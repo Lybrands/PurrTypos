@@ -1,0 +1,26 @@
+/* ─── 工具调用状态（气泡内每条调用） ───────────────────────────────────── */
+.bubble-tool-calls {
+  margin: 6px 0;
+}
+
+.bubble-tool-call-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  line-height: 1.6;
+
+  .bubble-tool-call-icon,
+  span {
+    color: var(--text-muted);
+  }
+
+  .bubble-tool-call-icon {
+    font-size: 14px;
+  }
+
+  .bubble-tool-call-icon--pending {
+    opacity: 0.55;
+  }
+}

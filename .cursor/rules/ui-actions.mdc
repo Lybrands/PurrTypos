@@ -1,0 +1,59 @@
+---
+description: UI — 操作按钮（图标按钮、Tooltip、添加/删除）
+globs: "**/*.tsx"
+alwaysApply: false
+---
+# 操作按钮通用规范
+
+## 基本原则
+
+- **操作按钮默认仅使用 icon**：新建、编辑、删除、收起、全屏等操作按钮，默认只显示图标，不显示文字
+- **使用 Tooltip 提示**：为 icon-only 按钮包裹 `Tooltip`，通过 `title` 说明按钮用途，hover 时展示
+
+## 添加按钮样式
+
+列表/面板头部的「添加」类按钮（新建、新建章节、新建人物等）统一使用以下样式：
+
+- **Button**：`type="text"`、`size="small"`、`icon` 字号 14px
+- **默认态**：文字/图标颜色为 `var(--text-muted)`，无背景
+- **hover 态**：仅增加背景 `var(--bg-hover)` 表示热区，不改变颜色
+- 使用 `Tooltip` 包裹，`title` 说明操作含义
+
+```tsx
+// ✅ 正确：添加按钮
+<Tooltip title="新建人物">
+  <Button
+    type="text"
+    size="small"
+    icon={<PlusOutlined style={{ fontSize: 14 }} />}
+    onClick={openCreate}
+    className="character-add-btn"
+  />
+</Tooltip>
+```
+
+```scss
+/* 添加按钮样式 */
+.character-add-btn {
+  color: var(--text-muted);
+  &:hover {
+    background: var(--bg-hover);
+  }
+}
+```
+
+## 其他操作按钮
+
+编辑、删除等操作按钮同样使用 icon-only + Tooltip，`type="text"`。
+
+- **删除按钮不要红色**：禁止使用 Ant Design Button 的 `danger` 属性，删除按钮使用默认文字/图标颜色，与编辑等按钮一致。
+
+## Icon hover 颜色
+
+- icon 按钮 hover 时，**如无强调需求，不改变颜色**，仅增加背景（`var(--bg-hover)`）表示热区
+- 需要强调的交互（如主操作、选中态）才使用 `color: var(--accent)` 变色
+
+## 例外
+
+- 主流程的「提交」「保存」「创建」等 Modal/Form 底部按钮可保留文字
+- 导航类按钮（如「返回书架」）可保留文字以明确目标

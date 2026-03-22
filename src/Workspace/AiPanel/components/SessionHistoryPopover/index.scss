@@ -1,0 +1,112 @@
+/* ─── 历史对话 Popover ──────────────────────────────────────── */
+.session-history-popover.ant-popover {
+  .ant-popover-inner {
+    padding: 0;
+  }
+
+  .ant-popover-title {
+    padding: 10px 14px 8px;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    border-bottom: 1px solid var(--border-light);
+    margin: 0;
+  }
+}
+
+.history-popover-body {
+  width: 300px;
+  padding: 8px 8px 4px;
+}
+
+.history-search.ant-input-search {
+  margin-bottom: 8px;
+  font-size: var(--font-size-sm);
+}
+
+.history-loading {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+
+.history-empty {
+  padding: 20px 0;
+}
+
+.history-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0 -4px;
+}
+
+.history-group {
+  margin-bottom: 4px;
+}
+
+.history-group-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 8px 2px;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.history-item.ant-list-item {
+  padding: 5px 8px;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  border: none !important;
+  transition: background 0.12s;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+
+  &.active {
+    background: var(--bg-active);
+  }
+
+  .ant-list-item-action {
+    margin-left: 6px;
+    opacity: 0;
+    transition: opacity 0.12s;
+
+    li { padding: 0; }
+  }
+
+  &:hover .ant-list-item-action {
+    opacity: 1;
+  }
+}
+
+.history-item-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.history-item-title {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+.history-delete-btn.ant-btn {
+  padding: 0 4px;
+  height: 22px;
+  color: var(--text-muted) !important;
+
+  &:hover {
+    color: var(--text-primary) !important;
+    background: transparent !important;
+  }
+}
+
+/* 与标签栏「新建对话」按钮同款间距（本组件与 AiPanel tabBarExtraContent 共用类名） */
+.session-new-btn.ant-btn {
+  flex-shrink: 0;
+  margin: 0 2px;
+}

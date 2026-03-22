@@ -1,0 +1,247 @@
+.ai-memory-modal {
+  .memory-select-list,
+  .memory-manage-list {
+    .memory-layer-block {
+      margin-bottom: 12px;
+    }
+    .memory-layer-title {
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+  }
+  .memory-select-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 0;
+    .memory-select-content {
+      flex: 1;
+      word-break: break-word;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    &.memory-select-item--foreshadow {
+      padding-left: 24px;
+      .memory-select-content {
+        cursor: default;
+      }
+    }
+  }
+  .memory-foreshadow-meta--inline {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* ─── 管理记忆 Tab ───────────────────────────────────────────── */
+  .memory-manage-tab {
+    padding: 4px 0;
+  }
+
+  .memory-manage-section {
+    margin-bottom: 18px;
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+  .memory-manage-section-title {
+    margin: 0 0 2px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .memory-manage-section-desc {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .memory-manage-section--foreshadow {
+    padding-top: 16px;
+    margin-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* ─── 添加表单卡片 ───────────────────────────────────────────── */
+  .memory-add-card {
+    background: var(--bg-active);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    &:focus-within {
+      border-color: var(--accent, #1677ff);
+      box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
+    }
+  }
+
+  .memory-add-form {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    .ant-select {
+      flex-shrink: 0;
+    }
+  }
+
+  /* 表单内 Select / Input 统一风格 */
+  .memory-add-card {
+    .ant-select-selector,
+    .ant-input {
+      border-radius: 6px;
+      font-size: 13px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .ant-select.ant-select-sm .ant-select-selector {
+      padding-inline: 10px 28px;
+      min-height: 32px;
+      align-items: center;
+    }
+    .ant-input {
+      padding: 6px 10px;
+      resize: vertical;
+      &::placeholder {
+        color: var(--text-muted);
+      }
+      &:focus,
+      &.ant-input-focused {
+        border-color: var(--accent, #1677ff);
+        box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
+      }
+    }
+    .ant-btn-primary {
+      border-radius: 6px;
+      font-weight: 500;
+      min-height: 32px;
+      padding-inline: 14px;
+    }
+  }
+
+  /* 四层记忆 / 伏笔记忆：第一行控件，第二行内容输入框 */
+  .memory-add-form--layer {
+    flex-direction: column;
+    gap: 10px;
+    .memory-add-form-row--controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .memory-add-form-row--content {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+      .memory-add-content-input.ant-input {
+        flex: 1;
+        min-width: 0;
+        min-height: 40px;
+        line-height: 1.5;
+      }
+      .ant-btn {
+        flex-shrink: 0;
+      }
+    }
+    .memory-add-layer-select {
+      width: 88px;
+      flex-shrink: 0;
+    }
+  }
+
+  .memory-add-form--foreshadow {
+    .memory-add-foreshadow-chapter {
+      width: 120px;
+      flex-shrink: 0;
+    }
+  .memory-add-foreshadow-type {
+    width: 72px;
+    flex-shrink: 0;
+  }
+}
+
+  .memory-manage-loading {
+    text-align: center;
+    padding: 16px;
+  }
+  .memory-manage-empty {
+    margin: 6px 0 12px;
+  }
+
+  .memory-manage-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    background: var(--bg-active);
+    border: 1px solid var(--border);
+    border-radius: var(--border-radius, 6px);
+    transition: border-color 0.15s, background 0.15s;
+    &:last-child {
+      margin-bottom: 0;
+    }
+    &:hover {
+      border-color: var(--border-light);
+      .memory-manage-delete-btn {
+        opacity: 1;
+      }
+    }
+    .memory-manage-content {
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--text-primary);
+    }
+    .memory-manage-delete-btn {
+      flex-shrink: 0;
+      opacity: 0.6;
+      transition: opacity 0.15s;
+    }
+  }
+  .memory-manage-content-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+  .memory-foreshadow-meta {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.35;
+  }
+  .memory-manage-item--foreshadow {
+    align-items: center;
+    .memory-manage-content-wrap {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+  .memory-foreshadow-actions {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 6px;
+  }
+  .memory-foreshadow-status-select {
+    width: 80px;
+  }
+  .memory-foreshadow-resolved-select {
+    width: 110px;
+  }
+
+  .memory-foreshadow-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 8px;
+    padding: 8px 12px;
+    background: var(--bg-active);
+    border-radius: var(--border-radius, 6px);
+  }
+}

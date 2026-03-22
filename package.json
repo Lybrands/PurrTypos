@@ -1,0 +1,116 @@
+{
+  "name": "purrtypos",
+  "version": "0.2.1",
+  "description": "写作",
+  "author": "Lybrand",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",
+    "build:no-clean": "node build/icon.js && vite build && electron-builder",
+    "preview": "vite preview",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.79.0",
+    "@azure/identity": "^4.13.0",
+    "@azure/search-documents": "^12.2.0",
+    "@google/genai": "^1.45.0",
+    "@langchain/core": "^1.1.33",
+    "@lexical/react": "^0.41.0",
+    "@mistralai/mistralai": "^1.15.1",
+    "@qdrant/js-client-rest": "^1.17.0",
+    "@supabase/supabase-js": "^2.99.2",
+    "@tiptap/extension-table": "^3.20.1",
+    "@tiptap/pm": "^3.20.0",
+    "@tiptap/react": "^3.20.0",
+    "@tiptap/starter-kit": "^3.20.0",
+    "adm-zip": "^0.5.16",
+    "antd": "^6.3.1",
+    "better-sqlite3": "^12.8.0",
+    "cloudflare": "^5.2.0",
+    "gray-matter": "^4.0.3",
+    "groq-sdk": "^1.1.1",
+    "lexical": "^0.41.0",
+    "marked": "^17.0.4",
+    "mem0ai": "^2.4.1",
+    "neo4j-driver": "^6.0.1",
+    "ollama": "^0.6.3",
+    "openai": "^6.25.0",
+    "pg": "^8.20.0",
+    "react-markdown": "^10.1.0",
+    "react-virtuoso": "^4.18.3",
+    "redis": "^5.11.0",
+    "remark-gfm": "^4.0.1",
+    "simple-mind-map": "^0.14.0-fix.1",
+    "sql.js": "^1.11.0",
+    "turndown": "^7.2.2",
+    "turndown-plugin-gfm": "^1.0.2",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/turndown": "^5.0.6",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^26.8.1",
+    "png-to-ico": "^2.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sass": "^1.77.6",
+    "typescript": "^5.2.2",
+    "vite": "^8.0.1",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.purrtypos.app",
+    "productName": "PurrTypos",
+    "electronDist": "node_modules/electron/dist",
+    "icon": "public/PurrTypos.png",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "package.json",
+      "main.js",
+      "dist",
+      "dist/**/*",
+      "electron",
+      "electron/**/*",
+      "public/**/*",
+      "node_modules/**/*"
+    ],
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "electron/skills",
+        "to": "skills"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": "dmg"
+    }
+  }
+}

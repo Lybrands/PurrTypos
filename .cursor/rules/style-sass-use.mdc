@@ -1,0 +1,11 @@
+---
+description: 样式 — Sass 使用 @use，禁止 @import
+globs: "**/*.scss"
+alwaysApply: false
+---
+
+# Sass 模块引入
+
+- **必须使用 `@use`** 引入其它样式文件，**禁止** `@import`。
+- 示例：`@use './styles/atomics';` 或 `@use '../styles/atomics';`
+- 同一文件对同一模块只需一次 `@use`。

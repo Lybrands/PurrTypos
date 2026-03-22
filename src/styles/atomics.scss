@@ -1,0 +1,136 @@
+/**
+ * 原子化样式：热区规范
+ * - 图标热区：最小 24×24px
+ * - 文字热区：最小行高 24px，宽度不限制
+ * - Hover 仅背景，无 border
+ */
+
+.hot-zone-icon {
+  min-width: 24px;
+  min-height: 24px;
+  width: 24px;
+  height: 24px;
+  padding: 4px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+
+  &:hover:not(:disabled) {
+    background: var(--bg-hover-zone);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.hot-zone-text {
+  min-height: 24px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  line-height: 1.25;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+
+  &:hover:not(:disabled) {
+    background: var(--bg-hover-zone);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+/* ─── 闪烁/眨眼/脉冲（统一抽离到原子化样式）────────────────────────────────────── */
+
+.a-blink-dots {
+  animation: a-blink-dots 1s ease-in-out infinite;
+}
+
+@keyframes a-blink-dots {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.a-flicker-opacity {
+  animation: a-flicker-opacity 1s ease-in-out infinite;
+}
+
+@keyframes a-flicker-opacity {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.a-thinking-dots {
+  animation: a-thinking-dots 1s ease-in-out infinite;
+}
+
+@keyframes a-thinking-dots {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.a-thinking-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  background: var(--text-muted);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: a-thinking-cursor-blink 0.8s step-end infinite;
+}
+
+@keyframes a-thinking-cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.a-loading-dots {
+  animation: a-loading-pulse 1.2s ease-in-out infinite;
+  color: var(--text-muted);
+}
+
+@keyframes a-loading-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}

@@ -1,0 +1,229 @@
+@use './styles/atomics.scss';
+
+/* 阿里巴巴普惠体：默认正文字体 */
+@font-face {
+  font-family: 'Alibaba PuHuiTi';
+  src: url('https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-55-regular@1.0.0/AlibabaPuHuiTi-3-55-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Alibaba PuHuiTi';
+  src: url('https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-65-medium@1.0.0/AlibabaPuHuiTi-3-65-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Alibaba PuHuiTi';
+  src: url('https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-75-semibold@1.0.0/AlibabaPuHuiTi-3-75-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* 设计规范：遵循 Ant Design 设计体系，与 antd 组件库保持一致 */
+:root {
+  /* ─── 字体：阿里巴巴普惠体为默认 ─────────────────── */
+  --font-family: 'Alibaba PuHuiTi', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  --font-family-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, 'Courier New', monospace;
+
+  /* 字阶（Ant Design 规范：主字体 14px） */
+  --font-size-xs: 10px;
+  --font-size-sm: 12px;
+  --font-size: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-h5: 16px;
+  --font-size-h4: 20px;
+  --font-size-h3: 24px;
+  --font-size-h2: 30px;
+  --font-size-h1: 38px;
+
+  /* 行高 */
+  --line-height-sm: 1.67;
+  --line-height: 1.57;
+  --line-height-lg: 1.5;
+
+  /* 字重 */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* ─── 间距（4px 基准，Ant Design sizeUnit） ───────── */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+
+  /* ─── 颜色（Ant Design 中性色 + 功能色） ──────────── */
+  --bg-base: #f5f5f5;
+  --bg-panel: #ffffff;
+  --bg-surface: #fafafa;
+  --bg-hover: #f5f5f5;
+  --bg-hover-zone: rgba(0, 0, 0, 0.12);
+  --bg-hover-list: #fafafa;
+  --bg-active: #f5f5f5;
+  --border: #d9d9d9;
+  --border-light: #f0f0f0;
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.65);
+  --text-muted: rgba(0, 0, 0, 0.45);
+  --accent: #1677ff;
+  --accent-hover: #4096ff;
+  --accent-dim: rgba(22, 119, 255, 0.1);
+  --success: #52c41a;
+  --success-dim: rgba(82, 196, 26, 0.12);
+  --warning: #faad14;
+  --danger: #ff4d4f;
+  --divider-bg: #f0f0f0;
+  --divider-hover: #1677ff;
+  --header-height: 48px;
+  --border-radius: 6px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  --bg-overlay: rgba(255, 255, 255, 0.72);
+  --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+/* 字体大小级别：小=14px，中=16px，大=18px */
+[data-font-size='small'] {
+  --font-size-xs: 10px;
+  --font-size-sm: 12px;
+  --font-size: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-h5: 16px;
+  --font-size-h4: 20px;
+  --font-size-h3: 24px;
+  --font-size-h2: 30px;
+  --font-size-h1: 38px;
+}
+
+[data-font-size='medium'] {
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-h5: 18px;
+  --font-size-h4: 22px;
+  --font-size-h3: 26px;
+  --font-size-h2: 32px;
+  --font-size-h1: 42px;
+}
+
+[data-font-size='large'] {
+  --font-size-xs: 14px;
+  --font-size-sm: 16px;
+  --font-size: 18px;
+  --font-size-lg: 20px;
+  --font-size-xl: 24px;
+  --font-size-h5: 20px;
+  --font-size-h4: 24px;
+  --font-size-h3: 28px;
+  --font-size-h2: 36px;
+  --font-size-h1: 48px;
+}
+
+/* 深色主题 */
+[data-theme='dark'] {
+  --bg-base: #141414;
+  --bg-panel: #1f1f1f;
+  --bg-surface: #171717;
+  --bg-hover: #262626;
+  --bg-hover-zone: rgba(255, 255, 255, 0.08);
+  --bg-hover-list: #262626;
+  --bg-active: #141414;
+  --border: #434343;
+  --border-light: #303030;
+  --text-primary: rgba(255, 255, 255, 0.85);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-muted: rgba(255, 255, 255, 0.45);
+  --accent: #4096ff;
+  --accent-hover: #69b1ff;
+  --accent-dim: rgba(64, 150, 255, 0.15);
+  --success: #49aa19;
+  --success-dim: rgba(73, 170, 25, 0.18);
+  --warning: #d89614;
+  --danger: #dc4446;
+  --divider-bg: #303030;
+  --divider-hover: #4096ff;
+  --bg-overlay: rgba(30, 30, 30, 0.72);
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  color: var(--text-primary);
+  background: var(--bg-base);
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: var(--font-size);
+  font-weight: var(--font-weight-regular);
+  color: var(--text-primary);
+  transition: all 0.15s ease;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  font-size: var(--font-size);
+  color: var(--text-primary);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+
+  &:hover {
+    background: var(--text-muted);
+  }
+}
+
+/* antd 文本按钮 hover 背景加深，浅色主题下更易辨认 */
+.ant-btn.ant-btn-text:not(:disabled):hover {
+  background: var(--bg-hover-zone) !important;
+}
+
+/* 图标辅助：加载旋转；图标与文字间距由父级 gap 控制 */
+.icon-spin {
+  animation: icon-spin 0.8s linear infinite;
+}
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

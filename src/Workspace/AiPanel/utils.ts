@@ -1,0 +1,113 @@
+import type { Chapter, Conversation } from '../../types'
+import {
+  extractTextFromLexical as extractTextFromLexicalImpl,
+  formatChaptersAsText as formatChaptersAsTextImpl,
+} from '../utils'
+import type { AiModelConfig } from '../../types'
+import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
+import type { ChatMessage } from './hooks'
+
+/** @deprecated 请从 Workspace/utils 导入 */
+export const extractTextFromLexical = extractTextFromLexicalImpl
+
+/** @deprecated 请从 Workspace/utils 导入；需要 Chapter 类型时从 types 导入 */
+export function formatChaptersAsText(chapters: Chapter[]): string {
+  return formatChaptersAsTextImpl(chapters)
+}
+
+// ─── 模型偏好（localStorage） ───
+
+export function getPrefsKey(bookId: number | null): string {
+  return `${AI_MODEL_PREFS_KEY_PREFIX}${bookId ?? '_default'}`
+}
+
+/** 若传入 validModelIds，则只接受该列表内的 model 作为有效选中项；空数组时无可用模型，默认 model 为空 */
+export function loadModelPrefs(
+  bookId: number | null,
+  validModelIds?: string[]
+): { model: string; agentEnabled: boolean; thinkingEnabled: boolean } {
+  const defaultModel = validModelIds?.length ? validModelIds[0] : ''
+  const isValid = (id: string) =>
+    Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
+  try {
+    const raw = localStorage.getItem(getPrefsKey(bookId))
+    if (raw) {
+      const p = JSON.parse(raw) as { model?: string; agentEnabled?: boolean; thinkingEnabled?: boolean }
+      const model = typeof p.model === 'string' && isValid(p.model) ? p.model : defaultModel
+      const agentEnabled = typeof p.agentEnabled === 'boolean' ? p.agentEnabled : true
+      const thinkingEnabled = typeof p.thinkingEnabled === 'boolean' ? p.thinkingEnabled : false
+      return { model, agentEnabled, thinkingEnabled }
+    }
+  } catch {
+    // ignore
+  }
+  return { model: defaultModel, agentEnabled: true, thinkingEnabled: false }
+}
+
+export function saveModelPrefs(
+  bookId: number | null,
+  model: string,
+  agentEnabled: boolean,
+  thinkingEnabled: boolean
+): void {
+  try {
+    localStorage.setItem(getPrefsKey(bookId), JSON.stringify({ model, agentEnabled, thinkingEnabled }))
+  } catch {
+    // ignore
+  }
+}
+
+/** 根据 modelKey 显示模型名称；可传入自定义配置列表优先匹配，有昵称时显示昵称 */
+export function formatModelName(modelKey?: string, modelConfigs?: AiModelConfig[]): string {
+  if (!modelKey) return '未知模型'
+  if (modelConfigs?.length) {
+    const c = modelConfigs.find((m) => m.id === modelKey)
+    if (c) return (c.nickname?.trim() || c.name) || '未命名'
+  }
+  return modelKey
+}
+
+/** 将接口返回的 Conversation[] 转为 ChatMessage[] */
+export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
+  return data
+    .map((item) => {
+      let thinkingBlocks: string[] | undefined
+      if (item.thinking_blocks) {
+        try {
+          const parsed = JSON.parse(item.thinking_blocks) as unknown
+          if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) thinkingBlocks = parsed
+        } catch (_) {}
+      }
+      if (!thinkingBlocks && item.thinking?.trim()) thinkingBlocks = [item.thinking.trim()]
+      let assistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: item.response,
+        model: item.model || undefined,
+        thinking: item.thinking || undefined,
+        thinkingBlocks,
+      }
+      const rawSegments = item.tool_call_segments
+      if (rawSegments) {
+        try {
+          const segments = JSON.parse(rawSegments) as { textBefore: string; labels: string[] }[]
+          if (Array.isArray(segments) && segments.length > 0) {
+            const textBeforeJoined = segments.map((s) => s.textBefore || '').join('')
+            const contentAfterToolCalls = item.response.startsWith(textBeforeJoined)
+              ? item.response.slice(textBeforeJoined.length)
+              : ''
+            assistantMsg = {
+              ...assistantMsg,
+              content: item.response,
+              toolCallSegments: segments,
+              contentAfterToolCalls: contentAfterToolCalls || undefined,
+            }
+          }
+        } catch (_) {}
+      }
+      return [
+        { role: 'user' as const, content: item.prompt },
+        assistantMsg,
+      ]
+    })
+    .flat()
+}

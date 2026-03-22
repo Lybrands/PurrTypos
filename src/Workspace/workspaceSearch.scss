@@ -1,0 +1,82 @@
+.workspace-search-floating {
+  z-index: 1000;
+  pointer-events: auto;
+
+  &--fixed {
+    position: fixed;
+    top: calc(var(--header-height, 48px) + 8px);
+    right: 16px;
+    max-width: min(420px, calc(100vw - 32px));
+  }
+
+  &--anchored {
+    position: absolute;
+    top: 0;
+    right: 0;
+    max-width: 100%;
+  }
+
+  .workspace-search-bar {
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border-radius: var(--border-radius-lg, 8px);
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--text-primary) 12%, transparent);
+  }
+}
+
+.workspace-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.workspace-search-input.ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 0;
+}
+
+.workspace-search-prefix-icon {
+  color: inherit;
+  opacity: 0.65;
+}
+
+.workspace-search-count {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm, 12px);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.workspace-search-nav-btn.ant-btn {
+  flex-shrink: 0;
+  color: inherit;
+
+  .anticon {
+    color: inherit;
+  }
+
+  &:disabled {
+    opacity: 0.45;
+  }
+}
+
+mark.workspace-search-hit {
+  padding: 0 0.1em;
+  margin: 0 -0.05em;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.workspace-search-hit--active {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}

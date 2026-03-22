@@ -1,0 +1,141 @@
+# Agent 可用工具说明
+
+> **合并策略 A**：主对话模型收到的 `tools` **仅来自** `electron/agentToolDefinitions.js`。本目录各 `SKILL.md` 仅用于 **embed / Ollama 意图** 等路由层，见 `README.md`。
+
+你是写作助手 Agent。你可以通过调用以下工具获取或修改用户的书稿信息。**实际调用由系统通过 tool_calls 完成**，以下说明描述各工具的用途与参数，便于你在适当时机选择调用。
+
+---
+
+## 工具列表
+
+### getBookContext
+
+- **用途**：一次性获取当前书籍的完整写作上下文：当前章节正文、写作大纲、小说背景、全部人物。适合在需要全面了解本书或当前章时调用。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `currentChapterId` (number, 可选)：当前正在写的章节 ID，不传则只取大纲/背景/人物。
+  - `currentChapterTitle` (string, 可选)：当前章节标题，用于展示。
+- **返回**：包含当前章节正文、写作大纲文本、小说背景、人物列表的聚合内容。
+
+---
+
+### getAllOutlines
+
+- **用途**：获取本书全部大纲（总纲、卷大纲、章节大纲、其他大纲、写作大纲），含每类大纲下的子章节树。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+- **返回**：包含 globalOutline、volumeOutlines、chapterOutlines、otherOutlines、writingOutline；每项含 chaptersText（层级标题文本）等。
+
+---
+
+### getWritingOutlineWithChapters
+
+- **用途**：获取本书「写作大纲」及其章节列表（即左侧写作目录）。返回的 chapters 中每个章节的 id 是获取该章正文时 getChapterContent(chapterId) 必须使用的 id；其他大纲（总纲、章节大纲等）的章节 id 不能用于获取正文。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+- **返回**：含 outlineId、chapters 等；chapters 为章节数组，含 id、title、parent_id 等。
+
+---
+
+### getChapterContent
+
+- **用途**：获取某一章的正文内容（纯文本）。重要：chapterId 必须是「写作大纲」中该章的 id，即必须先调用 getWritingOutlineWithChapters(bookId) 得到 chapters 列表，用其中对应「第一卷第一章」等标题的章节的 id 来调用本工具，不能使用 getAllOutlines 或其他大纲返回的章节 id，否则会取不到正文。
+- **参数**：
+  - `chapterId` (number, 必填)：写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）。
+  - `title` (string, 可选)：章节标题，用于展示。
+  - `maxTextLength` (number, 可选)：纯文本最大长度，默认 12000。
+- **返回**：含 chapterId、title、plainText 等；回答时用 plainText。
+
+---
+
+### batchGetChapterContents
+
+- **用途**：批量获取多章正文（纯文本）。
+- **参数**：
+  - `chapterIds` (array, 必填)：章节 ID 列表，如 [1,2,3]。
+  - `maxTextLength` (number, 可选)：每章纯文本最大长度，默认 12000。
+- **返回**：每章一项，含 chapterId、title、plainText 等。
+
+---
+
+### getBookCharacters
+
+- **用途**：以**纯文本摘要**返回人物信息（每人一行）：含姓名、性别、年龄、职业、性格、外貌、背景等已有字段，并含 **人物ID**（便于 `addMemory(characterId)`）；**不是仅返回 ID 列表**。默认全部。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `characterIds` (array, 可选)：只返回这些人物 ID（来自上次本工具返回中的「人物ID」）。
+  - `names` (array, 可选)：按角色名模糊匹配（子串即可），如 `["林月"]`；与 `characterIds` 同时存在时优先按 ID 筛选。
+- **返回**：可读文本摘要；每人一行，逗号连接多字段，含 `人物ID:` 及库中已填的人设项。
+
+---
+
+### listBookCharacters
+
+- **用途**：轻量获取本书人物的 **id 与姓名**，**不含**性别、背景等详情。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+- **返回**：**JSON 数组**的字符串形式，每项为 `{"id": number, "name": string}`，顺序同库中创建顺序；无人物时为 `[]`。用于先拿到 ID，再调用 `getBookCharacters`（`characterIds`）或 `addMemory`（`characterId`）。
+
+---
+
+### getStoryBackground
+
+- **用途**：获取本书小说背景的文本内容。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+- **返回**：含 content、update_time 等；回答时用 content。
+
+---
+
+### getAvailableOutlines
+
+- **用途**：获取本书「可关联」的大纲列表（总纲 + 章节大纲 + 其他大纲，扁平）。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+- **返回**：大纲数组，每项含 id、title、type 等。
+
+---
+
+### batchGetOutlineDetails
+
+- **用途**：根据大纲 ID 列表获取每个大纲的详情（含子章节与层级文本）。需先有 availableOutlines（可来自 getAvailableOutlines 或 getAllOutlines）。
+- **参数**：
+  - `outlineIds` (array, 必填)：大纲 ID 列表。
+  - `bookId` (number, 必填)：当前书籍 ID，用于解析 allOutlines。
+- **返回**：每项含 title、chaptersText 等。
+
+---
+
+### editChapterContent
+
+- **用途**：编辑指定章节的正文内容。将传入的 content（纯文本，段落用换行符分隔）写入该章节并保存。chapterId 必须来自 getWritingOutlineWithChapters(bookId) 返回的 chapters[].id（写作目录中的章节 ID）。适用于按用户要求改写某一章、替换整章正文等场景。
+- **参数**：
+  - `chapterId` (number, 必填)：写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）。
+  - `content` (string, 必填)：章节新正文，纯文本，段落之间用换行符分隔。
+- **返回**：成功时含 success: true、message、chapterId；失败时含 success: false、error。只有返回 success 后才可告知用户修改已完成。
+
+---
+
+### searchMemories
+
+- **用途**：按需查找本书的**长期记忆**，用于补充上下文。记忆分五层：**全局**（书名、主题、风格、世界观）、**大纲**（结构、章节任务、剧情走向）、**人物**（人设、关系、目标、缺陷、成长）、**章节**（本章内容与细节）、**伏笔**（埋入的伏笔及回收状态）。当需要回忆设定、核对伏笔、保证前后一致时调用。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `query` (string, 可选)：检索关键词，与当前问题或要回忆的内容相关；不传则返回近期记忆。
+  - `layer` (string, 可选)：限定层级：全局 / 大纲 / 人物 / 章节 / 伏笔；不传则检索所有层。
+  - `chapterId` (number, 可选)：当前章节 ID，检索章节记忆时可优先本章。
+  - `limit` (number, 可选)：最多返回条数，默认 15。
+- **返回**：按层级组织的记忆文本（含伏笔时会有类型、状态等）。未找到时返回「未找到与当前检索相关的长期记忆」。
+
+---
+
+## 使用建议
+
+- 对话开始时若已知 bookId、当前章节，可先调用 **getBookContext** 获取全书上下文。
+- 只需写作目录时用 **getWritingOutlineWithChapters**；需要总纲/卷/多类大纲时用 **getAllOutlines**。
+- 需要某章或某几章正文时用 **getChapterContent** 或 **batchGetChapterContents**；chapterId 必须来自写作目录。
+- 需要人物或小说背景时用 **getBookCharacters**（可按 ID 或按名子集）、**listBookCharacters**（只要名称与 ID 对照时）、**getStoryBackground**。
+- 用户要求写入、修改、改写、重写或替换某章内容时，必须调用 **editChapterContent** 并收到 success 后再回复完成，不得仅回复「已完成」而未实际调用该工具。
+- **需要回忆设定、核对伏笔、保证前后一致**时，调用 **searchMemories**：传入与当前问题相关的 `query`（或限定 `layer`），获取本书的长期记忆后再作答。
+- **回复用户时请使用书籍名、章节名等名称**（如「已修改《第一章》」），**不要直接暴露或返回 ID**（如「已修改 chapterId 5」）。
+

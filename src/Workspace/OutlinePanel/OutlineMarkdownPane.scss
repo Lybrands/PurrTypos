@@ -1,0 +1,72 @@
+/* 嵌在大纲详情内：复用 StoryBackgroundTab 的版式与 Typora 式编辑区 */
+.outline-markdown-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  &--empty {
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-sm);
+  }
+
+  .outline-markdown-empty {
+    margin: var(--spacing) 0;
+
+    .ant-empty-description {
+      max-width: 280px;
+    }
+  }
+
+  .outline-markdown-empty-text {
+    text-align: center;
+  }
+
+  .outline-markdown-empty-title {
+    margin: 0 0 var(--spacing-xs);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-secondary);
+  }
+
+  .outline-markdown-empty-desc {
+    margin: 0;
+    font-size: var(--font-size-xs);
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
+
+  &--view {
+    padding: var(--spacing-sm);
+
+    .story-background-view-header {
+      margin: 0 var(--spacing-xs) 0 0;
+    }
+
+    .story-background-content {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      margin: var(--spacing-xs);
+    }
+  }
+
+  &--editing {
+    gap: 0;
+    padding: var(--spacing-sm);
+
+    .story-background-editing-header {
+      margin: 0 0 var(--spacing-xs);
+    }
+
+    .story-background-editor-wrap {
+      margin: var(--spacing-xs);
+    }
+
+    .story-background-toolbar-bottom {
+      margin-bottom: var(--spacing);
+    }
+  }
+}

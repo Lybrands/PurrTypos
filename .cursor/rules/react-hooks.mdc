@@ -1,0 +1,27 @@
+---
+description: React — 导入与 Hooks 写法（React.useXxx）
+globs: "**/*.tsx"
+alwaysApply: false
+---
+
+# React 导入与 Hooks
+
+- 始终 `import React from 'react'`，不要从 `'react'` 解构导入 hooks。
+- Hooks 统一使用 `React.useState`、`React.useEffect`、`React.useCallback` 等形式。
+
+```tsx
+// ✅
+import React from 'react'
+
+function MyComponent() {
+  const [count, setCount] = React.useState(0)
+  React.useEffect(() => {}, [])
+  const handleClick = React.useCallback(() => {}, [])
+  return <div onClick={handleClick}>{count}</div>
+}
+```
+
+```tsx
+// ❌ 解构 hooks
+import { useState, useEffect } from 'react'
+```

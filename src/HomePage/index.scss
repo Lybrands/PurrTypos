@@ -1,0 +1,84 @@
+.home-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-base);
+  overflow-y: auto;
+}
+
+/* 中央整块：logo + 按钮，整体垂直居中 */
+.home-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  padding: 24px;
+}
+
+.home-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.home-app-logo {
+  height: min(36vh, 200px);
+  width: auto;
+  max-width: 85%;
+  display: block;
+  object-fit: contain;
+}
+
+/* 书架、设置：紧贴 logo 下方 */
+.home-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  justify-content: center;
+  gap: 20px;
+  flex-shrink: 0;
+}
+
+.home-entry-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100px;
+  padding: 20px 16px 18px;
+  border: 1.5px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.15s;
+  text-align: center;
+  box-sizing: border-box;
+
+  &:hover {
+    border-color: var(--accent);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+  }
+
+  &:active {
+    transform: translateY(0);
+    box-shadow: none;
+  }
+}
+
+.home-entry-icon {
+  font-size: 26px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.home-entry-label {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}

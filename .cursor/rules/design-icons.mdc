@@ -1,0 +1,11 @@
+---
+description: 设计 — 图标颜色与文字一致（字体色 / 继承）
+globs: "**/*.tsx, **/*.scss"
+alwaysApply: true
+---
+
+# 图标颜色
+
+- **所有图标（含 `@ant-design/icons`）与当前上下文文字同色**：`inherit`、`currentColor`，或 `--text-primary` / `--text-muted` 等文本 Token。
+- **禁止**仅为图标设置语义色（如成功绿 `var(--success)`），除非整块（含文字）同为该语义。
+- 弱化：对整行或父级用 `var(--text-muted)` 或与文字相同透明度，**不要**只靠图标变色表状态。

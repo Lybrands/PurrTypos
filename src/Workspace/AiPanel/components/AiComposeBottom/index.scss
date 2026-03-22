@@ -1,0 +1,104 @@
+.chat-input-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.chat-input-bottom-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+/* Agent/Ask 模式下拉：胶囊形 + 彩色边框 + 同色柔光（参考图） */
+.ai-agent-select.ant-select {
+  font-size: var(--font-size-sm);
+  width: fit-content;
+
+  .ant-select-selector {
+    border-radius: 9999px;
+    border: 1.5px solid var(--success) !important;
+    background: var(--bg-surface) !important;
+    color: var(--success);
+    box-shadow:
+      0 0 4px var(--success),
+      0 0 12px var(--success);
+    padding-inline: 12px 28px;
+    min-height: 28px;
+    align-items: center;
+  }
+
+  .ant-select-selection-item {
+    white-space: nowrap;
+    line-height: 1;
+  }
+
+  .ant-select-arrow {
+    color: inherit;
+    inset-inline-end: 10px;
+  }
+
+  /* Ask 模式：绿色边框 + 绿色柔光 + 绿色文字 */
+  &:not(.ai-agent-select--on) .ant-select-selector {
+    border-color: var(--success) !important;
+    color: var(--success);
+    box-shadow:
+      0 0 4px var(--success),
+      0 0 12px var(--success);
+  }
+
+  &:not(.ai-agent-select--on) .ant-select-selector:hover {
+    border-color: var(--success) !important;
+    box-shadow:
+      0 0 6px var(--success),
+      0 0 16px var(--success);
+  }
+
+  /* Agent 模式：蓝色边框 + 蓝色柔光 + 蓝色文字 */
+  &.ai-agent-select--on .ant-select-selector {
+    border-color: var(--accent) !important;
+    background: var(--accent-dim) !important;
+    color: var(--accent);
+    box-shadow:
+      0 0 4px var(--accent),
+      0 0 12px var(--accent);
+  }
+
+  &.ai-agent-select--on .ant-select-selector:hover {
+    border-color: var(--accent-hover) !important;
+    color: var(--accent-hover);
+    box-shadow:
+      0 0 6px var(--accent-hover),
+      0 0 16px var(--accent-hover);
+  }
+}
+
+.ai-model-select.ant-select {
+  width: fit-content;
+  font-size: var(--font-size-sm);
+
+  .ant-select-selector {
+    font-size: var(--font-size-sm);
+    padding-right: 24px !important;
+  }
+
+  .ant-select-selection-item {
+    white-space: nowrap;
+  }
+}
+
+.ai-model-dropdown-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px 8px;
+  gap: 12px;
+  user-select: none;
+}
+
+.ai-model-dropdown-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary, var(--text-muted));
+  white-space: nowrap;
+}

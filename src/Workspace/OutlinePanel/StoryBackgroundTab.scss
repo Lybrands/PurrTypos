@@ -1,0 +1,435 @@
+.story-background-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.story-background-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+}
+
+/* 空态卡片：紧凑尺寸，不占满整屏 */
+.story-background-empty-card {
+  width: 100%;
+  max-width: 280px;
+  margin: 24px auto;
+  padding: 24px 20px;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 编辑态：右上导入/附件，中间编辑区，右下保存/取消 */
+.story-background-editing {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0;
+
+  .story-background-editing-header {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+  }
+
+  .story-background-toolbar-top {
+    margin: 0;
+    padding: 0;
+    border: none;
+    gap: 4px;
+  }
+
+  .story-background-toolbar-bottom {
+    flex-shrink: 0;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-light);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+}
+
+/* 操作按钮栏（通用） */
+.story-background-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-light);
+}
+
+/* 附件列表（输入框下方） */
+.story-background-attachments {
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}
+
+.story-background-attachments-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--font-size-sm);
+}
+
+.story-background-attachment-list {
+  margin: 0;
+  padding-left: 1.25em;
+  list-style: none;
+}
+
+.story-background-attachment-item {
+  margin: 4px 0;
+  line-height: 1.5;
+}
+
+.story-background-attachments-empty {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* 附件列表在 Modal 内 */
+.story-background-attachments-modal {
+  max-height: 60vh;
+  overflow-y: auto;
+
+  .story-background-attachment-list {
+    margin: 0;
+    padding-left: 1.25em;
+    list-style: none;
+  }
+
+  .story-background-attachment-item {
+    margin: 8px 0;
+    line-height: 1.5;
+  }
+}
+
+/* 编辑区 */
+.story-background-editor-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-light);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+
+/* Typora 式：TipTap 单栏所见即所得，无工具栏 */
+.story-background-tiptap-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  .story-background-tiptap-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* 编辑态内容样式与预览态 .story-background-markdown 保持一致 */
+  .tiptap {
+    flex: 1;
+    min-height: 120px;
+    padding: 14px 16px;
+    overflow-y: auto;
+    font-size: var(--font-size-sm);
+    line-height: 1.7;
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    outline: none;
+
+    > p:first-child {
+      margin-top: 0;
+    }
+
+    p {
+      margin: 0 0 0.6em;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0.5em 0 0.25em;
+      font-weight: 600;
+      line-height: 1.5;
+    }
+
+    h1 { font-size: 1.35em; }
+    h2 { font-size: 1.2em; }
+    h3 { font-size: 1.1em; }
+    h4 { font-size: 1em; }
+
+    ul, ol {
+      margin: 0.5em 0;
+      padding-left: 0;
+      list-style-position: inside;
+    }
+
+    ul { list-style-type: disc; }
+    ol { list-style-type: decimal; }
+
+    li p {
+      margin: 0;
+      display: inline;
+    }
+
+    li ul, li ol {
+      margin: 0.25em 0;
+      padding-left: 1.25em;
+      list-style-position: inside;
+    }
+
+    li ul { list-style-type: circle; }
+    li ul li ul { list-style-type: square; }
+
+    li {
+      margin: 0.2em 0;
+    }
+
+    code {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 0.9em;
+      background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+      padding: 0 4px;
+      border-radius: 2px;
+    }
+
+    pre {
+      margin: 0.5em 0;
+      padding: 10px;
+      overflow: auto;
+      background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+      border-radius: 4px;
+
+      code {
+        padding: 0;
+        background: none;
+      }
+    }
+
+    /* 表格：与预览态一致 */
+    table {
+      width: 100%;
+      margin: 0.5em 0;
+      border-collapse: collapse;
+      font-size: 0.95em;
+
+      th, td {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        text-align: left;
+      }
+
+      th {
+        font-weight: 600;
+        background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+      }
+    }
+
+    blockquote {
+      margin: 0.5em 0;
+      padding: 0.35em 0 0.35em 1em;
+      border-left: 4px solid var(--border);
+      background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+      color: var(--text-muted);
+      font-style: italic;
+
+      p {
+        margin: 0;
+      }
+
+      blockquote {
+        margin: 0.35em 0;
+        margin-left: 0.5em;
+        border-left-width: 3px;
+        opacity: 0.95;
+      }
+
+      ul, ol {
+        margin: 0.35em 0;
+        padding-left: 1em;
+      }
+    }
+
+    strong { font-weight: 600; }
+    em { font-style: italic; }
+  }
+
+  .story-background-tiptap-editable {
+    min-height: 100%;
+  }
+}
+
+/* 保存后的查看态：右上角仅图标（编辑、附件），正文无框无底 */
+.story-background-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+
+  .story-background-view-header {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+  }
+
+  .story-background-toolbar-top {
+    margin: 0;
+    padding: 0;
+    border: none;
+    gap: 4px;
+  }
+
+  .story-background-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    margin: 0;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+/* Markdown 渲染样式（保存后查看） */
+.story-background-markdown {
+  font-size: var(--font-size-sm);
+  line-height: 1.7;
+  color: var(--text-primary);
+
+  > p:first-child {
+    margin-top: 0;
+  }
+
+  p {
+    margin: 0 0 0.6em;
+  }
+
+  h1, h2, h3, h4 {
+    margin: 0.5em 0 0.25em;
+    font-weight: 600;
+    line-height: 1.5;
+  }
+
+  h1 { font-size: 1.35em; }
+  h2 { font-size: 1.2em; }
+  h3 { font-size: 1.1em; }
+  h4 { font-size: 1em; }
+
+  ul, ol {
+    margin: 0.5em 0;
+    padding-left: 0;
+    list-style-position: inside;
+  }
+
+  ul { list-style-type: disc; }
+  ol { list-style-type: decimal; }
+
+  /* 与编辑态一致：列表项内段落与 bullet 同一行，不换行 */
+  li p {
+    margin: 0;
+    display: inline;
+  }
+
+  /* 嵌套列表：每层缩进 */
+  li ul, li ol {
+    margin: 0.25em 0;
+    padding-left: 1.25em;
+    list-style-position: inside;
+  }
+
+  li ul { list-style-type: circle; }
+  li ul li ul { list-style-type: square; }
+
+  li {
+    margin: 0.2em 0;
+  }
+
+  code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.9em;
+    background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+    padding: 0 4px;
+    border-radius: 2px;
+  }
+
+  pre {
+    margin: 0.5em 0;
+    padding: 10px;
+    overflow: auto;
+    background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+    border-radius: 4px;
+
+    code {
+      padding: 0;
+      background: none;
+    }
+  }
+
+  /* GFM 表格 */
+  table {
+    width: 100%;
+    margin: 0.5em 0;
+    border-collapse: collapse;
+    font-size: 0.95em;
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      text-align: left;
+    }
+
+    th {
+      font-weight: 600;
+      background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+    }
+  }
+
+  blockquote {
+    margin: 0.5em 0;
+    padding: 0.35em 0 0.35em 1em;
+    border-left: 4px solid var(--border);
+    background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+    color: var(--text-muted);
+    font-style: italic;
+
+    p {
+      margin: 0;
+    }
+
+    /* 嵌套引用：内层缩进并弱化边框 */
+    blockquote {
+      margin: 0.35em 0;
+      margin-left: 0.5em;
+      border-left-width: 3px;
+      opacity: 0.95;
+    }
+
+    /* 引用内的列表 */
+    ul, ol {
+      margin: 0.35em 0;
+      padding-left: 1em;
+    }
+  }
+
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+}

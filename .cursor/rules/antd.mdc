@@ -1,0 +1,54 @@
+---
+description: Ant Design — 优先使用 antd 组件及表单/弹窗/列表等用法
+globs: "**/*.tsx"
+alwaysApply: true
+---
+
+# Ant Design
+
+## 优先使用 antd（全局）
+
+项目已引入 Ant Design（antd），当 antd 组件能满足功能需求时，**必须使用 antd 组件**，不要自行实现等效的 UI 逻辑。
+
+- 能用 antd 覆盖的功能，不要写自定义 DOM + CSS 手搓；仅当样式/交互与需求本质不符时，再自定义。
+
+| 需求 | ✅ 用 antd | ❌ 不要自己写 |
+|------|------------|----------------|
+| 多标签页切换 | `<Tabs>` | 手写 div 模拟 tab |
+| 下拉选择 | `<Select>` | 手写 dropdown |
+| 弹窗确认 | `Modal.confirm()` | 手写遮罩 |
+| 表单输入 | `<Input>` / `<Input.TextArea>` | 裸 `<input>` / `<textarea>` |
+| 加载状态 | `<Spin>` | 手写 spinner |
+| 空状态 | `<Empty>` | 手写空提示 |
+| 工具提示 | `<Tooltip>` | 手写 title + CSS |
+| 按钮 | `<Button>` | 裸 `<button>` |
+
+---
+
+## 表单
+
+- 使用 `Form` + `Form.Item`，不要用多个 `useState` 手动管理字段。
+- 使用 `Form.useForm()`，通过 `validateFields` / `getFieldsValue` / `setFieldsValue` / `resetFields` 操作。
+- 必填：`rules={[{ required: true, message: '...' }]}`。
+
+```tsx
+const [form] = Form.useForm()
+<Form form={form} layout="vertical">
+  <Form.Item name="name" label="姓名" rules={[{ required: true, message: '请输入' }]}>
+    <Input />
+  </Form.Item>
+</Form>
+```
+
+## 输入与选择
+
+- 单行短文本：`Input`；多行：`Input.TextArea`（可配 `rows`、`maxLength`、`showCount`）。
+- 选择：`Select`、`Radio`、`Checkbox`；日期：`DatePicker`、`RangePicker`。
+
+## 弹窗与反馈
+
+- `Modal`、`message`、`notification`；危险操作二次确认，`okButtonProps={{ danger: true }}`。
+
+## 布局与展示
+
+- 空态 `Empty`，加载 `Spin`；表格 `Table`；卡片列表 `Card` + `Space` 等。

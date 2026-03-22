@@ -1,0 +1,96 @@
+---
+description: 设计 — Design Tokens（字体、颜色、间距等 CSS 变量）
+globs: "**/*.scss, **/*.tsx"
+alwaysApply: false
+---
+
+# 设计规范 Design Tokens
+
+项目遵循 **Ant Design 设计体系**，与 antd 组件库保持一致。所有样式应使用 CSS 变量（设计 Token），禁止硬编码数值。
+
+## 字体 Typography
+
+### 字体家族
+```scss
+font-family: var(--font-family);
+font-family: var(--font-family-mono);  /* 代码/等宽 */
+```
+
+### 字阶（禁止使用 11px、13px、15px 等非标准值）
+| Token | 值 | 用途 |
+|-------|-----|------|
+| `--font-size-xs` | 10px | 极小标签、角标 |
+| `--font-size-sm` | 12px | 辅助说明、小按钮 |
+| `--font-size` | 14px | **主字体**，正文、标题 |
+| `--font-size-lg` | 16px | 小标题、强调 |
+| `--font-size-xl` | 20px | 图标、大标题 |
+| `--font-size-h5` ~ `--font-size-h1` | 16~38px | 标题层级 |
+
+### 行高
+- `--line-height-sm`: 1.67
+- `--line-height`: 1.57（主字体）
+- `--line-height-lg`: 1.5
+
+### 字重
+- `--font-weight-regular`: 400
+- `--font-weight-medium`: 500
+- `--font-weight-semibold`: 600
+
+## 间距 Spacing（4px 基准）
+
+| Token | 值 | 用途 |
+|-------|-----|------|
+| `--spacing-xs` | 4px | 紧凑间距 |
+| `--spacing-sm` | 8px | 小间距 |
+| `--spacing` | 12px | 常规间距 |
+| `--spacing-lg` | 16px | 大间距 |
+| `--spacing-xl` | 24px | 区块间距 |
+
+## 颜色 Colors
+
+### 背景
+- `--bg-base` / `--bg-panel` / `--bg-surface` / `--bg-active` / `--bg-hover`
+
+### 文字
+- `--text-primary`: 主要文字 (rgba 0.88)
+- `--text-secondary`: 次要文字 (0.65)
+- `--text-muted`: 辅助/禁用 (0.45)
+
+### 功能色
+- `--accent` / `--accent-hover`: 主色 #1677ff
+- `--success` / `--warning` / `--danger`
+
+### 边框
+- `--border` / `--border-light`
+
+## 圆角与布局
+- `--border-radius`: 6px（与 antd 一致）
+- `--header-height`: 44px
+
+## 使用示例
+
+```scss
+// ✅ 正确：使用 Token
+.section-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-muted);
+  margin-bottom: var(--spacing-sm);
+  padding: var(--spacing) var(--spacing-lg);
+  border-radius: var(--border-radius);
+}
+
+// ❌ 错误：硬编码
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding: 12px 16px;
+  border-radius: 6px;
+}
+```
+
+## 原则
+1. **字阶克制**：同一系统尽量控制在 3~5 种字阶
+2. **少即是多**：避免无意义的样式堆砌
+3. **与 antd 一致**：自定义组件风格需与 antd 组件协调

@@ -1,0 +1,892 @@
+import React, { Suspense, lazy } from 'react'
+import {
+  ExpandOutlined,
+  CompressOutlined,
+  UploadOutlined,
+  ExportOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+  ArrowLeftOutlined,
+  LoadingOutlined,
+  InfoCircleOutlined,
+  BookOutlined,
+  FileAddOutlined,
+  CheckSquareOutlined,
+  EllipsisOutlined,
+  SwapOutlined,
+} from '@ant-design/icons'
+import type { Chapter, Outline, VolumeOutline } from '../../types'
+import { Button, Tabs, Spin, Empty, Tooltip, Alert, Checkbox, Dropdown, Segmented } from 'antd'
+import type { MenuProps } from 'antd'
+import { useOutlineCrud } from '../hooks/useOutlineCrud'
+import { useWorkspace } from '../WorkspaceContext'
+import { HighlightText } from '../search/highlightText'
+import ConfirmModal from '../../components/ConfirmModal'
+import CharacterTab from './CharacterTab'
+import StoryBackgroundTab from './StoryBackgroundTab'
+import OutlineMarkdownPane, { type OutlineMarkdownPaneRef } from './OutlineMarkdownPane'
+import './index.scss'
+
+const MindMapView = lazy(() => import('./MindMapView'))
+
+interface OutlinePanelProps {
+  isFullscreen: boolean
+  onToggleFullscreen: () => void
+  onChapterOutlineDeleted?: (title: string) => void
+  onChapterOutlineSelect?: (title: string) => void
+  skipAutoOpenForTitle?: string | null
+  refreshKey?: number
+  onRefreshReady?: (refresh: () => void) => void
+}
+
+export default function OutlinePanel({
+  isFullscreen,
+  onToggleFullscreen,
+  onChapterOutlineDeleted,
+  onChapterOutlineSelect,
+  skipAutoOpenForTitle,
+  refreshKey,
+  onRefreshReady,
+}: OutlinePanelProps) {
+  const { writingChapters = [], enableVolume, bookId, syncOutlineChapter, activeChapterTitle, workspaceSearchQuery } = useWorkspace()
+  const syncedChapterTitle = syncOutlineChapter ? activeChapterTitle : null
+  const [displayChapters, setDisplayChapters] = React.useState<Chapter[]>([])
+  const [displayOutlineId, setDisplayOutlineId] = React.useState<number | null>(null)
+  const [displayLoading, setDisplayLoading] = React.useState(false)
+  const [activeTab, setActiveTab] = React.useState(0)
+  const [viewMode, setViewMode] = React.useState<'list' | 'detail'>('list')
+  const [showSwitcher, setShowSwitcher] = React.useState(false)
+  const [chapterBatchMode, setChapterBatchMode] = React.useState(false)
+  const [selectedChapterOutlineIds, setSelectedChapterOutlineIds] = React.useState<Set<number>>(new Set())
+  const [otherBatchMode, setOtherBatchMode] = React.useState(false)
+  const [selectedOtherOutlineIds, setSelectedOtherOutlineIds] = React.useState<Set<number>>(new Set())
+  const [batchDeleteModal, setBatchDeleteModal] = React.useState<{ ids: number[]; titles: string[]; onConfirm: () => void } | null>(null)
+  /** 同步选中的章节无大纲记录时，用于展示待上传 */
+  const [syncedChapterNoOutlineTitle, setSyncedChapterNoOutlineTitle] = React.useState<string | null>(null)
+  /** 详情内：思维导图 / Markdown */
+  const [detailOutlineSub, setDetailOutlineSub] = React.useState<'xmind' | 'markdown'>('xmind')
+  const outlineMarkdownPaneRef = React.useRef<OutlineMarkdownPaneRef | null>(null)
+
+  const crud = useOutlineCrud({
+    refreshKey,
+    onRefreshReady,
+    onChapterOutlineDeleted,
+    displayOutlineId,
+    setDisplayChapters,
+    setDisplayOutlineId,
+    setViewMode,
+    bookId,
+    enableVolume,
+  })
+  const {
+    loadData,
+    globalOutline,
+    chapterOutlines,
+    otherOutlines,
+    volumeOutlines,
+    chaptersCache,
+    loading,
+    loadingType,
+    error,
+    setError,
+    deleteModal,
+    setDeleteModal,
+    handleUploadXmind,
+    handleUploadXmindForOutline,
+    handleEdit,
+    handleDelete,
+    handleDeleteVolumeOutline,
+    handleDeleteGlobal,
+  } = crud
+
+  const toggleChapterOutlineSelect = (id: number) => {
+    setSelectedChapterOutlineIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleOtherOutlineSelect = (id: number) => {
+    setSelectedOtherOutlineIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleBatchDeleteChapterOutlines = () => {
+    const ids = Array.from(selectedChapterOutlineIds)
+    if (ids.length === 0) return
+    const titles = chapterOutlines.filter((o) => ids.includes(Number(o.id))).map((o) => o.title)
+    setBatchDeleteModal({
+      ids,
+      titles,
+      onConfirm: async () => {
+        setBatchDeleteModal(null)
+        setChapterBatchMode(false)
+        setSelectedChapterOutlineIds(new Set())
+        for (const id of ids) {
+          const res = await window.electronAPI.deleteOutline({ outlineId: id })
+          if (res.success) {
+            const outline = chapterOutlines.find((o) => Number(o.id) === id)
+            if (outline) {
+              delete chaptersCache.current[id]
+              onChapterOutlineDeleted?.(outline.title)
+            }
+          }
+        }
+        loadData()
+        if (ids.includes(displayOutlineId ?? 0)) {
+          setViewMode('list')
+          setDisplayChapters([])
+          setDisplayOutlineId(null)
+        }
+      },
+    })
+  }
+
+  const handleBatchDeleteOtherOutlines = () => {
+    const ids = Array.from(selectedOtherOutlineIds)
+    if (ids.length === 0) return
+    const titles = otherOutlines.filter((o) => ids.includes(Number(o.id))).map((o) => o.title)
+    setBatchDeleteModal({
+      ids,
+      titles,
+      onConfirm: async () => {
+        setBatchDeleteModal(null)
+        setOtherBatchMode(false)
+        setSelectedOtherOutlineIds(new Set())
+        for (const id of ids) {
+          const res = await window.electronAPI.deleteOutline({ outlineId: id })
+          if (res.success) {
+            const outline = otherOutlines.find((o) => Number(o.id) === id)
+            if (outline) {
+              delete chaptersCache.current[id]
+            }
+          }
+        }
+        loadData()
+        if (ids.includes(displayOutlineId ?? 0)) {
+          setViewMode('list')
+          setDisplayChapters([])
+          setDisplayOutlineId(null)
+        }
+      },
+    })
+  }
+
+  const prevSyncedRef = React.useRef<string | null | undefined>(undefined)
+  React.useEffect(() => {
+    if (prevSyncedRef.current === syncedChapterTitle) return
+    prevSyncedRef.current = syncedChapterTitle
+    if (!syncedChapterTitle) return
+    if (skipAutoOpenForTitle != null && skipAutoOpenForTitle === syncedChapterTitle) return
+    const outline = chapterOutlines.find((o) => o.title === syncedChapterTitle)
+    setViewMode('detail')
+    if (!outline) {
+      setSyncedChapterNoOutlineTitle(syncedChapterTitle)
+      setDisplayOutlineId(null)
+      setDisplayChapters([])
+      setDisplayLoading(false)
+      return
+    }
+    setSyncedChapterNoOutlineTitle(null)
+    const id = Number(outline.id)
+    if (!Number.isFinite(id) || id <= 0) {
+      setSyncedChapterNoOutlineTitle(syncedChapterTitle)
+      setDisplayOutlineId(null)
+      setDisplayChapters([])
+      return
+    }
+    setDisplayOutlineId(id)
+    if (!outline.file_path) {
+      setDisplayChapters([])
+      setDisplayLoading(false)
+      return
+    }
+    const cached = chaptersCache.current[id]
+    if (cached && cached.length > 0) {
+      setDisplayChapters(cached)
+      return
+    }
+    setDisplayChapters([])
+    setDisplayLoading(true)
+    window.electronAPI
+      .getChapters({ outlineId: id })
+      .then((chapRes) => {
+        const data = chapRes?.data
+        const chapters = Array.isArray(data) ? data : []
+        if (chapRes?.success && chapters.length > 0) chaptersCache.current[id] = chapters
+        setDisplayChapters(chapters)
+      })
+      .catch(() => setDisplayChapters([]))
+      .finally(() => setDisplayLoading(false))
+  }, [syncedChapterTitle, chapterOutlines, skipAutoOpenForTitle])
+
+  const allOutlines = React.useMemo(() => {
+    const list: Outline[] = []
+    if (globalOutline) list.push(globalOutline)
+    if (enableVolume) {
+      for (const vol of volumeOutlines) {
+        list.push(vol)
+        list.push(...vol.chapters)
+      }
+      list.push(...chapterOutlines)
+    } else {
+      list.push(...chapterOutlines)
+    }
+    list.push(...otherOutlines)
+    return list
+  }, [globalOutline, chapterOutlines, otherOutlines, volumeOutlines, enableVolume])
+
+  const currentOutline = React.useMemo(
+    () => allOutlines.find((o) => Number(o?.id) === Number(displayOutlineId)),
+    [allOutlines, displayOutlineId]
+  )
+
+  const prevDisplayOutlineIdForSub = React.useRef<number | null>(null)
+  React.useEffect(() => {
+    if (viewMode === 'list') prevDisplayOutlineIdForSub.current = null
+  }, [viewMode])
+
+  React.useEffect(() => {
+    if (!currentOutline || Number(currentOutline.id) !== Number(displayOutlineId)) return
+    if (prevDisplayOutlineIdForSub.current === displayOutlineId) return
+    prevDisplayOutlineIdForSub.current = displayOutlineId
+    setDetailOutlineSub(currentOutline.file_path ? 'xmind' : 'markdown')
+  }, [viewMode, displayOutlineId, currentOutline])
+
+  const flushMarkdownSave = React.useCallback(async () => {
+    await outlineMarkdownPaneRef.current?.flushSave()
+  }, [])
+
+  const handleOutlineClick = React.useCallback(
+    async (outline: Outline, syncChapter = true) => {
+      await flushMarkdownSave()
+      setSyncedChapterNoOutlineTitle(null)
+      const id = Number(outline?.id)
+      if (!id || id <= 0) {
+        console.warn('[OutlinePanel] invalid id, outline:', outline)
+        return
+      }
+
+      setViewMode('detail')
+      setShowSwitcher(false)
+      setDisplayOutlineId(id)
+      setError('')
+
+      const cached = chaptersCache.current[id]
+      if (cached && cached.length > 0) {
+        setDisplayChapters(cached)
+        setDisplayLoading(false)
+        return
+      }
+
+      setDisplayChapters([])
+      setDisplayLoading(true)
+      if (syncChapter) onChapterOutlineSelect?.(outline.title)
+      window.electronAPI
+        .getChapters({ outlineId: id })
+        .then((chapRes) => {
+          const data = chapRes?.data
+          const chapters = Array.isArray(data) ? data : []
+          if (chapRes?.success) {
+            if (chapters.length > 0) {
+              chaptersCache.current[id] = chapters
+            }
+            setDisplayChapters(chapters)
+          } else {
+            setError(chapRes?.error || '加载失败')
+          }
+        })
+        .catch((err) => {
+          console.error('[OutlinePanel] getChapters error:', err)
+          setError('加载失败：' + (err?.message || String(err)))
+        })
+        .finally(() => setDisplayLoading(false))
+    },
+    [onChapterOutlineSelect, flushMarkdownSave]
+  )
+
+  const [openingSourceId, setOpeningSourceId] = React.useState<number | null>(null)
+
+  const handleOpenSource = React.useCallback((outline: Outline) => {
+    const fp = outline.file_path
+    if (!fp) {
+      setError('该大纲没有关联的源文件路径')
+      return
+    }
+    setOpeningSourceId(outline.id)
+    window.electronAPI.openFilePath(fp).then((res) => {
+      if (!res.success) setError('打开失败：' + res.error)
+    }).finally(() => setOpeningSourceId(null))
+  }, [])
+
+  const openDetailXmindUpload = React.useCallback(() => {
+    if (!currentOutline) return
+    if (currentOutline.type === 'global') void handleUploadXmind('global')
+    else if (currentOutline.type === 'other') void handleUploadXmind('other')
+    else if (enableVolume) void handleUploadXmindForOutline(currentOutline)
+    else void handleUploadXmind('chapter', currentOutline.title)
+  }, [currentOutline, enableVolume, handleUploadXmind, handleUploadXmindForOutline])
+
+  return (
+    <div className={`outline-panel ${isFullscreen ? 'fullscreen' : ''}`}>
+      {deleteModal && (
+        <ConfirmModal
+          title={deleteModal.title}
+          message={deleteModal.message}
+          checkboxLabel={deleteModal.checkboxLabel}
+          onConfirm={deleteModal.onConfirm}
+          onCancel={() => setDeleteModal(null)}
+        />
+      )}
+      {batchDeleteModal && (
+        <ConfirmModal
+          title="批量删除章节大纲"
+          message={`确认删除选中的 ${batchDeleteModal.ids.length} 个大纲？删除后无法恢复。`}
+          onConfirm={() => batchDeleteModal.onConfirm()}
+          onCancel={() => setBatchDeleteModal(null)}
+        />
+      )}
+      <div className="panel-header">
+        <span className="panel-title">大纲</span>
+        <div className="panel-header-actions">
+          <Button type="text" size="small" icon={isFullscreen ? <CompressOutlined style={{ fontSize: 16 }} /> : <ExpandOutlined style={{ fontSize: 16 }} />} title={isFullscreen ? '退出全屏' : '全屏'} onClick={onToggleFullscreen} />
+        </div>
+      </div>
+
+      <Tabs
+        activeKey={String(activeTab)}
+        onChange={(k) => setActiveTab(Number(k))}
+        size="small"
+        className="outline-tabs"
+        indicator={{ size: 20, align: 'center' }}
+        items={[
+          {
+            key: '0',
+            label: '大纲',
+            children: (
+        <div className={`tab-content outline-tab ${viewMode === 'detail' ? 'view-detail' : ''}`}>
+          {error && <Alert type="error" message={error} showIcon closable onClose={() => setError('')} className="outline-error-alert" />}
+
+          {viewMode === 'list' ? (
+            <>
+              {/* 列表视图：全局大纲 + 各章大纲 */}
+              <div className="outline-section global-section">
+                <div className="section-header">
+                  <span className="section-title">总纲</span>
+                  {!globalOutline && (
+                    <Button
+                      type="default"
+                      size="small"
+                      icon={<UploadOutlined style={{ fontSize: 14 }} />}
+                      onClick={() => handleUploadXmind('global')}
+                      loading={loading && loadingType === 'global'}
+                      disabled={loading}
+                      className="btn-upload"
+                    >
+                      {loading && loadingType === 'global' ? '上传中...' : '上传 XMind'}
+                    </Button>
+                  )}
+                </div>
+                {globalOutline && (
+                  <div
+                    className={`chapter-outline-item global-outline-item ${displayOutlineId === globalOutline.id ? 'active' : ''}`}
+                    onClick={() => handleOutlineClick(globalOutline)}
+                  >
+                    <span className="item-title" title={globalOutline.title}>
+                      <HighlightText text={globalOutline.title} query={workspaceSearchQuery} />
+                    </span>
+                    <div className="item-actions" onClick={(e) => e.stopPropagation()}>
+                      {globalOutline.file_path && (
+                        <Tooltip title="打开源文件">
+                          <Button type="text" size="small" icon={openingSourceId === globalOutline.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(globalOutline)} disabled={openingSourceId === globalOutline.id} className="btn-icon-small" />
+                        </Tooltip>
+                      )}
+                      <Tooltip title="编辑（重新上传 XMind）">
+                        <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} onClick={() => handleEdit(globalOutline)} disabled={loading} className="btn-icon-small" />
+                      </Tooltip>
+                      <Tooltip title="删除">
+                        <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={handleDeleteGlobal} disabled={loading} className="btn-icon-small" />
+                      </Tooltip>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="outline-section chapter-section">
+                <div className="section-header">
+                  <div className="section-title-row">
+                    <span className="section-title">{enableVolume ? '卷/章节大纲' : '章节大纲'}</span>
+                    <Tooltip title={enableVolume ? '创建卷和章节时自动新建，可点击「待上传」上传 XMind' : '创建写作章节时自动新建，可点击「待上传」上传 XMind'}>
+                      <span className="section-info-icon"><InfoCircleOutlined style={{ fontSize: 14 }} /></span>
+                    </Tooltip>
+                  </div>
+                  {!enableVolume && writingChapters.length > 0 && (
+                    <div className="section-actions">
+                      {chapterBatchMode ? (
+                        <>
+                          {selectedChapterOutlineIds.size > 0 && (
+                            <Tooltip title={`删除(${selectedChapterOutlineIds.size})`}>
+                              <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={handleBatchDeleteChapterOutlines} className="outline-batch-delete" />
+                            </Tooltip>
+                          )}
+                          <Button type="text" size="small" onClick={() => { setChapterBatchMode(false); setSelectedChapterOutlineIds(new Set()); }} className="outline-batch-cancel">
+                            取消
+                          </Button>
+                        </>
+                      ) : (
+                        <Button type="text" size="small" icon={<CheckSquareOutlined style={{ fontSize: 14 }} />} onClick={() => setChapterBatchMode(true)} title="批量操作" className="outline-batch-btn" />
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="chapter-outline-list">
+                  {writingChapters.length > 0 ? (
+                    enableVolume ? (
+                      volumeOutlines.length > 0 ? (
+                        volumeOutlines.map((vol: VolumeOutline) => (
+                          <React.Fragment key={vol.id}>
+                            <div
+                              className={`chapter-outline-item outline-volume-header${vol.file_path ? ' has-outline' : ''}${displayOutlineId === vol.id ? ' active' : ''}`}
+                              onClick={() => handleOutlineClick(vol)}
+                              style={{ cursor: 'pointer' }}
+                            >
+                              <span className="item-title" title={vol.title}>
+                                <HighlightText text={vol.title} query={workspaceSearchQuery} />
+                              </span>
+                              <div className="item-actions" onClick={(e) => e.stopPropagation()}>
+                                {vol.file_path && (
+                                  <Tooltip title="打开源文件">
+                                    <Button type="text" size="small" icon={openingSourceId === vol.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(vol)} disabled={openingSourceId === vol.id} className="btn-icon-small" />
+                                  </Tooltip>
+                                )}
+                                <Tooltip title={vol.file_path ? '重新上传 XMind 大纲' : '为此卷上传 XMind 大纲'}>
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    icon={<UploadOutlined style={{ fontSize: 14 }} />}
+                                    onClick={(e) => { e.stopPropagation(); handleUploadXmindForOutline(vol); }}
+                                    disabled={loading}
+                                    className="btn-icon-small"
+                                  />
+                                </Tooltip>
+                                <Tooltip title="删除此卷及其所有章节大纲">
+                                  <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={(e) => { e.stopPropagation(); handleDeleteVolumeOutline(vol); }} disabled={loading} className="btn-icon-small" />
+                                </Tooltip>
+                              </div>
+                            </div>
+                            {vol.chapters.map((chOutline: Outline) => {
+                              if (chOutline.file_path) {
+                                return (
+                                  <div
+                                    key={chOutline.id}
+                                    className={`chapter-outline-item outline-under-volume ${displayOutlineId === chOutline.id ? 'active' : ''}`}
+                                    onClick={() => handleOutlineClick(chOutline)}
+                                  >
+                                    <span className="item-title" title={chOutline.title}>
+                                      <HighlightText text={chOutline.title} query={workspaceSearchQuery} />
+                                    </span>
+                                    <div className="item-actions" onClick={(e) => e.stopPropagation()}>
+                                      {chOutline.file_path && (
+                                        <Tooltip title="打开源文件">
+                                          <Button type="text" size="small" icon={openingSourceId === chOutline.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(chOutline)} disabled={openingSourceId === chOutline.id} className="btn-icon-small" />
+                                        </Tooltip>
+                                      )}
+                                      <Tooltip title="编辑（重新上传 XMind）">
+                                        <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} onClick={() => handleUploadXmindForOutline(chOutline)} disabled={loading} className="btn-icon-small" />
+                                      </Tooltip>
+                                      <Tooltip title="删除">
+                                        <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={() => handleDelete(chOutline)} disabled={loading} className="btn-icon-small" />
+                                      </Tooltip>
+                                    </div>
+                                  </div>
+                                )
+                              }
+                              return (
+                                <div
+                                  key={`ch-outline-${chOutline.id}`}
+                                  className="chapter-outline-item no-outline outline-under-volume"
+                                  title="点击进入大纲详情（可写 Markdown 或上传 XMind）"
+                                  onClick={() => void handleOutlineClick(chOutline)}
+                                >
+                                  <span className="item-title" title={chOutline.title}>
+                                    <HighlightText text={chOutline.title} query={workspaceSearchQuery} />
+                                  </span>
+                                  <div className="item-actions">
+                                    <span className="item-pending">{chOutline.markdown_content?.trim() ? '待上传 XMind' : '待上传大纲'}</span>
+                                    <Tooltip title="删除">
+                                      <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={(e) => { e.stopPropagation(); handleDelete(chOutline); }} disabled={loading} className="btn-icon-small" />
+                                    </Tooltip>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        <div className="outline-empty-card">
+                          <BookOutlined className="outline-empty-card-icon" />
+                          <p className="outline-empty-card-title">暂无卷大纲</p>
+                          <p className="outline-empty-card-desc">在章节导航创建卷后自动生成</p>
+                        </div>
+                      )
+                    ) : (
+                      writingChapters.map((ch) => {
+                        const outline = chapterOutlines.find((o) => o.title === ch.title)
+                        if (outline && outline.file_path) {
+                          return (
+                            <div
+                              key={outline.id}
+                              className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${chapterBatchMode && selectedChapterOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                              onClick={() => handleOutlineClick(outline)}
+                            >
+                              {chapterBatchMode && <Checkbox checked={selectedChapterOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />}
+                              <span className="item-title" title={outline.title}>
+                                <HighlightText text={outline.title} query={workspaceSearchQuery} />
+                              </span>
+                              <div className="item-actions" onClick={(e) => e.stopPropagation()}>
+                                {outline.file_path && (
+                                  <Tooltip title="打开源文件">
+                                    <Button type="text" size="small" icon={openingSourceId === outline.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(outline)} disabled={openingSourceId === outline.id} className="btn-icon-small" />
+                                  </Tooltip>
+                                )}
+                                <Tooltip title="编辑">
+                                  <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} onClick={() => handleEdit(outline)} disabled={loading} className="btn-icon-small" />
+                                </Tooltip>
+                                <Tooltip title="删除">
+                                  <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={() => handleDelete(outline)} disabled={loading} className="btn-icon-small" />
+                                </Tooltip>
+                              </div>
+                            </div>
+                          )
+                        }
+                        return (
+                          <div
+                            key={`ch-${ch.id}`}
+                            className={`chapter-outline-item no-outline ${outline && selectedChapterOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                            title={outline ? '点击进入大纲详情（可写 Markdown 或上传 XMind）' : '点击上传 XMind 大纲文件'}
+                            onClick={() => (outline ? void handleOutlineClick(outline) : handleUploadXmind('chapter', ch.title))}
+                          >
+                            {chapterBatchMode && outline && (
+                              <Checkbox checked={selectedChapterOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />
+                            )}
+                            <span className="item-title" title={ch.title}>
+                              <HighlightText text={ch.title} query={workspaceSearchQuery} />
+                            </span>
+                            <div className="item-actions">
+                              <span className="item-pending">{outline?.markdown_content?.trim() ? '待上传 XMind' : '待上传大纲'}</span>
+                              {outline && (
+                                <Tooltip title="删除">
+                                  <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={(e) => { e.stopPropagation(); handleDelete(outline); }} disabled={loading} className="btn-icon-small" />
+                                </Tooltip>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })
+                    )
+                  ) : (
+                    <div className="outline-empty-card">
+                      <BookOutlined className="outline-empty-card-icon" />
+                      <p className="outline-empty-card-title">暂无写作章节</p>
+                      <p className="outline-empty-card-desc">在右侧编辑区创建章节后会自动生成</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="outline-section other-section">
+                <div className="section-header">
+                  <span className="section-title">其他大纲</span>
+                  <div className="section-actions">
+                    {otherOutlines.length > 0 && (
+                      otherBatchMode ? (
+                        <>
+                          {selectedOtherOutlineIds.size > 0 && (
+                            <Tooltip title={`删除(${selectedOtherOutlineIds.size})`}>
+                              <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={handleBatchDeleteOtherOutlines} className="outline-batch-delete" />
+                            </Tooltip>
+                          )}
+                          <Button type="text" size="small" onClick={() => { setOtherBatchMode(false); setSelectedOtherOutlineIds(new Set()); }} className="outline-batch-cancel">
+                            取消
+                          </Button>
+                        </>
+                      ) : (
+                        <Button type="text" size="small" icon={<CheckSquareOutlined style={{ fontSize: 14 }} />} onClick={() => setOtherBatchMode(true)} title="批量操作" className="outline-batch-btn" />
+                      )
+                    )}
+                    <Tooltip title={loading && loadingType === 'other' ? '上传中...' : '新建'}>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<PlusOutlined style={{ fontSize: 14 }} />}
+                        onClick={() => handleUploadXmind('other')}
+                        loading={loading && loadingType === 'other'}
+                        disabled={loading}
+                        className="outline-add-btn"
+                      />
+                    </Tooltip>
+                  </div>
+                </div>
+                {otherOutlines.length === 0 && !loading && (
+                  <div
+                    className="outline-empty-card outline-empty-card-action"
+                    onClick={() => !loading && handleUploadXmind('other')}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === 'Enter' && !loading && handleUploadXmind('other')}
+                  >
+                    <FileAddOutlined className="outline-empty-card-icon" />
+                    <p className="outline-empty-card-title">上传 XMind 大纲</p>
+                    <p className="outline-empty-card-desc">点击此处或上方 + 上传</p>
+                  </div>
+                )}
+                <div className="chapter-outline-list">
+                  {otherOutlines.map((outline) => (
+                      <div
+                        key={outline.id}
+                        className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${otherBatchMode && selectedOtherOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                        onClick={() => handleOutlineClick(outline)}
+                      >
+                        {otherBatchMode && <Checkbox checked={selectedOtherOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleOtherOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />}
+                        <span className="item-title" title={outline.title}>
+                          <HighlightText text={outline.title} query={workspaceSearchQuery} />
+                        </span>
+                        <div className="item-actions" onClick={(e) => e.stopPropagation()}>
+                          {outline.file_path && (
+                            <Tooltip title="打开源文件">
+                              <Button type="text" size="small" icon={openingSourceId === outline.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(outline)} disabled={openingSourceId === outline.id} className="btn-icon-small" />
+                            </Tooltip>
+                          )}
+                          <Tooltip title="编辑">
+                            <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} onClick={() => handleEdit(outline)} disabled={loading} className="btn-icon-small" />
+                          </Tooltip>
+                          <Tooltip title="删除">
+                            <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={() => handleDelete(outline)} disabled={loading} className="btn-icon-small" />
+                          </Tooltip>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            /* 详情视图：整个左侧区域展示大纲内容 */
+            <div className="outline-detail-view">
+              <div className="detail-header">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ArrowLeftOutlined style={{ fontSize: 14 }} />}
+                  onClick={() => {
+                    void flushMarkdownSave()
+                    setViewMode('list')
+                    setSyncedChapterNoOutlineTitle(null)
+                  }}
+                  title="返回列表"
+                  className="btn-back"
+                />
+                <div className="detail-title-wrap">
+                  <span className="detail-title">{currentOutline?.title || syncedChapterNoOutlineTitle || '大纲'}</span>
+                  {!syncedChapterNoOutlineTitle && (
+                  <div className="detail-switcher-wrap">
+                    <Button type="text" size="small" icon={<SwapOutlined style={{ fontSize: 12 }} />} onClick={() => setShowSwitcher((v) => !v)} title="切换大纲" className="btn-switcher" />
+                    {showSwitcher && (
+                      <div className="switcher-list">
+                        {enableVolume ? (
+                          <>
+                            {globalOutline && (
+                              <div
+                                key={globalOutline.id}
+                                className={`switcher-item ${globalOutline.id === displayOutlineId ? 'active' : ''}`}
+                                onClick={() => { handleOutlineClick(globalOutline, false); setShowSwitcher(false) }}
+                              >
+                                {globalOutline.title}
+                              </div>
+                            )}
+                            {volumeOutlines.map((vol) => (
+                              <React.Fragment key={vol.id}>
+                                {vol.file_path ? (
+                                  <div
+                                    className={`switcher-item ${vol.id === displayOutlineId ? 'active' : ''}`}
+                                    onClick={() => { handleOutlineClick(vol, false); setShowSwitcher(false) }}
+                                  >
+                                    {vol.title}
+                                  </div>
+                                ) : (
+                                  <div className="switcher-group-label">{vol.title}</div>
+                                )}
+                                {vol.chapters.map((ch) => (
+                                  <div
+                                    key={ch.id}
+                                    className={`switcher-item switcher-item-indent ${ch.id === displayOutlineId ? 'active' : ''}`}
+                                    onClick={() => { handleOutlineClick(ch, false); setShowSwitcher(false) }}
+                                  >
+                                    {ch.title}
+                                  </div>
+                                ))}
+                              </React.Fragment>
+                            ))}
+                            {otherOutlines.map((o) => (
+                              <div
+                                key={o.id}
+                                className={`switcher-item ${o.id === displayOutlineId ? 'active' : ''}`}
+                                onClick={() => { handleOutlineClick(o, false); setShowSwitcher(false) }}
+                              >
+                                {o.title}
+                              </div>
+                            ))}
+                          </>
+                        ) : (
+                          allOutlines.map((o) => (
+                            <div
+                              key={o.id}
+                              className={`switcher-item ${o.id === displayOutlineId ? 'active' : ''}`}
+                              onClick={() => { handleOutlineClick(o, false); setShowSwitcher(false) }}
+                            >
+                              {o.title}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  )}
+                </div>
+                {(currentOutline || syncedChapterNoOutlineTitle) && (
+                  <Dropdown
+                    menu={{
+                      items: [
+                        currentOutline?.file_path && {
+                          key: 'open',
+                          icon: <ExportOutlined style={{ fontSize: 14 }} />,
+                          label: openingSourceId === currentOutline.id ? '打开中…' : '打开源文件',
+                          disabled: openingSourceId === currentOutline.id,
+                          onClick: () => handleOpenSource(currentOutline),
+                        },
+                        {
+                          key: 'edit',
+                          icon: <EditOutlined style={{ fontSize: 14 }} />,
+                          label: currentOutline?.file_path ? '编辑（重新上传 XMind）' : '上传 XMind 大纲',
+                          disabled: loading,
+                          onClick: () => (currentOutline?.file_path ? handleEdit(currentOutline!) : openDetailXmindUpload()),
+                        },
+                        currentOutline && {
+                          key: 'delete',
+                          icon: <DeleteOutlined style={{ fontSize: 14 }} />,
+                          label: '删除',
+                          disabled: loading,
+                          danger: true,
+                          onClick: () => handleDelete(currentOutline),
+                        },
+                      ].filter(Boolean) as MenuProps['items'],
+                    }}
+                    trigger={['click']}
+                    placement="bottomRight"
+                  >
+                    <Button type="text" size="small" icon={<EllipsisOutlined style={{ fontSize: 14 }} />} title="更多操作" className="detail-more-btn" />
+                  </Dropdown>
+                )}
+              </div>
+              <div className="detail-body">
+                {displayLoading ? (
+                  <div className="display-area-loading"><Spin description="加载中..." /></div>
+                ) : syncedChapterNoOutlineTitle && !currentOutline ? (
+                  <div
+                    className="outline-empty-card outline-empty-card-action"
+                    onClick={() => !loading && handleUploadXmind('chapter', syncedChapterNoOutlineTitle || '')}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === 'Enter' && !loading && handleUploadXmind('chapter', syncedChapterNoOutlineTitle || '')}
+                  >
+                    <FileAddOutlined className="outline-empty-card-icon" />
+                    <p className="outline-empty-card-title">上传 XMind 大纲</p>
+                    <p className="outline-empty-card-desc">点击此处或上方编辑图标上传</p>
+                  </div>
+                ) : !currentOutline ? (
+                  <Empty image={false} description="未找到大纲" className="display-area-empty" />
+                ) : (
+                  <div className="outline-detail-body-inner">
+                    <Segmented
+                      className="outline-detail-segmented"
+                      value={detailOutlineSub}
+                      onChange={(v) => setDetailOutlineSub(v as 'xmind' | 'markdown')}
+                      options={[
+                        { label: '思维导图', value: 'xmind' },
+                        { label: 'Markdown', value: 'markdown' },
+                      ]}
+                      block
+                    />
+                    {detailOutlineSub === 'xmind' ? (
+                      <div className="outline-xmind-panel">
+                        {!currentOutline.file_path ? (
+                          <div
+                            className="outline-empty-card outline-empty-card-action"
+                            onClick={() => !loading && openDetailXmindUpload()}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => e.key === 'Enter' && !loading && openDetailXmindUpload()}
+                          >
+                            <FileAddOutlined className="outline-empty-card-icon" />
+                            <p className="outline-empty-card-title">上传 XMind 大纲</p>
+                            <p className="outline-empty-card-desc">点击此处或上方菜单上传；也可切换到「Markdown」编辑文本大纲</p>
+                          </div>
+                        ) : displayChapters.length === 0 ? (
+                          <Empty image={false} description="该大纲暂无思维导图节点" className="display-area-empty" />
+                        ) : (
+                          <Suspense fallback={<div className="display-area-loading"><Spin description="加载思维导图…" /></div>}>
+                            <MindMapView
+                              chapters={displayChapters}
+                              rootTitle={currentOutline.title}
+                              xmindData={currentOutline.xmind_data}
+                              filePath={currentOutline.file_path}
+                            />
+                          </Suspense>
+                        )}
+                      </div>
+                    ) : (
+                      <OutlineMarkdownPane
+                        ref={outlineMarkdownPaneRef}
+                        key={String(displayOutlineId)}
+                        outlineId={currentOutline.id}
+                        markdownContent={currentOutline.markdown_content ?? null}
+                        onSaved={loadData}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+            )},
+          {
+            key: '1',
+            label: '人物',
+            children: (
+              <div className="tab-content character-tab-wrapper">
+                <CharacterTab bookId={bookId ?? null} />
+              </div>
+            ),
+          },
+          {
+            key: '2',
+            label: '小说背景',
+            children: (
+              <div className="tab-content story-background-tab-wrapper">
+                <StoryBackgroundTab bookId={bookId ?? null} />
+              </div>
+            ),
+          },
+        ]}
+      />
+    </div>
+  )
+}
+

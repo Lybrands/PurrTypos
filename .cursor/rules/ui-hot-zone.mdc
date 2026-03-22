@@ -1,0 +1,15 @@
+---
+description: UI — 可点击热区尺寸与 hover（原子类 hot-zone-*）
+globs: "**/*.tsx"
+alwaysApply: false
+---
+
+# 热区规范
+
+所有可点击热区必须满足：
+
+- **图标热区**：最小宽高 24px × 24px（含 padding 4px），禁止 hover 时加 border。
+- **文字热区**：不限制宽度，最小行高 24px（可点击区域高度 ≥ 24px）。
+- **通用**：hover 背景 `var(--bg-hover-zone)`，无 border；圆角 4px；`transition: background 0.15s`。列表行 hover 用 `var(--bg-hover-list)`。
+
+样式使用 `src/styles/atomics.scss` 中的 `hot-zone-icon`、`hot-zone-text`，不要重复写热区尺寸与 hover。
