@@ -4,15 +4,32 @@ import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from 'antd'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
 import type { Editor } from '@tiptap/core'
-import { Extension } from '@tiptap/core'
+import { Extension, mergeAttributes } from '@tiptap/core'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
+import Heading from '@tiptap/extension-heading'
 import { TableKit } from '@tiptap/extension-table'
 import type { StoryBackgroundAttachment } from '../../types'
 import { getStoryBackground } from '../utils'
 import { useAntdApp } from '../../hooks/useAntdApp'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import './StoryBackgroundTab.scss'
+
+/** 悬停标题时显示原生 tooltip：第几级标题（与 StarterKit 默认 heading 二选一） */
+const storyBackgroundHeading = Heading.extend({
+  renderHTML({ node, HTMLAttributes }) {
+    const hasLevel = this.options.levels.includes(node.attrs.level)
+    const level = hasLevel ? node.attrs.level : this.options.levels[0]
+    return [
+      `h${level}`,
+      mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
+        title: `第 ${level} 级标题`,
+        'data-heading-level': String(level),
+      }),
+      0,
+    ]
+  },
+}).configure({ levels: [1, 2, 3, 4] })
 
 /** Tab 键：列表内缩进，非列表插入制表符；始终阻止失焦 */
 const LiteralTab = Extension.create({
@@ -47,8 +64,9 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     extensions: [
       LiteralTab,
       StarterKit.configure({
-        heading: { levels: [1, 2, 3, 4] },
+        heading: false,
       }),
+      storyBackgroundHeading,
       TableKit,
     ],
     content: '<p></p>',

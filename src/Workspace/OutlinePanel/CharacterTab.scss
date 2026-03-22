@@ -35,7 +35,6 @@
 .character-tab-list {
   flex: 1;
   overflow-y: auto;
-  padding: var(--spacing);
 }
 
 .character-tab-empty-card {
@@ -69,7 +68,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: var(--spacing) var(--spacing-md);
+  padding: 2px var(--spacing);
   margin-bottom: var(--spacing-xs);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);

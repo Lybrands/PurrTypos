@@ -21,6 +21,7 @@
     "@mistralai/mistralai": "^1.15.1",
     "@qdrant/js-client-rest": "^1.17.0",
     "@supabase/supabase-js": "^2.99.2",
+    "@tiptap/extension-heading": "^3.20.0",
     "@tiptap/extension-table": "^3.20.1",
     "@tiptap/pm": "^3.20.0",
     "@tiptap/react": "^3.20.0",

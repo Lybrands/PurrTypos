@@ -189,7 +189,7 @@
     background: var(--bg-hover-list);
 
     .nav-chapter-actions {
-      opacity: 1;
+      display: flex;
     }
   }
 
@@ -198,7 +198,7 @@
     border-left: 2px solid var(--accent);
 
     .nav-chapter-actions {
-      opacity: 1;
+      display: flex;
     }
   }
 
@@ -220,11 +220,10 @@
 
 .nav-chapter-actions {
   flex-shrink: 0;
-  display: flex;
+  display: none;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s;
+  transition: display 0.12s;
 }
 
 .nav-action-btn {

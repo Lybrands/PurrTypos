@@ -168,10 +168,11 @@
       line-height: 1.5;
     }
 
-    h1 { font-size: 1.35em; }
-    h2 { font-size: 1.2em; }
-    h3 { font-size: 1.1em; }
-    h4 { font-size: 1em; }
+    /* 四级标题字号阶梯拉大，便于区分层级 */
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.75em; }
+    h3 { font-size: 1.4em; }
+    h4 { font-size: 1.2em; }
 
     ul, ol {
       margin: 0.5em 0;
@@ -329,10 +330,11 @@
     line-height: 1.5;
   }
 
-  h1 { font-size: 1.35em; }
-  h2 { font-size: 1.2em; }
-  h3 { font-size: 1.1em; }
-  h4 { font-size: 1em; }
+  /* 与编辑态 .tiptap 四级标题字号一致 */
+  h1 { font-size: 2em; }
+  h2 { font-size: 1.75em; }
+  h3 { font-size: 1.4em; }
+  h4 { font-size: 1.2em; }
 
   ul, ol {
     margin: 0.5em 0;
