@@ -1,0 +1,80 @@
+/* ─── 关联上下文栏（icon 入口）─────────────────────── */
+.ai-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 2px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.ai-context-icon-btn.ant-btn {
+  flex-shrink: 0;
+  padding: 0 4px;
+  color: var(--text-muted);
+  &:hover {
+    color: var(--text-primary);
+  }
+}
+.ai-memory-btn--has-selection.ant-btn {
+  color: var(--accent);
+}
+
+/* 关联 Popover 内复用（章节/大纲选择） */
+.ai-context-group {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ai-context-select.ant-select {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+
+  .ant-select-selector {
+    font-size: var(--font-size-sm);
+    padding: 0 6px !important;
+  }
+
+  .ant-select-selection-placeholder,
+  .ant-select-selection-item {
+    font-size: var(--font-size-sm);
+    line-height: 22px;
+  }
+}
+
+.ai-context-quick-btn.ant-btn {
+  flex-shrink: 0;
+  padding: 0 3px;
+  color: var(--text-muted);
+}
+
+/* 关联 Popover 无箭头 */
+.ai-context-popover.ant-popover {
+  .ant-popover-arrow {
+    display: none;
+  }
+}
+.ai-context-popover-content {
+  min-width: 280px;
+  padding: 2px 0;
+}
+.ai-context-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+.ai-context-popover-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  width: 64px;
+}

@@ -1,0 +1,4 @@
+# 打包时用此文件替代 .gitignore，不忽略 dist，否则前端构建产物不会被打进 app
+node_modules
+dist-electron
+.env

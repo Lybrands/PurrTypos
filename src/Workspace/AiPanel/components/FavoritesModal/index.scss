@@ -1,0 +1,251 @@
+/* ─── 收藏列表弹窗 ──────────────────────────────────────────── */
+.ai-favorites-modal.ant-modal {
+  .ant-modal-body {
+    height: 50vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .favorites-modal-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex: 1;
+    min-height: 320px;
+  }
+
+  .ant-modal-body .ant-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 320px;
+  }
+
+  .favorites-list.ant-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .favorites-list-item.ant-list-item {
+    .ant-list-item-action {
+      display: none;
+    }
+  }
+
+  .favorites-item-main {
+    cursor: pointer;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .favorites-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    min-height: 24px;
+  }
+
+  .favorites-item-title {
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .favorites-item-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  /* 删除按钮不占位，hover 时再显示并占位；固定高度避免抖动 */
+  .favorites-item-delete {
+    display: none;
+    flex-shrink: 0;
+    height: 24px;
+    padding: 0 4px;
+    line-height: 24px;
+  }
+
+  .favorites-list-item:hover .favorites-item-delete {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .favorites-item-preview {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.4;
+  }
+
+  .favorites-item-delete.ant-btn {
+    min-width: 24px;
+    color: var(--text-muted);
+    &:hover {
+      color: var(--text-primary);
+    }
+  }
+}
+
+/* ─── 收藏详情弹窗 ──────────────────────────────────────────── */
+.ai-favorite-detail-modal.ant-modal {
+  .ant-modal-body {
+    height: 60vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .favorite-detail-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .favorite-detail-section {
+    display: flex;
+    flex-direction: column;
+    margin-top: 16px;
+
+    .favorite-detail-label {
+      font-size: var(--font-size-sm);
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+    .favorite-detail-text {
+      font-size: var(--font-size);
+      color: var(--text-primary);
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: var(--spacing-sm) var(--spacing-lg);
+      background: var(--bg-active);
+      border-radius: var(--border-radius);
+      border: 1px solid var(--border-light);
+    }
+  }
+
+  /* 问：高度随内容 */
+  .favorite-detail-section:first-child {
+    flex-shrink: 0;
+
+    .favorite-detail-text {
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+  }
+
+  /* 答：撑满剩余空间，内部滚动 */
+  .favorite-detail-section:last-child {
+    flex: 1;
+    min-height: 0;
+
+    .favorite-detail-text {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+  }
+
+  /* 答区域 Markdown 样式（与 AiPanel 气泡一致） */
+  .favorite-detail-answer-md {
+    white-space: pre-wrap;
+    word-break: break-word;
+
+    > p, > ul, > ol, > blockquote, > pre, > table, > h1, > h2, > h3, > h4, > h5, > h6, > hr {
+      white-space: normal;
+    }
+
+    p { margin: 0 0 0.5em; &:last-child { margin-bottom: 0; } }
+
+    h1, h2, h3, h4, h5, h6 {
+      font-weight: var(--font-weight-semibold);
+      line-height: 1.5;
+      margin: 0.75em 0 0.3em;
+      color: var(--text-primary);
+      &:first-child { margin-top: 0; }
+    }
+    h1 { font-size: 1.25em; }
+    h2 { font-size: 1.12em; }
+    h3 { font-size: 1em; }
+
+    ul, ol {
+      padding-left: 1.4em;
+      margin: 0.4em 0;
+      li { margin: 0.15em 0; }
+    }
+
+    blockquote {
+      border-left: 3px solid var(--accent);
+      margin: 0.5em 0;
+      padding: 0.2em 0.75em;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    code {
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 0.88em;
+      background: rgba(0, 0, 0, 0.18);
+      border-radius: 3px;
+      padding: 0.1em 0.35em;
+    }
+
+    pre {
+      background: rgba(0, 0, 0, 0.22);
+      border-radius: var(--border-radius);
+      padding: 0.65em 0.9em;
+      margin: 0.5em 0;
+      overflow-x: auto;
+      code {
+        background: none;
+        padding: 0;
+        font-size: 0.85em;
+      }
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.5em 0;
+      font-size: 0.9em;
+      th, td {
+        border: 1px solid var(--border);
+        padding: 0.3em 0.6em;
+        text-align: left;
+      }
+      th { background: rgba(0, 0, 0, 0.12); font-weight: var(--font-weight-semibold); }
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0.6em 0;
+    }
+  }
+}

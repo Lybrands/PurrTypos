@@ -1,0 +1,137 @@
+.bookshelf-page {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-base);
+  overflow-y: auto;
+}
+
+
+/* ─── 书架列表 ─────────────────────────────────────── */
+.bookshelf-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  padding: 32px;
+  align-content: flex-start;
+}
+
+/* ─── 书本卡片 ─────────────────────────────────────── */
+.book-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: transform 0.18s;
+
+  &:hover {
+    transform: translateY(-4px);
+
+    .book-actions {
+      opacity: 1;
+    }
+  }
+}
+
+.book-cover {
+  width: 110px;
+  height: 150px;
+  border-radius: 2px 8px 8px 2px;
+  background: var(--bg-surface);
+  border: 2px solid var(--border-light);
+  border-top: 4px solid;
+  box-shadow: 3px 3px 12px rgba(0, 0, 0, 0.14), inset -3px 0 8px rgba(0, 0, 0, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  text-align: center;
+  overflow: hidden;
+}
+
+.book-spine {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 10px;
+  height: 150px;
+  border-radius: 2px 0 0 2px;
+  opacity: 0.85;
+}
+
+.book-cover-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.5;
+  word-break: break-all;
+  max-height: 120px;
+  overflow: hidden;
+}
+
+.book-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.book-action-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--bg-overlay);
+  backdrop-filter: blur(4px);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover { background: var(--bg-hover); color: var(--text-primary); }
+  &.danger:hover { background: #fff1f0; color: #cf1322; }
+}
+
+.book-title {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  max-width: 110px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── 新建占位卡片 ─────────────────────────────────── */
+.book-card-add {
+  .book-card-add-inner {
+    width: 110px;
+    height: 150px;
+    border: 1.5px dashed var(--border);
+    border-radius: 2px 8px 8px 2px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    transition: border-color 0.15s, color 0.15s;
+
+    .anticon { font-size: 22px; }
+  }
+
+  &:hover .book-card-add-inner {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
