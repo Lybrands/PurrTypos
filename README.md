@@ -1,6 +1,6 @@
-# PurrTypos - 写作
+# PurrTypos
 
-Vite + React + Electron 桌面应用，支持 XMind 大纲、文档编辑与可配置模型 AI 对话。
+Vite + React + TypeScript + Electron 桌面写作应用：多书籍管理、XMind/大纲、章节正文编辑、人物与小说背景，以及可配置多模型的 AI 对话（含 Agent 工具调用与本地会话存储）。
 
 ## 环境要求
 
@@ -19,7 +19,7 @@ npm install
 node node_modules/electron/install.js
 ```
 
-或使用国内镜像（项目 `.npmrc` 已配置 npmmirror）重新安装：
+或使用国内镜像（项目 `.npmrc` 可配置 npmmirror）后重装：
 
 ```bash
 npm rebuild electron
@@ -33,10 +33,10 @@ npm run dev
 
 会同时启动：
 
-1. **Vite** 开发服务（http://localhost:5173，热更新）
-2. **Electron** 窗口（等待 Vite 就绪后自动打开）
+1. **Vite** 开发服务（`http://localhost:5173`，热更新）
+2. **Electron** 窗口（等待 Vite 就绪后加载页面）
 
-主进程修改后需重启 `npm run dev`；渲染进程（React）支持热更新。
+主进程（`electron/`）修改后需重启 `npm run dev`；渲染进程（`src/`）支持热更新。
 
 ## 打包
 
@@ -44,36 +44,59 @@ npm run dev
 npm run build
 ```
 
-流程：先执行 `vite build` 构建前端到 `dist/`，再执行 `electron-builder` 打包成安装包，输出在 `dist-electron/`。
+流程：生成图标 → `vite build` 输出到 `dist/` → `electron-builder` 生成安装包，产物在 `dist-electron/`。
 
-- Windows：生成 NSIS 安装程序
-- macOS：生成 .dmg
+- Windows：NSIS 安装程序  
+- macOS：`.dmg`
 
 ## 使用说明
 
-1. **顶栏**：点击「API Key」配置可用模型（Provider、API Key、Base URL、模型名），否则 AI 功能不可用。
-2. **左侧大纲**：点击「打开 .xmind 文件」选择 XMind 文件，解析后显示章节大纲；可切换标签「章节大纲 / 人物关系 / 小说背景」（后两者 MVP 为静态占位）；点击章节可标记进度并在右侧编辑。
-3. **右侧编辑区**：选择章节后在此编辑，内容自动保存到 SQLite；输入 `\` 唤起悬浮 AI 输入框，输入需求后调用当前所选模型，结果展示在悬浮框内（不自动插入正文）。
-4. **右侧 AI 对话**：输入提示词发送，与当前章节绑定的对话会保存到本地；可点击 🔧 设置系统提示词、🗑️ 清空当前对话。
-5. **布局**：中间分割线可拖拽调整左右比例；各面板标题栏有全屏按钮，退出后恢复比例。
+### 导航
+
+1. **首页**：进入书架或打开设置。  
+2. **书架**：创建/重命名/删除书籍，可选择是否启用分卷；可从多本书导出 Markdown/文本（支持 ZIP）。  
+3. **写作工作台**：选定书籍后进入三栏布局——左侧大纲、中间编辑、右侧 AI。
+
+### 设置（首页或工作台可打开）
+
+- **通用**：主题、字体等。  
+- **AI 配置**：系统提示词（保存后写入本地库，对话会携带）；可选「大纲章节同步」等选项。  
+- **模型配置**：添加多个模型（OpenAI / Anthropic 兼容接口）、API Key、Base URL、Temperature、thinking 相关选项等；未配置有效模型时 AI 不可用。  
+- **数据**：数据库导出 / 导入（覆盖当前数据，导入后通常会刷新页面）。
+
+### 工作台
+
+- **左侧大纲**：支持打开 `.xmind`、思维导图视图、Markdown 大纲等（与书籍/分卷/章节关联）；标签内可切换 **章节大纲 / 人物 / 小说背景**。  
+- **人物**：新建、编辑、删除；字段含名称、性别、年龄、外貌、背景、小传、标签、**备注** 等；性格/标签候选可在「选项配置」中维护。  
+- **小说背景**：书籍级背景正文与附件管理。  
+- **中间编辑区**：当前章节正文（Lexical），自动保存到本地数据库。  
+- **右侧 AI**：选择模型、开关 Agent、会话历史、收藏、记忆等；对话按书籍/会话持久化。分割线可拖拽；各面板支持全屏。
 
 ## 项目结构
 
 ```
-EsayWrite/
-├── electron/           # Electron 主进程
-│   ├── main.js         # 入口、窗口、IPC
-│   ├── preload.js      # 预加载脚本（暴露 API）
-│   └── database.js     # SQLite 封装
+PurrTypos/
+├── electron/              # Electron 主进程
+│   ├── main.js            # 窗口、IPC、与渲染进程通信
+│   ├── preload.js         # 预加载，暴露 window.electronAPI
+│   ├── database.js        # SQLite（sql.js）数据访问
+│   ├── openaiChat.js      # 聊天流式请求等
+│   ├── toolExecutor.js    # Agent 工具执行
+│   └── toolRouter.js      # 工具路由
 ├── src/
+│   ├── App.tsx            # 页面路由：首页 / 书架 / 工作台 + 设置浮层
+│   ├── main.tsx           # React 入口，ConfigProvider + antd App
+│   ├── hooks/             # 如 useAntdApp（与主题一致的 message 等）
+│   ├── HomePage/
+│   ├── BookshelfPage/
+│   ├── SettingsPage/      # 设置（模型、系统提示词、数据）
+│   ├── Workspace/         # 写作工作台
+│   │   ├── OutlinePanel/  # 大纲、人物 CharacterTab、小说背景 StoryBackgroundTab
+│   │   ├── EditorPanel/   # 章节列表与 Lexical 编辑
+│   │   └── AiPanel/       # AI 对话与相关组件
 │   ├── components/
-│   │   ├── OutlinePanel/   # 左侧大纲
-│   │   ├── EditorPanel/    # 右侧编辑区
-│   │   └── AiPanel/        # 右侧 AI 对话
-│   ├── App.jsx
-│   ├── App.css
-│   ├── main.jsx
-│   └── index.css
+│   └── contexts/          # 主题、字号等
+├── main.js                # 打包入口，转调 electron/main.js
 ├── index.html
 ├── vite.config.js
 └── package.json
@@ -81,11 +104,11 @@ EsayWrite/
 
 ## 数据存储
 
-- SQLite 数据库文件位于系统用户数据目录（如 Windows `%APPDATA%/purrtypos/purrtypos.db`）。
-- 表：`outlines`、`outline_chapters`、`articles`、`ai_conversations`，详见 `electron/database.js`。
+- 使用 **sql.js** 将 SQLite 数据库持久化到用户数据目录下的 **`purrtypos.db`**（例如 Windows：`%APPDATA%\purrtypos\purrtypos.db`，具体以 Electron `app.getPath('userData')` 为准）。  
+- 主要数据表包括：`books`、`outlines`、`outline_chapters`、`articles`、人物 `characters`、小说背景 `story_background`、AI 会话 `ai_sessions` / `ai_conversations`、收藏 `ai_favorites`、记忆 `ai_memories`、应用设置 `settings` 等。表结构以 `electron/database.js` 为准。
 
-## 异常处理
+## 异常处理（简要）
 
-- XMind 解析失败：弹窗/提示「解析失败」及原因。
-- AI 接口失败：对话区展示「请求失败：xxx」。
-- 数据库初始化失败：主进程控制台输出错误，渲染进程可做降级提示。
+- **XMind 解析失败**：界面提示原因。  
+- **AI 请求失败**：对话区域展示错误信息。  
+- **数据库**：初始化或读写失败时主进程控制台会有日志；导入数据库前请确认备份。
