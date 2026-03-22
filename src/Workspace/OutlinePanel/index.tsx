@@ -818,8 +818,8 @@ export default function OutlinePanel({
                       value={detailOutlineSub}
                       onChange={(v) => setDetailOutlineSub(v as 'xmind' | 'markdown')}
                       options={[
-                        { label: '思维导图', value: 'xmind' },
-                        { label: 'Markdown', value: 'markdown' },
+                        { label: '思维导图大纲', value: 'xmind' },
+                        { label: '文本大纲', value: 'markdown' },
                       ]}
                       block
                     />

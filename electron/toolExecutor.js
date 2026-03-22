@@ -5,6 +5,7 @@
 
 const Database = require('./database')
 const mem0Service = require('./mem0Service')
+const { collectTextOutlineEntries, formatTextOutlineForAgent } = require('./outlineTextForAgent')
 
 const MEMORY_LAYERS = ['全局', '大纲', '人物', '章节']
 const MEMORY_LAYER_ORDERED = ['全局', '大纲', '人物', '章节']
@@ -280,6 +281,14 @@ async function runTools(toolCalls, ctx, sendChunk) {
           content = JSON.stringify(details.map((d) => ({ title: d.outline.title, chaptersText: d.chaptersText }))).slice(0, 20000)
           break
         }
+        case 'getTextOutline': {
+          const bid = args.bookId ?? defaultBookId
+          const oids = args.outlineIds
+          const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+          const entries = collectTextOutlineEntries(bid, oids)
+          content = formatTextOutlineForAgent(entries, maxLen)
+          break
+        }
         case 'editChapterContent': {
           const cid = args.chapterId
           const newContent = typeof args.content === 'string' ? args.content : ''
@@ -397,4 +406,4 @@ async function runTools(toolCalls, ctx, sendChunk) {
   return results
 }
 
-module.exports = { runTools }
+module.exports = { runTools, collectTextOutlineEntries, formatTextOutlineForAgent }

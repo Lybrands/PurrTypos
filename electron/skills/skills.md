@@ -106,6 +106,17 @@
 
 ---
 
+### getTextOutline
+
+- **用途**：获取左侧大纲各条目中 **「文本大纲」标签页**保存的 **Markdown 正文**（剧情提纲、结构说明等）。与 **batchGetOutlineDetails**（子章节树 `chaptersText`）互补，后者来自 XMind/目录树而非文本页。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `outlineIds` (array, 可选)：只拉取这些大纲 ID；不传则返回本书所有已填写文本大纲。
+  - `maxTextLength` (number, 可选)：合并后总长度上限，默认 32000。
+- **返回**：纯文本，多块之间用分隔线拼接；每项含类型标签、标题与「大纲ID:」便于对照 `getAvailableOutlines`。
+
+---
+
 ### editChapterContent
 
 - **用途**：编辑指定章节的正文内容。将传入的 content（纯文本，段落用换行符分隔）写入该章节并保存。chapterId 必须来自 getWritingOutlineWithChapters(bookId) 返回的 chapters[].id（写作目录中的章节 ID）。适用于按用户要求改写某一章、替换整章正文等场景。
@@ -133,6 +144,7 @@
 
 - 对话开始时若已知 bookId、当前章节，可先调用 **getBookContext** 获取全书上下文。
 - 只需写作目录时用 **getWritingOutlineWithChapters**；需要总纲/卷/多类大纲时用 **getAllOutlines**。
+- 需要 **文本层大纲 Markdown**（非目录树）时用 **getTextOutline**；需要 **章节树结构** 时用 **batchGetOutlineDetails** / **getAllOutlines**。
 - 需要某章或某几章正文时用 **getChapterContent** 或 **batchGetChapterContents**；chapterId 必须来自写作目录。
 - 需要人物或小说背景时用 **getBookCharacters**（可按 ID 或按名子集）、**listBookCharacters**（只要名称与 ID 对照时）、**getStoryBackground**。
 - 用户要求写入、修改、改写、重写或替换某章内容时，必须调用 **editChapterContent** 并收到 success 后再回复完成，不得仅回复「已完成」而未实际调用该工具。

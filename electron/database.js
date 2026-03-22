@@ -388,6 +388,13 @@ Database.getOutlineByWritingChapterId = function (writingChapterId) {
   return get('SELECT * FROM outlines WHERE writing_chapter_id = ? LIMIT 1', [writingChapterId])
 }
 
+/** 只读：本书写作大纲行（无则 null，不创建） */
+Database.getWritingOutline = function (bookId) {
+  getDb()
+  if (bookId) return get('SELECT * FROM outlines WHERE type = ? AND book_id = ? LIMIT 1', ['writing', bookId])
+  return get('SELECT * FROM outlines WHERE type = ? LIMIT 1', ['writing'])
+}
+
 Database.getOrCreateWritingOutline = function (bookId) {
   getDb()
   if (bookId) {

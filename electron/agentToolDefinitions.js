@@ -163,6 +163,28 @@ const ROUTER_SKILL_ITEMS = [
     },
   },
   {
+    name: 'getTextOutline',
+    description:
+      '只读：获取左侧大纲各条目中「文本大纲」标签页保存的 Markdown 正文（剧情提纲、结构说明等）。与 batchGetOutlineDetails（XMind/子章节树 chaptersText）互补；用户讨论文本层大纲、总纲文档、卷/章文字说明时使用。可先 getAvailableOutlines 拿 id 再传 outlineIds 子集。',
+    parameters: {
+      type: 'object',
+      properties: {
+        bookId: { type: 'number', description: '当前书籍 ID' },
+        outlineIds: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            '可选。只拉取这些大纲 ID 的文本；不传则返回本书所有已填写文本大纲（按总纲→卷→章节大纲→其他→写作顺序）。',
+        },
+        maxTextLength: {
+          type: 'number',
+          description: '可选。合并后纯文本最大长度，默认 32000，超出截断。',
+        },
+      },
+      required: ['bookId'],
+    },
+  },
+  {
     name: 'editChapterContent',
     description:
       '写入：将新正文（纯文本，段落用换行符 \\n）保存到写作大纲中的指定章。chapterId 必须来自 getWritingOutlineWithChapters(bookId) 的 chapters[].id。用于按用户要求改写、替换整章、润色扩写等会修改书稿的操作。',
