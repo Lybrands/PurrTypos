@@ -3,23 +3,77 @@ import { flushSync } from "react-dom";
 import { App as AntdApp } from "antd";
 import type { AiModelConfig, Outline, AiSession } from "../../../types";
 
-/** 工具名 → 对话中展示的「正在查看 xxx」文案 */
-const TOOL_NAME_TO_LABEL: Record<string, string> = {
-  getBookContext: "书籍信息",
-  getAllOutlines: "全部大纲",
-  getWritingOutlineWithChapters: "写作大纲",
-  getChapterContent: "章节内容",
-  batchGetChapterContents: "多章内容",
-  getBookCharacters: "人物",
-  listBookCharacters: "人物列表",
-  getStoryBackground: "小说背景",
-  getAvailableOutlines: "可用大纲",
-  batchGetOutlineDetails: "大纲详情",
-  editChapterContent: "编辑章节",
-  searchMemories: "长期记忆",
-  addMemory: "添加记忆",
-  addForeshadowing: "添加伏笔",
-};
+function chapterDisplayTitle(
+  chapterId: number | undefined,
+  writingChapters: { id: number; title: string }[],
+): string {
+  if (chapterId == null || !Number.isFinite(chapterId)) return "（未知章节）";
+  const ch = writingChapters.find((c) => c.id === chapterId);
+  const t = ch?.title?.trim();
+  return t || `（章节 ${chapterId}）`;
+}
+
+/** 工具在对话里的展示文案；需带章名的工具在此用 chapterDisplayTitle 拼接，记忆/伏笔固定文案不带标题 */
+function toolCallDisplayLabel(
+  name: string,
+  args: Record<string, unknown>,
+  writingChapters: { id: number; title: string }[],
+): string {
+  const title = (cid: number | undefined) => chapterDisplayTitle(cid, writingChapters);
+  try {
+    switch (name) {
+      case "getChapterContent": {
+        const cid = args.chapterId != null ? Number(args.chapterId) : undefined;
+        return `查看《${title(cid)}》章节内容`;
+      }
+      case "editChapterContent": {
+        const cid = args.chapterId != null ? Number(args.chapterId) : undefined;
+        return `编辑《${title(cid)}》章节内容`;
+      }
+      case "batchGetChapterContents": {
+        const raw = args.chapterIds;
+        if (!Array.isArray(raw) || raw.length === 0) return "查看多章内容";
+        const ids = raw.map((x) => Number(x)).filter((n) => Number.isFinite(n));
+        if (ids.length === 0) return "查看多章内容";
+        if (ids.length === 1) return `查看《${title(ids[0])}》章节内容`;
+        const head = ids
+          .slice(0, 3)
+          .map((id) => `《${title(id)}》`)
+          .join("");
+        if (ids.length <= 3) return `查看${head}等多章内容`;
+        return `查看${head}等 ${ids.length} 章内容`;
+      }
+      case "listWritingChapters":
+        return "查看章节目录";
+      case "getBookCharacters":
+        return "查看人物信息";
+      case "listBookCharacters":
+        return "查看人物列表";
+      case "getStoryBackground":
+        return "查看小说背景";
+      case "getGlobalOutline":
+        return "查看总纲";
+      case "editGlobalOutline":
+        return "编辑总纲";
+      case "queryOutline":
+        return "查看大纲详情";
+      case "listOutlines":
+        return "查看大纲列表";
+      case "updateOutline":
+        return "更新大纲";
+      case "addMemory":
+        return "添加长期记忆";
+      case "searchMemories":
+        return "检索长期记忆";
+      case "addForeshadowing":
+        return "添加伏笔";
+      default:
+        return name;
+    }
+  } catch {
+    return name;
+  }
+}
 
 /** 一段「调用前文案 + 该次调用的正在查看列表」，按调用顺序排列 */
 export interface ToolCallSegment {
@@ -27,6 +81,13 @@ export interface ToolCallSegment {
   labels: string[];
   /** 本段内已执行完成的工具数量（与后端 toolIndexCompleted 同步，顺序递增） */
   completedToolCount?: number;
+  trace?: {
+    insertedByDag?: number;
+    insertedSkillNames?: string[];
+    plannedToolNames?: string[];
+    repairedRounds?: number;
+    repairReasons?: string[];
+  };
 }
 
 export interface ChatMessage {
@@ -154,11 +215,17 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         setPrompt("");
         return;
       }
+      if (bookId == null || chapterId == null) {
+        appMessage.warning("请先选择一个章节，再开始对话");
+        return;
+      }
+      if (activeSessionId == null) {
+        appMessage.warning("请先点击上方「+」新建对话，或从历史记录打开会话");
+        return;
+      }
+      const sessionId = activeSessionId;
 
-    let sessionId = activeSessionId;
-    let createdSessionThisSubmit = false;
-
-    // 先立刻把用户消息 + 助手占位推到 UI，并进入 loading，再去做建会话、拉记忆等异步
+    // 先立刻把用户消息 + 助手占位推到 UI，并进入 loading，再去做拉记忆等异步
     if (resend != null) {
       const nextConversations = [
         ...conversations.slice(0, resend.editIndex),
@@ -176,24 +243,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       ]);
       setPrompt("");
       setLoading(true);
-    }
-
-    if (!sessionId && bookId != null) {
-      const res = await window.electronAPI.createSession({ bookId, chapterId: chapterId ?? null });
-      if (!res.success || !res.data) {
-        setLoading(false);
-        setConversations((prev) => prev.slice(0, -2));
-        return;
-      }
-      setSessions((prev) => [...prev, res.data]);
-      setActiveSessionId(res.data.id);
-      sessionId = res.data.id;
-      createdSessionThisSubmit = true;
-    }
-    if (!sessionId) {
-      setLoading(false);
-      setConversations((prev) => prev.slice(0, -2));
-      return;
     }
 
     const bookName = bookTitle?.trim() || "（未命名）";
@@ -248,8 +297,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const isUntitledSession =
       currentSessionTitle.trim() === "" || currentSessionTitle === "新对话";
     const needsTitle =
-      createdSessionThisSubmit ||
-      (!hasHistoryBeforeThisQuestion && isUntitledSession);
+      !hasHistoryBeforeThisQuestion && isUntitledSession;
     const acc = {
       response: "",
       thinking: "",
@@ -265,6 +313,39 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning);
+      }
+      if (chunk.orchestratorRepair?.repairedRounds) {
+        appMessage.info(`已自动修复执行路径 ${chunk.orchestratorRepair.repairedRounds} 次`);
+        const repairedRounds = chunk.orchestratorRepair.repairedRounds;
+        const repairReasons = (chunk.orchestratorRepair?.events || [])
+          .map((x) => String(x?.reason || "").trim())
+          .filter(Boolean);
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const lastMsg = next[next.length - 1];
+            if (lastMsg?.role !== "assistant") return prev;
+            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
+            if (segs.length === 0) return prev;
+            const lastSeg = segs[segs.length - 1];
+            const nextSegs = [
+              ...segs.slice(0, -1),
+              {
+                ...lastSeg,
+                trace: {
+                  ...(lastSeg.trace ?? {}),
+                  repairedRounds,
+                  repairReasons,
+                },
+              },
+            ];
+            next[next.length - 1] = {
+              ...(lastMsg as ChatMessage),
+              toolCallSegments: nextSegs,
+            };
+            return next;
+          });
+        });
       }
       if (chunk.error) {
         setConversations((prev) => {
@@ -372,23 +453,35 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (chunk.toolCalls?.length && chunk.toolCallsInProgress) {
         const partialContent = chunk.partialContent ?? "";
         const partialThinking = chunk.partialThinking ?? "";
-        const newLabels = (chunk.toolCalls || [])
+        const insertedByDag = chunk.orchestratorInfo?.insertedByDag ?? 0;
+        const repairReasons = (chunk.orchestratorRepair?.events || [])
+          .map((x) => String(x?.reason || "").trim())
+          .filter(Boolean);
+        const rawLabels = (chunk.toolCalls || [])
           .map((tc: { function?: { name?: string; arguments?: string } }) => {
             const name = tc.function?.name;
             if (!name) return "";
-            const baseLabel = TOOL_NAME_TO_LABEL[name] ?? name;
-            if (name === "editChapterContent" && writingChapters?.length) {
-              try {
-                const args = JSON.parse(
-                  tc.function?.arguments || "{}",
-                ) as { chapterId?: number };
-                const ch = writingChapters.find((c) => c.id === args.chapterId);
-                if (ch?.title) return `编辑章节《${ch.title}》`;
-              } catch (_) {}
+            try {
+              const args = JSON.parse(tc.function?.arguments || "{}") as Record<
+                string,
+                unknown
+              >;
+              return toolCallDisplayLabel(name, args, writingChapters || []);
+            } catch {
+              return toolCallDisplayLabel(name, {}, writingChapters || []);
             }
-            return baseLabel;
-          })
-          .filter(Boolean) as string[];
+          }) as string[];
+        const taggedLabels = (chunk.toolCalls || []).map((tc, idx) => {
+          const base = rawLabels[idx] || "";
+          if (!base) return "";
+          const callId = String(tc.id || "");
+          if (callId.startsWith("repair_")) return `${base}（自动修复）`;
+          if (callId.startsWith("sys_")) return `${base}（自动补前置）`;
+          return base;
+        }).filter(Boolean) as string[];
+        if (insertedByDag > 0) {
+          appMessage.info(`DAG 已自动补齐 ${insertedByDag} 个前置步骤`);
+        }
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -407,7 +500,14 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                     : "";
               const newSegment: ToolCallSegment = {
                 textBefore,
-                labels: newLabels,
+                labels: taggedLabels,
+                trace: {
+                  insertedByDag,
+                  insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
+                  plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
+                  repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
+                  repairReasons,
+                },
               };
               const nextSegments = [...prevSeg, newSegment];
               let afterToolCalls = lastMsg.contentAfterToolCalls ?? "";

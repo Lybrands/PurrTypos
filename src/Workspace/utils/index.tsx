@@ -74,7 +74,7 @@ export async function batchGetChapterContents(
 
 /**
  * 获取单个章节内容（便捷方法）
- * 注意：chapterId 必须是「写作大纲」getWritingOutlineWithChapters 返回的 chapters[].id，不能是其他大纲的章节 id。
+ * 注意：chapterId 必须是左侧写作章节目录（写作大纲 outline）下的章节 id，不能是其他大纲树中的节点 id。
  */
 export async function getChapterContent(
   chapterId: number,
@@ -260,56 +260,3 @@ export async function getStoryBackground(bookId: number): Promise<StoryBackgroun
   return { content: res.data.content, updateTime: res.data.update_time }
 }
 
-// ─── 5. 聚合：获取书籍完整上下文（用于 AI Agent） ──────────────
-
-export interface BookContext {
-  currentChapter: ChapterContent | null
-  writingOutline: OutlineWithChapters | null
-  storyBackground: StoryBackground | null
-  characters: Character[]
-}
-
-/**
- * 一次性获取 AI Agent 所需的书籍完整上下文：
- *   当前章节正文 + 写作大纲 + 小说背景 + 全部人物
- */
-export async function getBookContext(
-  bookId: number,
-  currentChapterId?: number | null,
-  currentChapterTitle?: string,
-): Promise<BookContext> {
-  const [chapter, outlines, bg, chars] = await Promise.all([
-    currentChapterId
-      ? getChapterContent(currentChapterId, currentChapterTitle)
-      : Promise.resolve(null),
-    getAllOutlines(bookId),
-    getStoryBackground(bookId),
-    getBookCharacters(bookId),
-  ])
-  return {
-    currentChapter: chapter,
-    writingOutline: outlines.writingOutline,
-    storyBackground: bg,
-    characters: chars,
-  }
-}
-
-/**
- * 将 BookContext 格式化为适合注入到 AI system prompt 的文本
- */
-export function formatBookContextForAI(ctx: BookContext): string {
-  const parts: string[] = []
-  if (ctx.currentChapter?.plainText) {
-    parts.push(`【当前正在写的章节：${ctx.currentChapter.title || '当前章节'}】\n${ctx.currentChapter.plainText}`)
-  }
-  if (ctx.writingOutline?.chaptersText) {
-    parts.push(`【本书写作大纲】\n${ctx.writingOutline.chaptersText}`)
-  }
-  if (ctx.storyBackground?.content) {
-    parts.push(`【小说背景】\n${ctx.storyBackground.content}`)
-  }
-  if (ctx.characters.length > 0) {
-    parts.push(`【人物信息】\n${formatCharactersAsText(ctx.characters)}`)
-  }
-  return parts.length > 0 ? parts.join('\n\n') : ''
-}

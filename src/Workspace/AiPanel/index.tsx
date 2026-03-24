@@ -282,15 +282,15 @@ export default function AiPanel({
     // #endregion
   }, [bookId, modelConfigs.length]);
 
-  // 书籍/章节变化时加载 session 列表（不选章节时加载本书下的会话，选章节时加载该章下的会话）
+  // 书籍/章节变化时加载 session 列表（仅按当前章节隔离）
   React.useEffect(() => {
-    if (bookId == null) {
+    if (bookId == null || chapterId == null) {
       setConversations([]);
       setSessions([]);
       setActiveSessionId(null);
       return;
     }
-    const key = `${bookId}-${chapterId ?? "book"}`;
+    const key = `${bookId}-${chapterId}`;
     if (loadKeyRef.current === key) return;
     loadKeyRef.current = key;
     setConversations([]);
@@ -298,14 +298,14 @@ export default function AiPanel({
     setActiveSessionId(null);
 
     window.electronAPI
-      .getSessions({ bookId, chapterId: chapterId ?? null })
+      .getSessions({ bookId, chapterId })
       .then((res) => {
         if (loadKeyRef.current !== key) return;
         if (res.success && res.data.length > 0) {
           setSessions(res.data);
           setActiveSessionId(res.data[res.data.length - 1].id);
         }
-        // 无会话时不自动创建，由用户点击「新建对话」或发送首条消息时再创建
+        // 无会话时不自动创建，须由用户点击「新建对话」或从历史打开
       });
   }, [bookId, chapterId]);
 
@@ -395,6 +395,10 @@ export default function AiPanel({
 
   const handleNewSession = React.useCallback(async () => {
     if (bookId == null) return;
+    if (chapterId == null) {
+      appMessage.warning("请先选择一个章节，再创建对话");
+      return;
+    }
     if (loading) {
       appMessage.warning("当前对话进行中，请先等待完成或停止");
       return;
@@ -402,7 +406,7 @@ export default function AiPanel({
     if (sessions.length > 0 && conversations.length === 0) return;
     const res = await window.electronAPI.createSession({
       bookId,
-      chapterId: chapterId ?? null,
+      chapterId,
     });
     if (!res.success || !res.data) return;
     setSessions((prev) => [...prev, res.data]);
@@ -639,8 +643,8 @@ export default function AiPanel({
         </div>
       </div>
 
-      {/* Session 切换栏：有书籍即可（不选章节时显示本书下的对话） */}
-      {bookId != null && (
+      {/* Session 切换栏：仅在已选章节时显示（按章节隔离） */}
+      {bookId != null && chapterId != null && (
         <Tabs
           type="editable-card"
           hideAdd
@@ -1000,6 +1004,7 @@ export default function AiPanel({
                                           completedToolCount={
                                             toolCompletedCount
                                           }
+                                          trace={seg.trace}
                                         />
                                       </div>
                                     </React.Fragment>
@@ -1212,6 +1217,17 @@ export default function AiPanel({
             autoSize={false}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
+                if (
+                  !prompt.trim() ||
+                  bookId == null ||
+                  chapterId == null ||
+                  loading ||
+                  (bookId != null &&
+                    chapterId != null &&
+                    activeSessionId == null)
+                ) {
+                  return;
+                }
                 e.preventDefault();
                 handleSubmit();
               }
@@ -1242,7 +1258,15 @@ export default function AiPanel({
                 type="primary"
                 className="btn-submit"
                 onClick={handleSubmit}
-                disabled={!prompt.trim() || bookId == null}
+                disabled={
+                  !prompt.trim() ||
+                  bookId == null ||
+                  chapterId == null ||
+                  loading ||
+                  (bookId != null &&
+                    chapterId != null &&
+                    activeSessionId == null)
+                }
               >
                 发送
               </Button>

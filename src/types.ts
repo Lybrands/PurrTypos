@@ -213,6 +213,10 @@ export interface ElectronAPI {
   getGlobalOutline: (
     bookId?: number | null,
   ) => Promise<ApiResult<Outline | null>>;
+  /** 若无总纲记录则创建空总纲（可只写 Markdown），用于与章节大纲一致的文本大纲入口 */
+  ensureGlobalOutline: (
+    bookId?: number | null,
+  ) => Promise<ApiResult<Outline>>;
   getChapterOutlines: (bookId?: number | null) => Promise<ApiResult<Outline[]>>;
   getOtherOutlines: (bookId?: number | null) => Promise<ApiResult<Outline[]>>;
   deleteOutline: (data: { outlineId: number }) => Promise<ApiResult<void>>;
@@ -275,6 +279,13 @@ export interface ElectronAPI {
       textBefore: string;
       labels: string[];
       completedToolCount?: number;
+      trace?: {
+        insertedByDag?: number;
+        insertedSkillNames?: string[];
+        plannedToolNames?: string[];
+        repairedRounds?: number;
+        repairReasons?: string[];
+      };
     }[];
     thinkingBlocks?: string[];
   }) => Promise<ApiResult<void>>;
@@ -366,6 +377,22 @@ export interface ElectronAPI {
       toolIndexCompleted?: number;
       /** 工具路由（嵌入/意图模型）失败时的简短提示，由主进程经流式通道下发 */
       toolRouterWarning?: string;
+      /** DAG 编排阶段信息，用于前端可视化“自动补前置” */
+      orchestratorInfo?: {
+        insertedByDag?: number;
+        plannedNodeCount?: number;
+        insertedSkillNames?: string[];
+        plannedToolNames?: string[];
+      };
+      /** 执行阶段自动修复信息 */
+      orchestratorRepair?: {
+        repairedRounds?: number;
+        events?: Array<{
+          tool?: string;
+          reason?: string;
+          resolvedOutlineId?: number;
+        }>;
+      };
     }) => void,
   ) => () => void;
   // 设置

@@ -1,6 +1,6 @@
 {
   "name": "purrtypos",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "写作",
   "author": "Lybrand",
   "main": "main.js",
@@ -50,6 +50,9 @@
     "yaml": "^2.7.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250504.0",
+    "@types/jest": "^29.5.14",
+    "@types/pg": "^8.11.0",
     "@types/node": "^20.14.8",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
@@ -82,8 +85,7 @@
       "dist/**/*",
       "electron",
       "electron/**/*",
-      "public/**/*",
-      "node_modules/**/*"
+      "public/**/*"
     ],
     "asar": true,
     "extraResources": [

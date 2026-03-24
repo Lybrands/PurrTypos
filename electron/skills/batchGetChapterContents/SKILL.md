@@ -1,6 +1,6 @@
 ---
 name: batchGetChapterContents
-description: 只读：批量获取多章正文（纯文本）。每个 chapterId 均须来自写作大纲 chapters[].id。适合跨章对比、连续多章摘要、精读若干章而无需逐次调用 getChapterContent。
+description: 只读：批量获取多章正文（纯文本）。每个 chapterId 均须为左侧写作章节目录对应的章节 id（勿用其他大纲树节点 id）。适合跨章对比、连续多章摘要、精读若干章而无需逐次调用 getChapterContent。
 parameters:
   type: object
   properties:

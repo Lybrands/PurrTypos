@@ -425,8 +425,29 @@ Database.getOutlines = function (typeFilter) {
 
 Database.getGlobalOutline = function (bookId) {
   getDb()
-  if (bookId) return get('SELECT * FROM outlines WHERE type = ? AND book_id = ? LIMIT 1', ['global', bookId])
-  return get('SELECT * FROM outlines WHERE type = ? LIMIT 1', ['global'])
+  if (bookId) {
+    const scoped = get('SELECT * FROM outlines WHERE type = ? AND book_id = ? LIMIT 1', ['global', bookId])
+    if (scoped) return scoped
+    // 兼容旧库：历史全局总纲可能未写入 book_id
+    return get('SELECT * FROM outlines WHERE type = ? AND book_id IS NULL LIMIT 1', ['global'])
+  }
+  // 无 bookId 时仅返回未归属旧数据，避免跨书误取
+  return get('SELECT * FROM outlines WHERE type = ? AND book_id IS NULL LIMIT 1', ['global'])
+}
+
+/** 若无总纲行则插入仅 Markdown 可用的空总纲（标题固定「总纲」），便于与章节大纲一样编辑文本大纲 */
+Database.getOrCreateGlobalOutline = function (bookId) {
+  getDb()
+  const existing = Database.getGlobalOutline(bookId)
+  if (existing) return existing
+  Database.saveOutline({
+    title: '总纲',
+    type: 'global',
+    book_id: bookId ?? null,
+    xmind_data: null,
+    file_path: null,
+  })
+  return Database.getGlobalOutline(bookId)
 }
 
 Database.getChapterOutlines = function (bookId) {
@@ -604,10 +625,10 @@ Database.getSessions = function (bookId, chapterId, includeClosed = false) {
       [bookId]
     )
   }
-  const sql = includeClosed
-    ? 'SELECT * FROM ai_sessions WHERE (book_id = ? AND chapter_id = ?) OR (book_id IS NULL AND chapter_id = ?) ORDER BY create_time ASC'
-    : 'SELECT * FROM ai_sessions WHERE ((book_id = ? AND chapter_id = ?) OR (book_id IS NULL AND chapter_id = ?))' + closedCond + ' ORDER BY create_time ASC'
-  return all(sql, [bookId, chapterId, chapterId])
+  return all(
+    'SELECT * FROM ai_sessions WHERE book_id = ? AND chapter_id = ?' + closedCond + ' ORDER BY create_time ASC',
+    [bookId, chapterId]
+  )
 }
 
 Database.setSessionClosed = function (sessionId) {

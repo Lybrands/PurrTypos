@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVolumeOutlines: (bookId) => ipcRenderer.invoke('db-get-volume-outlines', bookId),
   getOutlineByWritingChapter: (id) => ipcRenderer.invoke('db-get-outline-by-writing-chapter', id),
   getGlobalOutline: (bookId) => ipcRenderer.invoke('db-get-global-outline', bookId),
+  ensureGlobalOutline: (bookId) => ipcRenderer.invoke('db-ensure-global-outline', bookId),
   getWritingOutline: (bookId) => ipcRenderer.invoke('db-get-writing-outline', bookId),
   getChapterOutlines: (bookId) => ipcRenderer.invoke('db-get-chapter-outlines', bookId),
   getOtherOutlines: (bookId) => ipcRenderer.invoke('db-get-other-outlines', bookId),

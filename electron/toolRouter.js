@@ -44,6 +44,12 @@ let skillsDirPath = ''
 /** 工具名 -> 向量，懒计算并缓存 */
 const toolVectorsCache = new Map()
 
+const GLOBAL_OUTLINE_READ_TOOL = 'getGlobalOutline'
+const GLOBAL_OUTLINE_EDIT_TOOL = 'editGlobalOutline'
+const OUTLINE_LIST_TOOL = 'listOutlines'
+const OUTLINE_QUERY_TOOL = 'queryOutline'
+const OUTLINE_UPDATE_TOOL = 'updateOutline'
+
 /**
  * 设置技能目录路径（由 main 在启动时调用，兼容保留）。
  */
@@ -195,7 +201,6 @@ async function llmIntentForTools(query, candidateNames) {
     return { success: true, toolNames: candidateNames, warnings }
   }
 
-  const maxIntentTools = Math.min(5, candidateNames.length)
   const byName = new Map(cachedSkills.map((s) => [s.name, s]))
   const list = candidateNames
     .map((name) => {
@@ -207,10 +212,10 @@ async function llmIntentForTools(query, candidateNames) {
     .join('\n')
   const prompt = `你是一个写作助手的工具选择器。用户说：「${query}」
 
-以下是候选工具及简要说明（仅返回与本轮用户意图最相关的 1～5 个工具名，用英文逗号分隔，不要解释、不要返回说明文字）：
+以下是候选工具及简要说明（从下列候选中选出与本轮用户意图相关的**全部**工具名，用英文逗号分隔；需要几个选几个，不要人为限制数量。不要解释、不要返回说明文字）：
 ${list}
 
-只返回工具名，多个用英文逗号分隔。例如只返回 1～2 个：getBookContext,searchMemories`
+只返回工具名，多个用英文逗号分隔。例如：queryOutline,listOutlines,searchMemories 或仅一个：getChapterContent`
 
   console.log('[toolRouter][步骤2-意图识别] query 摘要:', previewStr(query))
   console.log('[toolRouter][步骤2-意图识别] 输入候选（来自步骤1 向量 Top-K）:', candidateNames.join(', '))
@@ -224,7 +229,7 @@ ${list}
         model: intentModel,
         prompt,
         stream: false,
-        options: { num_predict: 128 },
+        options: { num_predict: 256 },
       }),
     })
     if (!res.ok) {
@@ -234,8 +239,8 @@ ${list}
         res.status,
         errText ? previewStr(errText, 120) : '',
       )
-      const fallback = candidateNames.slice(0, maxIntentTools)
-      console.log('[toolRouter][步骤2-意图识别] 回退为候选前', maxIntentTools, '个:', fallback.join(', '))
+      const fallback = [...candidateNames]
+      console.log('[toolRouter][步骤2-意图识别] 回退为候选全集:', fallback.join(', '))
       warnings.push(`Ollama ${intentModel} 模型调用失败，HTTP ${res.status}`)
       return { success: true, toolNames: fallback, warnings }
     }
@@ -253,17 +258,24 @@ ${list}
       filtered = candidateNames.filter((name) => lower.includes(name.toLowerCase()))
     }
     if (filtered.length === 0) {
-      filtered = candidateNames.slice(0, Math.min(2, candidateNames.length))
-      console.log('[toolRouter][步骤2-意图识别] 解析不到合法工具名，回退为候选前 2 个:', filtered.join(', '))
+      filtered = [...candidateNames]
+      console.log('[toolRouter][步骤2-意图识别] 解析不到合法工具名，回退为候选全集:', filtered.join(', '))
       warnings.push(`Ollama ${intentModel} 模型调用失败，输出无法解析为工具名`)
     }
-    const capped = filtered.slice(0, maxIntentTools)
-    console.log('[toolRouter][步骤2-意图识别] 解析后工具名（最多', maxIntentTools, '个）:', capped.join(', '))
-    return { success: true, toolNames: capped, warnings }
+    const seen = new Set()
+    const deduped = []
+    for (const n of filtered) {
+      if (!seen.has(n)) {
+        seen.add(n)
+        deduped.push(n)
+      }
+    }
+    console.log('[toolRouter][步骤2-意图识别] 解析后工具名（共', deduped.length, '个）:', deduped.join(', '))
+    return { success: true, toolNames: deduped, warnings }
   } catch (err) {
     console.error('[toolRouter][步骤2-意图识别] 请求异常:', err.message)
-    const fallback = candidateNames.slice(0, maxIntentTools)
-    console.log('[toolRouter][步骤2-意图识别] 异常回退:', fallback.join(', '))
+    const fallback = [...candidateNames]
+    console.log('[toolRouter][步骤2-意图识别] 异常回退（候选全集）:', fallback.join(', '))
     warnings.push(`Ollama ${intentModel} 模型调用失败，${(err && err.message) || String(err)}`)
     return { success: true, toolNames: fallback, warnings }
   }
@@ -282,6 +294,38 @@ function cosineSimilarity(a, b) {
   }
   const norm = Math.sqrt(na) * Math.sqrt(nb) || 1
   return dot / norm
+}
+
+/**
+ * 基于明确关键词的强规则命中（兜底）：
+ * - 提到「总纲」且包含编辑语义 -> 强制下发 editGlobalOutline（并附带 getGlobalOutline 便于先读后写）
+ * - 提到「总纲」但无明显编辑语义 -> 强制下发 getGlobalOutline
+ * @param {string} query
+ * @returns {string[]}
+ */
+function pickForcedToolsByQuery(query) {
+  const text = String(query || '').toLowerCase()
+  if (!text) return []
+  const hasGlobalOutline = /总纲|全局大纲|global\s*outline/.test(text)
+  if (!hasGlobalOutline) return []
+  const isEditIntent =
+    /编辑|修改|更新|重写|改写|写入|保存|覆盖|调整|完善|补充|rewrite|edit|update|save/.test(text)
+  if (isEditIntent) return [GLOBAL_OUTLINE_EDIT_TOOL, GLOBAL_OUTLINE_READ_TOOL]
+  return [GLOBAL_OUTLINE_READ_TOOL]
+}
+
+/**
+ * 工具依赖前置规则：
+ * - 当包含 queryOutline / updateOutline 时，自动补上 listOutlines，且置于前面
+ * @param {string[]} names
+ * @returns {string[]}
+ */
+function applyToolPrerequisites(names) {
+  const list = Array.isArray(names) ? names.filter(Boolean) : []
+  if (list.length === 0) return list
+  const hasQueryOrUpdate = list.includes(OUTLINE_QUERY_TOOL) || list.includes(OUTLINE_UPDATE_TOOL)
+  if (!hasQueryOrUpdate) return list
+  return Array.from(new Set([OUTLINE_LIST_TOOL, ...list]))
 }
 
 /**
@@ -311,21 +355,29 @@ function buildToolSchemas(skillItems, names) {
 /**
  * 根据用户输入解析出本轮应下发的 tools（向量 top-K + 意图筛选）。
  * @param {string} query
- * @returns {Promise<{ tools: Array<{ type: string, function: object }>, warnings: string[] }>}
+ * @returns {Promise<{ tools: Array<{ type: string, function: object }>, warnings: string[], candidates?: Array<{ name: string, score: number }>, intent?: { likelySkills: string[] } }>}
  */
 async function getToolsForQuery(query) {
   const warnings = []
+  const candidates = []
+  const intent = { likelySkills: [] }
   ensureSkillsLoaded()
   if (!cachedSkills.length) {
     console.log('[toolRouter][步骤3-最终下发] 无已加载技能，tools=[]')
-    return { tools: [], warnings }
+    return { tools: [], warnings, candidates, intent }
   }
   const text = (query || '').trim()
+  const forcedTools = pickForcedToolsByQuery(text)
+  if (forcedTools.length > 0) {
+    console.log('[toolRouter][强规则] 命中总纲关键词，强制候选工具:', forcedTools.join(', '))
+  }
   if (!text) {
     const names = cachedSkills.slice(0, ROUTER_TOP_K).map((s) => s.name)
+    const finalNames = applyToolPrerequisites(Array.from(new Set([...forcedTools, ...names])))
     console.log('[toolRouter][步骤1-向量匹配] query 为空，跳过向量与意图')
-    console.log('[toolRouter][步骤3-最终下发] 默认取技能列表前', ROUTER_TOP_K, '个:', names.join(', '))
-    return { tools: buildToolSchemas(cachedSkills, names), warnings }
+    console.log('[toolRouter][步骤3-最终下发] 默认工具（含强规则）:', finalNames.join(', '))
+    intent.likelySkills = finalNames
+    return { tools: buildToolSchemas(cachedSkills, finalNames), warnings, candidates, intent }
   }
 
   try {
@@ -348,41 +400,50 @@ async function getToolsForQuery(query) {
     const queryVec = await embed(text)
     if (!queryVec.length) {
       const fallback = cachedSkills.slice(0, ROUTER_TOP_K).map((s) => s.name)
+      const finalNames = applyToolPrerequisites(Array.from(new Set([...forcedTools, ...fallback])))
       console.warn('[toolRouter][步骤1-向量匹配] query 向量为空，无法算相似度，跳过排序')
       console.log('[toolRouter][步骤2-意图识别] 未执行（无有效 query 向量，直接进入默认列表）')
-      console.log('[toolRouter][步骤3-最终下发] 工具名:', fallback.join(', '))
+      console.log('[toolRouter][步骤3-最终下发] 工具名（含强规则）:', finalNames.join(', '))
       warnings.push(`${embedServiceLabel()} 模型调用失败，未返回向量`)
-      return { tools: buildToolSchemas(cachedSkills, fallback), warnings }
+      intent.likelySkills = finalNames
+      return { tools: buildToolSchemas(cachedSkills, finalNames), warnings, candidates, intent }
     }
     const withScore = cachedSkills.map((s, i) => ({
       name: s.name,
       score: cosineSimilarity(queryVec, vectors[i] || []),
     }))
+    for (const x of withScore.slice(0, ROUTER_TOP_K)) {
+      candidates.push({ name: x.name, score: x.score })
+    }
     withScore.sort((a, b) => b.score - a.score)
     const rankedLines = withScore
       .slice(0, ROUTER_TOP_K)
       .map((t, idx) => `  ${idx + 1}. ${t.name}  score=${t.score.toFixed(4)}`)
     console.log('[toolRouter][步骤1-向量匹配] 与 query 余弦相似度 Top', ROUTER_TOP_K, '(降序):\n' + rankedLines.join('\n'))
-    const top10 = withScore.slice(0, ROUTER_TOP_K).map((t) => t.name)
+    const top10Raw = withScore.slice(0, ROUTER_TOP_K).map((t) => t.name)
+    const top10 = Array.from(new Set([...forcedTools, ...top10Raw]))
     console.log('[toolRouter][步骤1-向量匹配] 送入步骤2 的候选工具名:', top10.join(', '))
 
     const intentRes = await llmIntentForTools(text, top10)
     if (Array.isArray(intentRes.warnings) && intentRes.warnings.length) {
       warnings.push(...intentRes.warnings)
     }
-    const finalNames =
-      intentRes.toolNames && intentRes.toolNames.length > 0 ? intentRes.toolNames : top10
+    const intentNames = intentRes.toolNames && intentRes.toolNames.length > 0 ? intentRes.toolNames : top10
+    intent.likelySkills = intentNames
+    const finalNames = applyToolPrerequisites(Array.from(new Set([...forcedTools, ...intentNames])))
     if (!(intentRes.toolNames && intentRes.toolNames.length > 0)) {
       console.log('[toolRouter][步骤3-最终下发] 意图步骤无有效输出，回退为步骤1 的 Top-K 顺序列表')
     }
     console.log('[toolRouter][步骤3-最终下发] 本轮发给主模型的工具（共', finalNames.length, '个）:', finalNames.join(', '))
-    return { tools: buildToolSchemas(cachedSkills, finalNames), warnings }
+    return { tools: buildToolSchemas(cachedSkills, finalNames), warnings, candidates, intent }
   } catch (err) {
     console.error('[toolRouter][步骤1/2] getToolsForQuery 异常:', err.message)
     const fallback = cachedSkills.slice(0, Math.min(2, cachedSkills.length)).map((s) => s.name)
-    console.log('[toolRouter][步骤3-最终下发] 异常回退（前 2 个技能）:', fallback.join(', '))
+    const finalNames = applyToolPrerequisites(Array.from(new Set([...forcedTools, ...fallback])))
+    console.log('[toolRouter][步骤3-最终下发] 异常回退（含强规则）:', finalNames.join(', '))
     warnings.push(`${embedServiceLabel()} 模型调用失败，${(err && err.message) || String(err)}`)
-    return { tools: buildToolSchemas(cachedSkills, fallback), warnings }
+    intent.likelySkills = finalNames
+    return { tools: buildToolSchemas(cachedSkills, finalNames), warnings, candidates, intent }
   }
 }
 
