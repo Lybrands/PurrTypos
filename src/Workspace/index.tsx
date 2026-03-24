@@ -246,9 +246,19 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   }, [])
 
   const handleChapterOutlineSelect = React.useCallback(
-    (title: string) => {
-      if (!syncOutlineChapter || !writingChapters.length) return
-      const ch = writingChapters.find((c) => c.title === title)
+    (info: { title: string; writingChapterId?: number | null }) => {
+      if (!syncOutlineChapter) return
+      const wcId = info.writingChapterId
+      if (wcId != null && Number.isFinite(Number(wcId))) {
+        const ch = writingChapters.find((c) => c.id === Number(wcId))
+        if (ch) {
+          setActiveWritingChapterId(ch.id)
+          setActiveWritingChapterTitle(ch.title)
+          return
+        }
+      }
+      if (!writingChapters.length) return
+      const ch = writingChapters.find((c) => c.title === info.title)
       if (ch) {
         setActiveWritingChapterId(ch.id)
         setActiveWritingChapterTitle(ch.title)

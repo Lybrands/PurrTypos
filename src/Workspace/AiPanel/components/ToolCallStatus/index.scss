@@ -24,3 +24,26 @@
     opacity: 0.55;
   }
 }
+
+.bubble-tool-trace {
+  margin-top: 4px;
+  color: var(--text-muted);
+
+  .ant-collapse-header {
+    color: var(--text-muted) !important;
+    padding: 0 !important;
+    font-size: var(--font-size-sm);
+  }
+
+  .ant-collapse-content-box {
+    padding: 4px 0 0 0 !important;
+  }
+}
+
+.bubble-tool-trace-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}

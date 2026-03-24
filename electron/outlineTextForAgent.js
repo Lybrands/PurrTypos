@@ -38,9 +38,15 @@ function collectTextOutlineEntries(bookId, outlineIds) {
 
   const entries = []
 
-  const consider = (row) => {
+  const consider = (row, opts = {}) => {
     if (!row) return
-    if (Number(row.book_id) !== Number(bookId)) return
+    const sameBook = Number(row.book_id) === Number(bookId)
+    const legacyGlobal = Boolean(
+      opts.allowLegacyGlobal &&
+      row.type === 'global' &&
+      (row.book_id == null || row.book_id === ''),
+    )
+    if (!sameBook && !legacyGlobal) return
     const md = String(row.markdown_content || '').trim()
     if (!md) return
     if (filter && !filter.has(row.id)) return
@@ -52,7 +58,7 @@ function collectTextOutlineEntries(bookId, outlineIds) {
     })
   }
 
-  consider(db.getGlobalOutline(bookId))
+  consider(db.getGlobalOutline(bookId), { allowLegacyGlobal: true })
 
   const vols = db.getVolumeOutlines(bookId) || []
   for (const vol of vols) {

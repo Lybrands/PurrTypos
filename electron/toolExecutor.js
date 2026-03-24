@@ -5,7 +5,7 @@
 
 const Database = require('./database')
 const mem0Service = require('./mem0Service')
-const { collectTextOutlineEntries, formatTextOutlineForAgent } = require('./outlineTextForAgent')
+const { collectTextOutlineEntries } = require('./outlineTextForAgent')
 
 const MEMORY_LAYERS = ['全局', '大纲', '人物', '章节']
 const MEMORY_LAYER_ORDERED = ['全局', '大纲', '人物', '章节']
@@ -69,7 +69,7 @@ function loadOutlineWithChapters(outline) {
   return { outline, chapters, chaptersText: formatChaptersAsText(chapters) }
 }
 
-async function getAllOutlines(bookId) {
+function loadAllOutlinesForBook(bookId) {
   const db = getDb()
   const globalRes = db.getGlobalOutline(bookId)
   const volumeRes = db.getVolumeOutlines(bookId)
@@ -89,14 +89,6 @@ async function getAllOutlines(bookId) {
   return { globalOutline, volumeOutlines, chapterOutlines, otherOutlines, writingOutline }
 }
 
-function getWritingOutlineWithChapters(bookId) {
-  if (bookId == null) return null
-  const row = getDb().getOrCreateWritingOutline(bookId)
-  if (!row) return null
-  const chapters = getDb().getChapters(row.id)
-  return { outlineId: row.id, chapters }
-}
-
 function getAvailableOutlines(bookId) {
   const db = getDb()
   const list = []
@@ -108,11 +100,72 @@ function getAvailableOutlines(bookId) {
   return list
 }
 
+function getGlobalOutline(bookId, maxTextLength = 32000) {
+  const row = getDb().getOrCreateGlobalOutline(bookId)
+  if (!row) return null
+  const markdownRaw = row.markdown_content || ''
+  const markdown =
+    typeof markdownRaw === 'string' && markdownRaw.length > maxTextLength
+      ? markdownRaw.slice(0, maxTextLength) + '\n…（已截断）'
+      : markdownRaw
+  return {
+    success: true,
+    bookId: Number(bookId),
+    outlineId: Number(row.id),
+    title: row.title || '总纲',
+    type: row.type || 'global',
+    markdown: markdown || '',
+    hasMarkdown: Boolean(markdownRaw && String(markdownRaw).trim()),
+  }
+}
+
 function batchGetOutlineDetails(outlineIds, allOutlines) {
   return outlineIds.map((oid) => {
     const outline = (allOutlines || []).find((o) => o.id === oid) ?? { id: oid, title: '' }
     return loadOutlineWithChapters(outline)
   })
+}
+
+function queryOutline(bookId, outlineIds, includeChapters = true, includeText = true, maxTextLength = 32000) {
+  const all = getAvailableOutlines(bookId)
+  const filterSet =
+    Array.isArray(outlineIds) && outlineIds.length > 0
+      ? new Set(outlineIds.map((x) => Number(x)).filter((n) => Number.isFinite(n)))
+      : null
+  const targetOutlines = filterSet ? all.filter((o) => filterSet.has(Number(o.id))) : all
+  const details = includeChapters
+    ? batchGetOutlineDetails(
+        targetOutlines.map((o) => Number(o.id)),
+        all,
+      )
+    : []
+  const byIdDetail = new Map(details.map((d) => [Number(d.outline?.id), d]))
+  const textEntries = includeText ? collectTextOutlineEntries(bookId, filterSet ? Array.from(filterSet) : undefined) : []
+  const byIdText = new Map(textEntries.map((e) => [Number(e.id), e.markdown]))
+
+  const outlines = targetOutlines.map((o) => {
+    const id = Number(o.id)
+    const detail = byIdDetail.get(id)
+    const markdown = byIdText.get(id)
+    const trimmedMarkdown =
+      typeof markdown === 'string' && markdown.length > maxTextLength
+        ? markdown.slice(0, maxTextLength) + '\n…（已截断）'
+        : markdown
+    return {
+      id,
+      title: o.title || '',
+      type: o.type || '',
+      chaptersText: includeChapters ? detail?.chaptersText || '' : undefined,
+      markdown: includeText ? trimmedMarkdown || '' : undefined,
+      hasMarkdown: Boolean(markdown && String(markdown).trim()),
+    }
+  })
+  return {
+    success: true,
+    bookId: Number(bookId),
+    total: outlines.length,
+    outlines,
+  }
 }
 
 function getChapterContent(chapterId, title, maxTextLength = 12000) {
@@ -133,27 +186,40 @@ function batchGetChapterContents(chapterIds, titleMap, maxTextLength = 12000) {
   })
 }
 
-function getBookContext(bookId, currentChapterId, currentChapterTitle) {
-  const chapter = currentChapterId ? getChapterContent(currentChapterId, currentChapterTitle) : null
-  const writingRow = getDb().getOrCreateWritingOutline(bookId)
-  const writingOutline = writingRow ? loadOutlineWithChapters(writingRow) : null
-  const bg = getDb().getStoryBackground(bookId)
-  const chars = getDb().getCharacters(bookId) || []
-
-  const parts = []
-  if (chapter?.plainText) {
-    parts.push(`【当前正在写的章节：${chapter.title || '当前章节'}】\n${chapter.plainText}`)
+function listWritingChapters(bookId) {
+  const db = getDb()
+  const writing = db.getOrCreateWritingOutline(bookId)
+  if (!writing?.id) {
+    return { success: false, error: '未找到写作目录' }
   }
-  if (writingOutline?.chaptersText) {
-    parts.push(`【本书写作大纲】\n${writingOutline.chaptersText}`)
+  const rows = db.getChapters(writing.id) || []
+  const parentSet = new Set(
+    rows
+      .map((r) => (r.parent_id == null ? null : Number(r.parent_id)))
+      .filter((x) => Number.isFinite(x) && x > 0),
+  )
+  const items = rows.map((r) => {
+    const id = Number(r.id)
+    const hasChildren = parentSet.has(id)
+    // 有子节点的节点视为“卷”；其余视为“章节”
+    const nodeType = hasChildren ? 'volume' : 'chapter'
+    return {
+      id,
+      title: String(r.title || ''),
+      parentId: r.parent_id == null ? null : Number(r.parent_id),
+      level: Number(r.level || 1),
+      sort: Number(r.sort || 0),
+      nodeType,
+      hasChildren,
+    }
+  })
+  return {
+    success: true,
+    bookId: Number(bookId),
+    writingOutlineId: Number(writing.id),
+    total: items.length,
+    items,
   }
-  if (bg?.content) {
-    parts.push(`【小说背景】\n${bg.content}`)
-  }
-  if (chars.length > 0) {
-    parts.push(`【人物信息】\n${formatCharactersAsText(chars)}`)
-  }
-  return parts.length > 0 ? parts.join('\n\n') : '（暂无内容）'
 }
 
 function parseArgs(argsStr) {
@@ -184,25 +250,6 @@ async function runTools(toolCalls, ctx, sendChunk) {
 
     try {
       switch (name) {
-        case 'getBookContext': {
-          const bid = args.bookId ?? defaultBookId
-          const cid = args.currentChapterId ?? chapterId ?? undefined
-          const title = args.currentChapterTitle ?? currentChapterTitle
-          content = getBookContext(bid, cid, title) || '（暂无内容）'
-          break
-        }
-        case 'getAllOutlines': {
-          const bid = args.bookId ?? defaultBookId
-          const data = getAllOutlines(bid)
-          content = JSON.stringify(data, null, 0).slice(0, 16000)
-          break
-        }
-        case 'getWritingOutlineWithChapters': {
-          const bid = args.bookId ?? defaultBookId
-          const data = getWritingOutlineWithChapters(bid)
-          content = data ? JSON.stringify(data).slice(0, 12000) : 'null'
-          break
-        }
         case 'getChapterContent': {
           const cid = args.chapterId
           const title = args.title
@@ -210,12 +257,22 @@ async function runTools(toolCalls, ctx, sendChunk) {
           const data = getChapterContent(cid, title, maxLen)
           if (!data) {
             content = JSON.stringify({
-              error: '未找到该章节正文。请确认 chapterId 来自 getWritingOutlineWithChapters(bookId) 返回的 chapters[].id（写作目录），不要使用 getAllOutlines 或其他大纲的章节 id。',
+              error: '未找到该章节正文。请确认 chapterId 为左侧写作章节目录对应的章节 id，不要使用总纲/章节大纲/其他大纲树中的节点 id。',
               chapterId: cid,
             })
           } else {
             content = JSON.stringify({ chapterId: data.chapterId, title: data.title, plainText: data.plainText || '（本章暂无正文内容）' })
           }
+          break
+        }
+        case 'listWritingChapters': {
+          const bid = args.bookId ?? defaultBookId
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取写作目录章节列表' })
+            break
+          }
+          const result = listWritingChapters(Number(bid))
+          content = JSON.stringify(result).slice(0, 24000)
           break
         }
         case 'batchGetChapterContents': {
@@ -267,26 +324,146 @@ async function runTools(toolCalls, ctx, sendChunk) {
           content = row?.content ?? '（暂无小说背景）'
           break
         }
-        case 'getAvailableOutlines': {
+        case 'queryOutline': {
           const bid = args.bookId ?? defaultBookId
-          const list = getAvailableOutlines(bid)
-          content = JSON.stringify(list.map((o) => ({ id: o.id, title: o.title, type: o.type })))
-          break
-        }
-        case 'batchGetOutlineDetails': {
-          const oids = args.outlineIds || []
-          const bid = args.bookId ?? defaultBookId
-          const all = availableOutlines.length > 0 ? availableOutlines : getAvailableOutlines(bid)
-          const details = batchGetOutlineDetails(oids, all)
-          content = JSON.stringify(details.map((d) => ({ title: d.outline.title, chaptersText: d.chaptersText }))).slice(0, 20000)
-          break
-        }
-        case 'getTextOutline': {
-          const bid = args.bookId ?? defaultBookId
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法查询大纲' })
+            break
+          }
           const oids = args.outlineIds
+          const includeChapters = args.includeChapters !== false
+          const includeText = args.includeText !== false
           const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
-          const entries = collectTextOutlineEntries(bid, oids)
-          content = formatTextOutlineForAgent(entries, maxLen)
+          const result = queryOutline(bid, oids, includeChapters, includeText, maxLen)
+          console.log('[toolExecutor:queryOutline] done', {
+            bookId: Number(bid),
+            outlineIds: Array.isArray(oids) ? oids : null,
+            total: result.total,
+            includeChapters,
+            includeText,
+            maxTextLength: maxLen,
+          })
+          content = JSON.stringify(result).slice(0, 24000)
+          break
+        }
+        case 'getGlobalOutline': {
+          const bid = args.bookId ?? defaultBookId
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取总纲' })
+            break
+          }
+          const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+          const result = getGlobalOutline(bid, maxLen)
+          if (!result) {
+            content = JSON.stringify({ success: false, error: '获取总纲失败' })
+            break
+          }
+          content = JSON.stringify(result)
+          break
+        }
+        case 'editGlobalOutline': {
+          const bid = args.bookId ?? defaultBookId
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
+            break
+          }
+          if (typeof args.markdownContent !== 'string') {
+            content = JSON.stringify({ success: false, error: 'markdownContent 必须为字符串' })
+            break
+          }
+          try {
+            const globalOutline = getDb().getOrCreateGlobalOutline(bid)
+            if (!globalOutline?.id) {
+              content = JSON.stringify({ success: false, error: '无法创建或获取总纲' })
+              break
+            }
+            const saved = getDb().updateOutline({
+              outlineId: Number(globalOutline.id),
+              markdown_content: args.markdownContent,
+            })
+            content = JSON.stringify({
+              success: true,
+              bookId: Number(bid),
+              outlineId: Number(globalOutline.id),
+              title: saved?.title || '总纲',
+              type: saved?.type || 'global',
+              markdownLength: String(args.markdownContent).length,
+            })
+          } catch (e) {
+            content = JSON.stringify({ success: false, error: e.message })
+          }
+          break
+        }
+        case 'listOutlines': {
+          const bid = args.bookId ?? defaultBookId
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取大纲列表' })
+            break
+          }
+          const list = getAvailableOutlines(bid).map((o) => ({
+            id: Number(o.id),
+            title: o.title || '',
+            type: o.type || '',
+          }))
+          content = JSON.stringify({
+            success: true,
+            bookId: Number(bid),
+            total: list.length,
+            outlines: list,
+          })
+          break
+        }
+        case 'updateOutline': {
+          const bid = args.bookId ?? defaultBookId
+          const oid = Number(args.outlineId)
+          if (!bid || Number.isNaN(Number(bid))) {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
+            break
+          }
+          if (!Number.isFinite(oid) || oid <= 0) {
+            content = JSON.stringify({ success: false, error: '缺少有效 outlineId' })
+            break
+          }
+          const updatePayload = { outlineId: oid }
+          if (args.title !== undefined) updatePayload.title = args.title
+          if (args.xmind_data !== undefined) updatePayload.xmind_data = args.xmind_data
+          if (args.file_path !== undefined) updatePayload.file_path = args.file_path
+          if (args.markdown_content !== undefined) updatePayload.markdown_content = args.markdown_content
+          if (Object.keys(updatePayload).length === 1) {
+            content = JSON.stringify({ success: false, error: '缺少可更新字段（title/xmind_data/file_path/markdown_content）' })
+            break
+          }
+          const allOutlines = loadAllOutlinesForBook(bid)
+          const exists = [
+            allOutlines?.globalOutline?.outline,
+            ...(allOutlines?.volumeOutlines || []).map((v) => v),
+            ...(allOutlines?.volumeOutlines || []).flatMap((v) => (v.chapters_detail || []).map((c) => c.outline)),
+            ...(allOutlines?.chapterOutlines || []).map((o) => o.outline),
+            ...(allOutlines?.otherOutlines || []).map((o) => o.outline),
+            allOutlines?.writingOutline?.outline,
+          ]
+            .filter(Boolean)
+            .some((o) => Number(o.id) === oid)
+          if (!exists) {
+            content = JSON.stringify({
+              success: false,
+              error: 'outlineId 不属于当前书籍，或该大纲不存在',
+              outlineId: oid,
+            })
+            break
+          }
+          try {
+            const saved = getDb().updateOutline(updatePayload)
+            content = JSON.stringify({
+              success: true,
+              outlineId: oid,
+              title: saved?.title || '',
+              type: saved?.type || '',
+              updatedFields: Object.keys(updatePayload).filter((k) => k !== 'outlineId'),
+            })
+          } catch (e) {
+            content = JSON.stringify({ success: false, error: e.message })
+          }
           break
         }
         case 'editChapterContent': {
@@ -406,4 +583,4 @@ async function runTools(toolCalls, ctx, sendChunk) {
   return results
 }
 
-module.exports = { runTools, collectTextOutlineEntries, formatTextOutlineForAgent }
+module.exports = { runTools, collectTextOutlineEntries }

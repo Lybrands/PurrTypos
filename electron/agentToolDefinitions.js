@@ -6,43 +6,30 @@
  * - 实际执行在 toolExecutor.js；新增工具请同步本文件、toolExecutor 与（可选）SKILL.md。
  */
 
-/** @typedef {{ name: string, description: string, parameters: object }} RouterSkillItem */
+/**
+ * @typedef {{
+ *   name: string,
+ *   description: string,
+ *   parameters: object,
+ *   skillSpec?: SkillSpec
+ * }} RouterSkillItem
+ */
+/**
+ * @typedef {{
+ *   requires?: string[],
+ *   provides?: string[],
+ *   consumes?: string[],
+ *   riskLevel: 'read'|'write',
+ *   autoResolveArgs?: string[]
+ * }} SkillSpec
+ */
 
 /** @type {RouterSkillItem[]} */
 const ROUTER_SKILL_ITEMS = [
   {
-    name: 'getBookContext',
+    name: 'listWritingChapters',
     description:
-      '一次性获取当前书籍的完整写作上下文：当前章节正文、写作大纲、小说背景正文、全部人物卡片。适合开场全面了解本书，或用户同时问到「写到哪、大纲、设定、角色」时调用，可减少多次单独查询。',
-    parameters: {
-      type: 'object',
-      properties: {
-        bookId: { type: 'number', description: '当前书籍 ID' },
-        currentChapterId: {
-          type: 'number',
-          description: '当前正在写的章节 ID，不传则只取大纲/背景/人物',
-        },
-        currentChapterTitle: { type: 'string', description: '当前章节标题，用于展示' },
-      },
-      required: ['bookId'],
-    },
-  },
-  {
-    name: 'getAllOutlines',
-    description:
-      '获取本书全部大纲类型（总纲、卷大纲、章节大纲、其他大纲、写作大纲）及每类下的子章节树与层级文本。用于查看全书结构、对比不同大纲类型，或需要完整大纲全景而非仅写作目录时。',
-    parameters: {
-      type: 'object',
-      properties: {
-        bookId: { type: 'number', description: '当前书籍 ID' },
-      },
-      required: ['bookId'],
-    },
-  },
-  {
-    name: 'getWritingOutlineWithChapters',
-    description:
-      '获取本书「写作大纲」及左侧写作目录中的章节列表。返回的 chapters[].id 是读取/编辑章节正文时唯一合法 ID；其他大纲（总纲、章节大纲等）里的章节 id 不能用于 getChapterContent 或 editChapterContent，否则会取不到正文。',
+      '只读：获取本书写作目录的章节列表（区分卷/章节）。返回结构化 JSON，包含每项 id、title、parentId、level、nodeType(volume|chapter)、hasChildren、sort。用于先定位章节 id，再调用 getChapterContent / editChapterContent / batchGetChapterContents。',
     parameters: {
       type: 'object',
       properties: {
@@ -54,13 +41,13 @@ const ROUTER_SKILL_ITEMS = [
   {
     name: 'getChapterContent',
     description:
-      '只读：获取写作大纲中某一章的纯文本正文。必须先调用 getWritingOutlineWithChapters(bookId) 取得 chapters[].id 再传入 chapterId；可选 maxTextLength。用于引用现状、续写依据、单章摘要等，不修改书稿。',
+      '只读：获取写作目录中某一章的纯文本正文。chapterId 须为左侧写作章节目录对应的章节 id（勿用总纲/章节大纲/其他大纲树里的节点 id）。可选 maxTextLength。用于引用现状、续写依据、单章摘要等，不修改书稿。',
     parameters: {
       type: 'object',
       properties: {
         chapterId: {
           type: 'number',
-          description: '写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）',
+          description: '写作目录章节 ID（与界面左侧写作章节目录一致，非其他大纲子节点 id）',
         },
         title: { type: 'string', description: '章节标题，用于展示' },
         maxTextLength: { type: 'number', description: '纯文本最大长度，默认 12000' },
@@ -71,7 +58,7 @@ const ROUTER_SKILL_ITEMS = [
   {
     name: 'batchGetChapterContents',
     description:
-      '只读：批量获取多章正文（纯文本）。每个 chapterId 均须来自写作大纲 chapters[].id。适合跨章对比、连续多章摘要、精读若干章而无需逐次调用 getChapterContent。',
+      '只读：批量获取多章正文（纯文本）。每个 chapterId 均须为写作目录章节 id（与左侧写作章节目录一致，勿用其他大纲树节点 id）。适合跨章对比、连续多章摘要、精读若干章而无需逐次调用 getChapterContent。',
     parameters: {
       type: 'object',
       properties: {
@@ -134,38 +121,38 @@ const ROUTER_SKILL_ITEMS = [
     },
   },
   {
-    name: 'getAvailableOutlines',
+    name: 'getGlobalOutline',
     description:
-      '只读：获取本书可关联到对话的大纲列表（总纲、章节大纲、其他大纲，扁平 id 与标题）。用于挑选要带入上下文的大纲，或作为 batchGetOutlineDetails 的 outlineIds 来源。',
+      '只读：获取本书总纲（global）文本内容。若总纲不存在会自动创建空总纲后返回，便于后续补写与编辑。',
     parameters: {
       type: 'object',
       properties: {
         bookId: { type: 'number', description: '当前书籍 ID' },
+        maxTextLength: {
+          type: 'number',
+          description: '可选。总纲 Markdown 最大长度，默认 32000。',
+        },
       },
       required: ['bookId'],
     },
   },
   {
-    name: 'batchGetOutlineDetails',
+    name: 'editGlobalOutline',
     description:
-      '只读：按大纲 ID 列表获取每个大纲的详情（子章节树与层级文本）。须已知 outlineIds（来自 getAvailableOutlines 或 getAllOutlines）。用于精读特定几条大纲的结构与内容，而非只列标题。',
+      '写入：编辑本书总纲（global）Markdown 内容，整体覆盖保存。若总纲不存在会自动创建后写入。',
     parameters: {
       type: 'object',
       properties: {
-        outlineIds: {
-          type: 'array',
-          items: { type: 'number' },
-          description: '大纲 ID 列表',
-        },
-        bookId: { type: 'number', description: '当前书籍 ID，用于解析 allOutlines' },
+        bookId: { type: 'number', description: '当前书籍 ID（用于归属校验）' },
+        markdownContent: { type: 'string', description: '总纲 Markdown 全文（覆盖写入）' },
       },
-      required: ['outlineIds', 'bookId'],
+      required: ['bookId', 'markdownContent'],
     },
   },
   {
-    name: 'getTextOutline',
+    name: 'queryOutline',
     description:
-      '只读：获取左侧大纲各条目中「文本大纲」标签页保存的 Markdown 正文（剧情提纲、结构说明等）。与 batchGetOutlineDetails（XMind/子章节树 chaptersText）互补；用户讨论文本层大纲、总纲文档、卷/章文字说明时使用。可先 getAvailableOutlines 拿 id 再传 outlineIds 子集。',
+      '只读：查询本书大纲详情。适用场景：用户要看/查/读/拉取「大纲、提纲、剧情结构、XMind 目录树、章节树、子节点列表」；要看「文本大纲、Markdown 提纲、剧情梗概」；要对比或浏览「总纲、章节大纲、其他大纲、卷大纲」的正文与结构。返回每条大纲的 id/title/type、可选 chaptersText（思维导图式层级文本）、可选 markdown（文本大纲页内容）。可先 listOutlines 拿 id 再传 outlineIds 精确查；不传 outlineIds 则返回本书可关联大纲全集。注意：与「写作目录章节正文」无关，正文请用 getChapterContent。',
     parameters: {
       type: 'object',
       properties: {
@@ -173,27 +160,63 @@ const ROUTER_SKILL_ITEMS = [
         outlineIds: {
           type: 'array',
           items: { type: 'number' },
-          description:
-            '可选。只拉取这些大纲 ID 的文本；不传则返回本书所有已填写文本大纲（按总纲→卷→章节大纲→其他→写作顺序）。',
+          description: '可选。只查询这些大纲 ID；不传则返回可用大纲列表并附带结构/文本信息。',
+        },
+        includeChapters: {
+          type: 'boolean',
+          description: '可选。是否返回章节树文本（chaptersText），默认 true。',
+        },
+        includeText: {
+          type: 'boolean',
+          description: '可选。是否返回文本大纲 Markdown，默认 true。',
         },
         maxTextLength: {
           type: 'number',
-          description: '可选。合并后纯文本最大长度，默认 32000，超出截断。',
+          description: '可选。文本大纲最大长度，默认 32000。',
         },
       },
       required: ['bookId'],
+    },
+  },
+  {
+    name: 'listOutlines',
+    description:
+      '只读：获取本书大纲列表（id、title、type），包含总纲。',
+    parameters: {
+      type: 'object',
+      properties: {
+        bookId: { type: 'number', description: '当前书籍 ID' },
+      },
+      required: ['bookId'],
+    },
+  },
+  {
+    name: 'updateOutline',
+    description:
+      '写入：修改/保存本书某条大纲元数据或内容。适用场景：用户要「改大纲标题、重写文本大纲、更新 Markdown 提纲、替换 XMind 数据、改关联文件路径」；要「保存/写入/覆盖」某条大纲（非总纲专用时可走本工具；仅总纲正文也可考虑 editGlobalOutline）。参数：outlineId 必填，且须先用 listOutlines 确认 id；可选 title、markdown_content（文本大纲全文覆盖）、xmind_data+file_path（导图 JSON 与源文件路径）。不要用于修改章节正文（用 editChapterContent）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        bookId: { type: 'number', description: '当前书籍 ID（用于归属校验）' },
+        outlineId: { type: 'number', description: '目标大纲 ID（可来自 queryOutline 返回）' },
+        title: { type: 'string', description: '可选。更新大纲标题' },
+        xmind_data: { type: 'string', description: '可选。更新 XMind JSON 文本' },
+        file_path: { type: 'string', description: '可选。更新源文件路径' },
+        markdown_content: { type: 'string', description: '可选。更新文本大纲 Markdown' },
+      },
+      required: ['bookId', 'outlineId'],
     },
   },
   {
     name: 'editChapterContent',
     description:
-      '写入：将新正文（纯文本，段落用换行符 \\n）保存到写作大纲中的指定章。chapterId 必须来自 getWritingOutlineWithChapters(bookId) 的 chapters[].id。用于按用户要求改写、替换整章、润色扩写等会修改书稿的操作。',
+      '写入：将新正文（纯文本，段落用换行符 \\n）保存到写作目录中的指定章。chapterId 须为左侧写作章节目录对应的章节 id（勿用其他大纲树节点 id）。用于按用户要求改写、替换整章、润色扩写等会修改书稿的操作。',
     parameters: {
       type: 'object',
       properties: {
         chapterId: {
           type: 'number',
-          description: '写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）',
+          description: '写作目录章节 ID（与界面左侧写作章节目录一致）',
         },
         content: {
           type: 'string',
@@ -215,7 +238,7 @@ const ROUTER_SKILL_ITEMS = [
         content: { type: 'string', description: '记忆内容，简明扼要' },
         chapterId: {
           type: 'number',
-          description: '可选。章节记忆时关联的写作章节 ID（来自 getWritingOutlineWithChapters）',
+          description: '可选。章节记忆时关联的写作目录章节 ID（左侧写作章节目录）',
         },
         characterId: { type: 'number', description: '可选。人物记忆时关联的人物 ID' },
       },
@@ -225,14 +248,14 @@ const ROUTER_SKILL_ITEMS = [
   {
     name: 'addForeshadowing',
     description:
-      '写入：添加一条伏笔记录（悬念、道具、线索、对话等），并标明埋入章节。chapterId 须为写作大纲章节 id（来自 getWritingOutlineWithChapters）。仅在用户明确要「记录/埋下伏笔」时使用；若用户只要看小说背景或总结人物，应使用 getStoryBackground、getBookCharacters 等只读工具，不要用本工具。',
+      '写入：添加一条伏笔记录（悬念、道具、线索、对话等），并标明埋入章节。chapterId 须为写作目录章节 id（左侧写作章节目录）。仅在用户明确要「记录/埋下伏笔」时使用；若用户只要看小说背景或总结人物，应使用 getStoryBackground、getBookCharacters 等只读工具，不要用本工具。',
     parameters: {
       type: 'object',
       properties: {
         bookId: { type: 'number', description: '当前书籍 ID' },
         chapterId: {
           type: 'number',
-          description: '埋入伏笔的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）',
+          description: '埋入伏笔的写作目录章节 ID（左侧写作章节目录）',
         },
         content: { type: 'string', description: '伏笔内容，简明扼要' },
         type: {
@@ -282,11 +305,80 @@ function toOpenAiTools(items) {
   }))
 }
 
+/**
+ * 技能结构化元信息（DAG 规划/执行器使用）。
+ * - 未显式配置的技能：默认 read + 无依赖。
+ * - 先覆盖大纲链路高频路径，其余工具使用默认值。
+ * @type {Record<string, SkillSpec>}
+ */
+const SKILL_SPECS = {
+  getGlobalOutline: {
+    riskLevel: 'read',
+    provides: ['globalOutlineMarkdown'],
+    consumes: ['bookId'],
+  },
+  editGlobalOutline: {
+    riskLevel: 'write',
+    requires: ['getGlobalOutline'],
+    consumes: ['bookId', 'markdownContent'],
+    autoResolveArgs: ['bookId'],
+  },
+  listOutlines: {
+    riskLevel: 'read',
+    provides: ['outlinesIndex'],
+    consumes: ['bookId'],
+  },
+  queryOutline: {
+    riskLevel: 'read',
+    requires: ['listOutlines'],
+    provides: ['outlineDetails'],
+    consumes: ['bookId'],
+    autoResolveArgs: ['bookId', 'outlineIds'],
+  },
+  updateOutline: {
+    riskLevel: 'write',
+    requires: ['listOutlines', 'queryOutline'],
+    consumes: ['bookId', 'outlineId'],
+    autoResolveArgs: ['bookId', 'outlineId'],
+  },
+  editChapterContent: {
+    riskLevel: 'write',
+    consumes: ['chapterId', 'content'],
+    autoResolveArgs: ['chapterId'],
+  },
+  listWritingChapters: {
+    riskLevel: 'read',
+    provides: ['writingChaptersIndex'],
+    consumes: ['bookId'],
+  },
+}
+
+/**
+ * 输出完整技能规格：若未配置 spec，则提供安全默认值。
+ * @returns {Record<string, SkillSpec>}
+ */
+function getSkillSpecs() {
+  const out = {}
+  for (const item of ROUTER_SKILL_ITEMS) {
+    const raw = SKILL_SPECS[item.name] || {}
+    out[item.name] = {
+      requires: Array.isArray(raw.requires) ? raw.requires : [],
+      provides: Array.isArray(raw.provides) ? raw.provides : [],
+      consumes: Array.isArray(raw.consumes) ? raw.consumes : [],
+      riskLevel: raw.riskLevel === 'write' ? 'write' : 'read',
+      autoResolveArgs: Array.isArray(raw.autoResolveArgs) ? raw.autoResolveArgs : [],
+    }
+  }
+  return out
+}
+
 /** 全部工具（供导出文档或调试） */
 const ALL_OPENAI_TOOLS = toOpenAiTools(ROUTER_SKILL_ITEMS)
 
 module.exports = {
   ROUTER_SKILL_ITEMS,
+  SKILL_SPECS,
+  getSkillSpecs,
   ALL_OPENAI_TOOLS,
   toOpenAiTools,
 }

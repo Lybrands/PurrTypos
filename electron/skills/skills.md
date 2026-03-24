@@ -8,40 +8,20 @@
 
 ## 工具列表
 
-### getBookContext
+### listWritingChapters
 
-- **用途**：一次性获取当前书籍的完整写作上下文：当前章节正文、写作大纲、小说背景、全部人物。适合在需要全面了解本书或当前章时调用。
+- **用途**：获取本书写作目录章节列表，并显式区分**卷**与**章节**。用于先定位正确的章节 ID，再调用 `getChapterContent` / `editChapterContent` / `batchGetChapterContents`。
 - **参数**：
   - `bookId` (number, 必填)：当前书籍 ID。
-  - `currentChapterId` (number, 可选)：当前正在写的章节 ID，不传则只取大纲/背景/人物。
-  - `currentChapterTitle` (string, 可选)：当前章节标题，用于展示。
-- **返回**：包含当前章节正文、写作大纲文本、小说背景、人物列表的聚合内容。
-
----
-
-### getAllOutlines
-
-- **用途**：获取本书全部大纲（总纲、卷大纲、章节大纲、其他大纲、写作大纲），含每类大纲下的子章节树。
-- **参数**：
-  - `bookId` (number, 必填)：当前书籍 ID。
-- **返回**：包含 globalOutline、volumeOutlines、chapterOutlines、otherOutlines、writingOutline；每项含 chaptersText（层级标题文本）等。
-
----
-
-### getWritingOutlineWithChapters
-
-- **用途**：获取本书「写作大纲」及其章节列表（即左侧写作目录）。返回的 chapters 中每个章节的 id 是获取该章正文时 getChapterContent(chapterId) 必须使用的 id；其他大纲（总纲、章节大纲等）的章节 id 不能用于获取正文。
-- **参数**：
-  - `bookId` (number, 必填)：当前书籍 ID。
-- **返回**：含 outlineId、chapters 等；chapters 为章节数组，含 id、title、parent_id 等。
+- **返回**：JSON，含 `items` 数组；每项含 `id`、`title`、`parentId`、`level`、`sort`、`nodeType`（`volume` 或 `chapter`）、`hasChildren`。
 
 ---
 
 ### getChapterContent
 
-- **用途**：获取某一章的正文内容（纯文本）。重要：chapterId 必须是「写作大纲」中该章的 id，即必须先调用 getWritingOutlineWithChapters(bookId) 得到 chapters 列表，用其中对应「第一卷第一章」等标题的章节的 id 来调用本工具，不能使用 getAllOutlines 或其他大纲返回的章节 id，否则会取不到正文。
+- **用途**：获取某一章的正文内容（纯文本）。重要：`chapterId` 必须是**左侧写作章节目录**对应的章节 id，不得使用总纲/章节大纲/其他大纲树中的节点 id，否则会取不到正文。
 - **参数**：
-  - `chapterId` (number, 必填)：写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）。
+  - `chapterId` (number, 必填)：写作目录章节 ID。
   - `title` (string, 可选)：章节标题，用于展示。
   - `maxTextLength` (number, 可选)：纯文本最大长度，默认 12000。
 - **返回**：含 chapterId、title、plainText 等；回答时用 plainText。
@@ -50,7 +30,7 @@
 
 ### batchGetChapterContents
 
-- **用途**：批量获取多章正文（纯文本）。
+- **用途**：批量获取多章正文（纯文本）。每个 id 均须为写作目录章节 id（与左侧写作章节目录一致）。
 - **参数**：
   - `chapterIds` (array, 必填)：章节 ID 列表，如 [1,2,3]。
   - `maxTextLength` (number, 可选)：每章纯文本最大长度，默认 12000。
@@ -87,6 +67,26 @@
 
 ---
 
+### getGlobalOutline
+
+- **用途**：只读获取本书总纲（`global`）Markdown 文本。若总纲不存在，会自动创建空总纲后返回，便于后续补写。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `maxTextLength` (number, 可选)：总纲 Markdown 最大长度，默认 32000。
+- **返回**：含 success、outlineId、title、type、markdown、hasMarkdown。
+
+---
+
+### editGlobalOutline
+
+- **用途**：写入编辑本书总纲（`global`）Markdown，整体覆盖保存。若总纲不存在，会自动创建后写入。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID。
+  - `markdownContent` (string, 必填)：新的总纲 Markdown 全文（覆盖写入）。
+- **返回**：成功时含 success: true、outlineId、title、type、markdownLength；失败时含 success: false、error。
+
+---
+
 ### getAvailableOutlines
 
 - **用途**：获取本书「可关联」的大纲列表（总纲 + 章节大纲 + 其他大纲，扁平）。
@@ -98,7 +98,7 @@
 
 ### batchGetOutlineDetails
 
-- **用途**：根据大纲 ID 列表获取每个大纲的详情（含子章节与层级文本）。需先有 availableOutlines（可来自 getAvailableOutlines 或 getAllOutlines）。
+- **用途**：根据大纲 ID 列表获取每个大纲的详情（含子章节与层级文本）。需先有 availableOutlines（来自 getAvailableOutlines）。
 - **参数**：
   - `outlineIds` (array, 必填)：大纲 ID 列表。
   - `bookId` (number, 必填)：当前书籍 ID，用于解析 allOutlines。
@@ -117,11 +117,22 @@
 
 ---
 
+### editTextOutline
+
+- **用途**：写入指定大纲条目的「文本大纲」Markdown（总纲 / 卷大纲 / 章节大纲 / 其他大纲 / 写作大纲均可），整体覆盖原内容。适用于补写总纲文档、重写某条文本提纲、统一提纲口径等场景。
+- **参数**：
+  - `bookId` (number, 必填)：当前书籍 ID（用于归属校验）。
+  - `outlineId` (number, 必填)：目标大纲 ID（建议来自 `getAvailableOutlines`）。
+  - `markdownContent` (string, 必填)：新的 Markdown 全文，保存时覆盖原文本大纲。
+- **返回**：成功时含 success: true、outlineId、title、type、markdownLength；失败时含 success: false、error。
+
+---
+
 ### editChapterContent
 
-- **用途**：编辑指定章节的正文内容。将传入的 content（纯文本，段落用换行符分隔）写入该章节并保存。chapterId 必须来自 getWritingOutlineWithChapters(bookId) 返回的 chapters[].id（写作目录中的章节 ID）。适用于按用户要求改写某一章、替换整章正文等场景。
+- **用途**：编辑指定章节的正文内容。将传入的 content（纯文本，段落用换行符分隔）写入该章节并保存。`chapterId` 须为左侧写作章节目录对应的章节 id。适用于按用户要求改写某一章、替换整章正文等场景。
 - **参数**：
-  - `chapterId` (number, 必填)：写作大纲中的章节 ID（来自 getWritingOutlineWithChapters 的 chapters[].id）。
+  - `chapterId` (number, 必填)：写作目录章节 ID。
   - `content` (string, 必填)：章节新正文，纯文本，段落之间用换行符分隔。
 - **返回**：成功时含 success: true、message、chapterId；失败时含 success: false、error。只有返回 success 后才可告知用户修改已完成。
 
@@ -142,9 +153,8 @@
 
 ## 使用建议
 
-- 对话开始时若已知 bookId、当前章节，可先调用 **getBookContext** 获取全书上下文。
-- 只需写作目录时用 **getWritingOutlineWithChapters**；需要总纲/卷/多类大纲时用 **getAllOutlines**。
-- 需要 **文本层大纲 Markdown**（非目录树）时用 **getTextOutline**；需要 **章节树结构** 时用 **batchGetOutlineDetails** / **getAllOutlines**。
+- 需要 **文本层大纲 Markdown**（非目录树）时用 **getTextOutline**；需要 **章节树结构** 时用 **batchGetOutlineDetails**。
+- 用户要求修改总纲/卷/章节/其他大纲的文本提纲时，用 **editTextOutline**（先用 `getAvailableOutlines` 确认 `outlineId`）。
 - 需要某章或某几章正文时用 **getChapterContent** 或 **batchGetChapterContents**；chapterId 必须来自写作目录。
 - 需要人物或小说背景时用 **getBookCharacters**（可按 ID 或按名子集）、**listBookCharacters**（只要名称与 ID 对照时）、**getStoryBackground**。
 - 用户要求写入、修改、改写、重写或替换某章内容时，必须调用 **editChapterContent** 并收到 success 后再回复完成，不得仅回复「已完成」而未实际调用该工具。

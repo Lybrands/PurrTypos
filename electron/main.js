@@ -461,6 +461,15 @@ ipcMain.handle('db-get-global-outline', (_, bookId) => {
   }
 })
 
+// 获取或创建总纲行（可无 XMind，仅用于文本大纲）
+ipcMain.handle('db-ensure-global-outline', (_, bookId) => {
+  try {
+    return { success: true, data: getDb().getOrCreateGlobalOutline(bookId) }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
 // 获取或创建写作章节专属大纲（支持 bookId）
 ipcMain.handle('db-get-writing-outline', (_, bookId) => {
   try {
@@ -732,6 +741,8 @@ const toolRouter = require('./toolRouter')
 const { buildToolRouterEmbeddingQuery } = require('./toolRouterQueryText')
 const { normalizeSessionTitle } = require('./sessionTitle')
 const toolExecutor = require('./toolExecutor')
+const skillOrchestrator = require('./skillOrchestrator')
+const { getSkillSpecs } = require('./agentToolDefinitions')
 
 /** 将 mem0 相关错误转为对用户/模型友好的提示，并打印原始错误到控制台 */
 function mem0ErrMessage(err) {
@@ -1086,15 +1097,31 @@ ipcMain.on('ai-chat-stream', async (event, { messages, apiKey, baseURL, apiProvi
   _activeAbortController = abortController
 
   const sendChunk = (chunk) => event.sender.send('ai-chat-chunk', chunk)
+  const skillSpecs = getSkillSpecs()
+  let latestUserTextForPlan = ''
+  if (Array.isArray(messages) && messages.length > 0) {
+    const lastUser = [...messages].reverse().find((m) => m && m.role === 'user')
+    latestUserTextForPlan = String(lastUser?.content || '')
+  }
 
   let tools = toolsFromFront
   if (useToolRouter && bookId != null && Array.isArray(messages) && messages.length > 0) {
     const userText = buildToolRouterEmbeddingQuery(messages)
+    latestUserTextForPlan = userText
     try {
       const routed = await toolRouter.getToolsForQuery(userText)
       tools = routed.tools || []
       if (Array.isArray(routed.warnings) && routed.warnings.length > 0) {
         sendChunk({ toolRouterWarning: routed.warnings.join(' ') })
+      }
+      if (routed?.candidates?.length) {
+        console.log(
+          '[skill-orchestrator][retrieve]',
+          routed.candidates.map((x) => `${x.name}:${Number(x.score || 0).toFixed(4)}`).join(', '),
+        )
+      }
+      if (routed?.intent?.likelySkills?.length) {
+        console.log('[skill-orchestrator][intent] likelySkills:', routed.intent.likelySkills.join(', '))
       }
     } catch (err) {
       tools = []
@@ -1144,25 +1171,61 @@ ipcMain.on('ai-chat-stream', async (event, { messages, apiKey, baseURL, apiProvi
           sendChunk({ done: true, model })
           return null
         }
-        const toolNames = list.map((tc) => tc.function?.name).filter(Boolean)
-        console.log('[ai-chat-stream] tool_calls:', toolNames.join(', '))
-        sendChunk({
+        const plan = skillOrchestrator.planToolCalls({
           toolCalls: list,
+          skillSpecs,
+          toolCtx,
+          latestUserText: latestUserTextForPlan,
+        })
+        const executableCalls = plan.executableCalls || list
+        const toolNames = executableCalls.map((tc) => tc.function?.name).filter(Boolean)
+        console.log('[ai-chat-stream] tool_calls(planned):', toolNames.join(', '))
+        console.log('[skill-orchestrator][plan]', {
+          nodes: plan?.telemetry?.nodes || 0,
+          edges: plan?.telemetry?.edges || 0,
+          insertedByDag: plan?.telemetry?.insertedByDag || 0,
+        })
+        sendChunk({
+          toolCalls: executableCalls,
           toolCallsInProgress: true,
           partialContent: accumulatedContent,
           partialThinking: accumulatedThinking,
           messagesSent: currentMessages,
+          orchestratorInfo: {
+            insertedByDag: plan?.telemetry?.insertedByDag || 0,
+            plannedNodeCount: plan?.telemetry?.nodes || executableCalls.length,
+            insertedSkillNames: plan?.telemetry?.insertedSkillNames || [],
+            plannedToolNames: plan?.telemetry?.finalCalls || toolNames,
+          },
           model,
         })
-        const toolResults = await toolExecutor.runTools(list, toolCtx, (ev) => {
-          if (!ev) return
-          if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
-          if (typeof ev.toolIndexCompleted === 'number') sendChunk({ toolIndexCompleted: ev.toolIndexCompleted })
+        const executed = await skillOrchestrator.executeWithRepair({
+          plannedCalls: executableCalls,
+          toolCtx,
+          latestUserText: latestUserTextForPlan,
+          maxRepairRounds: 1,
+          runTools: async (calls) =>
+            toolExecutor.runTools(calls, toolCtx, (ev) => {
+              if (!ev) return
+              if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
+              if (typeof ev.toolIndexCompleted === 'number') sendChunk({ toolIndexCompleted: ev.toolIndexCompleted })
+            }),
         })
+        if (executed.repairedRounds > 0) {
+          console.log('[skill-orchestrator][repair] repairedRounds:', executed.repairedRounds)
+          sendChunk({
+            orchestratorRepair: {
+              repairedRounds: executed.repairedRounds,
+              events: Array.isArray(executed.repairEvents) ? executed.repairEvents : [],
+            },
+          })
+        }
+        const toolResults = executed.toolResults || []
+        const usedCalls = executed.toolCalls || executableCalls
         const assistantMsg = {
           role: 'assistant',
           content: accumulatedContent,
-          tool_calls: list.map((tc) => ({
+          tool_calls: usedCalls.map((tc) => ({
             id: tc.id,
             type: 'function',
             function: { name: tc.function.name, arguments: tc.function.arguments },

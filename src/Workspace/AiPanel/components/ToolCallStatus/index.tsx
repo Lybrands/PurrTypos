@@ -1,4 +1,5 @@
 import React from 'react'
+import { Collapse } from 'antd'
 import {
   EditOutlined,
   CheckCircleOutlined,
@@ -8,26 +9,15 @@ import {
 import './index.scss'
 
 function getRunningText(label: string): string {
-  const isEditing = label.startsWith('编辑章节')
-  const isSearchMemory = label === '长期记忆'
-  const isAddMemory = label === '添加记忆'
-  const isAddForeshadowing = label === '添加伏笔'
-  if (isEditing) return `正在${label}`
-  if (isSearchMemory) return `正在查找${label}`
-  if (isAddMemory || isAddForeshadowing) return `正在${label}`
-  return `正在查看${label}`
+  return `正在执行 ${label}`
 }
 
 function getDoneText(label: string): string {
-  if (label.startsWith('编辑章节')) return `已完成${label}`
-  if (label === '长期记忆') return '已查询长期记忆'
-  if (label === '添加记忆') return '已添加记忆'
-  if (label === '添加伏笔') return '已添加伏笔'
-  return `已完成：${label}`
+  return `已完成 ${label}`
 }
 
 function getPendingText(label: string): string {
-  return `待执行：${label}`
+  return `待执行 ${label}`
 }
 
 export interface ToolCallStatusProps {
@@ -38,6 +28,13 @@ export interface ToolCallStatusProps {
    * 等于 labels.length 表示本段全部完成。
    */
   completedToolCount: number
+  trace?: {
+    insertedByDag?: number
+    insertedSkillNames?: string[]
+    plannedToolNames?: string[]
+    repairedRounds?: number
+    repairReasons?: string[]
+  }
 }
 
 type RowPhase = 'done' | 'running' | 'pending'
@@ -56,9 +53,15 @@ function rowPhase(
 export default function ToolCallStatus({
   labels,
   completedToolCount,
+  trace,
 }: ToolCallStatusProps) {
   const n = labels.length
   const done = Math.min(Math.max(0, completedToolCount), n)
+  const hasTrace =
+    Boolean(trace?.insertedByDag) ||
+    Boolean(trace?.repairedRounds) ||
+    Boolean(trace?.insertedSkillNames?.length) ||
+    Boolean(trace?.repairReasons?.length)
 
   return (
     <div className="bubble-tool-calls">
@@ -92,6 +95,35 @@ export default function ToolCallStatus({
           </div>
         )
       })}
+      {hasTrace ? (
+        <Collapse
+          size="small"
+          ghost
+          className="bubble-tool-trace"
+          items={[
+            {
+              key: 'trace',
+              label: '查看执行轨迹',
+              children: (
+                <div className="bubble-tool-trace-content">
+                  {trace?.insertedByDag ? (
+                    <div>自动补前置：{trace.insertedByDag} 个</div>
+                  ) : null}
+                  {trace?.insertedSkillNames?.length ? (
+                    <div>补齐步骤：{trace.insertedSkillNames.join('、')}</div>
+                  ) : null}
+                  {trace?.repairedRounds ? (
+                    <div>自动修复：{trace.repairedRounds} 次</div>
+                  ) : null}
+                  {trace?.repairReasons?.length ? (
+                    <div>修复原因：{trace.repairReasons.join('；')}</div>
+                  ) : null}
+                </div>
+              ),
+            },
+          ]}
+        />
+      ) : null}
     </div>
   )
 }
