@@ -59,9 +59,10 @@ interface WorkspaceProps {
   modelConfigs?: AiModelConfig[]
   syncOutlineChapter?: boolean
   systemPrompt?: string
+  aiAgentMode?: 'legacy' | 'subagent'
 }
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, systemPrompt = '' }: WorkspaceProps = {}) {
+export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, systemPrompt = '', aiAgentMode = 'legacy' }: WorkspaceProps = {}) {
   const [leftWidth, setLeftWidth] = React.useState(25)
   const [editorWidth, setEditorWidth] = React.useState(60)
   const [fullscreen, setFullscreen] = React.useState<PanelType | null>(null)
@@ -466,6 +467,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
               <AiPanel
                 modelConfigs={modelConfigs}
                 systemPrompt={systemPrompt}
+                aiAgentMode={aiAgentMode}
                 isFullscreen={fullscreen === 'ai'}
                 onToggleFullscreen={() => toggleFullscreen('ai')}
               />

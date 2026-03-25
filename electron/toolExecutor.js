@@ -249,6 +249,17 @@ async function runTools(toolCalls, ctx, sendChunk) {
     let content
 
     try {
+      const allow = ctx.subagentAllowedToolNames
+      if (allow instanceof Set && name && !allow.has(name)) {
+        content = JSON.stringify({
+          error: `工具「${name}」不在当前 subagent 授权范围，已拒绝执行。`,
+        })
+        results.push({ tool_call_id: tc.id, content })
+        if (typeof sendChunk === 'function') {
+          sendChunk({ toolIndexCompleted: i })
+        }
+        continue
+      }
       switch (name) {
         case 'getChapterContent': {
           const cid = args.chapterId

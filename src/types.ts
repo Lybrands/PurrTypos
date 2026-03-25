@@ -357,6 +357,8 @@ export interface ElectronAPI {
     currentChapterTitle?: string;
     writingChapters?: { id: number; title: string }[];
     availableOutlines?: { id: number; title: string }[];
+    agentMode?: "legacy" | "subagent";
+    agentAction?: "analyze" | "plan" | "draft" | "review" | "polish" | "full";
   }) => void;
   abortAiStream: () => void;
   onAiChunk: (
@@ -393,6 +395,12 @@ export interface ElectronAPI {
           resolvedOutlineId?: number;
         }>;
       };
+      subagentStage?: string;
+      /** 与 subagentStageName 同时出现时表示某一 subagent 阶段已结束 */
+      subagentStageName?: string;
+      subagentStageDone?: string;
+      subagentPayload?: unknown;
+      subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
     }) => void,
   ) => () => void;
   // 设置
@@ -405,6 +413,7 @@ export interface GeneralSettings {
   ai_system_prompt: string;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
+  ai_agent_mode?: "legacy" | "subagent";
 }
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */

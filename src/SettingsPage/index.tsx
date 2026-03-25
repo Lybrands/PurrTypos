@@ -24,6 +24,8 @@ interface SettingsPageProps {
   onSyncOutlineChapterChange: (value: boolean) => void
   systemPrompt: string
   onSystemPromptChange: (value: string) => void
+  aiAgentMode: 'legacy' | 'subagent'
+  onAiAgentModeChange: (value: 'legacy' | 'subagent') => void
 }
 
 export default function SettingsPage({
@@ -34,6 +36,8 @@ export default function SettingsPage({
   onSyncOutlineChapterChange,
   systemPrompt,
   onSystemPromptChange,
+  aiAgentMode,
+  onAiAgentModeChange,
 }: SettingsPageProps) {
   const { message } = useAntdApp()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
@@ -308,6 +312,17 @@ export default function SettingsPage({
                     恢复默认
                   </Button>
                 </div>
+              </div>
+              <div className="settings-field">
+                <div className="settings-field-label">Agent 模式</div>
+                <p className="settings-field-desc">legacy 为当前单代理模式，subagent 为多阶段子代理模式。</p>
+                <Radio.Group
+                  value={aiAgentMode}
+                  onChange={(e) => onAiAgentModeChange(e.target.value === 'subagent' ? 'subagent' : 'legacy')}
+                >
+                  <Radio value="legacy">legacy（默认）</Radio>
+                  <Radio value="subagent">subagent（实验）</Radio>
+                </Radio.Group>
               </div>
             </div>
           )}

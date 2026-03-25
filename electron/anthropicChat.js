@@ -243,6 +243,88 @@ async function chatStreamAsOpenAIFormat(apiKey, openAiMessages, options = {}, si
   return { stream: convert(), model }
 }
 
+/**
+ * 非流式对话，返回与 OpenAI chat.completions 兼容的 message 形状（供 subagent 等多轮 tool 循环复用）。
+ * @returns {Promise<{ message: object, model: string }>}
+ */
+async function chatNoStreamAsOpenAIFormat(apiKey, openAiMessages, options = {}, signal) {
+  const { model, temperature, thinking, tools, max_tokens, baseURL } = options
+  const client = createClient(apiKey, baseURL)
+  const { system, messages } = openAiMessagesToAnthropic(openAiMessages)
+  if (!messages.length) {
+    throw new Error('消息为空')
+  }
+
+  let maxOut = typeof max_tokens === 'number' && max_tokens > 0 ? max_tokens : 8192
+  const thinkingOn = thinking && thinking.type === 'enabled'
+  let thinkingParam
+  if (thinkingOn) {
+    let budget = Math.min(32000, Math.max(1024, Math.floor(maxOut / 2)))
+    if (budget >= maxOut) maxOut = budget + 2048
+    thinkingParam = { type: 'enabled', budget_tokens: budget }
+  }
+
+  const anthropicTools = openAiToolsToAnthropic(tools)
+  const params = {
+    model: String(model || '').trim(),
+    max_tokens: maxOut,
+    messages,
+    stream: false,
+    ...(system ? { system } : {}),
+    ...(thinkingParam ? { thinking: thinkingParam } : {}),
+    ...(anthropicTools && anthropicTools.length ? { tools: anthropicTools } : {}),
+  }
+  if (temperature !== undefined && temperature !== null) {
+    params.temperature = temperature
+  }
+
+  let msg
+  try {
+    msg = await client.messages.create(params, { signal })
+  } catch (err) {
+    const msgErr = (err && err.message) || String(err)
+    if (/thinking|not support|unrecogniz|invalid/i.test(msgErr) && params.thinking) {
+      const { thinking: _t, ...rest } = params
+      msg = await client.messages.create(rest, { signal })
+    } else {
+      throw err
+    }
+  }
+
+  const blocks = Array.isArray(msg.content) ? msg.content : []
+  const textParts = []
+  const thinkingParts = []
+  const toolCallsOpenAi = []
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue
+    if (block.type === 'text' && typeof block.text === 'string') {
+      textParts.push(block.text)
+    } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      thinkingParts.push(block.thinking)
+    } else if (block.type === 'tool_use') {
+      const input = block.input && typeof block.input === 'object' ? block.input : {}
+      toolCallsOpenAi.push({
+        id: String(block.id || ''),
+        type: 'function',
+        function: {
+          name: String(block.name || ''),
+          arguments: JSON.stringify(input),
+        },
+      })
+    }
+  }
+
+  return {
+    message: {
+      role: 'assistant',
+      content: textParts.join(''),
+      ...(thinkingParts.length ? { reasoning_content: thinkingParts.join('\n') } : {}),
+      ...(toolCallsOpenAi.length ? { tool_calls: toolCallsOpenAi } : {}),
+    },
+    model: msg.model || model,
+  }
+}
+
 /** 从 Messages 响应取出可见文本（兼容仅 text / 部分网关只给 thinking 或非标准块） */
 function extractAnthropicTitlePlainText(msg) {
   if (!msg || typeof msg !== 'object') return ''
@@ -317,6 +399,7 @@ async function generateTitle(apiKey, text, options = {}) {
 
 module.exports = {
   chatStreamAsOpenAIFormat,
+  chatNoStreamAsOpenAIFormat,
   generateTitle,
   openAiMessagesToAnthropic,
 }
