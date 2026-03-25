@@ -28,6 +28,7 @@ import { $setBlocksType } from '@lexical/selection'
 import { HeadingNode, $createHeadingNode } from '@lexical/rich-text'
 import { ListNode, ListItemNode, INSERT_ORDERED_LIST_COMMAND, INSERT_UNORDERED_LIST_COMMAND } from '@lexical/list'
 import { ListPlugin } from '@lexical/react/LexicalListPlugin'
+import type { EntityId } from '../../types'
 
 // ─── 工具：纯文本 ↔ Lexical 状态 ────────────────────────────────
 // 首行缩进由 CSS text-indent 控制，内容中不再插入全角空格
@@ -269,7 +270,7 @@ export interface LexicalEditorHandle {
 
 interface LexicalEditorProps {
   value: string
-  chapterId: number | null
+  chapterId: EntityId | null
   onChange: (text: string) => void
   onKeyTrigger?: (key: string, rect: DOMRect) => void
   placeholder?: string

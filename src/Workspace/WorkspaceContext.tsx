@@ -1,18 +1,18 @@
 import React from 'react'
 import type { LexicalEditor } from 'lexical'
-import type { Chapter } from '../types'
+import type { Chapter, EntityId } from '../types'
 
 export interface WorkspaceContextValue {
-  bookId: number | null
+  bookId: EntityId | null
   bookTitle: string
   enableVolume: boolean
   syncOutlineChapter: boolean
-  activeChapterId: number | null
+  activeChapterId: EntityId | null
   activeChapterTitle: string
   writingChapters: Chapter[]
-  writingOutlineId: number | null
-  setActiveChapter: (id: number, title: string) => void
-  setChaptersData: (outlineId: number, chapters: Chapter[]) => void
+  writingOutlineId: EntityId | null
+  setActiveChapter: (id: EntityId, title: string) => void
+  setChaptersData: (outlineId: EntityId, chapters: Chapter[]) => void
   loadWritingChapters: () => Promise<void>
   /** 工作台搜索：关键字（大纲 / 小说背景 / 写作区） */
   workspaceSearchQuery: string

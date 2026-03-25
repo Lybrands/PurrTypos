@@ -5,6 +5,8 @@
  * - 自动补齐静态前置依赖（requires）
  */
 
+const { shortId8 } = require('./idUtils')
+
 function parseArgsSafe(argsText) {
   if (typeof argsText !== 'string') return {}
   try {
@@ -34,9 +36,9 @@ function cloneToolCall(tc) {
   }
 }
 
-function makeToolCall(name, args, idPrefix, seq) {
+function makeToolCall(name, args) {
   return {
-    id: `${idPrefix}_${name}_${seq}`,
+    id: shortId8(),
     type: 'function',
     function: {
       name,
@@ -49,19 +51,16 @@ function makeToolCall(name, args, idPrefix, seq) {
  * @param {{
  *   toolCalls: Array<{ id:string, type:string, function:{ name:string, arguments:string } }>,
  *   skillSpecs: Record<string, { requires?: string[] }>,
- *   idPrefix?: string
  * }} input
  */
 function buildDagFromToolCalls(input) {
   const toolCalls = Array.isArray(input?.toolCalls) ? input.toolCalls : []
   const skillSpecs = input?.skillSpecs || {}
-  const idPrefix = input?.idPrefix || 'sys'
   const nodes = []
   const edges = []
   const topoOrder = []
   const warnings = []
   const seenPrereq = new Set()
-  let seq = 0
 
   for (const original of toolCalls) {
     const cur = cloneToolCall(original)
@@ -74,7 +73,7 @@ function buildDagFromToolCalls(input) {
       const key = `${dep}=>${name}`
       if (seenPrereq.has(key)) continue
       seenPrereq.add(key)
-      const depCall = makeToolCall(dep, {}, idPrefix, seq++)
+      const depCall = makeToolCall(dep, {})
       nodes.push({
         nodeId: depCall.id,
         skill: dep,
@@ -89,7 +88,7 @@ function buildDagFromToolCalls(input) {
       topoOrder.push(depCall.id)
     }
     if (!cur.id) {
-      cur.id = `${idPrefix}_${name}_${seq++}`
+      cur.id = shortId8()
       warnings.push(`tool_call 缺少 id，已自动生成：${cur.id}`)
     }
     nodes.push({

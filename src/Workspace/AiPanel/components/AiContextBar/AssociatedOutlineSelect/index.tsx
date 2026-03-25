@@ -1,12 +1,13 @@
 import React from 'react'
 import { Button, Select, Tooltip } from 'antd'
 import { ThunderboltOutlined } from '@ant-design/icons'
+import type { EntityId } from '../../../../../types'
 
 export interface AssociatedOutlineSelectProps {
-  value: number[]
-  onChange: (ids: number[]) => void
-  options: { label: string; value: number }[]
-  chapterId: number | null | undefined
+  value: EntityId[]
+  onChange: (ids: EntityId[]) => void
+  options: { label: string; value: EntityId }[]
+  chapterId: EntityId | null | undefined
   onQuickAssociate: () => void
 }
 

@@ -1,6 +1,8 @@
 const path = require('path')
 const fs = require('fs')
 const { app } = require('electron')
+const { shortId8 } = require('./idUtils')
+const { migrateEntityIdsToText8 } = require('./migrateEntityIdsToText')
 
 // 使用 sql.js（纯 JS，无需 C++ 编译），兼容 Node 22 且无需 Visual Studio
 let db = null
@@ -80,55 +82,64 @@ async function initDatabase() {
   db = new SQL.Database(buffer)
 
   db.run(`CREATE TABLE IF NOT EXISTS books (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     cover_color TEXT DEFAULT NULL,
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    enable_volume INTEGER DEFAULT 0
   )`)
+  try { db.run(`ALTER TABLE books ADD COLUMN enable_volume INTEGER DEFAULT 0`) } catch (_) {}
   db.run(`CREATE TABLE IF NOT EXISTS outlines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     type TEXT DEFAULT 'chapter',
     sort INTEGER DEFAULT 0,
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    xmind_data TEXT DEFAULT NULL,
+    file_path TEXT DEFAULT NULL,
+    book_id TEXT DEFAULT NULL,
+    parent_outline_id TEXT DEFAULT NULL,
+    writing_chapter_id TEXT DEFAULT NULL,
+    markdown_content TEXT DEFAULT NULL
   )`)
   try { db.run(`ALTER TABLE outlines ADD COLUMN type TEXT DEFAULT 'chapter'`) } catch (_) {}
   try { db.run(`ALTER TABLE outlines ADD COLUMN sort INTEGER DEFAULT 0`) } catch (_) {}
   try { db.run(`ALTER TABLE outlines ADD COLUMN xmind_data TEXT DEFAULT NULL`) } catch (_) {}
   try { db.run(`ALTER TABLE outlines ADD COLUMN file_path TEXT DEFAULT NULL`) } catch (_) {}
-  try { db.run(`ALTER TABLE outlines ADD COLUMN book_id INTEGER DEFAULT NULL`) } catch (_) {}
-  try { db.run(`ALTER TABLE books ADD COLUMN enable_volume INTEGER DEFAULT 0`) } catch (_) {}
-  try { db.run(`ALTER TABLE outlines ADD COLUMN parent_outline_id INTEGER DEFAULT NULL`) } catch (_) {}
-  try { db.run(`ALTER TABLE outlines ADD COLUMN writing_chapter_id INTEGER DEFAULT NULL`) } catch (_) {}
+  try { db.run(`ALTER TABLE outlines ADD COLUMN book_id TEXT DEFAULT NULL`) } catch (_) {}
+  try { db.run(`ALTER TABLE outlines ADD COLUMN parent_outline_id TEXT DEFAULT NULL`) } catch (_) {}
+  try { db.run(`ALTER TABLE outlines ADD COLUMN writing_chapter_id TEXT DEFAULT NULL`) } catch (_) {}
   try { db.run(`ALTER TABLE outlines ADD COLUMN markdown_content TEXT DEFAULT NULL`) } catch (_) {}
   try { db.run(`UPDATE outlines SET type = 'chapter' WHERE type IS NULL`) } catch (_) {}
   db.run(`CREATE TABLE IF NOT EXISTS outline_chapters (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    outline_id INTEGER NOT NULL,
+    id TEXT PRIMARY KEY NOT NULL,
+    outline_id TEXT NOT NULL,
     title TEXT NOT NULL,
     level INTEGER DEFAULT 1,
     progress TEXT DEFAULT 'todo',
     sort INTEGER DEFAULT 0,
-    parent_id INTEGER DEFAULT NULL
+    parent_id TEXT DEFAULT NULL
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chapter_id INTEGER NOT NULL UNIQUE,
+    chapter_id TEXT NOT NULL UNIQUE,
     content TEXT DEFAULT '',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS ai_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chapter_id INTEGER,
+    chapter_id TEXT,
     title TEXT DEFAULT '新对话',
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    closed INTEGER DEFAULT 0,
+    book_id TEXT
   )`)
   try { db.exec('ALTER TABLE ai_sessions ADD COLUMN closed INTEGER DEFAULT 0') } catch (_) {}
-  try { db.exec('ALTER TABLE ai_sessions ADD COLUMN book_id INTEGER') } catch (_) {}
+  try { db.exec('ALTER TABLE ai_sessions ADD COLUMN book_id TEXT') } catch (_) {}
   db.run(`CREATE TABLE IF NOT EXISTS ai_conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER,
-    chapter_id INTEGER,
+    chapter_id TEXT,
     prompt TEXT NOT NULL,
     response TEXT NOT NULL,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -152,22 +163,22 @@ async function initDatabase() {
   try { db.exec('ALTER TABLE ai_favorites ADD COLUMN prompt TEXT DEFAULT ""') } catch (_) {}
   db.run(`CREATE TABLE IF NOT EXISTS ai_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id INTEGER NOT NULL,
+    book_id TEXT NOT NULL,
     layer TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
-    chapter_id INTEGER DEFAULT NULL,
+    chapter_id TEXT DEFAULT NULL,
     character_id INTEGER DEFAULT NULL,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS ai_foreshadowing (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id INTEGER NOT NULL,
-    chapter_id INTEGER NOT NULL,
+    book_id TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT '悬念',
-    expected_chapter_id INTEGER DEFAULT NULL,
+    expected_chapter_id TEXT DEFAULT NULL,
     status TEXT NOT NULL DEFAULT '未回收',
-    resolved_chapter_id INTEGER DEFAULT NULL,
+    resolved_chapter_id TEXT DEFAULT NULL,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
@@ -189,20 +200,20 @@ async function initDatabase() {
     value TEXT DEFAULT ''
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS story_background (
-    book_id INTEGER NOT NULL PRIMARY KEY,
+    book_id TEXT NOT NULL PRIMARY KEY,
     content TEXT DEFAULT '',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS story_background_attachments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id INTEGER NOT NULL,
+    book_id TEXT NOT NULL,
     name TEXT NOT NULL,
     stored_path TEXT NOT NULL,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
   db.run(`CREATE TABLE IF NOT EXISTS characters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id INTEGER NOT NULL,
+    book_id TEXT NOT NULL,
     name TEXT NOT NULL,
     gender TEXT DEFAULT '',
     age TEXT DEFAULT '',
@@ -248,13 +259,13 @@ async function initDatabase() {
   if (!bookCount || Number(bookCount.c) === 0) {
     const outlineCount = get('SELECT COUNT(*) as c FROM outlines', [])
     if (outlineCount && Number(outlineCount.c) > 0) {
-      run('INSERT INTO books (title, cover_color) VALUES (?, ?)', ['我的作品', '#4A90D9'])
-      const defaultBook = get('SELECT id FROM books ORDER BY id ASC LIMIT 1', [])
-      if (defaultBook) {
-        run('UPDATE outlines SET book_id = ? WHERE book_id IS NULL', [defaultBook.id])
-      }
+      const defaultBid = shortId8()
+      run('INSERT INTO books (id, title, cover_color) VALUES (?, ?, ?)', [defaultBid, '我的作品', '#4A90D9'])
+      run('UPDATE outlines SET book_id = ? WHERE book_id IS NULL', [defaultBid])
     }
   }
+
+  migrateEntityIdsToText8({ all, get, run, persist })
 
   persist()
   console.log('数据库初始化成功:', dbPath)
@@ -288,13 +299,14 @@ Database.getBooks = function () {
 
 Database.createBook = function (title, enableVolume) {
   getDb()
+  const id = shortId8()
   const cnt = get('SELECT COUNT(*) as c FROM books', [])
   const color = BOOK_COLORS[Number(cnt?.c ?? 0) % BOOK_COLORS.length]
   const vol = enableVolume ? 1 : 0
-  run('INSERT INTO books (title, cover_color, enable_volume) VALUES (?, ?, ?)', [title, color, vol])
-  const row = get('SELECT * FROM books ORDER BY id DESC LIMIT 1', [])
-  // 自动为新书创建 writing outline
-  run('INSERT INTO outlines (title, type, sort, book_id) VALUES (?, ?, ?, ?)', [title, 'writing', 0, Number(row.id)])
+  run('INSERT INTO books (id, title, cover_color, enable_volume) VALUES (?, ?, ?, ?)', [id, title, color, vol])
+  const row = get('SELECT * FROM books WHERE id = ?', [id])
+  const wid = shortId8()
+  run('INSERT INTO outlines (id, title, type, sort, book_id) VALUES (?, ?, ?, ?, ?)', [wid, title, 'writing', 0, id])
   return row
 }
 
@@ -355,12 +367,12 @@ Database.saveOutline = function (data) {
     ? get('SELECT COALESCE(MAX(sort), 0) as m FROM outlines WHERE type = ? AND book_id = ?', [type, bookId])
     : get('SELECT COALESCE(MAX(sort), 0) as m FROM outlines WHERE type = ?', [type])
   const sort = (maxSort?.m ?? 0) + 1
+  const newOutlineId = shortId8()
   run(
-    'INSERT INTO outlines (title, type, sort, xmind_data, file_path, book_id, writing_chapter_id, parent_outline_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [title, type, sort, xmindData, filePath, bookId, writingChapterId, parentOutlineId]
+    'INSERT INTO outlines (id, title, type, sort, xmind_data, file_path, book_id, writing_chapter_id, parent_outline_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [newOutlineId, title, type, sort, xmindData, filePath, bookId, writingChapterId, parentOutlineId]
   )
-  const inserted = get('SELECT id FROM outlines ORDER BY id DESC LIMIT 1', [])
-  return { id: Number(inserted.id), title, type, book_id: bookId, writing_chapter_id: writingChapterId, parent_outline_id: parentOutlineId }
+  return { id: newOutlineId, title, type, book_id: bookId, writing_chapter_id: writingChapterId, parent_outline_id: parentOutlineId }
 }
 
 Database.updateOutlineXmind = function (outlineId, title, xmindData, filePath) {
@@ -397,20 +409,28 @@ Database.getWritingOutline = function (bookId) {
 
 Database.getOrCreateWritingOutline = function (bookId) {
   getDb()
-  if (bookId) {
+    if (bookId) {
     let row = get('SELECT * FROM outlines WHERE type = ? AND book_id = ? LIMIT 1', ['writing', bookId])
     if (!row) {
       const book = get('SELECT title FROM books WHERE id = ?', [bookId])
-      run('INSERT INTO outlines (title, type, sort, book_id) VALUES (?, ?, ?, ?)', [book?.title || '我的作品', 'writing', 0, bookId])
-      row = get('SELECT * FROM outlines WHERE type = ? AND book_id = ? LIMIT 1', ['writing', bookId])
+      const wid = shortId8()
+      run('INSERT INTO outlines (id, title, type, sort, book_id) VALUES (?, ?, ?, ?, ?)', [
+        wid,
+        book?.title || '我的作品',
+        'writing',
+        0,
+        bookId,
+      ])
+      row = get('SELECT * FROM outlines WHERE id = ?', [wid])
     }
     return row
   }
   // 向后兼容：无 bookId 时取第一个 writing outline
   let row = get('SELECT * FROM outlines WHERE type = ? LIMIT 1', ['writing'])
   if (!row) {
-    run('INSERT INTO outlines (title, type, sort) VALUES (?, ?, ?)', ['我的作品', 'writing', 0])
-    row = get('SELECT * FROM outlines WHERE type = ? LIMIT 1', ['writing'])
+    const wid = shortId8()
+    run('INSERT INTO outlines (id, title, type, sort) VALUES (?, ?, ?, ?)', [wid, '我的作品', 'writing', 0])
+    row = get('SELECT * FROM outlines WHERE id = ?', [wid])
   }
   return row
 }
@@ -503,11 +523,12 @@ Database.saveChapters = function (outlineId, chapters) {
   for (const item of chapters) {
     const level = item.level || 1
     const parentId = item.parentId ?? item.parent_id ?? (level > 1 ? lastIdByLevel[level - 1] ?? null : null)
-    const id = runAndGetId(
-      'INSERT INTO outline_chapters (outline_id, title, level, progress, sort, parent_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [outlineId, item.title, level, item.progress || 'todo', item.sort || 0, parentId]
+    const nid = shortId8()
+    run(
+      'INSERT INTO outline_chapters (id, outline_id, title, level, progress, sort, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [nid, outlineId, item.title, level, item.progress || 'todo', item.sort || 0, parentId],
     )
-    if (id) lastIdByLevel[level] = id
+    lastIdByLevel[level] = nid
   }
 }
 
@@ -519,12 +540,12 @@ Database.addChapter = function (outlineId, title, parentId = null) {
     ? get('SELECT COALESCE(MAX(sort), 0) as m FROM outline_chapters WHERE outline_id = ? AND parent_id = ?', [outlineId, parentIdVal])
     : get('SELECT COALESCE(MAX(sort), 0) as m FROM outline_chapters WHERE outline_id = ? AND parent_id IS NULL', [outlineId])
   const sort = (max?.m ?? 0) + 1
+  const newChapterId = shortId8()
   run(
-    'INSERT INTO outline_chapters (outline_id, title, level, progress, sort, parent_id) VALUES (?, ?, ?, ?, ?, ?)',
-    [outlineId, title, level, 'todo', sort, parentIdVal]
+    'INSERT INTO outline_chapters (id, outline_id, title, level, progress, sort, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [newChapterId, outlineId, title, level, 'todo', sort, parentIdVal]
   )
-  const inserted = get('SELECT id FROM outline_chapters WHERE outline_id = ? ORDER BY id DESC LIMIT 1', [outlineId])
-  return { id: Number(inserted.id), outline_id: outlineId, title, level, progress: 'todo', sort, parent_id: parentIdVal }
+  return { id: newChapterId, outline_id: outlineId, title, level, progress: 'todo', sort, parent_id: parentIdVal }
 }
 
 Database.deleteChapter = function (chapterId) {
@@ -611,8 +632,22 @@ Database.createSession = function (bookId, chapterId) {
   persist()
   const row = get('SELECT * FROM ai_sessions WHERE id = ?', [id])
   const session = row && typeof row === 'object'
-    ? { id: Number(row.id), book_id: row.book_id != null ? row.book_id : null, chapter_id: row.chapter_id != null ? row.chapter_id : null, title: row.title || '新对话', create_time: row.create_time, closed: row.closed ?? 0 }
-    : { id, book_id: bookId, chapter_id: chapterId != null ? chapterId : null, title: '新对话', create_time: new Date().toISOString(), closed: 0 }
+    ? {
+        id: Number(row.id),
+        book_id: row.book_id != null ? String(row.book_id) : null,
+        chapter_id: row.chapter_id != null ? String(row.chapter_id) : null,
+        title: row.title || '新对话',
+        create_time: row.create_time,
+        closed: row.closed ?? 0,
+      }
+    : {
+        id,
+        book_id: bookId != null ? String(bookId) : null,
+        chapter_id: chapterId != null ? String(chapterId) : null,
+        title: '新对话',
+        create_time: new Date().toISOString(),
+        closed: 0,
+      }
   return session
 }
 

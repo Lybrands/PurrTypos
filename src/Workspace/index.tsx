@@ -3,7 +3,7 @@ import { ArrowLeftOutlined, HomeOutlined } from '@ant-design/icons'
 import { Button, Tooltip, Spin } from 'antd'
 import type { LexicalEditor } from 'lexical'
 import AppHeader from '../components/AppHeader'
-import type { Chapter, AiModelConfig } from '../types'
+import type { Chapter, AiModelConfig, EntityId } from '../types'
 import { editorStateToText } from './EditorPanel/LexicalEditor'
 import { findAllMatchStarts, selectLexicalSearchMatch } from './search/lexicalSearch'
 import { getWritingOutlineWithChapters } from './utils'
@@ -50,7 +50,7 @@ function savePanelState(state: { leftCollapsed: boolean; rightCollapsed: boolean
 }
 
 interface WorkspaceProps {
-  bookId?: number | null
+  bookId?: EntityId | null
   bookTitle?: string
   enableVolume?: boolean
   onBack?: () => void
@@ -76,10 +76,10 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     savePanelState({ leftCollapsed, rightCollapsed, editorCollapsed })
   }, [leftCollapsed, rightCollapsed, editorCollapsed])
 
-  const [writingOutlineId, setWritingOutlineId] = React.useState<number | null>(null)
+  const [writingOutlineId, setWritingOutlineId] = React.useState<EntityId | null>(null)
   const [writingChapters, setWritingChapters] = React.useState<Chapter[]>([])
 
-  const [activeWritingChapterId, setActiveWritingChapterId] = React.useState<number | null>(null)
+  const [activeWritingChapterId, setActiveWritingChapterId] = React.useState<EntityId | null>(null)
   const [activeWritingChapterTitle, setActiveWritingChapterTitle] = React.useState('')
 
   const [outlineRefreshKey, setOutlineRefreshKey] = React.useState(0)
@@ -190,7 +190,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   }
 
   const handleItemCreated = React.useCallback(
-    async (chapterId: number, title: string, isVolume: boolean, parentWritingChapterId: number | null) => {
+    async (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => {
       if (!isVolume) {
         setSkipAutoOpenOutlineTitle(title)
       }
@@ -204,7 +204,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
           title, type: 'volume', book_id: bookId ?? null, writing_chapter_id: chapterId,
         })
       } else {
-        let parentOutlineId: number | null = null
+        let parentOutlineId: EntityId | null = null
         if (parentWritingChapterId != null) {
           const res = await window.electronAPI.getOutlineByWritingChapter(parentWritingChapterId)
           if (res.success && res.data) parentOutlineId = res.data.id
@@ -238,7 +238,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     setActiveWritingChapterTitle((prev) => (prev === title ? '' : prev))
   }, [writingOutlineId, loadWritingChapters])
 
-  const handleWritingChapterDeleted = React.useCallback(async (writingChapterId: number) => {
+  const handleWritingChapterDeleted = React.useCallback(async (writingChapterId: EntityId) => {
     const res = await window.electronAPI.getOutlineByWritingChapter(writingChapterId)
     if (!res.success || !res.data) return
     await window.electronAPI.deleteOutline({ outlineId: res.data.id })
@@ -247,11 +247,11 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   }, [])
 
   const handleChapterOutlineSelect = React.useCallback(
-    (info: { title: string; writingChapterId?: number | null }) => {
+    (info: { title: string; writingChapterId?: EntityId | null }) => {
       if (!syncOutlineChapter) return
       const wcId = info.writingChapterId
-      if (wcId != null && Number.isFinite(Number(wcId))) {
-        const ch = writingChapters.find((c) => c.id === Number(wcId))
+      if (wcId != null && String(wcId).trim() !== '') {
+        const ch = writingChapters.find((c) => String(c.id) === String(wcId))
         if (ch) {
           setActiveWritingChapterId(ch.id)
           setActiveWritingChapterTitle(ch.title)
@@ -269,12 +269,12 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   )
 
   // ─── Context 方法（useCallback 保证引用稳定）──────────────────
-  const handleWritingSelect = React.useCallback((id: number, title: string) => {
+  const handleWritingSelect = React.useCallback((id: EntityId, title: string) => {
     setActiveWritingChapterId(id)
     setActiveWritingChapterTitle(title || '')
   }, [])
 
-  const handleWritingChaptersChange = React.useCallback((outlineId: number, chapterList: Chapter[]) => {
+  const handleWritingChaptersChange = React.useCallback((outlineId: EntityId, chapterList: Chapter[]) => {
     setWritingOutlineId(outlineId)
     setWritingChapters(chapterList || [])
   }, [])

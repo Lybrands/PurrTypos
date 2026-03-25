@@ -1,4 +1,4 @@
-import type { Article, Chapter, Character, Outline, VolumeOutline } from '../../types'
+import type { Article, Chapter, Character, EntityId, Outline, VolumeOutline } from '../../types'
 
 // ─── 纯文本提取 ────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ export function extractTextFromLexical(json: string): string {
 /** 将章节列表格式化为层级文本（用于 AI 上下文） */
 export function formatChaptersAsText(chapters: Chapter[]): string {
   if (!chapters.length) return ''
-  const buildTree = (parentId: number | null | undefined, depth: number): string => {
+  const buildTree = (parentId: EntityId | null | undefined, depth: number): string => {
     const items = chapters.filter((c) => (c.parent_id ?? null) === (parentId ?? null))
     return items
       .map((c) => {
@@ -39,7 +39,7 @@ export function formatChaptersAsText(chapters: Chapter[]): string {
 // ─── 1. 批量获取章节内容 ───────────────────────────────────────
 
 export interface ChapterContent {
-  chapterId: number
+  chapterId: EntityId
   title: string
   content: string
   plainText: string
@@ -52,11 +52,11 @@ export interface ChapterContent {
  * @param maxTextLength 每篇纯文本截取的最大长度，默认 12000
  */
 export async function batchGetChapterContents(
-  chapterIds: number[],
-  chapterMap?: Map<number, string> | Record<number, string>,
+  chapterIds: EntityId[],
+  chapterMap?: Map<EntityId, string> | Record<string, string>,
   maxTextLength = 12000,
 ): Promise<ChapterContent[]> {
-  const titleOf = (id: number) => {
+  const titleOf = (id: EntityId) => {
     if (!chapterMap) return ''
     if (chapterMap instanceof Map) return chapterMap.get(id) ?? ''
     return chapterMap[id] ?? ''
@@ -77,7 +77,7 @@ export async function batchGetChapterContents(
  * 注意：chapterId 必须是左侧写作章节目录（写作大纲 outline）下的章节 id，不能是其他大纲树中的节点 id。
  */
 export async function getChapterContent(
-  chapterId: number,
+  chapterId: EntityId,
   title?: string,
   maxTextLength = 12000,
 ): Promise<ChapterContent | null> {
@@ -119,7 +119,7 @@ async function loadOutlineWithChapters(outline: Outline): Promise<OutlineWithCha
 /**
  * 一次性获取指定书籍的全部大纲（总纲 + 卷大纲 + 章节大纲 + 其他大纲 + 写作大纲）
  */
-export async function getAllOutlines(bookId: number): Promise<BookOutlines> {
+export async function getAllOutlines(bookId: EntityId): Promise<BookOutlines> {
   const [globalRes, volumeRes, chapterRes, otherRes, writingRes] = await Promise.all([
     window.electronAPI.getGlobalOutline(bookId),
     window.electronAPI.getVolumeOutlines(bookId),
@@ -156,7 +156,7 @@ export async function getAllOutlines(bookId: number): Promise<BookOutlines> {
  * 获取指定大纲 ID 列表的详情（含子章节）
  */
 export async function batchGetOutlineDetails(
-  outlineIds: number[],
+  outlineIds: EntityId[],
   allOutlines: Outline[],
 ): Promise<OutlineWithChapters[]> {
   return Promise.all(
@@ -170,7 +170,7 @@ export async function batchGetOutlineDetails(
 /**
  * 获取指定书籍的可关联大纲列表（总纲 + 章节大纲 + 其他大纲），扁平化
  */
-export async function getAvailableOutlines(bookId: number): Promise<Outline[]> {
+export async function getAvailableOutlines(bookId: EntityId): Promise<Outline[]> {
   const [globalRes, chapterRes, otherRes] = await Promise.all([
     window.electronAPI.getGlobalOutline(bookId),
     window.electronAPI.getChapterOutlines(bookId),
@@ -187,12 +187,12 @@ export async function getAvailableOutlines(bookId: number): Promise<Outline[]> {
  * 获取本书写作大纲及其章节列表（用于 Workspace 加载写作目录）
  */
 export async function getWritingOutlineWithChapters(
-  bookId: number | null | undefined,
-): Promise<{ outlineId: number; chapters: Chapter[] } | null> {
+  bookId: EntityId | null | undefined,
+): Promise<{ outlineId: EntityId; chapters: Chapter[] } | null> {
   if (bookId == null) return null
   const res = await window.electronAPI.getWritingOutline(bookId)
   if (!res.success || !res.data) return null
-  const oid = Number(res.data.id)
+  const oid = String(res.data.id)
   const chapRes = await window.electronAPI.getChapters({ outlineId: oid })
   const chapters = chapRes.success && chapRes.data ? chapRes.data : []
   return { outlineId: oid, chapters }
@@ -203,7 +203,7 @@ export async function getWritingOutlineWithChapters(
 /**
  * 获取指定书籍的全部人物列表
  */
-export async function getBookCharacters(bookId: number): Promise<Character[]> {
+export async function getBookCharacters(bookId: EntityId): Promise<Character[]> {
   const res = await window.electronAPI.getCharacters({ bookId })
   return res.success && res.data ? res.data : []
 }
@@ -212,7 +212,7 @@ export async function getBookCharacters(bookId: number): Promise<Character[]> {
  * 批量获取指定 ID 的人物信息；若 characterIds 为空则返回全部人物
  */
 export async function batchGetCharacters(
-  bookId: number,
+  bookId: EntityId,
   characterIds?: number[],
 ): Promise<Character[]> {
   const all = await getBookCharacters(bookId)
@@ -254,7 +254,7 @@ export interface StoryBackground {
 /**
  * 获取指定书籍的小说背景文本
  */
-export async function getStoryBackground(bookId: number): Promise<StoryBackground | null> {
+export async function getStoryBackground(bookId: EntityId): Promise<StoryBackground | null> {
   const res = await window.electronAPI.getStoryBackground({ bookId })
   if (!res.success || !res.data) return null
   return { content: res.data.content, updateTime: res.data.update_time }

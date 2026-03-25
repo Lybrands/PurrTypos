@@ -23,6 +23,11 @@
   .bubble-tool-call-icon--pending {
     opacity: 0.55;
   }
+
+  &--error .bubble-tool-call-icon,
+  &--error span {
+    color: var(--text-muted);
+  }
 }
 
 .bubble-tool-trace {

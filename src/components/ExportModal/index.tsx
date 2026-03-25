@@ -2,12 +2,12 @@ import React from "react";
 import { Modal, Radio, Checkbox, Button } from "antd";
 
 export interface ExportItem {
-  id: number;
+  id: string;
   title: string;
 }
 
 export interface ExportGroup {
-  id: number;
+  id: string;
   title: string;
   children: ExportItem[];
 }
@@ -20,10 +20,10 @@ export interface ExportModalProps {
   items?: ExportItem[];
   /** 分组列表（如卷 -> 章节），与 items 二选一 */
   groups?: ExportGroup[];
-  selectedIds: number[];
-  onSelectedIdsChange: (ids: number[]) => void;
+  selectedIds: string[];
+  onSelectedIdsChange: (ids: string[]) => void;
   onConfirm: (
-    selectedIds: number[],
+    selectedIds: string[],
     format: "md" | "txt",
     exportAsZip: boolean,
   ) => void | Promise<void>;
@@ -53,7 +53,7 @@ export default function ExportModal({
   const [exportAsZip, setExportAsZip] = React.useState(false);
 
   const toggleItem = React.useCallback(
-    (id: number) => {
+    (id: string) => {
       const set = new Set(selectedIds);
       if (set.has(id)) set.delete(id);
       else set.add(id);

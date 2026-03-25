@@ -9,7 +9,7 @@ import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Heading from '@tiptap/extension-heading'
 import { TableKit } from '@tiptap/extension-table'
-import type { StoryBackgroundAttachment } from '../../types'
+import type { EntityId, StoryBackgroundAttachment } from '../../types'
 import { getStoryBackground } from '../utils'
 import { useAntdApp } from '../../hooks/useAntdApp'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
@@ -46,7 +46,7 @@ const LiteralTab = Extension.create({
 })
 
 interface StoryBackgroundTabProps {
-  bookId: number | null
+  bookId: EntityId | null
 }
 
 export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) {

@@ -1,13 +1,13 @@
 /**
- * 工具路由后端：主模型 tools 仅来自 agentToolDefinitions.js（合并策略 A）。
- * SKILL.md（gray-matter）只增强路由：embedding 与 Ollama 意图 prompt，不参与 buildToolSchemas。
- * 对外：setSkillsPath(path)、ensureSkillsLoaded()、getToolsForQuery(query)。
+ * 工具路由与「发给大模型的 tools」真源：
+ * - **仅**扫描 `electron/skills/<toolName>/SKILL.md`（目录名 = 工具名 = toolExecutor 分支名）。
+ * - frontmatter：仅 `name`、`description`（及可选 `short_description`）；**parameters** 须在正文首个 **\`\`\`json** 代码块（OpenAI JSON Schema）。
+ * 对外：setSkillsPath(path)、ensureSkillsLoaded()、getApiSkillItems()、getToolsForQuery(query)。
  */
 
 const fs = require('fs')
 const path = require('path')
 const matter = require('gray-matter')
-const { ROUTER_SKILL_ITEMS } = require('./agentToolDefinitions')
 
 const ROUTER_TOP_K = 10
 const ROUTER_BODY_PREVIEW_MAX = 400
@@ -35,9 +35,9 @@ function previewStr(s, max = 200) {
 }
 
 let cachedEmbedder = null
-/** 主模型 API 用技能列表（纯 JS，与 agentToolDefinitions 一致） */
+/** 主模型 API 用技能列表（由各子目录 SKILL.md 解析） */
 let cachedSkills = []
-/** 工具名 -> 路由用语义片段（来自 SKILL.md 或回退 JS description），不用于 API tools */
+/** 工具名 -> 向量检索用语义片段 */
 let routerHints = new Map()
 /** 技能根目录（main 启动时设置） */
 let skillsDirPath = ''
@@ -51,10 +51,13 @@ const OUTLINE_QUERY_TOOL = 'queryOutline'
 const OUTLINE_UPDATE_TOOL = 'updateOutline'
 
 /**
- * 设置技能目录路径（由 main 在启动时调用，兼容保留）。
+ * 设置技能目录路径（由 main 在启动时调用）。变更时清空缓存以便重新扫描。
  */
 function setSkillsPath(dirPath) {
   skillsDirPath = dirPath || ''
+  cachedSkills = []
+  routerHints = new Map()
+  toolVectorsCache.clear()
 }
 
 function plainBodyPreview(md, maxLen) {
@@ -64,48 +67,137 @@ function plainBodyPreview(md, maxLen) {
   return t.slice(0, maxLen) + '…'
 }
 
-/**
- * 从 <skillsDir>/<toolName>/SKILL.md 解析路由用语义（策略 A：不用于主模型 tools）。
- * @param {string} toolName
- * @param {{ description?: string }} jsItem
- */
-function loadSkillMdRouterHint(toolName, jsItem) {
-  const fallback = (jsItem && jsItem.description) || ''
-  if (!skillsDirPath || !toolName) return fallback
-  const mdPath = path.join(skillsDirPath, toolName, 'SKILL.md')
-  if (!fs.existsSync(mdPath)) return fallback
-  try {
-    const raw = fs.readFileSync(mdPath, 'utf8')
-    const { data, content } = matter(raw)
-    const fromYaml =
-      data && (data.description != null || data.short_description != null)
-        ? String(data.description || data.short_description || '').trim()
-        : ''
-    const preview = plainBodyPreview(content, ROUTER_BODY_PREVIEW_MAX)
-    if (fromYaml && preview) return `${fromYaml} ${preview}`
-    if (fromYaml) return fromYaml
-    if (preview) return preview
-  } catch (err) {
-    console.warn(`[toolRouter] SKILL.md skipped for ${toolName}:`, err.message)
+function isLikelyParametersSchema(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false
+  if (obj.type === 'object' && obj.properties && typeof obj.properties === 'object') return true
+  if (obj.properties && typeof obj.properties === 'object') return true
+  return false
+}
+
+/** 正文里首个可解析为 JSON Schema 的 ```json 代码块 → parameters */
+function extractParametersFromBody(content) {
+  const src = String(content || '')
+  const re = /```(?:json)?\s*([\s\S]*?)```/gi
+  let m
+  while ((m = re.exec(src)) !== null) {
+    const raw = m[1].trim()
+    if (!raw) continue
+    try {
+      const obj = JSON.parse(raw)
+      if (isLikelyParametersSchema(obj)) {
+        const params = JSON.parse(JSON.stringify(obj))
+        if (!params.type) params.type = 'object'
+        return params
+      }
+    } catch (_) {
+      /* 尝试下一块 */
+    }
   }
-  return fallback
+  return null
+}
+
+/** 向量检索用正文摘要：去掉 JSON 代码块，避免与 description 重复堆叠 */
+function bodyTextForEmbedding(description, content) {
+  const stripped = String(content || '').replace(/```(?:json)?\s*[\s\S]*?```/gi, ' ')
+  const preview = plainBodyPreview(stripped, ROUTER_BODY_PREVIEW_MAX)
+  if (!preview) return String(description || '').trim()
+  return `${String(description || '').trim()} ${preview}`.trim()
+}
+
+const FRONTMATTER_ALLOWED = new Set(['name', 'description', 'short_description'])
+
+function discoverSkillToolNames() {
+  if (!skillsDirPath || !fs.existsSync(skillsDirPath)) return []
+  const out = []
+  for (const ent of fs.readdirSync(skillsDirPath, { withFileTypes: true })) {
+    if (!ent.isDirectory()) continue
+    const n = ent.name
+    if (n.startsWith('.')) continue
+    const md = path.join(skillsDirPath, n, 'SKILL.md')
+    if (fs.existsSync(md)) out.push(n)
+  }
+  return out.sort()
 }
 
 /**
- * 从 agentToolDefinitions 载入 API 技能表，并填充 routerHints（仅首次）。
+ * 仅从 SKILL.md 读取。工具名以**目录名**为准（须与 toolExecutor 中 switch 分支一致）。
+ * @param {string} canonicalName
+ */
+function loadSkillMarkdownOnly(canonicalName) {
+  const mdPath = path.join(skillsDirPath, canonicalName, 'SKILL.md')
+  const raw = fs.readFileSync(mdPath, 'utf8')
+  const { data, content } = matter(raw)
+  if (data && typeof data === 'object') {
+    for (const k of Object.keys(data)) {
+      if (!FRONTMATTER_ALLOWED.has(k)) {
+        console.warn(
+          `[toolRouter] ${canonicalName}/SKILL.md frontmatter 字段「${k}」已忽略（约定仅 name、description；参数请写在正文 \`\`\`json 代码块）`,
+        )
+      }
+    }
+  }
+  if (data?.name != null && String(data.name).trim() && String(data.name).trim() !== canonicalName) {
+    console.warn(
+      `[toolRouter] ${canonicalName}/SKILL.md frontmatter name 与目录名不一致，已以目录名「${canonicalName}」为准`,
+    )
+  }
+  const descYaml =
+    data && (data.description != null || data.short_description != null)
+      ? String(data.description || data.short_description || '').trim()
+      : ''
+  if (!descYaml) {
+    throw new Error('frontmatter 缺少 description / short_description')
+  }
+  const params = extractParametersFromBody(content)
+  if (!params) {
+    throw new Error('正文缺少合法的 ```json 代码块（须为 OpenAI 兼容的 parameters JSON Schema）')
+  }
+  const skill = {
+    name: canonicalName,
+    description: descYaml,
+    parameters: params,
+  }
+  const routerEmbedText = bodyTextForEmbedding(descYaml, content)
+  return { skill, routerEmbedText: String(routerEmbedText).trim() }
+}
+
+/**
+ * 扫描 skills 目录，仅载入存在 SKILL.md 的工具。
  */
 function loadSkillsFromDisk() {
   if (cachedSkills.length > 0) return
   try {
-    cachedSkills = ROUTER_SKILL_ITEMS.map((s) => ({ ...s }))
+    cachedSkills = []
     routerHints = new Map()
-    for (const s of cachedSkills) {
-      routerHints.set(s.name, loadSkillMdRouterHint(s.name, s))
+    if (!skillsDirPath) {
+      console.warn('[toolRouter] skillsDirPath 未设置，工具列表为空（请 main 调用 setSkillsPath）')
+      return
+    }
+    const names = discoverSkillToolNames()
+    for (const toolName of names) {
+      try {
+        const { skill, routerEmbedText } = loadSkillMarkdownOnly(toolName)
+        cachedSkills.push(skill)
+        routerHints.set(skill.name, routerEmbedText)
+      } catch (err) {
+        console.warn(`[toolRouter] 跳过 ${toolName}:`, (err && err.message) || String(err))
+      }
     }
     toolVectorsCache.clear()
+    if (cachedSkills.length === 0) {
+      console.warn('[toolRouter] 未加载到任何 SKILL.md，请检查 electron/skills 目录')
+    }
   } catch (err) {
     console.error('[toolRouter] loadSkillsFromDisk failed', err.message)
   }
+}
+
+/**
+ * 与 getToolsForQuery / buildToolSchemas 使用同一份；须已 setSkillsPath。
+ */
+function getApiSkillItems() {
+  ensureSkillsLoaded()
+  return cachedSkills.map((s) => ({ ...s }))
 }
 
 function ensureSkillsLoaded() {
@@ -447,4 +539,12 @@ async function getToolsForQuery(query) {
   }
 }
 
-module.exports = { setSkillsPath, loadSkillsFromDisk, ensureSkillsLoaded, getToolsForQuery, embed, llmIntentForTools }
+module.exports = {
+  setSkillsPath,
+  loadSkillsFromDisk,
+  ensureSkillsLoaded,
+  getApiSkillItems,
+  getToolsForQuery,
+  embed,
+  llmIntentForTools,
+}

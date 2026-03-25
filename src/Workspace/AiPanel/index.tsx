@@ -21,7 +21,6 @@ import {
   Tooltip,
   Tabs,
   Dropdown,
-  Select,
 } from "antd";
 import type { MenuProps } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
@@ -49,6 +48,8 @@ import AiContextBar from "./components/AiContextBar";
 import AiComposeBottom from "./components/AiComposeBottom";
 import ToolCallStatus from "./components/ToolCallStatus";
 import ThinkingRegion from "./components/ThinkingRegion";
+import SubagentStageStrip from "./components/SubagentStageStrip";
+import type { PipelineStageId } from "./pipelineStages";
 import "./index.scss";
 
 interface AiPanelProps {
@@ -87,21 +88,21 @@ export default function AiPanel({
   );
   const ids = React.useMemo(() => validModelIds(modelConfigs), [modelConfigs]);
   const initialPrefs = React.useMemo(
-    () => loadModelPrefs(bookId, ids),
-    [bookId, ids.join(",")],
+    () => loadModelPrefs(bookId, ids, aiAgentMode),
+    [bookId, ids.join(","), aiAgentMode],
   );
   const [selectedModel, setSelectedModel] = React.useState<string>(
     initialPrefs.model,
   );
-  const [agentEnabled, setAgentEnabled] = React.useState(
-    initialPrefs.agentEnabled,
+  const [chatAgentMode, setChatAgentMode] = React.useState(
+    initialPrefs.chatAgentMode,
   );
   const [thinkingEnabled, setThinkingEnabled] = React.useState(
     initialPrefs.thinkingEnabled,
   );
-  const [agentAction, setAgentAction] = React.useState<
-    "analyze" | "plan" | "draft" | "review" | "polish" | "full"
-  >("full");
+  const [agentActions, setAgentActions] = React.useState<PipelineStageId[]>([
+    "full",
+  ]);
 
   const selectedModelConfig = React.useMemo(
     () => modelConfigs.find((c) => c.id === selectedModel) ?? null,
@@ -116,11 +117,11 @@ export default function AiPanel({
   }, [modelConfigs]);
 
   React.useEffect(() => {
-    const prefs = loadModelPrefs(bookId, ids);
+    const prefs = loadModelPrefs(bookId, ids, aiAgentMode);
     setSelectedModel(prefs.model);
-    setAgentEnabled(prefs.agentEnabled);
+    setChatAgentMode(prefs.chatAgentMode);
     setThinkingEnabled(prefs.thinkingEnabled);
-  }, [bookId, ids.join(",")]);
+  }, [bookId, ids.join(","), aiAgentMode]);
 
   React.useEffect(() => {
     if (ids.length && !ids.includes(selectedModel)) {
@@ -132,8 +133,8 @@ export default function AiPanel({
   }, [ids, selectedModel]);
 
   React.useEffect(() => {
-    saveModelPrefs(bookId, selectedModel, agentEnabled, thinkingEnabled);
-  }, [selectedModel, agentEnabled, thinkingEnabled]);
+    saveModelPrefs(bookId, selectedModel, chatAgentMode, thinkingEnabled);
+  }, [bookId, selectedModel, chatAgentMode, thinkingEnabled]);
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
   const [selectedMemoryIds, setSelectedMemoryIds] = React.useState<
@@ -144,6 +145,7 @@ export default function AiPanel({
   const [editingTabId, setEditingTabId] = React.useState<number | null>(null);
   const [editingTitle, setEditingTitle] = React.useState("");
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false);
+  const [pipelinePopoverOpen, setPipelinePopoverOpen] = React.useState(false);
 
   const {
     associatedChapterIds,
@@ -180,12 +182,13 @@ export default function AiPanel({
     currentChapterTitle: activeChapterTitle || undefined,
     selectedModel,
     thinkingEnabled,
-    agentEnabled,
+    agentEnabled: chatAgentMode !== "ask",
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode: aiAgentMode,
-    agentAction,
+    agentMode: chatAgentMode === "subagent" ? "subagent" : "legacy",
+    agentActions:
+      chatAgentMode === "subagent" ? agentActions : undefined,
   });
 
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
@@ -826,10 +829,18 @@ export default function AiPanel({
                 const hasAnyThinking =
                   hasThinkingBlocks ||
                   (cm.thinking !== undefined && cm.thinking !== "");
+                const hasSubagentProgress = Boolean(
+                  cm.subagentStages?.length ||
+                    cm.subagentStageName ||
+                    cm.subagentStageId ||
+                    cm.subagentBridging ||
+                    cm.subagentMainPresenter,
+                );
                 const isEmpty =
                   !msg.content &&
                   !cm.toolCallSegments?.length &&
-                  !hasAnyThinking;
+                  !hasAnyThinking &&
+                  !hasSubagentProgress;
                 const isLastAssistant =
                   isLast && msg.role === "assistant" && !msg.isError;
                 /** 发送后占位：最后一条且为空内容时显示「思考中」+ 闪烁「...」 */
@@ -872,6 +883,13 @@ export default function AiPanel({
                               onOpenMemoryModal={() => setMemoryModalOpen(true)}
                               contextPopoverOpen={contextPopoverOpen}
                               onContextPopoverOpenChange={setContextPopoverOpen}
+                              pipelinePopoverOpen={pipelinePopoverOpen}
+                              onPipelinePopoverOpenChange={setPipelinePopoverOpen}
+                              pipelineAgentEnabled={
+                                chatAgentMode === "subagent"
+                              }
+                              pipelineSelectedStages={agentActions}
+                              onPipelineStagesChange={setAgentActions}
                             />
                           )}
                           <Input.TextArea
@@ -892,8 +910,8 @@ export default function AiPanel({
                           <AiComposeBottom
                             modelConfigs={modelConfigs}
                             thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}
-                            agentEnabled={agentEnabled}
-                            setAgentEnabled={setAgentEnabled}
+                            chatAgentMode={chatAgentMode}
+                            setChatAgentMode={setChatAgentMode}
                             selectedModel={selectedModel}
                             setSelectedModel={setSelectedModel}
                             thinkingEnabled={thinkingEnabled}
@@ -1007,13 +1025,17 @@ export default function AiPanel({
                                             {seg.textBefore}
                                           </ReactMarkdown>
                                         )}
-                                        <ToolCallStatus
-                                          labels={seg.labels}
-                                          completedToolCount={
-                                            toolCompletedCount
-                                          }
-                                          trace={seg.trace}
-                                        />
+                                        {seg.labels.length > 0 ? (
+                                          <ToolCallStatus
+                                            labels={seg.labels}
+                                            labelOutcomes={seg.labelOutcomes}
+                                            cachedFlags={seg.cachedFlags}
+                                            completedToolCount={
+                                              toolCompletedCount
+                                            }
+                                            trace={seg.trace}
+                                          />
+                                        ) : null}
                                       </div>
                                     </React.Fragment>
                                   );
@@ -1132,6 +1154,13 @@ export default function AiPanel({
                                   )}
                               </>
                             )}
+                            {hasSubagentProgress ? (
+                              <SubagentStageStrip
+                                message={cm}
+                                isLastAssistant={isLastAssistant}
+                                loading={loading}
+                              />
+                            ) : null}
                           </div>
                         );
                       })()}
@@ -1212,6 +1241,11 @@ export default function AiPanel({
             onOpenMemoryModal={() => setMemoryModalOpen(true)}
             contextPopoverOpen={contextPopoverOpen}
             onContextPopoverOpenChange={setContextPopoverOpen}
+            pipelinePopoverOpen={pipelinePopoverOpen}
+            onPipelinePopoverOpenChange={setPipelinePopoverOpen}
+            pipelineAgentEnabled={chatAgentMode === "subagent"}
+            pipelineSelectedStages={agentActions}
+            onPipelineStagesChange={setAgentActions}
           />
         )}
 
@@ -1220,7 +1254,7 @@ export default function AiPanel({
             className="chat-input"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="输入提示词，Enter 发送，Shift+Enter 换行..."
+            placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧💡"
             disabled={loading}
             autoSize={false}
             onKeyDown={(e) => {
@@ -1242,29 +1276,11 @@ export default function AiPanel({
             }}
           />
         </div>
-        {aiAgentMode === "subagent" && (
-          <div style={{ marginBottom: 8 }}>
-            <Select
-              size="small"
-              value={agentAction}
-              onChange={(v) => setAgentAction(v)}
-              options={[
-                { value: "full", label: "全流程" },
-                { value: "analyze", label: "仅分析" },
-                { value: "plan", label: "仅规划" },
-                { value: "draft", label: "仅写作" },
-                { value: "review", label: "仅审校" },
-                { value: "polish", label: "仅润色" },
-              ]}
-              popupMatchSelectWidth={false}
-            />
-          </div>
-        )}
         <AiComposeBottom
           modelConfigs={modelConfigs}
           thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}
-          agentEnabled={agentEnabled}
-          setAgentEnabled={setAgentEnabled}
+          chatAgentMode={chatAgentMode}
+          setChatAgentMode={setChatAgentMode}
           selectedModel={selectedModel}
           setSelectedModel={setSelectedModel}
           thinkingEnabled={thinkingEnabled}

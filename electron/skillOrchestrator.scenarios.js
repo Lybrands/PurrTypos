@@ -4,8 +4,12 @@
  */
 
 const assert = require('assert')
+const path = require('path')
+const toolRouter = require('./toolRouter')
 const { planToolCalls, executeWithRepair } = require('./skillOrchestrator')
 const { getSkillSpecs } = require('./agentToolDefinitions')
+
+toolRouter.setSkillsPath(path.join(__dirname, 'skills'))
 
 async function scenarioMissingOutlineIdAutoRepair() {
   const skillSpecs = getSkillSpecs()

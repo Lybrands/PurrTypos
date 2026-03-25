@@ -1,7 +1,7 @@
 import React from 'react'
 import { Button, Empty, Input, List, Popover, Spin, Tooltip } from 'antd'
 import { DeleteOutlined, HistoryOutlined } from '@ant-design/icons'
-import type { AiSession } from '../../../../types'
+import type { AiSession, EntityId } from '../../../../types'
 import './index.scss'
 
 // ─── 日期工具 ─────────────────────────────────────────────────────────────────
@@ -30,8 +30,8 @@ const DATE_GROUP_ORDER = ['今天', '昨天', '近 7 天', '更早']
 // ─── Props ───────────────────────────────────────────────────────────────────
 
 export interface SessionHistoryPopoverProps {
-  bookId: number | null | undefined
-  chapterId: number | null | undefined
+  bookId: EntityId | null | undefined
+  chapterId: EntityId | null | undefined
   activeSessionId: number | null
   /** 用户点击某条历史对话时回调，父组件负责加入标签栏并激活 */
   onOpen: (session: AiSession) => void

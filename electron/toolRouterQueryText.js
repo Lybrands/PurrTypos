@@ -78,8 +78,31 @@ function buildToolRouterEmbeddingQuery(messages) {
   return lines.join('\n').trim()
 }
 
+/** 写作专家阶段任务说明的最大截断（阶段 user 常为较长 JSON 指令） */
+const SUBAGENT_STAGE_TASK_MAX = 2000
+
+/**
+ * Subagent 工具路由专用：必须以「主会话」为锚（与主链路传入的 messages 一致），再追加当前阶段任务，
+ * 避免仅用 stageMessages 时把最后一条阶段指令误当作「当前提问」、导致向量检索与工具选取偏离用户真实意图。
+ * @param {Array<{ role?: string, content?: string }>} pipelineMessages - 与 IPC 一致的完整 messages（含 system 亦可，内部只取 user/assistant）
+ * @param {string} stageUserContent - runStage 追加给各专家阶段的 user（分析/规划/撰稿等提示）
+ */
+function buildSubagentStageRouterQuery(pipelineMessages, stageUserContent) {
+  const base = buildToolRouterEmbeddingQuery(
+    Array.isArray(pipelineMessages) ? pipelineMessages : [],
+  )
+  const task = trimForEmbed(stageUserContent, SUBAGENT_STAGE_TASK_MAX)
+  if (!task) return base
+  if (!base) {
+    return ['【对话历史】', '（无）', '', '【当前提问】', task].join('\n')
+  }
+  return `${base}\n\n【专家阶段任务】\n${task}`
+}
+
 module.exports = {
   buildToolRouterEmbeddingQuery,
+  buildSubagentStageRouterQuery,
   TURN_CONTENT_MAX,
   VECTOR_HISTORY_ROUNDS,
+  SUBAGENT_STAGE_TASK_MAX,
 }

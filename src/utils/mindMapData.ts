@@ -3,6 +3,7 @@
  */
 
 import type { Chapter } from '../types'
+import { shortUuid } from './common'
 
 export function chaptersToMindMapData(chapters: Chapter[], rootTitle: string): any {
   interface StackItem {
@@ -26,7 +27,7 @@ export function chaptersToMindMapData(chapters: Chapter[], rootTitle: string): a
 }
 
 export function convertXmindNode(xmindNode: any, idMap: Map<string, string>): any {
-  const uid = 'uid_' + Math.random().toString(36).slice(2, 10)
+  const uid = `uid_${shortUuid()}`
   const data: any = { text: xmindNode.title || '', uid }
 
   if (xmindNode.id) {

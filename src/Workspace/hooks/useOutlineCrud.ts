@@ -1,5 +1,5 @@
 import React from 'react'
-import type { Chapter, Outline, VolumeOutline } from '../../types'
+import type { Chapter, EntityId, Outline, VolumeOutline } from '../../types'
 import {
   getFileNameFromPath,
   getTitleFromXmind,
@@ -17,11 +17,11 @@ export interface UseOutlineCrudOptions {
   refreshKey?: number
   onRefreshReady?: (refresh: () => void) => void
   onChapterOutlineDeleted?: (title: string) => void
-  displayOutlineId: number | null
+  displayOutlineId: EntityId | null
   setDisplayChapters: React.Dispatch<React.SetStateAction<Chapter[]>>
-  setDisplayOutlineId: React.Dispatch<React.SetStateAction<number | null>>
+  setDisplayOutlineId: React.Dispatch<React.SetStateAction<EntityId | null>>
   setViewMode: React.Dispatch<React.SetStateAction<'list' | 'detail'>>
-  bookId?: number | null
+  bookId?: EntityId | null
   enableVolume?: boolean
 }
 
@@ -46,7 +46,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
   const [otherOutlines, setOtherOutlines] = React.useState<Outline[]>([])
   const [volumeOutlines, setVolumeOutlines] = React.useState<VolumeOutline[]>([])
   const [deleteModal, setDeleteModal] = React.useState<OutlineDeleteModal | null>(null)
-  const chaptersCache = React.useRef<Record<number, Chapter[]>>({})
+  const chaptersCache = React.useRef<Record<EntityId, Chapter[]>>({})
 
   const loadData = React.useCallback(() => {
     window.electronAPI.getGlobalOutline(bookId).then((res) => {
@@ -141,12 +141,12 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
             title, type, xmind_data: xmindJson, file_path: filePath, book_id: bookId ?? null,
           })
           if (!outlineRes.success) { setError('保存大纲失败：' + outlineRes.error); return }
-          const saveId = Number(outlineRes.data.id)
+          const saveId = outlineRes.data.id
           await window.electronAPI.saveChapters({ outlineId: saveId, chapters: flatChapters })
           const dbRes = await window.electronAPI.getGlobalOutline(bookId)
           const dbOutline = dbRes.success && dbRes.data ? dbRes.data : { ...outlineRes.data, type }
-          const dbId = Number(dbOutline.id)
-          if (dbId !== saveId && saveId > 0) {
+          const dbId = dbOutline.id
+          if (dbId !== saveId && saveId) {
             await window.electronAPI.saveChapters({ outlineId: dbId, chapters: flatChapters })
           }
           const chapRes = await window.electronAPI.getChapters({ outlineId: dbId })
@@ -177,7 +177,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
             title, type: 'other', xmind_data: xmindJson, file_path: filePath, book_id: bookId ?? null,
           })
           if (!outlineRes.success) { setError('保存大纲失败：' + outlineRes.error); return }
-          const saveId = Number(outlineRes.data.id)
+          const saveId = outlineRes.data.id
           await window.electronAPI.saveChapters({ outlineId: saveId, chapters: flatChapters })
           const chapRes = await window.electronAPI.getChapters({ outlineId: saveId })
           const chapters = chapRes?.success && Array.isArray(chapRes.data) ? chapRes.data : []
@@ -246,7 +246,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
           setDeleteModal(null)
           const res = await window.electronAPI.deleteOutline({ outlineId: outline.id })
           if (res.success) {
-            delete chaptersCache.current[Number(outline.id)]
+            delete chaptersCache.current[outline.id]
             loadData()
             if (displayOutlineId === outline.id) {
               setViewMode('list')
@@ -301,7 +301,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
         setDeleteModal(null)
         const res = await window.electronAPI.deleteOutline({ outlineId: outlineToDelete.id })
         if (res.success) {
-          delete chaptersCache.current[Number(outlineToDelete.id)]
+          delete chaptersCache.current[outlineToDelete.id]
           loadData()
           setViewMode('list')
           setGlobalOutline(null)

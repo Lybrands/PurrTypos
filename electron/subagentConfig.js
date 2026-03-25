@@ -1,84 +1,93 @@
 const STAGES = {
-  ANALYZE: 'analyze',
-  PLAN: 'plan',
-  DRAFT: 'draft',
-  REVIEW: 'review',
-  POLISH: 'polish',
-}
+  ANALYZE: "analyze",
+  PLAN: "plan",
+  DRAFT: "draft",
+  STYLE_UNIFY: "styleUnify",
+  REVIEW: "review",
+  POLISH: "polish",
+};
 
 const EXEC_ACTIONS = {
-  ANALYZE: 'analyze',
-  PLAN: 'plan',
-  DRAFT: 'draft',
-  REVIEW: 'review',
-  POLISH: 'polish',
-  FULL: 'full',
-}
+  ANALYZE: "analyze",
+  PLAN: "plan",
+  DRAFT: "draft",
+  STYLE_UNIFY: "styleUnify",
+  REVIEW: "review",
+  POLISH: "polish",
+  FULL: "full",
+};
 
 const SHARED_TOOL_NAMES = [
-  'listWritingChapters',
-  'getChapterContent',
-  'batchGetChapterContents',
-  'getBookCharacters',
-  'listBookCharacters',
-  'getStoryBackground',
-  'getGlobalOutline',
-  'queryOutline',
-  'listOutlines',
-  'searchMemories',
-]
+  "listWritingChapters",
+  "getChapterContent",
+  "batchGetChapterContents",
+  "getBookCharacters",
+  "listBookCharacters",
+  "getStoryBackground",
+  "getGlobalOutline",
+  "queryOutline",
+  "listOutlines",
+  "searchMemories",
+];
 
 const AGENT_EXCLUSIVE_TOOL_NAMES = {
-  [STAGES.ANALYZE]: ['addMemory'],
-  [STAGES.PLAN]: ['addMemory'],
-  [STAGES.DRAFT]: ['editChapterContent', 'addForeshadowing', 'addMemory'],
-  [STAGES.REVIEW]: ['addMemory'],
-  [STAGES.POLISH]: ['editChapterContent', 'addMemory'],
-}
+  [STAGES.ANALYZE]: ["addMemory"],
+  [STAGES.PLAN]: ["addMemory"],
+  [STAGES.DRAFT]: ["editChapterContent", "addForeshadowing", "addMemory"],
+  [STAGES.STYLE_UNIFY]: ["editChapterContent", "addMemory"],
+  [STAGES.REVIEW]: ["addMemory"],
+  [STAGES.POLISH]: ["editChapterContent", "addMemory"],
+};
 
 const SUBAGENT_REGISTRY = {
   [STAGES.ANALYZE]: {
-    name: '分析代理',
-    outputType: 'AnalyzeReport',
+    name: "分析专家",
+    outputType: "AnalyzeReport",
     systemPrompt:
-      '你是小说写作“分析代理”。你需要拆解用户目标、约束和风险，并给出可执行结论。允许调用工具补全证据。输出必须是 JSON，且只包含约定字段。',
+      "你是小说写作“分析专家”。你需要拆解用户目标、约束和风险，并给出可执行结论。允许调用工具补全证据。输出必须是 JSON，且只包含约定字段。",
   },
   [STAGES.PLAN]: {
-    name: '规划代理',
-    outputType: 'WritingBlueprint',
+    name: "规划专家",
+    outputType: "WritingBlueprint",
     systemPrompt:
-      '你是小说写作“规划代理”。基于 AnalyzeReport 生成可执行蓝图，不要重复长素材原文。允许调用工具补齐缺失信息。输出必须是 JSON，且只包含约定字段。',
+      "你是小说写作“规划专家”。基于 AnalyzeReport 生成可执行蓝图，不要重复长素材原文。允许调用工具补齐缺失信息。输出必须是 JSON，且只包含约定字段。",
   },
   [STAGES.DRAFT]: {
-    name: '写作代理',
-    outputType: 'DraftDocument',
+    name: "撰稿专家",
+    outputType: "DraftDocument",
     systemPrompt:
-      '你是小说写作“写作代理”。基于蓝图写出完整初稿。允许调用工具检索素材与落库。输出必须是 JSON，且只包含约定字段。',
+      "你是小说写作“撰稿专家”。基于蓝图写出完整初稿。允许调用工具检索素材与落库。输出必须是 JSON，且只包含约定字段。",
+  },
+  [STAGES.STYLE_UNIFY]: {
+    name: "风格统一专家",
+    outputType: "StyleUnifyResult",
+    systemPrompt:
+      "你是小说写作“风格统一专家”。任务：在**不改变剧情与人设前提**下，使当前章初稿的叙述方式、节奏、人称与语感与**紧邻当前章之前的若干章正文**保持一致。必须先调用 listWritingChapters 确认目录，再按宿主给出的 chapterIndex 列表用 batchGetChapterContents（或多次 getChapterContent）读取**至少 3 章、至多 5 章**前文正文（若前文不足则读全部可用前文；第 1 章无前文时须在 styleAnchors 中说明）。归纳「文风锚点」后再改写初稿。若需写回编辑器可调用 editChapterContent；一旦成功，JSON 中 content 可短占位，changeSummary 仍须说明相对初稿的调整。可调用 addMemory。输出必须是 JSON，且只包含约定字段。",
   },
   [STAGES.REVIEW]: {
-    name: '审校代理',
-    outputType: 'ReviewIssues',
+    name: "审校专家",
+    outputType: "ReviewIssues",
     systemPrompt:
-      '你是小说写作“审校代理”。只做问题定位与建议，不改写全文。审校按分段输入处理。允许调用工具辅助核对设定。输出必须是 JSON，且只包含约定字段。',
+      "你是小说写作“审校专家”。只做问题定位与建议，不改写全文。审校按分段输入处理。允许调用工具辅助核对设定。输出必须是 JSON，且只包含约定字段。",
   },
   [STAGES.POLISH]: {
-    name: '润色代理',
-    outputType: 'PolishedResult',
+    name: "润色专家",
+    outputType: "PolishedResult",
     systemPrompt:
-      '你是小说写作“润色代理”。基于问题点位与局部上下文给出修订结果，不应依赖全文。允许调用工具做必要同步。输出必须是 JSON，且只包含约定字段。',
+      "你是小说写作“润色专家”。基于问题点位与局部上下文给出修订结果，不应依赖全文。若要把润色后的正文写回当前写作章节，必须调用工具 editChapterContent。一旦 editChapterContent 成功，输出 JSON 时 finalText 不必重复全文（可短占位），changeSummary 仍须说明改动要点。可调用 addMemory 等只读/辅助工具。最终输出必须是 JSON，且只包含约定字段。",
   },
-}
+};
 
 function buildToolPermissionsForStage(stage) {
-  const exclusive = AGENT_EXCLUSIVE_TOOL_NAMES[stage] || []
-  return Array.from(new Set([...SHARED_TOOL_NAMES, ...exclusive]))
+  const exclusive = AGENT_EXCLUSIVE_TOOL_NAMES[stage] || [];
+  return Array.from(new Set([...SHARED_TOOL_NAMES, ...exclusive]));
 }
 
 function parseJsonSafe(text, fallback = null) {
   try {
-    return JSON.parse(String(text || ''))
+    return JSON.parse(String(text || ""));
   } catch (_) {
-    return fallback
+    return fallback;
   }
 }
 
@@ -89,120 +98,153 @@ function parseJsonSafe(text, fallback = null) {
  * @returns {object|Array|null}
  */
 function extractStructuredJsonFromModelText(text) {
-  const s = String(text || '').trim()
-  if (!s) return null
+  const s = String(text || "").trim();
+  if (!s) return null;
   try {
-    return JSON.parse(s)
+    return JSON.parse(s);
   } catch (_) {
     /* continue */
   }
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) {
-    const inner = String(fence[1] || '').trim()
+    const inner = String(fence[1] || "").trim();
     try {
-      return JSON.parse(inner)
+      return JSON.parse(inner);
     } catch (_) {
       /* continue */
     }
   }
-  const objStart = s.indexOf('{')
-  const objEnd = s.lastIndexOf('}')
+  const objStart = s.indexOf("{");
+  const objEnd = s.lastIndexOf("}");
   if (objStart >= 0 && objEnd > objStart) {
     try {
-      return JSON.parse(s.slice(objStart, objEnd + 1))
+      return JSON.parse(s.slice(objStart, objEnd + 1));
     } catch (_) {
       /* continue */
     }
   }
-  const arrStart = s.indexOf('[')
-  const arrEnd = s.lastIndexOf(']')
+  const arrStart = s.indexOf("[");
+  const arrEnd = s.lastIndexOf("]");
   if (arrStart >= 0 && arrEnd > arrStart) {
     try {
-      return JSON.parse(s.slice(arrStart, arrEnd + 1))
+      return JSON.parse(s.slice(arrStart, arrEnd + 1));
     } catch (_) {
       /* continue */
     }
   }
-  return null
+  return null;
 }
 
 function normalizeAnalyzeReport(raw, fallbackUserText) {
-  const val = raw && typeof raw === 'object' ? raw : {}
+  const val = raw && typeof raw === "object" ? raw : {};
   return {
-    summary: String(val.summary || fallbackUserText || '').slice(0, 1200),
-    goals: Array.isArray(val.goals) ? val.goals.map((x) => String(x)).slice(0, 12) : [],
-    constraints: Array.isArray(val.constraints) ? val.constraints.map((x) => String(x)).slice(0, 12) : [],
-    risks: Array.isArray(val.risks) ? val.risks.map((x) => String(x)).slice(0, 12) : [],
+    summary: String(val.summary || fallbackUserText || "").slice(0, 1200),
+    goals: Array.isArray(val.goals)
+      ? val.goals.map((x) => String(x)).slice(0, 12)
+      : [],
+    constraints: Array.isArray(val.constraints)
+      ? val.constraints.map((x) => String(x)).slice(0, 12)
+      : [],
+    risks: Array.isArray(val.risks)
+      ? val.risks.map((x) => String(x)).slice(0, 12)
+      : [],
     evidence: Array.isArray(val.evidence)
       ? val.evidence
           .map((x) => ({
-            source: String(x?.source || ''),
-            snippet: String(x?.snippet || '').slice(0, 400),
+            source: String(x?.source || ""),
+            snippet: String(x?.snippet || "").slice(0, 400),
           }))
           .slice(0, 12)
       : [],
-  }
+  };
 }
 
 function normalizeWritingBlueprint(raw) {
-  const val = raw && typeof raw === 'object' ? raw : {}
+  const val = raw && typeof raw === "object" ? raw : {};
   return {
-    chapterGoal: String(val.chapterGoal || '').slice(0, 1000),
-    beats: Array.isArray(val.beats) ? val.beats.map((x) => String(x)).slice(0, 20) : [],
-    tone: String(val.tone || '').slice(0, 200),
-    constraints: Array.isArray(val.constraints) ? val.constraints.map((x) => String(x)).slice(0, 20) : [],
+    chapterGoal: String(val.chapterGoal || "").slice(0, 1000),
+    beats: Array.isArray(val.beats)
+      ? val.beats.map((x) => String(x)).slice(0, 20)
+      : [],
+    tone: String(val.tone || "").slice(0, 200),
+    constraints: Array.isArray(val.constraints)
+      ? val.constraints.map((x) => String(x)).slice(0, 20)
+      : [],
     requiredMaterials: Array.isArray(val.requiredMaterials)
       ? val.requiredMaterials
           .map((x) => ({
-            type: String(x?.type || ''),
-            ref: String(x?.ref || ''),
-            note: String(x?.note || '').slice(0, 300),
+            type: String(x?.type || ""),
+            ref: String(x?.ref || ""),
+            note: String(x?.note || "").slice(0, 300),
           }))
           .slice(0, 40)
       : [],
-  }
+  };
 }
 
 function normalizeDraftDocument(raw) {
-  const val = raw && typeof raw === 'object' ? raw : {}
+  const val = raw && typeof raw === "object" ? raw : {};
   return {
-    title: String(val.title || ''),
-    content: String(val.content || ''),
-    notes: Array.isArray(val.notes) ? val.notes.map((x) => String(x)).slice(0, 12) : [],
-  }
+    title: String(val.title || ""),
+    content: String(val.content || ""),
+    notes: Array.isArray(val.notes)
+      ? val.notes.map((x) => String(x)).slice(0, 12)
+      : [],
+  };
+}
+
+function normalizeStyleUnifyResult(raw) {
+  const val = raw && typeof raw === "object" ? raw : {};
+  return {
+    styleAnchors: String(val.styleAnchors || "").slice(0, 4000),
+    content: String(val.content || "").slice(0, 500000),
+    changeSummary: String(val.changeSummary || "").slice(0, 2000),
+    priorChaptersRead: Array.isArray(val.priorChaptersRead)
+      ? val.priorChaptersRead
+          .slice(0, 8)
+          .map((x) => ({
+            chapterIndex: Number.isFinite(Number(x?.chapterIndex))
+              ? Number(x.chapterIndex)
+              : 0,
+            title: String(x?.title || "").slice(0, 120),
+          }))
+      : [],
+  };
 }
 
 function normalizeReviewIssues(raw) {
-  let list = []
+  let list = [];
   if (Array.isArray(raw)) {
-    list = raw
-  } else if (raw && typeof raw === 'object' && Array.isArray(raw.issues)) {
-    list = raw.issues
+    list = raw;
+  } else if (raw && typeof raw === "object" && Array.isArray(raw.issues)) {
+    list = raw.issues;
   }
   return list
     .map((x) => ({
-      segmentIndex: Number.isFinite(Number(x?.segmentIndex)) ? Number(x.segmentIndex) : 0,
-      span: String(x?.span || '').slice(0, 200),
-      issueType: String(x?.issueType || 'general').slice(0, 80),
-      severity: String(x?.severity || 'medium').slice(0, 20),
-      suggestion: String(x?.suggestion || '').slice(0, 600),
-      context: String(x?.context || '').slice(0, 500),
+      segmentIndex: Number.isFinite(Number(x?.segmentIndex))
+        ? Number(x.segmentIndex)
+        : 0,
+      span: String(x?.span || "").slice(0, 200),
+      issueType: String(x?.issueType || "general").slice(0, 80),
+      severity: String(x?.severity || "medium").slice(0, 20),
+      suggestion: String(x?.suggestion || "").slice(0, 600),
+      context: String(x?.context || "").slice(0, 500),
     }))
-    .slice(0, 120)
+    .slice(0, 120);
 }
 
 function validateSubagentConfig() {
-  const stageKeys = Object.values(STAGES)
+  const stageKeys = Object.values(STAGES);
   for (const key of stageKeys) {
     if (!SUBAGENT_REGISTRY[key]) {
-      throw new Error(`subagent registry 缺少阶段: ${key}`)
+      throw new Error(`subagent registry 缺少阶段: ${key}`);
     }
-    const tools = buildToolPermissionsForStage(key)
+    const tools = buildToolPermissionsForStage(key);
     if (!Array.isArray(tools) || tools.length === 0) {
-      throw new Error(`subagent 工具权限为空: ${key}`)
+      throw new Error(`subagent 工具权限为空: ${key}`);
     }
   }
-  return true
+  return true;
 }
 
 module.exports = {
@@ -217,6 +259,7 @@ module.exports = {
   normalizeAnalyzeReport,
   normalizeWritingBlueprint,
   normalizeDraftDocument,
+  normalizeStyleUnifyResult,
   normalizeReviewIssues,
   validateSubagentConfig,
-}
+};

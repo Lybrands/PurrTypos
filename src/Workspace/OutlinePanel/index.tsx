@@ -16,7 +16,7 @@ import {
   EllipsisOutlined,
   SwapOutlined,
 } from '@ant-design/icons'
-import type { Chapter, Outline, VolumeOutline } from '../../types'
+import type { Chapter, EntityId, Outline, VolumeOutline } from '../../types'
 import { Button, Tabs, Spin, Empty, Tooltip, Alert, Checkbox, Dropdown, Segmented, Space } from 'antd'
 import type { MenuProps } from 'antd'
 import { useOutlineCrud } from '../hooks/useOutlineCrud'
@@ -30,7 +30,7 @@ import './index.scss'
 
 const MindMapView = lazy(() => import('./MindMapView'))
 
-export type ChapterOutlineSelectInfo = { title: string; writingChapterId?: number | null }
+export type ChapterOutlineSelectInfo = { title: string; writingChapterId?: EntityId | null }
 
 interface OutlinePanelProps {
   isFullscreen: boolean
@@ -61,16 +61,16 @@ export default function OutlinePanel({
     workspaceSearchQuery,
   } = useWorkspace()
   const [displayChapters, setDisplayChapters] = React.useState<Chapter[]>([])
-  const [displayOutlineId, setDisplayOutlineId] = React.useState<number | null>(null)
+  const [displayOutlineId, setDisplayOutlineId] = React.useState<EntityId | null>(null)
   const [displayLoading, setDisplayLoading] = React.useState(false)
   const [activeTab, setActiveTab] = React.useState(0)
   const [viewMode, setViewMode] = React.useState<'list' | 'detail'>('list')
   const [showSwitcher, setShowSwitcher] = React.useState(false)
   const [chapterBatchMode, setChapterBatchMode] = React.useState(false)
-  const [selectedChapterOutlineIds, setSelectedChapterOutlineIds] = React.useState<Set<number>>(new Set())
+  const [selectedChapterOutlineIds, setSelectedChapterOutlineIds] = React.useState<Set<EntityId>>(new Set())
   const [otherBatchMode, setOtherBatchMode] = React.useState(false)
-  const [selectedOtherOutlineIds, setSelectedOtherOutlineIds] = React.useState<Set<number>>(new Set())
-  const [batchDeleteModal, setBatchDeleteModal] = React.useState<{ ids: number[]; titles: string[]; onConfirm: () => void } | null>(null)
+  const [selectedOtherOutlineIds, setSelectedOtherOutlineIds] = React.useState<Set<EntityId>>(new Set())
+  const [batchDeleteModal, setBatchDeleteModal] = React.useState<{ ids: EntityId[]; titles: string[]; onConfirm: () => void } | null>(null)
   /** 同步选中的章节无大纲记录时，用于展示待上传 */
   const [syncedChapterNoOutlineTitle, setSyncedChapterNoOutlineTitle] = React.useState<string | null>(null)
   /** 详情内：思维导图 / Markdown */
@@ -110,7 +110,7 @@ export default function OutlinePanel({
     handleDeleteGlobal,
   } = crud
 
-  const toggleChapterOutlineSelect = (id: number) => {
+  const toggleChapterOutlineSelect = (id: EntityId) => {
     setSelectedChapterOutlineIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -119,7 +119,7 @@ export default function OutlinePanel({
     })
   }
 
-  const toggleOtherOutlineSelect = (id: number) => {
+  const toggleOtherOutlineSelect = (id: EntityId) => {
     setSelectedOtherOutlineIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -131,7 +131,7 @@ export default function OutlinePanel({
   const handleBatchDeleteChapterOutlines = () => {
     const ids = Array.from(selectedChapterOutlineIds)
     if (ids.length === 0) return
-    const titles = chapterOutlines.filter((o) => ids.includes(Number(o.id))).map((o) => o.title)
+    const titles = chapterOutlines.filter((o) => ids.includes(o.id)).map((o) => o.title)
     setBatchDeleteModal({
       ids,
       titles,
@@ -142,7 +142,7 @@ export default function OutlinePanel({
         for (const id of ids) {
           const res = await window.electronAPI.deleteOutline({ outlineId: id })
           if (res.success) {
-            const outline = chapterOutlines.find((o) => Number(o.id) === id)
+            const outline = chapterOutlines.find((o) => o.id === id)
             if (outline) {
               delete chaptersCache.current[id]
               onChapterOutlineDeleted?.(outline.title)
@@ -150,7 +150,7 @@ export default function OutlinePanel({
           }
         }
         loadData()
-        if (ids.includes(displayOutlineId ?? 0)) {
+        if (displayOutlineId != null && ids.includes(displayOutlineId)) {
           setViewMode('list')
           setDisplayChapters([])
           setDisplayOutlineId(null)
@@ -162,7 +162,7 @@ export default function OutlinePanel({
   const handleBatchDeleteOtherOutlines = () => {
     const ids = Array.from(selectedOtherOutlineIds)
     if (ids.length === 0) return
-    const titles = otherOutlines.filter((o) => ids.includes(Number(o.id))).map((o) => o.title)
+    const titles = otherOutlines.filter((o) => ids.includes(o.id)).map((o) => o.title)
     setBatchDeleteModal({
       ids,
       titles,
@@ -173,14 +173,14 @@ export default function OutlinePanel({
         for (const id of ids) {
           const res = await window.electronAPI.deleteOutline({ outlineId: id })
           if (res.success) {
-            const outline = otherOutlines.find((o) => Number(o.id) === id)
+            const outline = otherOutlines.find((o) => o.id === id)
             if (outline) {
               delete chaptersCache.current[id]
             }
           }
         }
         loadData()
-        if (ids.includes(displayOutlineId ?? 0)) {
+        if (displayOutlineId != null && ids.includes(displayOutlineId)) {
           setViewMode('list')
           setDisplayChapters([])
           setDisplayOutlineId(null)
@@ -190,7 +190,7 @@ export default function OutlinePanel({
   }
 
   const fetchOutlineChaptersLatest = React.useCallback(
-    async (outlineId: number) => {
+    async (outlineId: EntityId) => {
       setDisplayChapters([])
       setDisplayLoading(true)
       try {
@@ -225,10 +225,13 @@ export default function OutlinePanel({
     if (!activeChapterId && !activeChapterTitle) return
     if (skipAutoOpenForTitle != null && skipAutoOpenForTitle === activeChapterTitle) return
 
-    const wid = activeChapterId != null && Number.isFinite(Number(activeChapterId)) ? Number(activeChapterId) : null
+    const wid =
+      activeChapterId != null && String(activeChapterId).trim() !== '' ? activeChapterId : null
     const outline =
       wid != null
-        ? chapterOutlines.find((o) => o.writing_chapter_id != null && Number(o.writing_chapter_id) === wid)
+        ? chapterOutlines.find(
+            (o) => o.writing_chapter_id != null && String(o.writing_chapter_id) === String(wid),
+          )
         : undefined
     const outlineByTitle =
       !outline && activeChapterTitle
@@ -245,8 +248,8 @@ export default function OutlinePanel({
       return
     }
     setSyncedChapterNoOutlineTitle(null)
-    const id = Number(resolved.id)
-    if (!Number.isFinite(id) || id <= 0) {
+    const id = resolved.id
+    if (!id || String(id).trim() === '') {
       setSyncedChapterNoOutlineTitle(activeChapterTitle || null)
       setDisplayOutlineId(null)
       setDisplayChapters([])
@@ -285,17 +288,17 @@ export default function OutlinePanel({
   }, [globalOutline, chapterOutlines, otherOutlines, volumeOutlines, enableVolume])
 
   const currentOutline = React.useMemo(
-    () => allOutlines.find((o) => Number(o?.id) === Number(displayOutlineId)),
+    () => allOutlines.find((o) => String(o?.id) === String(displayOutlineId)),
     [allOutlines, displayOutlineId]
   )
 
-  const prevDisplayOutlineIdForSub = React.useRef<number | null>(null)
+  const prevDisplayOutlineIdForSub = React.useRef<EntityId | null>(null)
   React.useEffect(() => {
     if (viewMode === 'list') prevDisplayOutlineIdForSub.current = null
   }, [viewMode])
 
   React.useEffect(() => {
-    if (!currentOutline || Number(currentOutline.id) !== Number(displayOutlineId)) return
+    if (!currentOutline || String(currentOutline.id) !== String(displayOutlineId)) return
     if (prevDisplayOutlineIdForSub.current === displayOutlineId) return
     prevDisplayOutlineIdForSub.current = displayOutlineId
     setDetailOutlineSub(currentOutline.file_path ? 'xmind' : 'markdown')
@@ -311,8 +314,8 @@ export default function OutlinePanel({
       // 每次点击进入详情都刷新大纲列表，避免详情使用旧的 outline 元数据
       loadData()
       setSyncedChapterNoOutlineTitle(null)
-      const id = Number(outline?.id)
-      if (!id || id <= 0) {
+      const id = outline?.id
+      if (!id || String(id).trim() === '') {
         console.warn('[OutlinePanel] invalid id, outline:', outline)
         return
       }
@@ -348,7 +351,7 @@ export default function OutlinePanel({
     void handleOutlineClick(res.data)
   }, [bookId, flushMarkdownSave, setGlobalOutline, handleOutlineClick])
 
-  const [openingSourceId, setOpeningSourceId] = React.useState<number | null>(null)
+  const [openingSourceId, setOpeningSourceId] = React.useState<EntityId | null>(null)
 
   const handleOpenSource = React.useCallback((outline: Outline) => {
     const fp = outline.file_path
@@ -576,16 +579,20 @@ export default function OutlinePanel({
                     ) : (
                       writingChapters.map((ch) => {
                         const outline =
-                          chapterOutlines.find((o) => o.writing_chapter_id != null && Number(o.writing_chapter_id) === ch.id)
+                          chapterOutlines.find(
+                            (o) =>
+                              o.writing_chapter_id != null &&
+                              String(o.writing_chapter_id) === String(ch.id),
+                          )
                           ?? chapterOutlines.find((o) => o.title === ch.title)
                         if (outline && outline.file_path) {
                           return (
                             <div
                               key={outline.id}
-                              className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${chapterBatchMode && selectedChapterOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                              className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${chapterBatchMode && selectedChapterOutlineIds.has(outline.id) ? 'selected' : ''}`}
                               onClick={() => handleOutlineClick(outline)}
                             >
-                              {chapterBatchMode && <Checkbox checked={selectedChapterOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />}
+                              {chapterBatchMode && <Checkbox checked={selectedChapterOutlineIds.has(outline.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(outline.id)} className="outline-item-checkbox" />}
                               <span className="item-title" title={outline.title}>
                                 <HighlightText text={outline.title} query={workspaceSearchQuery} />
                               </span>
@@ -608,12 +615,12 @@ export default function OutlinePanel({
                         return (
                           <div
                             key={`ch-${ch.id}`}
-                            className={`chapter-outline-item no-outline ${outline && selectedChapterOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                            className={`chapter-outline-item no-outline ${outline && selectedChapterOutlineIds.has(outline.id) ? 'selected' : ''}`}
                             title={outline ? '点击进入大纲详情' : undefined}
                             onClick={() => (outline ? void handleOutlineClick(outline) : undefined)}
                           >
                             {chapterBatchMode && outline && (
-                              <Checkbox checked={selectedChapterOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />
+                              <Checkbox checked={selectedChapterOutlineIds.has(outline.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleChapterOutlineSelect(outline.id)} className="outline-item-checkbox" />
                             )}
                             <span className="item-title" title={ch.title}>
                               <HighlightText text={ch.title} query={workspaceSearchQuery} />
@@ -689,10 +696,10 @@ export default function OutlinePanel({
                   {otherOutlines.map((outline) => (
                       <div
                         key={outline.id}
-                        className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${otherBatchMode && selectedOtherOutlineIds.has(Number(outline.id)) ? 'selected' : ''}`}
+                        className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${otherBatchMode && selectedOtherOutlineIds.has(outline.id) ? 'selected' : ''}`}
                         onClick={() => handleOutlineClick(outline)}
                       >
-                        {otherBatchMode && <Checkbox checked={selectedOtherOutlineIds.has(Number(outline.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggleOtherOutlineSelect(Number(outline.id))} className="outline-item-checkbox" />}
+                        {otherBatchMode && <Checkbox checked={selectedOtherOutlineIds.has(outline.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleOtherOutlineSelect(outline.id)} className="outline-item-checkbox" />}
                         <span className="item-title" title={outline.title}>
                           <HighlightText text={outline.title} query={workspaceSearchQuery} />
                         </span>

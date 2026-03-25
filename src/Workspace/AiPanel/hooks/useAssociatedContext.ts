@@ -1,11 +1,11 @@
 import React from "react";
-import type { Outline } from "../../../types";
+import type { EntityId, Outline } from "../../../types";
 import { getAvailableOutlines } from "../../utils";
 
 export interface UseAssociatedContextParams {
-  bookId: number | null | undefined;
-  chapterId: number | null | undefined;
-  writingChapters: { id: number; title: string }[];
+  bookId: EntityId | null | undefined;
+  chapterId: EntityId | null | undefined;
+  writingChapters: { id: EntityId; title: string }[];
 }
 
 export function useAssociatedContext({
@@ -14,10 +14,10 @@ export function useAssociatedContext({
   writingChapters,
 }: UseAssociatedContextParams) {
   const [associatedChapterIds, setAssociatedChapterIds] = React.useState<
-    number[]
+    EntityId[]
   >([]);
   const [associatedOutlineIds, setAssociatedOutlineIds] = React.useState<
-    number[]
+    EntityId[]
   >([]);
   const [availableOutlines, setAvailableOutlines] = React.useState<Outline[]>(
     [],
@@ -46,8 +46,9 @@ export function useAssociatedContext({
   // 将当前章节追加到关联章节列表（已存在则跳过）
   const handleQuickAssociateChapter = React.useCallback(() => {
     if (!chapterId) return;
+    const key = String(chapterId);
     setAssociatedChapterIds((prev) =>
-      prev.includes(chapterId) ? prev : [...prev, chapterId],
+      prev.some((x) => String(x) === key) ? prev : [...prev, chapterId],
     );
   }, [chapterId]);
 
@@ -58,7 +59,7 @@ export function useAssociatedContext({
     if (res.success && res.data) {
       const id = res.data.id;
       setAssociatedOutlineIds((prev) =>
-        prev.includes(id) ? prev : [...prev, id],
+        prev.some((x) => String(x) === String(id)) ? prev : [...prev, id],
       );
     }
   }, [chapterId]);

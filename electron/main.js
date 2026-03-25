@@ -15,6 +15,7 @@ if (!isDev) {
 
 // 使用 sql.js（纯 JS），需异步初始化
 const Database = require('./database')
+const { shortId8 } = require('./idUtils')
 function getDb() {
   return Database
 }
@@ -211,12 +212,12 @@ ipcMain.handle('story-background-pick-attachments', async (_, { bookId }) => {
     const dir = path.join(userData, 'story-background-attachments', String(bookId))
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     let addedCount = 0
-    const base = Date.now()
+    const batchId = shortId8()
     for (let i = 0; i < result.filePaths.length; i++) {
       const filePath = result.filePaths[i]
       try {
         const name = path.basename(filePath)
-        const safeName = `${base}_${i}_${name}`.replace(/[^a-zA-Z0-9._-]/g, '_')
+        const safeName = `${batchId}_${i}_${name}`.replace(/[^a-zA-Z0-9._-]/g, '_')
         const destPath = path.join(dir, safeName)
         const relativePath = path.join('story-background-attachments', String(bookId), safeName)
         fs.copyFileSync(filePath, destPath)
@@ -1079,12 +1080,16 @@ ipcMain.on('ai-chat-stream', async (event, {
   tools: toolsFromFront,
   useToolRouter = false,
   bookId,
+  bookTitle,
   chapterId,
   currentChapterTitle,
   writingChapters = [],
   availableOutlines = [],
+  associatedChapterIds,
+  associatedOutlineIds,
   agentMode,
   agentAction,
+  agentActions: rawAgentActions,
 }) => {
   const { model, temperature, ...rest } = options
   const key = (apiKey || '').trim()
@@ -1113,6 +1118,11 @@ ipcMain.on('ai-chat-stream', async (event, {
   const persistedMode = settings.ai_agent_mode === 'subagent' ? 'subagent' : 'legacy'
   const runtimeMode = agentMode === 'subagent' || agentMode === 'legacy' ? agentMode : persistedMode
   const action = Object.values(EXEC_ACTIONS).includes(agentAction) ? agentAction : EXEC_ACTIONS.FULL
+  const allowed = new Set(Object.values(EXEC_ACTIONS))
+  const normalizedAgentActions =
+    Array.isArray(rawAgentActions) && rawAgentActions.length > 0
+      ? rawAgentActions.filter((x) => allowed.has(x))
+      : null
 
   let tools = toolsFromFront
   if (useToolRouter && bookId != null && Array.isArray(messages) && messages.length > 0) {
@@ -1146,7 +1156,28 @@ ipcMain.on('ai-chat-stream', async (event, {
     requestParams.temperature = temperature
   }
   if (tools && tools.length > 0) requestParams.tools = tools
-  const toolCtx = { bookId, chapterId, currentChapterTitle, writingChapters, availableOutlines }
+  const normAccCh =
+    Array.isArray(associatedChapterIds)
+      ? [...new Set(associatedChapterIds.map((x) => String(x)).filter((s) => s.length > 0))]
+      : []
+  const normAccOl =
+    Array.isArray(associatedOutlineIds)
+      ? [...new Set(associatedOutlineIds.map((x) => String(x)).filter((s) => s.length > 0))]
+      : []
+  const toolCtx = {
+    bookId,
+    bookTitle: bookTitle != null ? String(bookTitle) : undefined,
+    chapterId,
+    currentChapterTitle,
+    writingChapters,
+    availableOutlines,
+    associatedChapterIds: normAccCh,
+    associatedOutlineIds: normAccOl,
+    /** 本会话内章节正文缓存（多阶段重复 getChapterContent 时复用，editChapterContent 对该章失效） */
+    chapterContentCache: new Map(),
+    /** 本会话内只读工具结果缓存（listOutlines/queryOutline/背景/人物目录等，大纲或总纲写入后整表清空） */
+    readToolCache: new Map(),
+  }
 
   const runStreamLoop = async (currentMessages) => {
     const { stream } = await createChatStream(key, currentMessages, requestParams, apiProvider, abortController.signal)
@@ -1218,7 +1249,13 @@ ipcMain.on('ai-chat-stream', async (event, {
             toolExecutor.runTools(calls, toolCtx, (ev) => {
               if (!ev) return
               if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
-              if (typeof ev.toolIndexCompleted === 'number') sendChunk({ toolIndexCompleted: ev.toolIndexCompleted })
+              if (Array.isArray(ev.toolReadCacheMask)) sendChunk({ toolReadCacheMask: ev.toolReadCacheMask })
+              if (typeof ev.toolIndexCompleted === 'number') {
+                sendChunk({
+                  toolIndexCompleted: ev.toolIndexCompleted,
+                  ...(ev.toolFromCache === true ? { toolFromCache: true } : {}),
+                })
+              }
             }),
         })
         if (executed.repairedRounds > 0) {
@@ -1266,6 +1303,10 @@ ipcMain.on('ai-chat-stream', async (event, {
         useToolRouter,
         toolsFromFront,
         action,
+        agentActions:
+          normalizedAgentActions && normalizedAgentActions.length > 0
+            ? normalizedAgentActions
+            : undefined,
         model: responseModel,
       })
     } else if (tools && tools.length > 0) {
