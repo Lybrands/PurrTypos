@@ -743,6 +743,8 @@ const { normalizeSessionTitle } = require('./sessionTitle')
 const toolExecutor = require('./toolExecutor')
 const skillOrchestrator = require('./skillOrchestrator')
 const { getSkillSpecs } = require('./agentToolDefinitions')
+const { EXEC_ACTIONS } = require('./subagentConfig')
+const { runSubagentPipeline } = require('./subagentPipeline')
 
 /** 将 mem0 相关错误转为对用户/模型友好的提示，并打印原始错误到控制台 */
 function mem0ErrMessage(err) {
@@ -898,6 +900,7 @@ ipcMain.handle('open-file-path', async (_, filePath) => {
 // ─── AI Provider 适配器 ──────────────────────────────────────────
 const openaiChat = require('./openaiChat')
 const anthropicChat = require('./anthropicChat')
+const { normalizeToolCallsList } = require('./toolCallUtils')
 
 let _activeAbortController = null
 
@@ -1067,20 +1070,22 @@ function mergeStreamToolCalls(accumulated, deltaToolCalls) {
   return next
 }
 
-function normalizeToolCallsList(list) {
-  return list
-    .filter((tc) => tc && (tc.id || '').trim() && (tc.function?.name || '').trim())
-    .map((tc) => ({
-      id: String(tc.id || '').trim(),
-      type: tc.type || 'function',
-      function: {
-        name: (tc.function?.name || '').trim(),
-        arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : '',
-      },
-    }))
-}
-
-ipcMain.on('ai-chat-stream', async (event, { messages, apiKey, baseURL, apiProvider = 'openai', options = {}, tools: toolsFromFront, useToolRouter = false, bookId, chapterId, currentChapterTitle, writingChapters = [], availableOutlines = [] }) => {
+ipcMain.on('ai-chat-stream', async (event, {
+  messages,
+  apiKey,
+  baseURL,
+  apiProvider = 'openai',
+  options = {},
+  tools: toolsFromFront,
+  useToolRouter = false,
+  bookId,
+  chapterId,
+  currentChapterTitle,
+  writingChapters = [],
+  availableOutlines = [],
+  agentMode,
+  agentAction,
+}) => {
   const { model, temperature, ...rest } = options
   const key = (apiKey || '').trim()
   if (!key) {
@@ -1103,6 +1108,11 @@ ipcMain.on('ai-chat-stream', async (event, { messages, apiKey, baseURL, apiProvi
     const lastUser = [...messages].reverse().find((m) => m && m.role === 'user')
     latestUserTextForPlan = String(lastUser?.content || '')
   }
+
+  const settings = getDb().getSettings?.() || {}
+  const persistedMode = settings.ai_agent_mode === 'subagent' ? 'subagent' : 'legacy'
+  const runtimeMode = agentMode === 'subagent' || agentMode === 'legacy' ? agentMode : persistedMode
+  const action = Object.values(EXEC_ACTIONS).includes(agentAction) ? agentAction : EXEC_ACTIONS.FULL
 
   let tools = toolsFromFront
   if (useToolRouter && bookId != null && Array.isArray(messages) && messages.length > 0) {
@@ -1242,7 +1252,23 @@ ipcMain.on('ai-chat-stream', async (event, { messages, apiKey, baseURL, apiProvi
 
   try {
     const responseModel = model
-    if (tools && tools.length > 0) {
+    if (runtimeMode === 'subagent') {
+      await runSubagentPipeline({
+        sendChunk,
+        signal: abortController.signal,
+        key,
+        apiProvider,
+        requestParams,
+        toolCtx,
+        skillSpecs,
+        messages,
+        latestUserTextForPlan,
+        useToolRouter,
+        toolsFromFront,
+        action,
+        model: responseModel,
+      })
+    } else if (tools && tools.length > 0) {
       let currentMessages = messages
       while (currentMessages) {
         const next = await runStreamLoop(currentMessages)

@@ -958,7 +958,7 @@ Database.deleteCharacterOption = function (id) {
 }
 
 const BOOL_SETTINGS_KEYS = ['sync_outline_chapter']
-const STRING_SETTINGS_KEYS = ['ai_system_prompt', 'ai_model_configs']
+const STRING_SETTINGS_KEYS = ['ai_system_prompt', 'ai_model_configs', 'ai_agent_mode']
 const SETTINGS_KEYS = [...BOOL_SETTINGS_KEYS, ...STRING_SETTINGS_KEYS]
 
 const DEFAULT_SYSTEM_PROMPT = '你是一位专业的写作助手，请帮助用户完善写作内容。'
@@ -984,6 +984,7 @@ Database.getSettings = function () {
     sync_outline_chapter: map.sync_outline_chapter === '1',
     ai_system_prompt: map.ai_system_prompt ?? DEFAULT_SYSTEM_PROMPT,
     ai_model_configs: parseAiModelConfigs(map.ai_model_configs),
+    ai_agent_mode: map.ai_agent_mode === 'subagent' ? 'subagent' : 'legacy',
   }
 }
 

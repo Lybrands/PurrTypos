@@ -21,6 +21,7 @@ import {
   Tooltip,
   Tabs,
   Dropdown,
+  Select,
 } from "antd";
 import type { MenuProps } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
@@ -53,6 +54,7 @@ import "./index.scss";
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
   systemPrompt?: string;
+  aiAgentMode?: "legacy" | "subagent";
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
 }
@@ -64,6 +66,7 @@ const thinkingOnlyModelIds = (configs: AiModelConfig[]) =>
 export default function AiPanel({
   modelConfigs = [],
   systemPrompt = DEFAULT_SYSTEM_PROMPT,
+  aiAgentMode = "legacy",
   isFullscreen,
   onToggleFullscreen,
 }: AiPanelProps) {
@@ -96,6 +99,9 @@ export default function AiPanel({
   const [thinkingEnabled, setThinkingEnabled] = React.useState(
     initialPrefs.thinkingEnabled,
   );
+  const [agentAction, setAgentAction] = React.useState<
+    "analyze" | "plan" | "draft" | "review" | "polish" | "full"
+  >("full");
 
   const selectedModelConfig = React.useMemo(
     () => modelConfigs.find((c) => c.id === selectedModel) ?? null,
@@ -178,6 +184,8 @@ export default function AiPanel({
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    agentMode: aiAgentMode,
+    agentAction,
   });
 
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
@@ -1234,6 +1242,24 @@ export default function AiPanel({
             }}
           />
         </div>
+        {aiAgentMode === "subagent" && (
+          <div style={{ marginBottom: 8 }}>
+            <Select
+              size="small"
+              value={agentAction}
+              onChange={(v) => setAgentAction(v)}
+              options={[
+                { value: "full", label: "全流程" },
+                { value: "analyze", label: "仅分析" },
+                { value: "plan", label: "仅规划" },
+                { value: "draft", label: "仅写作" },
+                { value: "review", label: "仅审校" },
+                { value: "polish", label: "仅润色" },
+              ]}
+              popupMatchSelectWidth={false}
+            />
+          </div>
+        )}
         <AiComposeBottom
           modelConfigs={modelConfigs}
           thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}

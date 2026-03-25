@@ -21,6 +21,7 @@ export default function App() {
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
   const [systemPrompt, setSystemPrompt] = React.useState('你是一位专业的写作助手，请帮助用户完善写作内容。')
+  const [aiAgentMode, setAiAgentMode] = React.useState<'legacy' | 'subagent'>('legacy')
 
   React.useEffect(() => {
     window.electronAPI.getSettings().then((res) => {
@@ -29,6 +30,9 @@ export default function App() {
       if (res.data.ai_system_prompt) setSystemPrompt(res.data.ai_system_prompt)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
+      }
+      if (res.data.ai_agent_mode === 'subagent' || res.data.ai_agent_mode === 'legacy') {
+        setAiAgentMode(res.data.ai_agent_mode)
       }
     })
   }, [])
@@ -46,6 +50,11 @@ export default function App() {
   const handleSystemPromptChange = React.useCallback((value: string) => {
     setSystemPrompt(value)
     window.electronAPI.setSettings({ ai_system_prompt: value })
+  }, [])
+
+  const handleAiAgentModeChange = React.useCallback((value: 'legacy' | 'subagent') => {
+    setAiAgentMode(value)
+    window.electronAPI.setSettings({ ai_agent_mode: value })
   }, [])
 
   const loadBooks = React.useCallback(async () => {
@@ -139,6 +148,7 @@ export default function App() {
               modelConfigs={modelConfigs}
               syncOutlineChapter={syncOutlineChapter}
               systemPrompt={systemPrompt}
+              aiAgentMode={aiAgentMode}
             />
           )}
         </Suspense>
@@ -158,6 +168,8 @@ export default function App() {
             onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
             systemPrompt={systemPrompt}
             onSystemPromptChange={handleSystemPromptChange}
+            aiAgentMode={aiAgentMode}
+            onAiAgentModeChange={handleAiAgentModeChange}
           />
           </Suspense>
         </div>

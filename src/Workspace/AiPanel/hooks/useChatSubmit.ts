@@ -133,6 +133,8 @@ export interface UseChatSubmitParams {
   modelConfigs: Record<string, { label?: string; max_tokens?: number }>;
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
+  agentMode?: "legacy" | "subagent";
+  agentAction?: "analyze" | "plan" | "draft" | "review" | "polish" | "full";
 }
 
 export function useChatSubmit(params: UseChatSubmitParams) {
@@ -163,6 +165,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     modelConfigs,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    agentMode = "legacy",
+    agentAction = "full",
   } = params;
 
   const { message: appMessage } = AntdApp.useApp();
@@ -313,6 +317,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning);
+      }
+      if (chunk.subagentStageDone && chunk.subagentStageName) {
+        appMessage.info(`阶段完成：${chunk.subagentStageName}`);
       }
       if (chunk.orchestratorRepair?.repairedRounds) {
         appMessage.info(`已自动修复执行路径 ${chunk.orchestratorRepair.repairedRounds} 次`);
@@ -691,6 +698,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       currentChapterTitle: currentChapterTitle ?? undefined,
       writingChapters,
       availableOutlines,
+      agentMode,
+      agentAction,
     });
   }, [
     prompt,
@@ -718,6 +727,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setActiveSessionId,
     setSessions,
     selectedMemoryIds,
+    agentMode,
+    agentAction,
     appMessage,
   ]);
 
