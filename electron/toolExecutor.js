@@ -6,6 +6,7 @@
 const Database = require('./database')
 const mem0Service = require('./mem0Service')
 const { collectTextOutlineEntries } = require('./outlineTextForAgent')
+const { getWritableChaptersForAgent } = require('./writingChaptersForAgent')
 
 const MEMORY_LAYERS = ['全局', '大纲', '人物', '章节']
 const MEMORY_LAYER_ORDERED = ['全局', '大纲', '人物', '章节']
@@ -110,8 +111,8 @@ function getGlobalOutline(bookId, maxTextLength = 32000) {
       : markdownRaw
   return {
     success: true,
-    bookId: Number(bookId),
-    outlineId: Number(row.id),
+    bookId: String(bookId),
+    outlineId: String(row.id),
     title: row.title || '总纲',
     type: row.type || 'global',
     markdown: markdown || '',
@@ -130,21 +131,21 @@ function queryOutline(bookId, outlineIds, includeChapters = true, includeText = 
   const all = getAvailableOutlines(bookId)
   const filterSet =
     Array.isArray(outlineIds) && outlineIds.length > 0
-      ? new Set(outlineIds.map((x) => Number(x)).filter((n) => Number.isFinite(n)))
+      ? new Set(outlineIds.map((x) => String(x)))
       : null
-  const targetOutlines = filterSet ? all.filter((o) => filterSet.has(Number(o.id))) : all
+  const targetOutlines = filterSet ? all.filter((o) => filterSet.has(String(o.id))) : all
   const details = includeChapters
     ? batchGetOutlineDetails(
-        targetOutlines.map((o) => Number(o.id)),
+        targetOutlines.map((o) => String(o.id)),
         all,
       )
     : []
-  const byIdDetail = new Map(details.map((d) => [Number(d.outline?.id), d]))
+  const byIdDetail = new Map(details.map((d) => [String(d.outline?.id), d]))
   const textEntries = includeText ? collectTextOutlineEntries(bookId, filterSet ? Array.from(filterSet) : undefined) : []
-  const byIdText = new Map(textEntries.map((e) => [Number(e.id), e.markdown]))
+  const byIdText = new Map(textEntries.map((e) => [String(e.id), e.markdown]))
 
   const outlines = targetOutlines.map((o) => {
-    const id = Number(o.id)
+    const id = String(o.id)
     const detail = byIdDetail.get(id)
     const markdown = byIdText.get(id)
     const trimmedMarkdown =
@@ -162,7 +163,7 @@ function queryOutline(bookId, outlineIds, includeChapters = true, includeText = 
   })
   return {
     success: true,
-    bookId: Number(bookId),
+    bookId: String(bookId),
     total: outlines.length,
     outlines,
   }
@@ -174,6 +175,57 @@ function getChapterContent(chapterId, title, maxTextLength = 12000) {
   const raw = row.content || ''
   const plainText = raw ? extractTextFromLexical(raw).slice(0, maxTextLength) : ''
   return { chapterId, title: title ?? '', content: raw, plainText }
+}
+
+/** 本会话 toolCtx 上的章节正文缓存（同一 ai-chat-stream / 写作专家管线内共享） */
+function ensureChapterContentCache(ctx) {
+  if (!ctx || typeof ctx !== 'object') return null
+  if (!ctx.chapterContentCache) ctx.chapterContentCache = new Map()
+  return ctx.chapterContentCache
+}
+
+function invalidateChapterContentCache(ctx, chapterId) {
+  const m = ensureChapterContentCache(ctx)
+  if (!m || chapterId == null) return
+  m.delete(String(chapterId).trim())
+}
+
+function titleFromWritingCatalog(chapterId, writingChapters) {
+  const key = String(chapterId ?? '').trim()
+  const c = (writingChapters || []).find((x) => String(x.id) === key)
+  return c ? String(c.title || '').trim() : ''
+}
+
+/** 读库并返回全文 plain（不截断），供缓存 */
+function readChapterPlainFull(chapterId) {
+  const row = getDb().getArticle(chapterId)
+  if (!row) return null
+  const raw = row.content || ''
+  const plainTextFull = raw ? extractTextFromLexical(raw) : ''
+  return { plainTextFull }
+}
+
+/** 本会话只读工具缓存（与 chapterContentCache 分工：此处存 JSON 字符串返回值） */
+function ensureReadToolCache(ctx) {
+  if (!ctx || typeof ctx !== 'object') return null
+  if (!ctx.readToolCache) ctx.readToolCache = new Map()
+  return ctx.readToolCache
+}
+
+function readToolCacheGet(ctx, key) {
+  const m = ensureReadToolCache(ctx)
+  return m && m.get(key)
+}
+
+function readToolCacheSet(ctx, key, value) {
+  const m = ensureReadToolCache(ctx)
+  if (m) m.set(key, value)
+}
+
+/** 大纲/总纲等元数据变更后，只读大纲类缓存失效 */
+function invalidateReadToolCache(ctx) {
+  const m = ensureReadToolCache(ctx)
+  if (m) m.clear()
 }
 
 function batchGetChapterContents(chapterIds, titleMap, maxTextLength = 12000) {
@@ -195,18 +247,18 @@ function listWritingChapters(bookId) {
   const rows = db.getChapters(writing.id) || []
   const parentSet = new Set(
     rows
-      .map((r) => (r.parent_id == null ? null : Number(r.parent_id)))
-      .filter((x) => Number.isFinite(x) && x > 0),
+      .map((r) => (r.parent_id == null || r.parent_id === '' ? null : String(r.parent_id)))
+      .filter((x) => x != null && x !== ''),
   )
   const items = rows.map((r) => {
-    const id = Number(r.id)
+    const id = String(r.id)
     const hasChildren = parentSet.has(id)
     // 有子节点的节点视为“卷”；其余视为“章节”
     const nodeType = hasChildren ? 'volume' : 'chapter'
     return {
       id,
       title: String(r.title || ''),
-      parentId: r.parent_id == null ? null : Number(r.parent_id),
+      parentId: r.parent_id == null || r.parent_id === '' ? null : String(r.parent_id),
       level: Number(r.level || 1),
       sort: Number(r.sort || 0),
       nodeType,
@@ -215,8 +267,8 @@ function listWritingChapters(bookId) {
   })
   return {
     success: true,
-    bookId: Number(bookId),
-    writingOutlineId: Number(writing.id),
+    bookId: String(bookId),
+    writingOutlineId: String(writing.id),
     total: items.length,
     items,
   }
@@ -231,6 +283,188 @@ function parseArgs(argsStr) {
 }
 
 /**
+ * 与前端传入的 writingChapters 快照一致：非空时仅允许目录内且标题非空的章节 id 读写正文，
+ * 失败则拦截不访问数据库，返回 error 供模型在下一轮 tool 结果中看到。
+ * 若 writingChapters 为空，不校验（兼容旧路径或未带目录的请求）。
+ */
+function chapterAllowedByWritingCatalog(chapterId, writingChapters) {
+  if (!Array.isArray(writingChapters) || writingChapters.length === 0) {
+    return { ok: true }
+  }
+  const key = String(chapterId ?? '').trim()
+  if (!key) {
+    return { ok: false }
+  }
+  const writable = getWritableChaptersForAgent(writingChapters)
+  const row = writable.find((c) => String(c.id) === key)
+  if (!row) {
+    return { ok: false, chapterId: key }
+  }
+  if (!String(row.title || '').trim()) {
+    return { ok: false, chapterId: key }
+  }
+  return { ok: true }
+}
+
+function chaptersAllowedByWritingCatalog(chapterIds, writingChapters) {
+  if (!Array.isArray(writingChapters) || writingChapters.length === 0) {
+    return { ok: true }
+  }
+  const ids = (Array.isArray(chapterIds) ? chapterIds : [])
+    .map((x) => String(x).trim())
+    .filter((s) => s !== '')
+  if (ids.length === 0) {
+    return { ok: false, badIds: [] }
+  }
+  const bad = []
+  for (const id of ids) {
+    const one = chapterAllowedByWritingCatalog(id, writingChapters)
+    if (!one.ok) bad.push(id)
+  }
+  if (bad.length > 0) {
+    return {
+      ok: false,
+      badIds: bad,
+    }
+  }
+  return { ok: true }
+}
+
+/** 章节目录校验类失败对模型仅返回简短 error，详细原因由主稿专家向用户说明 */
+const CATALOG_TOOL_FAIL_MSG = '失败'
+
+function ensureCatalogRejectSet(ctx) {
+  if (!ctx._catalogRejectedChapterIds) ctx._catalogRejectedChapterIds = new Set()
+  return ctx._catalogRejectedChapterIds
+}
+
+function catalogRejectPayload(ctx, gate, cidRaw) {
+  const set = ensureCatalogRejectSet(ctx)
+  const key =
+    gate.chapterId != null && String(gate.chapterId).trim() !== ''
+      ? String(gate.chapterId).trim()
+      : cidRaw != null && String(cidRaw).trim() !== ''
+        ? String(cidRaw).trim()
+        : ''
+  if (key) set.add(key)
+  return {
+    error: CATALOG_TOOL_FAIL_MSG,
+    chapterId: key || undefined,
+  }
+}
+
+function jsonCatalogReject(ctx, gate, cidRaw) {
+  const p = catalogRejectPayload(ctx, gate, cidRaw)
+  return JSON.stringify({
+    error: p.error,
+    ...(p.chapterId != null ? { chapterId: p.chapterId } : {}),
+  })
+}
+
+function jsonBatchCatalogReject(ctx, batchGate) {
+  const set = ensureCatalogRejectSet(ctx)
+  const badIds = Array.isArray(batchGate.badIds)
+    ? batchGate.badIds.map((x) => String(x).trim()).filter((s) => s !== '')
+    : []
+  const allDup = badIds.length > 0 && badIds.every((id) => set.has(id))
+  if (!allDup) {
+    for (const id of badIds) set.add(id)
+  }
+  return JSON.stringify({ error: CATALOG_TOOL_FAIL_MSG })
+}
+
+/**
+ * 与 runTools 内 toolFromCache 判定一致：执行前即可知是否将命中会话内只读缓存（用于前端整行不展示，含「正在执行」）
+ */
+function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
+  const name = tc.function?.name
+  const args = parseArgs(tc.function?.arguments || '{}')
+  const allow = ctx.subagentAllowedToolNames
+  if (allow instanceof Set && name && !allow.has(name)) {
+    return false
+  }
+  try {
+    switch (name) {
+      case 'getChapterContent': {
+        const cid = args.chapterId
+        const gate = chapterAllowedByWritingCatalog(cid, writingChapters)
+        if (!gate.ok) return false
+        const key = String(cid).trim()
+        const cache = ensureChapterContentCache(ctx)
+        return Boolean(cache && cache.has(key))
+      }
+      case 'listWritingChapters': {
+        const bid = args.bookId ?? defaultBookId
+        if (bid == null || String(bid).trim() === '') return false
+        const ck = `listWritingChapters:${String(bid)}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'batchGetChapterContents': {
+        const cids = args.chapterIds || []
+        const batchGate = chaptersAllowedByWritingCatalog(cids, writingChapters)
+        if (!batchGate.ok) return false
+        const cache = ensureChapterContentCache(ctx)
+        const idList = Array.isArray(cids) ? cids : []
+        if (idList.length === 0) return false
+        return idList.every((cidRaw) => {
+          const cid = String(cidRaw).trim()
+          return Boolean(cache && cache.has(cid))
+        })
+      }
+      case 'getBookCharacters': {
+        const bid = args.bookId ?? defaultBookId
+        const ids = args.characterIds
+        const nameQueries = args.names
+        const filtered =
+          (Array.isArray(ids) && ids.length > 0) ||
+          (Array.isArray(nameQueries) && nameQueries.length > 0)
+        if (filtered) return false
+        const ck = `getBookCharacters:all:${String(bid)}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'listBookCharacters': {
+        const bid = args.bookId ?? defaultBookId
+        const ck = `listBookCharacters:${String(bid)}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'getStoryBackground': {
+        const bid = args.bookId ?? defaultBookId
+        const ck = `getStoryBackground:${String(bid)}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'queryOutline': {
+        const bid = args.bookId ?? defaultBookId
+        if (bid == null || String(bid).trim() === '') return false
+        const oids = args.outlineIds
+        const includeChapters = args.includeChapters !== false
+        const includeText = args.includeText !== false
+        const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+        const oidKey = Array.isArray(oids) ? [...oids].map(String).sort().join(',') : ''
+        const ck = `queryOutline:${String(bid)}:${oidKey}:${includeChapters}:${includeText}:${maxLen}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'getGlobalOutline': {
+        const bid = args.bookId ?? defaultBookId
+        if (bid == null || String(bid).trim() === '') return false
+        const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+        const ck = `getGlobalOutline:${String(bid)}:${maxLen}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      case 'listOutlines': {
+        const bid = args.bookId ?? defaultBookId
+        if (bid == null || String(bid).trim() === '') return false
+        const ck = `listOutlines:${String(bid)}`
+        return readToolCacheGet(ctx, ck) != null
+      }
+      default:
+        return false
+    }
+  } catch {
+    return false
+  }
+}
+
+/**
  * 执行工具调用
  * @param {Array<{ id: string, type: string, function: { name: string, arguments: string } }>} toolCalls
  * @param {object} ctx - { bookId, chapterId, currentChapterTitle, writingChapters, availableOutlines }
@@ -240,13 +474,21 @@ function parseArgs(argsStr) {
 async function runTools(toolCalls, ctx, sendChunk) {
   const results = []
   const { bookId, chapterId, currentChapterTitle, writingChapters = [], availableOutlines = [] } = ctx
-  const defaultBookId = bookId ?? 0
+  const defaultBookId = bookId != null ? bookId : null
+
+  const toolReadCacheMask = toolCalls.map((tc) =>
+    toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId),
+  )
+  if (typeof sendChunk === 'function' && toolReadCacheMask.some(Boolean)) {
+    sendChunk({ toolReadCacheMask })
+  }
 
   for (let i = 0; i < toolCalls.length; i++) {
     const tc = toolCalls[i]
     const name = tc.function?.name
     const args = parseArgs(tc.function?.arguments || '{}')
     let content
+    let toolFromCache = false
 
     try {
       const allow = ctx.subagentAllowedToolNames
@@ -265,40 +507,117 @@ async function runTools(toolCalls, ctx, sendChunk) {
           const cid = args.chapterId
           const title = args.title
           const maxLen = args.maxTextLength || 12000
-          const data = getChapterContent(cid, title, maxLen)
-          if (!data) {
+          const gate = chapterAllowedByWritingCatalog(cid, writingChapters)
+          if (!gate.ok) {
+            content = jsonCatalogReject(ctx, gate, cid)
+            break
+          }
+          const key = String(cid).trim()
+          const cache = ensureChapterContentCache(ctx)
+          if (cache && cache.has(key)) {
+            const entry = cache.get(key)
+            const plainSlice = String(entry.plainTextFull ?? '').slice(0, maxLen)
+            const titleRes = title || entry.titleResolved || titleFromWritingCatalog(cid, writingChapters) || ''
             content = JSON.stringify({
-              error: '未找到该章节正文。请确认 chapterId 为左侧写作章节目录对应的章节 id，不要使用总纲/章节大纲/其他大纲树中的节点 id。',
+              chapterId: key,
+              title: titleRes,
+              plainText: plainSlice || '（本章暂无正文内容）',
+            })
+            toolFromCache = true
+            break
+          }
+          const full = readChapterPlainFull(cid)
+          if (!full) {
+            content = JSON.stringify({
+              error: CATALOG_TOOL_FAIL_MSG,
               chapterId: cid,
             })
-          } else {
-            content = JSON.stringify({ chapterId: data.chapterId, title: data.title, plainText: data.plainText || '（本章暂无正文内容）' })
+            break
           }
+          const titleResolved = title || titleFromWritingCatalog(cid, writingChapters) || ''
+          if (cache) {
+            cache.set(key, { plainTextFull: full.plainTextFull, titleResolved })
+          }
+          const plainText = String(full.plainTextFull || '').slice(0, maxLen)
+          content = JSON.stringify({
+            chapterId: key,
+            title: titleResolved,
+            plainText: plainText || '（本章暂无正文内容）',
+          })
           break
         }
         case 'listWritingChapters': {
           const bid = args.bookId ?? defaultBookId
-          if (!bid || Number.isNaN(Number(bid))) {
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取写作目录章节列表' })
             break
           }
-          const result = listWritingChapters(Number(bid))
-          content = JSON.stringify(result).slice(0, 24000)
+          const ck = `listWritingChapters:${String(bid)}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
+          const result = listWritingChapters(String(bid))
+          const payload = JSON.stringify(result).slice(0, 24000)
+          readToolCacheSet(ctx, ck, payload)
+          content = payload
           break
         }
         case 'batchGetChapterContents': {
           const cids = args.chapterIds || []
           const maxLen = args.maxTextLength || 12000
-          const titleMap = new Map((writingChapters || []).map((c) => [c.id, c.title]))
-          const list = batchGetChapterContents(cids, titleMap, maxLen)
+          const batchGate = chaptersAllowedByWritingCatalog(cids, writingChapters)
+          if (!batchGate.ok) {
+            content = jsonBatchCatalogReject(ctx, batchGate)
+            break
+          }
+          const titleMap = new Map((writingChapters || []).map((c) => [String(c.id), c.title]))
+          const cache = ensureChapterContentCache(ctx)
+          const idList = Array.isArray(cids) ? cids : []
+          let batchAllCached = idList.length > 0
+          const list = idList.map((cidRaw) => {
+            const cid = String(cidRaw).trim()
+            const t = titleMap.get(String(cid))
+            if (cache && cache.has(cid)) {
+              const entry = cache.get(cid)
+              const plainText = String(entry.plainTextFull ?? '').slice(0, maxLen)
+              return { chapterId: cid, title: t || entry.titleResolved || '', plainText }
+            }
+            batchAllCached = false
+            const full = readChapterPlainFull(cid)
+            if (!full) {
+              return { chapterId: cid, title: t || '', plainText: '' }
+            }
+            const titleResolved = t || titleFromWritingCatalog(cid, writingChapters) || ''
+            if (cache) {
+              cache.set(cid, { plainTextFull: full.plainTextFull, titleResolved })
+            }
+            const plainText = String(full.plainTextFull || '').slice(0, maxLen)
+            return { chapterId: cid, title: titleResolved, plainText }
+          })
           content = JSON.stringify(list.map((c) => ({ chapterId: c.chapterId, title: c.title, plainText: c.plainText }))).slice(0, 24000)
+          toolFromCache = batchAllCached
           break
         }
         case 'getBookCharacters': {
           const bid = args.bookId ?? defaultBookId
-          let chars = getDb().getCharacters(bid) || []
           const ids = args.characterIds
           const nameQueries = args.names
+          const filtered =
+            (Array.isArray(ids) && ids.length > 0) ||
+            (Array.isArray(nameQueries) && nameQueries.length > 0)
+          if (!filtered) {
+            const ck = `getBookCharacters:all:${String(bid)}`
+            const hit = readToolCacheGet(ctx, ck)
+            if (hit != null) {
+              content = hit
+              toolFromCache = true
+              break
+            }
+          }
+          let chars = getDb().getCharacters(bid) || []
           if (Array.isArray(ids) && ids.length > 0) {
             const idSet = new Set(ids.map((x) => Number(x)).filter((n) => !Number.isNaN(n)))
             chars = chars.filter((c) => idSet.has(c.id))
@@ -314,10 +633,20 @@ async function runTools(toolCalls, ctx, sendChunk) {
             }
           }
           content = formatCharactersAsText(chars) || '（暂无人物）'
+          if (!filtered) {
+            readToolCacheSet(ctx, `getBookCharacters:all:${String(bid)}`, content)
+          }
           break
         }
         case 'listBookCharacters': {
           const bid = args.bookId ?? defaultBookId
+          const ck = `listBookCharacters:${String(bid)}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
           const chars = getDb().getCharacters(bid) || []
           const list = chars.map((c) => ({
             id: c.id,
@@ -327,17 +656,26 @@ async function runTools(toolCalls, ctx, sendChunk) {
                 .trim() || '未命名',
           }))
           content = JSON.stringify(list)
+          readToolCacheSet(ctx, ck, content)
           break
         }
         case 'getStoryBackground': {
           const bid = args.bookId ?? defaultBookId
+          const ck = `getStoryBackground:${String(bid)}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
           const row = getDb().getStoryBackground(bid)
           content = row?.content ?? '（暂无小说背景）'
+          readToolCacheSet(ctx, ck, content)
           break
         }
         case 'queryOutline': {
           const bid = args.bookId ?? defaultBookId
-          if (!bid || Number.isNaN(Number(bid))) {
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法查询大纲' })
             break
           }
@@ -345,36 +683,54 @@ async function runTools(toolCalls, ctx, sendChunk) {
           const includeChapters = args.includeChapters !== false
           const includeText = args.includeText !== false
           const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+          const oidKey = Array.isArray(oids) ? [...oids].map(String).sort().join(',') : ''
+          const ck = `queryOutline:${String(bid)}:${oidKey}:${includeChapters}:${includeText}:${maxLen}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
           const result = queryOutline(bid, oids, includeChapters, includeText, maxLen)
           console.log('[toolExecutor:queryOutline] done', {
-            bookId: Number(bid),
+            bookId: String(bid),
             outlineIds: Array.isArray(oids) ? oids : null,
             total: result.total,
             includeChapters,
             includeText,
             maxTextLength: maxLen,
           })
-          content = JSON.stringify(result).slice(0, 24000)
+          const payload = JSON.stringify(result).slice(0, 24000)
+          readToolCacheSet(ctx, ck, payload)
+          content = payload
           break
         }
         case 'getGlobalOutline': {
           const bid = args.bookId ?? defaultBookId
-          if (!bid || Number.isNaN(Number(bid))) {
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取总纲' })
             break
           }
           const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
+          const ck = `getGlobalOutline:${String(bid)}:${maxLen}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
           const result = getGlobalOutline(bid, maxLen)
           if (!result) {
             content = JSON.stringify({ success: false, error: '获取总纲失败' })
             break
           }
           content = JSON.stringify(result)
+          readToolCacheSet(ctx, ck, content)
           break
         }
         case 'editGlobalOutline': {
           const bid = args.bookId ?? defaultBookId
-          if (!bid || Number.isNaN(Number(bid))) {
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
             break
           }
@@ -389,13 +745,14 @@ async function runTools(toolCalls, ctx, sendChunk) {
               break
             }
             const saved = getDb().updateOutline({
-              outlineId: Number(globalOutline.id),
+              outlineId: String(globalOutline.id),
               markdown_content: args.markdownContent,
             })
+            invalidateReadToolCache(ctx)
             content = JSON.stringify({
               success: true,
-              bookId: Number(bid),
-              outlineId: Number(globalOutline.id),
+              bookId: String(bid),
+              outlineId: String(globalOutline.id),
               title: saved?.title || '总纲',
               type: saved?.type || 'global',
               markdownLength: String(args.markdownContent).length,
@@ -407,31 +764,40 @@ async function runTools(toolCalls, ctx, sendChunk) {
         }
         case 'listOutlines': {
           const bid = args.bookId ?? defaultBookId
-          if (!bid || Number.isNaN(Number(bid))) {
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取大纲列表' })
             break
           }
+          const ck = `listOutlines:${String(bid)}`
+          const hit = readToolCacheGet(ctx, ck)
+          if (hit != null) {
+            content = hit
+            toolFromCache = true
+            break
+          }
           const list = getAvailableOutlines(bid).map((o) => ({
-            id: Number(o.id),
+            id: String(o.id),
             title: o.title || '',
             type: o.type || '',
           }))
-          content = JSON.stringify({
+          const payload = JSON.stringify({
             success: true,
-            bookId: Number(bid),
+            bookId: String(bid),
             total: list.length,
             outlines: list,
           })
+          readToolCacheSet(ctx, ck, payload)
+          content = payload
           break
         }
         case 'updateOutline': {
           const bid = args.bookId ?? defaultBookId
-          const oid = Number(args.outlineId)
-          if (!bid || Number.isNaN(Number(bid))) {
+          const oid = args.outlineId != null ? String(args.outlineId).trim() : ''
+          if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
             break
           }
-          if (!Number.isFinite(oid) || oid <= 0) {
+          if (!oid) {
             content = JSON.stringify({ success: false, error: '缺少有效 outlineId' })
             break
           }
@@ -454,7 +820,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
             allOutlines?.writingOutline?.outline,
           ]
             .filter(Boolean)
-            .some((o) => Number(o.id) === oid)
+            .some((o) => String(o.id) === oid)
           if (!exists) {
             content = JSON.stringify({
               success: false,
@@ -465,6 +831,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           }
           try {
             const saved = getDb().updateOutline(updatePayload)
+            invalidateReadToolCache(ctx)
             content = JSON.stringify({
               success: true,
               outlineId: oid,
@@ -483,8 +850,19 @@ async function runTools(toolCalls, ctx, sendChunk) {
           if (!cid) {
             content = JSON.stringify({ success: false, error: '缺少 chapterId' })
           } else {
+            const editGate = chapterAllowedByWritingCatalog(cid, writingChapters)
+            if (!editGate.ok) {
+              const p = catalogRejectPayload(ctx, editGate, cid)
+              content = JSON.stringify({
+                success: false,
+                error: p.error,
+                ...(p.chapterId != null ? { chapterId: p.chapterId } : {}),
+              })
+              break
+            }
             try {
               getDb().saveArticle(cid, newContent)
+              invalidateChapterContentCache(ctx, cid)
               if (sendChunk) sendChunk({ chapterContentUpdated: cid }) // 通知前端刷新章节
               content = JSON.stringify({ success: true, message: '章节正文已保存', chapterId: cid })
             } catch (e) {
@@ -587,7 +965,11 @@ async function runTools(toolCalls, ctx, sendChunk) {
 
     results.push({ tool_call_id: tc.id, content })
     if (typeof sendChunk === 'function') {
-      sendChunk({ toolIndexCompleted: i })
+      sendChunk(
+        toolFromCache
+          ? { toolIndexCompleted: i, toolFromCache: true }
+          : { toolIndexCompleted: i },
+      )
     }
   }
 

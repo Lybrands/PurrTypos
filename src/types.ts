@@ -1,15 +1,18 @@
+/** 书籍 / 大纲 / 章节主键：8 位字符串（数字 + 大小写字母，见 idUtils / shortUuid） */
+export type EntityId = string;
+
 export interface Chapter {
-  id: number;
-  outline_id: number;
+  id: EntityId;
+  outline_id: EntityId;
   title: string;
   level: number;
   progress: string;
   sort: number;
-  parent_id?: number | null;
+  parent_id?: EntityId | null;
 }
 
 export interface Book {
-  id: number;
+  id: EntityId;
   title: string;
   cover_color?: string | null;
   enable_volume?: number;
@@ -25,7 +28,7 @@ export interface CharacterOption {
 
 export interface Character {
   id: number;
-  book_id: number;
+  book_id: EntityId;
   name: string;
   gender?: string;
   age?: string;
@@ -43,7 +46,7 @@ export interface Character {
 }
 
 export interface Outline {
-  id: number;
+  id: EntityId;
   title: string;
   type?: "global" | "chapter" | "other" | "volume";
   sort?: number;
@@ -51,9 +54,9 @@ export interface Outline {
   file_path?: string | null;
   /** 应用内 Markdown 大纲正文，与 XMind 并行保存 */
   markdown_content?: string | null;
-  book_id?: number | null;
-  parent_outline_id?: number | null;
-  writing_chapter_id?: number | null;
+  book_id?: EntityId | null;
+  parent_outline_id?: EntityId | null;
+  writing_chapter_id?: EntityId | null;
   create_time?: string;
 }
 
@@ -63,14 +66,14 @@ export interface VolumeOutline extends Outline {
 
 export interface Article {
   id: number;
-  chapter_id: number;
+  chapter_id: EntityId;
   content: string;
   update_time?: string;
 }
 
 export interface StoryBackgroundAttachment {
   id: number;
-  book_id: number;
+  book_id: EntityId;
   name: string;
   stored_path: string;
   create_time?: string;
@@ -78,8 +81,8 @@ export interface StoryBackgroundAttachment {
 
 export interface AiSession {
   id: number;
-  book_id?: number | null;
-  chapter_id?: number | null;
+  book_id?: EntityId | null;
+  chapter_id?: EntityId | null;
   title: string;
   create_time?: string;
 }
@@ -96,7 +99,7 @@ export interface AiFavorite {
 export interface Conversation {
   id: number;
   session_id: number;
-  chapter_id: number;
+  chapter_id: EntityId;
   prompt: string;
   response: string;
   model?: string;
@@ -111,23 +114,23 @@ export type MemoryLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
 export interface AiMemory {
   id: number | string;  // mem0 使用 UUID 字符串
-  book_id: number;
+  book_id: EntityId;
   layer: MemoryLayer;
   content: string;
-  chapter_id?: number | null;
+  chapter_id?: EntityId | null;
   character_id?: number | null;
   create_time?: string;
 }
 
 export interface AiForeshadowing {
   id: number | string;  // mem0 使用 UUID 字符串
-  book_id: number;
-  chapter_id: number;
+  book_id: EntityId;
+  chapter_id: EntityId;
   content: string;
   type: string;
-  expected_chapter_id?: number | null;
+  expected_chapter_id?: EntityId | null;
   status: '未回收' | '已回收';
-  resolved_chapter_id?: number | null;
+  resolved_chapter_id?: EntityId | null;
   create_time?: string;
   update_time?: string;
 }
@@ -161,15 +164,15 @@ export interface ElectronAPI {
     title: string;
     enableVolume?: boolean;
   }) => Promise<ApiResult<Book>>;
-  deleteBook: (data: { bookId: number }) => Promise<ApiResult<void>>;
+  deleteBook: (data: { bookId: EntityId }) => Promise<ApiResult<void>>;
   renameBook: (data: {
-    bookId: number;
+    bookId: EntityId;
     title: string;
   }) => Promise<ApiResult<void>>;
   // 人物
-  getCharacters: (data: { bookId: number }) => Promise<ApiResult<Character[]>>;
+  getCharacters: (data: { bookId: EntityId }) => Promise<ApiResult<Character[]>>;
   createCharacter: (data: {
-    bookId: number;
+    bookId: EntityId;
     data: Partial<Character>;
   }) => Promise<ApiResult<Character>>;
   updateCharacter: (data: {
@@ -196,32 +199,32 @@ export interface ElectronAPI {
     type?: "global" | "chapter" | "other" | "volume";
     xmind_data?: string;
     file_path?: string;
-    book_id?: number | null;
-    writing_chapter_id?: number | null;
-    parent_outline_id?: number | null;
+    book_id?: EntityId | null;
+    writing_chapter_id?: EntityId | null;
+    parent_outline_id?: EntityId | null;
   }) => Promise<ApiResult<Outline>>;
   getVolumeOutlines: (
-    bookId?: number | null,
+    bookId?: EntityId | null,
   ) => Promise<ApiResult<VolumeOutline[]>>;
   getOutlineByWritingChapter: (
-    writingChapterId: number,
+    writingChapterId: EntityId,
   ) => Promise<ApiResult<Outline | null>>;
   getOutlines: (
     typeFilter?: "global" | "chapter",
   ) => Promise<ApiResult<Outline[]>>;
-  getWritingOutline: (bookId?: number | null) => Promise<ApiResult<Outline>>;
+  getWritingOutline: (bookId?: EntityId | null) => Promise<ApiResult<Outline>>;
   getGlobalOutline: (
-    bookId?: number | null,
+    bookId?: EntityId | null,
   ) => Promise<ApiResult<Outline | null>>;
   /** 若无总纲记录则创建空总纲（可只写 Markdown），用于与章节大纲一致的文本大纲入口 */
   ensureGlobalOutline: (
-    bookId?: number | null,
+    bookId?: EntityId | null,
   ) => Promise<ApiResult<Outline>>;
-  getChapterOutlines: (bookId?: number | null) => Promise<ApiResult<Outline[]>>;
-  getOtherOutlines: (bookId?: number | null) => Promise<ApiResult<Outline[]>>;
-  deleteOutline: (data: { outlineId: number }) => Promise<ApiResult<void>>;
+  getChapterOutlines: (bookId?: EntityId | null) => Promise<ApiResult<Outline[]>>;
+  getOtherOutlines: (bookId?: EntityId | null) => Promise<ApiResult<Outline[]>>;
+  deleteOutline: (data: { outlineId: EntityId }) => Promise<ApiResult<void>>;
   updateOutline: (data: {
-    outlineId: number;
+    outlineId: EntityId;
     title?: string;
     xmind_data?: string;
     file_path?: string;
@@ -229,48 +232,48 @@ export interface ElectronAPI {
   }) => Promise<ApiResult<Outline>>;
   // 章节
   saveChapters: (data: {
-    outlineId: number;
+    outlineId: EntityId;
     chapters: unknown[];
   }) => Promise<ApiResult<void>>;
-  getChapters: (data: { outlineId: number }) => Promise<ApiResult<Chapter[]>>;
+  getChapters: (data: { outlineId: EntityId }) => Promise<ApiResult<Chapter[]>>;
   addChapter: (data: {
-    outlineId: number;
+    outlineId: EntityId;
     title: string;
-    parentId?: number | null;
+    parentId?: EntityId | null;
   }) => Promise<ApiResult<Chapter>>;
-  deleteChapter: (data: { id: number }) => Promise<ApiResult<void>>;
+  deleteChapter: (data: { id: EntityId }) => Promise<ApiResult<void>>;
   renameChapter: (data: {
-    id: number;
+    id: EntityId;
     title: string;
   }) => Promise<ApiResult<void>>;
   updateChapterProgress: (data: {
-    id: number;
+    id: EntityId;
     progress: string;
   }) => Promise<ApiResult<void>>;
   // 文档
   saveArticle: (data: {
-    chapterId: number;
+    chapterId: EntityId;
     content: string;
   }) => Promise<ApiResult<void>>;
   getArticle: (data: {
-    chapterId: number;
+    chapterId: EntityId;
   }) => Promise<ApiResult<Article | null>>;
-  getStoryBackground: (data: { bookId: number }) => Promise<ApiResult<{ book_id: number; content: string; update_time?: string } | null>>;
-  saveStoryBackground: (data: { bookId: number; content: string }) => Promise<ApiResult<void>>;
+  getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
+  saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
-  pickStoryBackgroundAttachments: (data: { bookId: number }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
-  getStoryBackgroundAttachments: (data: { bookId: number }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
+  pickStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
+  getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
   // AI
-  createSession: (data: { bookId: number; chapterId?: number | null }) => Promise<ApiResult<AiSession>>;
-  getSessions: (data: { bookId: number; chapterId?: number | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
+  createSession: (data: { bookId: EntityId; chapterId?: EntityId | null }) => Promise<ApiResult<AiSession>>;
+  getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
   setSessionClosed: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   setSessionReopened: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   deleteSession: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   saveConversation: (data: {
     sessionId: number;
-    chapterId?: number | null;
+    chapterId?: EntityId | null;
     prompt: string;
     response: string;
     model?: string;
@@ -309,23 +312,23 @@ export interface ElectronAPI {
   getAiFavorites: () => Promise<ApiResult<AiFavorite[]>>;
   deleteAiFavorite: (data: { id: number }) => Promise<ApiResult<void>>;
   // 长期记忆（五层）
-  addMemory: (data: { bookId: number; layer: MemoryLayer; content: string; chapterId?: number | null; characterId?: number | null }) => Promise<ApiResult<AiMemory>>;
+  addMemory: (data: { bookId: EntityId; layer: MemoryLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiMemory>>;
   updateMemory: (data: { id: number | string; data: Partial<Pick<AiMemory, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiMemory>>;
   deleteMemory: (data: { id: number | string }) => Promise<ApiResult<void>>;
-  getMemoriesByBook: (data: { bookId: number; layer?: MemoryLayer }) => Promise<ApiResult<AiMemory[]>>;
+  getMemoriesByBook: (data: { bookId: EntityId; layer?: MemoryLayer }) => Promise<ApiResult<AiMemory[]>>;
   getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiMemory[]>>;
   getMemoriesForPrompt: (data: {
-    bookId: number;
+    bookId: EntityId;
     query?: string;
-    options?: { layers?: MemoryLayer[]; chapterId?: number; limitPerLayer?: number; limit?: number };
+    options?: { layers?: MemoryLayer[]; chapterId?: EntityId; limitPerLayer?: number; limit?: number };
   }) => Promise<ApiResult<AiMemory[]>>;
   // 伏笔记忆
-  addForeshadowing: (data: { bookId: number; chapterId: number; content: string; type?: string; expectedChapterId?: number | null }) => Promise<ApiResult<AiForeshadowing>>;
+  addForeshadowing: (data: { bookId: EntityId; chapterId: EntityId; content: string; type?: string; expectedChapterId?: EntityId | null }) => Promise<ApiResult<AiForeshadowing>>;
   updateForeshadowing: (data: { id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
   deleteForeshadowing: (data: { id: number | string }) => Promise<ApiResult<void>>;
-  getForeshadowingByBook: (data: { bookId: number; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
+  getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiForeshadowing[]>>;
-  getForeshadowingForPrompt: (data: { bookId: number; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
+  getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
   generateSessionTitle: (data: {
     apiKey: string;
     baseURL?: string;
@@ -352,13 +355,21 @@ export interface ElectronAPI {
     };
     tools?: unknown[];
     useToolRouter?: boolean;
-    bookId?: number | null;
-    chapterId?: number | null;
+    bookId?: EntityId | null;
+    /** 仅用于提示文案，不替代 bookId */
+    bookTitle?: string;
+    chapterId?: EntityId | null;
     currentChapterTitle?: string;
-    writingChapters?: { id: number; title: string }[];
-    availableOutlines?: { id: number; title: string }[];
+    writingChapters?: { id: EntityId; title: string }[];
+    availableOutlines?: { id: EntityId; title: string; type?: string }[];
+    /** 与界面「关联章节」一致，主进程并入 toolCtx 供写作专家 system 附录 */
+    associatedChapterIds?: EntityId[];
+    associatedOutlineIds?: EntityId[];
     agentMode?: "legacy" | "subagent";
-    agentAction?: "analyze" | "plan" | "draft" | "review" | "polish" | "full";
+    /** 兼容旧版单选 */
+    agentAction?: "analyze" | "plan" | "draft" | "styleUnify" | "review" | "polish" | "full";
+    /** 写作专家多选阶段（优先于 agentAction） */
+    agentActions?: string[];
   }) => void;
   abortAiStream: () => void;
   onAiChunk: (
@@ -374,9 +385,15 @@ export interface ElectronAPI {
       partialContent?: string;
       partialThinking?: string;
       messagesSent?: Array<{ role: string; content: string }>;
-      chapterContentUpdated?: number;
+      chapterContentUpdated?: EntityId;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
+      /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
+      toolFromCache?: boolean;
+      /** 本批工具执行前即已命中只读缓存的掩码（与 toolCalls 等长）；为 true 的索引整段不展示 */
+      toolReadCacheMask?: boolean[];
+      /** 命中请求内只读缓存的工具序号（与 toolIndexCompleted 配合） */
+      toolCallCachedIndex?: number;
       /** 工具路由（嵌入/意图模型）失败时的简短提示，由主进程经流式通道下发 */
       toolRouterWarning?: string;
       /** DAG 编排阶段信息，用于前端可视化“自动补前置” */
@@ -392,13 +409,18 @@ export interface ElectronAPI {
         events?: Array<{
           tool?: string;
           reason?: string;
-          resolvedOutlineId?: number;
+          resolvedOutlineId?: EntityId;
         }>;
       };
       subagentStage?: string;
-      /** 与 subagentStageName 同时出现时表示某一 subagent 阶段已结束 */
       subagentStageName?: string;
+      /** 为 true 时表示本 chunk 仅标记阶段开始（与交付物 chunk 区分） */
+      subagentStageStarting?: boolean;
       subagentStageDone?: string;
+      /** 主稿专家在各子阶段之间输出过渡说明时置 true，结束时 false */
+      subagentBridging?: boolean;
+      /** 进入最终主稿专家流式呈现时置 true */
+      subagentMainPresenter?: boolean;
       subagentPayload?: unknown;
       subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
     }) => void,

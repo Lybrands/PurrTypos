@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from 'react'
 import { App as AntdApp, Spin } from 'antd'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiModelConfig } from './types'
+import { Book, type AiModelConfig, type EntityId } from './types'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -52,11 +52,6 @@ export default function App() {
     window.electronAPI.setSettings({ ai_system_prompt: value })
   }, [])
 
-  const handleAiAgentModeChange = React.useCallback((value: 'legacy' | 'subagent') => {
-    setAiAgentMode(value)
-    window.electronAPI.setSettings({ ai_agent_mode: value })
-  }, [])
-
   const loadBooks = React.useCallback(async () => {
     const res = await window.electronAPI.getBooks()
     if (res.success && res.data) setBooks(res.data)
@@ -84,7 +79,7 @@ export default function App() {
     }
   }, [loadBooks, appMessage])
 
-  const handleDeleteBook = React.useCallback(async (bookId: number) => {
+  const handleDeleteBook = React.useCallback(async (bookId: EntityId) => {
     const res = await window.electronAPI.deleteBook({ bookId })
     if (res.success) {
       await loadBooks()
@@ -94,7 +89,7 @@ export default function App() {
     }
   }, [loadBooks, appMessage])
 
-  const handleRenameBook = React.useCallback(async (bookId: number, title: string) => {
+  const handleRenameBook = React.useCallback(async (bookId: EntityId, title: string) => {
     const res = await window.electronAPI.renameBook({ bookId, title })
     if (res.success) {
       await loadBooks()
@@ -168,8 +163,6 @@ export default function App() {
             onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
             systemPrompt={systemPrompt}
             onSystemPromptChange={handleSystemPromptChange}
-            aiAgentMode={aiAgentMode}
-            onAiAgentModeChange={handleAiAgentModeChange}
           />
           </Suspense>
         </div>

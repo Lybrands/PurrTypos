@@ -7,7 +7,7 @@ import {
 } from '@ant-design/icons'
 import { App as AntdApp, Button, Input, Empty, Checkbox, Tooltip } from 'antd'
 import type { InputRef } from 'antd/es/input/Input'
-import type { AiModelConfig, Chapter, Outline } from '../../types'
+import type { AiModelConfig, Chapter, EntityId, Outline } from '../../types'
 import { useWorkspace } from '../WorkspaceContext'
 import { HighlightText } from '../search/highlightText'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -19,7 +19,7 @@ import './index.scss'
 
 const AUTOSAVE_DELAY = 800
 
-async function ensureDefaultOutline(bookId?: number | null): Promise<Outline | null> {
+async function ensureDefaultOutline(bookId?: EntityId | null): Promise<Outline | null> {
   const res = await window.electronAPI.getWritingOutline(bookId)
   if (res.success && res.data) return res.data
   return null
@@ -33,9 +33,9 @@ interface AiFloatState {
 interface EditorPanelProps {
   bookTitle: string
   /** 非分卷模式 OR 分卷模式下均通过此回调通知父组件创建大纲 */
-  onItemCreated?: (chapterId: number, title: string, isVolume: boolean, parentWritingChapterId: number | null) => void
+  onItemCreated?: (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => void
   /** 删除写作章节时，通过 writingChapterId 通知父组件删除对应大纲 */
-  onWritingChapterDeleted?: (writingChapterId: number) => void
+  onWritingChapterDeleted?: (writingChapterId: EntityId) => void
   modelConfigs?: AiModelConfig[]
   isFullscreen: boolean
   onToggleFullscreen: () => void
@@ -73,7 +73,7 @@ export default function EditorPanel({
   const [navCollapsed, setNavCollapsed] = React.useState(false)
 
   // ─── 通用添加/重命名/删除状态 ─────────────────────────────
-  const [editingChapterId, setEditingChapterId] = React.useState<number | null>(null)
+  const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)
   const [editingTitle, setEditingTitle] = React.useState('')
   const addingRef = React.useRef(false)
 
@@ -88,24 +88,24 @@ export default function EditorPanel({
   const addVolRef = React.useRef<InputRef>(null)
 
   // ─── 分卷模式：添加章节（归属某卷） ──────────────────────
-  const [addingChapterVolId, setAddingChapterVolId] = React.useState<number | null>(null)
+  const [addingChapterVolId, setAddingChapterVolId] = React.useState<EntityId | null>(null)
   const [newChapterSubtitle, setNewChapterSubtitle] = React.useState('')
   const addChapterRef = React.useRef<InputRef>(null)
 
   // ─── 分卷模式：折叠卷 ────────────────────────────────────
-  const [collapsedVolIds, setCollapsedVolIds] = React.useState<Set<number>>(new Set())
+  const [collapsedVolIds, setCollapsedVolIds] = React.useState<Set<EntityId>>(new Set())
 
   // ─── 批量删除 ────────────────────────────────────────────
   type DeleteModal = { chapter: Chapter; onConfirm: (checked: boolean) => void; checkboxLabel?: string }
   const [deleteModal, setDeleteModal] = React.useState<DeleteModal | null>(null)
-  type BatchDeleteModal = { ids: number[]; onConfirm: () => void }
+  type BatchDeleteModal = { ids: EntityId[]; onConfirm: () => void }
   const [batchDeleteModal, setBatchDeleteModal] = React.useState<BatchDeleteModal | null>(null)
   const [batchMode, setBatchMode] = React.useState(false)
-  const [selectedIds, setSelectedIds] = React.useState<Set<number>>(new Set())
+  const [selectedIds, setSelectedIds] = React.useState<Set<EntityId>>(new Set())
 
   // ─── 导出章节 ─────────────────────────────────────────────
   const [exportModalOpen, setExportModalOpen] = React.useState(false)
-  const [exportSelectedIds, setExportSelectedIds] = React.useState<number[]>([])
+  const [exportSelectedIds, setExportSelectedIds] = React.useState<EntityId[]>([])
   const [exportLoading, setExportLoading] = React.useState(false)
 
   // ─── AI 浮窗 ─────────────────────────────────────────────
@@ -114,7 +114,7 @@ export default function EditorPanel({
   )
 
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastChapterIdRef = React.useRef<number | null>(null)
+  const lastChapterIdRef = React.useRef<EntityId | null>(null)
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
 
   // ─── 派生数据：分卷模式 ───────────────────────────────────
@@ -123,8 +123,8 @@ export default function EditorPanel({
     [chapters, enableVolume]
   )
   const chaptersByVolId = React.useMemo(() => {
-    if (!enableVolume) return new Map<number, Chapter[]>()
-    const map = new Map<number, Chapter[]>()
+    if (!enableVolume) return new Map<EntityId, Chapter[]>()
+    const map = new Map<EntityId, Chapter[]>()
     for (const ch of chapters) {
       if (ch.parent_id != null) {
         const list = map.get(ch.parent_id) ?? []
@@ -139,7 +139,7 @@ export default function EditorPanel({
   const idToChapter = React.useMemo(() => new Map(chapters.map((c) => [c.id, c])), [chapters])
 
   // ─── 加载/保存文章 ────────────────────────────────────────
-  const refreshArticle = React.useCallback((cid: number) => {
+  const refreshArticle = React.useCallback((cid: EntityId) => {
     window.electronAPI.getArticle({ chapterId: cid }).then((res) => {
       const text = res.success && res.data ? res.data.content : ''
       setContent(text)
@@ -157,7 +157,7 @@ export default function EditorPanel({
   // AI 通过 editChapterContent 保存某章后发出事件，若当前正在编辑该章则立即刷新
   React.useEffect(() => {
     const handler = (e: Event) => {
-      const { chapterId: updatedId } = (e as CustomEvent<{ chapterId: number }>).detail ?? {}
+      const { chapterId: updatedId } = (e as CustomEvent<{ chapterId: EntityId }>).detail ?? {}
       if (updatedId != null && updatedId === chapterId) refreshArticle(updatedId)
     }
     window.addEventListener('chapter-content-updated', handler)
@@ -255,13 +255,13 @@ export default function EditorPanel({
   }
 
   // ─── 获取写作大纲 ID ──────────────────────────────────────
-  const getOutlineId = async (): Promise<number | null> => {
+  const getOutlineId = async (): Promise<EntityId | null> => {
     if (writingOutlineId) return writingOutlineId
     const outline = await ensureDefaultOutline(bookId)
     return outline ? outline.id : null
   }
 
-  const reloadChapters = async (outlineId: number) => {
+  const reloadChapters = async (outlineId: EntityId) => {
     const chapRes = await window.electronAPI.getChapters({ outlineId })
     if (chapRes.success) onChaptersChange?.(outlineId, chapRes.data)
   }
@@ -308,7 +308,7 @@ export default function EditorPanel({
   }
 
   // ─── 分卷：在某卷下新建章节 ───────────────────────────────
-  const handleAddChapterUnderVolume = async (volumeId: number) => {
+  const handleAddChapterUnderVolume = async (volumeId: EntityId) => {
     if (addingRef.current) return
     const subtitle = newChapterSubtitle.trim()
     const volChapters = chaptersByVolId.get(volumeId) ?? []
@@ -351,7 +351,7 @@ export default function EditorPanel({
         setDeleteModal(null)
         for (const id of allIds) await window.electronAPI.deleteChapter({ id })
         if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (allIds.includes(chapterId ?? 0)) onChapterSelect?.(0, '')
+        if (chapterId != null && allIds.includes(chapterId)) onChapterSelect?.('', '')
         if (checked) {
           for (const id of allIds) onWritingChapterDeleted?.(id)
         }
@@ -361,7 +361,7 @@ export default function EditorPanel({
   }
 
   // ─── 批量删除 ────────────────────────────────────────────
-  const toggleSelect = (id: number) => {
+  const toggleSelect = (id: EntityId) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
@@ -372,7 +372,7 @@ export default function EditorPanel({
   const handleBatchDelete = () => {
     let ids = Array.from(selectedIds)
     if (enableVolume) {
-      const expanded = new Set<number>()
+      const expanded = new Set<EntityId>()
       for (const id of ids) {
         expanded.add(id)
         const ch = chapters.find((c) => c.id === id)
@@ -389,7 +389,7 @@ export default function EditorPanel({
         setBatchDeleteModal(null); setBatchMode(false); setSelectedIds(new Set())
         for (const id of ids) await window.electronAPI.deleteChapter({ id })
         if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (ids.includes(chapterId ?? 0)) onChapterSelect?.(0, '')
+        if (chapterId != null && ids.includes(chapterId)) onChapterSelect?.('', '')
         for (const id of ids) onWritingChapterDeleted?.(id)
       },
     })
@@ -419,7 +419,7 @@ export default function EditorPanel({
   )
 
   const handleExportConfirm = React.useCallback(
-    async (selectedIds: number[], format: 'md' | 'txt', exportAsZip: boolean) => {
+    async (selectedIds: EntityId[], format: 'md' | 'txt', exportAsZip: boolean) => {
       if (selectedIds.length === 0) {
         appMessage.warning('请至少选择一章')
         return

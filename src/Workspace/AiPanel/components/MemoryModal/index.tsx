@@ -1,7 +1,7 @@
 import React from 'react'
 import { Button, Checkbox, Empty, Input, Modal, Select, Spin, Tabs } from 'antd'
 import { DeleteOutlined } from '@ant-design/icons'
-import type { AiMemory, AiForeshadowing, MemoryLayer } from '../../../../types'
+import type { AiMemory, AiForeshadowing, EntityId, MemoryLayer } from '../../../../types'
 import {
   FORESHADOWING_TYPES,
   MemoryLayerFour,
@@ -13,8 +13,8 @@ import './index.scss'
 export interface MemoryModalProps {
   open: boolean
   onCancel: () => void
-  bookId: number | null
-  writingChapters?: { id: number; title: string }[]
+  bookId: EntityId | null
+  writingChapters?: { id: EntityId; title: string }[]
   selectedIds: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
   onSelectConfirm: (memoryIds: (number | string)[], foreshadowingIds: (number | string)[]) => void
@@ -44,7 +44,7 @@ export default function MemoryModal({
   const [adding, setAdding] = React.useState(false)
 
   // 管理：伏笔记忆新增表单
-  const [foreshadowChapterId, setForeshadowChapterId] = React.useState<number | null>(null)
+  const [foreshadowChapterId, setForeshadowChapterId] = React.useState<EntityId | null>(null)
   const [foreshadowContent, setForeshadowContent] = React.useState('')
   const [foreshadowType, setForeshadowType] = React.useState<string>('悬念')
   const [addingForeshadow, setAddingForeshadow] = React.useState(false)
@@ -124,7 +124,7 @@ export default function MemoryModal({
   }, [])
 
   const handleUpdateForeshadowingStatus = React.useCallback(
-    async (id: number | string, status: '未回收' | '已回收', resolvedChapterId?: number | null) => {
+    async (id: number | string, status: '未回收' | '已回收', resolvedChapterId?: EntityId | null) => {
       const res = await window.electronAPI.updateForeshadowing({
         id,
         data: { status, resolved_chapter_id: resolvedChapterId ?? undefined },
@@ -137,8 +137,8 @@ export default function MemoryModal({
   )
 
   const chapterTitleById = React.useMemo(() => {
-    const map = new Map<number, string>()
-    for (const c of writingChapters) map.set(c.id, c.title)
+    const map = new Map<string, string>()
+    for (const c of writingChapters) map.set(String(c.id), c.title)
     return map
   }, [writingChapters])
 
@@ -237,7 +237,7 @@ export default function MemoryModal({
                             >
                               {f.content || '（无内容）'}
                               <span className="memory-foreshadow-meta memory-foreshadow-meta--inline">
-                                【{chapterTitleById.get(f.chapter_id) ?? f.chapter_id} · {f.type}】
+                                【{chapterTitleById.get(String(f.chapter_id)) ?? f.chapter_id} · {f.type}】
                               </span>
                             </span>
                           </div>
@@ -371,7 +371,7 @@ export default function MemoryModal({
                                 <div className="memory-manage-content-wrap">
                                   <span className="memory-manage-content">{f.content || '（无内容）'}</span>
                                   <span className="memory-foreshadow-meta">
-                                    【{chapterTitleById.get(f.chapter_id) ?? f.chapter_id} · {f.type}】
+                                    【{chapterTitleById.get(String(f.chapter_id)) ?? f.chapter_id} · {f.type}】
                                   </span>
                                 </div>
                                 <div className="memory-foreshadow-actions">
@@ -391,7 +391,7 @@ export default function MemoryModal({
                                       placeholder="回收于"
                                       allowClear
                                       value={f.resolved_chapter_id ?? undefined}
-                                      onChange={(v) => handleUpdateForeshadowingStatus(f.id, '已回收', v != null ? Number(v) : null)}
+                                      onChange={(v) => handleUpdateForeshadowingStatus(f.id, '已回收', v != null ? String(v) : null)}
                                       options={writingChapters.map((c) => ({ label: c.title, value: c.id }))}
                                       className="memory-foreshadow-resolved-select"
                                     />

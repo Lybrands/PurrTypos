@@ -4,6 +4,7 @@
 
 import { getWritingOutlineWithChapters, batchGetChapterContents } from '../Workspace/utils'
 import { shortUuid } from './common'
+import type { EntityId } from '../types'
 
 /** 单章数据（标题 + 正文；带卷时可选卷名与卷 id 用于子目录） */
 export interface ExportChapter {
@@ -12,7 +13,7 @@ export interface ExportChapter {
   /** 带卷书籍时，该章所属卷名（用作书名下的子目录名） */
   volumeTitle?: string
   /** 带卷书籍时，该章所属卷的 id（parent_id），用于区分不同卷，保证同卷章节进同一目录） */
-  volumeId?: number
+  volumeId?: EntityId
 }
 
 /** 单本书导出数据（书名 + 章节列表） */
@@ -46,7 +47,7 @@ export function buildExportEntries(
 
   for (const book of books) {
     const folderName = `${sanitizeFileName(book.title)}_${Date.now()}_${shortUuid()}`
-    const volumeIdToDirName = new Map<number, string>()
+    const volumeIdToDirName = new Map<string, string>()
     const usedVolumeDirNames = new Set<string>()
     const fileSeenPerDir = new Map<string, Map<string, number>>()
 
@@ -94,8 +95,8 @@ export function buildExportEntries(
  * 根据选中的书籍 ID 拉取导出所需数据（写作大纲、章节、正文）
  * 依赖运行环境中的 window.electronAPI，使用方法库批量获取
  */
-export async function fetchExportData(bookIds: number[]): Promise<ExportBookData[]> {
-  const api = typeof window !== 'undefined' && (window as unknown as { electronAPI?: { getBooks: () => Promise<{ success: boolean; data?: { id: number; title: string; enable_volume?: number }[] }> } }).electronAPI
+export async function fetchExportData(bookIds: EntityId[]): Promise<ExportBookData[]> {
+  const api = typeof window !== 'undefined' && (window as unknown as { electronAPI?: { getBooks: () => Promise<{ success: boolean; data?: { id: string; title: string; enable_volume?: number }[] }> } }).electronAPI
   if (!api) return []
 
   const booksRes = await api.getBooks()

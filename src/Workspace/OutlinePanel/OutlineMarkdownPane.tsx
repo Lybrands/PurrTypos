@@ -9,6 +9,7 @@ import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
+import type { EntityId } from '../../types'
 import './StoryBackgroundTab.scss'
 import './OutlineMarkdownPane.scss'
 
@@ -31,7 +32,7 @@ export interface OutlineMarkdownPaneRef {
 }
 
 interface OutlineMarkdownPaneProps {
-  outlineId: number
+  outlineId: EntityId
   markdownContent: string | null
   onSaved: () => void
 }

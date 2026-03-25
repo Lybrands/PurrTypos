@@ -3,6 +3,7 @@ import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOut
 import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tooltip } from 'antd'
 import type { AiModelConfig } from '../types'
 import { useAntdApp } from '../hooks/useAntdApp'
+import { shortUuid } from '../utils/common'
 import './index.scss'
 
 type SettingsTab = 'general' | 'ai' | 'models' | 'data'
@@ -24,8 +25,6 @@ interface SettingsPageProps {
   onSyncOutlineChapterChange: (value: boolean) => void
   systemPrompt: string
   onSystemPromptChange: (value: string) => void
-  aiAgentMode: 'legacy' | 'subagent'
-  onAiAgentModeChange: (value: 'legacy' | 'subagent') => void
 }
 
 export default function SettingsPage({
@@ -36,8 +35,6 @@ export default function SettingsPage({
   onSyncOutlineChapterChange,
   systemPrompt,
   onSystemPromptChange,
-  aiAgentMode,
-  onAiAgentModeChange,
 }: SettingsPageProps) {
   const { message } = useAntdApp()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
@@ -161,7 +158,7 @@ export default function SettingsPage({
         message.success('已更新')
       } else {
         const newConfig: AiModelConfig = {
-          id: `model_${Date.now()}`,
+          id: `model_${shortUuid()}`,
           apiProvider: prov,
           name,
           nickname: nickname || undefined,
@@ -197,7 +194,7 @@ export default function SettingsPage({
       : `${c.name}${suffix}`
     const duplicated: AiModelConfig = {
       ...c,
-      id: `model_${Date.now()}`,
+      id: `model_${shortUuid()}`,
       nickname: dupNickname,
     }
     const next = [...modelConfigList, duplicated]
@@ -312,17 +309,6 @@ export default function SettingsPage({
                     恢复默认
                   </Button>
                 </div>
-              </div>
-              <div className="settings-field">
-                <div className="settings-field-label">Agent 模式</div>
-                <p className="settings-field-desc">legacy 为当前单代理模式，subagent 为多阶段子代理模式。</p>
-                <Radio.Group
-                  value={aiAgentMode}
-                  onChange={(e) => onAiAgentModeChange(e.target.value === 'subagent' ? 'subagent' : 'legacy')}
-                >
-                  <Radio value="legacy">legacy（默认）</Radio>
-                  <Radio value="subagent">subagent（实验）</Radio>
-                </Radio.Group>
               </div>
             </div>
           )}

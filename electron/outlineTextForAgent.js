@@ -25,22 +25,18 @@ const TYPE_LABEL = {
  */
 function collectTextOutlineEntries(bookId, outlineIds) {
   const db = getDb()
-  if (bookId == null || Number.isNaN(Number(bookId))) return []
+  if (bookId == null || String(bookId).trim() === '') return []
 
   const filter =
     Array.isArray(outlineIds) && outlineIds.length > 0
-      ? new Set(
-          outlineIds
-            .map((x) => Number(x))
-            .filter((n) => !Number.isNaN(n)),
-        )
+      ? new Set(outlineIds.map((x) => String(x)))
       : null
 
   const entries = []
 
   const consider = (row, opts = {}) => {
     if (!row) return
-    const sameBook = Number(row.book_id) === Number(bookId)
+    const sameBook = row.book_id != null && String(row.book_id) === String(bookId)
     const legacyGlobal = Boolean(
       opts.allowLegacyGlobal &&
       row.type === 'global' &&
@@ -49,7 +45,7 @@ function collectTextOutlineEntries(bookId, outlineIds) {
     if (!sameBook && !legacyGlobal) return
     const md = String(row.markdown_content || '').trim()
     if (!md) return
-    if (filter && !filter.has(row.id)) return
+    if (filter && !filter.has(String(row.id))) return
     entries.push({
       id: row.id,
       title: row.title || '',
@@ -73,8 +69,8 @@ function collectTextOutlineEntries(bookId, outlineIds) {
   consider(writing)
 
   if (Array.isArray(outlineIds) && outlineIds.length > 0 && entries.length > 0) {
-    const order = new Map(outlineIds.map((id, i) => [Number(id), i]))
-    entries.sort((a, b) => (order.get(a.id) ?? 999) - (order.get(b.id) ?? 999))
+    const order = new Map(outlineIds.map((id, i) => [String(id), i]))
+    entries.sort((a, b) => (order.get(String(a.id)) ?? 999) - (order.get(String(b.id)) ?? 999))
   }
 
   return entries

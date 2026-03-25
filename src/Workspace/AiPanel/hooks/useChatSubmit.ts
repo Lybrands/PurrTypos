@@ -1,84 +1,174 @@
 import React from "react";
 import { flushSync } from "react-dom";
 import { App as AntdApp } from "antd";
-import type { AiModelConfig, Outline, AiSession } from "../../../types";
+import type { AiModelConfig, Outline, AiSession, EntityId } from "../../../types";
 
-function chapterDisplayTitle(
-  chapterId: number | undefined,
-  writingChapters: { id: number; title: string }[],
-): string {
-  if (chapterId == null || !Number.isFinite(chapterId)) return "（未知章节）";
-  const ch = writingChapters.find((c) => c.id === chapterId);
-  const t = ch?.title?.trim();
-  return t || `（章节 ${chapterId}）`;
+function normalizeSubagentStageName(stage?: string): string {
+  switch (String(stage || "").trim()) {
+    case "analyze":
+      return "分析专家";
+    case "plan":
+      return "规划专家";
+    case "draft":
+      return "撰稿专家";
+    case "review":
+      return "审校专家";
+    case "polish":
+      return "润色专家";
+    case "styleUnify":
+      return "风格统一专家";
+    default:
+      return String(stage || "").trim();
+  }
 }
 
-/** 工具在对话里的展示文案；需带章名的工具在此用 chapterDisplayTitle 拼接，记忆/伏笔固定文案不带标题 */
-function toolCallDisplayLabel(
+export type ToolCallLabelOutcome = "ok" | "context_error";
+
+function resolveChapterTitleInCatalog(
+  chapterId: EntityId | undefined,
+  writingChapters: { id: EntityId; title: string }[],
+): string | undefined {
+  if (chapterId == null || String(chapterId).trim() === "") return undefined;
+  const key = String(chapterId);
+  const ch = writingChapters.find((c) => String(c.id) === key);
+  const t = ch?.title?.trim();
+  return t || undefined;
+}
+
+/** 工具气泡文案；章节类若在本地章节目录无对应标题则 outcome=context_error（视为参数/上下文有误） */
+function toolCallDisplayRow(
   name: string,
   args: Record<string, unknown>,
-  writingChapters: { id: number; title: string }[],
-): string {
-  const title = (cid: number | undefined) => chapterDisplayTitle(cid, writingChapters);
+  writingChapters: { id: EntityId; title: string }[],
+): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
       case "getChapterContent": {
-        const cid = args.chapterId != null ? Number(args.chapterId) : undefined;
-        return `查看《${title(cid)}》章节内容`;
+        const cid =
+          args.chapterId != null && args.chapterId !== ""
+            ? String(args.chapterId).trim()
+            : "";
+        if (!cid) {
+          return {
+            label: "getChapterContent（缺少有效 chapterId）",
+            outcome: "context_error",
+          };
+        }
+        const title = resolveChapterTitleInCatalog(cid, writingChapters);
+        if (!title) {
+          return {
+            label: `查看章节（ID ${cid}）`,
+            outcome: "context_error",
+          };
+        }
+        return { label: `查看《${title}》章节内容`, outcome: "ok" };
       }
       case "editChapterContent": {
-        const cid = args.chapterId != null ? Number(args.chapterId) : undefined;
-        return `编辑《${title(cid)}》章节内容`;
+        const cid =
+          args.chapterId != null && args.chapterId !== ""
+            ? String(args.chapterId).trim()
+            : "";
+        if (!cid) {
+          return {
+            label: "editChapterContent（缺少有效 chapterId）",
+            outcome: "context_error",
+          };
+        }
+        const title = resolveChapterTitleInCatalog(cid, writingChapters);
+        if (!title) {
+          return {
+            label: `编辑章节（ID ${cid}）`,
+            outcome: "context_error",
+          };
+        }
+        return { label: `编辑《${title}》章节内容`, outcome: "ok" };
       }
       case "batchGetChapterContents": {
         const raw = args.chapterIds;
-        if (!Array.isArray(raw) || raw.length === 0) return "查看多章内容";
-        const ids = raw.map((x) => Number(x)).filter((n) => Number.isFinite(n));
-        if (ids.length === 0) return "查看多章内容";
-        if (ids.length === 1) return `查看《${title(ids[0])}》章节内容`;
+        if (!Array.isArray(raw) || raw.length === 0) {
+          return { label: "查看多章内容", outcome: "ok" };
+        }
+        const ids = raw.map((x) => String(x).trim()).filter((s) => s !== "");
+        if (ids.length === 0) {
+          return {
+            label: "batchGetChapterContents（章节 ID 列表无效）",
+            outcome: "context_error",
+          };
+        }
+        const bad = ids.filter((id) => !resolveChapterTitleInCatalog(id, writingChapters));
+        if (bad.length > 0) {
+          return {
+            label: `批量查看章节（无目录对应：${bad.join("、")}）`,
+            outcome: "context_error",
+          };
+        }
+        if (ids.length === 1) {
+          const t0 = resolveChapterTitleInCatalog(ids[0], writingChapters)!;
+          return { label: `查看《${t0}》章节内容`, outcome: "ok" };
+        }
         const head = ids
           .slice(0, 3)
-          .map((id) => `《${title(id)}》`)
+          .map((id) => `《${resolveChapterTitleInCatalog(id, writingChapters)}》`)
           .join("");
-        if (ids.length <= 3) return `查看${head}等多章内容`;
-        return `查看${head}等 ${ids.length} 章内容`;
+        if (ids.length <= 3) return { label: `查看${head}等多章内容`, outcome: "ok" };
+        return { label: `查看${head}等 ${ids.length} 章内容`, outcome: "ok" };
       }
       case "listWritingChapters":
-        return "查看章节目录";
+        return { label: "查看章节目录", outcome: "ok" };
       case "getBookCharacters":
-        return "查看人物信息";
+        return { label: "查看人物信息", outcome: "ok" };
       case "listBookCharacters":
-        return "查看人物列表";
+        return { label: "查看人物列表", outcome: "ok" };
       case "getStoryBackground":
-        return "查看小说背景";
+        return { label: "查看小说背景", outcome: "ok" };
       case "getGlobalOutline":
-        return "查看总纲";
+        return { label: "查看总纲", outcome: "ok" };
       case "editGlobalOutline":
-        return "编辑总纲";
+        return { label: "编辑总纲", outcome: "ok" };
       case "queryOutline":
-        return "查看大纲详情";
+        return { label: "查看大纲详情", outcome: "ok" };
       case "listOutlines":
-        return "查看大纲列表";
+        return { label: "查看大纲列表", outcome: "ok" };
       case "updateOutline":
-        return "更新大纲";
+        return { label: "更新大纲", outcome: "ok" };
       case "addMemory":
-        return "添加长期记忆";
+        return { label: "添加长期记忆", outcome: "ok" };
       case "searchMemories":
-        return "检索长期记忆";
+        return { label: "检索长期记忆", outcome: "ok" };
       case "addForeshadowing":
-        return "添加伏笔";
+        return { label: "添加伏笔", outcome: "ok" };
       default:
-        return name;
+        return { label: name, outcome: "ok" };
     }
   } catch {
-    return name;
+    return { label: name, outcome: "ok" };
   }
+}
+
+/** 写作专家模式：助手轮仅有 tool 气泡、正文为空时，拼出可供模型阅读的摘要，避免主会话上下文断裂 */
+function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): string {
+  const segs = msg.toolCallSegments;
+  if (!segs?.length) return "";
+  const parts: string[] = [];
+  for (const s of segs) {
+    const tb = (s.textBefore || "").trim();
+    if (tb) parts.push(tb);
+    const labels = (s.labels || []).filter(Boolean);
+    if (labels.length) parts.push(`[已调用工具] ${labels.join("、")}`);
+  }
+  const after = (msg.contentAfterToolCalls || "").trim();
+  if (after) parts.push(after);
+  return parts.join("\n");
 }
 
 /** 一段「调用前文案 + 该次调用的正在查看列表」，按调用顺序排列 */
 export interface ToolCallSegment {
   textBefore: string;
   labels: string[];
+  /** 与 labels 同长度：目录/参数无法与当前书籍对齐时标记 context_error，气泡显示为失败 */
+  labelOutcomes?: ToolCallLabelOutcome[];
+  /** 与 labels 同长度：该次工具调用是否命中请求内只读缓存 */
+  cachedFlags?: boolean[];
   /** 本段内已执行完成的工具数量（与后端 toolIndexCompleted 同步，顺序递增） */
   completedToolCount?: number;
   trace?: {
@@ -87,6 +177,8 @@ export interface ToolCallSegment {
     plannedToolNames?: string[];
     repairedRounds?: number;
     repairReasons?: string[];
+    /** 当前工具执行阶段（如 subagent 的 analyze/plan） */
+    stage?: string;
   };
 }
 
@@ -102,6 +194,24 @@ export interface ChatMessage {
   toolCalling?: boolean;
   toolCallSegments?: ToolCallSegment[];
   contentAfterToolCalls?: string;
+  /** Subagent：当前阶段 id（如 analyze） */
+  subagentStageId?: string;
+  /** 写作专家模式：当前阶段展示名（如「分析专家」） */
+  subagentStageName?: string;
+  /** Subagent：该阶段是否仍在执行（含工具调用） */
+  subagentStageWorking?: boolean;
+  /** Subagent：最近一次完成阶段的展示名 */
+  subagentLastCompletedStageName?: string;
+  /** Subagent：按返回顺序记录阶段状态 */
+  subagentStages?: Array<{
+    id: string;
+    name: string;
+    status: "running" | "done";
+  }>;
+  /** 主稿专家正在输出阶段间过渡文案 */
+  subagentBridging?: boolean;
+  /** 已进入最终主稿专家答复流 */
+  subagentMainPresenter?: boolean;
 }
 
 export interface UseChatSubmitParams {
@@ -114,16 +224,16 @@ export interface UseChatSubmitParams {
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   conversations: ChatMessage[];
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  bookId: number | null | undefined;
+  bookId: EntityId | null | undefined;
   bookTitle?: string;
-  chapterId: number | null | undefined;
+  chapterId: EntityId | null | undefined;
   activeSessionId: number | null;
   setActiveSessionId: React.Dispatch<React.SetStateAction<number | null>>;
   sessions: AiSession[];
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>;
-  associatedChapterIds: number[];
-  associatedOutlineIds: number[];
-  writingChapters: { id: number; title: string }[];
+  associatedChapterIds: EntityId[];
+  associatedOutlineIds: EntityId[];
+  writingChapters: { id: EntityId; title: string }[];
   availableOutlines: Outline[];
   currentChapterTitle?: string;
   selectedModel: string;
@@ -134,7 +244,8 @@ export interface UseChatSubmitParams {
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
   agentMode?: "legacy" | "subagent";
-  agentAction?: "analyze" | "plan" | "draft" | "review" | "polish" | "full";
+  /** 写作专家管线多选阶段；默认 ['full'] */
+  agentActions?: string[];
 }
 
 export function useChatSubmit(params: UseChatSubmitParams) {
@@ -166,7 +277,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     selectedForeshadowingIds,
     agentMode = "legacy",
-    agentAction = "full",
+    agentActions = ["full"],
   } = params;
 
   const { message: appMessage } = AntdApp.useApp();
@@ -185,9 +296,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (!userText || loading) return;
 
       const cfg = selectedModelConfig;
-      const expectThinking = cfg
-        ? (cfg.thinkingOnly || (cfg.supportsThinking && thinkingEnabled))
-        : thinkingEnabled;
+      const forceNoThinking = agentMode === "subagent";
+      const expectThinking = forceNoThinking
+        ? false
+        : cfg
+          ? cfg.thinkingOnly || (cfg.supportsThinking && thinkingEnabled)
+          : thinkingEnabled;
       const assistantPlaceholder = {
         role: "assistant" as const,
         content: "",
@@ -254,12 +368,51 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const systemSuffix =
       bookId != null
         ? agentEnabled
-          ? `\n\n当前书籍：ID ${bookId}，《${bookName}》；当前章节：ID ${chapterId ?? "未选"}，《${chapterName}》。调用工具时使用上述 ID；回复用户时请使用书籍名、章节名等名称，不要直接暴露或返回 ID。`
-          : `\n\n当前书籍：ID ${bookId}，《${bookName}》；当前章节：ID ${chapterId ?? "未选"}，《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用名称，不暴露 ID。`
+          ? `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，请在工具参数中使用 **chapterTitle**（与左侧目录标题完全一致）或 **chapterIndex**（见主进程附录中的序号）、**outlineTitle** / **outlineIndex**，勿手写或猜测数据库 id。向用户回复时使用书名、章节名，不要暴露 id。`
+          : `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用名称，不暴露 id。`
         : "";
 
+    const toHistoryApiMessage = (
+      m: ChatMessage | { role: "user" | "assistant"; content: string },
+    ): { role: string; content: string } | null => {
+      const cm = m as ChatMessage;
+      if (cm.isError || cm.role === "system") return null;
+      let text = String(cm.content ?? "").trim();
+      if (
+        !text &&
+        agentMode === "subagent" &&
+        cm.role === "assistant"
+      ) {
+        text = synthesizeAssistantTextFromToolSegments(cm).trim();
+      }
+      if (!text) return null;
+      return { role: cm.role, content: text };
+    };
+
+    let subagentExtra = "";
+    if (agentMode === "subagent" && agentEnabled && bookId != null) {
+      const extra: string[] = [];
+      if (associatedChapterIds.length > 0 && writingChapters.length > 0) {
+        const bits = associatedChapterIds.map((id) => {
+          const c = writingChapters.find((w) => w.id === id);
+          return c ? `《${c.title}》` : `（未在目录中匹配的关联项）`;
+        });
+        extra.push(`用户在本轮对话中关联的写作章节：${bits.join("、")}。`);
+      }
+      if (associatedOutlineIds.length > 0 && availableOutlines.length > 0) {
+        const bits = associatedOutlineIds.map((oid) => {
+          const o = availableOutlines.find((x) => x.id === oid);
+          return o ? `《${o.title}》` : `（未在列表中匹配的关联项）`;
+        });
+        extra.push(`用户在本轮对话中关联的大纲：${bits.join("、")}。`);
+      }
+      if (extra.length > 0) {
+        subagentExtra = `\n\n【写作专家 — 主会话附加上下文】\n${extra.join("\n")}`;
+      }
+    }
+
     // 长期记忆由工具调用提供，不再拼入 system
-    const systemContent = systemPrompt + systemSuffix;
+    const systemContent = systemPrompt + systemSuffix + subagentExtra;
 
     let historyMessages: { role: string; content: string }[];
     if (resend != null) {
@@ -270,11 +423,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       ];
       historyMessages = nextConversations
         .slice(0, -1)
-        .filter(
-          (m) => !(m as ChatMessage).isError && m.role !== "system" && m.content.trim() !== "",
-        )
-        .slice(-50)
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map(toHistoryApiMessage)
+        .filter((row): row is { role: string; content: string } => row != null)
+        .slice(-50);
       // 从数据库删除「该条之后」的对话记录，与界面截断一致
       const keepTurnCount = Math.floor(resend.editIndex / 2);
       if (sessionId != null && keepTurnCount >= 0) {
@@ -282,11 +433,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
     } else {
       historyMessages = conversations
-        .filter(
-          (m) => !m.isError && m.role !== "system" && m.content.trim() !== "",
-        )
-        .slice(-50)
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map(toHistoryApiMessage)
+        .filter((row): row is { role: string; content: string } => row != null)
+        .slice(-50);
     }
 
     const newMessages = [
@@ -318,8 +467,130 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning);
       }
+      if (chunk.subagentBridging === true || chunk.subagentBridging === false) {
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              subagentBridging: chunk.subagentBridging === true,
+            };
+            return next;
+          });
+        });
+      }
+      if (chunk.subagentMainPresenter) {
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              subagentMainPresenter: true,
+            };
+            return next;
+          });
+        });
+      }
+      const skipSubagentStageUiForPayloadOnly =
+        agentMode === "subagent" &&
+        chunk.subagentStageStarting !== true &&
+        (chunk.subagentPayload !== undefined ||
+          chunk.subagentPayloadMeta !== undefined);
+      if (
+        (chunk.subagentStage || chunk.subagentStageName) &&
+        !skipSubagentStageUiForPayloadOnly
+      ) {
+        const stageId = chunk.subagentStage;
+        const stageName =
+          chunk.subagentStageName ||
+          normalizeSubagentStageName(chunk.subagentStage);
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            const prevStages = (last as ChatMessage).subagentStages ?? [];
+            const normalizedId = String(stageId || "").trim();
+            const existingIdx = normalizedId
+              ? prevStages.findIndex((s) => s.id === normalizedId)
+              : -1;
+            let nextStages = prevStages.map((s) =>
+              s.status === "running" ? { ...s, status: "done" as const } : s,
+            );
+            if (existingIdx >= 0) {
+              nextStages = nextStages.map((s, i) =>
+                i === existingIdx
+                  ? {
+                      ...s,
+                      name: stageName || s.name,
+                      status: "running" as const,
+                    }
+                  : s,
+              );
+            } else if (normalizedId || stageName) {
+              nextStages = [
+                ...nextStages,
+                {
+                  id: normalizedId || stageName,
+                  name: stageName || normalizedId,
+                  status: "running" as const,
+                },
+              ];
+            }
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              subagentStageId: stageId || (last as ChatMessage).subagentStageId,
+              subagentStageName:
+                stageName || (last as ChatMessage).subagentStageName,
+              subagentStageWorking: true,
+              subagentStages: nextStages,
+            };
+            return next;
+          });
+        });
+      }
       if (chunk.subagentStageDone && chunk.subagentStageName) {
-        appMessage.info(`阶段完成：${chunk.subagentStageName}`);
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            const prevStages = (last as ChatMessage).subagentStages ?? [];
+            const doneStageId = String(chunk.subagentStageDone || "").trim();
+            let found = false;
+            let nextStages = prevStages.map((s) => {
+              if (
+                (doneStageId && s.id === doneStageId) ||
+                (!doneStageId && s.name === chunk.subagentStageName)
+              ) {
+                found = true;
+                return { ...s, status: "done" as const };
+              }
+              return s;
+            });
+            if (!found && chunk.subagentStageName) {
+              nextStages = [
+                ...nextStages,
+                {
+                  id: doneStageId || chunk.subagentStageName,
+                  name: chunk.subagentStageName,
+                  status: "done" as const,
+                },
+              ];
+            }
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              subagentStageWorking: false,
+              subagentLastCompletedStageName: chunk.subagentStageName,
+              subagentStages: nextStages,
+            };
+            return next;
+          });
+        });
       }
       if (chunk.orchestratorRepair?.repairedRounds) {
         appMessage.info(`已自动修复执行路径 ${chunk.orchestratorRepair.repairedRounds} 次`);
@@ -398,9 +669,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             const hasSegments = segs?.length;
             if (hasSegments) {
               let after = (last.contentAfterToolCalls ?? "") + delta;
-              const lastSeg = segs[segs.length - 1];
-              if (lastSeg?.textBefore && after.startsWith(lastSeg.textBefore)) {
-                after = after.slice(lastSeg.textBefore.length);
+              if (agentMode !== "subagent") {
+                const lastSeg = segs[segs.length - 1];
+                if (lastSeg?.textBefore && after.startsWith(lastSeg.textBefore)) {
+                  after = after.slice(lastSeg.textBefore.length);
+                }
               }
               const fullContent =
                 segs.map((s) => s.textBefore).join("") + after;
@@ -431,8 +704,49 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         );
       }
 
+      if (Array.isArray(chunk.toolReadCacheMask) && chunk.toolReadCacheMask.length > 0) {
+        const mask = chunk.toolReadCacheMask;
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const lastMsg = next[next.length - 1];
+            if (lastMsg?.role !== "assistant") return prev;
+            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
+            if (segs.length === 0) return prev;
+            const lastSeg = segs[segs.length - 1];
+            const n = lastSeg.labels.length;
+            const flags = [
+              ...(lastSeg.cachedFlags ?? new Array(n).fill(false)),
+            ];
+            const m = Math.min(n, mask.length);
+            for (let i = 0; i < m; i++) {
+              if (mask[i]) flags[i] = true;
+            }
+            const nextSegs = [
+              ...segs.slice(0, -1),
+              { ...lastSeg, cachedFlags: flags },
+            ];
+            next[next.length - 1] = {
+              ...(lastMsg as ChatMessage),
+              toolCallSegments: nextSegs,
+            };
+            return next;
+          });
+        });
+        if (
+          !chunk.delta &&
+          !chunk.thinkingDelta &&
+          !chunk.done &&
+          !chunk.error &&
+          typeof chunk.toolIndexCompleted !== "number"
+        ) {
+          return;
+        }
+      }
+
       if (typeof chunk.toolIndexCompleted === "number") {
         const idx = chunk.toolIndexCompleted;
+        const fromCache = chunk.toolFromCache === true;
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -443,9 +757,17 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             const lastSeg = segs[segs.length - 1];
             const n = lastSeg.labels.length;
             const nextCount = Math.min(idx + 1, n);
+            const flags = [
+              ...(lastSeg.cachedFlags ?? new Array(n).fill(false)),
+            ];
+            if (fromCache && idx >= 0 && idx < flags.length) flags[idx] = true;
             const nextSegs = [
               ...segs.slice(0, -1),
-              { ...lastSeg, completedToolCount: nextCount },
+              {
+                ...lastSeg,
+                completedToolCount: nextCount,
+                cachedFlags: flags,
+              },
             ];
             next[next.length - 1] = {
               ...(lastMsg as ChatMessage),
@@ -454,7 +776,46 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             return next;
           });
         });
-        return;
+        if (
+          !chunk.delta &&
+          !chunk.thinkingDelta &&
+          !chunk.done &&
+          !chunk.error
+        ) {
+          return;
+        }
+      }
+      if (typeof chunk.toolCallCachedIndex === "number") {
+        const idx = chunk.toolCallCachedIndex;
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const lastMsg = next[next.length - 1];
+            if (lastMsg?.role !== "assistant") return prev;
+            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
+            if (segs.length === 0) return prev;
+            const lastSeg = segs[segs.length - 1];
+            const flags = [...(lastSeg.cachedFlags ?? new Array(lastSeg.labels.length).fill(false))];
+            if (idx >= 0 && idx < flags.length) flags[idx] = true;
+            const nextSegs = [
+              ...segs.slice(0, -1),
+              { ...lastSeg, cachedFlags: flags },
+            ];
+            next[next.length - 1] = {
+              ...(lastMsg as ChatMessage),
+              toolCallSegments: nextSegs,
+            };
+            return next;
+          });
+        });
+        if (
+          !chunk.delta &&
+          !chunk.thinkingDelta &&
+          !chunk.done &&
+          !chunk.error
+        ) {
+          return;
+        }
       }
 
       if (chunk.toolCalls?.length && chunk.toolCallsInProgress) {
@@ -464,31 +825,37 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         const repairReasons = (chunk.orchestratorRepair?.events || [])
           .map((x) => String(x?.reason || "").trim())
           .filter(Boolean);
-        const rawLabels = (chunk.toolCalls || [])
-          .map((tc: { function?: { name?: string; arguments?: string } }) => {
-            const name = tc.function?.name;
-            if (!name) return "";
+        const rows = (chunk.toolCalls || []).map(
+          (tc: { function?: { name?: string; arguments?: string }; id?: string }) => {
+            const fn = tc.function?.name;
+            if (!fn) {
+              return { label: "（未识别工具）", outcome: "ok" as ToolCallLabelOutcome };
+            }
             try {
               const args = JSON.parse(tc.function?.arguments || "{}") as Record<
                 string,
                 unknown
               >;
-              return toolCallDisplayLabel(name, args, writingChapters || []);
+              return toolCallDisplayRow(fn, args, writingChapters || []);
             } catch {
-              return toolCallDisplayLabel(name, {}, writingChapters || []);
+              return toolCallDisplayRow(fn, {}, writingChapters || []);
             }
-          }) as string[];
-        const taggedLabels = (chunk.toolCalls || []).map((tc, idx) => {
-          const base = rawLabels[idx] || "";
-          if (!base) return "";
-          const callId = String(tc.id || "");
-          if (callId.startsWith("repair_")) return `${base}（自动修复）`;
-          if (callId.startsWith("sys_")) return `${base}（自动补前置）`;
-          return base;
-        }).filter(Boolean) as string[];
+          },
+        );
+        const taggedLabels = rows.map((row, idx) => {
+          const base = row.label;
+          const tc = (chunk.toolCalls || [])[idx];
+          const callId = String(tc?.id || "");
+          let label = base;
+          if (callId.startsWith("repair_")) label = `${base}（自动修复）`;
+          else if (callId.startsWith("sys_")) label = `${base}（自动补前置）`;
+          return label;
+        });
+        const labelOutcomes = rows.map((row) => row.outcome);
         if (insertedByDag > 0) {
           appMessage.info(`DAG 已自动补齐 ${insertedByDag} 个前置步骤`);
         }
+        let rebuiltAssistantText = "";
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -498,35 +865,56 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               const prevBlocks = (lastMsg as ChatMessage).thinkingBlocks ?? [];
               const currentThinking = (lastMsg.thinking || "").trim();
               const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
-              const isFirstBlock = prevSeg.length === 0;
+              /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，否则渲染顺序会变成「新工具段在旧尾稿之上」 */
+              const tail = lastMsg.contentAfterToolCalls ?? "";
+              const flushTailSegments: ToolCallSegment[] =
+                tail.trim().length > 0
+                  ? [{ textBefore: tail, labels: [], cachedFlags: [] }]
+                  : [];
+              const baseSegs = [...prevSeg, ...flushTailSegments];
+              const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
               const textBefore =
                 partialContent && partialContent.trim()
                   ? partialContent
-                  : isFirstBlock
-                    ? lastMsg.content || acc.response || ""
+                  : !hasPriorToolRound
+                    ? agentMode === "subagent"
+                      ? ""
+                      : lastMsg.content || acc.response || ""
                     : "";
               const newSegment: ToolCallSegment = {
                 textBefore,
                 labels: taggedLabels,
+                labelOutcomes,
+                cachedFlags: (chunk.toolCalls || []).map((tc) =>
+                  Boolean((tc as { cached?: boolean }).cached),
+                ),
                 trace: {
                   insertedByDag,
                   insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
                   plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
                   repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
                   repairReasons,
+                  stage: chunk.subagentStage || undefined,
                 },
               };
-              const nextSegments = [...prevSeg, newSegment];
-              let afterToolCalls = lastMsg.contentAfterToolCalls ?? "";
-              if (textBefore && afterToolCalls.startsWith(textBefore)) {
+              const nextSegments = [...baseSegs, newSegment];
+              let afterToolCalls =
+                flushTailSegments.length > 0 ? "" : (lastMsg.contentAfterToolCalls ?? "");
+              if (
+                agentMode !== "subagent" &&
+                flushTailSegments.length === 0 &&
+                textBefore &&
+                afterToolCalls.startsWith(textBefore)
+              ) {
                 afterToolCalls = afterToolCalls.slice(textBefore.length);
               }
+              rebuiltAssistantText =
+                nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
               acc.toolCallSegments = nextSegments;
               acc.thinkingBlocks = nextBlocks;
               next[next.length - 1] = {
                 ...lastMsg,
-                content:
-                  nextSegments.map((s) => s.textBefore).join("") + afterToolCalls,
+                content: rebuiltAssistantText,
                 thinking: "",
                 thinkingBlocks: nextBlocks,
                 toolCalling: true,
@@ -538,7 +926,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           });
         });
         acc.response =
-          partialContent && partialContent.trim() ? partialContent : acc.response;
+          rebuiltAssistantText ||
+          (partialContent && partialContent.trim() ? partialContent : acc.response);
         acc.thinking = partialThinking;
         return;
       }
@@ -555,12 +944,31 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           if (last?.role === "assistant") {
             const blocks = (last as ChatMessage).thinkingBlocks ?? [];
             const thinkingBlocks = finalThinking ? [...blocks, finalThinking] : blocks;
+            const cm = last as ChatMessage;
+            const stages = cm.subagentStages ?? [];
+            const subagentStagesFinalized =
+              agentMode === "subagent" && stages.length > 0
+                ? stages.map((s) =>
+                    s.status === "running"
+                      ? { ...s, status: "done" as const }
+                      : s,
+                  )
+                : cm.subagentStages;
             next[next.length - 1] = {
               ...last,
               model: acc.model || undefined,
               thinking: finalThinking || last.thinking,
               thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
               toolCalling: false,
+              subagentStageWorking: false,
+              ...(agentMode === "subagent"
+                ? {
+                    subagentBridging: false,
+                    ...(subagentStagesFinalized
+                      ? { subagentStages: subagentStagesFinalized }
+                      : {}),
+                  }
+                : {}),
             };
           }
           return next;
@@ -650,7 +1058,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
     const modelConfig = modelConfigs[selectedModel];
     const effectiveThinking =
-      cfg?.thinkingOnly || (cfg?.supportsThinking && thinkingEnabled) || (!cfg && thinkingEnabled);
+      agentMode === "subagent"
+        ? false
+        : Boolean(
+            cfg?.thinkingOnly ||
+              (cfg?.supportsThinking && thinkingEnabled) ||
+              (!cfg && thinkingEnabled),
+          );
     const apiModelName = cfg?.name ?? selectedModel;
     /** false：不传 temperature；undefined / true：按配置传 temperature */
     const useConfiguredTemperature =
@@ -694,12 +1108,22 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       tools: [],
       useToolRouter,
       bookId: bookId ?? undefined,
+      bookTitle: bookTitle ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: currentChapterTitle ?? undefined,
       writingChapters,
       availableOutlines,
+      associatedChapterIds:
+        associatedChapterIds.length > 0 ? associatedChapterIds : undefined,
+      associatedOutlineIds:
+        associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
       agentMode,
-      agentAction,
+      ...(agentMode === "subagent"
+        ? {
+            agentActions:
+              agentActions && agentActions.length > 0 ? agentActions : ["full"],
+          }
+        : {}),
     });
   }, [
     prompt,
@@ -727,8 +1151,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setActiveSessionId,
     setSessions,
     selectedMemoryIds,
+    agentEnabled,
     agentMode,
-    agentAction,
+    agentActions,
     appMessage,
   ]);
 

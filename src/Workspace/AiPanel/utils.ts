@@ -1,4 +1,4 @@
-import type { Chapter, Conversation } from '../../types'
+import type { Chapter, Conversation, EntityId } from '../../types'
 import {
   extractTextFromLexical as extractTextFromLexicalImpl,
   formatChaptersAsText as formatChaptersAsTextImpl,
@@ -6,6 +6,11 @@ import {
 import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
+
+export type ChatAgentMode = 'ask' | 'legacy' | 'subagent'
+
+const isChatAgentMode = (v: unknown): v is ChatAgentMode =>
+  v === 'ask' || v === 'legacy' || v === 'subagent'
 
 /** @deprecated 请从 Workspace/utils 导入 */
 export const extractTextFromLexical = extractTextFromLexicalImpl
@@ -17,41 +22,59 @@ export function formatChaptersAsText(chapters: Chapter[]): string {
 
 // ─── 模型偏好（localStorage） ───
 
-export function getPrefsKey(bookId: number | null): string {
+export function getPrefsKey(bookId: EntityId | null): string {
   return `${AI_MODEL_PREFS_KEY_PREFIX}${bookId ?? '_default'}`
 }
 
 /** 若传入 validModelIds，则只接受该列表内的 model 作为有效选中项；空数组时无可用模型，默认 model 为空 */
 export function loadModelPrefs(
-  bookId: number | null,
-  validModelIds?: string[]
-): { model: string; agentEnabled: boolean; thinkingEnabled: boolean } {
+  bookId: EntityId | null,
+  validModelIds?: string[],
+  settingsDefaultAgentMode: 'legacy' | 'subagent' = 'legacy'
+): { model: string; chatAgentMode: ChatAgentMode; thinkingEnabled: boolean } {
   const defaultModel = validModelIds?.length ? validModelIds[0] : ''
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
+  const defaultChatAgentMode: ChatAgentMode =
+    settingsDefaultAgentMode === 'subagent' ? 'subagent' : 'legacy'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {
-      const p = JSON.parse(raw) as { model?: string; agentEnabled?: boolean; thinkingEnabled?: boolean }
+      const p = JSON.parse(raw) as {
+        model?: string
+        agentEnabled?: boolean
+        thinkingEnabled?: boolean
+        chatAgentMode?: unknown
+      }
       const model = typeof p.model === 'string' && isValid(p.model) ? p.model : defaultModel
-      const agentEnabled = typeof p.agentEnabled === 'boolean' ? p.agentEnabled : true
       const thinkingEnabled = typeof p.thinkingEnabled === 'boolean' ? p.thinkingEnabled : false
-      return { model, agentEnabled, thinkingEnabled }
+      let chatAgentMode: ChatAgentMode
+      if (isChatAgentMode(p.chatAgentMode)) {
+        chatAgentMode = p.chatAgentMode
+      } else if (p.agentEnabled === false) {
+        chatAgentMode = 'ask'
+      } else {
+        chatAgentMode = defaultChatAgentMode
+      }
+      return { model, chatAgentMode, thinkingEnabled }
     }
   } catch {
     // ignore
   }
-  return { model: defaultModel, agentEnabled: true, thinkingEnabled: false }
+  return { model: defaultModel, chatAgentMode: defaultChatAgentMode, thinkingEnabled: false }
 }
 
 export function saveModelPrefs(
-  bookId: number | null,
+  bookId: EntityId | null,
   model: string,
-  agentEnabled: boolean,
+  chatAgentMode: ChatAgentMode,
   thinkingEnabled: boolean
 ): void {
   try {
-    localStorage.setItem(getPrefsKey(bookId), JSON.stringify({ model, agentEnabled, thinkingEnabled }))
+    localStorage.setItem(
+      getPrefsKey(bookId),
+      JSON.stringify({ model, chatAgentMode, thinkingEnabled })
+    )
   } catch {
     // ignore
   }

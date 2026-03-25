@@ -8,6 +8,51 @@
   min-width: 0;
 }
 
+.ai-context-pipeline-popover {
+  min-width: 260px;
+  max-width: 320px;
+  padding: 4px 2px 2px;
+}
+
+.ai-context-pipeline-heading {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle, color-mix(in srgb, var(--text-muted) 22%, transparent));
+}
+
+.ai-context-pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 14px;
+  row-gap: 6px;
+  align-items: center;
+}
+
+.ai-context-pipeline-slot {
+  min-width: 0;
+
+  .ant-checkbox-wrapper {
+    font-size: var(--font-size-sm);
+    margin-inline-start: 0;
+    line-height: 1.35;
+  }
+}
+
+/* 全流程独占一行，与下方自定义组合区分 */
+.ai-context-pipeline-slot--full {
+  grid-column: 1 / -1;
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text-muted) 20%, transparent);
+}
+
+.ai-pipeline-btn--active.ant-btn {
+  color: var(--warning);
+}
+
 .ai-context-icon-btn.ant-btn {
   flex-shrink: 0;
   padding: 0 4px;

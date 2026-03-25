@@ -1,7 +1,7 @@
 import React from 'react'
 import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { Button, Modal, Form, Input, InputNumber, Radio, Select, Tag, Tooltip, Empty } from 'antd'
-import type { Character, CharacterOption } from '../../types'
+import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAntdApp } from '../../hooks/useAntdApp'
 import { getBookCharacters } from '../utils'
 import CharacterOptionsModal from './CharacterOptionsModal'
@@ -65,7 +65,7 @@ function toSaveData(values: CharacterFormValues): Partial<Character> {
 }
 
 interface CharacterTabProps {
-  bookId: number | null
+  bookId: EntityId | null
 }
 
 export default function CharacterTab({ bookId }: CharacterTabProps) {

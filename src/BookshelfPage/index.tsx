@@ -1,7 +1,7 @@
 import React from 'react'
 import { PlusOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons'
 import { Button, Modal, Input, Tooltip, Checkbox } from 'antd'
-import { Book } from '../types'
+import { Book, type EntityId } from '../types'
 import { useAntdApp } from '../hooks/useAntdApp'
 import AppHeader from '../components/AppHeader'
 import ExportModal from '../components/ExportModal'
@@ -12,8 +12,8 @@ interface BookshelfPageProps {
   books: Book[]
   onOpenBook: (book: Book) => void
   onCreateBook: (title: string, enableVolume?: boolean) => void
-  onDeleteBook: (bookId: number) => void
-  onRenameBook: (bookId: number, title: string) => void
+  onDeleteBook: (bookId: EntityId) => void
+  onRenameBook: (bookId: EntityId, title: string) => void
   onBack: () => void
 }
 
@@ -34,7 +34,7 @@ export default function BookshelfPage({
   const [renameTitle, setRenameTitle] = React.useState('')
   const [deleteTarget, setDeleteTarget] = React.useState<Book | null>(null)
   const [exportModalOpen, setExportModalOpen] = React.useState(false)
-  const [exportSelectedIds, setExportSelectedIds] = React.useState<number[]>([])
+  const [exportSelectedIds, setExportSelectedIds] = React.useState<EntityId[]>([])
   const [exporting, setExporting] = React.useState(false)
 
   const handleCreate = React.useCallback(() => {
@@ -79,7 +79,7 @@ export default function BookshelfPage({
   }, [])
 
   const handleExportConfirm = React.useCallback(
-    async (selectedIds: number[], format: 'md' | 'txt', exportAsZip: boolean) => {
+    async (selectedIds: EntityId[], format: 'md' | 'txt', exportAsZip: boolean) => {
       if (selectedIds.length === 0) {
         message.warning('请至少选择一本书籍')
         return
