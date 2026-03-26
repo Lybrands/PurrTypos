@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
   exportDatabase: () => ipcRenderer.invoke('export-database'),
   importDatabase: () => ipcRenderer.invoke('import-database'),
+  getDatabaseInfo: () => ipcRenderer.invoke('db-get-database-info'),
+  openDatabaseDirectory: () => ipcRenderer.invoke('open-database-directory'),
 
   // 书籍
   getBooks: () => ipcRenderer.invoke('db-get-books'),

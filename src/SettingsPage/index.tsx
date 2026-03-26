@@ -214,6 +214,32 @@ export default function SettingsPage({
 
   const [exportingDb, setExportingDb] = React.useState(false)
   const [importingDb, setImportingDb] = React.useState(false)
+  const [dbInfoLoading, setDbInfoLoading] = React.useState(false)
+  const [dbInfo, setDbInfo] = React.useState<{
+    dbPath: string
+    books: number
+    outlineChapters: number
+    articles: number
+  } | null>(null)
+
+  const refreshDbInfo = React.useCallback(async () => {
+    setDbInfoLoading(true)
+    try {
+      const res = await window.electronAPI.getDatabaseInfo()
+      if (res.success && res.data) {
+        setDbInfo(res.data)
+      } else {
+        setDbInfo(null)
+      }
+    } finally {
+      setDbInfoLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (activeTab !== 'data') return
+    void refreshDbInfo()
+  }, [activeTab, refreshDbInfo])
 
   const handleExportDatabase = React.useCallback(async () => {
     setExportingDb(true)
@@ -238,13 +264,30 @@ export default function SettingsPage({
     try {
       const res = await window.electronAPI.importDatabase()
       if (res.success) {
-        message.success('数据库已导入，正在刷新…')
+        const before = res.data?.beforeStats
+        const after = res.data?.afterStats
+        if (before && after) {
+          message.success(
+            `数据库已导入：章节 ${before.outlineChapters} -> ${after.outlineChapters}，正文 ${before.articles} -> ${after.articles}。正在刷新…`
+          )
+        } else {
+          message.success('数据库已导入，正在刷新…')
+        }
       } else if (res.error !== 'canceled') {
         message.error(res.error || '导入失败')
       }
     } finally {
       setImportingDb(false)
     }
+  }, [message])
+
+  const handleOpenDbDir = React.useCallback(async () => {
+    const res = await window.electronAPI.openDatabaseDirectory()
+    if (!res.success) {
+      message.error(res.error || '打开目录失败')
+      return
+    }
+    message.success('已打开数据库目录')
   }, [message])
 
   return (
@@ -472,6 +515,32 @@ export default function SettingsPage({
             <div className="settings-section">
               <h2 className="settings-section-title">备份与恢复</h2>
               <p className="settings-section-desc">导出完整数据库备份到本地文件，或从备份文件恢复数据。导入将覆盖当前全部数据并刷新应用。</p>
+              <div className="settings-field" style={{ maxWidth: 820, marginBottom: 16 }}>
+                <div className="settings-field-label">当前数据库</div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--text-muted)',
+                    padding: '8px 10px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    background: 'var(--bg-surface)',
+                    wordBreak: 'break-all',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                  }}
+                >
+                  {dbInfoLoading ? '读取中…' : (dbInfo?.dbPath || '读取失败')}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {dbInfo
+                    ? `书籍 ${dbInfo.books} 本，章节 ${dbInfo.outlineChapters} 条，正文 ${dbInfo.articles} 篇`
+                    : '—'}
+                </div>
+                <div className="settings-field-actions">
+                  <Button onClick={handleOpenDbDir}>打开数据库目录</Button>
+                  <Button onClick={refreshDbInfo} loading={dbInfoLoading}>刷新统计</Button>
+                </div>
+              </div>
               <div className="settings-data-actions">
                 <Button
                   type="default"

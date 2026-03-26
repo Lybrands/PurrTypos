@@ -334,6 +334,59 @@ ipcMain.handle('export-database', async () => {
   }
 })
 
+function getDatabaseStats() {
+  const db = getDb()
+  const books = Array.isArray(db.getBooks?.()) ? db.getBooks().length : 0
+  let outlineChapters = 0
+  let articles = 0
+  try {
+    const allOutlines = db.getOutlines?.() || []
+    for (const ol of allOutlines) {
+      const list = db.getChapters?.(ol.id) || []
+      outlineChapters += Array.isArray(list) ? list.length : 0
+    }
+  } catch (_) {}
+  try {
+    const booksList = db.getBooks?.() || []
+    for (const b of booksList) {
+      const writing = db.getWritingOutline?.(b.id)
+      if (!writing || !writing.id) continue
+      const chapters = db.getChapters?.(writing.id) || []
+      for (const ch of chapters) {
+        const article = db.getArticle?.(ch.id)
+        if (article && typeof article === 'object' && String(article.content || '').length > 0) {
+          articles += 1
+        }
+      }
+    }
+  } catch (_) {}
+  return { books, outlineChapters, articles }
+}
+
+ipcMain.handle('db-get-database-info', async () => {
+  try {
+    const dbPath = Database.getDbPath()
+    if (!dbPath) return { success: false, error: '数据库路径未知' }
+    const stats = getDatabaseStats()
+    return { success: true, data: { dbPath, ...stats } }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('open-database-directory', async () => {
+  try {
+    const dbPath = Database.getDbPath()
+    if (!dbPath) return { success: false, error: '数据库路径未知' }
+    const dir = path.dirname(dbPath)
+    const result = await shell.openPath(dir)
+    if (result) return { success: false, error: result }
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
 // 数据库导入：选择备份文件覆盖当前数据库，完成后需重启应用以生效
 ipcMain.handle('import-database', async () => {
   try {
@@ -346,13 +399,15 @@ ipcMain.handle('import-database', async () => {
     const sourcePath = result.filePaths[0]
     const dbPath = Database.getDbPath()
     if (!dbPath) return { success: false, error: '数据库路径未知' }
+    const beforeStats = getDatabaseStats()
     Database.closeDatabase()
     fs.copyFileSync(sourcePath, dbPath)
     await Database.initDatabase()
+    const afterStats = getDatabaseStats()
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.reload()
     }
-    return { success: true }
+    return { success: true, data: { beforeStats, afterStats } }
   } catch (err) {
     try { await Database.initDatabase() } catch (_) {}
     return { success: false, error: err.message }
