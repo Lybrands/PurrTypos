@@ -70,3 +70,8 @@
     }
   }
 }
+
+.outline-character-panel-body {
+  height: min(52vh, 430px);
+  overflow: hidden;
+}
