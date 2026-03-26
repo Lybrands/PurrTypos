@@ -157,7 +157,12 @@ export interface ElectronAPI {
   readFileBuffer: (filePath: string) => Promise<ApiResult<Buffer>>;
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
   exportDatabase: () => Promise<ApiResult<void>>;
-  importDatabase: () => Promise<ApiResult<void>>;
+  importDatabase: () => Promise<ApiResult<{
+    beforeStats: { books: number; outlineChapters: number; articles: number };
+    afterStats: { books: number; outlineChapters: number; articles: number };
+  }>>;
+  getDatabaseInfo: () => Promise<ApiResult<{ dbPath: string; books: number; outlineChapters: number; articles: number }>>;
+  openDatabaseDirectory: () => Promise<ApiResult<void>>;
   // 书籍
   getBooks: () => Promise<ApiResult<Book[]>>;
   createBook: (data: {
