@@ -45,6 +45,47 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
     if (!containerRef.current || !mindMapData) return
 
     let destroyed = false
+    let resizeObs: ResizeObserver | null = null
+    let fitTimer: ReturnType<typeof setTimeout> | null = null
+
+    const waitForContainerReady = async (el: HTMLDivElement): Promise<boolean> =>
+      new Promise((resolve) => {
+        const hasSize = () => {
+          const rect = el.getBoundingClientRect()
+          return rect.width > 0 && rect.height > 0
+        }
+        if (hasSize()) {
+          resolve(true)
+          return
+        }
+        if (typeof ResizeObserver === 'undefined') {
+          const tick = () => {
+            if (destroyed) {
+              resolve(false)
+              return
+            }
+            if (hasSize()) {
+              resolve(true)
+              return
+            }
+            requestAnimationFrame(tick)
+          }
+          requestAnimationFrame(tick)
+          return
+        }
+        const ro = new ResizeObserver(() => {
+          if (destroyed) {
+            ro.disconnect()
+            resolve(false)
+            return
+          }
+          if (hasSize()) {
+            ro.disconnect()
+            resolve(true)
+          }
+        })
+        ro.observe(el)
+      })
 
     const init = async () => {
       const MindMapModule = await import('simple-mind-map')
@@ -69,6 +110,8 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
         mindMapRef.current = null
       }
       containerRef.current.innerHTML = ''
+      const ready = await waitForContainerReady(containerRef.current)
+      if (!ready || destroyed || !containerRef.current) return
 
       try {
         const instance = new MindMap({
@@ -155,13 +198,22 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
         })
         mindMapRef.current = instance
 
-        setTimeout(() => {
+        fitTimer = setTimeout(() => {
           if (!destroyed && mindMapRef.current) {
             try {
               mindMapRef.current.view.fit()
             } catch (_) {}
           }
         }, 300)
+        if (typeof ResizeObserver !== 'undefined') {
+          resizeObs = new ResizeObserver(() => {
+            if (!mindMapRef.current) return
+            try {
+              mindMapRef.current.view.fit()
+            } catch (_) {}
+          })
+          resizeObs.observe(containerRef.current)
+        }
       } catch (err) {
         console.error('[MindMapView] init error:', err)
       }
@@ -171,6 +223,14 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
 
     return () => {
       destroyed = true
+      if (fitTimer) {
+        clearTimeout(fitTimer)
+        fitTimer = null
+      }
+      if (resizeObs) {
+        resizeObs.disconnect()
+        resizeObs = null
+      }
       if (mindMapRef.current) {
         try {
           mindMapRef.current.destroy()

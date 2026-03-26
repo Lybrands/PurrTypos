@@ -1,6 +1,6 @@
 ---
 name: editChapterContent
-description: 当需要保存或改写写作目录中某章正文时使用。依赖 listWritingChapters（在需要写作目录 chapterId 时）。
+description: 当需要写入写作目录中某章正文时使用[关键词：编写、写入、写进、改写、保存]。依赖 listWritingChapters（在需要写作目录 chapterId 时）。
 ---
 
 写操作；与 getChapterContent 成对。**优先 chapterTitle 或 chapterIndex，勿手写 id。**
