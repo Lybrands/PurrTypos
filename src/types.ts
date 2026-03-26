@@ -388,6 +388,8 @@ export interface ElectronAPI {
       partialThinking?: string;
       messagesSent?: Array<{ role: string; content: string }>;
       chapterContentUpdated?: EntityId;
+      /** 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示） */
+      collabLatestParagraph?: string;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
       /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
