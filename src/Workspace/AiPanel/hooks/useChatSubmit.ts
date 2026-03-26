@@ -729,6 +729,23 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         );
       }
 
+      if (typeof chunk.collabLatestParagraph === "string" && chunk.collabLatestParagraph.trim()) {
+        const para = chunk.collabLatestParagraph.trim();
+        const wrapped = `\n\n### 最新段落（已写入正文）\n\n${para}\n`;
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              content: ((last.content || "") + wrapped).trim(),
+            };
+            return next;
+          });
+        });
+      }
+
       if (Array.isArray(chunk.toolReadCacheMask) && chunk.toolReadCacheMask.length > 0) {
         const mask = chunk.toolReadCacheMask;
         flushSync(() => {

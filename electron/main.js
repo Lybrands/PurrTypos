@@ -1198,6 +1198,8 @@ ipcMain.on('ai-chat-stream', async (event, {
     bookId,
     bookTitle: bookTitle != null ? String(bookTitle) : undefined,
     chapterId,
+    /** legacy 协作共创开关：工具层可据此执行增量写入与回传最新段落 */
+    collabWriting,
     currentChapterTitle,
     writingChapters,
     availableOutlines,

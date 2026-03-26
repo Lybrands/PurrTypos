@@ -30,6 +30,13 @@ function extractTextFromLexical(json) {
   }
 }
 
+function extractLatestParagraph(text) {
+  const src = String(text || '').replace(/\r\n/g, '\n').trim()
+  if (!src) return ''
+  const paras = src.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean)
+  return paras.length > 0 ? paras[paras.length - 1] : src
+}
+
 function formatChaptersAsText(chapters) {
   if (!chapters || chapters.length === 0) return ''
   const buildTree = (parentId, depth) => {
@@ -861,9 +868,25 @@ async function runTools(toolCalls, ctx, sendChunk) {
               break
             }
             try {
-              getDb().saveArticle(cid, newContent)
+              let mergedContent = newContent
+              // 协作共创：默认按“增量段落”追加到现有正文；若模型已传完整正文（前缀命中）则不重复追加
+              if (ctx?.collabWriting === true && newContent.trim()) {
+                const oldPlain = readChapterPlainFull(cid)?.plainTextFull || ''
+                const oldTrim = String(oldPlain || '').trim()
+                const newTrim = String(newContent || '').trim()
+                if (oldTrim && newTrim && !newTrim.startsWith(oldTrim)) {
+                  mergedContent = `${oldTrim}\n\n${newTrim}`
+                }
+              }
+              getDb().saveArticle(cid, mergedContent)
               invalidateChapterContentCache(ctx, cid)
-              if (sendChunk) sendChunk({ chapterContentUpdated: cid }) // 通知前端刷新章节
+              if (sendChunk) {
+                const latestParagraph = extractLatestParagraph(newContent)
+                sendChunk({
+                  chapterContentUpdated: cid,
+                  ...(latestParagraph ? { collabLatestParagraph: latestParagraph } : {}),
+                }) // 通知前端刷新章节，并在协作模式对话中展示最新段落
+              }
               content = JSON.stringify({ success: true, message: '章节正文已保存', chapterId: cid })
             } catch (e) {
               content = JSON.stringify({ success: false, error: e.message })
