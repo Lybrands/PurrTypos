@@ -7,10 +7,10 @@ import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
 
-export type ChatAgentMode = 'ask' | 'legacy' | 'subagent'
+export type ChatAgentMode = 'ask' | 'legacy' | 'subagent' | 'collab'
 
 const isChatAgentMode = (v: unknown): v is ChatAgentMode =>
-  v === 'ask' || v === 'legacy' || v === 'subagent'
+  v === 'ask' || v === 'legacy' || v === 'subagent' || v === 'collab'
 
 /** @deprecated 请从 Workspace/utils 导入 */
 export const extractTextFromLexical = extractTextFromLexicalImpl

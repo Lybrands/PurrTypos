@@ -64,6 +64,17 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--warning)' },
       } as const
     }
+    if (chatAgentMode === 'collab') {
+      return {
+        root: {
+          border: 'none',
+          boxShadow: '0 0 2px var(--accent), 0 0 2px var(--accent)',
+          background: 'color-mix(in srgb, var(--accent) 12%, var(--bg-surface))',
+          color: 'var(--accent)',
+        },
+        suffix: { color: 'var(--accent)' },
+      } as const
+    }
     return {
       root: {
         border: 'none',
@@ -79,12 +90,13 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'legacy' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'subagent' ? 'ai-agent-select--subagent' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'legacy' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'subagent' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
             { value: 'subagent', label: '写作专家' },
+            { value: 'collab', label: '协作共创' },
             { value: 'legacy', label: '智能体' },
             { value: 'ask', label: '问答' },
           ]}

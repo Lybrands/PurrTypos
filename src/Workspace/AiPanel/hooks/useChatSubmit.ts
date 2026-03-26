@@ -244,6 +244,8 @@ export interface UseChatSubmitParams {
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
   agentMode?: "legacy" | "subagent";
+  /** legacy 下协作共创时传 collab，主进程注入协商提示并限制写入工具 */
+  writingMode?: "default" | "collab";
   /** 写作专家管线多选阶段；默认 ['full'] */
   agentActions?: string[];
 }
@@ -277,6 +279,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     selectedForeshadowingIds,
     agentMode = "legacy",
+    writingMode = "default",
     agentActions = ["full"],
   } = params;
 
@@ -411,8 +414,30 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
     }
 
+    let collabExtra = "";
+    if (writingMode === "collab" && agentEnabled && bookId != null) {
+      const extra: string[] = [];
+      if (associatedChapterIds.length > 0 && writingChapters.length > 0) {
+        const bits = associatedChapterIds.map((id) => {
+          const c = writingChapters.find((w) => w.id === id);
+          return c ? `《${c.title}》` : `（未在目录中匹配的关联项）`;
+        });
+        extra.push(`用户在本轮对话中关联的写作章节：${bits.join("、")}。`);
+      }
+      if (associatedOutlineIds.length > 0 && availableOutlines.length > 0) {
+        const bits = associatedOutlineIds.map((oid) => {
+          const o = availableOutlines.find((x) => x.id === oid);
+          return o ? `《${o.title}》` : `（未在列表中匹配的关联项）`;
+        });
+        extra.push(`用户在本轮对话中关联的大纲：${bits.join("、")}。`);
+      }
+      if (extra.length > 0) {
+        collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${extra.join("\n")}`;
+      }
+    }
+
     // 长期记忆由工具调用提供，不再拼入 system
-    const systemContent = systemPrompt + systemSuffix + subagentExtra;
+    const systemContent = systemPrompt + systemSuffix + subagentExtra + collabExtra;
 
     let historyMessages: { role: string; content: string }[];
     if (resend != null) {
@@ -1118,6 +1143,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       associatedOutlineIds:
         associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
       agentMode,
+      ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
       ...(agentMode === "subagent"
         ? {
             agentActions:
@@ -1153,6 +1179,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     agentEnabled,
     agentMode,
+    writingMode,
     agentActions,
     appMessage,
   ]);

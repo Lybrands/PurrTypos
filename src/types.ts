@@ -366,6 +366,8 @@ export interface ElectronAPI {
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
     agentMode?: "legacy" | "subagent";
+    /** legacy 下协作共创 */
+    writingMode?: "default" | "collab";
     /** 兼容旧版单选 */
     agentAction?: "analyze" | "plan" | "draft" | "styleUnify" | "review" | "polish" | "full";
     /** 写作专家多选阶段（优先于 agentAction） */

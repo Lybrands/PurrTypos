@@ -187,6 +187,7 @@ export default function AiPanel({
     selectedMemoryIds,
     selectedForeshadowingIds,
     agentMode: chatAgentMode === "subagent" ? "subagent" : "legacy",
+    writingMode: chatAgentMode === "collab" ? "collab" : "default",
     agentActions:
       chatAgentMode === "subagent" ? agentActions : undefined,
   });
