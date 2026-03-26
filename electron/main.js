@@ -744,6 +744,11 @@ const { normalizeSessionTitle } = require('./sessionTitle')
 const toolExecutor = require('./toolExecutor')
 const skillOrchestrator = require('./skillOrchestrator')
 const { getSkillSpecs } = require('./agentToolDefinitions')
+const {
+  buildCollabSystemPrompt,
+  buildCollabTurnAppendix,
+  filterCollabTools,
+} = require('./collabPrompt')
 const { EXEC_ACTIONS } = require('./subagentConfig')
 const { runSubagentPipeline } = require('./subagentPipeline')
 
@@ -1088,6 +1093,8 @@ ipcMain.on('ai-chat-stream', async (event, {
   associatedChapterIds,
   associatedOutlineIds,
   agentMode,
+  /** legacy 下协作共创：'collab'；默认 'default' */
+  writingMode: writingModeFromFront = 'default',
   agentAction,
   agentActions: rawAgentActions,
 }) => {
@@ -1117,6 +1124,9 @@ ipcMain.on('ai-chat-stream', async (event, {
   const settings = getDb().getSettings?.() || {}
   const persistedMode = settings.ai_agent_mode === 'subagent' ? 'subagent' : 'legacy'
   const runtimeMode = agentMode === 'subagent' || agentMode === 'legacy' ? agentMode : persistedMode
+  const collabWriting =
+    runtimeMode === 'legacy' &&
+    (writingModeFromFront === 'collab' || writingModeFromFront === true)
   const action = Object.values(EXEC_ACTIONS).includes(agentAction) ? agentAction : EXEC_ACTIONS.FULL
   const allowed = new Set(Object.values(EXEC_ACTIONS))
   const normalizedAgentActions =
@@ -1151,6 +1161,26 @@ ipcMain.on('ai-chat-stream', async (event, {
     }
   }
 
+  if (collabWriting && Array.isArray(tools) && tools.length > 0) {
+    tools = filterCollabTools(tools, latestUserTextForPlan)
+  }
+
+  const messagesForModel = (() => {
+    const base = Array.isArray(messages) ? [...messages] : []
+    if (!collabWriting || base.length === 0) return base
+    const extra =
+      `${buildCollabSystemPrompt({ challengeLevel: 'medium', generationStrategy: 'outline_then_draft' })}\n\n${buildCollabTurnAppendix(base)}`
+    const sysIdx = base.findIndex((m) => m && m.role === 'system')
+    if (sysIdx >= 0) {
+      return base.map((m, i) =>
+        i === sysIdx
+          ? { ...m, content: `${String(m.content || '')}\n\n${extra}` }
+          : m,
+      )
+    }
+    return [{ role: 'system', content: extra }, ...base]
+  })()
+
   const requestParams = { model: model.trim(), ...rest, baseURL: (baseURL && baseURL.trim()) ? baseURL.trim().replace(/\/+$/, '') : undefined }
   if (temperature !== undefined && temperature !== null) {
     requestParams.temperature = temperature
@@ -1180,7 +1210,13 @@ ipcMain.on('ai-chat-stream', async (event, {
   }
 
   const runStreamLoop = async (currentMessages) => {
-    const { stream } = await createChatStream(key, currentMessages, requestParams, apiProvider, abortController.signal)
+    const { stream } = await createChatStream(
+      key,
+      currentMessages,
+      requestParams,
+      apiProvider,
+      abortController.signal,
+    )
     let accumulatedContent = ''
     let accumulatedThinking = ''
     let accumulatedToolCalls = []
@@ -1310,14 +1346,20 @@ ipcMain.on('ai-chat-stream', async (event, {
         model: responseModel,
       })
     } else if (tools && tools.length > 0) {
-      let currentMessages = messages
+      let currentMessages = messagesForModel
       while (currentMessages) {
         const next = await runStreamLoop(currentMessages)
         if (next === null) break
         currentMessages = next
       }
     } else {
-      const { stream } = await createChatStream(key, messages, requestParams, apiProvider, abortController.signal)
+      const { stream } = await createChatStream(
+        key,
+        messagesForModel,
+        requestParams,
+        apiProvider,
+        abortController.signal,
+      )
       let finished = false
       for await (const chunk of stream) {
         if (finished) break

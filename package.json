@@ -10,7 +10,8 @@
     "build:no-clean": "node build/icon.js && vite build && electron-builder",
     "preview": "vite preview",
     "postinstall": "electron-builder install-app-deps",
-    "validate:skills": "node electron/validateSkills.js"
+    "validate:skills": "node electron/validateSkills.js",
+    "validate:collab": "node electron/collabMode.scenarios.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",
