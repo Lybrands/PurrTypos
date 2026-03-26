@@ -110,7 +110,7 @@ export default function AiComposeBottom({
           value={modelOptions.length ? selectedModel : undefined}
           onChange={(v) => setSelectedModel(v)}
           options={modelOptions}
-          placeholder={modelOptions.length ? undefined : '请先在设置中添加模型'}
+          placeholder={modelOptions.length ? undefined : '无模型配置'}
           variant="borderless"
           popupMatchSelectWidth={false}
           popupRender={(menu) =>
