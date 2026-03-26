@@ -66,9 +66,11 @@ function toSaveData(values: CharacterFormValues): Partial<Character> {
 
 interface CharacterTabProps {
   bookId: EntityId | null
+  hideHeader?: boolean
+  onActionActiveChange?: (active: boolean) => void
 }
 
-export default function CharacterTab({ bookId }: CharacterTabProps) {
+export default function CharacterTab({ bookId, hideHeader = false, onActionActiveChange }: CharacterTabProps) {
   const { message } = useAntdApp()
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [createModalOpen, setCreateModalOpen] = React.useState(false)
@@ -106,6 +108,10 @@ export default function CharacterTab({ bookId }: CharacterTabProps) {
       form.setFieldsValue(toFormValues(editTarget))
     }
   }, [createModalOpen, editTarget, form])
+
+  React.useEffect(() => {
+    onActionActiveChange?.(createModalOpen || !!deleteTarget || configOpen)
+  }, [createModalOpen, deleteTarget, configOpen, onActionActiveChange])
 
   const openCreate = React.useCallback(() => {
     setEditTarget(null)
@@ -179,8 +185,8 @@ export default function CharacterTab({ bookId }: CharacterTabProps) {
   return (
     <div className="character-tab">
       <div className="character-tab-header">
-        <span className="character-tab-title">人物列表</span>
-        <div style={{ display: 'flex', gap: 2 }}>
+        {!hideHeader && <span className="character-tab-title">人物列表</span>}
+        <div style={{ display: 'flex', gap: 2, marginLeft: hideHeader ? 'auto' : undefined }}>
           <Tooltip title="配置选项">
             <Button
               type="text"
@@ -201,7 +207,6 @@ export default function CharacterTab({ bookId }: CharacterTabProps) {
           </Tooltip>
         </div>
       </div>
-
       <div className="character-tab-list">
         {characters.length === 0 ? (
           <div className="character-tab-empty-card">
@@ -217,6 +222,7 @@ export default function CharacterTab({ bookId }: CharacterTabProps) {
                   <span className="character-card-index">{index + 1}.</span>
                   <span className="character-card-name">{c.name}</span>
                   <Tooltip
+                    zIndex={1301}
                     title={
                       <div className="character-info-tooltip">
                         <div>性别：{c.gender || '-'}</div>

@@ -1,6 +1,7 @@
 import React, { forwardRef, useImperativeHandle } from 'react'
-import { EditOutlined, ImportOutlined } from '@ant-design/icons'
+import { EditOutlined, ImportOutlined, UserOutlined } from '@ant-design/icons'
 import { App as AntdApp, Button, Empty, Tooltip } from 'antd'
+import FloatingPanel from '../../components/FloatingPanel'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
 import type { Editor } from '@tiptap/core'
@@ -10,6 +11,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import type { EntityId } from '../../types'
+import CharacterTab from './CharacterTab'
 import './StoryBackgroundTab.scss'
 import './OutlineMarkdownPane.scss'
 
@@ -40,7 +42,7 @@ interface OutlineMarkdownPaneProps {
 const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPaneProps>(
   function OutlineMarkdownPane({ outlineId, markdownContent, onSaved }, ref) {
     const { message: appMessage } = AntdApp.useApp()
-    const { workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
+    const { bookId, workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
 
     React.useEffect(() => {
       notifyWorkspaceSearchContentChanged()
@@ -91,6 +93,30 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
     }, [editing])
 
     const [editorIsEmpty, setEditorIsEmpty] = React.useState(true)
+    const [characterPanelOpen, setCharacterPanelOpen] = React.useState(false)
+    const [characterPanelInitialPos, setCharacterPanelInitialPos] = React.useState<{ x: number; y: number } | undefined>(undefined)
+    const [characterPanelPinned, setCharacterPanelPinned] = React.useState(false)
+    const pinStateBeforeActionRef = React.useRef<boolean | null>(null)
+
+    React.useEffect(() => {
+      if (!characterPanelOpen) {
+        pinStateBeforeActionRef.current = null
+      }
+    }, [characterPanelOpen])
+
+    const handleCharacterActionActiveChange = React.useCallback((active: boolean) => {
+      if (active) {
+        if (pinStateBeforeActionRef.current == null) {
+          pinStateBeforeActionRef.current = characterPanelPinned
+          if (!characterPanelPinned) setCharacterPanelPinned(true)
+        }
+        return
+      }
+      if (pinStateBeforeActionRef.current != null) {
+        setCharacterPanelPinned(pinStateBeforeActionRef.current)
+        pinStateBeforeActionRef.current = null
+      }
+    }, [characterPanelPinned])
 
     React.useEffect(() => {
       editorRef.current = editor ?? null
@@ -206,6 +232,23 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
         <div className="outline-markdown-pane outline-markdown-pane--view story-background-view">
           <div className="story-background-view-header">
             <div className="story-background-toolbar story-background-toolbar-top">
+              <Tooltip title="人物">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<UserOutlined />}
+                  onClick={(e) => {
+                    if (!characterPanelOpen) {
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                      setCharacterPanelInitialPos({
+                        x: rect.right + 10,
+                        y: Math.max(rect.top - 8, 8),
+                      })
+                    }
+                    setCharacterPanelOpen((v) => !v)
+                  }}
+                />
+              </Tooltip>
               <Tooltip title="编辑">
                 <Button type="text" size="small" icon={<EditOutlined />} onClick={handleEdit} />
               </Tooltip>
@@ -214,6 +257,23 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
           <div className="story-background-content story-background-markdown">
             <MarkdownWithSearch content={content} searchQuery={workspaceSearchQuery} />
           </div>
+          {characterPanelOpen && (
+            <FloatingPanel
+              title="人物列表"
+              width={400}
+              open={characterPanelOpen}
+              onClose={() => setCharacterPanelOpen(false)}
+              initialPinned={false}
+              initialPosition={characterPanelInitialPos}
+              pinned={characterPanelPinned}
+              onPinnedChange={setCharacterPanelPinned}
+              storageKey="outline-markdown-character-panel"
+            >
+              <div className="outline-character-panel-body">
+                <CharacterTab bookId={bookId} hideHeader onActionActiveChange={handleCharacterActionActiveChange} />
+              </div>
+            </FloatingPanel>
+          )}
         </div>
       )
     }
@@ -222,6 +282,23 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       <div className="outline-markdown-pane outline-markdown-pane--editing story-background-editing">
         <div className="story-background-editing-header">
           <div className="story-background-toolbar story-background-toolbar-top">
+            <Tooltip title="人物">
+              <Button
+                type="text"
+                size="small"
+                icon={<UserOutlined />}
+                onClick={(e) => {
+                  if (!characterPanelOpen) {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                    setCharacterPanelInitialPos({
+                      x: rect.right + 10,
+                      y: Math.max(rect.top - 8, 8),
+                    })
+                  }
+                  setCharacterPanelOpen((v) => !v)
+                }}
+              />
+            </Tooltip>
             <Tooltip title="导入文件">
               <Button type="text" size="small" icon={<ImportOutlined />} onClick={handleImportFile} />
             </Tooltip>
@@ -238,6 +315,23 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
             取消
           </Button>
         </div>
+        {characterPanelOpen && (
+          <FloatingPanel
+            title="人物列表"
+            width={400}
+            open={characterPanelOpen}
+            onClose={() => setCharacterPanelOpen(false)}
+            initialPinned={false}
+            initialPosition={characterPanelInitialPos}
+            pinned={characterPanelPinned}
+            onPinnedChange={setCharacterPanelPinned}
+            storageKey="outline-markdown-character-panel"
+          >
+            <div className="outline-character-panel-body">
+              <CharacterTab bookId={bookId} hideHeader onActionActiveChange={handleCharacterActionActiveChange} />
+            </div>
+          </FloatingPanel>
+        )}
       </div>
     )
   }
