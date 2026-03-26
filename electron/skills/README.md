@@ -13,6 +13,8 @@
 
 ## 目录约定（与常见 Skills 布局对齐）
 
+人工总览（与实现若有出入以各 `SKILL.md` 为准）：[`skills.md`](skills.md)。
+
 ```
 skills/
 ├── README.md                 # 本说明

@@ -3,6 +3,7 @@
  * - 输入模型 tool_calls + SkillSpec
  * - 输出线性 DAG（nodes/edges/topoOrder）
  * - 自动补齐静态前置依赖（requires）
+ * - 若本轮 tool_calls 中在**当前调用之前**已出现同名依赖，则复用该节点加边，不再插入合成 tool_call
  */
 
 const { shortId8 } = require('./idUtils')
@@ -62,8 +63,17 @@ function buildDagFromToolCalls(input) {
   const warnings = []
   const seenPrereq = new Set()
 
-  for (const original of toolCalls) {
+  const prepared = toolCalls.map((original) => {
     const cur = cloneToolCall(original)
+    if (!cur.id) {
+      cur.id = shortId8()
+      warnings.push(`tool_call 缺少 id，已自动生成：${cur.id}`)
+    }
+    return cur
+  })
+
+  for (let inputIdx = 0; inputIdx < prepared.length; inputIdx++) {
+    const cur = prepared[inputIdx]
     const name = cur.function.name
     if (!name) continue
     const spec = skillSpecs[name] || {}
@@ -73,6 +83,24 @@ function buildDagFromToolCalls(input) {
       const key = `${dep}=>${name}`
       if (seenPrereq.has(key)) continue
       seenPrereq.add(key)
+
+      let fromInputId = ''
+      for (let j = inputIdx - 1; j >= 0; j--) {
+        if (String(prepared[j].function.name || '') === dep) {
+          fromInputId = prepared[j].id
+          break
+        }
+      }
+
+      if (fromInputId) {
+        edges.push({
+          from: fromInputId,
+          to: cur.id,
+          type: 'depends_on',
+        })
+        continue
+      }
+
       const depCall = makeToolCall(dep, {})
       nodes.push({
         nodeId: depCall.id,
@@ -86,10 +114,6 @@ function buildDagFromToolCalls(input) {
         type: 'depends_on',
       })
       topoOrder.push(depCall.id)
-    }
-    if (!cur.id) {
-      cur.id = shortId8()
-      warnings.push(`tool_call 缺少 id，已自动生成：${cur.id}`)
     }
     nodes.push({
       nodeId: cur.id,

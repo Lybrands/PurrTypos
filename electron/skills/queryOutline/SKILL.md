@@ -11,7 +11,7 @@ description: 当需要只读查看本书某条大纲的结构与文本内容（�
 {
   "type": "object",
   "properties": {
-    "bookId": { "type": "string", "description": "当前书籍 id（可由宿主注入）" },
+    "bookId": { "type": "number", "description": "当前书籍 ID（可由宿主注入）" },
     "outlineIds": {
       "type": "array",
       "items": { "type": "string" },
