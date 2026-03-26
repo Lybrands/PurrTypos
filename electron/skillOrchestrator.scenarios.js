@@ -93,9 +93,69 @@ async function scenarioGlobalOutlineWriteNoRepairNeeded() {
   assert(names.includes('editGlobalOutline'))
 }
 
+async function scenarioChapterReadInsertsListWritingChapters() {
+  const plan = planToolCalls({
+    toolCalls: [
+      {
+        id: 'tc_ch',
+        type: 'function',
+        function: {
+          name: 'getChapterContent',
+          arguments: JSON.stringify({ chapterIndex: 1 }),
+        },
+      },
+    ],
+    skillSpecs: getSkillSpecs(),
+    toolCtx: { bookId: 3 },
+    latestUserText: '读第一章',
+  })
+  const names = plan.executableCalls.map((x) => x.function.name)
+  const li = names.indexOf('listWritingChapters')
+  const gi = names.indexOf('getChapterContent')
+  assert(li >= 0 && gi >= 0, 'expected listWritingChapters and getChapterContent')
+  assert(li < gi, 'listWritingChapters must run before getChapterContent')
+}
+
+async function scenarioChapterReadReusesExistingListWritingChapters() {
+  const plan = planToolCalls({
+    toolCalls: [
+      {
+        id: 'tc_list',
+        type: 'function',
+        function: {
+          name: 'listWritingChapters',
+          arguments: JSON.stringify({ bookId: 3 }),
+        },
+      },
+      {
+        id: 'tc_ch',
+        type: 'function',
+        function: {
+          name: 'getChapterContent',
+          arguments: JSON.stringify({ chapterIndex: 1 }),
+        },
+      },
+    ],
+    skillSpecs: getSkillSpecs(),
+    toolCtx: { bookId: 3 },
+    latestUserText: '读第一章',
+  })
+  const names = plan.executableCalls.map((x) => x.function.name)
+  assert.strictEqual(
+    names.filter((n) => n === 'listWritingChapters').length,
+    1,
+    'should not insert a second listWritingChapters when model already sent one',
+  )
+  const li = names.indexOf('listWritingChapters')
+  const gi = names.indexOf('getChapterContent')
+  assert(li < gi, 'listWritingChapters must run before getChapterContent')
+}
+
 async function run() {
   await scenarioMissingOutlineIdAutoRepair()
   await scenarioGlobalOutlineWriteNoRepairNeeded()
+  await scenarioChapterReadInsertsListWritingChapters()
+  await scenarioChapterReadReusesExistingListWritingChapters()
   console.log('[skillOrchestrator.scenarios] all scenarios passed')
 }
 

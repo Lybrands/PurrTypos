@@ -73,15 +73,31 @@ const SKILL_SPECS = {
     consumes: ['bookId', 'outlineId'],
     autoResolveArgs: ['bookId', 'outlineId'],
   },
-  editChapterContent: {
-    riskLevel: 'write',
-    consumes: ['chapterId', 'content'],
-    autoResolveArgs: ['chapterId'],
-  },
   listWritingChapters: {
     riskLevel: 'read',
     provides: ['writingChaptersIndex'],
     consumes: ['bookId'],
+  },
+  getChapterContent: {
+    riskLevel: 'read',
+    requires: ['listWritingChapters'],
+    consumes: ['bookId', 'chapterId'],
+  },
+  batchGetChapterContents: {
+    riskLevel: 'read',
+    requires: ['listWritingChapters'],
+    consumes: ['chapterIds'],
+  },
+  editChapterContent: {
+    riskLevel: 'write',
+    requires: ['listWritingChapters'],
+    consumes: ['chapterId', 'content'],
+    autoResolveArgs: ['chapterId'],
+  },
+  addForeshadowing: {
+    riskLevel: 'write',
+    requires: ['listWritingChapters'],
+    consumes: ['bookId', 'chapterId', 'content'],
   },
 }
 

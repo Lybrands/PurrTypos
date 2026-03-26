@@ -9,7 +9,8 @@
     "build": "node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",
     "build:no-clean": "node build/icon.js && vite build && electron-builder",
     "preview": "vite preview",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "validate:skills": "node electron/validateSkills.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",
