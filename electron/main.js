@@ -804,6 +804,7 @@ const {
   buildCollabTurnAppendix,
   filterCollabTools,
 } = require('./collabPrompt')
+const { resolveSystemPromptByMode } = require('./modeSystemPrompts')
 const { EXEC_ACTIONS } = require('./subagentConfig')
 const { runSubagentPipeline } = require('./subagentPipeline')
 
@@ -1148,9 +1149,9 @@ ipcMain.on('ai-chat-stream', async (event, {
   associatedChapterIds,
   associatedOutlineIds,
   agentMode,
+  chatAgentMode,
   /** legacy 下协作共创：'collab'；默认 'default' */
   writingMode: writingModeFromFront = 'default',
-  agentAction,
   agentActions: rawAgentActions,
 }) => {
   const { model, temperature, ...rest } = options
@@ -1182,7 +1183,6 @@ ipcMain.on('ai-chat-stream', async (event, {
   const collabWriting =
     runtimeMode === 'legacy' &&
     (writingModeFromFront === 'collab' || writingModeFromFront === true)
-  const action = Object.values(EXEC_ACTIONS).includes(agentAction) ? agentAction : EXEC_ACTIONS.FULL
   const allowed = new Set(Object.values(EXEC_ACTIONS))
   const normalizedAgentActions =
     Array.isArray(rawAgentActions) && rawAgentActions.length > 0
@@ -1222,18 +1222,21 @@ ipcMain.on('ai-chat-stream', async (event, {
 
   const messagesForModel = (() => {
     const base = Array.isArray(messages) ? [...messages] : []
-    if (!collabWriting || base.length === 0) return base
-    const extra =
-      `${buildCollabSystemPrompt({ challengeLevel: 'medium', generationStrategy: 'outline_then_draft' })}\n\n${buildCollabTurnAppendix(base)}`
+    if (base.length === 0) return base
+    const modeSystemPrompt = resolveSystemPromptByMode(chatAgentMode, runtimeMode, collabWriting)
+    const collabExtra = collabWriting
+      ? `${buildCollabSystemPrompt({ challengeLevel: 'medium', generationStrategy: 'outline_then_draft' })}\n\n${buildCollabTurnAppendix(base)}`
+      : ''
+    const mergedSystem = [modeSystemPrompt, collabExtra].filter(Boolean).join('\n\n')
     const sysIdx = base.findIndex((m) => m && m.role === 'system')
     if (sysIdx >= 0) {
       return base.map((m, i) =>
         i === sysIdx
-          ? { ...m, content: `${String(m.content || '')}\n\n${extra}` }
+          ? { ...m, content: [mergedSystem, String(m.content || '').trim()].filter(Boolean).join('\n\n') }
           : m,
       )
     }
-    return [{ role: 'system', content: extra }, ...base]
+    return [{ role: 'system', content: mergedSystem }, ...base]
   })()
 
   const requestParams = { model: model.trim(), ...rest, baseURL: (baseURL && baseURL.trim()) ? baseURL.trim().replace(/\/+$/, '') : undefined }
@@ -1264,6 +1267,52 @@ ipcMain.on('ai-chat-stream', async (event, {
     chapterContentCache: new Map(),
     /** 本会话内只读工具结果缓存（listOutlines/queryOutline/背景/人物目录等，大纲或总纲写入后整表清空） */
     readToolCache: new Map(),
+  }
+  let collabHasWrittenViaTool = false
+  const forwardToolExecutorEvent = (ev) => {
+    if (!ev) return
+    if (ev.chapterContentUpdated != null) {
+      collabHasWrittenViaTool = true
+      sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
+    }
+    if (typeof ev.collabLatestParagraph === 'string' && ev.collabLatestParagraph.trim()) {
+      sendChunk({ collabLatestParagraph: ev.collabLatestParagraph })
+    }
+    if (Array.isArray(ev.toolReadCacheMask)) sendChunk({ toolReadCacheMask: ev.toolReadCacheMask })
+    if (typeof ev.toolIndexCompleted === 'number') {
+      sendChunk({
+        toolIndexCompleted: ev.toolIndexCompleted,
+        ...(ev.toolFromCache === true ? { toolFromCache: true } : {}),
+      })
+    }
+  }
+  const autoPersistCollabDraft = async (text) => {
+    if (!collabWriting || collabHasWrittenViaTool) return
+    const cid = chapterId != null ? String(chapterId).trim() : ''
+    const draft = String(text || '').trim()
+    if (!cid || !draft) return
+    try {
+      const tcId = `collab_auto_${Date.now()}`
+      const res = await toolExecutor.runTools(
+        [{
+          id: tcId,
+          type: 'function',
+          function: {
+            name: 'editChapterContent',
+            arguments: JSON.stringify({ chapterId: cid, content: draft }),
+          },
+        }],
+        toolCtx,
+        forwardToolExecutorEvent,
+      )
+      const first = Array.isArray(res) ? res[0] : null
+      const parsed = first?.content ? JSON.parse(first.content) : null
+      if (!parsed?.success) {
+        sendChunk({ toolRouterWarning: '协作共创自动写入正文失败，请重试或手动确认写入。' })
+      }
+    } catch (_) {
+      sendChunk({ toolRouterWarning: '协作共创自动写入正文失败，请重试或手动确认写入。' })
+    }
   }
 
   const runStreamLoop = async (currentMessages) => {
@@ -1296,6 +1345,7 @@ ipcMain.on('ai-chat-stream', async (event, {
       }
       const finishReason = chunk.choices?.[0]?.finish_reason
       if (finishReason === 'stop' || finishReason === 'length') {
+        await autoPersistCollabDraft(accumulatedContent)
         sendChunk({ done: true, model })
         return null
       }
@@ -1339,17 +1389,7 @@ ipcMain.on('ai-chat-stream', async (event, {
           latestUserText: latestUserTextForPlan,
           maxRepairRounds: 1,
           runTools: async (calls) =>
-            toolExecutor.runTools(calls, toolCtx, (ev) => {
-              if (!ev) return
-              if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
-              if (Array.isArray(ev.toolReadCacheMask)) sendChunk({ toolReadCacheMask: ev.toolReadCacheMask })
-              if (typeof ev.toolIndexCompleted === 'number') {
-                sendChunk({
-                  toolIndexCompleted: ev.toolIndexCompleted,
-                  ...(ev.toolFromCache === true ? { toolFromCache: true } : {}),
-                })
-              }
-            }),
+            toolExecutor.runTools(calls, toolCtx, forwardToolExecutorEvent),
         })
         if (executed.repairedRounds > 0) {
           console.log('[skill-orchestrator][repair] repairedRounds:', executed.repairedRounds)
@@ -1395,7 +1435,6 @@ ipcMain.on('ai-chat-stream', async (event, {
         latestUserTextForPlan,
         useToolRouter,
         toolsFromFront,
-        action,
         agentActions:
           normalizedAgentActions && normalizedAgentActions.length > 0
             ? normalizedAgentActions
@@ -1418,6 +1457,7 @@ ipcMain.on('ai-chat-stream', async (event, {
         abortController.signal,
       )
       let finished = false
+      let accumulatedContent = ''
       for await (const chunk of stream) {
         if (finished) break
         const choice0 = chunk.choices?.[0]
@@ -1426,9 +1466,13 @@ ipcMain.on('ai-chat-stream', async (event, {
         const thinkingDelta = delta.reasoning_content || ''
         const msg = choice0?.message
         if (thinkingDelta) sendChunk({ thinkingDelta })
-        if (contentDelta) sendChunk({ delta: contentDelta })
+        if (contentDelta) {
+          accumulatedContent += contentDelta
+          sendChunk({ delta: contentDelta })
+        }
         const finishReason = choice0?.finish_reason
         if (finishReason === 'stop' || finishReason === 'length') {
+          await autoPersistCollabDraft(accumulatedContent)
           finished = true
           sendChunk({ done: true, model: responseModel })
         }

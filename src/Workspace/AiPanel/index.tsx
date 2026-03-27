@@ -27,7 +27,6 @@ import type { TextAreaRef } from "antd/es/input/TextArea";
 import type { AiModelConfig, AiSession, Conversation } from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
 import {
-  DEFAULT_SYSTEM_PROMPT,
   INPUT_AREA_DEFAULT,
   INPUT_AREA_MAX,
   INPUT_AREA_MIN,
@@ -54,7 +53,6 @@ import "./index.scss";
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
-  systemPrompt?: string;
   aiAgentMode?: "legacy" | "subagent";
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
@@ -66,7 +64,6 @@ const thinkingOnlyModelIds = (configs: AiModelConfig[]) =>
 
 export default function AiPanel({
   modelConfigs = [],
-  systemPrompt = DEFAULT_SYSTEM_PROMPT,
   aiAgentMode = "legacy",
   isFullscreen,
   onToggleFullscreen,
@@ -161,7 +158,6 @@ export default function AiPanel({
 
   const { handleSubmit: doSubmit, handleAbort } = useChatSubmit({
     selectedModelConfig,
-    systemPrompt,
     prompt,
     setPrompt,
     loading,
@@ -186,10 +182,10 @@ export default function AiPanel({
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode: chatAgentMode === "subagent" ? "subagent" : "legacy",
+    agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
     writingMode: chatAgentMode === "collab" ? "collab" : "default",
     agentActions:
-      chatAgentMode === "subagent" ? agentActions : undefined,
+      chatAgentMode === "expert" ? agentActions : undefined,
   });
 
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
@@ -887,7 +883,7 @@ export default function AiPanel({
                               pipelinePopoverOpen={pipelinePopoverOpen}
                               onPipelinePopoverOpenChange={setPipelinePopoverOpen}
                               pipelineAgentEnabled={
-                                chatAgentMode === "subagent"
+                                chatAgentMode === "expert"
                               }
                               pipelineSelectedStages={agentActions}
                               onPipelineStagesChange={setAgentActions}
@@ -1244,7 +1240,7 @@ export default function AiPanel({
             onContextPopoverOpenChange={setContextPopoverOpen}
             pipelinePopoverOpen={pipelinePopoverOpen}
             onPipelinePopoverOpenChange={setPipelinePopoverOpen}
-            pipelineAgentEnabled={chatAgentMode === "subagent"}
+            pipelineAgentEnabled={chatAgentMode === "expert"}
             pipelineSelectedStages={agentActions}
             onPipelineStagesChange={setAgentActions}
           />

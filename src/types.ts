@@ -112,6 +112,10 @@ export interface Conversation {
 /** 长期记忆层级 */
 export type MemoryLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
+/** AI 对话模式（与 UI 模式选择一致） */
+export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'collab'] as const;
+export type ChatAgentMode = (typeof CHAT_AGENT_MODES)[number];
+
 export interface AiMemory {
   id: number | string;  // mem0 使用 UUID 字符串
   book_id: EntityId;
@@ -371,11 +375,10 @@ export interface ElectronAPI {
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
     agentMode?: "legacy" | "subagent";
+    chatAgentMode?: "ask" | "agent" | "expert" | "collab";
     /** legacy 下协作共创 */
     writingMode?: "default" | "collab";
-    /** 兼容旧版单选 */
-    agentAction?: "analyze" | "plan" | "draft" | "styleUnify" | "review" | "polish" | "full";
-    /** 写作专家多选阶段（优先于 agentAction） */
+    /** 写作专家多选阶段 */
     agentActions?: string[];
   }) => void;
   abortAiStream: () => void;

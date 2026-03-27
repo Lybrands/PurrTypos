@@ -1,4 +1,4 @@
-import type { Chapter, Conversation, EntityId } from '../../types'
+import { CHAT_AGENT_MODES, type Chapter, type Conversation, type EntityId, type ChatAgentMode } from '../../types'
 import {
   extractTextFromLexical as extractTextFromLexicalImpl,
   formatChaptersAsText as formatChaptersAsTextImpl,
@@ -7,10 +7,8 @@ import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
 
-export type ChatAgentMode = 'ask' | 'legacy' | 'subagent' | 'collab'
-
 const isChatAgentMode = (v: unknown): v is ChatAgentMode =>
-  v === 'ask' || v === 'legacy' || v === 'subagent' || v === 'collab'
+  typeof v === 'string' && (CHAT_AGENT_MODES as readonly string[]).includes(v)
 
 /** @deprecated 请从 Workspace/utils 导入 */
 export const extractTextFromLexical = extractTextFromLexicalImpl
@@ -36,7 +34,7 @@ export function loadModelPrefs(
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
   const defaultChatAgentMode: ChatAgentMode =
-    settingsDefaultAgentMode === 'subagent' ? 'subagent' : 'legacy'
+    settingsDefaultAgentMode === 'subagent' ? 'expert' : 'agent'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {
@@ -51,6 +49,10 @@ export function loadModelPrefs(
       let chatAgentMode: ChatAgentMode
       if (isChatAgentMode(p.chatAgentMode)) {
         chatAgentMode = p.chatAgentMode
+      } else if (p.chatAgentMode === 'legacy') {
+        chatAgentMode = 'agent'
+      } else if (p.chatAgentMode === 'subagent') {
+        chatAgentMode = 'expert'
       } else if (p.agentEnabled === false) {
         chatAgentMode = 'ask'
       } else {

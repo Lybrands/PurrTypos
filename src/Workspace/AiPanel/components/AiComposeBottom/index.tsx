@@ -1,8 +1,7 @@
 import React from 'react'
 import { Divider, Select, Switch, Tooltip } from 'antd'
 import './index.scss'
-import type { AiModelConfig } from '../../../../types'
-import type { ChatAgentMode } from '../../utils'
+import type { AiModelConfig, ChatAgentMode } from '../../../../types'
 
 export interface AiComposeBottomProps {
   /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
@@ -42,7 +41,7 @@ export default function AiComposeBottom({
   const thinkingOnly = thinkingOnlyModelIds.includes(selectedModel)
 
   const agentModeSelectStyles = React.useMemo(() => {
-    if (chatAgentMode === 'legacy') {
+    if (chatAgentMode === 'agent') {
       return {
         root: {
           border: 'none',
@@ -53,7 +52,7 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--accent)' },
       } as const
     }
-    if (chatAgentMode === 'subagent') {
+    if (chatAgentMode === 'expert') {
       return {
         root: {
           border: 'none',
@@ -90,14 +89,14 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'legacy' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'subagent' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
-            { value: 'subagent', label: '写作专家' },
+            { value: 'expert', label: '写作专家' },
             { value: 'collab', label: '协作共创' },
-            { value: 'legacy', label: '智能体' },
+            { value: 'agent', label: '智能体' },
             { value: 'ask', label: '问答' },
           ]}
           variant="filled"
@@ -114,7 +113,7 @@ export default function AiComposeBottom({
           variant="borderless"
           popupMatchSelectWidth={false}
           popupRender={(menu) =>
-            chatAgentMode === 'subagent' ? (
+            chatAgentMode === 'expert' ? (
               menu
             ) : (
               <>
