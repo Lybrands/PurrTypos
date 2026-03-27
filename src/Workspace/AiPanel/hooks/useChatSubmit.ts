@@ -35,70 +35,105 @@ function resolveChapterTitleInCatalog(
   return t || undefined;
 }
 
+function resolveChapterTitleByIndexInCatalog(
+  chapterIndex: unknown,
+  writingChapters: { id: EntityId; title: string }[],
+): string | undefined {
+  const idx = Number(chapterIndex);
+  if (!Number.isInteger(idx) || idx <= 0) return undefined;
+  const row = writingChapters[idx - 1];
+  const t = String(row?.title || "").trim();
+  return t || undefined;
+}
+
+function resolveOutlineTitleInCatalog(
+  outlineId: EntityId | undefined,
+  availableOutlines: Outline[],
+): string | undefined {
+  if (outlineId == null || String(outlineId).trim() === "") return undefined;
+  const key = String(outlineId).trim();
+  const row = availableOutlines.find((o) => String(o.id) === key);
+  const t = row?.title?.trim();
+  return t || undefined;
+}
+
 /** 工具气泡文案；章节类若在本地章节目录无对应标题则 outcome=context_error（视为参数/上下文有误） */
 function toolCallDisplayRow(
   name: string,
   args: Record<string, unknown>,
   writingChapters: { id: EntityId; title: string }[],
+  availableOutlines: Outline[],
 ): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
       case "getChapterContent": {
+        const chapterTitleArg =
+          args.chapterTitle != null && String(args.chapterTitle).trim() !== ""
+            ? String(args.chapterTitle).trim()
+            : "";
+        if (chapterTitleArg) {
+          return { label: `查看《${chapterTitleArg}》章节内容`, outcome: "ok" };
+        }
+        const titleByIndex = resolveChapterTitleByIndexInCatalog(
+          args.chapterIndex,
+          writingChapters,
+        );
+        if (titleByIndex) {
+          return { label: `查看《${titleByIndex}》章节内容`, outcome: "ok" };
+        }
         const cid =
           args.chapterId != null && args.chapterId !== ""
             ? String(args.chapterId).trim()
             : "";
         if (!cid) {
-          return {
-            label: "getChapterContent（缺少有效 chapterId）",
-            outcome: "context_error",
-          };
+          return { label: "查看章节内容", outcome: "ok" };
         }
         const title = resolveChapterTitleInCatalog(cid, writingChapters);
-        if (!title) {
-          return {
-            label: `查看章节（ID ${cid}）`,
-            outcome: "context_error",
-          };
-        }
-        return { label: `查看《${title}》章节内容`, outcome: "ok" };
+        return { label: title ? `查看《${title}》章节内容` : "查看章节内容", outcome: "ok" };
       }
       case "editChapterContent": {
+        const chapterTitleArg =
+          args.chapterTitle != null && String(args.chapterTitle).trim() !== ""
+            ? String(args.chapterTitle).trim()
+            : "";
+        if (chapterTitleArg) {
+          return { label: `编辑《${chapterTitleArg}》章节内容`, outcome: "ok" };
+        }
+        const titleByIndex = resolveChapterTitleByIndexInCatalog(
+          args.chapterIndex,
+          writingChapters,
+        );
+        if (titleByIndex) {
+          return { label: `编辑《${titleByIndex}》章节内容`, outcome: "ok" };
+        }
         const cid =
           args.chapterId != null && args.chapterId !== ""
             ? String(args.chapterId).trim()
             : "";
         if (!cid) {
-          return {
-            label: "editChapterContent（缺少有效 chapterId）",
-            outcome: "context_error",
-          };
+          return { label: "编辑章节内容", outcome: "ok" };
         }
         const title = resolveChapterTitleInCatalog(cid, writingChapters);
-        if (!title) {
-          return {
-            label: `编辑章节（ID ${cid}）`,
-            outcome: "context_error",
-          };
-        }
-        return { label: `编辑《${title}》章节内容`, outcome: "ok" };
+        return { label: title ? `编辑《${title}》章节内容` : "编辑章节内容", outcome: "ok" };
       }
       case "batchGetChapterContents": {
         const raw = args.chapterIds;
         if (!Array.isArray(raw) || raw.length === 0) {
           return { label: "查看多章内容", outcome: "ok" };
         }
-        const ids = raw.map((x) => String(x).trim()).filter((s) => s !== "");
+        const ids = raw
+          .map((x) => String(x).trim())
+          .filter((s) => s !== "");
         if (ids.length === 0) {
           return {
-            label: "batchGetChapterContents（章节 ID 列表无效）",
+            label: "查看多章内容",
             outcome: "context_error",
           };
         }
         const bad = ids.filter((id) => !resolveChapterTitleInCatalog(id, writingChapters));
         if (bad.length > 0) {
           return {
-            label: `批量查看章节（无目录对应：${bad.join("、")}）`,
+            label: "查看多章内容",
             outcome: "context_error",
           };
         }
@@ -115,6 +150,8 @@ function toolCallDisplayRow(
       }
       case "listWritingChapters":
         return { label: "查看章节目录", outcome: "ok" };
+      case "createWritingChapter":
+        return { label: "创建章节", outcome: "ok" };
       case "getBookCharacters":
         return { label: "查看人物信息", outcome: "ok" };
       case "listBookCharacters":
@@ -126,7 +163,36 @@ function toolCallDisplayRow(
       case "editGlobalOutline":
         return { label: "编辑总纲", outcome: "ok" };
       case "queryOutline":
-        return { label: "查看大纲详情", outcome: "ok" };
+        {
+          const outlineIdArg =
+            args.outlineId != null && String(args.outlineId).trim() !== ""
+              ? String(args.outlineId).trim()
+              : "";
+          if (outlineIdArg) {
+            const title = resolveOutlineTitleInCatalog(outlineIdArg, availableOutlines);
+            if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
+            return { label: "查看大纲详情", outcome: "context_error" };
+          }
+          if (Array.isArray(args.outlineIds) && args.outlineIds.length > 0) {
+            const ids = args.outlineIds
+              .map((x) => String(x).trim())
+              .filter((s) => s !== "");
+            if (ids.length === 1) {
+              const title = resolveOutlineTitleInCatalog(ids[0], availableOutlines);
+              if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
+              return { label: "查看大纲详情", outcome: "context_error" };
+            }
+            const titles = ids
+              .map((id) => resolveOutlineTitleInCatalog(id, availableOutlines))
+              .filter((t): t is string => Boolean(t));
+            if (titles.length > 0) {
+              const head = titles.slice(0, 3).map((t) => `《${t}》`).join("");
+              if (titles.length <= 3) return { label: `查看${head}等多条大纲详情`, outcome: "ok" };
+              return { label: `查看${head}等 ${titles.length} 条大纲详情`, outcome: "ok" };
+            }
+          }
+          return { label: "查看大纲详情", outcome: "context_error" };
+        }
       case "listOutlines":
         return { label: "查看大纲列表", outcome: "ok" };
       case "updateOutline":
@@ -283,6 +349,19 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
   const { message: appMessage } = AntdApp.useApp();
   const unsubscribeRef = React.useRef<(() => void) | null>(null);
+  const visibleSessionIdRef = React.useRef<number | null>(activeSessionId);
+  const runningSessionIdRef = React.useRef<number | null>(null);
+  const runningAccRef = React.useRef<{
+    response: string;
+    thinking: string;
+    userText: string;
+    toolCallSegments?: ToolCallSegment[];
+    thinkingBlocks?: string[];
+  } | null>(null);
+
+  React.useEffect(() => {
+    visibleSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   const handleAbort = React.useCallback(() => {
     window.electronAPI.abortAiStream();
@@ -369,7 +448,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const systemSuffix =
       bookId != null
         ? agentEnabled
-          ? `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，请在工具参数中使用 **chapterTitle**（与左侧目录标题完全一致）或 **chapterIndex**（见主进程附录中的序号）、**outlineTitle** / **outlineIndex**，勿手写或猜测数据库 id。向用户回复时使用书名、章节名，不要暴露 id。`
+          ? `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，只能先读取列表中的真实 id，再传 **chapterId** / **outlineId(outlineIds)**。不支持 chapterTitle/chapterIndex/outlineTitle/outlineIndex。勿猜测数据库 id。向用户回复时使用书名、章节名，不要暴露 id。`
           : `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用名称，不暴露 id。`
         : "";
 
@@ -485,38 +564,45 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       toolCallSegments: undefined as ToolCallSegment[] | undefined,
       thinkingBlocks: [] as string[],
     };
+    runningSessionIdRef.current = sessionId;
+    runningAccRef.current = acc;
 
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
+      const isVisibleSession = () => visibleSessionIdRef.current === sessionId;
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning);
       }
       if (chunk.subagentBridging === true || chunk.subagentBridging === false) {
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              subagentBridging: chunk.subagentBridging === true,
-            };
-            return next;
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              next[next.length - 1] = {
+                ...(last as ChatMessage),
+                subagentBridging: chunk.subagentBridging === true,
+              };
+              return next;
+            });
           });
-        });
+        }
       }
       if (chunk.subagentMainPresenter) {
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              subagentMainPresenter: true,
-            };
-            return next;
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              next[next.length - 1] = {
+                ...(last as ChatMessage),
+                subagentMainPresenter: true,
+              };
+              return next;
+            });
           });
-        });
+        }
       }
       const skipSubagentStageUiForPayloadOnly =
         agentMode === "subagent" &&
@@ -527,204 +613,235 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         (chunk.subagentStage || chunk.subagentStageName) &&
         !skipSubagentStageUiForPayloadOnly
       ) {
-        const stageId = chunk.subagentStage;
-        const stageName =
-          chunk.subagentStageName ||
-          normalizeSubagentStageName(chunk.subagentStage);
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            const prevStages = (last as ChatMessage).subagentStages ?? [];
-            const normalizedId = String(stageId || "").trim();
-            const existingIdx = normalizedId
-              ? prevStages.findIndex((s) => s.id === normalizedId)
-              : -1;
-            let nextStages = prevStages.map((s) =>
-              s.status === "running" ? { ...s, status: "done" as const } : s,
-            );
-            if (existingIdx >= 0) {
-              nextStages = nextStages.map((s, i) =>
-                i === existingIdx
-                  ? {
-                      ...s,
-                      name: stageName || s.name,
-                      status: "running" as const,
-                    }
-                  : s,
+        if (isVisibleSession()) {
+          const stageId = chunk.subagentStage;
+          const stageName =
+            chunk.subagentStageName ||
+            normalizeSubagentStageName(chunk.subagentStage);
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const prevStages = (last as ChatMessage).subagentStages ?? [];
+              const normalizedId = String(stageId || "").trim();
+              const existingIdx = normalizedId
+                ? prevStages.findIndex((s) => s.id === normalizedId)
+                : -1;
+              let nextStages = prevStages.map((s) =>
+                s.status === "running" ? { ...s, status: "done" as const } : s,
               );
-            } else if (normalizedId || stageName) {
-              nextStages = [
-                ...nextStages,
-                {
-                  id: normalizedId || stageName,
-                  name: stageName || normalizedId,
-                  status: "running" as const,
-                },
-              ];
-            }
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              subagentStageId: stageId || (last as ChatMessage).subagentStageId,
-              subagentStageName:
-                stageName || (last as ChatMessage).subagentStageName,
-              subagentStageWorking: true,
-              subagentStages: nextStages,
-            };
-            return next;
+              if (existingIdx >= 0) {
+                nextStages = nextStages.map((s, i) =>
+                  i === existingIdx
+                    ? {
+                        ...s,
+                        name: stageName || s.name,
+                        status: "running" as const,
+                      }
+                    : s,
+                );
+              } else if (normalizedId || stageName) {
+                nextStages = [
+                  ...nextStages,
+                  {
+                    id: normalizedId || stageName,
+                    name: stageName || normalizedId,
+                    status: "running" as const,
+                  },
+                ];
+              }
+              next[next.length - 1] = {
+                ...(last as ChatMessage),
+                subagentStageId: stageId || (last as ChatMessage).subagentStageId,
+                subagentStageName:
+                  stageName || (last as ChatMessage).subagentStageName,
+                subagentStageWorking: true,
+                subagentStages: nextStages,
+              };
+              return next;
+            });
           });
-        });
+        }
       }
       if (chunk.subagentStageDone && chunk.subagentStageName) {
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            const prevStages = (last as ChatMessage).subagentStages ?? [];
-            const doneStageId = String(chunk.subagentStageDone || "").trim();
-            let found = false;
-            let nextStages = prevStages.map((s) => {
-              if (
-                (doneStageId && s.id === doneStageId) ||
-                (!doneStageId && s.name === chunk.subagentStageName)
-              ) {
-                found = true;
-                return { ...s, status: "done" as const };
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const prevStages = (last as ChatMessage).subagentStages ?? [];
+              const doneStageId = String(chunk.subagentStageDone || "").trim();
+              let found = false;
+              let nextStages = prevStages.map((s) => {
+                if (
+                  (doneStageId && s.id === doneStageId) ||
+                  (!doneStageId && s.name === chunk.subagentStageName)
+                ) {
+                  found = true;
+                  return { ...s, status: "done" as const };
+                }
+                return s;
+              });
+              if (!found && chunk.subagentStageName) {
+                nextStages = [
+                  ...nextStages,
+                  {
+                    id: doneStageId || chunk.subagentStageName,
+                    name: chunk.subagentStageName,
+                    status: "done" as const,
+                  },
+                ];
               }
-              return s;
+              next[next.length - 1] = {
+                ...(last as ChatMessage),
+                subagentStageWorking: false,
+                subagentLastCompletedStageName: chunk.subagentStageName,
+                subagentStages: nextStages,
+              };
+              return next;
             });
-            if (!found && chunk.subagentStageName) {
-              nextStages = [
-                ...nextStages,
-                {
-                  id: doneStageId || chunk.subagentStageName,
-                  name: chunk.subagentStageName,
-                  status: "done" as const,
-                },
-              ];
-            }
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              subagentStageWorking: false,
-              subagentLastCompletedStageName: chunk.subagentStageName,
-              subagentStages: nextStages,
-            };
-            return next;
           });
-        });
+        }
       }
       if (chunk.orchestratorRepair?.repairedRounds) {
-        appMessage.info(`已自动修复执行路径 ${chunk.orchestratorRepair.repairedRounds} 次`);
-        const repairedRounds = chunk.orchestratorRepair.repairedRounds;
-        const repairReasons = (chunk.orchestratorRepair?.events || [])
-          .map((x) => String(x?.reason || "").trim())
-          .filter(Boolean);
-        flushSync(() => {
+        if (isVisibleSession()) {
+          const repairedRounds = chunk.orchestratorRepair.repairedRounds;
+          const repairReasons = (chunk.orchestratorRepair?.events || [])
+            .map((x) => String(x?.reason || "").trim())
+            .filter(Boolean);
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const lastMsg = next[next.length - 1];
+              if (lastMsg?.role !== "assistant") return prev;
+              const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
+              if (segs.length === 0) return prev;
+              const lastSeg = segs[segs.length - 1];
+              const nextSegs = [
+                ...segs.slice(0, -1),
+                {
+                  ...lastSeg,
+                  trace: {
+                    ...(lastSeg.trace ?? {}),
+                    repairedRounds,
+                    repairReasons,
+                  },
+                },
+              ];
+              next[next.length - 1] = {
+                ...(lastMsg as ChatMessage),
+                toolCallSegments: nextSegs,
+              };
+              return next;
+            });
+          });
+        }
+      }
+      if (chunk.error) {
+        if (isVisibleSession()) {
           setConversations((prev) => {
             const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg?.role !== "assistant") return prev;
-            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
-            if (segs.length === 0) return prev;
-            const lastSeg = segs[segs.length - 1];
-            const nextSegs = [
-              ...segs.slice(0, -1),
-              {
-                ...lastSeg,
-                trace: {
-                  ...(lastSeg.trace ?? {}),
-                  repairedRounds,
-                  repairReasons,
-                },
-              },
-            ];
             next[next.length - 1] = {
-              ...(lastMsg as ChatMessage),
-              toolCallSegments: nextSegs,
+              role: "assistant",
+              content: "本轮已结束，请继续下一条指令。",
+              isError: true,
             };
             return next;
           });
-        });
-      }
-      if (chunk.error) {
-        setConversations((prev) => {
-          const next = [...prev];
-          next[next.length - 1] = {
-            role: "assistant",
-            content: "请求失败：" + chunk.error,
-            isError: true,
-          };
-          return next;
-        });
-        setLoading(false);
+          setLoading(false);
+        }
         unsubscribe();
         unsubscribeRef.current = null;
+        runningSessionIdRef.current = null;
+        runningAccRef.current = null;
         return;
       }
 
       if (chunk.thinkingDelta) {
         acc.thinking += chunk.thinkingDelta;
         const td = chunk.thinkingDelta;
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            next[next.length - 1] = {
-              ...last,
-              thinking: (last.thinking || "") + td,
-              toolCalling: false,
-            };
-            return next;
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              next[next.length - 1] = {
+                ...last,
+                thinking: (last.thinking || "") + td,
+                toolCalling: false,
+              };
+              return next;
+            });
           });
-        });
+        }
       }
 
       if (chunk.delta) {
         acc.response += chunk.delta;
         const delta = chunk.delta;
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            const segs = (last as ChatMessage).toolCallSegments;
-            const hasSegments = segs?.length;
-            if (hasSegments) {
-              let after = (last.contentAfterToolCalls ?? "") + delta;
-              if (agentMode !== "subagent") {
-                const lastSeg = segs[segs.length - 1];
-                if (lastSeg?.textBefore && after.startsWith(lastSeg.textBefore)) {
-                  after = after.slice(lastSeg.textBefore.length);
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const segs = (last as ChatMessage).toolCallSegments;
+              const hasSegments = segs?.length;
+              if (hasSegments) {
+                let after = (last.contentAfterToolCalls ?? "") + delta;
+                if (agentMode !== "subagent") {
+                  const lastSeg = segs[segs.length - 1];
+                  if (lastSeg?.textBefore && after.startsWith(lastSeg.textBefore)) {
+                    after = after.slice(lastSeg.textBefore.length);
+                  }
                 }
+                const fullContent =
+                  segs.map((s) => s.textBefore).join("") + after;
+                acc.response = fullContent;
+                next[next.length - 1] = {
+                  ...last,
+                  contentAfterToolCalls: after,
+                  content: fullContent,
+                  toolCalling: false,
+                };
+              } else {
+                next[next.length - 1] = {
+                  ...last,
+                  content: last.content + delta,
+                  toolCalling: false,
+                };
               }
-              const fullContent =
-                segs.map((s) => s.textBefore).join("") + after;
-              acc.response = fullContent;
-              next[next.length - 1] = {
-                ...last,
-                contentAfterToolCalls: after,
-                content: fullContent,
-                toolCalling: false,
-              };
-            } else {
-              next[next.length - 1] = {
-                ...last,
-                content: last.content + delta,
-                toolCalling: false,
-              };
-            }
-            return next;
+              return next;
+            });
           });
-        });
+        }
       }
 
       if (chunk.chapterContentUpdated != null) {
-        window.dispatchEvent(
-          new CustomEvent("chapter-content-updated", {
-            detail: { chapterId: chunk.chapterContentUpdated },
-          }),
-        );
+        if (isVisibleSession()) {
+          window.dispatchEvent(
+            new CustomEvent("chapter-content-updated", {
+              detail: { chapterId: chunk.chapterContentUpdated },
+            }),
+          );
+        }
+      }
+
+      if (chunk.chapterCreated != null) {
+        if (isVisibleSession()) {
+          window.dispatchEvent(
+            new CustomEvent("chapter-created", {
+              detail: {
+                chapterId: chunk.chapterCreated.chapterId,
+                title: chunk.chapterCreated.title,
+                parentId: chunk.chapterCreated.parentId ?? null,
+              },
+            }),
+          );
+        }
       }
 
       if (typeof chunk.collabLatestParagraph === "string" && chunk.collabLatestParagraph.trim()) {
@@ -746,6 +863,17 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
       if (Array.isArray(chunk.toolReadCacheMask) && chunk.toolReadCacheMask.length > 0) {
         const mask = chunk.toolReadCacheMask;
+        if (!isVisibleSession()) {
+          if (
+            !chunk.delta &&
+            !chunk.thinkingDelta &&
+            !chunk.done &&
+            !chunk.error &&
+            typeof chunk.toolIndexCompleted !== "number"
+          ) {
+            return;
+          }
+        }
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -787,6 +915,16 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (typeof chunk.toolIndexCompleted === "number") {
         const idx = chunk.toolIndexCompleted;
         const fromCache = chunk.toolFromCache === true;
+        if (!isVisibleSession()) {
+          if (
+            !chunk.delta &&
+            !chunk.thinkingDelta &&
+            !chunk.done &&
+            !chunk.error
+          ) {
+            return;
+          }
+        }
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -827,6 +965,16 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
       if (typeof chunk.toolCallCachedIndex === "number") {
         const idx = chunk.toolCallCachedIndex;
+        if (!isVisibleSession()) {
+          if (
+            !chunk.delta &&
+            !chunk.thinkingDelta &&
+            !chunk.done &&
+            !chunk.error
+          ) {
+            return;
+          }
+        }
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -865,7 +1013,18 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         const repairReasons = (chunk.orchestratorRepair?.events || [])
           .map((x) => String(x?.reason || "").trim())
           .filter(Boolean);
-        const rows = (chunk.toolCalls || []).map(
+        const visibleToolCalls = (chunk.toolCalls || []).filter((tc) => {
+          const callId = String((tc as { id?: string })?.id || "");
+          return !callId.startsWith("repair_") && !callId.startsWith("sys_");
+        });
+        if (
+          visibleToolCalls.length === 0 &&
+          !partialContent.trim() &&
+          !partialThinking.trim()
+        ) {
+          return;
+        }
+        const rows = visibleToolCalls.map(
           (tc: { function?: { name?: string; arguments?: string }; id?: string }) => {
             const fn = tc.function?.name;
             if (!fn) {
@@ -876,15 +1035,37 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 string,
                 unknown
               >;
-              return toolCallDisplayRow(fn, args, writingChapters || []);
+              const row = toolCallDisplayRow(
+                fn,
+                args,
+                writingChapters || [],
+                availableOutlines || [],
+              );
+              if (
+                (fn === "getChapterContent" || fn === "editChapterContent") &&
+                row.outcome === "context_error"
+              ) {
+              }
+              return row;
             } catch {
-              return toolCallDisplayRow(fn, {}, writingChapters || []);
+              const row = toolCallDisplayRow(
+                fn,
+                {},
+                writingChapters || [],
+                availableOutlines || [],
+              );
+              if (
+                (fn === "getChapterContent" || fn === "editChapterContent") &&
+                row.outcome === "context_error"
+              ) {
+              }
+              return row;
             }
           },
         );
         const taggedLabels = rows.map((row, idx) => {
           const base = row.label;
-          const tc = (chunk.toolCalls || [])[idx];
+          const tc = visibleToolCalls[idx];
           const callId = String(tc?.id || "");
           let label = base;
           if (callId.startsWith("repair_")) label = `${base}（自动修复）`;
@@ -892,79 +1073,117 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           return label;
         });
         const labelOutcomes = rows.map((row) => row.outcome);
-        if (insertedByDag > 0) {
-          appMessage.info(`DAG 已自动补齐 ${insertedByDag} 个前置步骤`);
-        }
         let rebuiltAssistantText = "";
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg?.role === "assistant") {
-              const prevSeg = (lastMsg as ChatMessage).toolCallSegments ?? [];
-              const prevBlocks = (lastMsg as ChatMessage).thinkingBlocks ?? [];
-              const currentThinking = (lastMsg.thinking || "").trim();
-              const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
-              /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，否则渲染顺序会变成「新工具段在旧尾稿之上」 */
-              const tail = lastMsg.contentAfterToolCalls ?? "";
-              const flushTailSegments: ToolCallSegment[] =
-                tail.trim().length > 0
-                  ? [{ textBefore: tail, labels: [], cachedFlags: [] }]
-                  : [];
-              const baseSegs = [...prevSeg, ...flushTailSegments];
-              const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
-              const textBefore =
-                partialContent && partialContent.trim()
-                  ? partialContent
-                  : !hasPriorToolRound
-                    ? agentMode === "subagent"
-                      ? ""
-                      : lastMsg.content || acc.response || ""
-                    : "";
-              const newSegment: ToolCallSegment = {
-                textBefore,
-                labels: taggedLabels,
-                labelOutcomes,
-                cachedFlags: (chunk.toolCalls || []).map((tc) =>
-                  Boolean((tc as { cached?: boolean }).cached),
-                ),
-                trace: {
-                  insertedByDag,
-                  insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
-                  plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
-                  repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
-                  repairReasons,
-                  stage: chunk.subagentStage || undefined,
-                },
-              };
-              const nextSegments = [...baseSegs, newSegment];
-              let afterToolCalls =
-                flushTailSegments.length > 0 ? "" : (lastMsg.contentAfterToolCalls ?? "");
-              if (
-                agentMode !== "subagent" &&
-                flushTailSegments.length === 0 &&
-                textBefore &&
-                afterToolCalls.startsWith(textBefore)
-              ) {
-                afterToolCalls = afterToolCalls.slice(textBefore.length);
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const lastMsg = next[next.length - 1];
+              if (lastMsg?.role === "assistant") {
+                const prevSeg = (lastMsg as ChatMessage).toolCallSegments ?? [];
+                const prevBlocks = (lastMsg as ChatMessage).thinkingBlocks ?? [];
+                const currentThinking = (lastMsg.thinking || "").trim();
+                const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
+                /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，否则渲染顺序会变成「新工具段在旧尾稿之上」 */
+                const tail = lastMsg.contentAfterToolCalls ?? "";
+                const flushTailSegments: ToolCallSegment[] =
+                  tail.trim().length > 0
+                    ? [{ textBefore: tail, labels: [], cachedFlags: [] }]
+                    : [];
+                const baseSegs = [...prevSeg, ...flushTailSegments];
+                const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
+                const textBefore =
+                  partialContent && partialContent.trim()
+                    ? partialContent
+                    : !hasPriorToolRound
+                      ? agentMode === "subagent"
+                        ? ""
+                        : lastMsg.content || acc.response || ""
+                      : "";
+                const newSegment: ToolCallSegment = {
+                  textBefore,
+                  labels: taggedLabels,
+                  labelOutcomes,
+                  cachedFlags: visibleToolCalls.map((tc) =>
+                    Boolean((tc as { cached?: boolean }).cached),
+                  ),
+                  trace: {
+                    insertedByDag,
+                    insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
+                    plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
+                    repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
+                    repairReasons,
+                    stage: chunk.subagentStage || undefined,
+                  },
+                };
+                const nextSegments = [...baseSegs, newSegment];
+                let afterToolCalls =
+                  flushTailSegments.length > 0 ? "" : (lastMsg.contentAfterToolCalls ?? "");
+                if (
+                  agentMode !== "subagent" &&
+                  flushTailSegments.length === 0 &&
+                  textBefore &&
+                  afterToolCalls.startsWith(textBefore)
+                ) {
+                  afterToolCalls = afterToolCalls.slice(textBefore.length);
+                }
+                rebuiltAssistantText =
+                  nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
+                acc.toolCallSegments = nextSegments;
+                acc.thinkingBlocks = nextBlocks;
+                next[next.length - 1] = {
+                  ...lastMsg,
+                  content: rebuiltAssistantText,
+                  thinking: "",
+                  thinkingBlocks: nextBlocks,
+                  toolCalling: true,
+                  toolCallSegments: nextSegments,
+                  contentAfterToolCalls: afterToolCalls,
+                };
               }
-              rebuiltAssistantText =
-                nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
-              acc.toolCallSegments = nextSegments;
-              acc.thinkingBlocks = nextBlocks;
-              next[next.length - 1] = {
-                ...lastMsg,
-                content: rebuiltAssistantText,
-                thinking: "",
-                thinkingBlocks: nextBlocks,
-                toolCalling: true,
-                toolCallSegments: nextSegments,
-                contentAfterToolCalls: afterToolCalls,
-              };
-            }
-            return next;
+              return next;
+            });
           });
-        });
+        } else {
+          const prevSeg = acc.toolCallSegments ?? [];
+          const prevBlocks = acc.thinkingBlocks ?? [];
+          const currentThinking = (acc.thinking || "").trim();
+          const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
+          const flushTailSegments: ToolCallSegment[] =
+            acc.response.trim().length > 0
+              ? [{ textBefore: acc.response, labels: [], cachedFlags: [] }]
+              : [];
+          const baseSegs = [...prevSeg, ...flushTailSegments];
+          const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
+          const textBefore =
+            partialContent && partialContent.trim()
+              ? partialContent
+              : !hasPriorToolRound
+                ? agentMode === "subagent"
+                  ? ""
+                  : acc.response || ""
+                : "";
+          const newSegment: ToolCallSegment = {
+            textBefore,
+            labels: taggedLabels,
+            labelOutcomes,
+            cachedFlags: visibleToolCalls.map((tc) =>
+              Boolean((tc as { cached?: boolean }).cached),
+            ),
+            trace: {
+              insertedByDag,
+              insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
+              plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
+              repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
+              repairReasons,
+              stage: chunk.subagentStage || undefined,
+            },
+          };
+          const nextSegments = [...baseSegs, newSegment];
+          rebuiltAssistantText = nextSegments.map((s) => s.textBefore).join("");
+          acc.toolCallSegments = nextSegments;
+          acc.thinkingBlocks = nextBlocks;
+        }
         acc.response =
           rebuiltAssistantText ||
           (partialContent && partialContent.trim() ? partialContent : acc.response);
@@ -978,44 +1197,73 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         const savedThinkingBlocks = finalThinking
           ? [...(acc.thinkingBlocks ?? []), finalThinking]
           : (acc.thinkingBlocks ?? []);
-        setConversations((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last?.role === "assistant") {
-            const blocks = (last as ChatMessage).thinkingBlocks ?? [];
-            const thinkingBlocks = finalThinking ? [...blocks, finalThinking] : blocks;
-            const cm = last as ChatMessage;
-            const stages = cm.subagentStages ?? [];
-            const subagentStagesFinalized =
-              agentMode === "subagent" && stages.length > 0
-                ? stages.map((s) =>
-                    s.status === "running"
-                      ? { ...s, status: "done" as const }
-                      : s,
-                  )
-                : cm.subagentStages;
-            next[next.length - 1] = {
-              ...last,
-              model: acc.model || undefined,
-              thinking: finalThinking || last.thinking,
-              thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
-              toolCalling: false,
-              subagentStageWorking: false,
-              ...(agentMode === "subagent"
-                ? {
-                    subagentBridging: false,
-                    ...(subagentStagesFinalized
-                      ? { subagentStages: subagentStagesFinalized }
-                      : {}),
-                  }
-                : {}),
-            };
-          }
-          return next;
-        });
-        setLoading(false);
+        let resolvedAssistantContent =
+          acc.response ||
+          synthesizeAssistantTextFromToolSegments({
+            role: "assistant",
+            content: "",
+            toolCallSegments: acc.toolCallSegments,
+          } as ChatMessage).trim();
+        if (isVisibleSession()) {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant") {
+              const blocks = (last as ChatMessage).thinkingBlocks ?? [];
+              const thinkingBlocks = finalThinking ? [...blocks, finalThinking] : blocks;
+              const cm = last as ChatMessage;
+              const stages = cm.subagentStages ?? [];
+              const subagentStagesFinalized =
+                agentMode === "subagent" && stages.length > 0
+                  ? stages.map((s) =>
+                      s.status === "running"
+                        ? { ...s, status: "done" as const }
+                        : s,
+                    )
+                  : cm.subagentStages;
+              const currentContent = String(last.content || "");
+              let finalContent = currentContent;
+              if (!currentContent.trim()) {
+                const synthesized = synthesizeAssistantTextFromToolSegments(
+                  cm,
+                ).trim();
+                if (synthesized) {
+                  finalContent = synthesized;
+                } else {
+                  finalContent =
+                    agentMode === "subagent"
+                      ? "内容同步中。"
+                      : "内容同步中。";
+                }
+              }
+              resolvedAssistantContent = finalContent;
+              next[next.length - 1] = {
+                ...last,
+                content: finalContent,
+                model: acc.model || undefined,
+                thinking: finalThinking || last.thinking,
+                thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
+                toolCalling: false,
+                subagentStageWorking: false,
+                ...(agentMode === "subagent"
+                  ? {
+                      subagentBridging: false,
+                      ...(subagentStagesFinalized
+                        ? { subagentStages: subagentStagesFinalized }
+                        : {}),
+                    }
+                  : {}),
+              };
+            }
+            return next;
+          });
+          setLoading(false);
+        }
         unsubscribe();
         unsubscribeRef.current = null;
+        runningSessionIdRef.current = null;
+        runningAccRef.current = null;
+        acc.response = resolvedAssistantContent;
 
         const respTrim = (acc.response || "").trim();
         const thinkTrim = (acc.thinking || "").trim();
@@ -1199,5 +1447,5 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     appMessage,
   ]);
 
-  return { handleSubmit, handleAbort };
+  return { handleSubmit, handleAbort, runningSessionIdRef, runningAccRef };
 }

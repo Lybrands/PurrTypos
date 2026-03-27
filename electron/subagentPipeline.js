@@ -4,18 +4,15 @@
 
 const { setImmediate } = require('timers')
 const toolRouter = require('./toolRouter')
-const { buildSubagentStageRouterQuery } = require('./toolRouterQueryText')
 const openaiChat = require('./openaiChat')
 const anthropicChat = require('./anthropicChat')
 const toolExecutor = require('./toolExecutor')
-const skillOrchestrator = require('./skillOrchestrator')
 const { normalizeToolCallsList } = require('./toolCallUtils')
 const { toOpenAiTools } = require('./agentToolDefinitions')
 const {
   STAGES,
   EXEC_ACTIONS,
   SUBAGENT_REGISTRY,
-  buildToolPermissionsForStage,
   extractStructuredJsonFromModelText,
   normalizeAnalyzeReport,
   normalizeWritingBlueprint,
@@ -106,8 +103,41 @@ function ensureStageCandidateTools(candidateTools, allowedSet) {
   return out
 }
 
+function ensurePinnedToolsForStage(stage, toolSchemas, allowedSet) {
+  if (!stage || !Array.isArray(toolSchemas)) return toolSchemas || []
+  const pinned = (STAGE_PINNED_TOOLS[stage] || []).filter((n) => allowedSet.has(n))
+  if (pinned.length === 0) return toolSchemas
+  toolRouter.ensureSkillsLoaded()
+  const allApi = toOpenAiTools(toolRouter.getApiSkillItems())
+  const byName = new Map(allApi.map((t) => [t?.function?.name, t]))
+  const present = new Set(toolSchemas.map((t) => t?.function?.name).filter(Boolean))
+  const out = [...toolSchemas]
+  for (const name of pinned) {
+    if (!present.has(name) && byName.has(name)) {
+      out.push(byName.get(name))
+      present.add(name)
+    }
+  }
+  return out
+}
+
 /** 章节正文/目录 gate 类工具：若本批仅调用这些且全部返回 JSON error，提前结束 tool loop，避免反复用错误 id 打 API */
-const CHAPTER_CATALOG_BODY_TOOL_NAMES = new Set(['getChapterContent', 'editChapterContent', 'batchGetChapterContents'])
+const CHAPTER_CATALOG_BODY_TOOL_NAMES = new Set([
+  'getChapterContent',
+  'editChapterContent',
+  'batchGetChapterContents',
+  'createWritingChapter',
+])
+
+/** 各阶段常驻工具：无论向量路由结果如何都必须下发 */
+const STAGE_PINNED_TOOLS = {
+  [STAGES.ANALYZE]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'getChapterContent', 'batchGetChapterContents', 'listOutlines', 'queryOutline'],
+  [STAGES.PLAN]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'listOutlines', 'queryOutline'],
+  [STAGES.DRAFT]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'getChapterContent', 'batchGetChapterContents', 'createWritingChapter'],
+  [STAGES.STYLE_UNIFY]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'getChapterContent', 'batchGetChapterContents'],
+  [STAGES.REVIEW]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'getChapterContent', 'batchGetChapterContents'],
+  [STAGES.POLISH]: ['getStoryBackground', 'getGlobalOutline', 'listWritingChapters', 'getChapterContent', 'batchGetChapterContents', 'createWritingChapter', 'editChapterContent'],
+}
 
 function toolResultContentLooksLikeJsonError(content) {
   if (typeof content !== 'string') return false
@@ -136,10 +166,13 @@ function buildSubagentToolingContextAppendix(toolCtx) {
   const accCh = Array.isArray(toolCtx.associatedChapterIds) ? toolCtx.associatedChapterIds : []
   const accOl = Array.isArray(toolCtx.associatedOutlineIds) ? toolCtx.associatedOutlineIds : []
   const lines = []
-  lines.push('【会话同步 — 工具与界面上下文（不向模型暴露数据库 id）】')
+  lines.push('【会话同步 — 工具与界面上下文】')
   lines.push(
-    '宿主已为当前会话绑定书籍与章节；bookId/chapterId 若缺省将由工具层注入。若需指定**非当前**章节或大纲：'
-      + '工具参数使用 chapterTitle（与下方《》内标题完全一致）或 chapterIndex、outlineTitle 或 outlineIndex；禁止编造 id。',
+    '宿主已为当前会话绑定书籍与章节；**请勿在工具参数中手写 bookId**（一律由工具层使用当前会话书籍）。'
+      + '章节工具仅允许 chapterId；大纲查询仅允许 outlineId/outlineIds；禁止使用序号或标题作为定位参数。',
+  )
+  lines.push(
+    '若需操作非当前章节，必须先 listWritingChapters 读取真实 chapterId，再传 chapterId。',
   )
   const bookTitle = String(toolCtx.bookTitle || '').replace(/\s+/g, ' ').trim()
   lines.push(
@@ -168,24 +201,25 @@ function buildSubagentToolingContextAppendix(toolCtx) {
   const WC_CAP = 100
   if (wc.length) {
     lines.push(
-      `写作章节目录（仅含可写正文的章节，不含卷名行；chapterIndex=1…${Math.min(wc.length, WC_CAP)} 或 chapterTitle=与下列标题完全一致）。共 ${wc.length} 条：`,
+      `写作章节目录（仅含可写正文的章节，每条给出 chapterId）。共 ${wc.length} 条：`,
     )
     for (let i = 0; i < Math.min(wc.length, WC_CAP); i++) {
       const c = wc[i]
-      lines.push(`- [${i + 1}] ${String(c.title || '').replace(/\r?\n/g, ' ').slice(0, 120)}`)
+      lines.push(`- chapterId=${String(c.id || '').trim()} ${String(c.title || '').replace(/\r?\n/g, ' ').slice(0, 120)}`)
     }
     if (wc.length > WC_CAP) lines.push(`… 余 ${wc.length - WC_CAP} 条略`)
   }
   const AO_CAP = 60
   if (ao.length) {
     lines.push(
-      `大纲列表（参数 outlineIndex=1…${Math.min(ao.length, AO_CAP)} 或 outlineTitle；与 listOutlines/queryOutline/updateOutline 等一致）。共 ${ao.length} 条：`,
+      `大纲列表（每项含 outlineId；queryOutline 仅传 outlineId/outlineIds，勿传纯数字序号）。共 ${ao.length} 条：`,
     )
     for (let i = 0; i < Math.min(ao.length, AO_CAP); i++) {
       const o = ao[i]
       const typ = o.type != null ? String(o.type) : ''
+      const oid = String(o.id || '').trim()
       lines.push(
-        `- [${i + 1}] ${String(o.title || '').replace(/\r?\n/g, ' ').slice(0, 80)}${typ ? `\t${typ}` : ''}`,
+        `- [${i + 1}] outlineId=${oid} ${String(o.title || '').replace(/\r?\n/g, ' ').slice(0, 80)}${typ ? `\t${typ}` : ''}`,
       )
     }
     if (ao.length > AO_CAP) lines.push(`… 余 ${ao.length - AO_CAP} 条略`)
@@ -244,6 +278,15 @@ function resolveDraftPlainText(draftDoc, userText, action) {
   return ''
 }
 
+function looksLikeBodyText(text) {
+  const s = String(text || '').trim()
+  if (!s) return false
+  if (/^【?\s*已写入编辑器\s*】?$/.test(s)) return false
+  if (/^【?\s*正文以已写入编辑器为准\s*】?$/.test(s)) return false
+  if (s.length >= 80) return true
+  return /[\n。！？；]/.test(s) && s.length >= 20
+}
+
 /**
  * 由多选阶段推导管线开关与用于「用户粘贴代正文」的 resolveAction。
  * @param {string[]|null|undefined} agentActions
@@ -292,7 +335,7 @@ function normalizePipelineFlags(agentActions) {
 }
 
 /**
- * 根据当前写作章在目录中的位置，推算应读取的「紧邻前文」chapterIndex 列表（3～5 章，不足则全读）。
+ * 根据当前写作章在目录中的位置，推算应读取的「紧邻前文」chapterId 列表（3～5 章，不足则全读）。
  */
 function buildStyleUnifyPriorChapterHint(toolCtx) {
   if (!toolCtx || toolCtx.bookId == null) {
@@ -306,7 +349,7 @@ function buildStyleUnifyPriorChapterHint(toolCtx) {
   }
   const idx = wc.findIndex((c) => String(c.id) === String(curId))
   if (idx < 0) {
-    return '【宿主提示】当前章节不在可写目录中：请核对章节标题与 chapterIndex。'
+    return '【宿主提示】当前章节不在可写目录中：请核对 chapterId。'
   }
   if (idx === 0) {
     return '【宿主提示】当前章为目录中第 1 章，无前文：styleAnchors 须注明「无前文可参照」，仅做语气与蓝图内约束下的统一。'
@@ -316,15 +359,16 @@ function buildStyleUnifyPriorChapterHint(toolCtx) {
   const start = idx - nRead
   const lines = []
   lines.push(
-    `【宿主推算】当前章在写作目录中为第 ${idx + 1} 章（chapterIndex=${idx + 1}）。请必读以下 ${nRead} 章正文以萃取文风（紧邻当前章向前的连续章）：`,
+    `【宿主推算】当前章在写作目录中为第 ${idx + 1} 章。请必读以下 ${nRead} 章正文以萃取文风（紧邻当前章向前的连续章）：`,
   )
   for (let i = start; i < idx; i++) {
     const t = String(wc[i]?.title || '').replace(/\r?\n/g, ' ').slice(0, 120)
-    lines.push(`- chapterIndex=${i + 1} 《${t}》`)
+    lines.push(`- chapterId=${String(wc[i]?.id || '').trim()} 《${t}》`)
   }
   lines.push(
-    '请优先使用 batchGetChapterContents 一次传入多个 chapterIndex；或多次 getChapterContent。归纳 styleAnchors 后再改写下方「待统一初稿」。',
+    '请优先使用 batchGetChapterContents 一次传入多个 chapterId；或多次 getChapterContent。归纳 styleAnchors 后再改写下方「待统一初稿」。',
   )
+  lines.push('batchGetChapterContents.chapterIds 参数类型必须是 string[]，且每项都来自上方 chapterId。')
   return lines.join('\n')
 }
 
@@ -574,13 +618,9 @@ async function streamMainAgentPresenter({
  *    - associatedChapterIds, associatedOutlineIds（IPC 自界面关联）
  *    各阶段执行前会合并 `subagentAllowedToolNames`。
  *
- * 3) `latestUserTextForPlan`
- *    - 主链路在开启工具路由时为 `buildToolRouterEmbeddingQuery(messages)` 的检索串；编排器 plan/repair 使用。
- *
- * 4) 工具列表（与 legacy 主链路同源，均来自 toolRouter 扫描 electron/skills 下各工具目录的 SKILL.md）
- *    - 开启路由：`toolRouter.getToolsForQuery(...)` → `buildToolSchemas` 与主进程一致。
- *    - 回退全量：`toOpenAiTools(toolRouter.getApiSkillItems())` 再按阶段 `filterToolSchemasByNames`。
- *    - `getToolsForStage` 使用 `buildSubagentStageRouterQuery(messages, 阶段 user)`，避免向量锚点仅绑阶段指令。
+ * 3) 工具列表（与 legacy 主链路同源，均来自 toolRouter 扫描 electron/skills 下各工具目录的 SKILL.md）
+ *    - 写作专家阶段固定按「阶段权限 + 常驻工具」下发，不再走工具路由和 DAG 计划/修复。
+ *    - 目的：减少识别分发开销，直接执行模型返回的 tool_calls。
  *
  * @param {object} input
  * @param {Function} input.sendChunk
@@ -589,11 +629,8 @@ async function streamMainAgentPresenter({
  * @param {string} input.apiProvider
  * @param {object} input.requestParams
  * @param {object} input.toolCtx
- * @param {Record<string, unknown>} input.skillSpecs
  * @param {Array} input.messages
- * @param {string} input.latestUserTextForPlan
- * @param {boolean} input.useToolRouter
- * @param {Array} input.toolsFromFront
+ * @param {Record<string, unknown>} input.skillSpecs
  * @param {string[]} [input.agentActions] 多选阶段，如 ['analyze','plan','draft']
  * @param {string} input.model
  */
@@ -605,48 +642,28 @@ async function runSubagentPipeline(input) {
     apiProvider,
     requestParams: rawRequestParams,
     toolCtx,
-    skillSpecs,
     messages,
-    latestUserTextForPlan,
-    useToolRouter,
-    toolsFromFront,
+    skillSpecs,
     agentActions,
     model,
   } = input
   /** 写作专家管线整段禁用思考扩展，避免各阶段/主稿专家流式把推理内容推到对话 UI */
   const requestParams = { ...rawRequestParams, thinking: { type: 'disabled' } }
   const toolingContextAppendix = buildSubagentToolingContextAppendix(toolCtx)
-
-  const getToolsForStage = async (stage, pipelineMessages, stageUserContent) => {
-    const allowedSet = new Set(buildToolPermissionsForStage(stage))
-    let candidateTools = Array.isArray(toolsFromFront) ? toolsFromFront : []
-    if (
-      useToolRouter &&
-      toolCtx.bookId != null &&
-      Array.isArray(pipelineMessages) &&
-      pipelineMessages.length > 0
-    ) {
-      try {
-        const routed = await toolRouter.getToolsForQuery(
-          buildSubagentStageRouterQuery(pipelineMessages, stageUserContent),
-        )
-        candidateTools = routed.tools || []
-        if (Array.isArray(routed.warnings) && routed.warnings.length > 0) {
-          sendChunk({ toolRouterWarning: routed.warnings.join(' ') })
-        }
-      } catch (err) {
-        sendChunk({ toolRouterWarning: `工具路由调用失败，${(err && err.message) || String(err)}` })
-      }
-    } else if ((!candidateTools || candidateTools.length === 0) && allowedSet.size > 0) {
-      const allTools = toOpenAiTools(toolRouter.getApiSkillItems())
-      candidateTools = filterToolSchemasByNames(allTools, allowedSet)
-    }
+  const getToolsForStage = async (stage) => {
+    const allowedSet = new Set(STAGE_PINNED_TOOLS[stage] || [])
+    const allTools = toOpenAiTools(toolRouter.getApiSkillItems())
+    let candidateTools = filterToolSchemasByNames(allTools, allowedSet)
     candidateTools = ensureStageCandidateTools(candidateTools, allowedSet)
-    return filterToolSchemasByNames(candidateTools, allowedSet)
+    const filtered = filterToolSchemasByNames(candidateTools, allowedSet)
+    return ensurePinnedToolsForStage(stage, filtered, allowedSet)
   }
 
   const chatNoStreamUnified = async (msgs, stageTools) => {
-    const stageParams = { ...requestParams, tools: stageTools }
+    const stageParams = { ...requestParams }
+    if (Array.isArray(stageTools) && stageTools.length > 0) {
+      stageParams.tools = stageTools
+    }
     if (apiProvider === 'anthropic') {
       return anthropicChat.chatNoStreamAsOpenAIFormat(key, msgs, stageParams, signal)
     }
@@ -669,8 +686,9 @@ async function runSubagentPipeline(input) {
   }
 
   const runNonStreamToolLoop = async (currentMessages, stageTools, stageName) => {
-    const allowedNames = new Set(buildToolPermissionsForStage(stageName))
-    const toolCtxWithAllow = { ...toolCtx, subagentAllowedToolNames: allowedNames }
+    const allowedNames = new Set(STAGE_PINNED_TOOLS[stageName] || [])
+    const prevAllowed = toolCtx.subagentAllowedToolNames
+    toolCtx.subagentAllowedToolNames = allowedNames
 
     let loopMessages = currentMessages
     let finalText = ''
@@ -682,50 +700,33 @@ async function runSubagentPipeline(input) {
       if (content) finalText = content
       const list = normalizeToolCallsList(Array.isArray(message?.tool_calls) ? message.tool_calls : [])
       if (list.length === 0) {
+        if (prevAllowed === undefined) delete toolCtx.subagentAllowedToolNames
+        else toolCtx.subagentAllowedToolNames = prevAllowed
         return { text: finalText, thinking: '', editChapterSaved }
       }
-      const plan = skillOrchestrator.planToolCalls({
-        toolCalls: list,
-        skillSpecs,
-        toolCtx: toolCtxWithAllow,
-        latestUserText: latestUserTextForPlan,
-      })
-      const executableCalls = plan.executableCalls || list
+      const executableCalls = list
       /** 向气泡同步工具调用状态（ToolCallStatus）；不推送 partialContent，各专家模型正文仍仅由主稿专家过渡/终稿流式呈现 */
       sendChunk({
         toolCalls: executableCalls,
         toolCallsInProgress: true,
         partialContent: '',
         partialThinking: '',
-        orchestratorInfo: {
-          insertedByDag: plan?.telemetry?.insertedByDag || 0,
-          plannedNodeCount: plan?.telemetry?.nodes || executableCalls.length,
-          insertedSkillNames: plan?.telemetry?.insertedSkillNames || [],
-          plannedToolNames: plan?.telemetry?.finalCalls || executableCalls.map((x) => x.function?.name).filter(Boolean),
-          stage: stageName,
-        },
+        orchestratorInfo: { stage: stageName },
         model,
       })
-      const executed = await skillOrchestrator.executeWithRepair({
-        plannedCalls: executableCalls,
-        toolCtx: toolCtxWithAllow,
-        latestUserText: latestUserTextForPlan,
-        maxRepairRounds: 1,
-        runTools: async (calls) =>
-          toolExecutor.runTools(calls, toolCtxWithAllow, (ev) => {
-            if (!ev) return
-            if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
-            if (Array.isArray(ev.toolReadCacheMask)) sendChunk({ toolReadCacheMask: ev.toolReadCacheMask })
-            if (typeof ev.toolIndexCompleted === 'number') {
-              sendChunk({
-                toolIndexCompleted: ev.toolIndexCompleted,
-                ...(ev.toolFromCache === true ? { toolFromCache: true } : {}),
-              })
-            }
-          }),
+      const toolResults = await toolExecutor.runTools(executableCalls, toolCtx, (ev) => {
+        if (!ev) return
+        if (ev.chapterCreated != null) sendChunk({ chapterCreated: ev.chapterCreated })
+        if (ev.chapterContentUpdated != null) sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
+        if (Array.isArray(ev.toolReadCacheMask)) sendChunk({ toolReadCacheMask: ev.toolReadCacheMask })
+        if (typeof ev.toolIndexCompleted === 'number') {
+          sendChunk({
+            toolIndexCompleted: ev.toolIndexCompleted,
+            ...(ev.toolFromCache === true ? { toolFromCache: true } : {}),
+          })
+        }
       })
-      const toolResults = executed.toolResults || []
-      const usedCalls = executed.toolCalls || executableCalls
+      const usedCalls = executableCalls
       if (markEditChapterSavedFromResults(usedCalls, toolResults)) {
         editChapterSaved = true
       }
@@ -749,9 +750,13 @@ async function runSubagentPipeline(input) {
         toolResults.length === usedCalls.length &&
         toolResults.every((r) => toolResultContentLooksLikeJsonError(r.content))
       if (allChapterBodyFailed) {
+        if (prevAllowed === undefined) delete toolCtx.subagentAllowedToolNames
+        else toolCtx.subagentAllowedToolNames = prevAllowed
         return { text: finalText, thinking: '', editChapterSaved }
       }
     }
+    if (prevAllowed === undefined) delete toolCtx.subagentAllowedToolNames
+    else toolCtx.subagentAllowedToolNames = prevAllowed
     return { text: finalText, thinking: '', editChapterSaved }
   }
 
@@ -765,8 +770,7 @@ async function runSubagentPipeline(input) {
       { role: 'user', content: userContent },
     ]
     sendChunk({ subagentStage: stage, subagentStageName: stageCfg.name, subagentStageStarting: true })
-    /** 工具路由：主会话 messages 与阶段任务串联，避免把阶段 JSON 指令当作「当前提问」量 embedding */
-    const stageTools = await getToolsForStage(stage, messages, userContent)
+    const stageTools = await getToolsForStage(stage)
     const stageRes = await runNonStreamToolLoop(stageMessages, stageTools, stage)
     sendChunk({ subagentStageDone: stage, subagentStageName: stageCfg.name })
     const parsed = extractStructuredJsonFromModelText(stageRes.text)
@@ -881,8 +885,8 @@ async function runSubagentPipeline(input) {
       'styleAnchors（string：从前文归纳的人称/时态/节奏/句式与用语习惯，勿大段粘贴原文）、',
       'content（string：对齐文风后的当前章完整正文；须保留初稿剧情与人设，仅做叙述层面统一）、',
       'changeSummary（string：相对「待统一初稿」的修改说明）、',
-      'priorChaptersRead（可选 array，每项含 chapterIndex、title，标明实际参照的章节）。',
-      '必须先 listWritingChapters，再按宿主列表用 batchGetChapterContents 或 getChapterContent 读取前文；不得跳过读前文直接臆造风格。',
+      'priorChaptersRead（可选 array，每项含 chapterId、title，标明实际参照的章节）。',
+      '必须先 listWritingChapters，再按宿主列表中的 chapterId 用 batchGetChapterContents 或 getChapterContent 读取前文；不得跳过读前文直接臆造风格。',
       '若需写回当前章：在输出 JSON 前调用 editChapterContent；成功后 JSON 中 content 可短占位。',
       priorHint,
       '\n待统一初稿：\n',
@@ -892,7 +896,9 @@ async function runSubagentPipeline(input) {
     styleUnifyReport = normalizeStyleUnifyResult(styleRes.parsed)
     styleSkipFullText = Boolean(styleRes.editChapterSaved)
     const merged = String(styleUnifyReport.content || '').trim()
-    if (merged) draftPlain = merged
+    if (merged && (!styleSkipFullText || looksLikeBodyText(merged))) {
+      draftPlain = merged
+    }
     sendChunk({
       subagentStage: STAGES.STYLE_UNIFY,
       subagentPayloadMeta: {
@@ -971,7 +977,7 @@ async function runSubagentPipeline(input) {
   if (needPolish) {
     const polishInput = [
       '请输出 PolishedResult JSON（仅 JSON），字段：finalText、changeSummary。',
-      '若需将润色结果保存到左侧当前写作章节：在输出 JSON 之前先调用 editChapterContent，参数 content 为润色后的完整正文（chapterId/chapterTitle 可省略，由宿主按当前章注入）。',
+      '若需将润色结果保存到左侧当前写作章节：在输出 JSON 之前先调用 editChapterContent，参数 content 为润色后的完整正文（允许省略 chapterId，由宿主按当前章注入；若显式传参仅可传 chapterId）。',
       '若已成功调用 editChapterContent，JSON 中 finalText 可填简短占位或空串（正文以已写入编辑器为准），changeSummary 仍须简要说明改动。',
       '不要要求全文，仅基于问题点位与上下文窗口修订。',
       'ReviewIssuesWithContext:',
@@ -985,7 +991,11 @@ async function runSubagentPipeline(input) {
     const polishRes = await runStage(STAGES.POLISH, polishInput)
     const p = polishRes.parsed && typeof polishRes.parsed === 'object' ? polishRes.parsed : {}
     polishSkipFullText = Boolean(polishRes.editChapterSaved)
-    polishFinalText = String(p.finalText || draftPlain || '')
+    const polishedCandidate = String(p.finalText || '').trim()
+    polishFinalText =
+      polishedCandidate && (!polishSkipFullText || looksLikeBodyText(polishedCandidate))
+        ? polishedCandidate
+        : String(draftPlain || '')
     polishChangeSummary = String(p.changeSummary || '')
     await streamStageTransition({
       sendChunk,
@@ -999,6 +1009,38 @@ async function runSubagentPipeline(input) {
       nextLine: '接下来由主稿专家整合全文并正式回复你。',
       modelName: model,
     })
+  }
+
+  // 最终阶段必须落库：强制调用 editChapterContent 写入当前章节
+  const finalChapterContent = String(polishFinalText || draftPlain || '').trim()
+  if (!finalChapterContent) {
+    throw new Error('最终阶段未产出可写入的章节正文，已中止提交。')
+  }
+  if (!toolCtx || toolCtx.chapterId == null || String(toolCtx.chapterId).trim() === '') {
+    throw new Error('缺少当前章节上下文，无法执行最终写回。')
+  }
+  const finalWriteCall = {
+    id: `final_write_${Date.now()}`,
+    type: 'function',
+    function: {
+      name: 'editChapterContent',
+      arguments: JSON.stringify({
+        chapterId: String(toolCtx.chapterId),
+        content: finalChapterContent,
+      }),
+    },
+  }
+  const finalWriteRes = await toolExecutor.runTools([finalWriteCall], toolCtx, () => {})
+  const finalWritePayload = finalWriteRes && finalWriteRes[0] ? String(finalWriteRes[0].content || '') : ''
+  let finalWriteOk = false
+  try {
+    const parsed = JSON.parse(finalWritePayload)
+    finalWriteOk = parsed && parsed.success === true
+  } catch {
+    finalWriteOk = false
+  }
+  if (!finalWriteOk) {
+    throw new Error('最终章节写入失败，已中止回复。')
   }
 
   await streamMainAgentPresenter({

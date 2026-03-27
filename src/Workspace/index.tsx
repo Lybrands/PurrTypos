@@ -184,6 +184,20 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     loadWritingChapters()
   }, [loadWritingChapters])
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ chapterId: EntityId; title: string }>).detail
+      const nextId = detail?.chapterId ?? null
+      const nextTitle = detail?.title ?? ''
+      if (nextId == null || String(nextId).trim() === '') return
+      setActiveWritingChapterId(nextId)
+      setActiveWritingChapterTitle(nextTitle)
+      loadWritingChapters()
+    }
+    window.addEventListener('chapter-created', handler)
+    return () => window.removeEventListener('chapter-created', handler)
+  }, [loadWritingChapters])
+
   const toggleFullscreen = (panel: PanelType) => {
     setFullscreen((prev) => (prev === panel ? null : panel))
   }

@@ -15,22 +15,30 @@
 - **参数**：`bookId` (number, 必填)。
 - **返回**：JSON，含 `items`；每项含 `id`、`title`、`parentId`、`level`、`sort`、`nodeType`（`volume` 或 `chapter`）、`hasChildren`。
 
+### createWritingChapter
+
+- **用途**：在本书写作目录中新建章节；可选挂到某个父节点下创建子章节。
+- **命名规则**：章节标题由系统自动生成，格式为"第n章"（n 从同级现有章节自动递增），无需传 `title`。
+- **默认行为**：未传 `parentId` 时，若当前章节位于某一卷下，则默认在当前卷下创建同级章节；平铺目录时才在根级创建章节。
+- **参数**：`bookId` (number, 必填)、`parentId` (string, 可选)。
+- **返回**：`success`、`chapter`（含 `id`、`title`、`parentId`、`level`、`sort`）等。
+
 ### getChapterContent
 
 - **用途**：只读获取某一章正文（纯文本）。`chapterId` 必须对应**左侧写作章节目录**，不可用总纲/其他大纲树节点 id。
-- **参数**：`chapterId` (string, 可选)、`chapterTitle`、`chapterIndex` (number)、`title`、`maxTextLength` 等；**优先 `chapterTitle` 或 `chapterIndex`（附录 [序号]），勿手写 id**；可省略章节参数由宿主注入当前章。
+- **参数**：`chapterId` (string, 可选)、`title`、`maxTextLength` 等；**仅允许 `chapterId`**（可省略，由宿主注入当前章）。
 - **返回**：含 `plainText` 等。
 
 ### batchGetChapterContents
 
 - **用途**：批量读取多章正文；每个 id 须为写作目录章节 id。
-- **参数**：`chapterIds` (array of number, 必填)、`maxTextLength` (可选)。
+- **参数**：`chapterIds` (array of string, 必填)、`maxTextLength` (可选)。仅允许写作目录中的真实 `chapterId`。
 - **返回**：每章一项，含 `chapterId`、`title`、`plainText` 等。
 
 ### editChapterContent
 
 - **用途**：覆盖写入指定章节正文（纯文本）。`chapterId` 须为写作目录章节 id。
-- **参数**：`content` (string, 必填)；`chapterId` / `chapterTitle` / `chapterIndex` 与 `getChapterContent` 同理。
+- **参数**：`content` (string, 必填)；`chapterId` 与 `getChapterContent` 同理（仅允许 id）。
 - **返回**：`success`、错误信息等；**须 `success: true` 后再向用户确认完成**。
 
 ### listOutlines
@@ -41,8 +49,9 @@
 
 ### queryOutline
 
-- **用途**：只读查看指定大纲的**章节树文本**与/或 **「文本大纲」标签页 Markdown**（`includeChapters` / `includeText`）。依赖 `listOutlines` 在需要 `outlineId` 时。
-- **参数**：`bookId` (number, 必填)；`outlineIds` / `outlineId` / `outlineTitle` / `outlineIndex`；`includeChapters`、`includeText`、`maxTextLength`。
+- **用途**：只读查看指定大纲内容；固定同时返回思维导图（xmind）与文本大纲（markdown）。依赖 `listOutlines` 获取真实 `outlineId`。
+- **参数**：`bookId` (number, 必填)；`outlineId` 或 `outlineIds`（二选一，必填）；`maxTextLength`（仅作用于 markdown）。
+- **限制**：仅允许通过大纲 id 查询，不支持 `outlineTitle` / `outlineIndex`。
 - **返回**：结构化大纲详情文本。
 
 ### updateOutline
@@ -104,7 +113,7 @@
 ## 使用建议
 
 - **大纲**：先 **`listOutlines`** 拿 id/标题；只读详情用 **`queryOutline`**（可同时取章节树与文本大纲 Markdown）；修改用 **`updateOutline`**。需要总纲全文用 **`getGlobalOutline`** / **`editGlobalOutline`**。
-- **章节正文**：先 **`listWritingChapters`** 再读/写；**`getChapterContent`** / **`batchGetChapterContents`** / **`editChapterContent`** 的章节 id 必须来自写作目录。
+- **章节正文/目录**：先 **`listWritingChapters`** 再操作；新增目录用 **`createWritingChapter`**；正文读写用 **`getChapterContent`** / **`batchGetChapterContents`** / **`editChapterContent`**，其章节 id 必须来自写作目录。
 - **人物与背景**：**`getBookCharacters`** / **`listBookCharacters`** / **`getStoryBackground`**。
 - **记忆与伏笔**：**`addMemory`**、**`addForeshadowing`**、**`searchMemories`**。
 - 用户要求改写某章正文时，必须实际调用 **`editChapterContent`** 并收到成功后再宣称完成。

@@ -156,7 +156,7 @@ export default function AiPanel({
     handleQuickAssociateOutline,
   } = useAssociatedContext({ bookId, chapterId, writingChapters });
 
-  const { handleSubmit: doSubmit, handleAbort } = useChatSubmit({
+  const { handleSubmit: doSubmit, handleAbort, runningSessionIdRef, runningAccRef } = useChatSubmit({
     selectedModelConfig,
     prompt,
     setPrompt,
@@ -296,6 +296,7 @@ export default function AiPanel({
       setConversations([]);
       setSessions([]);
       setActiveSessionId(null);
+      setLoading(false);
       return;
     }
     const key = `${bookId}-${chapterId}`;
@@ -304,6 +305,7 @@ export default function AiPanel({
     setConversations([]);
     setSessions([]);
     setActiveSessionId(null);
+    setLoading(false);
 
     window.electronAPI
       .getSessions({ bookId, chapterId })
@@ -331,10 +333,30 @@ export default function AiPanel({
     window.electronAPI
       .getConversations({ sessionId: activeSessionId })
       .then((res) => {
-        if (res.success)
-          setConversations(
-            parseConversationsFromApi(res.data as Conversation[]),
-          );
+        if (!res.success) return;
+        const loaded = parseConversationsFromApi(res.data as Conversation[]);
+        const acc = runningAccRef.current;
+        if (
+          runningSessionIdRef.current === activeSessionId &&
+          acc != null
+        ) {
+          setConversations([
+            ...loaded,
+            { role: "user" as const, content: acc.userText },
+            {
+              role: "assistant" as const,
+              content: acc.response || "",
+              thinking: acc.thinking || undefined,
+              toolCallSegments: acc.toolCallSegments,
+              thinkingBlocks: acc.thinkingBlocks?.length
+                ? acc.thinkingBlocks
+                : undefined,
+            },
+          ]);
+          setLoading(true);
+        } else {
+          setConversations(loaded);
+        }
       });
   }, [activeSessionId]);
 
@@ -845,7 +867,16 @@ export default function AiPanel({
                 /** 有内容时，等待中在气泡内显示的小 spinner / 闪烁「...」 */
                 const showWaitingInBubble =
                   isLastAssistant && loading && !cm.toolCalling;
-                if (msg.role === "assistant" && isEmpty && !isLast) return null;
+                if (msg.role === "assistant" && isEmpty && !isLast) {
+                  return (
+                    <div className="chat-bubble assistant">
+                      <div className="bubble-label">AI</div>
+                      <div className="bubble-content">
+                        内容同步中。
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div
                     className={`chat-bubble ${msg.role} ${msg.isError ? "error" : ""} ${msg.role === "user" && convIndex >= 0 && editingMessageIndex === convIndex ? "chat-bubble--editing" : ""}`}

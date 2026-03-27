@@ -78,6 +78,12 @@ const SKILL_SPECS = {
     provides: ['writingChaptersIndex'],
     consumes: ['bookId'],
   },
+  createWritingChapter: {
+    riskLevel: 'write',
+    requires: ['listWritingChapters'],
+    consumes: ['bookId'],
+    autoResolveArgs: ['bookId'],
+  },
   getChapterContent: {
     riskLevel: 'read',
     requires: ['listWritingChapters'],

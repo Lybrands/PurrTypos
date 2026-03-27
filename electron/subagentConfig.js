@@ -17,27 +17,15 @@ const EXEC_ACTIONS = {
   FULL: "full",
 };
 
-const SHARED_TOOL_NAMES = [
-  "listWritingChapters",
-  "getChapterContent",
-  "batchGetChapterContents",
-  "getBookCharacters",
-  "listBookCharacters",
-  "getStoryBackground",
-  "getGlobalOutline",
-  "queryOutline",
-  "listOutlines",
-  "searchMemories",
-];
 
-const AGENT_EXCLUSIVE_TOOL_NAMES = {
-  [STAGES.ANALYZE]: ["addMemory"],
-  [STAGES.PLAN]: ["addMemory"],
-  [STAGES.DRAFT]: ["editChapterContent", "addForeshadowing", "addMemory"],
-  [STAGES.STYLE_UNIFY]: ["editChapterContent", "addMemory"],
-  [STAGES.REVIEW]: ["addMemory"],
-  [STAGES.POLISH]: ["editChapterContent", "addMemory"],
-};
+const CHAPTER_LOCATOR_HARD_RULE =
+  "【硬性约束】调用章节相关工具（getChapterContent / batchGetChapterContents / editChapterContent / createWritingChapter）时，" +
+  "必须先通过 listWritingChapters 获取真实目录中的 chapterId，并且仅允许传 chapterId；" +
+  "严禁使用 chapterTitle/chapterIndex，严禁猜测、编造或手写不存在的 chapterId。若定位信息不足，先补充查询，不得盲调工具。";
+
+const OUTLINE_LOCATOR_HARD_RULE =
+  "【硬性约束】调用大纲详情工具 queryOutline 时，仅允许 outlineId/outlineIds；必须先通过 listOutlines 获取真实 id，" +
+  "严禁使用 outlineTitle 或 outlineIndex。";
 
 const SUBAGENT_REGISTRY = {
   [STAGES.ANALYZE]: {
@@ -47,6 +35,8 @@ const SUBAGENT_REGISTRY = {
       `你是小说写作“分析专家”（审计式分析）。
 先证据、后结论：优先调用工具核对章节正文、设定与大纲，再给出判断。
 任务是识别目标、约束、冲突与风险，不写正文。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}
 
 请做两步内部自检：
 1) 目标-约束对照（确认 goals 与 constraints 是否互相冲突）；
@@ -63,6 +53,8 @@ evidence 中每条都要能对应可追溯来源；
       `你是小说写作“规划专家”（Blueprint 生成）。
 基于 AnalyzeReport 产出单一可执行写作蓝图：把 goals/constraints 映射到可执行节拍与素材需求，不复述长素材原文。
 必要时先调用工具补齐缺失信息。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}
 
 使用轻量思维树（Tree-of-Thought）进行内部规划：
 1) 先内部生成 2-3 个候选方向；
@@ -82,13 +74,17 @@ evidence 中每条都要能对应可追溯来源；
     name: "撰稿专家",
     outputType: "DraftDocument",
     systemPrompt:
-      "你是小说写作“撰稿专家”（执行写作）。严格按 WritingBlueprint 落稿：先保证剧情推进与约束满足，再追求文采。可调用工具检索素材或写回章节。输出必须是 JSON 且仅包含：title, content, notes。notes 仅记录关键实现取舍与风险提醒，不输出额外解释文本；不得偏离人设、时间线与世界观。",
+      `你是小说写作“撰稿专家”（执行写作）。严格按 WritingBlueprint 落稿：先保证剧情推进与约束满足，再追求文采。可调用工具检索素材或写回章节。输出必须是 JSON 且仅包含：title, content, notes。notes 仅记录关键实现取舍与风险提醒，不输出额外解释文本；不得偏离人设、时间线与世界观。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}`,
   },
   [STAGES.STYLE_UNIFY]: {
     name: "风格统一专家",
     outputType: "StyleUnifyResult",
     systemPrompt:
-      "你是小说写作“风格统一专家”。任务：在**不改变剧情与人设前提**下，使当前章初稿的叙述方式、节奏、人称与语感与**紧邻当前章之前的若干章正文**保持一致。必须先调用 listWritingChapters 确认目录，再按宿主给出的 chapterIndex 列表用 batchGetChapterContents（或多次 getChapterContent）读取**至少 3 章、至多 5 章**前文正文（若前文不足则读全部可用前文；第 1 章无前文时须在 styleAnchors 中说明）。归纳「文风锚点」后再改写初稿。若需写回编辑器可调用 editChapterContent；一旦成功，JSON 中 content 可短占位，changeSummary 仍须说明相对初稿的调整。可调用 addMemory。输出必须是 JSON，且只包含约定字段。",
+      `你是小说写作“风格统一专家”。任务：在**不改变剧情与人设前提**下，使当前章初稿的叙述方式、节奏、人称与语感与**紧邻当前章之前的若干章正文**保持一致。必须先调用 listWritingChapters 确认目录，再按宿主给出的 chapterId 列表用 batchGetChapterContents（或多次 getChapterContent）读取**至少 3 章、至多 5 章**前文正文（若前文不足则读全部可用前文；第 1 章无前文时须在 styleAnchors 中说明）。归纳「文风锚点」后再改写初稿。若需写回编辑器可调用 editChapterContent；一旦成功，JSON 中 content 可短占位，changeSummary 仍须说明相对初稿的调整。可调用 addMemory。输出必须是 JSON，且只包含约定字段。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}`,
   },
   [STAGES.REVIEW]: {
     name: "审校专家",
@@ -98,6 +94,8 @@ evidence 中每条都要能对应可追溯来源；
 只定位问题并给建议，不重写全文。
 按问题分类与严重度输出（如 continuity, motivation, pacing, clarity, style），建议需具体可执行。
 允许调用工具核对设定一致性。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}
 
 请执行两轮内部审校：
 1) 第一轮做类型化问题扫描；
@@ -111,14 +109,12 @@ evidence 中每条都要能对应可追溯来源；
     name: "润色专家",
     outputType: "PolishedResult",
     systemPrompt:
-      "你是小说写作“润色专家”（Patch 式修复）。基于审校问题与局部上下文逐点修复，避免大范围无关改写；优先修复高严重度问题，并保持剧情/人设不变形。若需写回当前章节，必须调用 editChapterContent；调用成功后，输出 JSON 时 finalText 可短占位，但 changeSummary 必须清晰说明改动点与影响范围。可调用 addMemory 等辅助工具。最终输出必须是 JSON，且只包含约定字段。",
+      `你是小说写作“润色专家”（Patch 式修复）。基于审校问题与局部上下文逐点修复，避免大范围无关改写；优先修复高严重度问题，并保持剧情/人设不变形。若需写回当前章节，必须调用 editChapterContent；调用成功后，输出 JSON 时 finalText 可短占位，但 changeSummary 必须清晰说明改动点与影响范围。可调用 addMemory 等辅助工具。最终输出必须是 JSON，且只包含约定字段。
+${CHAPTER_LOCATOR_HARD_RULE}
+${OUTLINE_LOCATOR_HARD_RULE}`,
   },
 };
 
-function buildToolPermissionsForStage(stage) {
-  const exclusive = AGENT_EXCLUSIVE_TOOL_NAMES[stage] || [];
-  return Array.from(new Set([...SHARED_TOOL_NAMES, ...exclusive]));
-}
 
 function parseJsonSafe(text, fallback = null) {
   try {
@@ -288,9 +284,6 @@ module.exports = {
   STAGES,
   EXEC_ACTIONS,
   SUBAGENT_REGISTRY,
-  SHARED_TOOL_NAMES,
-  AGENT_EXCLUSIVE_TOOL_NAMES,
-  buildToolPermissionsForStage,
   parseJsonSafe,
   extractStructuredJsonFromModelText,
   normalizeAnalyzeReport,

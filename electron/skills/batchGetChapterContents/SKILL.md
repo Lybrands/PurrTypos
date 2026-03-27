@@ -13,8 +13,8 @@ description: 当同一轮需要读取多章写作正文（对比、连载摘要�
   "properties": {
     "chapterIds": {
       "type": "array",
-      "items": { "type": "number" },
-      "description": "章节 ID 列表"
+      "items": { "type": "string" },
+      "description": "章节 ID 列表（仅允许 listWritingChapters.items[].id）"
     },
     "maxTextLength": { "type": "number", "description": "每章纯文本最大长度，默认 12000" }
   },
