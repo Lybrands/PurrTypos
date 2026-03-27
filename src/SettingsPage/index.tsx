@@ -15,16 +15,12 @@ const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
   { key: 'data', label: '数据' },
 ]
 
-const DEFAULT_SYSTEM_PROMPT = '你是一位专业的写作助手，请帮助用户完善写作内容。'
-
 interface SettingsPageProps {
   modelConfigs: AiModelConfig[]
   onSaveModelConfigs: (configs: AiModelConfig[]) => void
   onClose: () => void
   syncOutlineChapter: boolean
   onSyncOutlineChapterChange: (value: boolean) => void
-  systemPrompt: string
-  onSystemPromptChange: (value: string) => void
 }
 
 export default function SettingsPage({
@@ -33,12 +29,9 @@ export default function SettingsPage({
   onClose,
   syncOutlineChapter,
   onSyncOutlineChapterChange,
-  systemPrompt,
-  onSystemPromptChange,
 }: SettingsPageProps) {
   const { message } = useAntdApp()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
-  const [systemPromptValue, setSystemPromptValue] = React.useState(systemPrompt)
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
@@ -49,10 +42,6 @@ export default function SettingsPage({
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
-
-  React.useEffect(() => {
-    setSystemPromptValue(systemPrompt)
-  }, [systemPrompt])
 
   React.useEffect(() => {
     setModelConfigList(modelConfigs)
@@ -203,15 +192,6 @@ export default function SettingsPage({
     message.success('已复制配置')
   }
 
-  const handleSaveSystemPrompt = () => {
-    onSystemPromptChange(systemPromptValue.trim() || DEFAULT_SYSTEM_PROMPT)
-  }
-
-  const handleResetSystemPrompt = () => {
-    setSystemPromptValue(DEFAULT_SYSTEM_PROMPT)
-    onSystemPromptChange(DEFAULT_SYSTEM_PROMPT)
-  }
-
   const [exportingDb, setExportingDb] = React.useState(false)
   const [importingDb, setImportingDb] = React.useState(false)
   const [dbInfoLoading, setDbInfoLoading] = React.useState(false)
@@ -334,24 +314,12 @@ export default function SettingsPage({
           {activeTab === 'ai' && (
             <div className="settings-section">
               <h2 className="settings-section-title">AI 配置</h2>
-              <p className="settings-section-desc">配置 AI 对话助手的行为与角色设定。</p>
+              <p className="settings-section-desc">系统提示词已内置，不对终端用户开放自定义。</p>
               <div className="settings-field">
                 <div className="settings-field-label">系统提示词</div>
-                <p className="settings-field-desc">定义 AI 助手的角色和行为准则，对所有对话生效。</p>
-                <Input.TextArea
-                  value={systemPromptValue}
-                  onChange={(e) => setSystemPromptValue(e.target.value)}
-                  rows={5}
-                  style={{ maxWidth: 480 }}
-                />
-                <div className="settings-field-actions">
-                  <Button type="primary" onClick={handleSaveSystemPrompt}>
-                    保存
-                  </Button>
-                  <Button onClick={handleResetSystemPrompt}>
-                    恢复默认
-                  </Button>
-                </div>
+                <p className="settings-field-desc">
+                  当前版本统一使用内置 ReAct 提示词，以保证工具调用与智能体行为稳定一致。
+                </p>
               </div>
             </div>
           )}

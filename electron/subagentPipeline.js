@@ -245,21 +245,14 @@ function resolveDraftPlainText(draftDoc, userText, action) {
 }
 
 /**
- * 由多选阶段或单选 legacy `action` 推导管线开关与用于「用户粘贴代正文」的 resolveAction。
+ * 由多选阶段推导管线开关与用于「用户粘贴代正文」的 resolveAction。
  * @param {string[]|null|undefined} agentActions
- * @param {string} legacyAction
  */
-function normalizePipelineFlags(agentActions, legacyAction) {
+function normalizePipelineFlags(agentActions) {
   const list =
     Array.isArray(agentActions) && agentActions.length > 0
       ? agentActions.map(String)
-      : [
-          String(
-            legacyAction && Object.values(EXEC_ACTIONS).includes(legacyAction)
-              ? legacyAction
-              : EXEC_ACTIONS.FULL,
-          ),
-        ]
+      : [EXEC_ACTIONS.FULL]
   const keys = new Set(list)
   if (keys.has(EXEC_ACTIONS.FULL)) {
     return {
@@ -601,7 +594,6 @@ async function streamMainAgentPresenter({
  * @param {string} input.latestUserTextForPlan
  * @param {boolean} input.useToolRouter
  * @param {Array} input.toolsFromFront
- * @param {string} [input.action] 单选兼容；与 agentActions 二选一或并存时以 agentActions 为准
  * @param {string[]} [input.agentActions] 多选阶段，如 ['analyze','plan','draft']
  * @param {string} input.model
  */
@@ -618,7 +610,6 @@ async function runSubagentPipeline(input) {
     latestUserTextForPlan,
     useToolRouter,
     toolsFromFront,
-    action,
     agentActions,
     model,
   } = input
@@ -798,7 +789,7 @@ async function runSubagentPipeline(input) {
     onlyDraft,
     resolveAction,
     pipelineActionLabel,
-  } = normalizePipelineFlags(agentActions, action)
+  } = normalizePipelineFlags(agentActions)
 
   const analyzeInput = `请输出 AnalyzeReport JSON（仅 JSON 对象，字段：summary, goals, constraints, risks, evidence）。\n用户请求：${userText}`
   const analyzeRes = await runStage(STAGES.ANALYZE, analyzeInput)

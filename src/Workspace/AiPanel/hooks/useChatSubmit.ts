@@ -217,7 +217,6 @@ export interface ChatMessage {
 export interface UseChatSubmitParams {
   /** 当前选中的模型配置（含 apiKey、baseUrl、name）；为空时无法发送 */
   selectedModelConfig: AiModelConfig | null;
-  systemPrompt: string;
   prompt: string;
   setPrompt: React.Dispatch<React.SetStateAction<string>>;
   loading: boolean;
@@ -253,7 +252,6 @@ export interface UseChatSubmitParams {
 export function useChatSubmit(params: UseChatSubmitParams) {
   const {
     selectedModelConfig,
-    systemPrompt,
     prompt,
     setPrompt,
     loading,
@@ -437,7 +435,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     }
 
     // 长期记忆由工具调用提供，不再拼入 system
-    const systemContent = systemPrompt + systemSuffix + subagentExtra + collabExtra;
+    const systemContent = [systemSuffix, subagentExtra, collabExtra].filter(Boolean).join("");
 
     let historyMessages: { role: string; content: string }[];
     if (resend != null) {
@@ -731,7 +729,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
       if (typeof chunk.collabLatestParagraph === "string" && chunk.collabLatestParagraph.trim()) {
         const para = chunk.collabLatestParagraph.trim();
-        const wrapped = `\n\n### 最新段落（已写入正文）\n\n${para}\n`;
+        const wrapped = `\n\n### 最新段落（已写入正文）\n\n\`\`\`text\n${para}\n\`\`\`\n`;
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
@@ -1160,6 +1158,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       associatedOutlineIds:
         associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
       agentMode,
+      chatAgentMode: writingMode === "collab" ? "collab" : (agentMode === "subagent" ? "expert" : (agentEnabled ? "agent" : "ask")),
       ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
       ...(agentMode === "subagent"
         ? {
@@ -1173,7 +1172,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     loading,
     selectedModelConfig,
     conversations,
-    systemPrompt,
     bookId,
     bookTitle,
     chapterId,
