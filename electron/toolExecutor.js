@@ -127,33 +127,18 @@ function getGlobalOutline(bookId, maxTextLength = 32000) {
   }
 }
 
-function batchGetOutlineDetails(outlineIds, allOutlines) {
-  return outlineIds.map((oid) => {
-    const outline = (allOutlines || []).find((o) => o.id === oid) ?? { id: oid, title: '' }
-    return loadOutlineWithChapters(outline)
-  })
-}
-
-function queryOutline(bookId, outlineIds, includeChapters = true, includeText = true, maxTextLength = 32000) {
+function queryOutline(bookId, outlineIds, maxTextLength = 32000) {
   const all = getAvailableOutlines(bookId)
   const filterSet =
     Array.isArray(outlineIds) && outlineIds.length > 0
       ? new Set(outlineIds.map((x) => String(x)))
       : null
   const targetOutlines = filterSet ? all.filter((o) => filterSet.has(String(o.id))) : all
-  const details = includeChapters
-    ? batchGetOutlineDetails(
-        targetOutlines.map((o) => String(o.id)),
-        all,
-      )
-    : []
-  const byIdDetail = new Map(details.map((d) => [String(d.outline?.id), d]))
-  const textEntries = includeText ? collectTextOutlineEntries(bookId, filterSet ? Array.from(filterSet) : undefined) : []
+  const textEntries = collectTextOutlineEntries(bookId, filterSet ? Array.from(filterSet) : undefined)
   const byIdText = new Map(textEntries.map((e) => [String(e.id), e.markdown]))
 
   const outlines = targetOutlines.map((o) => {
     const id = String(o.id)
-    const detail = byIdDetail.get(id)
     const markdown = byIdText.get(id)
     const trimmedMarkdown =
       typeof markdown === 'string' && markdown.length > maxTextLength
@@ -163,8 +148,8 @@ function queryOutline(bookId, outlineIds, includeChapters = true, includeText = 
       id,
       title: o.title || '',
       type: o.type || '',
-      chaptersText: includeChapters ? detail?.chaptersText || '' : undefined,
-      markdown: includeText ? trimmedMarkdown || '' : undefined,
+      xmindData: typeof o.xmind_data === 'string' ? o.xmind_data : '',
+      markdown: trimmedMarkdown || '',
       hasMarkdown: Boolean(markdown && String(markdown).trim()),
     }
   })
@@ -281,12 +266,47 @@ function listWritingChapters(bookId) {
   }
 }
 
+function normalizeChapterParentId(row) {
+  if (!row || typeof row !== 'object') return null
+  const raw = row.parent_id ?? row.parentId
+  if (raw == null) return null
+  const s = String(raw).trim()
+  return s || null
+}
+
+function resolveCreateWritingParentId(parentIdRaw, writingChapters, currentChapterId) {
+  const explicit = parentIdRaw == null ? '' : String(parentIdRaw).trim()
+  if (explicit) return explicit
+  const currentId = currentChapterId == null ? '' : String(currentChapterId).trim()
+  if (!currentId || !Array.isArray(writingChapters) || writingChapters.length === 0) return null
+  const current = writingChapters.find((c) => String(c?.id || '').trim() === currentId)
+  if (!current) return null
+  const currentParentId = normalizeChapterParentId(current)
+  if (currentParentId) return currentParentId
+  const hasChildren = writingChapters.some((c) => normalizeChapterParentId(c) === currentId)
+  if (hasChildren) return currentId
+  return null
+}
+
 function parseArgs(argsStr) {
   try {
     return JSON.parse(argsStr || '{}')
   } catch {
     return {}
   }
+}
+
+/**
+ * 会话已绑定 bookId 时，始终以 toolCtx.bookId 为准，禁止模型误传的 bookId（如数字 1）覆盖宿主注入值。
+ * 否则 listOutlines/queryOutline 会查错书，与前端 availableOutlines、writingChapters 快照不一致。
+ */
+function resolveBookIdForTools(ctx, args) {
+  const fromCtx =
+    ctx && ctx.bookId != null && String(ctx.bookId).trim() !== '' ? String(ctx.bookId).trim() : ''
+  if (fromCtx) return fromCtx
+  const fromArgs =
+    args && args.bookId != null && String(args.bookId).trim() !== '' ? String(args.bookId).trim() : ''
+  return fromArgs || null
 }
 
 /**
@@ -304,6 +324,24 @@ function chapterAllowedByWritingCatalog(chapterId, writingChapters) {
   }
   const writable = getWritableChaptersForAgent(writingChapters)
   const row = writable.find((c) => String(c.id) === key)
+  if (!row) {
+    return { ok: false, chapterId: key }
+  }
+  if (!String(row.title || '').trim()) {
+    return { ok: false, chapterId: key }
+  }
+  return { ok: true }
+}
+
+function chapterNodeAllowedByWritingCatalog(chapterId, writingChapters) {
+  if (!Array.isArray(writingChapters) || writingChapters.length === 0) {
+    return { ok: true }
+  }
+  const key = String(chapterId ?? '').trim()
+  if (!key) {
+    return { ok: false }
+  }
+  const row = writingChapters.find((c) => String(c?.id || '').trim() === key)
   if (!row) {
     return { ok: false, chapterId: key }
   }
@@ -337,7 +375,43 @@ function chaptersAllowedByWritingCatalog(chapterIds, writingChapters) {
   return { ok: true }
 }
 
-/** 章节目录校验类失败对模型仅返回简短 error，详细原因由主稿专家向用户说明 */
+/**
+ * 强约束：章节工具仅允许 chapterId；若未传 chapterId，则仅允许回退到当前章节 ctx.chapterId。
+ */
+function resolveChapterIdStrict(args, writingChapters, currentChapterId) {
+  const byId = args?.chapterId != null ? String(args.chapterId).trim() : ''
+  const byTitle = typeof args?.chapterTitle === 'string' ? String(args.chapterTitle).trim() : ''
+  const byIndex = args?.chapterIndex
+  if (byTitle || byIndex != null) {
+    return { ok: false, reason: 'non_id_locator_forbidden' }
+  }
+  let resolved = byId
+  if (!resolved) {
+    const current = currentChapterId != null ? String(currentChapterId).trim() : ''
+    if (!current) {
+      return { ok: false, reason: 'locator_required' }
+    }
+    resolved = current
+  }
+  const gate = chapterAllowedByWritingCatalog(resolved, writingChapters)
+  if (!gate.ok) {
+    return { ok: false, reason: 'chapter_not_in_catalog' }
+  }
+  return { ok: true, chapterId: resolved }
+}
+
+function rejectNumericChapterIdsForBatch(cids) {
+  const ids = Array.isArray(cids) ? cids.map((x) => String(x).trim()).filter(Boolean) : []
+  const bad = ids.filter((s) => /^\d+$/.test(s))
+  if (bad.length > 0) {
+    return { ok: false, bad }
+  }
+  return { ok: true, ids }
+}
+
+/**
+ * 章节目录校验类失败对模型仅返回简短 error，详细原因由主稿专家向用户说明
+ */
 const CATALOG_TOOL_FAIL_MSG = '失败'
 
 function ensureCatalogRejectSet(ctx) {
@@ -383,7 +457,7 @@ function jsonBatchCatalogReject(ctx, batchGate) {
 /**
  * 与 runTools 内 toolFromCache 判定一致：执行前即可知是否将命中会话内只读缓存（用于前端整行不展示，含「正在执行」）
  */
-function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
+function toolWillHitReadCache(ctx, tc, writingChapters) {
   const name = tc.function?.name
   const args = parseArgs(tc.function?.arguments || '{}')
   const allow = ctx.subagentAllowedToolNames
@@ -393,7 +467,9 @@ function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
   try {
     switch (name) {
       case 'getChapterContent': {
-        const cid = args.chapterId
+        const resolved = resolveChapterIdStrict(args, writingChapters, ctx.chapterId)
+        if (!resolved.ok || !resolved.chapterId) return false
+        const cid = resolved.chapterId
         const gate = chapterAllowedByWritingCatalog(cid, writingChapters)
         if (!gate.ok) return false
         const key = String(cid).trim()
@@ -401,13 +477,16 @@ function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
         return Boolean(cache && cache.has(key))
       }
       case 'listWritingChapters': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         if (bid == null || String(bid).trim() === '') return false
         const ck = `listWritingChapters:${String(bid)}`
         return readToolCacheGet(ctx, ck) != null
       }
       case 'batchGetChapterContents': {
-        const cids = args.chapterIds || []
+        const cidsRaw = args.chapterIds || []
+        const numericCheck = rejectNumericChapterIdsForBatch(cidsRaw)
+        if (!numericCheck.ok) return false
+        const cids = numericCheck.ids
         const batchGate = chaptersAllowedByWritingCatalog(cids, writingChapters)
         if (!batchGate.ok) return false
         const cache = ensureChapterContentCache(ctx)
@@ -419,7 +498,7 @@ function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
         })
       }
       case 'getBookCharacters': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         const ids = args.characterIds
         const nameQueries = args.names
         const filtered =
@@ -430,35 +509,33 @@ function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
         return readToolCacheGet(ctx, ck) != null
       }
       case 'listBookCharacters': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         const ck = `listBookCharacters:${String(bid)}`
         return readToolCacheGet(ctx, ck) != null
       }
       case 'getStoryBackground': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         const ck = `getStoryBackground:${String(bid)}`
         return readToolCacheGet(ctx, ck) != null
       }
       case 'queryOutline': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         if (bid == null || String(bid).trim() === '') return false
         const oids = args.outlineIds
-        const includeChapters = args.includeChapters !== false
-        const includeText = args.includeText !== false
         const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
         const oidKey = Array.isArray(oids) ? [...oids].map(String).sort().join(',') : ''
-        const ck = `queryOutline:${String(bid)}:${oidKey}:${includeChapters}:${includeText}:${maxLen}`
+        const ck = `queryOutline:${String(bid)}:${oidKey}:${maxLen}`
         return readToolCacheGet(ctx, ck) != null
       }
       case 'getGlobalOutline': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         if (bid == null || String(bid).trim() === '') return false
         const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
         const ck = `getGlobalOutline:${String(bid)}:${maxLen}`
         return readToolCacheGet(ctx, ck) != null
       }
       case 'listOutlines': {
-        const bid = args.bookId ?? defaultBookId
+        const bid = resolveBookIdForTools(ctx, args)
         if (bid == null || String(bid).trim() === '') return false
         const ck = `listOutlines:${String(bid)}`
         return readToolCacheGet(ctx, ck) != null
@@ -481,10 +558,11 @@ function toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId) {
 async function runTools(toolCalls, ctx, sendChunk) {
   const results = []
   const { bookId, chapterId, currentChapterTitle, writingChapters = [], availableOutlines = [] } = ctx
-  const defaultBookId = bookId != null ? bookId : null
-
+  let runtimeChapterId = chapterId != null ? String(chapterId).trim() : ''
+  let runtimeCurrentChapterTitle = currentChapterTitle != null ? String(currentChapterTitle) : ''
+  let runtimeWritingChapters = Array.isArray(writingChapters) ? [...writingChapters] : []
   const toolReadCacheMask = toolCalls.map((tc) =>
-    toolWillHitReadCache(ctx, tc, writingChapters, defaultBookId),
+    toolWillHitReadCache(ctx, tc, writingChapters),
   )
   if (typeof sendChunk === 'function' && toolReadCacheMask.some(Boolean)) {
     sendChunk({ toolReadCacheMask })
@@ -511,10 +589,20 @@ async function runTools(toolCalls, ctx, sendChunk) {
       }
       switch (name) {
         case 'getChapterContent': {
-          const cid = args.chapterId
+          const resolved = resolveChapterIdStrict(args, runtimeWritingChapters, runtimeChapterId)
+          if (!resolved.ok || !resolved.chapterId) {
+            content = JSON.stringify({
+              error:
+                resolved.reason === 'non_id_locator_forbidden'
+                  ? 'getChapterContent 仅支持 chapterId'
+                  : CATALOG_TOOL_FAIL_MSG,
+            })
+            break
+          }
+          const cid = resolved.chapterId
           const title = args.title
           const maxLen = args.maxTextLength || 12000
-          const gate = chapterAllowedByWritingCatalog(cid, writingChapters)
+          const gate = chapterAllowedByWritingCatalog(cid, runtimeWritingChapters)
           if (!gate.ok) {
             content = jsonCatalogReject(ctx, gate, cid)
             break
@@ -524,7 +612,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           if (cache && cache.has(key)) {
             const entry = cache.get(key)
             const plainSlice = String(entry.plainTextFull ?? '').slice(0, maxLen)
-            const titleRes = title || entry.titleResolved || titleFromWritingCatalog(cid, writingChapters) || ''
+            const titleRes = title || entry.titleResolved || titleFromWritingCatalog(cid, runtimeWritingChapters) || ''
             content = JSON.stringify({
               chapterId: key,
               title: titleRes,
@@ -541,7 +629,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
             })
             break
           }
-          const titleResolved = title || titleFromWritingCatalog(cid, writingChapters) || ''
+          const titleResolved = title || titleFromWritingCatalog(cid, runtimeWritingChapters) || ''
           if (cache) {
             cache.set(key, { plainTextFull: full.plainTextFull, titleResolved })
           }
@@ -554,7 +642,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'listWritingChapters': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取写作目录章节列表' })
             break
@@ -572,15 +660,106 @@ async function runTools(toolCalls, ctx, sendChunk) {
           content = payload
           break
         }
+        case 'createWritingChapter': {
+          const bid = resolveBookIdForTools(ctx, args)
+          if (bid == null || String(bid).trim() === '') {
+            content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法创建章节' })
+            break
+          }
+          const parentIdRaw = args.parentId
+          const parentId = resolveCreateWritingParentId(parentIdRaw, runtimeWritingChapters, runtimeChapterId)
+          if (parentId != null && parentId !== '') {
+            const gate = chapterNodeAllowedByWritingCatalog(parentId, runtimeWritingChapters)
+            if (!gate.ok) {
+              const p = catalogRejectPayload(ctx, gate, parentId)
+              content = JSON.stringify({
+                success: false,
+                error: p.error,
+                ...(p.chapterId != null ? { parentId: p.chapterId } : {}),
+              })
+              break
+            }
+          }
+          try {
+            const writing = getDb().getOrCreateWritingOutline(String(bid))
+            if (!writing?.id) {
+              content = JSON.stringify({ success: false, error: '未找到写作目录，无法创建章节' })
+              break
+            }
+            const effectiveParentId = (parentId == null || parentId === '') ? null : parentId
+            let maxNum = 0
+            for (const c of runtimeWritingChapters) {
+              const pid = (c.parent_id == null || c.parent_id === '') ? null : String(c.parent_id)
+              if (pid !== effectiveParentId) continue
+              const m = String(c.title || '').match(/^第(\d+)章/)
+              if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10))
+            }
+            const title = `第${maxNum + 1}章`
+            const created = getDb().addChapter(
+              String(writing.id),
+              title,
+              effectiveParentId,
+            )
+            // 目录变更后清除只读缓存（listWritingChapters 需刷新）
+            invalidateReadToolCache(ctx)
+            runtimeChapterId = String(created.id)
+            runtimeCurrentChapterTitle = String(created.title || title)
+            runtimeWritingChapters = [
+              ...runtimeWritingChapters.filter((c) => String(c?.id || '') !== runtimeChapterId),
+              {
+                id: runtimeChapterId,
+                title: runtimeCurrentChapterTitle,
+                parent_id: created.parent_id == null || created.parent_id === '' ? null : String(created.parent_id),
+                level: Number(created.level || 1),
+                sort: Number(created.sort || 0),
+              },
+            ]
+            ctx.chapterId = runtimeChapterId
+            ctx.currentChapterTitle = runtimeCurrentChapterTitle
+            ctx.writingChapters = runtimeWritingChapters
+            if (typeof sendChunk === 'function') {
+              sendChunk({
+                chapterCreated: {
+                  chapterId: runtimeChapterId,
+                  title: runtimeCurrentChapterTitle,
+                  parentId: created.parent_id == null || created.parent_id === '' ? null : String(created.parent_id),
+                },
+              })
+            }
+            content = JSON.stringify({
+              success: true,
+              bookId: String(bid),
+              writingOutlineId: String(writing.id),
+              chapter: {
+                id: String(created.id),
+                title: String(created.title || title),
+                parentId: created.parent_id == null || created.parent_id === '' ? null : String(created.parent_id),
+                level: Number(created.level || 1),
+                sort: Number(created.sort || 0),
+              },
+            })
+          } catch (e) {
+            content = JSON.stringify({ success: false, error: e.message })
+          }
+          break
+        }
         case 'batchGetChapterContents': {
-          const cids = args.chapterIds || []
+          const cidsRaw = args.chapterIds || []
+          const numericCheck = rejectNumericChapterIdsForBatch(cidsRaw)
+          if (!numericCheck.ok) {
+            content = JSON.stringify({
+              error: 'batchGetChapterContents 仅支持 chapterId 字符串数组（listWritingChapters.items[].id）',
+            })
+            break
+          }
+          const cids = numericCheck.ids
           const maxLen = args.maxTextLength || 12000
-          const batchGate = chaptersAllowedByWritingCatalog(cids, writingChapters)
+          const batchGate = chaptersAllowedByWritingCatalog(cids, runtimeWritingChapters)
           if (!batchGate.ok) {
             content = jsonBatchCatalogReject(ctx, batchGate)
             break
           }
-          const titleMap = new Map((writingChapters || []).map((c) => [String(c.id), c.title]))
+          const titleMap = new Map((runtimeWritingChapters || []).map((c) => [String(c.id), c.title]))
           const cache = ensureChapterContentCache(ctx)
           const idList = Array.isArray(cids) ? cids : []
           let batchAllCached = idList.length > 0
@@ -597,7 +776,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
             if (!full) {
               return { chapterId: cid, title: t || '', plainText: '' }
             }
-            const titleResolved = t || titleFromWritingCatalog(cid, writingChapters) || ''
+            const titleResolved = t || titleFromWritingCatalog(cid, runtimeWritingChapters) || ''
             if (cache) {
               cache.set(cid, { plainTextFull: full.plainTextFull, titleResolved })
             }
@@ -609,7 +788,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'getBookCharacters': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const ids = args.characterIds
           const nameQueries = args.names
           const filtered =
@@ -646,7 +825,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'listBookCharacters': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const ck = `listBookCharacters:${String(bid)}`
           const hit = readToolCacheGet(ctx, ck)
           if (hit != null) {
@@ -667,7 +846,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'getStoryBackground': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const ck = `getStoryBackground:${String(bid)}`
           const hit = readToolCacheGet(ctx, ck)
           if (hit != null) {
@@ -681,30 +860,36 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'queryOutline': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法查询大纲' })
             break
           }
-          const oids = args.outlineIds
-          const includeChapters = args.includeChapters !== false
-          const includeText = args.includeText !== false
+          if (args.outlineIndex != null || args.outlineTitle != null) {
+            content = JSON.stringify({ success: false, error: 'queryOutline 仅支持 outlineId/outlineIds' })
+            break
+          }
+          const oids = Array.isArray(args.outlineIds)
+            ? args.outlineIds
+            : (args.outlineId != null && String(args.outlineId).trim() !== '' ? [String(args.outlineId).trim()] : [])
+          if (oids.length === 0) {
+            content = JSON.stringify({ success: false, error: '缺少有效 outlineId/outlineIds' })
+            break
+          }
           const maxLen = typeof args.maxTextLength === 'number' ? args.maxTextLength : 32000
           const oidKey = Array.isArray(oids) ? [...oids].map(String).sort().join(',') : ''
-          const ck = `queryOutline:${String(bid)}:${oidKey}:${includeChapters}:${includeText}:${maxLen}`
+          const ck = `queryOutline:${String(bid)}:${oidKey}:${maxLen}`
           const hit = readToolCacheGet(ctx, ck)
           if (hit != null) {
             content = hit
             toolFromCache = true
             break
           }
-          const result = queryOutline(bid, oids, includeChapters, includeText, maxLen)
+          const result = queryOutline(bid, oids, maxLen)
           console.log('[toolExecutor:queryOutline] done', {
             bookId: String(bid),
             outlineIds: Array.isArray(oids) ? oids : null,
             total: result.total,
-            includeChapters,
-            includeText,
             maxTextLength: maxLen,
           })
           const payload = JSON.stringify(result).slice(0, 24000)
@@ -713,7 +898,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'getGlobalOutline': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取总纲' })
             break
@@ -736,7 +921,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'editGlobalOutline': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
             break
@@ -770,7 +955,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'listOutlines': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId，无法获取大纲列表' })
             break
@@ -798,7 +983,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'updateOutline': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const oid = args.outlineId != null ? String(args.outlineId).trim() : ''
           if (bid == null || String(bid).trim() === '') {
             content = JSON.stringify({ success: false, error: '缺少有效 bookId' })
@@ -852,12 +1037,19 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'editChapterContent': {
-          const cid = args.chapterId
+          const resolved = resolveChapterIdStrict(args, runtimeWritingChapters, runtimeChapterId)
+          const cid = resolved.ok ? resolved.chapterId : ''
           const newContent = typeof args.content === 'string' ? args.content : ''
           if (!cid) {
-            content = JSON.stringify({ success: false, error: '缺少 chapterId' })
+            content = JSON.stringify({
+              success: false,
+              error:
+                resolved.reason === 'non_id_locator_forbidden'
+                  ? 'editChapterContent 仅支持 chapterId（chapterTitle/chapterIndex 已禁用）'
+                  : '章节定位失败（仅支持 chapterId）',
+            })
           } else {
-            const editGate = chapterAllowedByWritingCatalog(cid, writingChapters)
+            const editGate = chapterAllowedByWritingCatalog(cid, runtimeWritingChapters)
             if (!editGate.ok) {
               const p = catalogRejectPayload(ctx, editGate, cid)
               content = JSON.stringify({
@@ -895,9 +1087,9 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'addMemory': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const memContent = typeof args.content === 'string' ? args.content.trim() : ''
-          const cid = args.chapterId ?? chapterId ?? undefined
+          const cid = args.chapterId ?? runtimeChapterId ?? undefined
           const characterId = args.characterId
           const layerNum = typeof args.layer === 'number' ? args.layer : undefined
           const layerValid = layerNum !== undefined && [0, 1, 2, 3].includes(layerNum)
@@ -918,7 +1110,7 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'addForeshadowing': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const forChapterId = args.chapterId
           const forContent = typeof args.content === 'string' ? args.content.trim() : ''
           const forType = args.type || FORESHADOWING_TYPES[0]
@@ -940,10 +1132,10 @@ async function runTools(toolCalls, ctx, sendChunk) {
           break
         }
         case 'searchMemories': {
-          const bid = args.bookId ?? defaultBookId
+          const bid = resolveBookIdForTools(ctx, args)
           const query = args.query || ''
           const layer = args.layer
-          const cid = args.chapterId ?? chapterId ?? undefined
+          const cid = args.chapterId ?? runtimeChapterId ?? undefined
           const limit = args.limit || 15
           try {
             const parts = []

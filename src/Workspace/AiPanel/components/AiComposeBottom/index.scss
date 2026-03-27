@@ -40,7 +40,7 @@
   }
 
   /* Ask 模式：绿色边框 + 绿色柔光 + 绿色文字 */
-  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent) .ant-select-selector {
+  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent):not(.ai-agent-select--collab) .ant-select-selector {
     border-color: var(--success) !important;
     color: var(--success);
     box-shadow:
@@ -48,7 +48,7 @@
       0 0 12px var(--success);
   }
 
-  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent) .ant-select-selector:hover {
+  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent):not(.ai-agent-select--collab) .ant-select-selector:hover {
     border-color: var(--success) !important;
     box-shadow:
       0 0 6px var(--success),
@@ -88,6 +88,23 @@
     box-shadow:
       0 0 6px var(--warning),
       0 0 16px var(--warning);
+  }
+
+  &.ai-agent-select--collab .ant-select-selector {
+    border-color: var(--collab) !important;
+    background: color-mix(in srgb, var(--collab) 18%, var(--bg-surface)) !important;
+    color: var(--collab);
+    box-shadow:
+      0 0 4px var(--collab),
+      0 0 12px var(--collab);
+  }
+
+  &.ai-agent-select--collab .ant-select-selector:hover {
+    border-color: var(--collab-hover) !important;
+    color: var(--collab-hover);
+    box-shadow:
+      0 0 6px var(--collab-hover),
+      0 0 16px var(--collab-hover);
   }
 }
 

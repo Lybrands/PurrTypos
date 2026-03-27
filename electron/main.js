@@ -1190,7 +1190,7 @@ ipcMain.on('ai-chat-stream', async (event, {
       : null
 
   let tools = toolsFromFront
-  if (useToolRouter && bookId != null && Array.isArray(messages) && messages.length > 0) {
+  if (runtimeMode === 'legacy' && useToolRouter && bookId != null && Array.isArray(messages) && messages.length > 0) {
     const userText = buildToolRouterEmbeddingQuery(messages)
     latestUserTextForPlan = userText
     try {
@@ -1300,6 +1300,9 @@ ipcMain.on('ai-chat-stream', async (event, {
   }
   const forwardToolExecutorEvent = (ev) => {
     if (!ev) return
+    if (ev.chapterCreated != null) {
+      sendChunk({ chapterCreated: ev.chapterCreated })
+    }
     if (ev.chapterContentUpdated != null) {
       const persisted = pickPersistableCollabText(collabCurrentDraftCandidate)
       if (persisted) collabLastPersistedDraft = persisted

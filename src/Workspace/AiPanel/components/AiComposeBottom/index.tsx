@@ -67,11 +67,11 @@ export default function AiComposeBottom({
       return {
         root: {
           border: 'none',
-          boxShadow: '0 0 2px var(--accent), 0 0 2px var(--accent)',
-          background: 'color-mix(in srgb, var(--accent) 12%, var(--bg-surface))',
-          color: 'var(--accent)',
+          boxShadow: '0 0 2px var(--collab), 0 0 2px var(--collab)',
+          background: 'color-mix(in srgb, var(--collab) 12%, var(--bg-surface))',
+          color: 'var(--collab)',
         },
-        suffix: { color: 'var(--accent)' },
+        suffix: { color: 'var(--collab)' },
       } as const
     }
     return {
