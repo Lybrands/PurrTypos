@@ -1268,11 +1268,41 @@ ipcMain.on('ai-chat-stream', async (event, {
     /** 本会话内只读工具结果缓存（listOutlines/queryOutline/背景/人物目录等，大纲或总纲写入后整表清空） */
     readToolCache: new Map(),
   }
-  let collabHasWrittenViaTool = false
+  let collabLastPersistedDraft = ''
+  let collabCurrentDraftCandidate = ''
+  const COLLAB_META_HINT_RE = /(本轮理解|当前提案|下一步选择|请确认|是否继续|A\/B|A\/B\/C)/
+  const pickPersistableCollabText = (rawText) => {
+    const raw = String(rawText || '').trim()
+    if (!raw) return ''
+    const blocks = []
+    const re = /```text\s*([\s\S]*?)```/gi
+    let m
+    while ((m = re.exec(raw)) != null) {
+      const inner = String(m[1] || '').trim()
+      if (inner) blocks.push(inner)
+    }
+    if (blocks.length > 0) return blocks.join('\n\n').trim()
+    if (COLLAB_META_HINT_RE.test(raw)) return ''
+    return raw
+  }
+  const appendModelContent = (acc, deltaContent, messageContent) => {
+    const cur = String(acc || '')
+    const d = String(deltaContent || '')
+    if (d) return { next: cur + d, emittedDelta: d }
+    const msg = typeof messageContent === 'string' ? messageContent : ''
+    if (!msg) return { next: cur, emittedDelta: '' }
+    if (!cur) return { next: msg, emittedDelta: msg }
+    if (msg.startsWith(cur)) {
+      const tail = msg.slice(cur.length)
+      return { next: msg, emittedDelta: tail }
+    }
+    return { next: cur, emittedDelta: '' }
+  }
   const forwardToolExecutorEvent = (ev) => {
     if (!ev) return
     if (ev.chapterContentUpdated != null) {
-      collabHasWrittenViaTool = true
+      const persisted = pickPersistableCollabText(collabCurrentDraftCandidate)
+      if (persisted) collabLastPersistedDraft = persisted
       sendChunk({ chapterContentUpdated: ev.chapterContentUpdated })
     }
     if (typeof ev.collabLatestParagraph === 'string' && ev.collabLatestParagraph.trim()) {
@@ -1287,10 +1317,11 @@ ipcMain.on('ai-chat-stream', async (event, {
     }
   }
   const autoPersistCollabDraft = async (text) => {
-    if (!collabWriting || collabHasWrittenViaTool) return
+    if (!collabWriting) return
     const cid = chapterId != null ? String(chapterId).trim() : ''
-    const draft = String(text || '').trim()
+    const draft = pickPersistableCollabText(text)
     if (!cid || !draft) return
+    if (draft === collabLastPersistedDraft) return
     try {
       const tcId = `collab_auto_${Date.now()}`
       const res = await toolExecutor.runTools(
@@ -1309,6 +1340,8 @@ ipcMain.on('ai-chat-stream', async (event, {
       const parsed = first?.content ? JSON.parse(first.content) : null
       if (!parsed?.success) {
         sendChunk({ toolRouterWarning: '协作共创自动写入正文失败，请重试或手动确认写入。' })
+      } else {
+        collabLastPersistedDraft = draft
       }
     } catch (_) {
       sendChunk({ toolRouterWarning: '协作共创自动写入正文失败，请重试或手动确认写入。' })
@@ -1335,9 +1368,15 @@ ipcMain.on('ai-chat-stream', async (event, {
         accumulatedThinking += thinkingDelta
         sendChunk({ thinkingDelta })
       }
-      if (contentDelta) {
-        accumulatedContent += contentDelta
-        sendChunk({ delta: contentDelta })
+      {
+        const merged = appendModelContent(
+          accumulatedContent,
+          contentDelta,
+          chunk.choices?.[0]?.message?.content,
+        )
+        accumulatedContent = merged.next
+        collabCurrentDraftCandidate = accumulatedContent
+        if (merged.emittedDelta) sendChunk({ delta: merged.emittedDelta })
       }
       const rawToolCalls = delta.tool_calls
       if (rawToolCalls && Array.isArray(rawToolCalls)) {
@@ -1466,9 +1505,15 @@ ipcMain.on('ai-chat-stream', async (event, {
         const thinkingDelta = delta.reasoning_content || ''
         const msg = choice0?.message
         if (thinkingDelta) sendChunk({ thinkingDelta })
-        if (contentDelta) {
-          accumulatedContent += contentDelta
-          sendChunk({ delta: contentDelta })
+        {
+          const merged = appendModelContent(
+            accumulatedContent,
+            contentDelta,
+            msg?.content,
+          )
+          accumulatedContent = merged.next
+          collabCurrentDraftCandidate = accumulatedContent
+          if (merged.emittedDelta) sendChunk({ delta: merged.emittedDelta })
         }
         const finishReason = choice0?.finish_reason
         if (finishReason === 'stop' || finishReason === 'length') {
