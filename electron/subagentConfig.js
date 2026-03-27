@@ -44,13 +44,39 @@ const SUBAGENT_REGISTRY = {
     name: "分析专家",
     outputType: "AnalyzeReport",
     systemPrompt:
-      "你是小说写作“分析专家”（审计式分析）。先证据、后结论：优先调用工具核对章节正文、设定与大纲，再给出判断。任务是识别目标、约束、冲突与风险，不写正文。输出必须是 JSON 且仅包含：summary, goals, constraints, risks, evidence。evidence 中每条都要能对应可追溯来源；信息不足时在 risks/constraints 中显式标注，不得臆造。",
+      `你是小说写作“分析专家”（审计式分析）。
+先证据、后结论：优先调用工具核对章节正文、设定与大纲，再给出判断。
+任务是识别目标、约束、冲突与风险，不写正文。
+
+请做两步内部自检：
+1) 目标-约束对照（确认 goals 与 constraints 是否互相冲突）；
+2) 证据完备性检查（缺证据项必须显式标注为风险或待确认）。
+
+输出必须是 JSON 且仅包含：summary, goals, constraints, risks, evidence。
+evidence 中每条都要能对应可追溯来源；
+信息不足时在 risks/constraints 中显式标注，不得臆造。`,
   },
   [STAGES.PLAN]: {
     name: "规划专家",
     outputType: "WritingBlueprint",
     systemPrompt:
-      "你是小说写作“规划专家”（Blueprint 生成）。基于 AnalyzeReport 产出可执行写作蓝图：把 goals/constraints 映射到可执行节拍与素材需求，不复述长素材原文。必要时先调用工具补齐缺失信息。输出必须是 JSON 且仅包含：chapterGoal, beats, tone, constraints, requiredMaterials。每个关键节拍应可追溯到目标或约束；若存在取舍，优先保证一致性与可落地。",
+      `你是小说写作“规划专家”（Blueprint 生成）。
+基于 AnalyzeReport 产出单一可执行写作蓝图：把 goals/constraints 映射到可执行节拍与素材需求，不复述长素材原文。
+必要时先调用工具补齐缺失信息。
+
+使用轻量思维树（Tree-of-Thought）进行内部规划：
+1) 先内部生成 2-3 个候选方向；
+2) 按三项标准评分并选优（约束覆盖率、一致性/冲突风险、可执行性）；
+3) 只保留最终选中的单一蓝图，不输出候选过程。
+
+定稿前必须进行三项自检：
+1) 约束覆盖率检查（每条 constraints 在 beats/requiredMaterials 中有对应落实）；
+2) 冲突消解检查（人物动机、时间线、视角与信息揭示顺序不冲突）；
+3) 可执行性检查（关键 beat 需明确“谁做什么、为何、推进了什么”）。
+
+输出必须是 JSON 且仅包含：chapterGoal, beats, tone, constraints, requiredMaterials。
+每个关键节拍应可追溯到目标或约束；
+若存在取舍，优先保证一致性与可落地。`,
   },
   [STAGES.DRAFT]: {
     name: "撰稿专家",
@@ -68,7 +94,18 @@ const SUBAGENT_REGISTRY = {
     name: "审校专家",
     outputType: "ReviewIssues",
     systemPrompt:
-      "你是小说写作“审校专家”（静态审校）。只定位问题并给建议，不重写全文。按问题分类与严重度输出（如 continuity, motivation, pacing, clarity, style），建议需具体可执行。允许调用工具核对设定一致性。输出必须是 JSON，且只包含约定字段（issues 数组或等价数组结构）；每条问题需包含位置线索、严重度、建议与必要上下文。",
+      `你是小说写作“审校专家”（静态审校）。
+只定位问题并给建议，不重写全文。
+按问题分类与严重度输出（如 continuity, motivation, pacing, clarity, style），建议需具体可执行。
+允许调用工具核对设定一致性。
+
+请执行两轮内部审校：
+1) 第一轮做类型化问题扫描；
+2) 第二轮做反证去误报（证据不足或可合理解释的问题不输出）。
+最终只保留高置信问题。
+
+输出必须是 JSON，且只包含约定字段（issues 数组或等价数组结构）；
+每条问题需包含位置线索、严重度、建议与必要上下文。`,
   },
   [STAGES.POLISH]: {
     name: "润色专家",
@@ -150,11 +187,11 @@ function normalizeAnalyzeReport(raw, fallbackUserText) {
       : [],
     evidence: Array.isArray(val.evidence)
       ? val.evidence
-          .map((x) => ({
-            source: String(x?.source || ""),
-            snippet: String(x?.snippet || "").slice(0, 400),
-          }))
-          .slice(0, 12)
+        .map((x) => ({
+          source: String(x?.source || ""),
+          snippet: String(x?.snippet || "").slice(0, 400),
+        }))
+        .slice(0, 12)
       : [],
   };
 }
@@ -172,12 +209,12 @@ function normalizeWritingBlueprint(raw) {
       : [],
     requiredMaterials: Array.isArray(val.requiredMaterials)
       ? val.requiredMaterials
-          .map((x) => ({
-            type: String(x?.type || ""),
-            ref: String(x?.ref || ""),
-            note: String(x?.note || "").slice(0, 300),
-          }))
-          .slice(0, 40)
+        .map((x) => ({
+          type: String(x?.type || ""),
+          ref: String(x?.ref || ""),
+          note: String(x?.note || "").slice(0, 300),
+        }))
+        .slice(0, 40)
       : [],
   };
 }
@@ -201,13 +238,13 @@ function normalizeStyleUnifyResult(raw) {
     changeSummary: String(val.changeSummary || "").slice(0, 2000),
     priorChaptersRead: Array.isArray(val.priorChaptersRead)
       ? val.priorChaptersRead
-          .slice(0, 8)
-          .map((x) => ({
-            chapterIndex: Number.isFinite(Number(x?.chapterIndex))
-              ? Number(x.chapterIndex)
-              : 0,
-            title: String(x?.title || "").slice(0, 120),
-          }))
+        .slice(0, 8)
+        .map((x) => ({
+          chapterIndex: Number.isFinite(Number(x?.chapterIndex))
+            ? Number(x.chapterIndex)
+            : 0,
+          title: String(x?.title || "").slice(0, 120),
+        }))
       : [],
   };
 }
