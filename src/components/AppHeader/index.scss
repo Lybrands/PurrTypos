@@ -35,6 +35,28 @@
   object-fit: contain;
 }
 
+.app-title-with-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.app-title-with-meta > .app-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-title-word-count {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-normal);
+  color: var(--text-muted);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
 .app-title {
   font-size: var(--font-size-h3);
   font-weight: var(--font-weight-semibold);

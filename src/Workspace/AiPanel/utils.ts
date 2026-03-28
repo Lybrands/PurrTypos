@@ -117,14 +117,27 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
           const segments = JSON.parse(rawSegments) as { textBefore: string; labels: string[] }[]
           if (Array.isArray(segments) && segments.length > 0) {
             const textBeforeJoined = segments.map((s) => s.textBefore || '').join('')
-            const contentAfterToolCalls = item.response.startsWith(textBeforeJoined)
-              ? item.response.slice(textBeforeJoined.length)
-              : ''
-            assistantMsg = {
-              ...assistantMsg,
-              content: item.response,
-              toolCallSegments: segments,
-              contentAfterToolCalls: contentAfterToolCalls || undefined,
+            const resp = item.response ?? ''
+            if (
+              resp.length > 0 &&
+              textBeforeJoined.length > 0 &&
+              !resp.startsWith(textBeforeJoined)
+            ) {
+              // 存库与片段前缀不一致时若仍走分段渲染，会丢尾文；回退为纯正文以免空白
+              assistantMsg = {
+                ...assistantMsg,
+                content: resp,
+              }
+            } else {
+              const contentAfterToolCalls = resp.startsWith(textBeforeJoined)
+                ? resp.slice(textBeforeJoined.length)
+                : ''
+              assistantMsg = {
+                ...assistantMsg,
+                content: resp,
+                toolCallSegments: segments,
+                contentAfterToolCalls: contentAfterToolCalls || undefined,
+              }
             }
           }
         } catch (_) {}

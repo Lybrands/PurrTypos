@@ -73,7 +73,6 @@ export default function AiPanel({
     activeChapterId: chapterId,
     activeChapterTitle,
     bookId,
-    bookTitle,
     writingChapters,
   } = useWorkspace();
   const [prompt, setPrompt] = React.useState("");
@@ -165,7 +164,6 @@ export default function AiPanel({
     conversations,
     setConversations,
     bookId: bookId ?? undefined,
-    bookTitle: bookTitle || undefined,
     chapterId,
     activeSessionId,
     setActiveSessionId,
@@ -234,61 +232,15 @@ export default function AiPanel({
   const [inputAreaHeight, setInputAreaHeight] =
     React.useState(INPUT_AREA_DEFAULT);
   const inputAreaDragRef = React.useRef(false);
-  const emitDebug = React.useCallback(
-    (payload: {
-      hypothesisId: string;
-      location: string;
-      message: string;
-      data?: Record<string, unknown>;
-      runId?: string;
-    }) => {
-      (window as any).electronAPI?.debugLog?.({
-        ...payload,
-        sessionId: "6b0872",
-        timestamp: Date.now(),
-      });
-    },
-    [],
-  );
   const setScrolledUpByReason = React.useCallback(
-    (nextValue: boolean, reason: string) => {
+    (nextValue: boolean, _reason: string) => {
       setUserHasScrolledUp((prev) => {
-        // #region agent log
-        emitDebug({
-          runId: "post-fix",
-          hypothesisId: "H7",
-          location: "AiPanel/index.tsx:setScrolledUpByReason",
-          message: "set userHasScrolledUp",
-          data: {
-            reason,
-            prev,
-            next: nextValue,
-            changed: prev !== nextValue,
-            loading,
-          },
-        });
-        // #endregion
         if (prev === nextValue) return prev;
         return nextValue;
       });
     },
-    [emitDebug, loading],
+    [],
   );
-
-  React.useEffect(() => {
-    // #region agent log
-    emitDebug({
-      runId: "pre-fix",
-      hypothesisId: "H0",
-      location: "AiPanel/index.tsx:mountHeartbeatIpc",
-      message: "AiPanel mounted debug heartbeat (ipc)",
-      data: {
-        hasBookId: bookId != null,
-        modelConfigsCount: modelConfigs.length,
-      },
-    });
-    // #endregion
-  }, [bookId, modelConfigs.length]);
 
   // 书籍/章节变化时加载 session 列表（仅按当前章节隔离）
   React.useEffect(() => {
@@ -348,6 +300,9 @@ export default function AiPanel({
               content: acc.response || "",
               thinking: acc.thinking || undefined,
               toolCallSegments: acc.toolCallSegments,
+              contentAfterToolCalls: acc.toolCallSegments?.length
+                ? (acc.contentAfterToolCalls ?? "")
+                : undefined,
               thinkingBlocks: acc.thinkingBlocks?.length
                 ? acc.thinkingBlocks
                 : undefined,
@@ -554,40 +509,12 @@ export default function AiPanel({
       last.contentAfterToolCalls ?? "",
       last.toolCalling ? "1" : "0",
     ].join("|");
-    // #region agent log
-    emitDebug({
-      runId: "pre-fix",
-      hypothesisId: "H1",
-      location: "AiPanel/index.tsx:streamFollowKeyIpc",
-      message: "streamFollowKey active (ipc)",
-      data: {
-        keyLen: key.length,
-        loading,
-        userHasScrolledUp,
-        now: Date.now(),
-        hasContent: Boolean((last.content || "").trim()),
-        hasThinking: Boolean((last.thinking || "").trim()),
-      },
-    });
-    // #endregion
     return key;
-  }, [loading, userHasScrolledUp, combinedData, emitDebug]);
+  }, [loading, userHasScrolledUp, combinedData]);
 
   // 流式输出期间（用户未主动上滑）保持视图贴底
   React.useEffect(() => {
     if (!streamFollowKey) return;
-    // #region agent log
-    emitDebug({
-      runId: "pre-fix",
-      hypothesisId: "H1",
-      location: "AiPanel/index.tsx:autoScrollEffectIpc",
-      message: "auto scroll effect triggered (ipc)",
-      data: {
-        streamFollowKeyLen: streamFollowKey.length,
-        listLength: combinedData.length,
-      },
-    });
-    // #endregion
     const raf = requestAnimationFrame(() => {
       virtuosoRef.current?.scrollToIndex({
         index: combinedData.length - 1,
@@ -597,50 +524,6 @@ export default function AiPanel({
     });
     return () => cancelAnimationFrame(raf);
   }, [streamFollowKey, combinedData.length]);
-
-  React.useEffect(() => {
-    // #region agent log
-    emitDebug({
-      runId: "pre-fix",
-      hypothesisId: "H5",
-      location: "AiPanel/index.tsx:userHasScrolledUpEffect",
-      message: "userHasScrolledUp changed",
-      data: {
-        userHasScrolledUp,
-        loading,
-      },
-    });
-    // #endregion
-  }, [userHasScrolledUp, loading, emitDebug]);
-
-  React.useEffect(() => {
-    if (combinedData.length === 0) return;
-    const last = combinedData[combinedData.length - 1] as ChatMessage | undefined;
-    if (!last || last.role !== "assistant" || last.isError) return;
-    const hasGeneratedContent = Boolean(
-      (last.content || "").trim() || (last.contentAfterToolCalls || "").trim(),
-    );
-    const hasThinking = Boolean((last.thinking || "").trim());
-    // #region agent log
-    emitDebug({
-      runId: "pre-fix",
-      hypothesisId: "H3",
-      location: "AiPanel/index.tsx:lastAssistantRenderStateIpc",
-      message: "last assistant mode state (ipc)",
-      data: {
-        loading,
-        hasThinking,
-        hasGeneratedContent,
-        renderMode:
-          loading && hasThinking && hasGeneratedContent
-            ? "streaming-collapse-locked"
-            : loading && hasThinking
-              ? "streaming-thinking-panel"
-              : "history-or-no-thinking",
-      },
-    });
-    // #endregion
-  }, [combinedData, loading, emitDebug]);
 
   return (
     <div className={`ai-panel ${isFullscreen ? "fullscreen" : ""}`}>
@@ -806,19 +689,6 @@ export default function AiPanel({
                 } else {
                   setScrolledUpByReason(true, "atBottom-false-idle");
                 }
-                // #region agent log
-                emitDebug({
-                  runId: "post-fix",
-                  hypothesisId: "H6",
-                  location: "AiPanel/index.tsx:atBottomStateChange",
-                  message: "atBottom callback",
-                  data: {
-                    atBottom,
-                    loading,
-                    userHasScrolledUp,
-                  },
-                });
-                // #endregion
               }}
               atTopStateChange={() => {
                 /* 向上滚动加载历史：可在此接入分页 API */

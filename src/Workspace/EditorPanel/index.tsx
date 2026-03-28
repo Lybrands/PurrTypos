@@ -297,7 +297,7 @@ export default function EditorPanel({
     try {
       const outlineId = await getOutlineId()
       if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: undefined })
+      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: undefined, isVolume: true })
       if (res.success) {
         await reloadChapters(outlineId)
         setNewVolSubtitle('')

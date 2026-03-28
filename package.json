@@ -1,17 +1,18 @@
 {
   "name": "purrtypos",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "写作",
   "author": "Lybrand",
-  "main": "main.js",
+  "main": "electron/main_python.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "build": "node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",
-    "build:no-clean": "node build/icon.js && vite build && electron-builder",
+    "prepare:backend-resources": "node scripts/prepare-backend-resources.cjs",
+    "build:backend:win": "py -m pip install -q -r backend/requirements.txt pyinstaller && py -m PyInstaller --clean --noconfirm --distpath backend/dist --workpath backend/build backend/purrtypos-backend.spec",
+    "build:win": "npm run build:backend:win && npm run build",
+    "build": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",
+    "build:no-clean": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && electron-builder",
     "preview": "vite preview",
-    "postinstall": "electron-builder install-app-deps",
-    "validate:skills": "node electron/validateSkills.js",
-    "validate:collab": "node electron/collabMode.scenarios.js"
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",
@@ -82,7 +83,8 @@
     },
     "files": [
       "package.json",
-      "main.js",
+      "electron/main_python.js",
+      "electron/preload_python.js",
       "dist",
       "dist/**/*",
       "electron",
@@ -100,8 +102,8 @@
         "to": "icon.ico"
       },
       {
-        "from": "electron/skills",
-        "to": "skills"
+        "from": "build-resources/backend",
+        "to": "backend"
       }
     ],
     "win": {
