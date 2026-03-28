@@ -83,6 +83,8 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
 
   const [outlineRefreshKey, setOutlineRefreshKey] = React.useState(0)
   const [skipAutoOpenOutlineTitle, setSkipAutoOpenOutlineTitle] = React.useState<string | null>(null)
+  /** 本书总字数（万），与后端规则一致；null 表示尚未拉取 */
+  const [bookWordWanDisplay, setBookWordWanDisplay] = React.useState<string | null>(null)
 
   const containerRef = React.useRef<HTMLDivElement>(null)
   const isDraggingMain = React.useRef(false)
@@ -185,6 +187,23 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   }, [loadWritingChapters])
 
   React.useEffect(() => {
+    if (bookId == null || String(bookId).trim() === '') {
+      setBookWordWanDisplay(null)
+      return
+    }
+    const t = window.setTimeout(() => {
+      void window.electronAPI.getBookWordCount({ bookId }).then((res) => {
+        if (res.success && res.data != null && typeof res.data.count === 'number') {
+          setBookWordWanDisplay((res.data.count / 10000).toFixed(2))
+        } else {
+          setBookWordWanDisplay(null)
+        }
+      })
+    }, 400)
+    return () => clearTimeout(t)
+  }, [bookId, outlineRefreshKey, searchContentVersion])
+
+  React.useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ chapterId: EntityId; title: string }>).detail
       const nextId = detail?.chapterId ?? null
@@ -203,34 +222,15 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   }
 
   const handleItemCreated = React.useCallback(
-    async (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => {
+    async (chapterId: EntityId, title: string, isVolume: boolean, _parentWritingChapterId: EntityId | null) => {
       if (!isVolume) {
         setSkipAutoOpenOutlineTitle(title)
       }
-
-      if (!enableVolume) {
-        await window.electronAPI.saveOutline({
-          title, type: 'chapter', book_id: bookId ?? null, writing_chapter_id: chapterId,
-        })
-      } else if (isVolume) {
-        await window.electronAPI.saveOutline({
-          title, type: 'volume', book_id: bookId ?? null, writing_chapter_id: chapterId,
-        })
-      } else {
-        let parentOutlineId: EntityId | null = null
-        if (parentWritingChapterId != null) {
-          const res = await window.electronAPI.getOutlineByWritingChapter(parentWritingChapterId)
-          if (res.success && res.data) parentOutlineId = res.data.id
-        }
-        await window.electronAPI.saveOutline({
-          title, type: 'chapter', book_id: bookId ?? null,
-          writing_chapter_id: chapterId, parent_outline_id: parentOutlineId,
-        })
-      }
+      // 大纲记录已由后端在 add_chapter 时同步创建，这里只需刷新大纲列表
       setOutlineRefreshKey((k) => k + 1)
       refreshOutlineListRef.current?.()
     },
-    [enableVolume, bookId]
+    []
   )
 
   React.useEffect(() => {
@@ -399,7 +399,18 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   return (
     <WorkspaceContext.Provider value={workspaceContextValue}>
       <AppHeader
-        title={bookTitle || 'PurrTypos'}
+        title={
+          bookId ? (
+            <span className="app-title-with-meta">
+              <span className="app-title">{bookTitle || '未命名'}</span>
+              {bookWordWanDisplay != null ? (
+                <span className="app-title-word-count">{bookWordWanDisplay} 万字</span>
+              ) : null}
+            </span>
+          ) : (
+            (bookTitle || 'PurrTypos')
+          )
+        }
         left={
           <>
             {onGoHome && (

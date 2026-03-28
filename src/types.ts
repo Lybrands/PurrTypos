@@ -178,6 +178,10 @@ export interface ElectronAPI {
     bookId: EntityId;
     title: string;
   }) => Promise<ApiResult<void>>;
+  /** 本书写作章节正文总字数（与编辑器统计规则一致） */
+  getBookWordCount: (data: {
+    bookId: EntityId;
+  }) => Promise<ApiResult<{ count: number }>>;
   // 人物
   getCharacters: (data: { bookId: EntityId }) => Promise<ApiResult<Character[]>>;
   createCharacter: (data: {
@@ -365,8 +369,6 @@ export interface ElectronAPI {
     tools?: unknown[];
     useToolRouter?: boolean;
     bookId?: EntityId | null;
-    /** 仅用于提示文案，不替代 bookId */
-    bookTitle?: string;
     chapterId?: EntityId | null;
     currentChapterTitle?: string;
     writingChapters?: { id: EntityId; title: string }[];

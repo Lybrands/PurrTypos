@@ -168,10 +168,13 @@ function toolCallDisplayRow(
             args.outlineId != null && String(args.outlineId).trim() !== ""
               ? String(args.outlineId).trim()
               : "";
+          /** 本地 availableOutlines 可能与 listOutlines 时点不一致；只要模型传了合法 id 就不标 context_error（以服务端结果为准） */
+          const labelForUnknownId = (id: string) =>
+            id.length > 12 ? `查看大纲详情（${id.slice(0, 10)}…）` : `查看大纲详情（${id}）`;
           if (outlineIdArg) {
             const title = resolveOutlineTitleInCatalog(outlineIdArg, availableOutlines);
             if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
-            return { label: "查看大纲详情", outcome: "context_error" };
+            return { label: labelForUnknownId(outlineIdArg), outcome: "ok" };
           }
           if (Array.isArray(args.outlineIds) && args.outlineIds.length > 0) {
             const ids = args.outlineIds
@@ -180,7 +183,7 @@ function toolCallDisplayRow(
             if (ids.length === 1) {
               const title = resolveOutlineTitleInCatalog(ids[0], availableOutlines);
               if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
-              return { label: "查看大纲详情", outcome: "context_error" };
+              return { label: labelForUnknownId(ids[0]), outcome: "ok" };
             }
             const titles = ids
               .map((id) => resolveOutlineTitleInCatalog(id, availableOutlines))
@@ -189,6 +192,9 @@ function toolCallDisplayRow(
               const head = titles.slice(0, 3).map((t) => `《${t}》`).join("");
               if (titles.length <= 3) return { label: `查看${head}等多条大纲详情`, outcome: "ok" };
               return { label: `查看${head}等 ${titles.length} 条大纲详情`, outcome: "ok" };
+            }
+            if (ids.length > 0) {
+              return { label: `查看 ${ids.length} 条大纲详情`, outcome: "ok" };
             }
           }
           return { label: "查看大纲详情", outcome: "context_error" };
@@ -290,7 +296,6 @@ export interface UseChatSubmitParams {
   conversations: ChatMessage[];
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   bookId: EntityId | null | undefined;
-  bookTitle?: string;
   chapterId: EntityId | null | undefined;
   activeSessionId: number | null;
   setActiveSessionId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -325,7 +330,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     conversations,
     setConversations,
     bookId,
-    bookTitle,
     chapterId,
     activeSessionId,
     setActiveSessionId,
@@ -357,6 +361,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     userText: string;
     toolCallSegments?: ToolCallSegment[];
     thinkingBlocks?: string[];
+    /** 与 React 消息 state 一致：本轮工具批次之后的流式正文后缀 */
+    contentAfterToolCalls?: string;
   } | null>(null);
 
   React.useEffect(() => {
@@ -443,13 +449,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       setLoading(true);
     }
 
-    const bookName = bookTitle?.trim() || "（未命名）";
     const chapterName = currentChapterTitle?.trim() || "（未选章节）";
     const systemSuffix =
       bookId != null
         ? agentEnabled
-          ? `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，只能先读取列表中的真实 id，再传 **chapterId** / **outlineId(outlineIds)**。不支持 chapterTitle/chapterIndex/outlineTitle/outlineIndex。勿猜测数据库 id。向用户回复时使用书名、章节名，不要暴露 id。`
-          : `\n\n当前书籍：《${bookName}》；当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用名称，不暴露 id。`
+          ? `\n\n当前写作章节：《${chapterName}》。宿主已为当前会话绑定作品上下文；需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，只能先读取列表中的真实 id，再传 **chapterId** / **outlineId(outlineIds)**。不支持 chapterTitle/chapterIndex/outlineTitle/outlineIndex。勿猜测数据库 id。向用户回复时使用章节名等界面可见名称，不要暴露 id。`
+          : `\n\n当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用章节名等界面可见名称，不暴露 id。`
         : "";
 
     const toHistoryApiMessage = (
@@ -563,6 +568,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       model: "" as string,
       toolCallSegments: undefined as ToolCallSegment[] | undefined,
       thinkingBlocks: [] as string[],
+      contentAfterToolCalls: "",
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;
@@ -780,8 +786,22 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
 
       if (chunk.delta) {
-        acc.response += chunk.delta;
         const delta = chunk.delta;
+        if (acc.toolCallSegments?.length) {
+          let after = (acc.contentAfterToolCalls ?? "") + delta;
+          if (agentMode !== "subagent") {
+            const lastS = acc.toolCallSegments[acc.toolCallSegments.length - 1];
+            if (lastS?.textBefore && after.startsWith(lastS.textBefore)) {
+              after = after.slice(lastS.textBefore.length);
+            }
+          }
+          acc.contentAfterToolCalls = after;
+          acc.response =
+            acc.toolCallSegments.map((s) => s.textBefore).join("") + after;
+        } else {
+          acc.contentAfterToolCalls = "";
+          acc.response += delta;
+        }
         if (isVisibleSession()) {
           flushSync(() => {
             setConversations((prev) => {
@@ -789,28 +809,17 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               const last = next[next.length - 1];
               if (!last || last.role !== "assistant") return prev;
               const segs = (last as ChatMessage).toolCallSegments;
-              const hasSegments = segs?.length;
-              if (hasSegments) {
-                let after = (last.contentAfterToolCalls ?? "") + delta;
-                if (agentMode !== "subagent") {
-                  const lastSeg = segs[segs.length - 1];
-                  if (lastSeg?.textBefore && after.startsWith(lastSeg.textBefore)) {
-                    after = after.slice(lastSeg.textBefore.length);
-                  }
-                }
-                const fullContent =
-                  segs.map((s) => s.textBefore).join("") + after;
-                acc.response = fullContent;
+              if (segs?.length) {
                 next[next.length - 1] = {
                   ...last,
-                  contentAfterToolCalls: after,
-                  content: fullContent,
+                  contentAfterToolCalls: acc.contentAfterToolCalls,
+                  content: acc.response,
                   toolCalling: false,
                 };
               } else {
                 next[next.length - 1] = {
                   ...last,
-                  content: last.content + delta,
+                  content: (last.content || "") + delta,
                   toolCalling: false,
                 };
               }
@@ -1048,6 +1057,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               }
               return row;
             } catch {
+              if (fn === "queryOutline") {
+                return {
+                  label: "查看大纲详情",
+                  outcome: "ok" as ToolCallLabelOutcome,
+                };
+              }
               const row = toolCallDisplayRow(
                 fn,
                 {},
@@ -1085,10 +1100,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 const currentThinking = (lastMsg.thinking || "").trim();
                 const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
                 /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，否则渲染顺序会变成「新工具段在旧尾稿之上」 */
-                const tail = lastMsg.contentAfterToolCalls ?? "";
+                const tailAcc =
+                  acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "";
+                const hasPartial = Boolean(partialContent && partialContent.trim());
                 const flushTailSegments: ToolCallSegment[] =
-                  tail.trim().length > 0
-                    ? [{ textBefore: tail, labels: [], cachedFlags: [] }]
+                  !hasPartial && tailAcc.trim().length > 0
+                    ? [{ textBefore: tailAcc, labels: [], cachedFlags: [] }]
                     : [];
                 const baseSegs = [...prevSeg, ...flushTailSegments];
                 const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
@@ -1098,7 +1115,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                     : !hasPriorToolRound
                       ? agentMode === "subagent"
                         ? ""
-                        : lastMsg.content || acc.response || ""
+                        : acc.response || lastMsg.content || ""
                       : "";
                 const newSegment: ToolCallSegment = {
                   textBefore,
@@ -1118,7 +1135,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 };
                 const nextSegments = [...baseSegs, newSegment];
                 let afterToolCalls =
-                  flushTailSegments.length > 0 ? "" : (lastMsg.contentAfterToolCalls ?? "");
+                  flushTailSegments.length > 0
+                    ? ""
+                    : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
                 if (
                   agentMode !== "subagent" &&
                   flushTailSegments.length === 0 &&
@@ -1130,6 +1149,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 rebuiltAssistantText =
                   nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
                 acc.toolCallSegments = nextSegments;
+                acc.contentAfterToolCalls = afterToolCalls;
                 acc.thinkingBlocks = nextBlocks;
                 next[next.length - 1] = {
                   ...lastMsg,
@@ -1149,9 +1169,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           const prevBlocks = acc.thinkingBlocks ?? [];
           const currentThinking = (acc.thinking || "").trim();
           const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
+          const tailBg = acc.contentAfterToolCalls ?? "";
+          const hasPartialBg = Boolean(partialContent && partialContent.trim());
           const flushTailSegments: ToolCallSegment[] =
-            acc.response.trim().length > 0
-              ? [{ textBefore: acc.response, labels: [], cachedFlags: [] }]
+            !hasPartialBg && tailBg.trim().length > 0
+              ? [{ textBefore: tailBg, labels: [], cachedFlags: [] }]
               : [];
           const baseSegs = [...prevSeg, ...flushTailSegments];
           const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
@@ -1180,8 +1202,20 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             },
           };
           const nextSegments = [...baseSegs, newSegment];
-          rebuiltAssistantText = nextSegments.map((s) => s.textBefore).join("");
+          let afterToolCallsBg =
+            flushTailSegments.length > 0 ? "" : tailBg;
+          if (
+            agentMode !== "subagent" &&
+            flushTailSegments.length === 0 &&
+            textBefore &&
+            afterToolCallsBg.startsWith(textBefore)
+          ) {
+            afterToolCallsBg = afterToolCallsBg.slice(textBefore.length);
+          }
+          rebuiltAssistantText =
+            nextSegments.map((s) => s.textBefore).join("") + afterToolCallsBg;
           acc.toolCallSegments = nextSegments;
+          acc.contentAfterToolCalls = afterToolCallsBg;
           acc.thinkingBlocks = nextBlocks;
         }
         acc.response =
@@ -1277,18 +1311,42 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           );
 
         if (shouldSave) {
-          window.electronAPI.saveConversation({
-            sessionId: acc.sessionId,
-            chapterId: acc.chapterId ?? null,
-            prompt: acc.userText,
-            response: acc.response || "",
-            model: acc.model || undefined,
-            thinking: acc.thinking || undefined,
-            thinkingBlocks: savedThinkingBlocks.length ? savedThinkingBlocks : undefined,
-            toolCallSegments: acc.toolCallSegments?.length
-              ? acc.toolCallSegments
-              : undefined,
-          });
+          void window.electronAPI
+            .saveConversation({
+              sessionId: acc.sessionId,
+              chapterId: acc.chapterId ?? null,
+              prompt: acc.userText,
+              response: acc.response || "",
+              model: acc.model || undefined,
+              thinking: acc.thinking || undefined,
+              thinkingBlocks: savedThinkingBlocks.length
+                ? savedThinkingBlocks
+                : undefined,
+              toolCallSegments: acc.toolCallSegments?.length
+                ? acc.toolCallSegments
+                : undefined,
+            })
+            .then((res) => {
+              if (res && res.success) return;
+              const detail = (res as { detail?: unknown })?.detail;
+              const msg =
+                typeof (res as { error?: string })?.error === "string"
+                  ? (res as { error: string }).error
+                  : Array.isArray(detail)
+                    ? detail
+                        .map(
+                          (d: { msg?: string }) =>
+                            String(d?.msg ?? d ?? "").trim(),
+                        )
+                        .filter(Boolean)
+                        .join("；")
+                    : "";
+              appMessage.warning(
+                msg
+                  ? `本轮对话未能写入本地库：${msg}`
+                  : "本轮对话未能写入本地库（保存接口异常）。",
+              );
+            });
         }
 
         const titleSource = (acc.response || acc.thinking || "").trim();
@@ -1396,7 +1454,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       tools: [],
       useToolRouter,
       bookId: bookId ?? undefined,
-      bookTitle: bookTitle ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: currentChapterTitle ?? undefined,
       writingChapters,
@@ -1421,7 +1478,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedModelConfig,
     conversations,
     bookId,
-    bookTitle,
     chapterId,
     currentChapterTitle,
     activeSessionId,
