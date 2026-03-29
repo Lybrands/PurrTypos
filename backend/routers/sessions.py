@@ -40,7 +40,7 @@ async def get_sessions(
         conditions.append("closed = 0")
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     rows = await db.fetch_all(
-        f"SELECT * FROM ai_sessions{where} ORDER BY create_time DESC",
+        f"SELECT * FROM ai_sessions{where} ORDER BY create_time ASC",
         params,
     )
     return {"success": True, "data": rows}

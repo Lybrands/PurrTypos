@@ -13,7 +13,7 @@ COLLAB_WRITE_TOOL_NAMES: set[str] = {
     "editChapterContent",
     "editGlobalOutline",
     "updateOutline",
-    "addMemory",
+    "addSparkIdea",
     "addForeshadowing",
 }
 

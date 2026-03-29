@@ -1,6 +1,6 @@
 import React from "react";
 import type { EntityId, Outline } from "../../../types";
-import { getAvailableOutlines } from "../../utils";
+import { formatAssociableOutlineLabel, getAvailableOutlines } from "../../utils";
 
 export interface UseAssociatedContextParams {
   bookId: EntityId | null | undefined;
@@ -25,7 +25,11 @@ export function useAssociatedContext({
 
   // 大纲下拉选项，依赖 availableOutlines，避免每次渲染重新生成
   const outlineSelectOptions = React.useMemo(
-    () => availableOutlines.map((o) => ({ label: o.title, value: o.id })),
+    () =>
+      availableOutlines.map((o) => ({
+        label: formatAssociableOutlineLabel(o, availableOutlines),
+        value: o.id,
+      })),
     [availableOutlines],
   );
 

@@ -391,7 +391,7 @@
 .ai-float-box {
   position: fixed;
   z-index: 1000;
-  width: 420px;
+  width: 520px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--border-radius);
@@ -418,9 +418,43 @@
   border-bottom: 1px solid var(--border-light);
 }
 
-.ai-float-input {
-  flex: 1;
+.ai-float-input-row--textarea {
+  padding-bottom: var(--spacing-xs);
+}
+
+.ai-float-textarea {
   font-size: var(--font-size);
+}
+
+.ai-float-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing) var(--spacing-sm) var(--spacing);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.ai-float-bottom-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.ai-float-model-select {
+  min-width: 160px;
+  max-width: 220px;
+}
+
+.ai-float-thinking-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.ai-float-bottom-right {
+  display: flex;
+  align-items: center;
 }
 
 .ai-float-result {

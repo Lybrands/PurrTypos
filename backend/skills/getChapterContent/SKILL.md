@@ -3,7 +3,7 @@ name: getChapterContent
 description: 当需要只读读取写作目录中某一章正文（引用原文、续写依据、单章摘要等）时使用。依赖 listWritingChapters（在需要写作目录 chapterId 时）。
 ---
 
-chapterId 必须对应左侧写作章节目录，不可用其他大纲树中的节点 id。
+chapterId 必须对应左侧写作章节目录，不可用思维导图大纲树中的节点 id。
 
 **仅允许使用 `chapterId`。** 不支持 `chapterTitle`、`chapterIndex`。
 

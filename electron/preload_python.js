@@ -87,7 +87,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ensureGlobalOutline: (bookId) => apiPost(`/outlines/global/${bookId}/ensure`, {}),
   getWritingOutline: (bookId) => apiGet(`/outlines/writing/${bookId}`),
   getChapterOutlines: (bookId) => apiGet(`/outlines/chapter/${bookId}`),
-  getOtherOutlines: (bookId) => apiGet(`/outlines/other/${bookId}`),
+  getAssociableOutlines: (bookId) => apiGet(`/outlines/associable/${bookId}`),
   deleteOutline: (data) => apiDelete(`/outlines/${data.outlineId}`),
   updateOutline: (data) => apiPut(`/outlines/${data.outlineId}`, data),
 
@@ -134,14 +134,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAiFavorites: () => apiGet('/ai-favorites'),
   deleteAiFavorite: (data) => apiDelete(`/ai-favorites/${data.id}`),
 
-  // ─── Memories — HTTP ───────────────────────────────────────────
-  addMemory: (data) => apiPost('/memories', data),
-  updateMemory: (data) => apiPut(`/memories/${data.id}`, { data: data.data }),
-  deleteMemory: (data) => apiDelete(`/memories/${data.id}`),
-  getMemoriesByBook: (data) =>
-    apiGet(`/memories/by-book?bookId=${data.bookId}${data.layer ? '&layer=' + data.layer : ''}`),
-  getMemoriesByIds: (data) => apiPost('/memories/by-ids', data),
-  getMemoriesForPrompt: (data) => apiPost('/memories/for-prompt', data),
+  // ─── Spark ideas — HTTP ────────────────────────────────────────
+  addSparkIdea: (data) => apiPost('/spark-ideas', data),
+  updateSparkIdea: (data) => apiPut(`/spark-ideas/${data.id}`, { data: data.data }),
+  deleteSparkIdea: (data) => apiDelete(`/spark-ideas/${data.id}`),
+  getSparkIdeasByBook: (data) =>
+    apiGet(`/spark-ideas/by-book?bookId=${data.bookId}${data.layer ? '&layer=' + data.layer : ''}`),
+  getSparkIdeasByIds: (data) => apiPost('/spark-ideas/by-ids', data),
+  getSparkIdeasForPrompt: (data) => apiPost('/spark-ideas/for-prompt', data),
 
   // ─── Foreshadowing — HTTP ──────────────────────────────────────
   addForeshadowing: (data) => apiPost('/foreshadowing', data),

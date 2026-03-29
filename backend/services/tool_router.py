@@ -355,7 +355,7 @@ async def _llm_intent_for_tools(query: str, candidate_names: list[str]) -> dict:
         "以下是候选工具及简要说明（从下列候选中选出与本轮用户意图相关的**全部**工具名，"
         "用英文逗号分隔；需要几个选几个，不要人为限制数量。不要解释、不要返回说明文字）：\n"
         f"{tool_list}\n\n"
-        "只返回工具名，多个用英文逗号分隔。例如：queryOutline,listOutlines,searchMemories 或仅一个：getChapterContent"
+        "只返回工具名，多个用英文逗号分隔。例如：queryOutline,listOutlines,searchSparkIdeas 或仅一个：getChapterContent"
     )
 
     try:

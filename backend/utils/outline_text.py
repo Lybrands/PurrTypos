@@ -11,7 +11,6 @@ from constants import OUTLINE_TYPE_LABEL
 from database.crud.outlines import (
     get_chapter_outlines,
     get_global_outline,
-    get_other_outlines,
     get_volume_outlines,
     get_writing_outline,
 )
@@ -63,8 +62,6 @@ async def collect_text_outline_entries(
             _consider(ch)
 
     for o in await get_chapter_outlines(db, book_id) or []:
-        _consider(o)
-    for o in await get_other_outlines(db, book_id) or []:
         _consider(o)
 
     writing = await get_writing_outline(db, book_id)

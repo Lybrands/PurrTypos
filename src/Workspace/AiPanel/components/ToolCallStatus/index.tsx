@@ -24,7 +24,7 @@ function getPendingText(label: string): string {
 export type ToolCallLabelOutcome = 'ok' | 'context_error'
 
 export interface ToolCallStatusProps {
-  /** 工具调用名称列表（如「编辑章节」「长期记忆」等） */
+  /** 工具调用名称列表（如「编辑章节」「本书设定」等） */
   labels: string[]
   /** 与 labels 等长；context_error 表示目录/参数与当前书籍不一致，按失败展示 */
   labelOutcomes?: ToolCallLabelOutcome[]

@@ -1,12 +1,12 @@
 import React from 'react'
 import { Button, Checkbox, Empty, Input, Modal, Select, Spin, Tabs } from 'antd'
 import { DeleteOutlined } from '@ant-design/icons'
-import type { AiMemory, AiForeshadowing, EntityId, MemoryLayer } from '../../../../types'
+import type { AiForeshadowing, AiSparkIdea, EntityId, SparkIdeaLayer } from '../../../../types'
 import {
   FORESHADOWING_TYPES,
-  MemoryLayerFour,
-  MEMORY_LAYER_FOUR_VALUES,
-  MEMORY_LAYER_LABELS,
+  SparkIdeaLayerFour,
+  SPARK_IDEA_LAYER_FOUR_VALUES,
+  SPARK_IDEA_LAYER_LABELS,
 } from '../../types'
 import './index.scss'
 
@@ -30,7 +30,7 @@ export default function MemoryModal({
   onSelectConfirm,
 }: MemoryModalProps) {
   const [activeTab, setActiveTab] = React.useState<string>('select')
-  const [memories, setMemories] = React.useState<AiMemory[]>([])
+  const [sparkIdeas, setSparkIdeas] = React.useState<AiSparkIdea[]>([])
   const [foreshadowing, setForeshadowing] = React.useState<AiForeshadowing[]>([])
   const [loading, setLoading] = React.useState(false)
   const [checkedIds, setCheckedIds] = React.useState<(number | string)[]>(selectedIds)
@@ -39,7 +39,7 @@ export default function MemoryModal({
   )
 
   // 管理：四层记忆新增表单
-  const [addLayer, setAddLayer] = React.useState<MemoryLayerFour>(MemoryLayerFour.Global)
+  const [addLayer, setAddLayer] = React.useState<SparkIdeaLayerFour>(SparkIdeaLayerFour.Global)
   const [addContent, setAddContent] = React.useState('')
   const [adding, setAdding] = React.useState(false)
 
@@ -55,12 +55,12 @@ export default function MemoryModal({
     setCheckedIds(selectedIds)
     setCheckedForeshadowingIds(selectedForeshadowingIds)
     Promise.all([
-      window.electronAPI.getMemoriesByBook({ bookId }),
+      window.electronAPI.getSparkIdeasByBook({ bookId }),
       window.electronAPI.getForeshadowingByBook({ bookId }),
     ]).then(([memRes, forRes]) => {
       setLoading(false)
-      if (memRes.success && Array.isArray(memRes.data)) setMemories(memRes.data)
-      else setMemories([])
+      if (memRes.success && Array.isArray(memRes.data)) setSparkIdeas(memRes.data)
+      else setSparkIdeas([])
       if (forRes.success && Array.isArray(forRes.data)) setForeshadowing(forRes.data)
       else setForeshadowing([])
     })
@@ -84,21 +84,21 @@ export default function MemoryModal({
   const handleAdd = React.useCallback(async () => {
     if (bookId == null || !addContent.trim()) return
     setAdding(true)
-    const res = await window.electronAPI.addMemory({
+    const res = await window.electronAPI.addSparkIdea({
       bookId,
-      layer: MEMORY_LAYER_LABELS[addLayer] as MemoryLayer,
+      layer: SPARK_IDEA_LAYER_LABELS[addLayer] as SparkIdeaLayer,
       content: addContent.trim(),
     })
     setAdding(false)
     if (res.success && res.data) {
-      setMemories((prev) => [res.data as AiMemory, ...prev])
+      setSparkIdeas((prev) => [res.data as AiSparkIdea, ...prev])
       setAddContent('')
     }
   }, [bookId, addLayer, addContent])
 
   const handleDelete = React.useCallback(async (id: number | string) => {
-    await window.electronAPI.deleteMemory({ id })
-    setMemories((prev) => prev.filter((m) => m.id !== id))
+    await window.electronAPI.deleteSparkIdea({ id })
+    setSparkIdeas((prev) => prev.filter((m) => m.id !== id))
     setCheckedIds((prev) => prev.filter((x) => x !== id))
   }, [])
 
@@ -143,24 +143,24 @@ export default function MemoryModal({
   }, [writingChapters])
 
   const byLayer = React.useMemo(() => {
-    const map = new Map<MemoryLayer, AiMemory[]>()
-    for (const m of memories) {
-      const arr = map.get(m.layer as MemoryLayer) || []
+    const map = new Map<SparkIdeaLayer, AiSparkIdea[]>()
+    for (const m of sparkIdeas) {
+      const arr = map.get(m.layer as SparkIdeaLayer) || []
       arr.push(m)
-      map.set(m.layer as MemoryLayer, arr)
+      map.set(m.layer as SparkIdeaLayer, arr)
     }
-    return MEMORY_LAYER_FOUR_VALUES.map((value) => {
-      const layerLabel = MEMORY_LAYER_LABELS[value]
+    return SPARK_IDEA_LAYER_FOUR_VALUES.map((value) => {
+      const layerLabel = SPARK_IDEA_LAYER_LABELS[value]
       return {
         layer: layerLabel,
-        list: map.get(layerLabel as MemoryLayer) || [],
+        list: map.get(layerLabel as SparkIdeaLayer) || [],
       }
     })
-  }, [memories])
+  }, [sparkIdeas])
 
   return (
     <Modal
-      title="长期记忆"
+      title="本书设定"
       open={open}
       onCancel={onCancel}
       width={680}
@@ -181,19 +181,19 @@ export default function MemoryModal({
         items={[
           {
             key: 'select',
-            label: '选用记忆',
+            label: '选用本书设定',
             children: (
               <>
                 {loading ? (
                   <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
-                ) : memories.length === 0 && foreshadowing.length === 0 ? (
-                  <Empty image={false} description="本书暂无记忆，请先在「管理记忆」中添加" />
+                ) : sparkIdeas.length === 0 && foreshadowing.length === 0 ? (
+                  <Empty image={false} description="本书暂无设定，请先在「管理本书设定」中添加" />
                 ) : (
                   <div className="memory-select-list">
                     {byLayer.map(({ layer, list }) =>
                       list.length === 0 ? null : (
                         <div key={layer} className="memory-layer-block">
-                          <div className="memory-layer-title">{layer}记忆</div>
+                          <div className="memory-layer-title">{layer}设定</div>
                           {list.map((m) => (
                             <div key={m.id} className="memory-select-item">
                               <Checkbox
@@ -251,11 +251,11 @@ export default function MemoryModal({
           },
           {
             key: 'manage',
-            label: '管理记忆',
+            label: '管理本书设定',
             children: (
               <div className="memory-manage-tab">
                 <section className="memory-manage-section">
-                  <h4 className="memory-manage-section-title">四层记忆</h4>
+                  <h4 className="memory-manage-section-title">四层设定</h4>
                   <p className="memory-manage-section-desc">全局 / 大纲 / 人物 / 章节</p>
                   <div className="memory-add-card">
                     <div className="memory-add-form memory-add-form--layer">
@@ -264,16 +264,16 @@ export default function MemoryModal({
                           size="small"
                           value={addLayer}
                           onChange={setAddLayer}
-                          options={MEMORY_LAYER_FOUR_VALUES.map((v) => ({
-          label: MEMORY_LAYER_LABELS[v],
-          value: v,
-        }))}
+                          options={SPARK_IDEA_LAYER_FOUR_VALUES.map((v) => ({
+                            label: SPARK_IDEA_LAYER_LABELS[v],
+                            value: v,
+                          }))}
                           className="memory-add-layer-select"
                         />
                       </div>
                       <div className="memory-add-form-row memory-add-form-row--content">
                         <Input.TextArea
-                          placeholder="记忆内容"
+                          placeholder="设定内容"
                           value={addContent}
                           onChange={(e) => setAddContent(e.target.value)}
                           rows={1}
@@ -288,14 +288,14 @@ export default function MemoryModal({
                   </div>
                   {loading ? (
                     <div className="memory-manage-loading"><Spin /></div>
-                  ) : memories.length === 0 ? (
-                    <Empty image={false} description="暂无四层记忆" className="memory-manage-empty" />
+                  ) : sparkIdeas.length === 0 ? (
+                    <Empty image={false} description="暂无四层设定" className="memory-manage-empty" />
                   ) : (
                     <div className="memory-manage-list">
                       {byLayer.map(({ layer, list }) =>
                         list.length === 0 ? null : (
                           <div key={layer} className="memory-layer-block">
-                            <div className="memory-layer-title">{layer}记忆</div>
+                            <div className="memory-layer-title">{layer}设定</div>
                             {list.map((m) => (
                               <div key={m.id} className="memory-manage-item">
                                 <span className="memory-manage-content">{m.content || '（无内容）'}</span>

@@ -27,7 +27,7 @@ async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
 async def get_attachments(bookId: str):
     db = get_db()
     rows = await db.fetch_all(
-        "SELECT * FROM story_background_attachments WHERE book_id = ? ORDER BY create_time DESC",
+        "SELECT * FROM story_background_attachments WHERE book_id = ? ORDER BY create_time ASC",
         [bookId],
     )
     return {"success": True, "data": rows}

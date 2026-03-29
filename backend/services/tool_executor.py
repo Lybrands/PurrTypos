@@ -2,7 +2,7 @@
 Tool executor — port of electron/toolExecutor.js.
 
 Executes all Agent tool calls (books, outlines, chapters, characters,
-memories, foreshadowing, etc.).
+spark ideas, foreshadowing, etc.).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from constants import FORESHADOWING_TYPES, MEMORY_LAYERS, MEMORY_LAYER_ORDERED
+from constants import FORESHADOWING_TYPES, SPARK_IDEA_LAYERS, SPARK_IDEA_LAYER_ORDERED
 from database.crud.articles import get_article, save_article
 from database.crud.chapters import add_chapter, get_chapters
 from database.crud.characters import get_characters
@@ -21,7 +21,6 @@ from database.crud.outlines import (
     get_global_outline,
     get_or_create_global_outline,
     get_or_create_writing_outline,
-    get_other_outlines,
     get_volume_outlines,
     get_writing_outline,
     update_outline,
@@ -54,7 +53,6 @@ async def _load_all_outlines_for_book(book_id: str) -> dict:
     global_res = await get_global_outline(db, book_id)
     volume_res = await get_volume_outlines(db, book_id)
     chapter_res = await get_chapter_outlines(db, book_id)
-    other_res = await get_other_outlines(db, book_id)
     writing_res = await get_or_create_writing_outline(db, book_id)
 
     global_outline = await _load_outline_with_chapters(global_res) if global_res else None
@@ -67,28 +65,37 @@ async def _load_all_outlines_for_book(book_id: str) -> dict:
     chapter_outlines = []
     for o in (chapter_res or []):
         chapter_outlines.append(await _load_outline_with_chapters(o))
-    other_outlines = []
-    for o in (other_res or []):
-        other_outlines.append(await _load_outline_with_chapters(o))
     writing_outline = await _load_outline_with_chapters(writing_res) if writing_res else None
     return {
         "globalOutline": global_outline,
         "volumeOutlines": volume_outlines,
         "chapterOutlines": chapter_outlines,
-        "otherOutlines": other_outlines,
         "writingOutline": writing_outline,
     }
 
 
 async def _get_available_outlines(book_id: str) -> list[dict]:
     db = get_db()
-    lst: list[dict] = []
-    g = await get_global_outline(db, book_id)
-    if g:
-        lst.append(g)
-    lst.extend(await get_chapter_outlines(db, book_id) or [])
-    lst.extend(await get_other_outlines(db, book_id) or [])
-    return lst
+    result: list[dict] = []
+    seen: set[str] = set()
+
+    def add_row(row: dict | None) -> None:
+        if row is None:
+            return
+        oid = row.get("id")
+        if oid is None or str(oid) in seen:
+            return
+        seen.add(str(oid))
+        result.append(dict(row))
+
+    add_row(await get_global_outline(db, book_id))
+    for vol in await get_volume_outlines(db, book_id) or []:
+        add_row({k: v for k, v in vol.items() if k != "chapters"})
+        for ch in vol.get("chapters") or []:
+            add_row(ch)
+    for ch in await get_chapter_outlines(db, book_id) or []:
+        add_row(ch)
+    return result
 
 
 async def _get_global_outline(book_id: str, max_text_length: int = 32000) -> dict | None:
@@ -822,8 +829,6 @@ async def run_tools(
                                 candidates.append(cd["outline"])
                         for o in (all_outlines.get("chapterOutlines") or []):
                             candidates.append(o["outline"])
-                        for o in (all_outlines.get("otherOutlines") or []):
-                            candidates.append(o["outline"])
                         if all_outlines.get("writingOutline"):
                             candidates.append(all_outlines["writingOutline"]["outline"])
                         exists = any(str(o.get("id")) == oid for o in candidates if o)
@@ -878,7 +883,7 @@ async def run_tools(
                         except Exception as e:
                             content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-            elif name == "addMemory":
+            elif name == "addSparkIdea":
                 bid = resolve_book_id_for_tools(ctx, args)
                 mem_content = str(args.get("content") or "").strip() if isinstance(args.get("content"), str) else ""
                 cid = args.get("chapterId") or runtime_chapter_id or None
@@ -888,14 +893,14 @@ async def run_tools(
                 if not layer_valid or not mem_content:
                     content = json.dumps({
                         "success": False,
-                        "error": "记忆内容不能为空" if not mem_content else f"layer 须为 0/1/2/3（{' / '.join(MEMORY_LAYER_ORDERED)}）",
+                        "error": "设定内容不能为空" if not mem_content else f"layer 须为 0/1/2/3（{' / '.join(SPARK_IDEA_LAYER_ORDERED)}）",
                     }, ensure_ascii=False)
                 else:
-                    layer_str = MEMORY_LAYERS[int(layer_num)]
+                    layer_str = SPARK_IDEA_LAYERS[int(layer_num)]
                     try:
                         from services import memory_service
-                        row = await memory_service.add_memory(bid, layer_str, mem_content, cid, character_id)
-                        content = json.dumps({"success": True, "message": f"已添加【{layer_str}记忆】", "id": row.get("id") if row else None}, ensure_ascii=False)
+                        row = await memory_service.add_spark_idea(bid, layer_str, mem_content, cid, character_id)
+                        content = json.dumps({"success": True, "message": f"已添加【{layer_str}设定】", "id": row.get("id") if row else None}, ensure_ascii=False)
                     except Exception as e:
                         content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
@@ -919,7 +924,7 @@ async def run_tools(
                     except Exception as e:
                         content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-            elif name == "searchMemories":
+            elif name == "searchSparkIdeas":
                 bid = resolve_book_id_for_tools(ctx, args)
                 query = args.get("query") or ""
                 layer = args.get("layer")
@@ -931,7 +936,7 @@ async def run_tools(
                     want_foreshadowing = not layer or layer == "伏笔"
                     want_layers = None if (not layer or layer == "伏笔") else [layer]
                     mem_limit = max(1, limit - 5) if want_foreshadowing else limit
-                    mem_res = await memory_service.get_memories_for_prompt(
+                    mem_res = await memory_service.get_spark_ideas_for_prompt(
                         bid, query,
                         options={"layers": want_layers, "chapterId": cid, "limit": mem_limit},
                     )
@@ -939,18 +944,18 @@ async def run_tools(
                         by_layer: dict[str, list[str]] = {}
                         for m in mem_res:
                             by_layer.setdefault(m.get("layer", ""), []).append(str(m.get("content") or "").strip())
-                        for layer_name in MEMORY_LAYER_ORDERED:
+                        for layer_name in SPARK_IDEA_LAYER_ORDERED:
                             arr = by_layer.get(layer_name)
                             if arr:
-                                parts.append(f"【{layer_name}记忆】\n" + "\n".join(arr))
+                                parts.append(f"【{layer_name}设定】\n" + "\n".join(arr))
                     if want_foreshadowing:
                         for_res = await memory_service.get_foreshadowing_for_prompt(
                             bid, query, options={"limit": 5},
                         )
                         if for_res:
                             lines = [f"- {f.get('content')}（类型：{f.get('type')}，状态：{f.get('status')}）" for f in for_res]
-                            parts.append("【伏笔记忆】\n" + "\n".join(lines))
-                    content = "\n\n".join(parts) if parts else "（未找到与当前检索相关的长期记忆）"
+                            parts.append("【伏笔】\n" + "\n".join(lines))
+                    content = "\n\n".join(parts) if parts else "（未找到与当前检索相关的本书设定）"
                 except Exception as e:
                     content = json.dumps({"error": str(e)}, ensure_ascii=False)
 

@@ -5,9 +5,12 @@ import {
   PlusOutlined, EditOutlined, DeleteOutlined, CloseOutlined, CheckSquareOutlined, ExportOutlined,
   UndoOutlined, RedoOutlined,
 } from '@ant-design/icons'
-import { App as AntdApp, Button, Input, Empty, Checkbox, Tooltip } from 'antd'
+import { App as AntdApp, Button, Input, Empty, Checkbox, Tooltip, Select, Switch } from 'antd'
 import type { InputRef } from 'antd/es/input/Input'
+import type { TextAreaRef } from 'antd/es/input/TextArea'
 import type { AiModelConfig, Chapter, EntityId, Outline } from '../../types'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useWorkspace } from '../WorkspaceContext'
 import { HighlightText } from '../search/highlightText'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -15,6 +18,7 @@ import LexicalEditorComponent, { type LexicalEditorHandle } from './LexicalEdito
 import ExportModal from '../../components/ExportModal'
 import { buildExportEntries } from '../../utils/exportBooks'
 import type { ExportChapter } from '../../utils/exportBooks'
+import StopCircleIcon from '../../icons/StopCircleIcon'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
@@ -28,6 +32,8 @@ async function ensureDefaultOutline(bookId?: EntityId | null): Promise<Outline |
 interface AiFloatState {
   visible: boolean; x: number; y: number
   prompt: string; loading: boolean; result: string
+  selectedModelId: string
+  thinkingEnabled: boolean
 }
 
 interface EditorPanelProps {
@@ -109,9 +115,20 @@ export default function EditorPanel({
   const [exportLoading, setExportLoading] = React.useState(false)
 
   // ─── AI 浮窗 ─────────────────────────────────────────────
+  const initialModelId = modelConfigs[0]?.id ?? ''
   const [aiFloat, setAiFloat] = React.useState<AiFloatState>(
-    { visible: false, x: 0, y: 0, prompt: '', loading: false, result: '' }
+    {
+      visible: false,
+      x: 0,
+      y: 0,
+      prompt: '',
+      loading: false,
+      result: '',
+      selectedModelId: initialModelId,
+      thinkingEnabled: false,
+    }
   )
+  const aiChunkUnsubRef = React.useRef<(() => void) | null>(null)
 
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
@@ -198,26 +215,65 @@ export default function EditorPanel({
 
   const handleKeyTrigger = React.useCallback((key: string, rect: DOMRect) => {
     if (key === 'backslash') {
-      setAiFloat({ visible: true, x: rect.left + 40, y: rect.top + 60, prompt: '', loading: false, result: '' })
+      setAiFloat((prev) => ({
+        ...prev,
+        visible: true,
+        x: rect.left + 40,
+        y: rect.top + 60,
+        prompt: '',
+        loading: false,
+        result: '',
+      }))
     }
     if (key === 'escape') {
-      setAiFloat({ visible: false, x: 0, y: 0, prompt: '', loading: false, result: '' })
+      setAiFloat((prev) => ({ ...prev, visible: false, x: 0, y: 0, prompt: '', loading: false }))
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!modelConfigs.length) return
+    setAiFloat((prev) => {
+      if (modelConfigs.some((m) => m.id === prev.selectedModelId)) return prev
+      return { ...prev, selectedModelId: modelConfigs[0].id }
+    })
+  }, [modelConfigs])
+
+  React.useEffect(() => {
+    return () => {
+      aiChunkUnsubRef.current?.()
+      aiChunkUnsubRef.current = null
+      window.electronAPI.abortAiStream()
     }
   }, [])
 
   const closeAiFloat = () => {
-    setAiFloat({ visible: false, x: 0, y: 0, prompt: '', loading: false, result: '' })
+    aiChunkUnsubRef.current?.()
+    aiChunkUnsubRef.current = null
+    if (aiFloat.loading) window.electronAPI.abortAiStream()
+    setAiFloat((prev) => ({ ...prev, visible: false, x: 0, y: 0, loading: false }))
   }
 
-  const firstModelConfig = modelConfigs[0]
+  const selectedModelConfig = React.useMemo(
+    () => modelConfigs.find((m) => m.id === aiFloat.selectedModelId) ?? modelConfigs[0],
+    [modelConfigs, aiFloat.selectedModelId]
+  )
+
+  const handleAiFloatAbort = React.useCallback(() => {
+    aiChunkUnsubRef.current?.()
+    aiChunkUnsubRef.current = null
+    window.electronAPI.abortAiStream()
+    setAiFloat((prev) => ({ ...prev, loading: false }))
+  }, [])
+
   const handleAiFloatSubmit = () => {
     if (!aiFloat.prompt.trim()) return
-    if (!firstModelConfig?.apiKey?.trim()) {
+    if (!selectedModelConfig?.apiKey?.trim()) {
       setAiFloat((prev) => ({ ...prev, result: '请先在设置中添加模型并填写 API Key', loading: false }))
       return
     }
     setAiFloat((prev) => ({ ...prev, loading: true, result: '' }))
 
+    aiChunkUnsubRef.current?.()
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning)
@@ -225,6 +281,7 @@ export default function EditorPanel({
       if (chunk.error) {
         setAiFloat((prev) => ({ ...prev, loading: false, result: '请求失败：' + chunk.error }))
         unsubscribe()
+        aiChunkUnsubRef.current = null
         return
       }
       if (chunk.delta) {
@@ -233,24 +290,54 @@ export default function EditorPanel({
       if (chunk.done) {
         setAiFloat((prev) => ({ ...prev, loading: false }))
         unsubscribe()
+        aiChunkUnsubRef.current = null
       }
     })
+    aiChunkUnsubRef.current = unsubscribe
+
+    const useConfiguredTemperature =
+      selectedModelConfig.customizeTemperature === undefined ||
+      selectedModelConfig.customizeTemperature === true
+
+    const streamOptions: {
+      model: string
+      temperature?: number
+      thinking: { type: 'enabled' | 'disabled' }
+      max_tokens: number
+    } = {
+      model: selectedModelConfig.name,
+      ...(useConfiguredTemperature
+        ? {
+            temperature: aiFloat.thinkingEnabled
+              ? (selectedModelConfig.temperatureThinking ?? 0.6)
+              : (selectedModelConfig.temperatureNonThinking ?? 0.6),
+          }
+        : {}),
+      thinking: {
+        type: (aiFloat.thinkingEnabled ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
+      },
+      max_tokens: 8192,
+    }
 
     window.electronAPI.aiChatStream({
-      apiKey: firstModelConfig.apiKey,
-      baseURL: firstModelConfig.baseUrl || undefined,
+      apiKey: selectedModelConfig.apiKey,
+      baseURL: selectedModelConfig.baseUrl || undefined,
       apiProvider:
-        firstModelConfig.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
+        selectedModelConfig.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
       messages: [
         { role: 'system', content: '你是一位专业写作助手，请根据用户需求提供写作建议或内容。' },
         { role: 'user', content: aiFloat.prompt },
       ],
-      options: {
-        model: firstModelConfig.name,
-        ...(firstModelConfig.customizeTemperature === false
-          ? {}
-          : { temperature: firstModelConfig.temperatureNonThinking ?? 0.6 }),
-      },
+      options: streamOptions,
+      tools: [],
+      useToolRouter: false,
+      bookId: bookId ?? undefined,
+      chapterId: chapterId ?? undefined,
+      currentChapterTitle: chapterTitle || undefined,
+      writingChapters: chapters.map((c) => ({ id: c.id, title: c.title })),
+      availableOutlines: [],
+      agentMode: 'legacy',
+      chatAgentMode: 'ask',
     })
   }
 
@@ -800,9 +887,17 @@ export default function EditorPanel({
       {aiFloat.visible && (
         <AiFloatBox
           x={aiFloat.x} y={aiFloat.y}
-          prompt={aiFloat.prompt} loading={aiFloat.loading} result={aiFloat.result}
+          prompt={aiFloat.prompt}
+          loading={aiFloat.loading}
+          result={aiFloat.result}
+          modelConfigs={modelConfigs}
+          selectedModelId={aiFloat.selectedModelId}
+          thinkingEnabled={aiFloat.thinkingEnabled}
           onPromptChange={(v) => setAiFloat((prev) => ({ ...prev, prompt: v }))}
+          onModelChange={(v) => setAiFloat((prev) => ({ ...prev, selectedModelId: v }))}
+          onThinkingChange={(v) => setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))}
           onSubmit={handleAiFloatSubmit}
+          onAbort={handleAiFloatAbort}
           onClose={closeAiFloat}
         />
       )}
@@ -811,34 +906,106 @@ export default function EditorPanel({
 }
 
 interface AiFloatBoxProps {
-  x: number; y: number; prompt: string; loading: boolean; result: string
-  onPromptChange: (v: string) => void; onSubmit: () => void; onClose: () => void
+  x: number
+  y: number
+  prompt: string
+  loading: boolean
+  result: string
+  modelConfigs: AiModelConfig[]
+  selectedModelId: string
+  thinkingEnabled: boolean
+  onPromptChange: (v: string) => void
+  onModelChange: (v: string) => void
+  onThinkingChange: (v: boolean) => void
+  onSubmit: () => void
+  onAbort: () => void
+  onClose: () => void
 }
 
-function AiFloatBox({ x, y, prompt, loading, result, onPromptChange, onSubmit, onClose }: AiFloatBoxProps) {
-  const inputRef = React.useRef<InputRef>(null)
-  React.useEffect(() => { inputRef.current?.focus() }, [])
+function AiFloatBox({
+  x,
+  y,
+  prompt,
+  loading,
+  result,
+  modelConfigs,
+  selectedModelId,
+  thinkingEnabled,
+  onPromptChange,
+  onModelChange,
+  onThinkingChange,
+  onSubmit,
+  onAbort,
+  onClose,
+}: AiFloatBoxProps) {
+  const textareaRef = React.useRef<TextAreaRef>(null)
+  React.useEffect(() => { textareaRef.current?.focus() }, [])
+  const modelOptions = React.useMemo(
+    () => modelConfigs.map((c) => ({ label: (c.nickname?.trim() || c.name) || '未命名', value: c.id })),
+    [modelConfigs]
+  )
+
   return (
     <div className="ai-float-box" style={{ left: x, top: y }}>
       <div className="ai-float-header">
         <span>✨ AI 写作助手</span>
         <Button type="text" size="small" icon={<CloseOutlined style={{ fontSize: 16 }} />} onClick={onClose} className="btn-close" />
       </div>
-      <div className="ai-float-input-row">
-        <Input
-          ref={inputRef} className="ai-float-input"
-          value={prompt} onChange={(e) => onPromptChange(e.target.value)}
-          placeholder="描述你的写作需求..."
-          onKeyDown={(e) => { if (e.key === 'Enter') onSubmit(); if (e.key === 'Escape') onClose() }}
+      <div className="ai-float-input-row ai-float-input-row--textarea">
+        <Input.TextArea
+          ref={textareaRef}
+          className="ai-float-textarea"
+          value={prompt}
+          onChange={(e) => onPromptChange(e.target.value)}
+          placeholder="告诉 AI 你要润色、续写或改写的需求..."
+          autoSize={{ minRows: 2, maxRows: 6 }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              onSubmit()
+            }
+            if (e.key === 'Escape') onClose()
+          }}
           disabled={loading}
         />
-        <Button type="primary" size="small" onClick={onSubmit} loading={loading}>
-          {loading ? '生成中' : '生成'}
-        </Button>
+      </div>
+      <div className="ai-float-bottom">
+        <div className="ai-float-bottom-left">
+          <Select
+            className="ai-float-model-select"
+            size="small"
+            value={modelOptions.length ? selectedModelId : undefined}
+            onChange={onModelChange}
+            options={modelOptions}
+            placeholder={modelOptions.length ? undefined : '无模型配置'}
+            variant="borderless"
+            popupMatchSelectWidth={false}
+          />
+          <span className="ai-float-thinking-label">思考模式</span>
+          <Switch size="small" checked={thinkingEnabled} onChange={onThinkingChange} />
+        </div>
+        <div className="ai-float-bottom-right">
+          {loading ? (
+            <Button
+              className="btn-submit btn-stop"
+              icon={<StopCircleIcon size={18} />}
+              type="text"
+              onClick={onAbort}
+            />
+          ) : (
+            <Button type="primary" size="small" onClick={onSubmit} disabled={!prompt.trim()}>
+              发送
+            </Button>
+          )}
+        </div>
       </div>
       {(loading || result) && (
         <div className="ai-float-result">
-          {loading ? <span className="a-loading-dots">思考中...</span> : result}
+          {loading && !result ? (
+            <span className="a-loading-dots">思考中...</span>
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+          )}
         </div>
       )}
     </div>

@@ -69,7 +69,7 @@
   }
 }
 
-/* 空态卡片：章节大纲 / 其他大纲 */
+/* 空态卡片：章节大纲等 */
 .outline-empty-card {
   display: flex;
   flex-direction: column;
@@ -407,31 +407,6 @@
     }
   }
 
-  &.other-section {
-    flex-shrink: 0;
-
-    .chapter-outline-list {
-      max-height: 80px;
-    }
-
-    .outline-empty-card {
-      padding: var(--spacing) var(--spacing-sm);
-      margin: var(--spacing-xs) 0;
-
-      .outline-empty-card-icon {
-        font-size: 24px;
-        margin-bottom: var(--spacing-xs);
-      }
-
-      .outline-empty-card-title {
-        font-size: var(--font-size-xs);
-      }
-
-      .outline-empty-card-desc {
-        font-size: 10px;
-      }
-    }
-  }
 }
 
 .section-header {

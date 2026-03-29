@@ -48,7 +48,7 @@ export interface Character {
 export interface Outline {
   id: EntityId;
   title: string;
-  type?: "global" | "chapter" | "other" | "volume";
+  type?: "global" | "chapter" | "volume";
   sort?: number;
   xmind_data?: string | null;
   file_path?: string | null;
@@ -109,17 +109,17 @@ export interface Conversation {
   create_time?: string;
 }
 
-/** 长期记忆层级 */
-export type MemoryLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
+/** 本书设定层级 */
+export type SparkIdeaLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
 /** AI 对话模式（与 UI 模式选择一致） */
 export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'collab'] as const;
 export type ChatAgentMode = (typeof CHAT_AGENT_MODES)[number];
 
-export interface AiMemory {
+export interface AiSparkIdea {
   id: number | string;  // mem0 使用 UUID 字符串
   book_id: EntityId;
-  layer: MemoryLayer;
+  layer: SparkIdeaLayer;
   content: string;
   chapter_id?: EntityId | null;
   character_id?: number | null;
@@ -209,7 +209,7 @@ export interface ElectronAPI {
   // 大纲
   saveOutline: (data: {
     title: string;
-    type?: "global" | "chapter" | "other" | "volume";
+    type?: "global" | "chapter" | "volume";
     xmind_data?: string;
     file_path?: string;
     book_id?: EntityId | null;
@@ -234,7 +234,10 @@ export interface ElectronAPI {
     bookId?: EntityId | null,
   ) => Promise<ApiResult<Outline>>;
   getChapterOutlines: (bookId?: EntityId | null) => Promise<ApiResult<Outline[]>>;
-  getOtherOutlines: (bookId?: EntityId | null) => Promise<ApiResult<Outline[]>>;
+  /** AI 关联大纲列表（卷/章节），顺序与左侧大纲面板章节区一致 */
+  getAssociableOutlines: (
+    bookId?: EntityId | null,
+  ) => Promise<ApiResult<Outline[]>>;
   deleteOutline: (data: { outlineId: EntityId }) => Promise<ApiResult<void>>;
   updateOutline: (data: {
     outlineId: EntityId;
@@ -324,17 +327,17 @@ export interface ElectronAPI {
   }) => Promise<ApiResult<AiFavorite>>;
   getAiFavorites: () => Promise<ApiResult<AiFavorite[]>>;
   deleteAiFavorite: (data: { id: number }) => Promise<ApiResult<void>>;
-  // 长期记忆（五层）
-  addMemory: (data: { bookId: EntityId; layer: MemoryLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiMemory>>;
-  updateMemory: (data: { id: number | string; data: Partial<Pick<AiMemory, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiMemory>>;
-  deleteMemory: (data: { id: number | string }) => Promise<ApiResult<void>>;
-  getMemoriesByBook: (data: { bookId: EntityId; layer?: MemoryLayer }) => Promise<ApiResult<AiMemory[]>>;
-  getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiMemory[]>>;
-  getMemoriesForPrompt: (data: {
+  // 本书设定（五层）
+  addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
+  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
+  deleteSparkIdea: (data: { id: number | string }) => Promise<ApiResult<void>>;
+  getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
+  getSparkIdeasByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiSparkIdea[]>>;
+  getSparkIdeasForPrompt: (data: {
     bookId: EntityId;
     query?: string;
-    options?: { layers?: MemoryLayer[]; chapterId?: EntityId; limitPerLayer?: number; limit?: number };
-  }) => Promise<ApiResult<AiMemory[]>>;
+    options?: { layers?: SparkIdeaLayer[]; chapterId?: EntityId; limitPerLayer?: number; limit?: number };
+  }) => Promise<ApiResult<AiSparkIdea[]>>;
   // 伏笔记忆
   addForeshadowing: (data: { bookId: EntityId; chapterId: EntityId; content: string; type?: string; expectedChapterId?: EntityId | null }) => Promise<ApiResult<AiForeshadowing>>;
   updateForeshadowing: (data: { id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
