@@ -1,5 +1,5 @@
 """
-长期记忆服务 — 使用 SQLite (ai_memories / ai_foreshadowing 表) 存储。
+本书设定服务 — 使用 SQLite (ai_memories / ai_foreshadowing 表) 存储。
 
 原先基于 mem0 向量库的实现在没有 Ollama/OpenAI Embedder 的环境下无法工作；
 现改为直接操作数据库，与其余路由保持一致。
@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Memory CRUD
+# Spark idea CRUD
 # ---------------------------------------------------------------------------
 
-async def add_memory(
+async def add_spark_idea(
     book_id: str,
     layer: str,
     content: str,
@@ -34,10 +34,10 @@ async def add_memory(
         [book_id, layer, content.strip(), chapter_id, character_id],
     )
     row = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [row_id])
-    return _memory_row(row)
+    return _spark_idea_row(row)
 
 
-async def update_memory(id_: str, data: dict) -> dict | None:
+async def update_spark_idea(id_: str, data: dict) -> dict | None:
     db = get_db()
     row = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [id_])
     if not row:
@@ -49,31 +49,31 @@ async def update_memory(id_: str, data: dict) -> dict | None:
         [content, layer, id_],
     )
     updated = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [id_])
-    return _memory_row(updated)
+    return _spark_idea_row(updated)
 
 
-async def delete_memory(id_: str) -> None:
+async def delete_spark_idea(id_: str) -> None:
     db = get_db()
     await db.execute("DELETE FROM ai_memories WHERE id = ?", [id_])
 
 
-async def get_memories_by_book(book_id: str, layer: str | None = None) -> list[dict]:
+async def get_spark_ideas_by_book(book_id: str, layer: str | None = None) -> list[dict]:
     db = get_db()
     if layer:
         rows = await db.fetch_all(
             "SELECT * FROM ai_memories WHERE book_id = ? AND layer = ? "
-            "ORDER BY create_time DESC",
+            "ORDER BY create_time ASC",
             [book_id, layer],
         )
     else:
         rows = await db.fetch_all(
-            "SELECT * FROM ai_memories WHERE book_id = ? ORDER BY create_time DESC",
+            "SELECT * FROM ai_memories WHERE book_id = ? ORDER BY create_time ASC",
             [book_id],
         )
-    return [_memory_row(r) for r in rows]
+    return [_spark_idea_row(r) for r in rows]
 
 
-async def get_memories_by_ids(ids: list[str]) -> list[dict]:
+async def get_spark_ideas_by_ids(ids: list[str]) -> list[dict]:
     if not ids:
         return []
     db = get_db()
@@ -81,18 +81,18 @@ async def get_memories_by_ids(ids: list[str]) -> list[dict]:
     rows = await db.fetch_all(
         f"SELECT * FROM ai_memories WHERE id IN ({placeholders})", ids
     )
-    return [_memory_row(r) for r in rows]
+    return [_spark_idea_row(r) for r in rows]
 
 
-async def get_memories_for_prompt(
+async def get_spark_ideas_for_prompt(
     book_id: str,
     query: str,
     options: dict | None = None,
 ) -> list[dict]:
-    """返回书籍记忆用于提示词注入。
+    """返回书籍本书设定用于提示词注入。
 
     - query 非空（≥2字）：FTS5 trigram 全文检索，按相关度排序
-    - query 为空或1字：按创建时间倒序返回，每层取 limitPerLayer 条
+    - query 为空或1字：按创建时间正序返回，每层取 limitPerLayer 条
     """
     opts = options or {}
     layers: list[str] | None = opts.get("layers")
@@ -114,7 +114,7 @@ async def get_memories_for_prompt(
 
     # ── 全量过滤（query 为空 / 短词 / FTS 失败兜底）────────────────
     rows = await db.fetch_all(
-        "SELECT * FROM ai_memories WHERE book_id = ? ORDER BY create_time DESC",
+        "SELECT * FROM ai_memories WHERE book_id = ? ORDER BY create_time ASC",
         [book_id],
     )
 
@@ -132,7 +132,7 @@ async def get_memories_for_prompt(
             continue
         bucket = by_layer.setdefault(rl, [])
         if len(bucket) < limit_per_layer:
-            bucket.append(_memory_row(r))
+            bucket.append(_spark_idea_row(r))
 
     result: list[dict] = []
     order = layers or list(by_layer.keys())
@@ -190,7 +190,7 @@ async def _fts_search(
     """
     params: list[Any] = [query, book_id, *layer_params, *chapter_params, limit]
     rows = await db.fetch_all(sql, params)
-    return [_memory_row(r) for r in rows]
+    return [_spark_idea_row(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -254,12 +254,12 @@ async def get_foreshadowing_by_book(
     if status_filter:
         rows = await db.fetch_all(
             "SELECT * FROM ai_foreshadowing WHERE book_id = ? AND status = ? "
-            "ORDER BY create_time DESC",
+            "ORDER BY create_time ASC",
             [book_id, status_filter],
         )
     else:
         rows = await db.fetch_all(
-            "SELECT * FROM ai_foreshadowing WHERE book_id = ? ORDER BY create_time DESC",
+            "SELECT * FROM ai_foreshadowing WHERE book_id = ? ORDER BY create_time ASC",
             [book_id],
         )
     return [_foreshadowing_row(r) for r in rows]
@@ -289,13 +289,13 @@ async def get_foreshadowing_for_prompt(
     if status_filter:
         rows = await db.fetch_all(
             "SELECT * FROM ai_foreshadowing WHERE book_id = ? AND status = ? "
-            "ORDER BY create_time DESC LIMIT ?",
+            "ORDER BY create_time ASC LIMIT ?",
             [book_id, status_filter, limit],
         )
     else:
         rows = await db.fetch_all(
             "SELECT * FROM ai_foreshadowing WHERE book_id = ? "
-            "ORDER BY create_time DESC LIMIT ?",
+            "ORDER BY create_time ASC LIMIT ?",
             [book_id, limit],
         )
     return [_foreshadowing_row(r) for r in rows]
@@ -305,7 +305,7 @@ async def get_foreshadowing_for_prompt(
 # Row serialisers
 # ---------------------------------------------------------------------------
 
-def _memory_row(r: Any) -> dict:
+def _spark_idea_row(r: Any) -> dict:
     if r is None:
         return {}
     return {

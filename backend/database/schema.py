@@ -54,6 +54,13 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN writing_chapter_id TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN markdown_content TEXT DEFAULT NULL")
     await _try_exec(db, "UPDATE outlines SET type = 'chapter' WHERE type IS NULL")
+    # 废弃「其他大纲」：启动时清理历史 type = other 的数据
+    await _try_exec(
+        db,
+        "DELETE FROM outline_chapters WHERE outline_id IN "
+        "(SELECT id FROM outlines WHERE type = 'other')",
+    )
+    await _try_exec(db, "DELETE FROM outlines WHERE type = 'other'")
 
     # ── outline_chapters ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS outline_chapters (

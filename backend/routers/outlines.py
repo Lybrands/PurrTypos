@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
+from database.crud.outlines import get_associable_outlines
 from dependencies import get_db
 from schemas.outlines import SaveOutlineRequest, UpdateOutlineRequest
 from utils.id_utils import short_id8
@@ -16,12 +17,12 @@ async def get_outlines(type: Optional[str] = Query(None)):
     db = get_db()
     if type:
         rows = await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? ORDER BY create_time DESC",
+            "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
             [type],
         )
     else:
         rows = await db.fetch_all(
-            "SELECT * FROM outlines ORDER BY create_time DESC"
+            "SELECT * FROM outlines ORDER BY create_time ASC"
         )
     return {"success": True, "data": rows}
 
@@ -77,12 +78,12 @@ async def delete_outline(outlineId: str):
 async def get_volume_outlines(bookId: str):
     db = get_db()
     volumes = await db.fetch_all(
-        "SELECT * FROM outlines WHERE book_id = ? AND type = 'volume' ORDER BY sort ASC, create_time ASC",
+        "SELECT * FROM outlines WHERE book_id = ? AND type = 'volume' ORDER BY create_time ASC",
         [bookId],
     )
     for vol in volumes:
         chapters = await db.fetch_all(
-            "SELECT * FROM outlines WHERE parent_outline_id = ? AND type = 'chapter' ORDER BY sort ASC, create_time ASC",
+            "SELECT * FROM outlines WHERE parent_outline_id = ? AND type = 'chapter' ORDER BY create_time ASC",
             [vol["id"]],
         )
         vol["chapters"] = chapters
@@ -137,19 +138,17 @@ async def get_writing_outline(bookId: str):
 async def get_chapter_outlines(bookId: str):
     db = get_db()
     rows = await db.fetch_all(
-        "SELECT * FROM outlines WHERE book_id = ? AND type = 'chapter' ORDER BY create_time DESC",
+        "SELECT * FROM outlines WHERE book_id = ? AND type = 'chapter' ORDER BY create_time ASC",
         [bookId],
     )
     return {"success": True, "data": rows}
 
 
-@router.get("/outlines/other/{bookId}")
-async def get_other_outlines(bookId: str):
+@router.get("/outlines/associable/{bookId}")
+async def list_associable_outlines(bookId: str):
+    """AI 关联章节大纲列表；顺序与左侧大纲面板章节区一致。"""
     db = get_db()
-    rows = await db.fetch_all(
-        "SELECT * FROM outlines WHERE book_id = ? AND type NOT IN ('global', 'writing', 'chapter', 'volume') ORDER BY create_time DESC",
-        [bookId],
-    )
+    rows = await get_associable_outlines(db, bookId)
     return {"success": True, "data": rows}
 
 

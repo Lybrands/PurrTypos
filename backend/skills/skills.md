@@ -25,7 +25,7 @@
 
 ### getChapterContent
 
-- **用途**：只读获取某一章正文（纯文本）。`chapterId` 必须对应**左侧写作章节目录**，不可用总纲/其他大纲树节点 id。
+- **用途**：只读获取某一章正文（纯文本）。`chapterId` 必须对应**左侧写作章节目录**，不可用思维导图大纲树节点 id。
 - **参数**：`chapterId` (string, 可选)、`title`、`maxTextLength` 等；**仅允许 `chapterId`**（可省略，由宿主注入当前章）。
 - **返回**：含 `plainText` 等。
 
@@ -43,7 +43,7 @@
 
 ### listOutlines
 
-- **用途**：获取本书大纲条目列表（id、标题、类型，含总纲），扁平列表。Agent 侧「枚举可关联大纲」对应该工具（前端 UI 另有 `getAvailableOutlines` 等封装，**非**独立 IPC 工具名）。
+- **用途**：获取本书大纲条目列表（id、标题、类型，含总纲），供 Agent 枚举/定位 outlineId 使用。与前端 AI 的关联大纲下拉**不是同一接口**。
 - **参数**：`bookId` (number, 必填)。
 - **返回**：大纲条目数组。
 
@@ -74,7 +74,7 @@
 
 ### getBookCharacters
 
-- **用途**：人物设定**纯文本摘要**（每人一行），含 **人物ID**（便于 `addMemory`）；非仅 ID 列表。
+- **用途**：人物设定**纯文本摘要**（每人一行），含 **人物ID**（便于 `addSparkIdea`）；非仅 ID 列表。
 - **参数**：`bookId` (number, 必填)；`characterIds`、`names` (可选)。
 - **返回**：可读摘要文本。
 
@@ -90,9 +90,9 @@
 - **参数**：`bookId` (number, 必填)。
 - **返回**：`content` 等。
 
-### addMemory
+### addSparkIdea
 
-- **用途**：写入一条长期记忆（全局/大纲/人物/章节等层级）。
+- **用途**：写入一条本书设定（全局/大纲/人物/章节等层级）。
 - **参数**：`bookId` (number, 必填)、`layer` (number：0–3)、`content` (string, 必填)；`chapterId`、`characterId` (可选)。
 - **返回**：成功/失败信息。
 
@@ -102,11 +102,11 @@
 - **参数**：`bookId`、`chapterId` (number)、`content` (必填)；`type` (可选：悬念/道具/线索/对话)。
 - **返回**：成功/失败信息。
 
-### searchMemories
+### searchSparkIdeas
 
-- **用途**：按关键词检索本书长期记忆与/或伏笔条目。
+- **用途**：按关键词检索本书设定与/或伏笔条目。
 - **参数**：`bookId` (number, 必填)；`query`、`layer`、`chapterId`、`limit` (可选)。
-- **返回**：按层级组织的记忆文本等。
+- **返回**：按层级组织的本书设定文本等。
 
 ---
 
@@ -115,6 +115,6 @@
 - **大纲**：先 **`listOutlines`** 拿 id/标题；只读详情用 **`queryOutline`**（可同时取章节树与文本大纲 Markdown）；修改用 **`updateOutline`**。需要总纲全文用 **`getGlobalOutline`** / **`editGlobalOutline`**。
 - **章节正文/目录**：先 **`listWritingChapters`** 再操作；新增目录用 **`createWritingChapter`**；正文读写用 **`getChapterContent`** / **`batchGetChapterContents`** / **`editChapterContent`**，其章节 id 必须来自写作目录。
 - **人物与背景**：**`getBookCharacters`** / **`listBookCharacters`** / **`getStoryBackground`**。
-- **记忆与伏笔**：**`addMemory`**、**`addForeshadowing`**、**`searchMemories`**。
+- **本书设定与伏笔**：**`addSparkIdea`**、**`addForeshadowing`**、**`searchSparkIdeas`**。
 - 用户要求改写某章正文时，必须实际调用 **`editChapterContent`** 并收到成功后再宣称完成。
 - 回复用户时优先使用**章节名**等与界面一致的可见名称，避免直接暴露内部数字 id。

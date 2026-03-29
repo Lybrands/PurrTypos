@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 
-class AddMemoryRequest(BaseModel):
+class AddSparkIdeaRequest(BaseModel):
     bookId: str
     layer: str
     content: str
@@ -13,22 +13,22 @@ class AddMemoryRequest(BaseModel):
     characterId: Optional[str] = None
 
 
-class UpdateMemoryRequest(BaseModel):
+class UpdateSparkIdeaRequest(BaseModel):
     data: Dict[str, Any]
 
 
-class SearchMemoriesRequest(BaseModel):
+class SearchSparkIdeasRequest(BaseModel):
     bookId: str
     query: str = ""
     options: Optional[Dict[str, Any]] = None
 
 
-class GetMemoriesByBookRequest(BaseModel):
+class GetSparkIdeasByBookRequest(BaseModel):
     bookId: str
     layer: Optional[str] = None
 
 
-class GetMemoriesByIdsRequest(BaseModel):
+class GetSparkIdeasByIdsRequest(BaseModel):
     ids: List[str]
 
 

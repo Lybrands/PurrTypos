@@ -74,7 +74,7 @@ export async function batchGetChapterContents(
 
 /**
  * 获取单个章节内容（便捷方法）
- * 注意：chapterId 必须是左侧写作章节目录（写作大纲 outline）下的章节 id，不能是其他大纲树中的节点 id。
+ * 注意：chapterId 必须是左侧写作章节目录（写作大纲 outline）下的章节 id，不能是思维导图大纲树中的节点 id。
  */
 export async function getChapterContent(
   chapterId: EntityId,
@@ -105,7 +105,6 @@ export interface BookOutlines {
   globalOutline: OutlineWithChapters | null
   volumeOutlines: (VolumeOutline & { chapters_detail: OutlineWithChapters[] })[]
   chapterOutlines: OutlineWithChapters[]
-  otherOutlines: OutlineWithChapters[]
   writingOutline: OutlineWithChapters | null
 }
 
@@ -117,14 +116,13 @@ async function loadOutlineWithChapters(outline: Outline): Promise<OutlineWithCha
 }
 
 /**
- * 一次性获取指定书籍的全部大纲（总纲 + 卷大纲 + 章节大纲 + 其他大纲 + 写作大纲）
+ * 一次性获取指定书籍的全部大纲（总纲 + 卷大纲 + 章节大纲 + 写作大纲）
  */
 export async function getAllOutlines(bookId: EntityId): Promise<BookOutlines> {
-  const [globalRes, volumeRes, chapterRes, otherRes, writingRes] = await Promise.all([
+  const [globalRes, volumeRes, chapterRes, writingRes] = await Promise.all([
     window.electronAPI.getGlobalOutline(bookId),
     window.electronAPI.getVolumeOutlines(bookId),
     window.electronAPI.getChapterOutlines(bookId),
-    window.electronAPI.getOtherOutlines(bookId),
     window.electronAPI.getWritingOutline(bookId),
   ])
 
@@ -143,13 +141,10 @@ export async function getAllOutlines(bookId: EntityId): Promise<BookOutlines> {
   const chapterOutlines = await Promise.all(
     (chapterRes.success ? chapterRes.data : []).map(loadOutlineWithChapters),
   )
-  const otherOutlines = await Promise.all(
-    (otherRes.success ? otherRes.data : []).map(loadOutlineWithChapters),
-  )
   const writingOutline =
     writingRes.success && writingRes.data ? await loadOutlineWithChapters(writingRes.data) : null
 
-  return { globalOutline, volumeOutlines, chapterOutlines, otherOutlines, writingOutline }
+  return { globalOutline, volumeOutlines, chapterOutlines, writingOutline }
 }
 
 /**
@@ -168,19 +163,40 @@ export async function batchGetOutlineDetails(
 }
 
 /**
- * 获取指定书籍的可关联大纲列表（总纲 + 章节大纲 + 其他大纲），扁平化
+ * 下拉展示用：在扁平关联列表中生成区分重名、标明卷归属的文案。
+ */
+export function formatAssociableOutlineLabel(
+  outline: Outline,
+  orderedList: Outline[],
+): string {
+  const t = (outline.title ?? '').trim() || '未命名'
+  if (outline.type === 'volume') {
+    return `卷 · ${t}`
+  }
+  if (outline.type === 'global') {
+    return t
+  }
+  const pid = outline.parent_outline_id
+  if (pid != null && String(pid).trim() !== '') {
+    const parent = orderedList.find((x) => String(x.id) === String(pid))
+    if (parent?.type === 'volume') {
+      const pt = (parent.title ?? '').trim() || '卷'
+      return `${pt} / ${t}`
+    }
+    if (parent) {
+      return `${(parent.title ?? '').trim() || '大纲'} / ${t}`
+    }
+  }
+  return t
+}
+
+/**
+ * AI 关联大纲列表（卷/章节大纲）；顺序与左侧大纲面板章节区一致。
+ * 数据来自后端 `GET /outlines/associable/{bookId}`。
  */
 export async function getAvailableOutlines(bookId: EntityId): Promise<Outline[]> {
-  const [globalRes, chapterRes, otherRes] = await Promise.all([
-    window.electronAPI.getGlobalOutline(bookId),
-    window.electronAPI.getChapterOutlines(bookId),
-    window.electronAPI.getOtherOutlines(bookId),
-  ])
-  const list: Outline[] = []
-  if (globalRes.success && globalRes.data) list.push(globalRes.data)
-  if (chapterRes.success) list.push(...chapterRes.data)
-  if (otherRes.success) list.push(...otherRes.data)
-  return list
+  const res = await window.electronAPI.getAssociableOutlines(bookId)
+  return res.success && Array.isArray(res.data) ? res.data : []
 }
 
 /**

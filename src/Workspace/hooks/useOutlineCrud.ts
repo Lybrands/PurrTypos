@@ -1,10 +1,6 @@
 import React from 'react'
 import type { Chapter, EntityId, Outline, VolumeOutline } from '../../types'
-import {
-  getFileNameFromPath,
-  getTitleFromXmind,
-  parseXmindToChapters,
-} from '../../utils/outlineXmind'
+import { getTitleFromXmind, parseXmindToChapters } from '../../utils/outlineXmind'
 
 export type OutlineDeleteModal = {
   title: string
@@ -39,11 +35,10 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
   } = options
 
   const [loading, setLoading] = React.useState(false)
-  const [loadingType, setLoadingType] = React.useState<'global' | 'chapter' | 'other' | 'volume' | null>(null)
+  const [loadingType, setLoadingType] = React.useState<'global' | 'chapter' | 'volume' | null>(null)
   const [error, setError] = React.useState('')
   const [globalOutline, setGlobalOutline] = React.useState<Outline | null>(null)
   const [chapterOutlines, setChapterOutlines] = React.useState<Outline[]>([])
-  const [otherOutlines, setOtherOutlines] = React.useState<Outline[]>([])
   const [volumeOutlines, setVolumeOutlines] = React.useState<VolumeOutline[]>([])
   const [deleteModal, setDeleteModal] = React.useState<OutlineDeleteModal | null>(null)
   const chaptersCache = React.useRef<Record<EntityId, Chapter[]>>({})
@@ -66,9 +61,6 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
         if (res.success) setChapterOutlines(res.data ?? [])
       })
     }
-    window.electronAPI.getOtherOutlines(bookId).then((res) => {
-      if (res.success) setOtherOutlines(res.data ?? [])
-    })
   }, [bookId, enableVolume])
 
   React.useEffect(() => {
@@ -111,9 +103,9 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
     [displayOutlineId, setDisplayChapters]
   )
 
-  // 非分卷：传统 handleUploadXmind（全局/章节/其他）
+  // 非分卷：传统 handleUploadXmind（全局/章节）
   const handleUploadXmind = React.useCallback(
-    async (type: 'global' | 'chapter' | 'other', forChapterTitle?: string) => {
+    async (type: 'global' | 'chapter', forChapterTitle?: string) => {
       setError('')
       setLoading(true)
       setLoadingType(type)
@@ -126,13 +118,10 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
         const rootTopic = parseRes.data[0]?.rootTopic
         if (!rootTopic) { setError('未找到根节点，请确认文件格式'); return }
 
-        const fileName = getFileNameFromPath(filePath)
         const title =
           type === 'chapter'
             ? (forChapterTitle ?? '')
-            : type === 'other'
-              ? fileName
-              : getTitleFromXmind(parseRes, filePath)
+            : getTitleFromXmind(parseRes, filePath)
         const flatChapters = parseXmindToChapters(parseRes)
         const xmindJson = JSON.stringify(parseRes.data)
 
@@ -172,17 +161,6 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
           } else {
             setError('未找到对应章节，请先创建写作章节')
           }
-        } else {
-          const outlineRes = await window.electronAPI.saveOutline({
-            title, type: 'other', xmind_data: xmindJson, file_path: filePath, book_id: bookId ?? null,
-          })
-          if (!outlineRes.success) { setError('保存大纲失败：' + outlineRes.error); return }
-          const saveId = outlineRes.data.id
-          await window.electronAPI.saveChapters({ outlineId: saveId, chapters: flatChapters })
-          const chapRes = await window.electronAPI.getChapters({ outlineId: saveId })
-          const chapters = chapRes?.success && Array.isArray(chapRes.data) ? chapRes.data : []
-          if (chapters.length > 0) chaptersCache.current[saveId] = chapters
-          setOtherOutlines((prev) => [...prev, { ...outlineRes.data, type: 'other' } as Outline])
         }
         loadData()
       } catch (e) {
@@ -316,7 +294,6 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
     loadData,
     globalOutline, setGlobalOutline,
     chapterOutlines, setChapterOutlines,
-    otherOutlines, setOtherOutlines,
     volumeOutlines, setVolumeOutlines,
     chaptersCache,
     loading, loadingType,

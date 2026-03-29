@@ -203,10 +203,10 @@ function toolCallDisplayRow(
         return { label: "查看大纲列表", outcome: "ok" };
       case "updateOutline":
         return { label: "更新大纲", outcome: "ok" };
-      case "addMemory":
-        return { label: "添加长期记忆", outcome: "ok" };
-      case "searchMemories":
-        return { label: "检索长期记忆", outcome: "ok" };
+      case "addSparkIdea":
+        return { label: "添加设定", outcome: "ok" };
+      case "searchSparkIdeas":
+        return { label: "检索设定", outcome: "ok" };
       case "addForeshadowing":
         return { label: "添加伏笔", outcome: "ok" };
       default:
@@ -518,7 +518,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
     }
 
-    // 长期记忆由工具调用提供，不再拼入 system
+    // 本书设定由工具调用提供，不再拼入 system
     const systemContent = [systemSuffix, subagentExtra, collabExtra].filter(Boolean).join("");
 
     let historyMessages: { role: string; content: string }[];

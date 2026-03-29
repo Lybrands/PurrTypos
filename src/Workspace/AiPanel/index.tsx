@@ -12,6 +12,7 @@ import {
   LoadingOutlined,
   VerticalAlignBottomOutlined,
 } from "@ant-design/icons";
+import type { TextAreaRef } from "antd/es/input/TextArea";
 import StopCircleIcon from "../../icons/StopCircleIcon";
 import {
   App as AntdApp,
@@ -23,7 +24,6 @@ import {
   Dropdown,
 } from "antd";
 import type { MenuProps } from "antd";
-import type { TextAreaRef } from "antd/es/input/TextArea";
 import type { AiModelConfig, AiSession, Conversation } from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
 import {
@@ -190,7 +190,32 @@ export default function AiPanel({
     number | null
   >(null);
   const editTextareaRef = React.useRef<TextAreaRef | null>(null);
+  const editingMessageDraftRef = React.useRef("");
   const pinNewTurnToTopRef = React.useRef(false);
+
+  const getEditTextareaValue = React.useCallback(() => {
+    const el = editTextareaRef.current;
+    if (!el) return "";
+    const textarea =
+      el.resizableTextArea?.textArea ??
+      (el.nativeElement as HTMLTextAreaElement | null);
+    return textarea?.value ?? "";
+  }, []);
+
+  React.useEffect(() => {
+    if (editingMessageIndex == null) return;
+    const raf = requestAnimationFrame(() => {
+      const el = editTextareaRef.current;
+      const textarea =
+        el?.resizableTextArea?.textArea ??
+        (el?.nativeElement as HTMLTextAreaElement | null);
+      if (!textarea) return;
+      const end = textarea.value.length;
+      textarea.focus();
+      textarea.setSelectionRange(end, end);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [editingMessageIndex]);
 
   const handleSubmit = React.useCallback(() => {
     pinNewTurnToTopRef.current = true;
@@ -199,21 +224,15 @@ export default function AiPanel({
     setSelectedForeshadowingIds([]);
   }, [doSubmit]);
 
-  const getEditTextareaValue = React.useCallback(() => {
-    const el = editTextareaRef.current;
-    if (!el) return "";
-    const textarea = el.resizableTextArea?.textArea ?? (el.nativeElement as HTMLTextAreaElement | null);
-    return textarea?.value ?? "";
-  }, []);
-
   const handleEditSend = React.useCallback(
     (editIndex: number, content?: string) => {
-      const raw = content ?? getEditTextareaValue();
+      const raw = content ?? getEditTextareaValue() ?? editingMessageDraftRef.current;
       const trimmed = raw.trim();
       if (!trimmed) return;
       pinNewTurnToTopRef.current = true;
       doSubmit({ editIndex, content: trimmed });
       setEditingMessageIndex(null);
+      editingMessageDraftRef.current = "";
       setSelectedMemoryIds([]);
       setSelectedForeshadowingIds([]);
     },
@@ -793,11 +812,14 @@ export default function AiPanel({
                           <Input.TextArea
                             key={`edit-${editingMessageIndex}`}
                             className="bubble-edit-textarea"
-                            defaultValue={msg.content}
+                            defaultValue={editingMessageDraftRef.current}
                             ref={editTextareaRef}
                             placeholder="编辑内容，发送将从此处重新对话…"
                             autoSize={{ minRows: 2, maxRows: 8 }}
                             autoFocus
+                            onChange={(e) => {
+                              editingMessageDraftRef.current = e.target.value;
+                            }}
                             onKeyDown={(e) => {
                               if (e.key === "Enter" && !e.shiftKey) {
                                 e.preventDefault();
@@ -821,7 +843,10 @@ export default function AiPanel({
                                 <Button
                                   type="text"
                                   size="small"
-                                  onClick={() => setEditingMessageIndex(null)}
+                                  onClick={() => {
+                                    setEditingMessageIndex(null);
+                                    editingMessageDraftRef.current = "";
+                                  }}
                                 >
                                   取消
                                 </Button>
@@ -853,7 +878,11 @@ export default function AiPanel({
                                     <EditOutlined style={{ fontSize: 12 }} />
                                   }
                                   className="bubble-edit-btn"
-                                  onClick={() => setEditingMessageIndex(convIndex)}
+                                  onClick={() => {
+                                    editingMessageDraftRef.current =
+                                      msg.content ?? "";
+                                    setEditingMessageIndex(convIndex);
+                                  }}
                                 />
                               </Tooltip>
                             </div>

@@ -29,7 +29,7 @@ async def save_ai_favorite(
 
 async def get_ai_favorites(db: DatabaseConnection) -> list[dict[str, Any]]:
     return await db.fetch_all(
-        "SELECT * FROM ai_favorites ORDER BY create_time DESC"
+        "SELECT * FROM ai_favorites ORDER BY create_time ASC"
     )
 
 

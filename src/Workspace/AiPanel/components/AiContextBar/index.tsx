@@ -163,8 +163,8 @@ export default function AiContextBar({
       <Tooltip
         title={
           selectedMemoryIds.length || selectedForeshadowingIds.length
-            ? `已选 ${selectedMemoryIds.length} 条记忆、${selectedForeshadowingIds.length} 条伏笔，发送时将注入`
-            : '选用长期记忆注入'
+            ? `已选 ${selectedMemoryIds.length} 条本书设定、${selectedForeshadowingIds.length} 条伏笔，发送时将注入`
+            : '选用本书设定注入'
         }
       >
         <Button

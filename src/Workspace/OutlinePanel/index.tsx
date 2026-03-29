@@ -6,7 +6,6 @@ import {
   ExportOutlined,
   EditOutlined,
   DeleteOutlined,
-  PlusOutlined,
   ArrowLeftOutlined,
   LoadingOutlined,
   InfoCircleOutlined,
@@ -68,8 +67,6 @@ export default function OutlinePanel({
   const [showSwitcher, setShowSwitcher] = React.useState(false)
   const [chapterBatchMode, setChapterBatchMode] = React.useState(false)
   const [selectedChapterOutlineIds, setSelectedChapterOutlineIds] = React.useState<Set<EntityId>>(new Set())
-  const [otherBatchMode, setOtherBatchMode] = React.useState(false)
-  const [selectedOtherOutlineIds, setSelectedOtherOutlineIds] = React.useState<Set<EntityId>>(new Set())
   const [batchDeleteModal, setBatchDeleteModal] = React.useState<{ ids: EntityId[]; titles: string[]; onConfirm: () => void } | null>(null)
   /** 同步选中的章节无大纲记录时，用于展示待上传 */
   const [syncedChapterNoOutlineTitle, setSyncedChapterNoOutlineTitle] = React.useState<string | null>(null)
@@ -93,11 +90,9 @@ export default function OutlinePanel({
     globalOutline,
     setGlobalOutline,
     chapterOutlines,
-    otherOutlines,
     volumeOutlines,
     chaptersCache,
     loading,
-    loadingType,
     error,
     setError,
     deleteModal,
@@ -112,15 +107,6 @@ export default function OutlinePanel({
 
   const toggleChapterOutlineSelect = (id: EntityId) => {
     setSelectedChapterOutlineIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const toggleOtherOutlineSelect = (id: EntityId) => {
-    setSelectedOtherOutlineIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -146,36 +132,6 @@ export default function OutlinePanel({
             if (outline) {
               delete chaptersCache.current[id]
               onChapterOutlineDeleted?.(outline.title)
-            }
-          }
-        }
-        loadData()
-        if (displayOutlineId != null && ids.includes(displayOutlineId)) {
-          setViewMode('list')
-          setDisplayChapters([])
-          setDisplayOutlineId(null)
-        }
-      },
-    })
-  }
-
-  const handleBatchDeleteOtherOutlines = () => {
-    const ids = Array.from(selectedOtherOutlineIds)
-    if (ids.length === 0) return
-    const titles = otherOutlines.filter((o) => ids.includes(o.id)).map((o) => o.title)
-    setBatchDeleteModal({
-      ids,
-      titles,
-      onConfirm: async () => {
-        setBatchDeleteModal(null)
-        setOtherBatchMode(false)
-        setSelectedOtherOutlineIds(new Set())
-        for (const id of ids) {
-          const res = await window.electronAPI.deleteOutline({ outlineId: id })
-          if (res.success) {
-            const outline = otherOutlines.find((o) => o.id === id)
-            if (outline) {
-              delete chaptersCache.current[id]
             }
           }
         }
@@ -283,9 +239,8 @@ export default function OutlinePanel({
     } else {
       list.push(...chapterOutlines)
     }
-    list.push(...otherOutlines)
     return list
-  }, [globalOutline, chapterOutlines, otherOutlines, volumeOutlines, enableVolume])
+  }, [globalOutline, chapterOutlines, volumeOutlines, enableVolume])
 
   const currentOutline = React.useMemo(
     () => allOutlines.find((o) => String(o?.id) === String(displayOutlineId)),
@@ -368,10 +323,8 @@ export default function OutlinePanel({
   const openDetailXmindUpload = React.useCallback(() => {
     if (!currentOutline) return
     if (currentOutline.type === 'global') void handleUploadXmind('global')
-    else if (currentOutline.type === 'other') void handleUploadXmind('other')
-    else if (enableVolume) void handleUploadXmindForOutline(currentOutline)
-    else void handleUploadXmind('chapter', currentOutline.title)
-  }, [currentOutline, enableVolume, handleUploadXmind, handleUploadXmindForOutline])
+    else void handleUploadXmindForOutline(currentOutline)
+  }, [currentOutline, handleUploadXmind, handleUploadXmindForOutline])
 
   return (
     <div className={`outline-panel ${isFullscreen ? 'fullscreen' : ''}`}>
@@ -645,81 +598,6 @@ export default function OutlinePanel({
                   )}
                 </div>
               </div>
-
-              <div className="outline-section other-section">
-                <div className="section-header">
-                  <span className="section-title">其他大纲</span>
-                  <div className="section-actions">
-                    {otherOutlines.length > 0 && (
-                      otherBatchMode ? (
-                        <>
-                          {selectedOtherOutlineIds.size > 0 && (
-                            <Tooltip title={`删除(${selectedOtherOutlineIds.size})`}>
-                              <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={handleBatchDeleteOtherOutlines} className="outline-batch-delete" />
-                            </Tooltip>
-                          )}
-                          <Button type="text" size="small" onClick={() => { setOtherBatchMode(false); setSelectedOtherOutlineIds(new Set()); }} className="outline-batch-cancel">
-                            取消
-                          </Button>
-                        </>
-                      ) : (
-                        <Button type="text" size="small" icon={<CheckSquareOutlined style={{ fontSize: 14 }} />} onClick={() => setOtherBatchMode(true)} title="批量操作" className="outline-batch-btn" />
-                      )
-                    )}
-                    <Tooltip title={loading && loadingType === 'other' ? '上传中...' : '新建'}>
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<PlusOutlined style={{ fontSize: 14 }} />}
-                        onClick={() => handleUploadXmind('other')}
-                        loading={loading && loadingType === 'other'}
-                        disabled={loading}
-                        className="outline-add-btn"
-                      />
-                    </Tooltip>
-                  </div>
-                </div>
-                {otherOutlines.length === 0 && !loading && (
-                  <div
-                    className="outline-empty-card outline-empty-card-action"
-                    onClick={() => !loading && handleUploadXmind('other')}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => e.key === 'Enter' && !loading && handleUploadXmind('other')}
-                  >
-                    <FileAddOutlined className="outline-empty-card-icon" />
-                    <p className="outline-empty-card-title">上传 XMind 大纲</p>
-                    <p className="outline-empty-card-desc">点击此处或上方 + 上传</p>
-                  </div>
-                )}
-                <div className="chapter-outline-list">
-                  {otherOutlines.map((outline) => (
-                      <div
-                        key={outline.id}
-                        className={`chapter-outline-item ${displayOutlineId === outline.id ? 'active' : ''} ${otherBatchMode && selectedOtherOutlineIds.has(outline.id) ? 'selected' : ''}`}
-                        onClick={() => handleOutlineClick(outline)}
-                      >
-                        {otherBatchMode && <Checkbox checked={selectedOtherOutlineIds.has(outline.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleOtherOutlineSelect(outline.id)} className="outline-item-checkbox" />}
-                        <span className="item-title" title={outline.title}>
-                          <HighlightText text={outline.title} query={workspaceSearchQuery} />
-                        </span>
-                        <div className="item-actions" onClick={(e) => e.stopPropagation()}>
-                          {outline.file_path && (
-                            <Tooltip title="打开源文件">
-                              <Button type="text" size="small" icon={openingSourceId === outline.id ? <LoadingOutlined style={{ fontSize: 14 }} spin /> : <ExportOutlined style={{ fontSize: 14 }} />} onClick={() => handleOpenSource(outline)} disabled={openingSourceId === outline.id} className="btn-icon-small" />
-                            </Tooltip>
-                          )}
-                          <Tooltip title="编辑">
-                            <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} onClick={() => handleEdit(outline)} disabled={loading} className="btn-icon-small" />
-                          </Tooltip>
-                          <Tooltip title="删除">
-                            <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} onClick={() => handleDelete(outline)} disabled={loading} className="btn-icon-small" />
-                          </Tooltip>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </div>
             </>
           ) : (
             /* 详情视图：整个左侧区域展示大纲内容 */
@@ -777,15 +655,6 @@ export default function OutlinePanel({
                                   </div>
                                 ))}
                               </React.Fragment>
-                            ))}
-                            {otherOutlines.map((o) => (
-                              <div
-                                key={o.id}
-                                className={`switcher-item ${o.id === displayOutlineId ? 'active' : ''}`}
-                                onClick={() => { handleOutlineClick(o, false); setShowSwitcher(false) }}
-                              >
-                                {o.title}
-                              </div>
                             ))}
                           </>
                         ) : (
