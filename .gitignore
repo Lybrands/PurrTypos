@@ -5,3 +5,5 @@ dist-electron
 build-resources
 backend/dist
 backend/build
+__pycache__/
+*.pyc
