@@ -1420,6 +1420,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       temperature?: number;
       thinking: { type: "enabled" | "disabled" };
       max_tokens: number;
+      top_k?: number;
     } = {
       model: apiModelName,
       ...(useConfiguredTemperature
@@ -1435,6 +1436,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           | "disabled",
       },
       max_tokens: modelConfig?.max_tokens ?? 8192,
+      ...(agentMode === "subagent" ? { top_k: 45 } : {}),
     };
 
     const hasBookContext = bookId != null;

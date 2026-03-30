@@ -45,6 +45,7 @@ async def chat_no_stream(
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
 
@@ -57,6 +58,13 @@ async def chat_no_stream(
         params["max_tokens"] = max_tokens
     if tools:
         params["tools"] = tools
+    if top_k is not None:
+        try:
+            tk = int(top_k)
+            if tk > 0:
+                params.setdefault("extra_body", {})["top_k"] = tk
+        except (TypeError, ValueError):
+            pass
 
     res = await client.chat.completions.create(**params)
     choice = res.choices[0] if res.choices else None
@@ -80,6 +88,7 @@ async def chat_stream(
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    top_k: Any = opts.get("top_k")
 
     tool_names = (
         ", ".join(t.get("function", {}).get("name", "") for t in tools if t.get("function", {}).get("name"))
@@ -102,6 +111,13 @@ async def chat_stream(
         params["max_tokens"] = max_tokens
     if tools:
         params["tools"] = tools
+    if top_k is not None:
+        try:
+            tk = int(top_k)
+            if tk > 0:
+                params.setdefault("extra_body", {})["top_k"] = tk
+        except (TypeError, ValueError):
+            pass
 
     raw_stream = await client.chat.completions.create(**params)
 

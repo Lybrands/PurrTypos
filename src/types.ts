@@ -368,6 +368,8 @@ export interface ElectronAPI {
       temperature?: number;
       max_tokens?: number;
       thinking?: { type: "disabled" | "enabled" };
+      /** 采样 top-k；写作专家模式由前端设为 45 */
+      top_k?: number;
     };
     tools?: unknown[];
     useToolRouter?: boolean;
