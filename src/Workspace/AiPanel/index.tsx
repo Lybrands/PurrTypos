@@ -748,7 +748,8 @@ export default function AiPanel({
                   !msg.content &&
                   !cm.toolCallSegments?.length &&
                   !hasAnyThinking &&
-                  !hasSubagentProgress;
+                  !hasSubagentProgress &&
+                  !(cm.subagentPipelineDigest || "").trim();
                 const isLastAssistant =
                   isLast && msg.role === "assistant" && !msg.isError;
                 /** 发送后占位：最后一条且为空内容时显示「思考中」+ 闪烁「...」 */
@@ -901,7 +902,8 @@ export default function AiPanel({
                           (msg as ChatMessage).thinking ?? "";
                         const hasGeneratedContent = Boolean(
                           (msg.content || "").trim() ||
-                            ((msg as ChatMessage).contentAfterToolCalls || "").trim(),
+                            ((msg as ChatMessage).contentAfterToolCalls || "").trim() ||
+                            ((msg as ChatMessage).subagentPipelineDigest || "").trim(),
                         );
 
                         return (
@@ -916,6 +918,13 @@ export default function AiPanel({
                             )}
                             {!showPlaceholder && (
                               <>
+                                {(cm.subagentPipelineDigest || "").trim() ? (
+                                  <div className="bubble-content bubble-content--subagent-digest">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                      {(cm.subagentPipelineDigest || "").trim()}
+                                    </ReactMarkdown>
+                                  </div>
+                                ) : null}
                                 {segments.map((seg, segIdx) => {
                                   const cm = msg as ChatMessage;
                                   const isToolLive =
