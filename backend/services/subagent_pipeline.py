@@ -18,6 +18,7 @@ from typing import Any, Callable
 from services.agent_tool_definitions import to_openai_tools
 from services.ai_provider import create_chat_no_stream, create_chat_stream
 from services.subagent_config import (
+    BODY_DIALOGUE_QUOTE_RULE,
     EXEC_ACTIONS,
     STAGES,
     SUBAGENT_REGISTRY,
@@ -352,7 +353,8 @@ MAIN_AGENT_PRESENTER_EXTRA = (
     "后台各专业写作专家已完成本会话中的结构化步骤，并在用户消息中提供了「内部产出」（含结构化字段与/或正文）。"
     "请严格依据用户问题与这些产出，用自然、清晰的中文作答；结构复杂时可用小标题或列表。"
     "不要向用户提及写作专家、管线、阶段、JSON 或「内部产出」等实现细节；不要整段照抄 JSON。"
-    "若产出中已有可交付的正文（如初稿、润色定稿），应在回答中完整呈现该正文，并可酌情加简短辅说明。"
+    "若产出中已有可交付的正文（如初稿、润色定稿），应在回答中完整呈现该正文，并可酌情加简短辅说明。\n"
+    f"{BODY_DIALOGUE_QUOTE_RULE}"
 )
 
 MAIN_AGENT_TRANSITION_SYSTEM = (

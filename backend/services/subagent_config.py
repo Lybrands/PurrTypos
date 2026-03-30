@@ -50,6 +50,11 @@ OUTLINE_LOCATOR_HARD_RULE = (
     "严禁使用 outlineTitle 或 outlineIndex。"
 )
 
+BODY_DIALOGUE_QUOTE_RULE = (
+    "【正文对白标点】叙事中人物对白须用中文弯双引号“与”成对包裹（勿用半角直引号 \" 与 ' 作对白起止）；"
+    "对白内嵌套引语时内层可用中文单引号‘与’。"
+)
+
 
 # ---------------------------------------------------------------------------
 # Subagent registry
@@ -102,6 +107,7 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
             f"你是小说写作「撰稿专家」（执行写作）。严格按 WritingBlueprint 落稿：先保证剧情推进与约束满足，再追求文采。"
             f"可调用工具检索素材或写回章节。输出必须是 JSON 且仅包含：title, content, notes。"
             f"notes 仅记录关键实现取舍与风险提醒，不输出额外解释文本；不得偏离人设、时间线与世界观。\n"
+            f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
             f"{OUTLINE_LOCATOR_HARD_RULE}"
         ),
@@ -115,6 +121,7 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
             "读取**至少 3 章、至多 5 章**前文正文（若前文不足则读全部可用前文；第 1 章无前文时须在 styleAnchors 中说明）。"
             "归纳「文风锚点」后再改写初稿。若需写回编辑器可调用 editChapterContent；一旦成功，JSON 中 content 可短占位，changeSummary 仍须说明相对初稿的调整。"
             "可调用 addSparkIdea。输出必须是 JSON，且只包含约定字段。\n"
+            f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
             f"{OUTLINE_LOCATOR_HARD_RULE}"
         ),
@@ -134,7 +141,8 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
             "2) 第二轮做反证去误报（证据不足或可合理解释的问题不输出）。\n"
             "最终只保留高置信问题。\n\n"
             "输出必须是 JSON，且只包含约定字段（issues 数组或等价数组结构）；\n"
-            "每条问题需包含位置线索、严重度、建议与必要上下文。"
+            "每条问题需包含位置线索、严重度、建议与必要上下文；"
+            "若在 suggestion/context 中给出替换句示例，对白部分须用中文弯双引号“与”。"
         ),
     },
     STAGES.POLISH: {
@@ -145,6 +153,7 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
             "优先修复高严重度问题，并保持剧情/人设不变形。若需写回当前章节，必须调用 editChapterContent；"
             "调用成功后，输出 JSON 时 finalText 可短占位，但 changeSummary 必须清晰说明改动点与影响范围。"
             "可调用 addSparkIdea 等辅助工具。最终输出必须是 JSON，且只包含约定字段。\n"
+            f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
             f"{OUTLINE_LOCATOR_HARD_RULE}"
         ),

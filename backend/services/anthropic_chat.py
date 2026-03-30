@@ -191,6 +191,7 @@ async def chat_stream_as_openai_format(
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
     converted = openai_messages_to_anthropic(messages)
@@ -217,6 +218,13 @@ async def chat_stream_as_openai_format(
         params["tools"] = anthropic_tools
     if temperature is not None:
         params["temperature"] = temperature
+    if top_k is not None:
+        try:
+            tk = int(top_k)
+            if tk > 0:
+                params["top_k"] = tk
+        except (TypeError, ValueError):
+            pass
 
     raw_stream = await client.messages.create(**params)
 
@@ -310,6 +318,7 @@ async def chat_no_stream_as_openai_format(
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
     converted = openai_messages_to_anthropic(messages)
@@ -335,6 +344,13 @@ async def chat_no_stream_as_openai_format(
         params["tools"] = anthropic_tools
     if temperature is not None:
         params["temperature"] = temperature
+    if top_k is not None:
+        try:
+            tk = int(top_k)
+            if tk > 0:
+                params["top_k"] = tk
+        except (TypeError, ValueError):
+            pass
 
     try:
         msg = await client.messages.create(**params)
