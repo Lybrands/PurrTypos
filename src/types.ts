@@ -447,6 +447,8 @@ export interface ElectronAPI {
       subagentMainPresenter?: boolean;
       subagentPayload?: unknown;
       subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
+      /** 写作专家：阶段摘要 Markdown，逐段追加 */
+      subagentPipelineDigest?: string;
     }) => void,
   ) => () => void;
   // 设置

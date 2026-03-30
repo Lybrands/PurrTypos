@@ -284,6 +284,8 @@ export interface ChatMessage {
   subagentBridging?: boolean;
   /** 已进入最终主稿专家答复流 */
   subagentMainPresenter?: boolean;
+  /** 写作专家：各阶段摘要（Markdown），在工具条与主答复之前展示 */
+  subagentPipelineDigest?: string;
 }
 
 export interface UseChatSubmitParams {
@@ -463,6 +465,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       const cm = m as ChatMessage;
       if (cm.isError || cm.role === "system") return null;
       let text = String(cm.content ?? "").trim();
+      const pipeDigest = (cm.subagentPipelineDigest ?? "").trim();
+      if (pipeDigest && cm.role === "assistant") {
+        text = text ? `${pipeDigest}\n\n${text}` : pipeDigest;
+      }
       if (
         !text &&
         agentMode === "subagent" &&
@@ -569,6 +575,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       toolCallSegments: undefined as ToolCallSegment[] | undefined,
       thinkingBlocks: [] as string[],
       contentAfterToolCalls: "",
+      subagentPipelineDigest: "",
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;
@@ -604,6 +611,32 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               next[next.length - 1] = {
                 ...(last as ChatMessage),
                 subagentMainPresenter: true,
+              };
+              return next;
+            });
+          });
+        }
+      }
+      if (
+        typeof chunk.subagentPipelineDigest === "string" &&
+        chunk.subagentPipelineDigest.trim() &&
+        agentMode === "subagent"
+      ) {
+        const piece = chunk.subagentPipelineDigest.trim();
+        acc.subagentPipelineDigest = acc.subagentPipelineDigest
+          ? `${acc.subagentPipelineDigest}\n\n${piece}`
+          : piece;
+        if (isVisibleSession()) {
+          flushSync(() => {
+            setConversations((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const prevD = ((last as ChatMessage).subagentPipelineDigest ?? "").trim();
+              const merged = prevD ? `${prevD}\n\n${piece}` : piece;
+              next[next.length - 1] = {
+                ...(last as ChatMessage),
+                subagentPipelineDigest: merged,
               };
               return next;
             });
@@ -1255,6 +1288,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                         : s,
                     )
                   : cm.subagentStages;
+              const digestTrim = (cm.subagentPipelineDigest ?? "").trim();
               const currentContent = String(last.content || "");
               let finalContent = currentContent;
               if (!currentContent.trim()) {
@@ -1270,10 +1304,16 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                       : "内容同步中。";
                 }
               }
+              if (digestTrim) {
+                finalContent = finalContent.trim()
+                  ? `${digestTrim}\n\n${finalContent.trim()}`
+                  : digestTrim;
+              }
               resolvedAssistantContent = finalContent;
               next[next.length - 1] = {
                 ...last,
                 content: finalContent,
+                subagentPipelineDigest: undefined,
                 model: acc.model || undefined,
                 thinking: finalThinking || last.thinking,
                 thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,

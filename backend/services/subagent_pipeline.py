@@ -30,6 +30,12 @@ from services.subagent_config import (
     normalize_writing_blueprint,
     validate_subagent_config,
 )
+from services.subagent_stage_digest import (
+    format_analyze_digest,
+    format_draft_thoughts_digest,
+    format_plan_digest,
+    format_review_digest,
+)
 from services.tool_executor import run_tools as executor_run_tools
 from services.tool_router import ensure_skills_loaded, get_api_skill_items
 from utils.streaming import text_from_chat_delta, text_from_stream_choice0
@@ -707,6 +713,7 @@ async def run_subagent_pipeline(
     analyze_res = await run_stage(STAGES.ANALYZE, analyze_input)
     analyze_report = normalize_analyze_report(analyze_res["parsed"], user_text)
     send_chunk({"subagentStage": STAGES.ANALYZE, "subagentPayload": analyze_report})
+    send_chunk({"subagentPipelineDigest": format_analyze_digest(analyze_report)})
 
     hint_after_analyze = "即将由主稿专家汇总本轮结果。"
     if need_plan:
@@ -735,6 +742,7 @@ async def run_subagent_pipeline(
         plan_res = await run_stage(STAGES.PLAN, plan_input)
         blueprint = normalize_writing_blueprint(plan_res["parsed"])
         send_chunk({"subagentStage": STAGES.PLAN, "subagentPayload": blueprint})
+        send_chunk({"subagentPipelineDigest": format_plan_digest(blueprint)})
         hint = "即将由主稿专家汇总。" if not need_draft else "接下来将撰写初稿正文。"
         await _stream_stage_transition(
             send_chunk=send_chunk, signal=signal, key=key, api_provider=api_provider,
@@ -754,6 +762,7 @@ async def run_subagent_pipeline(
         draft_res = await run_stage(STAGES.DRAFT, draft_input)
         draft = normalize_draft_document(draft_res["parsed"])
         send_chunk({"subagentStage": STAGES.DRAFT, "subagentPayloadMeta": {"contentLength": len(draft.get("content", ""))}})
+        send_chunk({"subagentPipelineDigest": format_draft_thoughts_digest(draft)})
         hint = "即将由主稿专家汇总。"
         if need_style:
             hint = "接下来将参照前文 3～5 章统一文风。"
@@ -836,6 +845,7 @@ async def run_subagent_pipeline(
                 })
         review_issues = all_issues
         send_chunk({"subagentStage": STAGES.REVIEW, "subagentPayloadMeta": {"issueCount": len(review_issues)}})
+        send_chunk({"subagentPipelineDigest": format_review_digest(review_issues)})
         hint = "接下来由主稿专家汇总审校结果。" if not need_polish else "接下来将进行润色定稿。"
         await _stream_stage_transition(
             send_chunk=send_chunk, signal=signal, key=key, api_provider=api_provider,
