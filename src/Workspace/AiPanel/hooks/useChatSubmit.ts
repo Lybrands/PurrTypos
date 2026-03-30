@@ -2,6 +2,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { App as AntdApp } from "antd";
 import type { AiModelConfig, Outline, AiSession, EntityId } from "../../../types";
+import { appendAssistantTailMarkdown } from "../rendering";
 
 function normalizeSubagentStageName(stage?: string): string {
   switch (String(stage || "").trim()) {
@@ -889,14 +890,35 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (typeof chunk.collabLatestParagraph === "string" && chunk.collabLatestParagraph.trim()) {
         const para = chunk.collabLatestParagraph.trim();
         const wrapped = `\n\n### 最新段落（已写入正文）\n\n\`\`\`text\n${para}\n\`\`\`\n`;
+        const accTailPatched = appendAssistantTailMarkdown(
+          {
+            content: acc.response,
+            contentAfterToolCalls: acc.contentAfterToolCalls,
+            toolCallSegments: acc.toolCallSegments,
+          },
+          wrapped,
+        );
+        acc.response = accTailPatched.content ?? acc.response;
+        if (acc.toolCallSegments?.length) {
+          acc.contentAfterToolCalls = accTailPatched.contentAfterToolCalls ?? "";
+        }
         flushSync(() => {
           setConversations((prev) => {
             const next = [...prev];
             const last = next[next.length - 1];
             if (!last || last.role !== "assistant") return prev;
+            const tailPatched = appendAssistantTailMarkdown(
+              {
+                content: (last as ChatMessage).content,
+                contentAfterToolCalls: (last as ChatMessage).contentAfterToolCalls,
+                toolCallSegments: (last as ChatMessage).toolCallSegments,
+              },
+              wrapped,
+            );
             next[next.length - 1] = {
               ...(last as ChatMessage),
-              content: ((last.content || "") + wrapped).trim(),
+              content: tailPatched.content ?? (last.content || ""),
+              contentAfterToolCalls: tailPatched.contentAfterToolCalls,
             };
             return next;
           });
