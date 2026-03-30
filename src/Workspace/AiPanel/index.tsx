@@ -26,6 +26,7 @@ import {
 import type { MenuProps } from "antd";
 import type { AiModelConfig, AiSession, Conversation } from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
+import { getAssistantRenderableMarkdown } from "./rendering";
 import {
   INPUT_AREA_DEFAULT,
   INPUT_AREA_MAX,
@@ -900,9 +901,11 @@ export default function AiPanel({
                         const isStreaming = loading && isLast;
                         const currentThinking =
                           (msg as ChatMessage).thinking ?? "";
+                        const assistantMarkdown = getAssistantRenderableMarkdown(
+                          msg as ChatMessage,
+                        );
                         const hasGeneratedContent = Boolean(
-                          (msg.content || "").trim() ||
-                            ((msg as ChatMessage).contentAfterToolCalls || "").trim() ||
+                          assistantMarkdown.trim() ||
                             ((msg as ChatMessage).subagentPipelineDigest || "").trim(),
                         );
 
@@ -1053,30 +1056,13 @@ export default function AiPanel({
                                       }
                                     />
                                   )}
-                                {(msg.content ||
-                                  (msg as ChatMessage)
-                                    .contentAfterToolCalls) && (
+                                {assistantMarkdown && (
                                   <div className="bubble-content">
-                                    {(msg as ChatMessage).toolCallSegments
-                                      ?.length
-                                      ? (msg as ChatMessage)
-                                          .contentAfterToolCalls && (
-                                          <ReactMarkdown
-                                            remarkPlugins={[remarkGfm]}
-                                          >
-                                            {
-                                              (msg as ChatMessage)
-                                                .contentAfterToolCalls!
-                                            }
-                                          </ReactMarkdown>
-                                        )
-                                      : msg.content && (
-                                          <ReactMarkdown
-                                            remarkPlugins={[remarkGfm]}
-                                          >
-                                            {msg.content}
-                                          </ReactMarkdown>
-                                        )}
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                    >
+                                      {assistantMarkdown}
+                                    </ReactMarkdown>
                                   </div>
                                 )}
                                 {!showPlaceholder &&
