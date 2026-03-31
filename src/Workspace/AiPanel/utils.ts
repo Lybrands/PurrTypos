@@ -1,4 +1,11 @@
-import { CHAT_AGENT_MODES, type Chapter, type Conversation, type EntityId, type ChatAgentMode } from '../../types'
+import {
+  CHAT_AGENT_MODES,
+  type AiAgentMode,
+  type Chapter,
+  type Conversation,
+  type EntityId,
+  type ChatAgentMode,
+} from '../../types'
 import {
   extractTextFromLexical as extractTextFromLexicalImpl,
   formatChaptersAsText as formatChaptersAsTextImpl,
@@ -28,13 +35,17 @@ export function getPrefsKey(bookId: EntityId | null): string {
 export function loadModelPrefs(
   bookId: EntityId | null,
   validModelIds?: string[],
-  settingsDefaultAgentMode: 'legacy' | 'subagent' = 'legacy'
+  settingsDefaultAgentMode: AiAgentMode = 'legacy'
 ): { model: string; chatAgentMode: ChatAgentMode; thinkingEnabled: boolean } {
   const defaultModel = validModelIds?.length ? validModelIds[0] : ''
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
   const defaultChatAgentMode: ChatAgentMode =
-    settingsDefaultAgentMode === 'subagent' ? 'expert' : 'agent'
+    settingsDefaultAgentMode === 'subagent'
+      ? 'expert'
+      : settingsDefaultAgentMode === 'expert_team'
+        ? 'expert_team'
+        : 'agent'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {

@@ -286,11 +286,13 @@ async def stream_main_agent_presenter(
     )
     style_hint = (
         "风格统一后的正文已通过工具写入当前章节：回复中不要重复粘贴该正文，用一两句说明已保存即可，可结合「文风锚点」或「风格修订摘要」简述。"
-        if style_skip_full_text else ""
+        if style_skip_full_text
+        else ""
     )
+    action_label = f"本轮管线动作：{pipeline_action_label or ''}。"
     system_content = "\n\n".join(filter(None, [
         base_system, MAIN_AGENT_PRESENTER_EXTRA, polish_hint, style_hint,
-        f"本轮管线动作：{pipeline_action_label or ''}。",
+        action_label,
     ]))
 
     parts = [f"【用户问题】\n{user_text}", "\n【内部产出 — 仅供你组织给用户的最终回复】\n"]

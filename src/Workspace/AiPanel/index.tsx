@@ -24,7 +24,13 @@ import {
   Dropdown,
 } from "antd";
 import type { MenuProps } from "antd";
-import type { AiModelConfig, AiSession, Conversation } from "../../types";
+import type {
+  AiAgentMode,
+  AiModelConfig,
+  AiSession,
+  ChatAgentMode,
+  Conversation,
+} from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
 import { getAssistantRenderableMarkdown } from "./rendering";
 import {
@@ -54,9 +60,13 @@ import "./index.scss";
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
-  aiAgentMode?: "legacy" | "subagent";
+  aiAgentMode?: AiAgentMode;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
+}
+
+function isExpertPipelineChatMode(m: ChatAgentMode): boolean {
+  return m === "expert" || m === "expert_team";
 }
 
 const validModelIds = (configs: AiModelConfig[]) => configs.map((c) => c.id);
@@ -181,10 +191,14 @@ export default function AiPanel({
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
+    agentMode:
+      chatAgentMode === "expert_team"
+        ? "expert_team"
+        : chatAgentMode === "expert"
+          ? "subagent"
+          : "legacy",
     writingMode: chatAgentMode === "collab" ? "collab" : "default",
-    agentActions:
-      chatAgentMode === "expert" ? agentActions : undefined,
+    agentActions: isExpertPipelineChatMode(chatAgentMode) ? agentActions : undefined,
   });
 
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
@@ -805,7 +819,8 @@ export default function AiPanel({
                               pipelinePopoverOpen={pipelinePopoverOpen}
                               onPipelinePopoverOpenChange={setPipelinePopoverOpen}
                               pipelineAgentEnabled={
-                                chatAgentMode === "expert"
+                                isExpertPipelineChatMode(chatAgentMode) &&
+                                chatAgentMode !== "expert_team"
                               }
                               pipelineSelectedStages={agentActions}
                               onPipelineStagesChange={setAgentActions}
@@ -1081,6 +1096,7 @@ export default function AiPanel({
                                 message={cm}
                                 isLastAssistant={isLastAssistant}
                                 loading={loading}
+                                expertTeam={chatAgentMode === "expert_team"}
                               />
                             ) : null}
                           </div>
@@ -1165,7 +1181,10 @@ export default function AiPanel({
             onContextPopoverOpenChange={setContextPopoverOpen}
             pipelinePopoverOpen={pipelinePopoverOpen}
             onPipelinePopoverOpenChange={setPipelinePopoverOpen}
-            pipelineAgentEnabled={chatAgentMode === "expert"}
+            pipelineAgentEnabled={
+              isExpertPipelineChatMode(chatAgentMode) &&
+              chatAgentMode !== "expert_team"
+            }
             pipelineSelectedStages={agentActions}
             onPipelineStagesChange={setAgentActions}
           />
