@@ -171,12 +171,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
+        const _processLines = (lines) => {
           for (const line of lines) {
             if (line.startsWith('data: ')) {
               const payload = line.slice(6).trim()
@@ -187,6 +182,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
               } catch {}
             }
           }
+        }
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          _processLines(lines)
+        }
+        // Flush any remaining data left in the buffer (last SSE event
+        // may lack a trailing newline when the connection closes).
+        if (buffer.trim()) {
+          _processLines(buffer.split('\n'))
         }
         _aiChunkListeners.forEach(cb => { try { cb({ done: true }) } catch (_e) {} })
       })

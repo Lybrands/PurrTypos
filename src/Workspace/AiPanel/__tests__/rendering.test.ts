@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   appendAssistantTailMarkdown,
   getAssistantRenderableMarkdown,
+  mergeAssistantErrorNotice,
 } from "../rendering.ts";
 
 test("renders collab tail markdown when tool calls exist but no post-tool content exists yet", () => {
@@ -43,4 +44,38 @@ test("appends plain assistant markdown directly when no tool calls exist", () =>
 
   assert.equal(next.content, "已有回复\n\n补充段落");
   assert.equal(getAssistantRenderableMarkdown(next), "已有回复\n\n补充段落");
+});
+
+test("preserves streamed assistant content when an error arrives mid-response", () => {
+  const next = mergeAssistantErrorNotice(
+    {
+      content: "这是已经生成的回答",
+    },
+    "网络中断",
+  );
+
+  assert.equal(next.content, "这是已经生成的回答\n\n> 生成中断：网络中断");
+});
+
+test("shows error detail when no assistant content exists yet", () => {
+  const next = mergeAssistantErrorNotice(
+    {
+      content: "",
+    },
+    "网络中断",
+  );
+
+  assert.equal(next.content, "生成失败：网络中断");
+  assert.equal(next.isError, true);
+});
+
+test("shows generic fallback when no content and no error text", () => {
+  const next = mergeAssistantErrorNotice(
+    {
+      content: "",
+    },
+  );
+
+  assert.equal(next.content, "本轮已结束，请继续下一条指令。");
+  assert.equal(next.isError, true);
 });

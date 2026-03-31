@@ -2,7 +2,10 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { App as AntdApp } from "antd";
 import type { AiModelConfig, Outline, AiSession, EntityId } from "../../../types";
-import { appendAssistantTailMarkdown } from "../rendering";
+import {
+  appendAssistantTailMarkdown,
+  mergeAssistantErrorNotice,
+} from "../rendering";
 
 function normalizeSubagentStageName(stage?: string): string {
   switch (String(stage || "").trim()) {
@@ -791,10 +794,27 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         if (isVisibleSession()) {
           setConversations((prev) => {
             const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            const merged = mergeAssistantErrorNotice(
+              {
+                content: acc.response || (last as ChatMessage).content || "",
+                contentAfterToolCalls:
+                  acc.toolCallSegments?.length
+                    ? (acc.contentAfterToolCalls ??
+                      (last as ChatMessage).contentAfterToolCalls)
+                    : (last as ChatMessage).contentAfterToolCalls,
+                toolCallSegments:
+                  acc.toolCallSegments ?? (last as ChatMessage).toolCallSegments,
+              },
+              chunk.error,
+            );
             next[next.length - 1] = {
-              role: "assistant",
-              content: "本轮已结束，请继续下一条指令。",
-              isError: true,
+              ...(last as ChatMessage),
+              content: merged.content ?? (last as ChatMessage).content,
+              contentAfterToolCalls: merged.contentAfterToolCalls,
+              toolCalling: false,
+              ...(merged.isError ? { isError: true } : {}),
             };
             return next;
           });
@@ -1320,15 +1340,20 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                   : cm.subagentStages;
               const digestTrim = (cm.subagentPipelineDigest ?? "").trim();
               const currentContent = String(last.content || "");
+              const accContent = (acc.response || "").trim();
               let finalContent = currentContent;
               if (!currentContent.trim()) {
-                const synthesized = synthesizeAssistantTextFromToolSegments(
-                  cm,
-                ).trim();
-                if (synthesized) {
-                  finalContent = synthesized;
+                if (accContent) {
+                  finalContent = acc.response!;
                 } else {
-                  finalContent = "内容同步中。";
+                  const synthesized = synthesizeAssistantTextFromToolSegments(
+                    cm,
+                  ).trim();
+                  if (synthesized) {
+                    finalContent = synthesized;
+                  } else {
+                    finalContent = "内容同步中。";
+                  }
                 }
               }
               if (digestTrim) {

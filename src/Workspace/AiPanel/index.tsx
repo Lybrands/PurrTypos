@@ -906,6 +906,11 @@ export default function AiPanel({
                           )}
                         </>
                       )}
+                    {msg.role === "assistant" && msg.isError && (
+                      <div className="bubble-content bubble-content--error">
+                        {String(msg.content || "")}
+                      </div>
+                    )}
                     {msg.role === "assistant" &&
                       !msg.isError &&
                       (() => {
