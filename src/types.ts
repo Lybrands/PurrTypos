@@ -113,8 +113,11 @@ export interface Conversation {
 export type SparkIdeaLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
 /** AI 对话模式（与 UI 模式选择一致） */
-export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'collab'] as const;
+export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'expert_team', 'collab'] as const;
 export type ChatAgentMode = (typeof CHAT_AGENT_MODES)[number];
+
+/** 设置中「默认写作智能体」档位（工作区对话默认来源） */
+export type AiAgentMode = 'legacy' | 'subagent' | 'expert_team';
 
 export interface AiSparkIdea {
   id: number | string;  // mem0 使用 UUID 字符串
@@ -381,8 +384,8 @@ export interface ElectronAPI {
     /** 与界面「关联章节」一致，主进程并入 toolCtx 供写作专家 system 附录 */
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
-    agentMode?: "legacy" | "subagent";
-    chatAgentMode?: "ask" | "agent" | "expert" | "collab";
+    agentMode?: "legacy" | "subagent" | "expert_team";
+    chatAgentMode?: "ask" | "agent" | "expert" | "expert_team" | "collab";
     /** legacy 下协作共创 */
     writingMode?: "default" | "collab";
     /** 写作专家多选阶段 */
@@ -461,7 +464,7 @@ export interface GeneralSettings {
   ai_system_prompt: string;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
-  ai_agent_mode?: "legacy" | "subagent";
+  ai_agent_mode?: AiAgentMode;
 }
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */

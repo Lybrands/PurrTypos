@@ -48,6 +48,12 @@ SUBAGENT_SYSTEM_PROMPT = (
     "若信息不足，优先通过工具补证，不臆造事实。"
 )
 
+EXPERT_TEAM_SYSTEM_PROMPT = (
+    "你正在执行「专家团」网文向多席位分工流程。\n"
+    "保持目标一致、上下文一致、结果可追溯；严格遵循各席位指令与输出格式。\n"
+    "若信息不足，优先通过工具补证，不臆造事实。"
+)
+
 
 def resolve_system_prompt_by_mode(
     chat_agent_mode: str | None,
@@ -56,6 +62,8 @@ def resolve_system_prompt_by_mode(
 ) -> str:
     if chat_agent_mode == "ask":
         return ASK_SYSTEM_PROMPT
+    if chat_agent_mode == "expert_team" or runtime_mode == "expert_team":
+        return EXPERT_TEAM_SYSTEM_PROMPT
     if chat_agent_mode in ("expert", "subagent") or runtime_mode == "subagent":
         return SUBAGENT_SYSTEM_PROMPT
     if chat_agent_mode == "collab" or collab_writing:

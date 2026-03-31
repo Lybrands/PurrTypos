@@ -3,7 +3,7 @@ import { ArrowLeftOutlined, HomeOutlined } from '@ant-design/icons'
 import { Button, Tooltip, Spin } from 'antd'
 import type { LexicalEditor } from 'lexical'
 import AppHeader from '../components/AppHeader'
-import type { Chapter, AiModelConfig, EntityId } from '../types'
+import type { Chapter, AiAgentMode, AiModelConfig, EntityId } from '../types'
 import { editorStateToText } from './EditorPanel/LexicalEditor'
 import { findAllMatchStarts, selectLexicalSearchMatch } from './search/lexicalSearch'
 import { getWritingOutlineWithChapters } from './utils'
@@ -58,7 +58,7 @@ interface WorkspaceProps {
   onOpenSettings?: () => void
   modelConfigs?: AiModelConfig[]
   syncOutlineChapter?: boolean
-  aiAgentMode?: 'legacy' | 'subagent'
+  aiAgentMode?: AiAgentMode
 }
 
 export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, aiAgentMode = 'legacy' }: WorkspaceProps = {}) {

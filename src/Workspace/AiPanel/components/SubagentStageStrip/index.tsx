@@ -9,6 +9,8 @@ export interface SubagentStageStripProps {
   isLastAssistant: boolean;
   /** 会话是否仍在请求中 */
   loading: boolean;
+  /** 专家团模式：文案显示「专家团主持」等 */
+  expertTeam?: boolean;
 }
 
 /** 写作专家模式：气泡底部展示各专家阶段 / 主稿专家进度与完成态 */
@@ -16,7 +18,10 @@ export default function SubagentStageStrip({
   message,
   isLastAssistant,
   loading,
+  expertTeam = false,
 }: SubagentStageStripProps) {
+  const host = expertTeam ? "专家团主持" : "主稿专家";
+  const doneText = expertTeam ? "专家团流程已完成" : "写作专家流程已完成";
   const stages = message.subagentStages ?? [];
   const allStagesDone =
     stages.length > 0 && stages.every((s) => s.status === "done");
@@ -43,7 +48,7 @@ export default function SubagentStageStrip({
         className="subagent-stage-strip subagent-stage-strip--main"
         aria-live="polite"
       >
-        <span className="subagent-stage-strip__label">主稿专家</span>
+        <span className="subagent-stage-strip__label">{host}</span>
         <span className="subagent-stage-strip__current">
           <LoadingOutlined className="subagent-stage-strip__icon" spin />
           <span className="subagent-stage-strip__name">正在衔接各阶段…</span>
@@ -72,7 +77,7 @@ export default function SubagentStageStrip({
         className="subagent-stage-strip subagent-stage-strip--main"
         aria-live="polite"
       >
-        <span className="subagent-stage-strip__label">主稿专家</span>
+        <span className="subagent-stage-strip__label">{host}</span>
         <span className="subagent-stage-strip__current">
           <LoadingOutlined className="subagent-stage-strip__icon" spin />
           <span className="subagent-stage-strip__name">正在组织回复…</span>
@@ -88,7 +93,7 @@ export default function SubagentStageStrip({
         aria-live="polite"
       >
         <CheckCircleOutlined className="subagent-stage-strip__icon subagent-stage-strip__icon--done" />
-        <span className="subagent-stage-strip__done-text">写作专家流程已完成</span>
+        <span className="subagent-stage-strip__done-text">{doneText}</span>
       </div>
     );
   }

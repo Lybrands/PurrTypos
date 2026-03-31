@@ -197,19 +197,19 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
         try:
             from services.ai_provider import create_chat_stream
 
+            _am = (body.agentMode or "").strip().lower()
+            _cam = (body.chatAgentMode or "").strip().lower()
+            is_expert_team = _am == "expert_team" or _cam == "expert_team"
             is_writing_expert = bool(
                 body.bookId
                 and (
-                    (body.agentMode or "").strip().lower() == "subagent"
-                    or (body.chatAgentMode or "").strip().lower()
-                    in ("expert", "subagent")
+                    _am in ("subagent", "expert_team")
+                    or _cam in ("expert", "subagent", "expert_team")
                 )
             )
 
-            # ── 写作专家：多阶段子管线（分析→…→主稿流式呈现）────────────────
+            # ── 专家团：AutoGen 多智能体多轮对话 / 写作专家：LangGraph 子管线 ─────
             if is_writing_expert:
-                from services.subagent_pipeline import run_subagent_pipeline
-
                 tool_ctx: dict[str, Any] = {
                     "bookId": body.bookId,
                     "chapterId": body.chapterId,
@@ -229,35 +229,52 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
                 progress_queue: asyncio.Queue = asyncio.Queue()
 
-                def _send_subagent_progress(ev: dict[str, Any]) -> None:
+                def _send_writing_progress(ev: dict[str, Any]) -> None:
                     try:
                         progress_queue.put_nowait(ev)
                     except Exception:
                         pass
 
-                async def _subagent_runner() -> None:
+                async def _writing_runner() -> None:
                     try:
-                        await run_subagent_pipeline(
-                            send_chunk=_send_subagent_progress,
-                            signal=abort,
-                            key=key,
-                            api_provider=body.apiProvider,
-                            request_params=sub_rp,
-                            tool_ctx=tool_ctx,
-                            messages=list(body.messages or []),
-                            skill_specs={},
-                            agent_actions=list(body.agentActions)
-                            if body.agentActions
-                            else None,
-                            model=model,
-                        )
+                        if is_expert_team:
+                            from services.expert_team_autogen import run_expert_team_autogen
+
+                            await run_expert_team_autogen(
+                                send_chunk=_send_writing_progress,
+                                signal=abort,
+                                tool_ctx=tool_ctx,
+                                messages=list(body.messages or []),
+                                model=model,
+                                api_provider=body.apiProvider,
+                                key=key,
+                                request_params=sub_rp,
+                            )
+                        else:
+                            from services.subagent_pipeline import run_subagent_pipeline
+
+                            tool_ctx["pipeline_variant"] = "writing_expert"
+                            await run_subagent_pipeline(
+                                send_chunk=_send_writing_progress,
+                                signal=abort,
+                                key=key,
+                                api_provider=body.apiProvider,
+                                request_params=sub_rp,
+                                tool_ctx=tool_ctx,
+                                messages=list(body.messages or []),
+                                skill_specs={},
+                                agent_actions=list(body.agentActions)
+                                if body.agentActions
+                                else None,
+                                model=model,
+                            )
                     except Exception as e:
-                        logger.exception("[ai/chat/stream] subagent pipeline")
+                        logger.exception("[ai/chat/stream] writing expert / expert team")
                         await progress_queue.put({"error": str(e)})
                     finally:
                         await progress_queue.put(None)
 
-                sub_task = asyncio.create_task(_subagent_runner())
+                sub_task = asyncio.create_task(_writing_runner())
                 try:
                     while True:
                         item = await progress_queue.get()

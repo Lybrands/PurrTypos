@@ -23,6 +23,13 @@ function normalizeSubagentStageName(stage?: string): string {
   }
 }
 
+/** 写作专家或专家团：共用子管线协议与 UI */
+export function isWritingExpertPipeline(
+  mode: "legacy" | "subagent" | "expert_team" | undefined,
+): boolean {
+  return mode === "subagent" || mode === "expert_team";
+}
+
 export type ToolCallLabelOutcome = "ok" | "context_error";
 
 function resolveChapterTitleInCatalog(
@@ -316,7 +323,7 @@ export interface UseChatSubmitParams {
   modelConfigs: Record<string, { label?: string; max_tokens?: number }>;
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
-  agentMode?: "legacy" | "subagent";
+  agentMode?: "legacy" | "subagent" | "expert_team";
   /** legacy 下协作共创时传 collab，主进程注入协商提示并限制写入工具 */
   writingMode?: "default" | "collab";
   /** 写作专家管线多选阶段；默认 ['full'] */
@@ -385,7 +392,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (!userText || loading) return;
 
       const cfg = selectedModelConfig;
-      const forceNoThinking = agentMode === "subagent";
+      const forceNoThinking = isWritingExpertPipeline(agentMode);
       const expectThinking = forceNoThinking
         ? false
         : cfg
@@ -472,7 +479,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
       if (
         !text &&
-        agentMode === "subagent" &&
+        isWritingExpertPipeline(agentMode) &&
         cm.role === "assistant"
       ) {
         text = synthesizeAssistantTextFromToolSegments(cm).trim();
@@ -482,7 +489,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     };
 
     let subagentExtra = "";
-    if (agentMode === "subagent" && agentEnabled && bookId != null) {
+    if (isWritingExpertPipeline(agentMode) && agentEnabled && bookId != null) {
       const extra: string[] = [];
       if (associatedChapterIds.length > 0 && writingChapters.length > 0) {
         const bits = associatedChapterIds.map((id) => {
@@ -499,7 +506,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         extra.push(`用户在本轮对话中关联的大纲：${bits.join("、")}。`);
       }
       if (extra.length > 0) {
-        subagentExtra = `\n\n【写作专家 — 主会话附加上下文】\n${extra.join("\n")}`;
+        const brand = agentMode === "expert_team" ? "专家团" : "写作专家";
+        subagentExtra = `\n\n【${brand} — 主会话附加上下文】\n${extra.join("\n")}`;
       }
     }
 
@@ -621,7 +629,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (
         typeof chunk.subagentPipelineDigest === "string" &&
         chunk.subagentPipelineDigest.trim() &&
-        agentMode === "subagent"
+        isWritingExpertPipeline(agentMode)
       ) {
         const piece = chunk.subagentPipelineDigest.trim();
         acc.subagentPipelineDigest = acc.subagentPipelineDigest
@@ -645,7 +653,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         }
       }
       const skipSubagentStageUiForPayloadOnly =
-        agentMode === "subagent" &&
+        isWritingExpertPipeline(agentMode) &&
         chunk.subagentStageStarting !== true &&
         (chunk.subagentPayload !== undefined ||
           chunk.subagentPayloadMeta !== undefined);
@@ -823,7 +831,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         const delta = chunk.delta;
         if (acc.toolCallSegments?.length) {
           let after = (acc.contentAfterToolCalls ?? "") + delta;
-          if (agentMode !== "subagent") {
+          if (!isWritingExpertPipeline(agentMode)) {
             const lastS = acc.toolCallSegments[acc.toolCallSegments.length - 1];
             if (lastS?.textBefore && after.startsWith(lastS.textBefore)) {
               after = after.slice(lastS.textBefore.length);
@@ -1168,7 +1176,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                   partialContent && partialContent.trim()
                     ? partialContent
                     : !hasPriorToolRound
-                      ? agentMode === "subagent"
+                      ? isWritingExpertPipeline(agentMode)
                         ? ""
                         : acc.response || lastMsg.content || ""
                       : "";
@@ -1194,7 +1202,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                     ? ""
                     : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
                 if (
-                  agentMode !== "subagent" &&
+                  !isWritingExpertPipeline(agentMode) &&
                   flushTailSegments.length === 0 &&
                   textBefore &&
                   afterToolCalls.startsWith(textBefore)
@@ -1236,7 +1244,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             partialContent && partialContent.trim()
               ? partialContent
               : !hasPriorToolRound
-                ? agentMode === "subagent"
+                ? isWritingExpertPipeline(agentMode)
                   ? ""
                   : acc.response || ""
                 : "";
@@ -1260,7 +1268,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           let afterToolCallsBg =
             flushTailSegments.length > 0 ? "" : tailBg;
           if (
-            agentMode !== "subagent" &&
+            !isWritingExpertPipeline(agentMode) &&
             flushTailSegments.length === 0 &&
             textBefore &&
             afterToolCallsBg.startsWith(textBefore)
@@ -1303,7 +1311,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               const cm = last as ChatMessage;
               const stages = cm.subagentStages ?? [];
               const subagentStagesFinalized =
-                agentMode === "subagent" && stages.length > 0
+                isWritingExpertPipeline(agentMode) && stages.length > 0
                   ? stages.map((s) =>
                       s.status === "running"
                         ? { ...s, status: "done" as const }
@@ -1320,10 +1328,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 if (synthesized) {
                   finalContent = synthesized;
                 } else {
-                  finalContent =
-                    agentMode === "subagent"
-                      ? "内容同步中。"
-                      : "内容同步中。";
+                  finalContent = "内容同步中。";
                 }
               }
               if (digestTrim) {
@@ -1341,7 +1346,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
                 toolCalling: false,
                 subagentStageWorking: false,
-                ...(agentMode === "subagent"
+                ...(isWritingExpertPipeline(agentMode)
                   ? {
                       subagentBridging: false,
                       ...(subagentStagesFinalized
@@ -1466,7 +1471,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
     const modelConfig = modelConfigs[selectedModel];
     const effectiveThinking =
-      agentMode === "subagent"
+      isWritingExpertPipeline(agentMode)
         ? false
         : Boolean(
             cfg?.thinkingOnly ||
@@ -1498,7 +1503,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           | "disabled",
       },
       max_tokens: modelConfig?.max_tokens ?? 8192,
-      ...(agentMode === "subagent" ? { top_k: 45 } : {}),
+      ...(isWritingExpertPipeline(agentMode) ? { top_k: 45 } : {}),
     };
 
     const hasBookContext = bookId != null;
@@ -1527,9 +1532,18 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       associatedOutlineIds:
         associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
       agentMode,
-      chatAgentMode: writingMode === "collab" ? "collab" : (agentMode === "subagent" ? "expert" : (agentEnabled ? "agent" : "ask")),
+      chatAgentMode:
+        writingMode === "collab"
+          ? "collab"
+          : agentMode === "expert_team"
+            ? "expert_team"
+            : agentMode === "subagent"
+              ? "expert"
+              : agentEnabled
+                ? "agent"
+                : "ask",
       ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
-      ...(agentMode === "subagent"
+      ...(isWritingExpertPipeline(agentMode) && agentMode !== "expert_team"
         ? {
             agentActions:
               agentActions && agentActions.length > 0 ? agentActions : ["full"],
