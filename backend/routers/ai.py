@@ -484,6 +484,8 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         }
                         if accumulated_content:
                             asst_msg["content"] = accumulated_content
+                        if accumulated_thinking:
+                            asst_msg["reasoning_content"] = accumulated_thinking
                         messages = messages + [asst_msg]
                         for r in tool_results:
                             messages.append({
