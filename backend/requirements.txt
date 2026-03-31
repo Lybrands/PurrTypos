@@ -10,3 +10,5 @@ mem0ai>=0.1.0
 python-frontmatter>=1.1.0
 pyyaml>=6.0.0
 numpy>=1.26.0
+langgraph>=0.2.0
+langchain-core>=0.3.0
