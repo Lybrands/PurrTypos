@@ -231,11 +231,51 @@ def normalize_analyze_report(raw: Any, fallback_user_text: str = "") -> dict:
     }
 
 
+def _normalize_beat_entry(x: Any) -> dict | str | None:
+    """保留结构化节拍（dict），供摘要渲染；纯字符串节拍仍支持。"""
+    if isinstance(x, dict):
+        out: dict[str, Any] = {}
+        for k, v in x.items():
+            key = str(k).strip()[:64]
+            if not key:
+                continue
+            if isinstance(v, list):
+                items = [str(i).strip()[:600] for i in v[:30]]
+                items = [i for i in items if i]
+                if items:
+                    out[key] = items
+            elif isinstance(v, dict):
+                s = json.dumps(v, ensure_ascii=False)
+                if s:
+                    out[key] = s[:1200]
+            else:
+                sv = str(v).strip()
+                if not sv:
+                    continue
+                lim = (
+                    8000
+                    if key.lower()
+                    in ("content", "body", "text", "description", "summary", "plot")
+                    else 2000
+                )
+                out[key] = sv[:lim]
+        return out if out else None
+    s = str(x).strip()
+    return s[:3000] if s else None
+
+
 def normalize_writing_blueprint(raw: Any) -> dict:
     val = raw if isinstance(raw, dict) else {}
+    beats_out: list[dict | str] = []
+    raw_beats = val.get("beats")
+    if isinstance(raw_beats, list):
+        for item in raw_beats[:20]:
+            nb = _normalize_beat_entry(item)
+            if nb is not None:
+                beats_out.append(nb)
     return {
         "chapterGoal": str(val.get("chapterGoal") or "")[:1000],
-        "beats": [str(x) for x in val.get("beats", [])][:20] if isinstance(val.get("beats"), list) else [],
+        "beats": beats_out,
         "tone": str(val.get("tone") or "")[:200],
         "constraints": [str(x) for x in val.get("constraints", [])][:20] if isinstance(val.get("constraints"), list) else [],
         "requiredMaterials": [

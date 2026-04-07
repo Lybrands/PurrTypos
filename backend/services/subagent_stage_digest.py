@@ -18,6 +18,104 @@ def _bullet_list(items: list[Any], max_items: int, prefix: str = "- ") -> list[s
     return out
 
 
+# 规划阶段：模型常输出结构化 beat 对象（beatId、position、content 等）
+_BEAT_FIELD_LABELS: dict[str, str] = {
+    "beatId": "编号",
+    "position": "位置",
+    "content": "情节",
+    "characterFocus": "视角",
+    "keyElements": "关键要素",
+    "goalLink": "目标关联",
+    "constraintCheck": "约束自检",
+}
+
+_BEAT_FIELD_ORDER: tuple[str, ...] = (
+    "beatId",
+    "position",
+    "characterFocus",
+    "content",
+    "keyElements",
+    "goalLink",
+    "constraintCheck",
+)
+
+
+def _format_beat_digest_lines(b: Any) -> list[str]:
+    """将单条节拍渲染为 Markdown 列表块（避免 str(dict) 原样展示）。"""
+    if isinstance(b, str):
+        t = b.strip()
+        return [f"- {t}"] if t else []
+    if not isinstance(b, dict):
+        t = str(b).strip()
+        return [f"- {t}"] if t else []
+
+    lines: list[str] = []
+    bid = str(b.get("beatId") or "").strip()
+    pos = str(b.get("position") or "").strip()
+    title_bits = [x for x in (bid, pos) if x]
+    if title_bits:
+        lines.append(f"- **{' · '.join(title_bits)}**")
+    else:
+        lines.append("- **节拍**")
+
+    def append_field(label: str, text: str, multiline: bool) -> None:
+        if not text:
+            return
+        if multiline:
+            parts = [p.strip() for p in text.split("\n") if p.strip()]
+            if not parts:
+                return
+            first, rest = parts[0], parts[1:13]
+            lines.append(f"  - **{label}**　{first}")
+            for para in rest:
+                lines.append(f"    - {para}")
+            if len(parts) > 13:
+                lines.append("    - …")
+        else:
+            if len(text) > 1200:
+                text = text[:1200] + "…"
+            lines.append(f"  - **{label}**　{text}")
+
+    for key in _BEAT_FIELD_ORDER:
+        if key in ("beatId", "position"):
+            continue
+        if key not in b:
+            continue
+        val = b[key]
+        label = _BEAT_FIELD_LABELS.get(key, key)
+        if isinstance(val, list):
+            items = [str(x).strip() for x in val if str(x).strip()]
+            if not items:
+                continue
+            joined = "；".join(items)
+            if len(joined) > 800:
+                joined = joined[:800] + "…"
+            lines.append(f"  - **{label}**　{joined}")
+        else:
+            text = str(val).strip()
+            append_field(label, text, multiline=key == "content" and "\n" in text)
+
+    order_set = frozenset(_BEAT_FIELD_ORDER)
+    for key in sorted(str(k) for k in b.keys()):
+        if key in order_set:
+            continue
+        val = b.get(key)
+        label = _BEAT_FIELD_LABELS.get(key, key)
+        if isinstance(val, list):
+            items = [str(x).strip() for x in val if str(x).strip()]
+            if not items:
+                continue
+            joined = "；".join(items)
+            if len(joined) > 600:
+                joined = joined[:600] + "…"
+            lines.append(f"  - **{label}**　{joined}")
+        else:
+            text = str(val).strip() if val is not None else ""
+            append_field(label, text, multiline="\n" in text)
+
+    return lines
+
+
 def format_analyze_digest(report: dict | None) -> str:
     if not report or not isinstance(report, dict):
         return "### 分析结果\n\n（无法展示：分析数据为空）"
@@ -69,7 +167,8 @@ def format_plan_digest(blueprint: dict | None) -> str:
     beats = blueprint.get("beats")
     if isinstance(beats, list) and beats:
         lines.append("**节拍 / 关键情节**")
-        lines.extend(_bullet_list(beats, 24))
+        for beat in beats[:24]:
+            lines.extend(_format_beat_digest_lines(beat))
         lines.append("")
     cons = blueprint.get("constraints")
     if isinstance(cons, list) and cons:
