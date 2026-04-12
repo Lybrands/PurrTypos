@@ -63,7 +63,7 @@ STAGE_PINNED_TOOLS: dict[str, list[str]] = {
     ],
     STAGES.POLISH: [
         "getStoryBackground", "getGlobalOutline", "listWritingChapters",
-        "getChapterContent", "batchGetChapterContents", "createWritingChapter", "editChapterContent",
+        "getChapterContent", "batchGetChapterContents", "createWritingChapter",
     ],
 }
 

@@ -119,7 +119,8 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
             f"你是小说写作「风格统一专家」。任务：在**不改变剧情与人设前提**下，使当前章初稿的叙述方式、节奏、人称与语感与**紧邻当前章之前的若干章正文**保持一致。"
             "必须先调用 listWritingChapters 确认目录，再按宿主给出的 chapterId 列表用 batchGetChapterContents（或多次 getChapterContent）"
             "读取**至少 3 章、至多 5 章**前文正文（若前文不足则读全部可用前文；第 1 章无前文时须在 styleAnchors 中说明）。"
-            "归纳「文风锚点」后再改写初稿。若需写回编辑器可调用 editChapterContent；一旦成功，JSON 中 content 可短占位，changeSummary 仍须说明相对初稿的调整。"
+            "归纳「文风锚点」后再改写初稿，将统一后的完整正文放入 JSON 的 content 字段；changeSummary 须说明相对初稿的调整。"
+            "**禁止调用 editChapterContent**，正文写回由系统在所有阶段完成后统一执行。"
             "可调用 addSparkIdea。输出必须是 JSON，且只包含约定字段。\n"
             f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
@@ -150,8 +151,9 @@ SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {
         "outputType": "PolishedResult",
         "systemPrompt": (
             f"你是小说写作「润色专家」（Patch 式修复）。基于审校问题与局部上下文逐点修复，避免大范围无关改写；"
-            "优先修复高严重度问题，并保持剧情/人设不变形。若需写回当前章节，必须调用 editChapterContent；"
-            "调用成功后，输出 JSON 时 finalText 可短占位，但 changeSummary 必须清晰说明改动点与影响范围。"
+            "优先修复高严重度问题，并保持剧情/人设不变形。"
+            "将修复后的完整正文放入 JSON 的 finalText 字段；changeSummary 必须清晰说明改动点与影响范围。"
+            "**禁止调用 editChapterContent**，正文写回由系统在所有阶段完成后统一执行。"
             "可调用 addSparkIdea 等辅助工具。最终输出必须是 JSON，且只包含约定字段。\n"
             f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"

@@ -63,7 +63,8 @@ EXPERT_TEAM_REGISTRY: dict[str, dict[str, str]] = {
             "须先 listWritingChapters，再按宿主列表用 batchGetChapterContents/getChapterContent 读 **3～5 章**前文（不足则读满）；"
             "第 1 章无前文时在 styleAnchors 注明。\n"
             "归纳 styleAnchors 时须体现「追读节奏观察」与「前文语感锚点」。\n"
-            "若需写回可调用 editChapterContent；成功后 JSON 中 content 可短占位，changeSummary 须说明相对初稿的调整。\n"
+            "将统一后的完整正文放入 JSON 的 content 字段；changeSummary 须说明相对初稿的调整。\n"
+            "**禁止调用 editChapterContent**，正文写回由系统在所有阶段完成后统一执行。\n"
             f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
             f"{OUTLINE_LOCATOR_HARD_RULE}"
@@ -88,7 +89,8 @@ EXPERT_TEAM_REGISTRY: dict[str, dict[str, str]] = {
         "outputType": "PolishedResult",
         "systemPrompt": (
             "你是「主笔」的润色定稿环节：在设定审校意见基础上做补丁式修订，避免无关大改，保持人设与剧情不变形。\n"
-            "优先高严重度问题；若需写回须调用 editChapterContent；成功后 finalText 可短占位，changeSummary 必须清晰。\n"
+            "优先高严重度问题；将修复后的完整正文放入 JSON 的 finalText 字段，changeSummary 必须清晰。\n"
+            "**禁止调用 editChapterContent**，正文写回由系统在所有阶段完成后统一执行。\n"
             f"{BODY_DIALOGUE_QUOTE_RULE}\n"
             f"{CHAPTER_LOCATOR_HARD_RULE}\n"
             f"{OUTLINE_LOCATOR_HARD_RULE}"

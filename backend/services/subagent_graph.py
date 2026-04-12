@@ -198,17 +198,16 @@ async def run_writing_expert_langgraph(
             "changeSummary（string：相对「待统一初稿」的修改说明）、",
             "priorChaptersRead（可选 array，每项含 chapterId、title，标明实际参照的章节）。",
             "必须先 listWritingChapters，再按宿主列表中的 chapterId 用 batchGetChapterContents 或 getChapterContent 读取前文；不得跳过读前文直接臆造风格。",
-            "若需写回当前章：在输出 JSON 前调用 editChapterContent；成功后 JSON 中 content 可短占位。",
+            "将统一后的完整正文放入 JSON 的 content 字段（禁止调用 editChapterContent，正文写回由系统在所有阶段完成后统一执行）。",
             prior_hint,
             "\n待统一初稿：\n",
             draft_plain,
         ])
         style_res = await run_stage(STAGES.STYLE_UNIFY, style_input)
         style_unify_report = normalize_style_unify_result(style_res["parsed"])
-        style_skip_full_text = bool(style_res.get("editChapterSaved"))
         merged = str(style_unify_report.get("content") or "").strip()
         new_plain = draft_plain
-        if merged and (not style_skip_full_text or looks_like_body_text(merged)):
+        if merged and looks_like_body_text(merged):
             new_plain = merged
         send_chunk({
             "subagentStage": STAGES.STYLE_UNIFY,
@@ -233,7 +232,7 @@ async def run_writing_expert_langgraph(
         return {
             "draft_plain": new_plain,
             "style_unify_report": style_unify_report,
-            "style_skip_full_text": style_skip_full_text,
+            "style_skip_full_text": False,
         }
 
     async def node_review(state: SubagentGraphState) -> dict[str, Any]:
@@ -290,9 +289,8 @@ async def run_writing_expert_langgraph(
         review_issues = state.get("review_issues") or []
         polish_input = "\n".join([
             "请输出 PolishedResult JSON（仅 JSON），字段：finalText、changeSummary。",
-            "若需将润色结果保存到左侧当前写作章节：在输出 JSON 之前先调用 editChapterContent，参数 content 为润色后的完整正文。",
-            "若已成功调用 editChapterContent，JSON 中 finalText 可填简短占位或空串，changeSummary 仍须简要说明改动。",
-            "不要要求全文，仅基于问题点位与上下文窗口修订。",
+            "finalText 必须为润色后的完整正文（禁止调用 editChapterContent，正文写回由系统在所有阶段完成后统一执行）。",
+            "仅基于问题点位与上下文窗口修订，不要大范围无关改写。",
             "ReviewIssuesWithContext:",
             json.dumps([
                 {**x, "context": x.get("context") or extract_context_around_span(draft_plain, x.get("span", ""))}
@@ -301,11 +299,10 @@ async def run_writing_expert_langgraph(
         ])
         polish_res = await run_stage(STAGES.POLISH, polish_input)
         p = polish_res["parsed"] if isinstance(polish_res.get("parsed"), dict) else {}
-        polish_skip_full_text = bool(polish_res.get("editChapterSaved"))
         polished_candidate = str(p.get("finalText") or "").strip()
         polish_final_text = (
             polished_candidate
-            if polished_candidate and (not polish_skip_full_text or looks_like_body_text(polished_candidate))
+            if polished_candidate and looks_like_body_text(polished_candidate)
             else str(draft_plain or "")
         )
         polish_change_summary = str(p.get("changeSummary") or "")
@@ -324,7 +321,7 @@ async def run_writing_expert_langgraph(
         return {
             "polish_final_text": polish_final_text,
             "polish_change_summary": polish_change_summary,
-            "polish_skip_full_text": polish_skip_full_text,
+            "polish_skip_full_text": False,
         }
 
     async def node_final_writeback(state: SubagentGraphState) -> dict[str, Any]:
@@ -332,6 +329,13 @@ async def run_writing_expert_langgraph(
         draft_plain = str(state.get("draft_plain") or "")
         final_content = str(polish_final or draft_plain or "").strip()
         chapter_id = str((tool_ctx or {}).get("chapterId") or "").strip()
+
+        def _forward_writeback_events(ev: dict | None) -> None:
+            if not ev:
+                return
+            if ev.get("chapterContentUpdated") is not None:
+                send_chunk({"chapterContentUpdated": ev["chapterContentUpdated"]})
+
         if final_content and chapter_id:
             final_write_call = {
                 "id": f"final_write_{int(time.time() * 1000)}",
@@ -344,7 +348,9 @@ async def run_writing_expert_langgraph(
                     ),
                 },
             }
-            final_res = await executor_run_tools([final_write_call], tool_ctx, lambda _: None)
+            final_res = await executor_run_tools(
+                [final_write_call], tool_ctx, _forward_writeback_events,
+            )
             payload_str = str((final_res[0] if final_res else {}).get("content") or "")
             try:
                 ok = json.loads(payload_str).get("success") is True
