@@ -200,7 +200,7 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
             _am = (body.agentMode or "").strip().lower()
             _cam = (body.chatAgentMode or "").strip().lower()
             is_expert_team = _am == "expert_team" or _cam == "expert_team"
-            is_writing_expert = bool(
+            is_writing_expert_book = bool(
                 body.bookId
                 and (
                     _am in ("subagent", "expert_team")
@@ -208,25 +208,25 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 )
             )
 
-            # ── 专家团：AutoGen 多智能体多轮对话 / 写作专家：LangGraph 子管线 ─────
-            if is_writing_expert:
-                tool_ctx: dict[str, Any] = {
-                    "bookId": body.bookId,
-                    "chapterId": body.chapterId,
-                    "currentChapterTitle": body.currentChapterTitle,
-                    "writingChapters": list(body.writingChapters or []),
-                    "availableOutlines": list(body.availableOutlines or []),
-                    "associatedChapterIds": list(body.associatedChapterIds or []),
-                    "associatedOutlineIds": list(body.associatedOutlineIds or []),
-                }
-                sub_rp: dict[str, Any] = {
-                    "model": model,
-                    **rest,
-                    "baseURL": base_url,
-                }
-                if temperature is not None:
-                    sub_rp["temperature"] = temperature
+            tool_ctx_book: dict[str, Any] = {
+                "bookId": body.bookId,
+                "chapterId": body.chapterId,
+                "currentChapterTitle": body.currentChapterTitle,
+                "writingChapters": list(body.writingChapters or []),
+                "availableOutlines": list(body.availableOutlines or []),
+                "associatedChapterIds": list(body.associatedChapterIds or []),
+                "associatedOutlineIds": list(body.associatedOutlineIds or []),
+            }
+            sub_rp: dict[str, Any] = {
+                "model": model,
+                **rest,
+                "baseURL": base_url,
+            }
+            if temperature is not None:
+                sub_rp["temperature"] = temperature
 
+            # ── 专家团：AutoGen 多智能体多轮对话 ─────────────────────────────
+            if is_writing_expert_book and is_expert_team:
                 progress_queue: asyncio.Queue = asyncio.Queue()
 
                 def _send_writing_progress(ev: dict[str, Any]) -> None:
@@ -237,39 +237,20 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
                 async def _writing_runner() -> None:
                     try:
-                        if is_expert_team:
-                            from services.expert_team_autogen import run_expert_team_autogen
+                        from services.expert_team_autogen import run_expert_team_autogen
 
-                            await run_expert_team_autogen(
-                                send_chunk=_send_writing_progress,
-                                signal=abort,
-                                tool_ctx=tool_ctx,
-                                messages=list(body.messages or []),
-                                model=model,
-                                api_provider=body.apiProvider,
-                                key=key,
-                                request_params=sub_rp,
-                            )
-                        else:
-                            from services.subagent_pipeline import run_subagent_pipeline
-
-                            tool_ctx["pipeline_variant"] = "writing_expert"
-                            await run_subagent_pipeline(
-                                send_chunk=_send_writing_progress,
-                                signal=abort,
-                                key=key,
-                                api_provider=body.apiProvider,
-                                request_params=sub_rp,
-                                tool_ctx=tool_ctx,
-                                messages=list(body.messages or []),
-                                skill_specs={},
-                                agent_actions=list(body.agentActions)
-                                if body.agentActions
-                                else None,
-                                model=model,
-                            )
+                        await run_expert_team_autogen(
+                            send_chunk=_send_writing_progress,
+                            signal=abort,
+                            tool_ctx=tool_ctx_book,
+                            messages=list(body.messages or []),
+                            model=model,
+                            api_provider=body.apiProvider,
+                            key=key,
+                            request_params=sub_rp,
+                        )
                     except Exception as e:
-                        logger.exception("[ai/chat/stream] writing expert / expert team")
+                        logger.exception("[ai/chat/stream] expert team")
                         await progress_queue.put({"error": str(e)})
                     finally:
                         await progress_queue.put(None)
@@ -289,6 +270,56 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         except asyncio.CancelledError:
                             pass
 
+                return
+
+            # ── 写作专家：按需子专家（单次调用，非管线）────────────────────────
+            if is_writing_expert_book and body.subagentRole:
+                progress_queue2: asyncio.Queue = asyncio.Queue()
+
+                def _send_sub(ev: dict[str, Any]) -> None:
+                    try:
+                        progress_queue2.put_nowait(ev)
+                    except Exception:
+                        pass
+
+                async def _sub_runner() -> None:
+                    try:
+                        from services.writing_subagents import run_writing_subagent
+
+                        await run_writing_subagent(
+                            role=str(body.subagentRole),
+                            send_chunk=_send_sub,
+                            signal=abort,
+                            key=key,
+                            api_provider=body.apiProvider,
+                            request_params=sub_rp,
+                            tool_ctx=dict(tool_ctx_book),
+                            messages=list(body.messages or []),
+                            model=model,
+                        )
+                    except Exception as e:
+                        logger.exception("[ai/chat/stream] writing subagent")
+                        await progress_queue2.put({"error": str(e)})
+                    finally:
+                        await progress_queue2.put(None)
+
+                sub_task2 = asyncio.create_task(_sub_runner())
+                try:
+                    while True:
+                        item = await progress_queue2.get()
+                        if item is None:
+                            break
+                        yield json.dumps(item)
+                finally:
+                    if not sub_task2.done():
+                        sub_task2.cancel()
+                        try:
+                            await sub_task2
+                        except asyncio.CancelledError:
+                            pass
+
+                if not abort.is_set():
+                    yield json.dumps({"done": True, "model": model})
                 return
 
             # ── Agent mode: load tools from skill definitions ─────────────
@@ -326,6 +357,9 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "chapterId": body.chapterId,
                 "currentChapterTitle": body.currentChapterTitle,
                 "writingChapters": list(body.writingChapters or []),
+                "availableOutlines": list(body.availableOutlines or []),
+                "associatedChapterIds": list(body.associatedChapterIds or []),
+                "associatedOutlineIds": list(body.associatedOutlineIds or []),
                 "collabWriting": is_collab,
             }
 
@@ -352,6 +386,26 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                             break
                     if not _seen_system:
                         messages.insert(0, {"role": "system", "content": collab_inject})
+
+            if (
+                body.bookId
+                and not body.subagentRole
+                and (_cam == "expert" or _am == "subagent")
+            ):
+                from utils.writing_prompt import build_writing_main_system_prompt
+
+                writing_inject = build_writing_main_system_prompt(tool_ctx_book)
+                if writing_inject:
+                    _seen_w = False
+                    for m in messages:
+                        if isinstance(m, dict) and m.get("role") == "system":
+                            cur = str(m.get("content") or "")
+                            m["content"] = f"{writing_inject}\n\n{cur}" if cur else writing_inject
+                            _seen_w = True
+                            break
+                    if not _seen_w:
+                        messages.insert(0, {"role": "system", "content": writing_inject})
+
             used_model = model
             _MAX_ROUNDS = 6
 

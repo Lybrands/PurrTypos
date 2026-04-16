@@ -134,6 +134,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAiFavorites: () => apiGet('/ai-favorites'),
   deleteAiFavorite: (data) => apiDelete(`/ai-favorites/${data.id}`),
 
+  // ─── Prompt templates — HTTP ───────────────────────────────────
+  listPromptTemplates: () => apiGet('/prompt-templates'),
+  createPromptTemplate: (data) => apiPost('/prompt-templates', data),
+  updatePromptTemplate: (data) => apiPut(`/prompt-templates/${data.id}`, data.data ?? {}),
+  deletePromptTemplate: (data) => apiDelete(`/prompt-templates/${data.id}`),
+  reorderPromptTemplates: (data) => apiPost('/prompt-templates/reorder', { ids: data.ids }),
+
   // ─── Spark ideas — HTTP ────────────────────────────────────────
   addSparkIdea: (data) => apiPost('/spark-ideas', data),
   updateSparkIdea: (data) => apiPut(`/spark-ideas/${data.id}`, { data: data.data }),

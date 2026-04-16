@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatStreamRequest(BaseModel):
@@ -23,7 +23,14 @@ class ChatStreamRequest(BaseModel):
     agentMode: Optional[str] = None
     chatAgentMode: Optional[str] = None
     writingMode: str = "default"
-    agentActions: Optional[List[str]] = None
+    agentActions: Optional[List[str]] = Field(
+        default=None,
+        deprecated=True,
+        description="Deprecated: ignored by server; on-demand experts use subagentRole",
+    )
+    subagentRole: Optional[
+        Literal["review", "polish", "continuation_plan", "style_unify"]
+    ] = None
 
 
 class ListModelsRequest(BaseModel):

@@ -119,6 +119,16 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, 'ALTER TABLE ai_favorites ADD COLUMN prompt TEXT DEFAULT ""')
 
+    # ── ai_prompt_templates ──────────────────────────────────────
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_prompt_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        sort INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # ── ai_memories ──────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,7 +1,7 @@
 """
 专家团模式 — Microsoft AutoGen（aut AgentChat）多智能体多轮对话。
 
-与写作专家（LangGraph 顺序管线）隔离：本模块仅在选择「专家团」时启用。
+与写作专家（单 Agent + 按需子专家）隔离：本模块仅在选择「专家团」时启用。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from services.subagent_pipeline import _build_subagent_tooling_context_appendix
+from utils.tooling_context import build_tooling_context_appendix
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,7 @@ async def run_expert_team_autogen(
         (str(m.get("content") or "") for m in (messages or []) if m.get("role") == "system"),
         "",
     ).strip()
-    raw_appendix = _build_subagent_tooling_context_appendix(tool_ctx or {})
+    raw_appendix = build_tooling_context_appendix(tool_ctx or {})
     appendix = _strip_ids_from_context(raw_appendix) if raw_appendix else ""
     task_parts = [
         user_text,
