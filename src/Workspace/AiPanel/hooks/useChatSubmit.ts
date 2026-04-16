@@ -6,25 +6,10 @@ import {
   appendAssistantTailMarkdown,
   mergeAssistantErrorNotice,
 } from "../rendering";
-
-function normalizeSubagentStageName(stage?: string): string {
-  switch (String(stage || "").trim()) {
-    case "analyze":
-      return "分析专家";
-    case "plan":
-      return "规划专家";
-    case "draft":
-      return "撰稿专家";
-    case "review":
-      return "审校专家";
-    case "polish":
-      return "润色专家";
-    case "styleUnify":
-      return "风格统一专家";
-    default:
-      return String(stage || "").trim();
-  }
-}
+import {
+  parseWritingSlashCommand,
+  type WritingSubagentRole,
+} from "../pipelineStages";
 
 /** 写作专家或专家团：共用子管线协议与 UI */
 export function isWritingExpertPipeline(
@@ -297,6 +282,31 @@ export interface ChatMessage {
   subagentMainPresenter?: boolean;
   /** 写作专家：各阶段摘要（Markdown），在工具条与主答复之前展示 */
   subagentPipelineDigest?: string;
+  /** 按需子专家进行中 */
+  writingSubagentActive?: boolean;
+  writingSubagentLabel?: string;
+  writingSubagentRole?: WritingSubagentRole;
+  /** 子专家结构化结果（审校 / 规划 / 润色 / 风格） */
+  subagentResult?: { role: WritingSubagentRole; payload: unknown };
+}
+
+function summarizeSubagentResult(cm: ChatMessage): string {
+  const sr = cm.subagentResult;
+  if (!sr) return "";
+  if (sr.role === "review") {
+    const n = ((sr.payload as { issues?: unknown[] })?.issues ?? []).length;
+    return `审校完成：共 ${n} 条问题（见下方卡片）。`;
+  }
+  if (sr.role === "continuation_plan") {
+    return "续写规划已生成（见下方 Blueprint 卡片）。";
+  }
+  if (sr.role === "polish") {
+    return "润色结果已生成（见下方卡片，可「应用到当前章」）。";
+  }
+  if (sr.role === "style_unify") {
+    return "风格统一结果已生成（见下方卡片，可「应用到当前章」）。";
+  }
+  return "";
 }
 
 export interface UseChatSubmitParams {
@@ -329,8 +339,9 @@ export interface UseChatSubmitParams {
   agentMode?: "legacy" | "subagent" | "expert_team";
   /** legacy 下协作共创时传 collab，主进程注入协商提示并限制写入工具 */
   writingMode?: "default" | "collab";
-  /** 写作专家管线多选阶段；默认 ['full'] */
-  agentActions?: string[];
+  /** 写作专家：下次发送使用的子专家；发送后由 onPendingSubagentRoleConsumed 清空 */
+  pendingSubagentRole?: WritingSubagentRole | null;
+  onPendingSubagentRoleConsumed?: () => void;
 }
 
 export function useChatSubmit(params: UseChatSubmitParams) {
@@ -361,7 +372,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedForeshadowingIds,
     agentMode = "legacy",
     writingMode = "default",
-    agentActions = ["full"],
+    pendingSubagentRole = null,
+    onPendingSubagentRoleConsumed,
   } = params;
 
   const { message: appMessage } = AntdApp.useApp();
@@ -391,8 +403,22 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   /** 可选：从某条用户消息重新编辑并发送，会丢弃该条之后的所有消息 */
   const handleSubmit = React.useCallback(
     async (resend?: { editIndex: number; content: string }) => {
-      const userText = (resend?.content ?? prompt).trim();
-      if (!userText || loading) return;
+      const rawUserText = (resend?.content ?? prompt).trim();
+      if (!rawUserText || loading) return;
+
+      const slash = parseWritingSlashCommand(rawUserText);
+      const effectiveUserText = slash.stripped || rawUserText;
+      const effSubagentRole: WritingSubagentRole | null =
+        agentMode === "expert_team"
+          ? null
+          : (slash.role ?? pendingSubagentRole ?? null);
+      onPendingSubagentRoleConsumed?.();
+
+      const userText = effectiveUserText;
+      if (!userText) {
+        appMessage.warning("请输入有效内容");
+        return;
+      }
 
       const cfg = selectedModelConfig;
       const forceNoThinking = isWritingExpertPipeline(agentMode);
@@ -597,7 +623,29 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       if (chunk.toolRouterWarning) {
         appMessage.warning(chunk.toolRouterWarning);
       }
-      if (chunk.subagentBridging === true || chunk.subagentBridging === false) {
+      if (chunk.writingSubagentStart && isVisibleSession()) {
+        const w = chunk.writingSubagentStart as {
+          role?: WritingSubagentRole;
+          label?: string;
+        };
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              writingSubagentActive: true,
+              writingSubagentLabel: w.label,
+              writingSubagentRole: w.role,
+            };
+            return next;
+          });
+        });
+      }
+      if (chunk.writingSubagentDelta?.delta) {
+        const delta = chunk.writingSubagentDelta.delta;
+        acc.response += delta;
         if (isVisibleSession()) {
           flushSync(() => {
             setConversations((prev) => {
@@ -605,156 +653,45 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               const last = next[next.length - 1];
               if (!last || last.role !== "assistant") return prev;
               next[next.length - 1] = {
-                ...(last as ChatMessage),
-                subagentBridging: chunk.subagentBridging === true,
+                ...last,
+                content: (last.content || "") + delta,
               };
               return next;
             });
           });
         }
       }
-      if (chunk.subagentMainPresenter) {
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              next[next.length - 1] = {
-                ...(last as ChatMessage),
-                subagentMainPresenter: true,
-              };
-              return next;
-            });
+      if (chunk.writingSubagentResult && isVisibleSession()) {
+        const wr = chunk.writingSubagentResult as {
+          role: WritingSubagentRole;
+          payload: unknown;
+        };
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              subagentResult: { role: wr.role, payload: wr.payload },
+            };
+            return next;
           });
-        }
+        });
       }
-      if (
-        typeof chunk.subagentPipelineDigest === "string" &&
-        chunk.subagentPipelineDigest.trim() &&
-        isWritingExpertPipeline(agentMode)
-      ) {
-        const piece = chunk.subagentPipelineDigest.trim();
-        acc.subagentPipelineDigest = acc.subagentPipelineDigest
-          ? `${acc.subagentPipelineDigest}\n\n${piece}`
-          : piece;
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const prevD = ((last as ChatMessage).subagentPipelineDigest ?? "").trim();
-              const merged = prevD ? `${prevD}\n\n${piece}` : piece;
-              next[next.length - 1] = {
-                ...(last as ChatMessage),
-                subagentPipelineDigest: merged,
-              };
-              return next;
-            });
+      if (chunk.writingSubagentDone && isVisibleSession()) {
+        flushSync(() => {
+          setConversations((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (!last || last.role !== "assistant") return prev;
+            next[next.length - 1] = {
+              ...(last as ChatMessage),
+              writingSubagentActive: false,
+            };
+            return next;
           });
-        }
-      }
-      const skipSubagentStageUiForPayloadOnly =
-        isWritingExpertPipeline(agentMode) &&
-        chunk.subagentStageStarting !== true &&
-        (chunk.subagentPayload !== undefined ||
-          chunk.subagentPayloadMeta !== undefined);
-      if (
-        (chunk.subagentStage || chunk.subagentStageName) &&
-        !skipSubagentStageUiForPayloadOnly
-      ) {
-        if (isVisibleSession()) {
-          const stageId = chunk.subagentStage;
-          const stageName =
-            chunk.subagentStageName ||
-            normalizeSubagentStageName(chunk.subagentStage);
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const prevStages = (last as ChatMessage).subagentStages ?? [];
-              const normalizedId = String(stageId || "").trim();
-              const existingIdx = normalizedId
-                ? prevStages.findIndex((s) => s.id === normalizedId)
-                : -1;
-              let nextStages = prevStages.map((s) =>
-                s.status === "running" ? { ...s, status: "done" as const } : s,
-              );
-              if (existingIdx >= 0) {
-                nextStages = nextStages.map((s, i) =>
-                  i === existingIdx
-                    ? {
-                        ...s,
-                        name: stageName || s.name,
-                        status: "running" as const,
-                      }
-                    : s,
-                );
-              } else if (normalizedId || stageName) {
-                nextStages = [
-                  ...nextStages,
-                  {
-                    id: normalizedId || stageName,
-                    name: stageName || normalizedId,
-                    status: "running" as const,
-                  },
-                ];
-              }
-              next[next.length - 1] = {
-                ...(last as ChatMessage),
-                subagentStageId: stageId || (last as ChatMessage).subagentStageId,
-                subagentStageName:
-                  stageName || (last as ChatMessage).subagentStageName,
-                subagentStageWorking: true,
-                subagentStages: nextStages,
-              };
-              return next;
-            });
-          });
-        }
-      }
-      if (chunk.subagentStageDone && chunk.subagentStageName) {
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const prevStages = (last as ChatMessage).subagentStages ?? [];
-              const doneStageId = String(chunk.subagentStageDone || "").trim();
-              let found = false;
-              let nextStages = prevStages.map((s) => {
-                if (
-                  (doneStageId && s.id === doneStageId) ||
-                  (!doneStageId && s.name === chunk.subagentStageName)
-                ) {
-                  found = true;
-                  return { ...s, status: "done" as const };
-                }
-                return s;
-              });
-              if (!found && chunk.subagentStageName) {
-                nextStages = [
-                  ...nextStages,
-                  {
-                    id: doneStageId || chunk.subagentStageName,
-                    name: chunk.subagentStageName,
-                    status: "done" as const,
-                  },
-                ];
-              }
-              next[next.length - 1] = {
-                ...(last as ChatMessage),
-                subagentStageWorking: false,
-                subagentLastCompletedStageName: chunk.subagentStageName,
-                subagentStages: nextStages,
-              };
-              return next;
-            });
-          });
-        }
+        });
       }
       if (chunk.orchestratorRepair?.repairedRounds) {
         if (isVisibleSession()) {
@@ -1352,7 +1289,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                   if (synthesized) {
                     finalContent = synthesized;
                   } else {
-                    finalContent = "内容同步中。";
+                    const subSummary = summarizeSubagentResult(cm);
+                    finalContent = subSummary || "内容同步中。";
                   }
                 }
               }
@@ -1568,12 +1506,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
                 ? "agent"
                 : "ask",
       ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
-      ...(isWritingExpertPipeline(agentMode) && agentMode !== "expert_team"
-        ? {
-            agentActions:
-              agentActions && agentActions.length > 0 ? agentActions : ["full"],
-          }
-        : {}),
+      ...(effSubagentRole ? { subagentRole: effSubagentRole } : {}),
     });
   }, [
     prompt,
@@ -1599,10 +1532,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setActiveSessionId,
     setSessions,
     selectedMemoryIds,
-    agentEnabled,
     agentMode,
     writingMode,
-    agentActions,
+    pendingSubagentRole,
+    onPendingSubagentRoleConsumed,
     appMessage,
   ]);
 

@@ -11,6 +11,12 @@
   gap: var(--spacing-xs);
 }
 
+.chat-compose-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Agent/Ask 模式下拉：胶囊形 + 彩色边框 + 同色柔光（参考图） */
 .ai-agent-select.ant-select {
   font-size: var(--font-size-sm);

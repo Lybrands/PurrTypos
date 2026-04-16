@@ -76,6 +76,17 @@ SKILL_SPECS: dict[str, dict[str, Any]] = {
         "requires": ["listWritingChapters"],
         "consumes": ["bookId", "chapterId", "content"],
     },
+    "listBookCharacters": {
+        "riskLevel": "read",
+        "provides": ["bookCharactersIndex"],
+        "consumes": ["bookId"],
+    },
+    "getBookCharacters": {
+        "riskLevel": "read",
+        "requires": ["listBookCharacters"],
+        "provides": ["bookCharactersDetails"],
+        "consumes": ["bookId"],
+    },
 }
 
 

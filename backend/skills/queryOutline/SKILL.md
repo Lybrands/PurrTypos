@@ -15,15 +15,13 @@ description: 当需要只读查看本书某条大纲内容时使用（同时返�
     "outlineIds": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "可选。仅查询这些大纲 id"
+      "description": "仅查询这些大纲 id（与 outlineId 二选一，必须提供其一）"
     },
-    "outlineId": { "type": "string", "description": "单条大纲 id（与 outlineIds 二选一）" },
+    "outlineId": { "type": "string", "description": "单条大纲 id（与 outlineIds 二选一，必须提供其一）" },
     "maxTextLength": { "type": "number", "description": "可选。文本大纲最大长度，默认 32000" }
   },
-  "required": ["bookId"],
-  "anyOf": [
-    { "required": ["outlineId"] },
-    { "required": ["outlineIds"] }
-  ]
+  "required": ["bookId"]
 }
 ```
+
+> 调用约束：`outlineId` 与 `outlineIds` 二选一必须传；仅传 `bookId` 将被后端拒绝（服务端会在执行阶段强制校验）。

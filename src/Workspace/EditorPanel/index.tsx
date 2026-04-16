@@ -3,7 +3,9 @@ import React from 'react'
 import {
   ExpandOutlined, CompressOutlined, MenuFoldOutlined,
   PlusOutlined, EditOutlined, DeleteOutlined, CloseOutlined, CheckSquareOutlined, ExportOutlined,
-  UndoOutlined, RedoOutlined,
+  UndoOutlined, RedoOutlined, AlignLeftOutlined,
+  CopyOutlined,
+  BorderlessTableOutlined,
 } from '@ant-design/icons'
 import { App as AntdApp, Button, Input, Empty, Checkbox, Tooltip, Select, Switch } from 'antd'
 import type { InputRef } from 'antd/es/input/Input'
@@ -27,6 +29,24 @@ async function ensureDefaultOutline(bookId?: EntityId | null): Promise<Outline |
   const res = await window.electronAPI.getWritingOutline(bookId)
   if (res.success && res.data) return res.data
   return null
+}
+
+/**
+ * 剔除章节标题里开头的「第 xx 章」前缀，便于复制时只保留纯标题正文。
+ * 支持：
+ * - 阿拉伯数字 / 全角数字（第 12 章、第１２章）
+ * - 中文数字（第一章 / 第一百零八章 / 第两章 / 第〇章）
+ * - 章号与章字、标题之间的分隔符：空格、冒号、句点、破折号、中点、下划线等
+ * 若剥离后为空（整标题本身就是「第 X 章」），则回退为原始标题，避免复制出空串。
+ */
+function stripChapterPrefix(title: string): string {
+  if (!title) return title
+  const stripped = title.replace(
+    /^\s*第\s*[0-9０-９一二三四五六七八九十百千万亿零〇两]+\s*章[\s:：.。、．\-—–·_　]*/,
+    '',
+  )
+  const trimmed = stripped.trim()
+  return trimmed || title.trim()
 }
 
 interface AiFloatState {
@@ -212,6 +232,21 @@ export default function EditorPanel({
       notifyWorkspaceSearchContentChanged()
     }, 200)
   }, [scheduleAutoSave, notifyWorkspaceSearchContentChanged])
+
+  /** 复制文本到剪贴板，统一错误提示与空内容提示 */
+  const handleCopyToClipboard = React.useCallback(async (text: string, label: string) => {
+    if (!text.trim()) {
+      appMessage.info(`${label}为空，没有可复制的内容`)
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(text)
+      appMessage.success(`已复制${label}`)
+    } catch (err) {
+      console.error('[EditorPanel] clipboard write failed:', err)
+      appMessage.error(`复制${label}失败，请手动复制`)
+    }
+  }, [appMessage])
 
   const handleKeyTrigger = React.useCallback((key: string, rect: DOMRect) => {
     if (key === 'backslash') {
@@ -872,6 +907,31 @@ export default function EditorPanel({
                   <Tooltip title="前进 (Ctrl+Shift+Z)">
                     <Button type="text" size="small" icon={<RedoOutlined />} className="editor-toolbar-btn"
                       onClick={() => lexicalEditorRef.current?.redo()} />
+                  </Tooltip>
+                  <Tooltip title="一键排版">
+                    <Button type="text" size="small" icon={<AlignLeftOutlined />} className="editor-toolbar-btn"
+                      onClick={() => {
+                        const result = lexicalEditorRef.current?.reformat()
+                        if (!result) return
+                        if (!result.changed) {
+                          appMessage.info('已是规范排版，无需调整')
+                          return
+                        }
+                        const parts: string[] = []
+                        if (result.strippedIndents > 0) parts.push(`去除 ${result.strippedIndents} 处首行空白`)
+                        if (result.removedEmptyLines > 0) parts.push(`删除 ${result.removedEmptyLines} 行空行`)
+                        appMessage.success(
+                          parts.length ? `已排版：${parts.join('、')}（Ctrl+Z 可撤销）` : '已排版（Ctrl+Z 可撤销）',
+                        )
+                      }} />
+                  </Tooltip>
+                  <Tooltip title="复制标题">
+                    <Button type="text" size="small" icon={<BorderlessTableOutlined />} className="editor-toolbar-btn"
+                      onClick={() => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')} />
+                  </Tooltip>
+                  <Tooltip title="复制正文">
+                    <Button type="text" size="small" icon={<CopyOutlined />} className="editor-toolbar-btn"
+                      onClick={() => handleCopyToClipboard(content ?? '', '正文')} />
                   </Tooltip>
                 </div>
                 <div className="editor-footer-right">

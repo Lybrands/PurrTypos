@@ -54,8 +54,9 @@ import AiContextBar from "./components/AiContextBar";
 import AiComposeBottom from "./components/AiComposeBottom";
 import ToolCallStatus from "./components/ToolCallStatus";
 import ThinkingRegion from "./components/ThinkingRegion";
-import SubagentStageStrip from "./components/SubagentStageStrip";
-import type { PipelineStageId } from "./pipelineStages";
+import SubagentResultCard from "./components/SubagentResultCard";
+import SubagentPicker from "./components/SubagentPicker";
+import type { WritingSubagentRole } from "./pipelineStages";
 import "./index.scss";
 
 interface AiPanelProps {
@@ -84,6 +85,7 @@ export default function AiPanel({
     activeChapterId: chapterId,
     activeChapterTitle,
     bookId,
+    bookTitle,
     writingChapters,
   } = useWorkspace();
   const [prompt, setPrompt] = React.useState("");
@@ -107,10 +109,6 @@ export default function AiPanel({
   const [thinkingEnabled, setThinkingEnabled] = React.useState(
     initialPrefs.thinkingEnabled,
   );
-  const [agentActions, setAgentActions] = React.useState<PipelineStageId[]>([
-    "full",
-  ]);
-
   const selectedModelConfig = React.useMemo(
     () => modelConfigs.find((c) => c.id === selectedModel) ?? null,
     [modelConfigs, selectedModel],
@@ -152,7 +150,13 @@ export default function AiPanel({
   const [editingTabId, setEditingTabId] = React.useState<number | null>(null);
   const [editingTitle, setEditingTitle] = React.useState("");
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false);
-  const [pipelinePopoverOpen, setPipelinePopoverOpen] = React.useState(false);
+  const [pendingSubagentRole, setPendingSubagentRole] =
+    React.useState<WritingSubagentRole | null>(null);
+
+  const handleInsertPrompt = React.useCallback(
+    (text: string) => setPrompt(text),
+    [],
+  );
 
   const {
     associatedChapterIds,
@@ -165,6 +169,36 @@ export default function AiPanel({
     handleQuickAssociateChapter,
     handleQuickAssociateOutline,
   } = useAssociatedContext({ bookId, chapterId, writingChapters });
+
+  const promptTemplateContext = React.useMemo(() => {
+    const chapterTitles = associatedChapterIds
+      .map(
+        (id) =>
+          chapterSelectOptions.find((o) => String(o.value) === String(id))
+            ?.label ?? "",
+      )
+      .filter(Boolean);
+    const outlineTitles = associatedOutlineIds
+      .map(
+        (id) =>
+          outlineSelectOptions.find((o) => String(o.value) === String(id))
+            ?.label ?? "",
+      )
+      .filter(Boolean);
+    return {
+      bookTitle,
+      currentChapterTitle: activeChapterTitle,
+      associatedChapterTitles: chapterTitles,
+      associatedOutlineTitles: outlineTitles,
+    };
+  }, [
+    bookTitle,
+    activeChapterTitle,
+    associatedChapterIds,
+    associatedOutlineIds,
+    chapterSelectOptions,
+    outlineSelectOptions,
+  ]);
 
   const { handleSubmit: doSubmit, handleAbort, runningSessionIdRef, runningAccRef } = useChatSubmit({
     selectedModelConfig,
@@ -198,7 +232,9 @@ export default function AiPanel({
           ? "subagent"
           : "legacy",
     writingMode: chatAgentMode === "collab" ? "collab" : "default",
-    agentActions: isExpertPipelineChatMode(chatAgentMode) ? agentActions : undefined,
+    pendingSubagentRole:
+      chatAgentMode === "expert" ? pendingSubagentRole : null,
+    onPendingSubagentRoleConsumed: () => setPendingSubagentRole(null),
   });
 
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
@@ -753,7 +789,9 @@ export default function AiPanel({
                   hasThinkingBlocks ||
                   (cm.thinking !== undefined && cm.thinking !== "");
                 const hasSubagentProgress = Boolean(
-                  cm.subagentStages?.length ||
+                  cm.writingSubagentActive ||
+                    cm.subagentResult ||
+                    cm.subagentStages?.length ||
                     cm.subagentStageName ||
                     cm.subagentStageId ||
                     cm.subagentBridging ||
@@ -816,14 +854,6 @@ export default function AiPanel({
                               onOpenMemoryModal={() => setMemoryModalOpen(true)}
                               contextPopoverOpen={contextPopoverOpen}
                               onContextPopoverOpenChange={setContextPopoverOpen}
-                              pipelinePopoverOpen={pipelinePopoverOpen}
-                              onPipelinePopoverOpenChange={setPipelinePopoverOpen}
-                              pipelineAgentEnabled={
-                                isExpertPipelineChatMode(chatAgentMode) &&
-                                chatAgentMode !== "expert_team"
-                              }
-                              pipelineSelectedStages={agentActions}
-                              onPipelineStagesChange={setAgentActions}
                             />
                           )}
                           <Input.TextArea
@@ -1096,12 +1126,18 @@ export default function AiPanel({
                                   )}
                               </>
                             )}
-                            {hasSubagentProgress ? (
-                              <SubagentStageStrip
-                                message={cm}
-                                isLastAssistant={isLastAssistant}
-                                loading={loading}
-                                expertTeam={chatAgentMode === "expert_team"}
+                            {cm.writingSubagentActive ? (
+                              <div className="bubble-content bubble-content--waiting-dots">
+                                <span className="a-blink-dots">
+                                  {cm.writingSubagentLabel || "子专家"}处理中…
+                                </span>
+                              </div>
+                            ) : null}
+                            {cm.subagentResult ? (
+                              <SubagentResultCard
+                                role={cm.subagentResult.role}
+                                payload={cm.subagentResult.payload}
+                                chapterId={chapterId}
                               />
                             ) : null}
                           </div>
@@ -1184,14 +1220,10 @@ export default function AiPanel({
             onOpenMemoryModal={() => setMemoryModalOpen(true)}
             contextPopoverOpen={contextPopoverOpen}
             onContextPopoverOpenChange={setContextPopoverOpen}
-            pipelinePopoverOpen={pipelinePopoverOpen}
-            onPipelinePopoverOpenChange={setPipelinePopoverOpen}
-            pipelineAgentEnabled={
-              isExpertPipelineChatMode(chatAgentMode) &&
-              chatAgentMode !== "expert_team"
-            }
-            pipelineSelectedStages={agentActions}
-            onPipelineStagesChange={setAgentActions}
+            currentPrompt={prompt}
+            onInsertPrompt={handleInsertPrompt}
+            promptTemplateContext={promptTemplateContext}
+            promptTemplateDisabled={loading}
           />
         )}
 
@@ -1234,31 +1266,40 @@ export default function AiPanel({
           loading={loading}
           onAbort={handleAbort}
           rightContent={
-            loading ? (
-              <Button
-                className="btn-submit btn-stop"
-                icon={<StopCircleIcon size={18} />}
-                type="text"
-                onClick={handleAbort}
-              />
-            ) : (
-              <Button
-                type="primary"
-                className="btn-submit"
-                onClick={handleSubmit}
-                disabled={
-                  !prompt.trim() ||
-                  bookId == null ||
-                  chapterId == null ||
-                  loading ||
-                  (bookId != null &&
-                    chapterId != null &&
-                    activeSessionId == null)
-                }
-              >
-                发送
-              </Button>
-            )
+            <div className="chat-compose-right">
+              {chatAgentMode === "expert" && bookId != null ? (
+                <SubagentPicker
+                  value={pendingSubagentRole}
+                  onChange={setPendingSubagentRole}
+                  disabled={loading}
+                />
+              ) : null}
+              {loading ? (
+                <Button
+                  className="btn-submit btn-stop"
+                  icon={<StopCircleIcon size={18} />}
+                  type="text"
+                  onClick={handleAbort}
+                />
+              ) : (
+                <Button
+                  type="primary"
+                  className="btn-submit"
+                  onClick={handleSubmit}
+                  disabled={
+                    !prompt.trim() ||
+                    bookId == null ||
+                    chapterId == null ||
+                    loading ||
+                    (bookId != null &&
+                      chapterId != null &&
+                      activeSessionId == null)
+                  }
+                >
+                  发送
+                </Button>
+              )}
+            </div>
           }
         />
       </div>

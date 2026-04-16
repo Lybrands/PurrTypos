@@ -78,7 +78,22 @@ function getEditorText(editor: LexicalEditor): string {
   )
 }
 
-// ─── 插件：暴露 undo/redo 给父组件 ref ─────────────────────────────
+/**
+ * 一键排版：去除每段首行的空白（包括半角、全角空格、制表符、不换行空格），
+ * 并删除段落间只含空白的空行。
+ * - 不保留任何首行缩进，由 CSS text-indent 负责视觉缩进
+ * - 空行定义：trim 后为空
+ */
+export function reformatArticleText(text: string): string {
+  if (!text) return text
+  return text
+    .split('\n')
+    .map((line) => line.replace(/^[\u0020\t\u00A0\u3000]+/, ''))
+    .filter((line) => line.trim().length > 0)
+    .join('\n')
+}
+
+// ─── 插件：暴露 undo/redo/reformat 给父组件 ref ─────────────────────
 function UndoRedoRefPlugin({ parentRef }: { parentRef: React.Ref<LexicalEditorHandle | null> }) {
   const [editor] = useLexicalComposerContext()
   React.useImperativeHandle(
@@ -86,6 +101,36 @@ function UndoRedoRefPlugin({ parentRef }: { parentRef: React.Ref<LexicalEditorHa
     () => ({
       undo: () => editor.dispatchCommand(UNDO_COMMAND, undefined),
       redo: () => editor.dispatchCommand(REDO_COMMAND, undefined),
+      reformat: () => {
+        const before = getEditorText(editor)
+        const after = reformatArticleText(before)
+        if (after === before) {
+          return { changed: false, removedEmptyLines: 0, strippedIndents: 0 }
+        }
+        const beforeLines = before.split('\n')
+        const afterLines = after ? after.split('\n') : []
+        const removedEmptyLines = beforeLines.length - afterLines.length
+        let strippedIndents = 0
+        for (const line of beforeLines) {
+          if (/^[\u0020\t\u00A0\u3000]+/.test(line) && line.trim().length > 0) {
+            strippedIndents += 1
+          }
+        }
+        editor.update(() => {
+          const root = $getRoot()
+          root.clear()
+          if (!after) {
+            root.append($createParagraphNode())
+            return
+          }
+          for (const line of afterLines) {
+            const para = $createParagraphNode()
+            para.append($createTextNode(line))
+            root.append(para)
+          }
+        })
+        return { changed: true, removedEmptyLines, strippedIndents }
+      },
     }),
     [editor]
   )
@@ -108,21 +153,47 @@ function ExposeLexicalEditorPlugin({ onEditor }: { onEditor: (editor: LexicalEdi
 function LoadContentPlugin({ value }: { value: string }) {
   const [editor] = useLexicalComposerContext()
   const isInitialRef = React.useRef(true)
+  /**
+   * 记录编辑器最近一次提交后的纯文本。用于辨别 `value` prop 是否源自用户自己的输入。
+   *
+   * 为何需要：
+   * - 用户输入时，Lexical 提交 → onChange 把文本向外回流到父组件的 setState，
+   *   随后若父组件因为「其他 state」（如 saveStatus）先一步触发过中间渲染，
+   *   父组件重渲染时传下来的 `value` 就可能「暂时落后」于编辑器最新提交的文本；
+   *   此时旧逻辑的 `editorText !== value` 会成立 → 触发 textToEditorState(旧 value)
+   *   → root.clear() + 以旧文本重建段落，造成「选中替换后，选区外的内容也被吞掉」。
+   * - 通过追踪编辑器自身最近提交的文本，只要 `value` 能匹配到近期的「自发出」文本，
+   *   就一律跳过重建，即使与 `editorText` 的严格比较不一致也不会误伤。
+   */
+  const lastEmittedRef = React.useRef<string>('')
 
   React.useEffect(() => {
-    // 初次 mount：无论内容是否为空都加载
+    const unregister = editor.registerUpdateListener(({ editorState }) => {
+      editorState.read(() => {
+        lastEmittedRef.current = $getRoot()
+          .getChildren()
+          .map((n) => n.getTextContent())
+          .join('\n')
+      })
+    })
+    return unregister
+  }, [editor])
+
+  React.useEffect(() => {
     if (isInitialRef.current) {
       isInitialRef.current = false
+      lastEmittedRef.current = value
       textToEditorState(value, editor)
       return
     }
-    // value 后续变化：与编辑器实际内容对比
-    // - 用户输入时：onChange → setContent(x) → value=x，编辑器也是 x → 相同 → 跳过
-    // - 异步内容到达：value 变为真实内容，编辑器仍是之前的旧内容 → 不同 → 重载
+    // 1) value 与编辑器最近发出的文本一致 → 这是用户输入回环造成的 value 更新，跳过。
+    if (value === lastEmittedRef.current) return
+    // 2) value 与编辑器当前实际文本一致 → 已经同步过，跳过。
     const editorText = getEditorText(editor)
-    if (editorText !== value) {
-      textToEditorState(value, editor)
-    }
+    if (editorText === value) return
+    // 3) 走到这里说明 value 是真正的外部更新（章节异步加载 / AI 写回等），才重建编辑器。
+    lastEmittedRef.current = value
+    textToEditorState(value, editor)
   }, [value, editor])
 
   return null
@@ -266,6 +337,16 @@ function FormatToolbar() {
 export interface LexicalEditorHandle {
   undo: () => void
   redo: () => void
+  /**
+   * 一键排版：去除段落首行空白、删除段落间空行。
+   * 返回本次排版的统计；若无变更则 changed=false。
+   * 保留编辑历史（可撤销）。
+   */
+  reformat: () => {
+    changed: boolean
+    removedEmptyLines: number
+    strippedIndents: number
+  }
 }
 
 interface LexicalEditorProps {

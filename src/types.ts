@@ -96,6 +96,15 @@ export interface AiFavorite {
   create_time?: string;
 }
 
+export interface AiPromptTemplate {
+  id: number;
+  title: string;
+  content: string;
+  sort?: number;
+  create_time?: string;
+  update_time?: string;
+}
+
 export interface Conversation {
   id: number;
   session_id: number;
@@ -259,6 +268,8 @@ export interface ElectronAPI {
     outlineId: EntityId;
     title: string;
     parentId?: EntityId | null;
+    /** 写作大纲下创建卷节点等场景 */
+    isVolume?: boolean;
   }) => Promise<ApiResult<Chapter>>;
   deleteChapter: (data: { id: EntityId }) => Promise<ApiResult<void>>;
   renameChapter: (data: {
@@ -330,6 +341,19 @@ export interface ElectronAPI {
   }) => Promise<ApiResult<AiFavorite>>;
   getAiFavorites: () => Promise<ApiResult<AiFavorite[]>>;
   deleteAiFavorite: (data: { id: number }) => Promise<ApiResult<void>>;
+  // 提示词模版
+  listPromptTemplates: () => Promise<ApiResult<AiPromptTemplate[]>>;
+  createPromptTemplate: (data: {
+    title: string;
+    content: string;
+    sort?: number;
+  }) => Promise<ApiResult<AiPromptTemplate>>;
+  updatePromptTemplate: (data: {
+    id: number;
+    data: { title?: string; content?: string; sort?: number };
+  }) => Promise<ApiResult<AiPromptTemplate>>;
+  deletePromptTemplate: (data: { id: number }) => Promise<ApiResult<void>>;
+  reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
   updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
@@ -388,8 +412,10 @@ export interface ElectronAPI {
     chatAgentMode?: "ask" | "agent" | "expert" | "expert_team" | "collab";
     /** legacy 下协作共创 */
     writingMode?: "default" | "collab";
-    /** 写作专家多选阶段 */
+    /** @deprecated 已由 subagentRole 替代，后端忽略 */
     agentActions?: string[];
+    /** 按需子专家：review | polish | continuation_plan | style_unify */
+    subagentRole?: "review" | "polish" | "continuation_plan" | "style_unify";
   }) => void;
   abortAiStream: () => void;
   onAiChunk: (
@@ -452,6 +478,16 @@ export interface ElectronAPI {
       subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
       /** 写作专家：阶段摘要 Markdown，逐段追加 */
       subagentPipelineDigest?: string;
+      writingSubagentStart?: {
+        role?: "review" | "polish" | "continuation_plan" | "style_unify";
+        label?: string;
+      };
+      writingSubagentDelta?: { delta?: string };
+      writingSubagentResult?: {
+        role: "review" | "polish" | "continuation_plan" | "style_unify";
+        payload: unknown;
+      };
+      writingSubagentDone?: { role?: string };
     }) => void,
   ) => () => void;
   // 设置

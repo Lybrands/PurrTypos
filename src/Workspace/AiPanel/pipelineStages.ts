@@ -1,56 +1,39 @@
-/** 写作专家管线阶段（与 electron/subagentConfig EXEC_ACTIONS 对齐，不含 full） */
-export const PIPELINE_STAGE_ORDER = [
-  "analyze",
-  "plan",
-  "draft",
-  "styleUnify",
-  "review",
-  "polish",
-] as const;
+/**
+ * On-demand writing sub-experts (matches backend `subagentRole`).
+ * Replaces the former multi-select pipeline stages.
+ */
 
-export type PipelineStageId = (typeof PIPELINE_STAGE_ORDER)[number] | "full";
+export type WritingSubagentRole =
+  | "review"
+  | "polish"
+  | "continuation_plan"
+  | "style_unify";
 
-/** 多选下拉选项（全流程与其它阶段互斥） */
-export const PIPELINE_SELECT_OPTIONS: { value: PipelineStageId; label: string }[] = [
-  { value: "full", label: "全流程" },
-  { value: "analyze", label: "分析" },
-  { value: "plan", label: "规划" },
-  { value: "draft", label: "撰稿" },
-  { value: "styleUnify", label: "风格统一" },
-  { value: "review", label: "审校" },
-  { value: "polish", label: "润色" },
+export const WRITING_SUBAGENT_OPTIONS: {
+  value: WritingSubagentRole;
+  label: string;
+}[] = [
+  { value: "review", label: "审校专家" },
+  { value: "polish", label: "润色专家" },
+  { value: "continuation_plan", label: "续写规划" },
+  { value: "style_unify", label: "风格统一" },
 ];
 
-/**
- * 多选归一：空 → 全流程；选「全流程」则仅保留全流程；否则按管线顺序去重。
- */
-export function normalizePipelineSelection(selected: string[]): PipelineStageId[] {
-  const raw = Array.isArray(selected) ? selected.map(String) : [];
-  if (raw.length === 0) return ["full"];
-  if (raw.includes("full")) return ["full"];
-  const set = new Set(raw);
-  const ordered = PIPELINE_STAGE_ORDER.filter((k) => set.has(k));
-  return ordered.length > 0 ? ordered : ["full"];
-}
-
-/** 气泡内 Checkbox 切换：全流程与其余阶段互斥 */
-export function applyPipelineCheckboxToggle(
-  current: PipelineStageId[],
-  key: PipelineStageId,
-  checked: boolean,
-): PipelineStageId[] {
-  if (key === "full") {
-    if (checked) return ["full"];
-    const rest = current.filter((x) => x !== "full");
-    return normalizePipelineSelection(rest.length > 0 ? rest : ["analyze"]);
-  }
-  if (checked) {
-    const base = current.filter((x) => x !== "full");
-    return normalizePipelineSelection([...base, key]);
-  }
-  return normalizePipelineSelection(current.filter((x) => x !== key));
-}
-
-export function pipelineIsNonDefaultFull(stages: PipelineStageId[]): boolean {
-  return !(stages.length === 1 && stages[0] === "full");
+/** Parse leading slash command: /review /polish /plan /style */
+export function parseWritingSlashCommand(text: string): {
+  stripped: string;
+  role?: WritingSubagentRole;
+} {
+  const m = text.match(/^\s*\/(review|polish|plan|style)\b(?:\s|\n|$)/i);
+  if (!m) return { stripped: text };
+  const cmd = m[1].toLowerCase();
+  const map: Record<string, WritingSubagentRole> = {
+    review: "review",
+    polish: "polish",
+    plan: "continuation_plan",
+    style: "style_unify",
+  };
+  const role = map[cmd];
+  const stripped = text.slice(m[0].length).trim();
+  return role ? { stripped, role } : { stripped: text };
 }
