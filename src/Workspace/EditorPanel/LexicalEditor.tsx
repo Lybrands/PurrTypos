@@ -1,4 +1,5 @@
 import React from 'react'
+import ReactDOM from 'react-dom'
 import { LexicalComposer } from '@lexical/react/LexicalComposer'
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
@@ -10,6 +11,8 @@ import {
   $getRoot,
   $createParagraphNode,
   $createTextNode,
+  $createRangeSelection,
+  $setSelection,
   $getSelection,
   $isRangeSelection,
   CLEAR_HISTORY_COMMAND,
@@ -20,6 +23,7 @@ import {
   REDO_COMMAND,
   type EditorState,
   type LexicalEditor,
+  type RangeSelection,
 } from 'lexical'
 import { Dropdown } from 'antd'
 import type { MenuProps } from 'antd'
@@ -131,9 +135,240 @@ function UndoRedoRefPlugin({ parentRef }: { parentRef: React.Ref<LexicalEditorHa
         })
         return { changed: true, removedEmptyLines, strippedIndents }
       },
+      insertAtCursor: (text: string) => {
+        if (!text) return
+        const lines = text.split('\n')
+        editor.focus()
+        editor.update(() => {
+          const selection = $getSelection()
+          if ($isRangeSelection(selection)) {
+            // 多行：第一行直接插入到当前光标，后续行作为新段落
+            // 利用 selection.insertText 处理首行；后续行通过 insertParagraph 插入
+            selection.insertText(lines[0])
+            for (let i = 1; i < lines.length; i++) {
+              const sel = $getSelection()
+              if ($isRangeSelection(sel)) {
+                sel.insertParagraph()
+                sel.insertText(lines[i])
+              }
+            }
+          } else {
+            // 没有选区：追加到 root 末尾
+            const root = $getRoot()
+            for (const line of lines) {
+              const para = $createParagraphNode()
+              para.append($createTextNode(line))
+              root.append(para)
+            }
+          }
+        })
+      },
+      captureSelection: () => {
+        let result:
+          | {
+              text: string
+              restore: () => void
+              replace: (newText: string) => void
+            }
+          | null = null
+        editor.getEditorState().read(() => {
+          const sel = $getSelection()
+          if (!$isRangeSelection(sel) || sel.isCollapsed()) return
+          const text = sel.getTextContent()
+          if (!text) return
+          const anchorKey = sel.anchor.key
+          const anchorOffset = sel.anchor.offset
+          const anchorType = sel.anchor.type
+          const focusKey = sel.focus.key
+          const focusOffset = sel.focus.offset
+          const focusType = sel.focus.type
+
+          const restoreFn = () => {
+            editor.update(() => {
+              const range = $createRangeSelection()
+              range.anchor.set(anchorKey, anchorOffset, anchorType)
+              range.focus.set(focusKey, focusOffset, focusType)
+              $setSelection(range)
+            })
+          }
+          const replaceFn = (newText: string) => {
+            if (!newText) return
+            editor.focus()
+            editor.update(() => {
+              const range = $createRangeSelection()
+              range.anchor.set(anchorKey, anchorOffset, anchorType)
+              range.focus.set(focusKey, focusOffset, focusType)
+              $setSelection(range)
+              const current = $getSelection() as RangeSelection | null
+              if (!current || !$isRangeSelection(current)) return
+              const lines = newText.split('\n')
+              current.insertText(lines[0])
+              for (let i = 1; i < lines.length; i++) {
+                const s = $getSelection()
+                if ($isRangeSelection(s)) {
+                  s.insertParagraph()
+                  s.insertText(lines[i])
+                }
+              }
+            })
+          }
+          result = { text, restore: restoreFn, replace: replaceFn }
+        })
+        return result
+      },
+      getSelectedText: () => {
+        let text = ''
+        editor.getEditorState().read(() => {
+          const sel = $getSelection()
+          if ($isRangeSelection(sel) && !sel.isCollapsed()) {
+            text = sel.getTextContent()
+          }
+        })
+        return text
+      },
+      focus: () => editor.focus(),
     }),
     [editor]
   )
+  return null
+}
+
+// ─── 插件：Ghost Text 触发检测 ──────────────────────────────────
+// - selection 折叠且空闲 `idleMs` 毫秒后触发 onIdle（携带光标前缀 + cursor DOM rect）
+// - 任何 update（编辑或光标移动）触发 onChangeAny，供父组件即时 cancel ghost
+function IdleDetectPlugin({
+  enabled,
+  idleMs = 800,
+  onIdle,
+  onChangeAny,
+}: {
+  enabled: boolean
+  idleMs?: number
+  onIdle: (payload: { prefix: string; cursorRect: DOMRect }) => void
+  onChangeAny: () => void
+}) {
+  const [editor] = useLexicalComposerContext()
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastTriggerPrefixRef = React.useRef<string | null>(null)
+
+  React.useEffect(() => {
+    if (!enabled) {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      lastTriggerPrefixRef.current = null
+      return
+    }
+    const clearTimer = () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+
+    const unregister = editor.registerUpdateListener(({ editorState, tags }) => {
+      // 内部 load / remote 等 tag 不触发
+      if (tags.has('history-merge')) return
+      onChangeAny()
+      clearTimer()
+
+      // 800ms idle 后再检查状态
+      timerRef.current = setTimeout(() => {
+        editorState.read(() => {
+          const sel = $getSelection()
+          if (!$isRangeSelection(sel) || !sel.isCollapsed()) return
+          const root = editor.getRootElement()
+          if (!root) return
+          if (document.activeElement !== root) return
+          const fullText = $getRoot().getTextContent()
+          if (!fullText.trim()) return
+          // 用选区前的文本做 prefix；Lexical 没有直接 offset，
+          // 用 anchor 所在 textNode + 之前所有节点拼接。
+          const anchorNode = sel.anchor.getNode()
+          const anchorOffset = sel.anchor.offset
+          let prefix = ''
+          const children = $getRoot().getChildren()
+          for (const child of children) {
+            const desc = child.getTextContent()
+            if (child.getKey() === anchorNode.getTopLevelElement()?.getKey()) {
+              // 粗粒度：段落前的全部 + 本段落 anchorOffset 之前
+              // （多节点 inline 的精细 offset 在 MVP 暂忽略）
+              prefix += desc.slice(0, anchorOffset)
+              break
+            }
+            prefix += desc + '\n'
+          }
+          if (prefix.length < 4) return
+          if (prefix === lastTriggerPrefixRef.current) return
+          lastTriggerPrefixRef.current = prefix
+          const domSel = window.getSelection()
+          if (!domSel || domSel.rangeCount === 0) return
+          const rect = domSel.getRangeAt(0).getBoundingClientRect()
+          onIdle({ prefix, cursorRect: rect })
+        })
+      }, idleMs)
+    })
+    return () => {
+      unregister()
+      clearTimer()
+    }
+  }, [editor, enabled, idleMs, onIdle, onChangeAny])
+
+  return null
+}
+
+// ─── 插件：暴露选区变化（非空文本选区时）给父组件 ──────────────────
+function SelectionChangePlugin({
+  onSelectionChange,
+}: {
+  onSelectionChange: (payload: { text: string; rect: DOMRect } | null) => void
+}) {
+  const [editor] = useLexicalComposerContext()
+  React.useEffect(() => {
+    const root = editor.getRootElement()
+    const report = () => {
+      editor.getEditorState().read(() => {
+        const sel = $getSelection()
+        if (!$isRangeSelection(sel) || sel.isCollapsed()) {
+          onSelectionChange(null)
+          return
+        }
+        const text = sel.getTextContent()
+        if (!text.trim()) {
+          onSelectionChange(null)
+          return
+        }
+        const domSel = window.getSelection()
+        if (!domSel || domSel.rangeCount === 0) {
+          onSelectionChange(null)
+          return
+        }
+        const rect = domSel.getRangeAt(0).getBoundingClientRect()
+        if (rect.width === 0 && rect.height === 0) {
+          onSelectionChange(null)
+          return
+        }
+        onSelectionChange({ text, rect })
+      })
+    }
+    const unregister = editor.registerUpdateListener(() => {
+      report()
+    })
+    const onBlur = () => {
+      // blur 会触发 DOM selection 清空，但 Lexical 选区可能仍在。
+      // 延时一帧：若焦点移到受控 UI（如工具条），保留；否则关闭。
+      setTimeout(() => {
+        const active = document.activeElement as HTMLElement | null
+        if (active?.closest('.inline-edit-toolbar') || active?.closest('.inline-edit-popover')) {
+          return
+        }
+        onSelectionChange(null)
+      }, 50)
+    }
+    root?.addEventListener('blur', onBlur, true)
+    return () => {
+      unregister()
+      root?.removeEventListener('blur', onBlur, true)
+    }
+  }, [editor, onSelectionChange])
   return null
 }
 
@@ -347,6 +582,30 @@ export interface LexicalEditorHandle {
     removedEmptyLines: number
     strippedIndents: number
   }
+  /**
+   * 把文本插入到当前光标位置：
+   * - 若有选区，先替换选区
+   * - 文本中的 `\n` 会拆为新段落
+   * - 没有选区或聚焦时：默认追加到末尾
+   * 保留编辑历史（可撤销）。
+   */
+  insertAtCursor: (text: string) => void
+  /**
+   * 捕获当前选区，返回：
+   * - `text`：选中文本
+   * - `restore()`：重新把同一范围设为选区
+   * - `replace(newText)`：基于快照范围替换为新文本
+   * 无选区（collapsed / 空）返回 null。
+   */
+  captureSelection: () => {
+    text: string
+    restore: () => void
+    replace: (newText: string) => void
+  } | null
+  /** 读取当前选区纯文本；无选区返回空串。 */
+  getSelectedText: () => string
+  /** 聚焦编辑器。 */
+  focus: () => void
 }
 
 interface LexicalEditorProps {
@@ -360,6 +619,13 @@ interface LexicalEditorProps {
   showFormatToolbar?: boolean
   /** 供工作台搜索定位 Lexical 实例 */
   onLexicalEditor?: (editor: LexicalEditor | null) => void
+  /** 选区变化回调：非空文本选区时返回 text + rect，否则 null。 */
+  onSelectionChange?: (payload: { text: string; rect: DOMRect } | null) => void
+  /** Ghost text 空闲检测：开启后 idleMs 毫秒无输入则触发 onGhostIdle。 */
+  ghostEnabled?: boolean
+  onGhostIdle?: (payload: { prefix: string; cursorRect: DOMRect }) => void
+  /** 任意编辑/光标变化：父组件用来 cancel 正在显示的 ghost。 */
+  onGhostReset?: () => void
 }
 
 const theme = {
@@ -382,6 +648,103 @@ const theme = {
   },
 }
 
+/**
+ * 字数标尺插件：每 N 个字（默认 500）在编辑器右侧打一个浮签：「500字 / 1000字 ...」。
+ * - 字数定义：去除空白字符（含换行）后的全部字符
+ * - 标尺贴在「跨过该阈值的段落」的顶部，scrollTop 一起滚
+ * - 一段若跨多个阈值，按发生顺序竖向堆叠排列
+ */
+function WordRulerPlugin({ interval = 500 }: { interval?: number }) {
+  const [editor] = useLexicalComposerContext()
+  const [markers, setMarkers] = React.useState<{ top: number; label: string }[]>([])
+  const [wrapEl, setWrapEl] = React.useState<HTMLElement | null>(null)
+
+  React.useEffect(() => {
+    if (interval <= 0) return
+
+    let raf = 0
+    const compute = () => {
+      const editorEl = editor.getRootElement()
+      if (!editorEl) {
+        setMarkers([])
+        return
+      }
+      const wrap = editorEl.closest('.editor-lexical-wrap') as HTMLElement | null
+      if (!wrap) return
+      setWrapEl(wrap)
+
+      const next: { top: number; label: string }[] = []
+      let cum = 0
+      let nextThreshold = interval
+
+      editor.getEditorState().read(() => {
+        const root = $getRoot()
+        const children = root.getChildren()
+        for (const child of children) {
+          const text = child.getTextContent()
+          // 去掉空白与换行，按可见字符计数
+          const charsInThisPara = text.replace(/\s+/g, '').length
+          cum += charsInThisPara
+          if (cum < nextThreshold) continue
+
+          const paraEl = editor.getElementByKey(child.getKey()) as HTMLElement | null
+          if (!paraEl) {
+            while (nextThreshold <= cum) nextThreshold += interval
+            continue
+          }
+          // 段相对于 wrap 的纵坐标（offsetParent 应该就是 .editor-lexical-wrap）
+          const baseTop = paraEl.offsetTop
+          let stackOffset = 0
+          while (nextThreshold <= cum) {
+            next.push({
+              top: baseTop + stackOffset,
+              label: `${nextThreshold} 字`,
+            })
+            nextThreshold += interval
+            stackOffset += 22 // 同段多个阈值时往下错开
+          }
+        }
+      })
+      setMarkers(next)
+    }
+
+    const schedule = () => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(compute)
+    }
+
+    schedule()
+    const unregister = editor.registerUpdateListener(() => schedule())
+    const ro = new ResizeObserver(schedule)
+    const editorEl = editor.getRootElement()
+    if (editorEl) ro.observe(editorEl)
+    window.addEventListener('resize', schedule)
+
+    return () => {
+      unregister()
+      ro.disconnect()
+      window.removeEventListener('resize', schedule)
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [editor, interval])
+
+  if (!wrapEl || markers.length === 0) return null
+  return ReactDOM.createPortal(
+    <>
+      {markers.map((m, i) => (
+        <div
+          key={`${m.label}-${i}`}
+          className="lexical-word-ruler"
+          style={{ top: m.top }}
+        >
+          {m.label}
+        </div>
+      ))}
+    </>,
+    wrapEl,
+  )
+}
+
 const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, LexicalEditorProps>(function LexicalEditorComponentInner({
   value,
   chapterId,
@@ -391,6 +754,10 @@ const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, Lexica
   className,
   showFormatToolbar = false,
   onLexicalEditor,
+  onSelectionChange,
+  ghostEnabled = false,
+  onGhostIdle,
+  onGhostReset,
 }, ref) {
   const [focused, setFocused] = React.useState(false)
   const initialConfig = React.useMemo(
@@ -436,8 +803,17 @@ const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, Lexica
         <OnChangePlugin onChange={handleChange} ignoreSelectionChange />
         <HistoryPlugin />
         <LoadContentPlugin value={value} />
+        <WordRulerPlugin interval={500} />
 
         <KeyPlugin onKeyTrigger={onKeyTrigger} />
+        {onSelectionChange && <SelectionChangePlugin onSelectionChange={onSelectionChange} />}
+        {ghostEnabled && onGhostIdle && onGhostReset && (
+          <IdleDetectPlugin
+            enabled={ghostEnabled}
+            onIdle={onGhostIdle}
+            onChangeAny={onGhostReset}
+          />
+        )}
       </div>
     </LexicalComposer>
   )

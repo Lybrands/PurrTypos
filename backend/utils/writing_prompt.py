@@ -10,12 +10,21 @@ from services.writing_rules import (
     CHARACTER_LOOKUP_HARD_RULE,
     OUTLINE_LOCATOR_HARD_RULE,
 )
+from utils.book_style_prompt import build_book_style_appendix
 from utils.tooling_context import build_tooling_context_appendix
 
 
 def build_writing_main_system_prompt(tool_ctx: dict | None) -> str:
-    """Appendix + hard rules for the single streaming writing agent (chatAgentMode=expert)."""
-    appendix = build_tooling_context_appendix(tool_ctx or {})
+    """Appendix + hard rules for the single streaming writing agent (chatAgentMode=expert).
+
+    tool_ctx 可附带 ``bookStyle``（dict|None）：若有则在最前注入风格基调强制遵守段。
+    """
+    ctx = tool_ctx or {}
+    style_appendix = build_book_style_appendix(
+        ctx.get("bookStyle"),
+        writing_chapters=ctx.get("writingChapters"),
+    )
+    appendix = build_tooling_context_appendix(ctx)
     core = (
         "你是本书的「写作专家」：以自然、流畅的中文协助用户创作与修订小说正文。\n"
         "原则：先通过工具查证章节、大纲、人物设定与故事背景，再下笔；不得凭空编造未在书中登记的人物或与设定矛盾的内容。\n"
@@ -26,7 +35,7 @@ def build_writing_main_system_prompt(tool_ctx: dict | None) -> str:
         f"{CHARACTER_LOOKUP_HARD_RULE}\n"
         f"{BODY_DIALOGUE_QUOTE_RULE}"
     )
-    return "\n\n".join(p for p in (core, appendix) if p)
+    return "\n\n".join(p for p in (style_appendix, core, appendix) if p)
 
 
 def build_review_expert_prompt(tool_ctx: dict | None, prior_hint: str) -> str:

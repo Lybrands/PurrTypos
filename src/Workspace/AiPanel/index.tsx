@@ -11,6 +11,7 @@ import {
   EditOutlined,
   LoadingOutlined,
   VerticalAlignBottomOutlined,
+  ArrowUpOutlined,
 } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import StopCircleIcon from "../../icons/StopCircleIcon";
@@ -46,7 +47,7 @@ import {
   saveModelPrefs,
 } from "./utils";
 import { Virtuoso, type VirtuosoHandle, type ListProps } from "react-virtuoso";
-import { useAssociatedContext, useChatSubmit, type ChatMessage } from "./hooks";
+import { useAssociatedContext, useMemorySelection, useChatSubmit, type ChatMessage } from "./hooks";
 import SessionHistoryPopover from "./components/SessionHistoryPopover";
 import FavoritesModal from "./components/FavoritesModal";
 import MemoryModal from "./components/MemoryModal";
@@ -62,8 +63,15 @@ import "./index.scss";
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
   aiAgentMode?: AiAgentMode;
-  isFullscreen: boolean;
-  onToggleFullscreen: () => void;
+  /** 是否为当前主区域（占 56%）。 */
+  isMain: boolean;
+  /** 点击 ⤢ 时回调：非主时切换为主，主时回到默认（导演模式 = AI 主） */
+  onSetMain: () => void;
+  /**
+   * 写作模式浮岛：用于 mainPanel === 'editor' 时收紧 AI 面板视觉：
+   * 隐藏 system prompt 区、会话栏，最近消息超出自动截断滚动。
+   */
+  compact?: boolean;
 }
 
 function isExpertPipelineChatMode(m: ChatAgentMode): boolean {
@@ -77,8 +85,9 @@ const thinkingOnlyModelIds = (configs: AiModelConfig[]) =>
 export default function AiPanel({
   modelConfigs = [],
   aiAgentMode = "legacy",
-  isFullscreen,
-  onToggleFullscreen,
+  isMain,
+  onSetMain,
+  compact = false,
 }: AiPanelProps) {
   const { message: appMessage } = AntdApp.useApp();
   const {
@@ -142,11 +151,12 @@ export default function AiPanel({
   }, [bookId, selectedModel, chatAgentMode, thinkingEnabled]);
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
-  const [selectedMemoryIds, setSelectedMemoryIds] = React.useState<
-    (number | string)[]
-  >([]);
-  const [selectedForeshadowingIds, setSelectedForeshadowingIds] =
-    React.useState<(number | string)[]>([]);
+  const {
+    selectedMemoryIds,
+    setSelectedMemoryIds,
+    selectedForeshadowingIds,
+    setSelectedForeshadowingIds,
+  } = useMemorySelection(bookId);
   const [editingTabId, setEditingTabId] = React.useState<number | null>(null);
   const [editingTitle, setEditingTitle] = React.useState("");
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false);
@@ -533,6 +543,15 @@ export default function AiPanel({
     [activeSessionId, currentSessionTitle, appMessage],
   );
 
+  /*
+   * v3.2 起，AiPanel 不再提供任何"把 AI 回复直接落到正文/草稿"的快捷入口：
+   * - 改正文：必须通过 AI 工具调用 editChapterContent → 后端推 chunk.proposedChapterDiff
+   *           → DiffProvider 自动 startDiff → 用户在 DiffOverlay 接受/拒绝
+   * - 草稿区（Canvas）整体下线
+   * - 光标插入也下线（避免误覆盖 / 跳过 diff 审阅）
+   * 因此 handleWriteToCanvas / handleInsertAtCursor / handleApplyAsDiff 全部移除。
+   */
+
   const ellipsisMenuItems: MenuProps["items"] = [
     {
       key: "favorites",
@@ -596,7 +615,9 @@ export default function AiPanel({
   }, [streamFollowKey, combinedData.length]);
 
   return (
-    <div className={`ai-panel ${isFullscreen ? "fullscreen" : ""}`}>
+    <div
+      className={`ai-panel ${isMain ? "panel-main" : ""} ${compact && !isMain ? "ai-panel--compact" : ""}`.trim()}
+    >
       <div className="panel-header">
         <span className="panel-title">AI 对话</span>
         <div className="panel-header-actions">
@@ -604,14 +625,14 @@ export default function AiPanel({
             type="text"
             size="small"
             icon={
-              isFullscreen ? (
+              isMain ? (
                 <CompressOutlined style={{ fontSize: 16 }} />
               ) : (
                 <ExpandOutlined style={{ fontSize: 16 }} />
               )
             }
-            title={isFullscreen ? "退出全屏" : "全屏"}
-            onClick={onToggleFullscreen}
+            title={isMain ? "已是主区域" : "扩大此区域为主"}
+            onClick={onSetMain}
           />
           <Dropdown menu={{ items: ellipsisMenuItems }} trigger={["click"]}>
             <Tooltip title="更多" mouseEnterDelay={0.5}>
@@ -1153,6 +1174,11 @@ export default function AiPanel({
                               {formatModelName(msg.model, modelConfigs)}
                             </span>
                           )}
+                          {/*
+                           * v3.2 起：消息气泡不再提供"改正文 / Canvas / 插入"任一按钮。
+                           * AI 改正文必须通过工具调用 editChapterContent，
+                           * 后端会自动推送 diff 提议给前端，由 DiffOverlay 接手。
+                           */}
                           <Tooltip title="收藏">
                             <Button
                               type="text"
@@ -1232,7 +1258,7 @@ export default function AiPanel({
             className="chat-input"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧💡"
+            placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧"
             disabled={loading}
             autoSize={false}
             onKeyDown={(e) => {
@@ -1276,28 +1302,30 @@ export default function AiPanel({
               ) : null}
               {loading ? (
                 <Button
-                  className="btn-submit btn-stop"
+                  className="btn-submit btn-stop btn-submit--icon"
                   icon={<StopCircleIcon size={18} />}
                   type="text"
                   onClick={handleAbort}
                 />
               ) : (
-                <Button
-                  type="primary"
-                  className="btn-submit"
-                  onClick={handleSubmit}
-                  disabled={
-                    !prompt.trim() ||
-                    bookId == null ||
-                    chapterId == null ||
-                    loading ||
-                    (bookId != null &&
-                      chapterId != null &&
-                      activeSessionId == null)
-                  }
-                >
-                  发送
-                </Button>
+                <Tooltip title="发送 (Enter)">
+                  <Button
+                    type="primary"
+                    shape="circle"
+                    className="btn-submit btn-submit--icon"
+                    icon={<ArrowUpOutlined style={{ fontSize: 16 }} />}
+                    onClick={handleSubmit}
+                    disabled={
+                      !prompt.trim() ||
+                      bookId == null ||
+                      chapterId == null ||
+                      loading ||
+                      (bookId != null &&
+                        chapterId != null &&
+                        activeSessionId == null)
+                    }
+                  />
+                </Tooltip>
               )}
             </div>
           }

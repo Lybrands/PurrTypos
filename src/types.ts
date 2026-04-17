@@ -71,6 +71,31 @@ export interface Article {
   update_time?: string;
 }
 
+export interface BookStyle {
+  book_id: EntityId;
+  pov: string;
+  tone: string;
+  pace: string;
+  banned_rules: string;
+  /** JSON 字符串：number[] 或 string[]，参考章节 id */
+  reference_chapter_ids: string;
+  free_notes: string;
+  update_time?: string;
+}
+
+export type SaveBookStylePayload = Omit<BookStyle, 'book_id' | 'update_time'> & { bookId: EntityId };
+
+export interface ChapterDiffHistory {
+  id: number;
+  chapter_id: EntityId;
+  before_text: string;
+  after_text: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
 export interface StoryBackgroundAttachment {
   id: number;
   book_id: EntityId;
@@ -295,6 +320,22 @@ export interface ElectronAPI {
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
+  // Book style
+  getBookStyle: (data: { bookId: EntityId }) => Promise<ApiResult<BookStyle | null>>;
+  saveBookStyle: (data: SaveBookStylePayload) => Promise<ApiResult<void>>;
+  // Chapter diff history
+  commitChapterDiff: (data: {
+    chapterId: EntityId;
+    content: string;
+    beforeText?: string;
+    afterText?: string;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number } | null>>;
+  listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
+  getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
+  rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
   // AI
   createSession: (data: { bookId: EntityId; chapterId?: EntityId | null }) => Promise<ApiResult<AiSession>>;
   getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
@@ -437,7 +478,22 @@ export interface ElectronAPI {
         title: string;
         parentId?: EntityId | null;
       };
-      /** 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示） */
+      /**
+       * AI 工具 editChapterContent 提交的差异提议：
+       * 后端不再直接 save_article，改为把 before/after 推给前端，
+       * 由 DiffProvider 启动 diff 会话，等用户在 DiffOverlay 接受后才落库。
+       */
+      proposedChapterDiff?: {
+        chapterId: EntityId;
+        beforeText: string;
+        proposedText: string;
+        source?: string;
+      };
+      /**
+       * 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
+       * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
+       * @deprecated
+       */
       collabLatestParagraph?: string;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;

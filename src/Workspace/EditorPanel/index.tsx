@@ -1,35 +1,28 @@
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import {
-  ExpandOutlined, CompressOutlined, MenuFoldOutlined,
-  PlusOutlined, EditOutlined, DeleteOutlined, CloseOutlined, CheckSquareOutlined, ExportOutlined,
+  ExpandOutlined, CompressOutlined, CloseOutlined,
   UndoOutlined, RedoOutlined, AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons'
-import { App as AntdApp, Button, Input, Empty, Checkbox, Tooltip, Select, Switch } from 'antd'
-import type { InputRef } from 'antd/es/input/Input'
+import { App as AntdApp, Button, Input, Empty, Tooltip, Select, Switch } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
-import type { AiModelConfig, Chapter, EntityId, Outline } from '../../types'
+import type { AiModelConfig, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useWorkspace } from '../WorkspaceContext'
-import { HighlightText } from '../search/highlightText'
-import ConfirmModal from '../../components/ConfirmModal'
 import LexicalEditorComponent, { type LexicalEditorHandle } from './LexicalEditor'
-import ExportModal from '../../components/ExportModal'
-import { buildExportEntries } from '../../utils/exportBooks'
-import type { ExportChapter } from '../../utils/exportBooks'
 import StopCircleIcon from '../../icons/StopCircleIcon'
+import { useDiff } from '../diff/DiffContext'
+import DiffOverlay from '../diff/DiffOverlay'
+import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
+import InlineEditLayer from './InlineEditLayer'
+import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
-
-async function ensureDefaultOutline(bookId?: EntityId | null): Promise<Outline | null> {
-  const res = await window.electronAPI.getWritingOutline(bookId)
-  if (res.success && res.data) return res.data
-  return null
-}
 
 /**
  * 剔除章节标题里开头的「第 xx 章」前缀，便于复制时只保留纯标题正文。
@@ -58,24 +51,20 @@ interface AiFloatState {
 
 interface EditorPanelProps {
   bookTitle: string
-  /** 非分卷模式 OR 分卷模式下均通过此回调通知父组件创建大纲 */
-  onItemCreated?: (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => void
-  /** 删除写作章节时，通过 writingChapterId 通知父组件删除对应大纲 */
-  onWritingChapterDeleted?: (writingChapterId: EntityId) => void
   modelConfigs?: AiModelConfig[]
-  isFullscreen: boolean
-  onToggleFullscreen: () => void
+  /** 是否为当前主区域（占 56%）。 */
+  isMain: boolean
+  /** 点击 ⤢ 时回调：非主时切换为主，主时回到默认。 */
+  onSetMain: () => void
   /** 工作台搜索：注册 Lexical 实例 */
   onLexicalEditor?: (editor: import('lexical').LexicalEditor | null) => void
 }
 
 export default function EditorPanel({
-  bookTitle,
-  onItemCreated,
-  onWritingChapterDeleted,
+  bookTitle: _bookTitle,
   modelConfigs = [],
-  isFullscreen,
-  onToggleFullscreen,
+  isMain,
+  onSetMain,
   onLexicalEditor,
 }: EditorPanelProps) {
   const { message: appMessage } = AntdApp.useApp()
@@ -83,58 +72,51 @@ export default function EditorPanel({
     writingChapters: chapters,
     activeChapterId: chapterId,
     activeChapterTitle: chapterTitle,
-    writingOutlineId,
     bookId,
-    enableVolume,
-    setActiveChapter: onChapterSelect,
-    setChaptersData: onChaptersChange,
-    workspaceSearchQuery,
     notifyWorkspaceSearchContentChanged,
   } = useWorkspace()
+  const diff = useDiff()
+  const diffActive = chapterId != null && diff.hasSession(chapterId)
+  const [diffHistoryOpen, setDiffHistoryOpen] = React.useState(false)
+
+  /** Inline Edit：选区状态 */
+  const [inlineSelection, setInlineSelection] = React.useState<
+    { text: string; rect: DOMRect } | null
+  >(null)
+  const handleSelectionChange = React.useCallback(
+    (payload: { text: string; rect: DOMRect } | null) => {
+      setInlineSelection(payload)
+    },
+    []
+  )
+  const clearInlineSelection = React.useCallback(() => {
+    setInlineSelection(null)
+  }, [])
+  /** diff 时禁用 Inline Edit */
+  const inlineEditEnabled = !diffActive
+
+  /** Ghost text 续写：与 Inline Edit 同生命周期条件 */
+  const [ghostTrigger, setGhostTrigger] = React.useState<GhostTrigger | null>(null)
+  const ghostTokenRef = React.useRef(0)
+  const handleGhostIdle = React.useCallback(
+    (payload: { prefix: string; cursorRect: DOMRect }) => {
+      ghostTokenRef.current += 1
+      setGhostTrigger({ token: ghostTokenRef.current, ...payload })
+    },
+    []
+  )
+  const handleGhostReset = React.useCallback(() => {
+    setGhostTrigger(null)
+  }, [])
+  const handleGhostAccept = React.useCallback((text: string) => {
+    if (text) lexicalEditorRef.current?.insertAtCursor(text)
+    setGhostTrigger(null)
+  }, [])
   const searchNotifyTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-  // ─── 编辑器状态 ───────────────────────────────────────────
   const [content, setContent] = React.useState('')
   const [saveStatus, setSaveStatus] = React.useState('已保存')
   const [wordCount, setWordCount] = React.useState(0)
-  const [navCollapsed, setNavCollapsed] = React.useState(false)
 
-  // ─── 通用添加/重命名/删除状态 ─────────────────────────────
-  const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)
-  const [editingTitle, setEditingTitle] = React.useState('')
-  const addingRef = React.useRef(false)
-
-  // ─── 非分卷模式：添加章节 ─────────────────────────────────
-  const [showAddInput, setShowAddInput] = React.useState(false)
-  const [newTitle, setNewTitle] = React.useState('')
-  const addInputRef = React.useRef<InputRef>(null)
-
-  // ─── 分卷模式：添加卷 ─────────────────────────────────────
-  const [addingVolume, setAddingVolume] = React.useState(false)
-  const [newVolSubtitle, setNewVolSubtitle] = React.useState('')
-  const addVolRef = React.useRef<InputRef>(null)
-
-  // ─── 分卷模式：添加章节（归属某卷） ──────────────────────
-  const [addingChapterVolId, setAddingChapterVolId] = React.useState<EntityId | null>(null)
-  const [newChapterSubtitle, setNewChapterSubtitle] = React.useState('')
-  const addChapterRef = React.useRef<InputRef>(null)
-
-  // ─── 分卷模式：折叠卷 ────────────────────────────────────
-  const [collapsedVolIds, setCollapsedVolIds] = React.useState<Set<EntityId>>(new Set())
-
-  // ─── 批量删除 ────────────────────────────────────────────
-  type DeleteModal = { chapter: Chapter; onConfirm: (checked: boolean) => void; checkboxLabel?: string }
-  const [deleteModal, setDeleteModal] = React.useState<DeleteModal | null>(null)
-  type BatchDeleteModal = { ids: EntityId[]; onConfirm: () => void }
-  const [batchDeleteModal, setBatchDeleteModal] = React.useState<BatchDeleteModal | null>(null)
-  const [batchMode, setBatchMode] = React.useState(false)
-  const [selectedIds, setSelectedIds] = React.useState<Set<EntityId>>(new Set())
-
-  // ─── 导出章节 ─────────────────────────────────────────────
-  const [exportModalOpen, setExportModalOpen] = React.useState(false)
-  const [exportSelectedIds, setExportSelectedIds] = React.useState<EntityId[]>([])
-  const [exportLoading, setExportLoading] = React.useState(false)
-
-  // ─── AI 浮窗 ─────────────────────────────────────────────
   const initialModelId = modelConfigs[0]?.id ?? ''
   const [aiFloat, setAiFloat] = React.useState<AiFloatState>(
     {
@@ -154,28 +136,6 @@ export default function EditorPanel({
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
 
-  // ─── 派生数据：分卷模式 ───────────────────────────────────
-  const volumes = React.useMemo(
-    () => enableVolume ? chapters.filter((c) => c.parent_id == null) : [],
-    [chapters, enableVolume]
-  )
-  const chaptersByVolId = React.useMemo(() => {
-    if (!enableVolume) return new Map<EntityId, Chapter[]>()
-    const map = new Map<EntityId, Chapter[]>()
-    for (const ch of chapters) {
-      if (ch.parent_id != null) {
-        const list = map.get(ch.parent_id) ?? []
-        list.push(ch)
-        map.set(ch.parent_id, list)
-      }
-    }
-    return map
-  }, [chapters, enableVolume])
-
-  const writableChapters = enableVolume ? chapters.filter((c) => c.parent_id != null) : chapters
-  const idToChapter = React.useMemo(() => new Map(chapters.map((c) => [c.id, c])), [chapters])
-
-  // ─── 加载/保存文章 ────────────────────────────────────────
   const refreshArticle = React.useCallback((cid: EntityId) => {
     window.electronAPI.getArticle({ chapterId: cid }).then((res) => {
       const text = res.success && res.data ? res.data.content : ''
@@ -191,7 +151,6 @@ export default function EditorPanel({
     refreshArticle(chapterId)
   }, [chapterId, refreshArticle])
 
-  // AI 通过 editChapterContent 保存某章后发出事件，若当前正在编辑该章则立即刷新
   React.useEffect(() => {
     const handler = (e: Event) => {
       const { chapterId: updatedId } = (e as CustomEvent<{ chapterId: EntityId }>).detail ?? {}
@@ -200,18 +159,6 @@ export default function EditorPanel({
     window.addEventListener('chapter-content-updated', handler)
     return () => window.removeEventListener('chapter-content-updated', handler)
   }, [chapterId, refreshArticle])
-
-  React.useEffect(() => {
-    if (showAddInput) addInputRef.current?.focus()
-  }, [showAddInput])
-
-  React.useEffect(() => {
-    if (addingVolume) addVolRef.current?.focus()
-  }, [addingVolume])
-
-  React.useEffect(() => {
-    if (addingChapterVolId != null) addChapterRef.current?.focus()
-  }, [addingChapterVolId])
 
   const scheduleAutoSave = React.useCallback((text: string) => {
     if (!chapterId) return
@@ -233,7 +180,6 @@ export default function EditorPanel({
     }, 200)
   }, [scheduleAutoSave, notifyWorkspaceSearchContentChanged])
 
-  /** 复制文本到剪贴板，统一错误提示与空内容提示 */
   const handleCopyToClipboard = React.useCallback(async (text: string, label: string) => {
     if (!text.trim()) {
       appMessage.info(`${label}为空，没有可复制的内容`)
@@ -247,6 +193,52 @@ export default function EditorPanel({
       appMessage.error(`复制${label}失败，请手动复制`)
     }
   }, [appMessage])
+
+  const handleReformat = React.useCallback(() => {
+    const result = lexicalEditorRef.current?.reformat()
+    if (!result) return
+    if (!result.changed) {
+      appMessage.info('已是规范排版，无需调整')
+      return
+    }
+    const parts: string[] = []
+    if (result.strippedIndents > 0) parts.push(`去除 ${result.strippedIndents} 处首行空白`)
+    if (result.removedEmptyLines > 0) parts.push(`删除 ${result.removedEmptyLines} 行空行`)
+    appMessage.success(
+      parts.length ? `已排版：${parts.join('、')}（Ctrl+Z 可撤销）` : '已排版（Ctrl+Z 可撤销）',
+    )
+  }, [appMessage])
+
+  /** 命令面板派发的事件监听 */
+  React.useEffect(() => {
+    const onOpenHistory = () => {
+      if (chapterId == null) {
+        appMessage.info('请先选择章节')
+        return
+      }
+      setDiffHistoryOpen(true)
+    }
+    const onReformat = () => {
+      if (chapterId == null) {
+        appMessage.info('请先选择章节')
+        return
+      }
+      handleReformat()
+    }
+    const onCopyTitle = () => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')
+    const onCopyContent = () => handleCopyToClipboard(content ?? '', '正文')
+
+    window.addEventListener('editor-open-diff-history', onOpenHistory)
+    window.addEventListener('editor-reformat', onReformat)
+    window.addEventListener('editor-copy-title', onCopyTitle)
+    window.addEventListener('editor-copy-content', onCopyContent)
+    return () => {
+      window.removeEventListener('editor-open-diff-history', onOpenHistory)
+      window.removeEventListener('editor-reformat', onReformat)
+      window.removeEventListener('editor-copy-title', onCopyTitle)
+      window.removeEventListener('editor-copy-content', onCopyContent)
+    }
+  }, [chapterId, chapterTitle, content, appMessage, handleCopyToClipboard, handleReformat])
 
   const handleKeyTrigger = React.useCallback((key: string, rect: DOMRect) => {
     if (key === 'backslash') {
@@ -376,573 +368,134 @@ export default function EditorPanel({
     })
   }
 
-  // ─── 获取写作大纲 ID ──────────────────────────────────────
-  const getOutlineId = async (): Promise<EntityId | null> => {
-    if (writingOutlineId) return writingOutlineId
-    const outline = await ensureDefaultOutline(bookId)
-    return outline ? outline.id : null
-  }
-
-  const reloadChapters = async (outlineId: EntityId) => {
-    const chapRes = await window.electronAPI.getChapters({ outlineId })
-    if (chapRes.success) onChaptersChange?.(outlineId, chapRes.data)
-  }
-
-  // ─── 非分卷：新建章节 ─────────────────────────────────────
-  const handleAddChapter = async () => {
-    if (addingRef.current) return
-    const subtitle = newTitle.trim()
-    const num = writableChapters.length + 1
-    const title = subtitle ? `第${num}章 ${subtitle}` : `第${num}章`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        setNewTitle('')
-        setShowAddInput(false)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, null)
-      }
-    } finally { addingRef.current = false }
-  }
-
-  // ─── 分卷：新建卷 ─────────────────────────────────────────
-  const handleAddVolume = async () => {
-    if (addingRef.current) return
-    const subtitle = newVolSubtitle.trim()
-    const num = volumes.length + 1
-    const title = subtitle ? `第${num}卷 ${subtitle}` : `第${num}卷`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: undefined, isVolume: true })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        setNewVolSubtitle('')
-        setAddingVolume(false)
-        onItemCreated?.(res.data.id, title, true, null)
-      }
-    } finally { addingRef.current = false }
-  }
-
-  // ─── 分卷：在某卷下新建章节 ───────────────────────────────
-  const handleAddChapterUnderVolume = async (volumeId: EntityId) => {
-    if (addingRef.current) return
-    const subtitle = newChapterSubtitle.trim()
-    const volChapters = chaptersByVolId.get(volumeId) ?? []
-    const num = volChapters.length + 1
-    const title = subtitle ? `第${num}章 ${subtitle}` : `第${num}章`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: volumeId })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        setNewChapterSubtitle('')
-        setAddingChapterVolId(null)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, volumeId)
-      }
-    } finally { addingRef.current = false }
-  }
-
-  // ─── 重命名 ───────────────────────────────────────────────
-  const handleRenameChapter = async (ch: Chapter) => {
-    const title = editingTitle.trim()
-    if (!title || title === ch.title) { setEditingChapterId(null); return }
-    await window.electronAPI.renameChapter({ id: ch.id, title })
-    setEditingChapterId(null)
-    if (writingOutlineId) await reloadChapters(writingOutlineId)
-    if (chapterId === ch.id) onChapterSelect?.(ch.id, title)
-  }
-
-  // ─── 删除单个（卷/章节） ──────────────────────────────────
-  const handleDeleteItem = async (ch: Chapter) => {
-    const isVol = enableVolume && ch.parent_id == null
-    const childIds = isVol ? (chaptersByVolId.get(ch.id) ?? []).map((c) => c.id) : []
-    const allIds = isVol ? [ch.id, ...childIds] : [ch.id]
-
-    setDeleteModal({
-      chapter: ch,
-      onConfirm: async (checked) => {
-        setDeleteModal(null)
-        for (const id of allIds) await window.electronAPI.deleteChapter({ id })
-        if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (chapterId != null && allIds.includes(chapterId)) onChapterSelect?.('', '')
-        if (checked) {
-          for (const id of allIds) onWritingChapterDeleted?.(id)
-        }
-      },
-      checkboxLabel: '同时删除对应大纲',
-    })
-  }
-
-  // ─── 批量删除 ────────────────────────────────────────────
-  const toggleSelect = (id: EntityId) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
-  }
-
-  const handleBatchDelete = () => {
-    let ids = Array.from(selectedIds)
-    if (enableVolume) {
-      const expanded = new Set<EntityId>()
-      for (const id of ids) {
-        expanded.add(id)
-        const ch = chapters.find((c) => c.id === id)
-        if (ch?.parent_id == null) {
-          for (const child of chaptersByVolId.get(id) ?? []) expanded.add(child.id)
-        }
-      }
-      ids = Array.from(expanded)
-    }
-    if (!ids.length) return
-    setBatchDeleteModal({
-      ids,
-      onConfirm: async () => {
-        setBatchDeleteModal(null); setBatchMode(false); setSelectedIds(new Set())
-        for (const id of ids) await window.electronAPI.deleteChapter({ id })
-        if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (chapterId != null && ids.includes(chapterId)) onChapterSelect?.('', '')
-        for (const id of ids) onWritingChapterDeleted?.(id)
-      },
-    })
-  }
-
-  // ─── 导出章节 ─────────────────────────────────────────────
-  const openExportModal = React.useCallback(() => {
-    setExportSelectedIds([])
-    setExportModalOpen(true)
-  }, [])
-
-  const exportGroups = React.useMemo(
-    () =>
-      enableVolume
-        ? volumes.map((vol) => ({
-            id: vol.id,
-            title: vol.title,
-            children: (chaptersByVolId.get(vol.id) ?? []).map((c) => ({ id: c.id, title: c.title })),
-          }))
-        : [],
-    [enableVolume, volumes, chaptersByVolId]
-  )
-
-  const exportItems = React.useMemo(
-    () => (enableVolume ? [] : writableChapters.map((c) => ({ id: c.id, title: c.title }))),
-    [enableVolume, writableChapters]
-  )
-
-  const handleExportConfirm = React.useCallback(
-    async (selectedIds: EntityId[], format: 'md' | 'txt', exportAsZip: boolean) => {
-      if (selectedIds.length === 0) {
-        appMessage.warning('请至少选择一章')
-        return
-      }
-      setExportLoading(true)
-      try {
-        const chaptersWithContent: ExportChapter[] = await Promise.all(
-          selectedIds.map(async (chapterId) => {
-            const ch = idToChapter.get(chapterId)
-            const res = await window.electronAPI.getArticle({ chapterId })
-            const content = (res.success && res.data?.content != null) ? String(res.data.content) : ''
-            const volumeTitle = enableVolume && ch?.parent_id != null ? idToChapter.get(ch.parent_id)?.title : undefined
-            const volumeId = enableVolume ? ch?.parent_id ?? undefined : undefined
-            return { title: ch?.title ?? '', content, volumeTitle, volumeId }
-          })
-        )
-        const bookData = { title: bookTitle, chapters: chaptersWithContent }
-        const entries = buildExportEntries([bookData], format)
-        const res = await window.electronAPI.writeExportFiles({ entries, exportAsZip })
-        if (res.success) {
-          appMessage.success('导出成功')
-          setExportModalOpen(false)
-        } else {
-          if (res.error !== 'canceled') appMessage.error(res.error || '导出失败')
-        }
-      } finally {
-        setExportLoading(false)
-      }
-    },
-    [bookTitle, enableVolume, idToChapter]
-  )
-
-  // ─── 渲染：重命名输入框 ───────────────────────────────────
-  const renderRenameInput = (ch: Chapter) => (
-    <Input
-      className="nav-rename-input"
-      value={editingTitle}
-      autoFocus size="small"
-      onChange={(e) => setEditingTitle(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') handleRenameChapter(ch)
-        if (e.key === 'Escape') setEditingChapterId(null)
-      }}
-      onBlur={() => handleRenameChapter(ch)}
-      onClick={(e) => e.stopPropagation()}
-    />
-  )
-
-  // ─── 渲染：分卷模式 ───────────────────────────────────────
-  const renderVolumeNav = () => (
-    <div className="nav-chapter-list">
-      {volumes.length === 0 && !addingVolume && (
-        <Empty image={false} description={<><span>暂无卷，点击 + 新建卷</span><br /><small>再在卷内新增章节</small></>} className="nav-empty" />
-      )}
-
-      {volumes.map((vol) => {
-        const volChaps = chaptersByVolId.get(vol.id) ?? []
-        const collapsed = collapsedVolIds.has(vol.id)
-        return (
-          <React.Fragment key={vol.id}>
-            {/* 卷行 */}
-            <div className={`nav-chapter-item nav-volume-item ${batchMode && selectedIds.has(vol.id) ? 'selected' : ''}`}>
-              {batchMode && (
-                <Checkbox
-                  checked={selectedIds.has(vol.id)}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={() => toggleSelect(vol.id)}
-                  className="nav-chapter-checkbox"
-                />
-              )}
-              <button
-                className="nav-volume-collapse-btn"
-                onClick={() => setCollapsedVolIds((prev) => {
-                  const next = new Set(prev)
-                  next.has(vol.id) ? next.delete(vol.id) : next.add(vol.id)
-                  return next
-                })}
-              >
-                <span className={`nav-volume-arrow ${collapsed ? 'collapsed' : ''}`}>▾</span>
-              </button>
-              {editingChapterId === vol.id ? (
-                renderRenameInput(vol)
-              ) : (
-                <>
-                  <span className="nav-chapter-title nav-volume-title">
-                    <HighlightText text={vol.title} query={workspaceSearchQuery} />
-                  </span>
-                  <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
-                    <Tooltip title="新建章节">
-                      <Button type="text" size="small" icon={<PlusOutlined style={{ fontSize: 12 }} />}
-                        onClick={() => { setAddingChapterVolId(vol.id); setNewChapterSubtitle(''); setCollapsedVolIds(prev => { const n = new Set(prev); n.delete(vol.id); return n }) }}
-                        className="nav-action-btn" />
-                    </Tooltip>
-                    <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
-                      onClick={() => { setEditingChapterId(vol.id); setEditingTitle(vol.title) }}
-                      className="nav-action-btn" />
-                    <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
-                      onClick={() => handleDeleteItem(vol)} className="nav-action-btn" />
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* 卷内章节 */}
-            {!collapsed && (
-              <>
-                {volChaps.map((ch) => (
-                  <div
-                    key={ch.id}
-                    className={`nav-chapter-item nav-chapter-under-volume ${chapterId === ch.id ? 'active' : ''} ${batchMode && selectedIds.has(ch.id) ? 'selected' : ''}`}
-                    onClick={() => { if (editingChapterId !== ch.id) onChapterSelect?.(ch.id, ch.title) }}
-                  >
-                    {batchMode && (
-                      <Checkbox
-                        checked={selectedIds.has(ch.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={() => toggleSelect(ch.id)}
-                        className="nav-chapter-checkbox"
-                      />
-                    )}
-                    {editingChapterId === ch.id ? (
-                      renderRenameInput(ch)
-                    ) : (
-                      <>
-                        <span className="nav-chapter-title">
-                          <HighlightText text={ch.title} query={workspaceSearchQuery} />
-                        </span>
-                        <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
-                          <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
-                            onClick={() => { setEditingChapterId(ch.id); setEditingTitle(ch.title) }}
-                            className="nav-action-btn" />
-                          <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
-                            onClick={() => handleDeleteItem(ch)} className="nav-action-btn" />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-
-                {/* 在此卷下新建章节的输入框 */}
-                {addingChapterVolId === vol.id && (
-                  <div className="nav-add-row nav-add-row-indent">
-                    <span className="nav-add-prefix">第{volChaps.length + 1}章</span>
-                    <Input
-                      ref={addChapterRef}
-                      className="nav-add-input"
-                      value={newChapterSubtitle}
-                      onChange={(e) => setNewChapterSubtitle(e.target.value)}
-                      placeholder="副标题（可选）"
-                      onBlur={() => handleAddChapterUnderVolume(vol.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleAddChapterUnderVolume(vol.id)
-                        if (e.key === 'Escape') { setAddingChapterVolId(null); setNewChapterSubtitle('') }
-                      }}
-                    />
-                  </div>
-                )}
-              </>
-            )}
-          </React.Fragment>
-        )
-      })}
-
-      {/* 新建卷输入框 */}
-      {addingVolume && (
-        <div className="nav-add-row">
-          <span className="nav-add-prefix">第{volumes.length + 1}卷</span>
-          <Input
-            ref={addVolRef}
-            className="nav-add-input"
-            value={newVolSubtitle}
-            onChange={(e) => setNewVolSubtitle(e.target.value)}
-            placeholder="副标题（可选）"
-            onBlur={handleAddVolume}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleAddVolume()
-              if (e.key === 'Escape') { setAddingVolume(false); setNewVolSubtitle('') }
-            }}
-          />
-        </div>
-      )}
-    </div>
-  )
-
-  // ─── 渲染：非分卷模式 ─────────────────────────────────────
-  const renderFlatNav = () => (
-    <div className="nav-chapter-list">
-      {chapters.length === 0 && !showAddInput && (
-        <Empty image={false} description={<><span>暂无章节，点击 + 新建</span><br /><small>或打开 XMind 导入大纲</small></>} className="nav-empty" />
-      )}
-      {chapters.map((ch) => (
-        <div
-          key={ch.id}
-          className={`nav-chapter-item ${chapterId === ch.id ? 'active' : ''} ${batchMode && selectedIds.has(ch.id) ? 'selected' : ''}`}
-          style={{ paddingLeft: `${((ch.level || 1) - 1) * 12 + 8}px` }}
-          onClick={() => { if (editingChapterId !== ch.id) onChapterSelect?.(ch.id, ch.title) }}
-        >
-          {batchMode && (
-            <Checkbox
-              checked={selectedIds.has(ch.id)}
-              onClick={(e) => e.stopPropagation()}
-              onChange={() => toggleSelect(ch.id)}
-              className="nav-chapter-checkbox"
-            />
-          )}
-          {editingChapterId === ch.id ? renderRenameInput(ch) : (
-            <>
-              <span className="nav-chapter-title">
-                <HighlightText text={ch.title} query={workspaceSearchQuery} />
-              </span>
-              <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
-                <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
-                  onClick={() => { setEditingChapterId(ch.id); setEditingTitle(ch.title) }} className="nav-action-btn" />
-                <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
-                  onClick={() => handleDeleteItem(ch)} className="nav-action-btn" />
-              </div>
-            </>
-          )}
-        </div>
-      ))}
-      {showAddInput && (
-        <div className="nav-add-row">
-          <span className="nav-add-prefix">第{writableChapters.length + 1}章</span>
-          <Input
-            ref={addInputRef}
-            className="nav-add-input"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="副标题（可选）"
-            onBlur={handleAddChapter}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleAddChapter()
-              if (e.key === 'Escape') { setShowAddInput(false); setNewTitle('') }
-            }}
-          />
-        </div>
-      )}
-    </div>
-  )
-
   return (
-    <div className={`editor-panel ${isFullscreen ? 'fullscreen' : ''}`}>
-      {deleteModal && (
-        <ConfirmModal
-          title={enableVolume && deleteModal.chapter.parent_id == null ? '删除卷' : '删除章节'}
-          message={`确认删除${enableVolume && deleteModal.chapter.parent_id == null ? '卷' : '章节'}「${deleteModal.chapter.title}」？${enableVolume && deleteModal.chapter.parent_id == null ? '卷内章节将一并删除。' : ''}删除后无法恢复。`}
-          checkboxLabel={deleteModal.checkboxLabel}
-          onConfirm={deleteModal.onConfirm}
-          onCancel={() => setDeleteModal(null)}
-        />
-      )}
-      {batchDeleteModal && (
-        <ConfirmModal
-          title="批量删除"
-          message={`确认删除选中的 ${batchDeleteModal.ids.length} 个条目？删除后无法恢复。`}
-          onConfirm={() => batchDeleteModal.onConfirm()}
-          onCancel={() => setBatchDeleteModal(null)}
-        />
-      )}
-
-      <ExportModal
-        title="导出章节"
-        open={exportModalOpen}
-        onCancel={() => setExportModalOpen(false)}
-        items={exportItems}
-        groups={exportGroups}
-        selectedIds={exportSelectedIds}
-        onSelectedIdsChange={setExportSelectedIds}
-        onConfirm={handleExportConfirm}
-        confirmLoading={exportLoading}
-        selectLabel="选择章节（可多选）："
-        emptyText="暂无章节"
-      />
-
+    <div className={`editor-panel ${isMain ? 'panel-main' : ''}`}>
       <div className="panel-header">
         <span className="panel-title">{chapterTitle || '选择章节开始写作'}</span>
         <div className="panel-header-actions">
-          <Tooltip title="导出章节">
-            <Button type="text" size="small" icon={<ExportOutlined style={{ fontSize: 16 }} />} onClick={openExportModal} />
+          {/*
+           * diff 历史回滚按钮：始终可见且可点击，
+           * 即使未选章节，也允许点开提示用户"请先选择章节"，
+           * 这是 AI 误改正文后唯一的兜底入口，不能被任何状态遮蔽。
+           */}
+          <Tooltip title="查看本章 diff 历史 / 回滚">
+            <Button
+              type="text"
+              size="small"
+              icon={<HistoryOutlined style={{ fontSize: 14 }} />}
+              onClick={() => {
+                if (chapterId == null) {
+                  appMessage.info('请先选择章节，再查看 diff 历史')
+                  return
+                }
+                setDiffHistoryOpen(true)
+              }}
+            />
           </Tooltip>
           <Button type="text" size="small"
-            icon={isFullscreen ? <CompressOutlined style={{ fontSize: 16 }} /> : <ExpandOutlined style={{ fontSize: 16 }} />}
-            title={isFullscreen ? '退出全屏' : '全屏'} onClick={onToggleFullscreen} />
+            icon={isMain ? <CompressOutlined style={{ fontSize: 16 }} /> : <ExpandOutlined style={{ fontSize: 16 }} />}
+            title={isMain ? '已是主区域' : '扩大此区域为主'} onClick={onSetMain} />
         </div>
       </div>
 
-      <div className="editor-body">
-        <div className={`editor-nav ${navCollapsed ? 'collapsed' : ''}`}>
-          {navCollapsed && (
-            <div className="nav-collapse-bar" onClick={() => setNavCollapsed(false)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && setNavCollapsed(false)} title="展开导航" />
-          )}
-          {!navCollapsed && (
-            <div className="nav-content">
-              <div className="nav-title-row">
-                <span className="nav-title">章节</span>
-                <div className="nav-title-actions">
-                  {batchMode ? (
-                    <>
-                      {selectedIds.size > 0 && (
-                        <Tooltip title={`删除(${selectedIds.size})`}>
-                          <Button type="text" size="small"
-                            icon={<DeleteOutlined style={{ fontSize: 14 }} />}
-                            onClick={handleBatchDelete} className="nav-batch-delete" />
-                        </Tooltip>
-                      )}
-                      <Button type="text" size="small"
-                        onClick={() => { setBatchMode(false); setSelectedIds(new Set()) }}
-                        className="nav-batch-cancel">取消</Button>
-                    </>
-                  ) : (
-                    <Button type="text" size="small"
-                      icon={<CheckSquareOutlined style={{ fontSize: 14 }} />}
-                      onClick={() => setBatchMode(true)} title="批量操作" className="nav-batch-btn" />
-                  )}
-                  {enableVolume ? (
-                    <Button type="text" size="small"
-                      icon={<PlusOutlined style={{ fontSize: 14 }} />} title="新建卷"
-                      onClick={() => { setAddingVolume(true); setNewVolSubtitle('') }}
-                      className="nav-add-btn" />
-                  ) : (
-                    <Button type="text" size="small"
-                      icon={<PlusOutlined style={{ fontSize: 14 }} />} title="新建章节"
-                      onClick={() => { setShowAddInput((v) => !v); setNewTitle('') }}
-                      className="nav-add-btn" />
-                  )}
-                  {!isFullscreen && (
-                    <Button type="text" size="small"
-                      icon={<MenuFoldOutlined style={{ fontSize: 14 }} />} title="收起导航"
-                      onClick={() => setNavCollapsed(true)} className="nav-toggle-inline" />
-                  )}
-                </div>
-              </div>
+      <DiffHistoryDrawer
+        chapterId={chapterId ?? null}
+        chapterTitle={chapterTitle ?? ''}
+        open={diffHistoryOpen}
+        onClose={() => setDiffHistoryOpen(false)}
+      />
 
-              {enableVolume ? renderVolumeNav() : renderFlatNav()}
+      <div className="editor-main">
+        {diffActive && chapterId != null && (
+          <DiffOverlay chapterId={chapterId} chapterTitle={chapterTitle ?? ''} />
+        )}
+        {!chapterId ? (
+          <Empty image={false} description={
+            <><p>从导演笔记本选择章节</p><small>点击左侧「章节」分组中的章节可切换，输入 <kbd>\</kbd> 可唤起 AI 助手</small></>
+          } className="editor-empty" />
+        ) : (
+          <>
+            <LexicalEditorComponent
+              ref={lexicalEditorRef}
+              key={chapterId}
+              value={content}
+              chapterId={chapterId}
+              onChange={handleContentChange}
+              onKeyTrigger={handleKeyTrigger}
+              placeholder={`开始写作「${chapterTitle}」... 提示：输入 \\ 可唤起 AI 助手`}
+              className="editor-lexical-wrap"
+              onLexicalEditor={onLexicalEditor}
+              onSelectionChange={inlineEditEnabled ? handleSelectionChange : undefined}
+              ghostEnabled={inlineEditEnabled}
+              onGhostIdle={inlineEditEnabled ? handleGhostIdle : undefined}
+              onGhostReset={inlineEditEnabled ? handleGhostReset : undefined}
+            />
+            <div className="editor-footer">
+              <div className="editor-footer-left">
+                <Tooltip title="撤回 (Ctrl+Z)">
+                  <Button type="text" size="small" icon={<UndoOutlined />} className="editor-toolbar-btn"
+                    onClick={() => lexicalEditorRef.current?.undo()} />
+                </Tooltip>
+                <Tooltip title="前进 (Ctrl+Shift+Z)">
+                  <Button type="text" size="small" icon={<RedoOutlined />} className="editor-toolbar-btn"
+                    onClick={() => lexicalEditorRef.current?.redo()} />
+                </Tooltip>
+                <Tooltip title="一键排版">
+                  <Button type="text" size="small" icon={<AlignLeftOutlined />} className="editor-toolbar-btn"
+                    onClick={handleReformat} />
+                </Tooltip>
+                <Tooltip title="复制标题">
+                  <Button type="text" size="small" icon={<BorderlessTableOutlined />} className="editor-toolbar-btn"
+                    onClick={() => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')} />
+                </Tooltip>
+                <Tooltip title="复制正文">
+                  <Button type="text" size="small" icon={<CopyOutlined />} className="editor-toolbar-btn"
+                    onClick={() => handleCopyToClipboard(content ?? '', '正文')} />
+                </Tooltip>
+              </div>
+              <div className="editor-footer-right">
+                <span className="word-count">{wordCount} 字</span>
+                <span className={`save-status ${saveStatus === '保存失败' ? 'save-error' : ''}`}>{saveStatus}</span>
+              </div>
             </div>
-          )}
-        </div>
-
-        <div className="editor-main">
-          {!chapterId ? (
-            <Empty image={false} description={
-              <><p>从导航选择章节</p><small>点击导航中的章节可切换，输入 <kbd>\</kbd> 可唤起 AI 助手</small></>
-            } className="editor-empty" />
-          ) : (
-            <>
-              <LexicalEditorComponent
-                ref={lexicalEditorRef}
-                key={chapterId}
-                value={content}
-                chapterId={chapterId}
-                onChange={handleContentChange}
-                onKeyTrigger={handleKeyTrigger}
-                placeholder={`开始写作「${chapterTitle}」... 提示：输入 \\ 可唤起 AI 助手`}
-                className="editor-lexical-wrap"
-                onLexicalEditor={onLexicalEditor}
-              />
-              <div className="editor-footer">
-                <div className="editor-footer-left">
-                  <Tooltip title="撤回 (Ctrl+Z)">
-                    <Button type="text" size="small" icon={<UndoOutlined />} className="editor-toolbar-btn"
-                      onClick={() => lexicalEditorRef.current?.undo()} />
-                  </Tooltip>
-                  <Tooltip title="前进 (Ctrl+Shift+Z)">
-                    <Button type="text" size="small" icon={<RedoOutlined />} className="editor-toolbar-btn"
-                      onClick={() => lexicalEditorRef.current?.redo()} />
-                  </Tooltip>
-                  <Tooltip title="一键排版">
-                    <Button type="text" size="small" icon={<AlignLeftOutlined />} className="editor-toolbar-btn"
-                      onClick={() => {
-                        const result = lexicalEditorRef.current?.reformat()
-                        if (!result) return
-                        if (!result.changed) {
-                          appMessage.info('已是规范排版，无需调整')
-                          return
-                        }
-                        const parts: string[] = []
-                        if (result.strippedIndents > 0) parts.push(`去除 ${result.strippedIndents} 处首行空白`)
-                        if (result.removedEmptyLines > 0) parts.push(`删除 ${result.removedEmptyLines} 行空行`)
-                        appMessage.success(
-                          parts.length ? `已排版：${parts.join('、')}（Ctrl+Z 可撤销）` : '已排版（Ctrl+Z 可撤销）',
-                        )
-                      }} />
-                  </Tooltip>
-                  <Tooltip title="复制标题">
-                    <Button type="text" size="small" icon={<BorderlessTableOutlined />} className="editor-toolbar-btn"
-                      onClick={() => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')} />
-                  </Tooltip>
-                  <Tooltip title="复制正文">
-                    <Button type="text" size="small" icon={<CopyOutlined />} className="editor-toolbar-btn"
-                      onClick={() => handleCopyToClipboard(content ?? '', '正文')} />
-                  </Tooltip>
-                </div>
-                <div className="editor-footer-right">
-                  <span className="word-count">{wordCount} 字</span>
-                  <span className={`save-status ${saveStatus === '保存失败' ? 'save-error' : ''}`}>{saveStatus}</span>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+          </>
+        )}
       </div>
+
+      {inlineEditEnabled && (
+        <InlineEditLayer
+          lexicalRef={lexicalEditorRef}
+          selection={inlineSelection}
+          onClearSelection={clearInlineSelection}
+          modelConfigs={modelConfigs}
+          selectedModelId={aiFloat.selectedModelId}
+          onSelectedModelChange={(id) =>
+            setAiFloat((prev) => ({ ...prev, selectedModelId: id }))
+          }
+          thinkingEnabled={aiFloat.thinkingEnabled}
+          onThinkingChange={(v) =>
+            setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))
+          }
+          bookId={bookId}
+          chapterId={chapterId}
+          chapterTitle={chapterTitle ?? ''}
+          bookTitle={_bookTitle}
+          writingChapters={chapters.map((c) => ({ id: c.id, title: c.title }))}
+        />
+      )}
+
+      {inlineEditEnabled && (
+        <GhostCompletion
+          trigger={ghostTrigger}
+          model={modelConfigs.find((m) => m.id === aiFloat.selectedModelId) ?? modelConfigs[0]}
+          bookId={bookId}
+          chapterId={chapterId}
+          chapterTitle={chapterTitle ?? ''}
+          bookTitle={_bookTitle}
+          onAccept={handleGhostAccept}
+          onCancel={handleGhostReset}
+        />
+      )}
 
       {aiFloat.visible && (
         <AiFloatBox
@@ -1008,7 +561,7 @@ function AiFloatBox({
   return (
     <div className="ai-float-box" style={{ left: x, top: y }}>
       <div className="ai-float-header">
-        <span>✨ AI 写作助手</span>
+        <span>AI 写作助手</span>
         <Button type="text" size="small" icon={<CloseOutlined style={{ fontSize: 16 }} />} onClick={onClose} className="btn-close" />
       </div>
       <div className="ai-float-input-row ai-float-input-row--textarea">
@@ -1071,4 +624,3 @@ function AiFloatBox({
     </div>
   )
 }
-

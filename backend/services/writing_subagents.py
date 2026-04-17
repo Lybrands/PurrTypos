@@ -40,22 +40,22 @@ SUBAGENT_ROLE_LABELS: dict[str, str] = {
 
 TOOL_NAMES_BY_ROLE: dict[str, list[str]] = {
     "review": [
-        "getStoryBackground", "getGlobalOutline", "listWritingChapters",
+        "getStoryBackground", "getBookStyle", "getGlobalOutline", "listWritingChapters",
         "getChapterContent", "batchGetChapterContents", "listOutlines", "queryOutline",
         "listBookCharacters", "getBookCharacters",
     ],
     "continuation_plan": [
-        "getStoryBackground", "getGlobalOutline", "listWritingChapters",
+        "getStoryBackground", "getBookStyle", "getGlobalOutline", "listWritingChapters",
         "listOutlines", "queryOutline",
         "listBookCharacters", "getBookCharacters",
     ],
     "polish": [
-        "getStoryBackground", "getGlobalOutline", "listWritingChapters",
+        "getStoryBackground", "getBookStyle", "getGlobalOutline", "listWritingChapters",
         "getChapterContent", "batchGetChapterContents", "createWritingChapter",
         "listBookCharacters", "getBookCharacters",
     ],
     "style_unify": [
-        "getStoryBackground", "getGlobalOutline", "listWritingChapters",
+        "getStoryBackground", "getBookStyle", "getGlobalOutline", "listWritingChapters",
         "getChapterContent", "batchGetChapterContents",
         "listBookCharacters", "getBookCharacters",
     ],
