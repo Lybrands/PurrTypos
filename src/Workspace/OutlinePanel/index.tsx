@@ -71,7 +71,7 @@ export default function OutlinePanel({
   /** 同步选中的章节无大纲记录时，用于展示待上传 */
   const [syncedChapterNoOutlineTitle, setSyncedChapterNoOutlineTitle] = React.useState<string | null>(null)
   /** 详情内：思维导图 / Markdown */
-  const [detailOutlineSub, setDetailOutlineSub] = React.useState<'xmind' | 'markdown'>('xmind')
+  const [detailOutlineSub, setDetailOutlineSub] = React.useState<'xmind' | 'markdown'>('markdown')
   const outlineMarkdownPaneRef = React.useRef<OutlineMarkdownPaneRef | null>(null)
 
   const crud = useOutlineCrud({
@@ -732,8 +732,8 @@ export default function OutlinePanel({
                       value={detailOutlineSub}
                       onChange={(v) => setDetailOutlineSub(v as 'xmind' | 'markdown')}
                       options={[
-                        { label: '思维导图大纲', value: 'xmind' },
                         { label: '文本大纲', value: 'markdown' },
+                        { label: '思维导图大纲', value: 'xmind' },
                       ]}
                       block
                     />
