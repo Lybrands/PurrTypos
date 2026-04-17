@@ -106,6 +106,8 @@ export interface PromptTemplateContext {
   currentChapterTitle?: string | null;
   associatedChapterTitles?: string[];
   associatedOutlineTitles?: string[];
+  /** Inline 改写场景下传入：当前选区文本，对应模板变量 {选中} / selection */
+  selection?: string | null;
 }
 
 /** 将内容中的自动占位符替换为上下文值 */
@@ -124,16 +126,19 @@ export function applyPromptPlaceholders(
     .map((s) => s.trim())
     .filter(Boolean)
     .join("、");
+  const selection = (ctx.selection || "").trim();
 
   const map: Record<string, string> = {
     "书名": book || "（未命名书籍）",
     "当前章节": chapter || "（未选择章节）",
     "关联章节": chapters || "（未关联章节）",
     "关联大纲": outlines || "（未关联大纲）",
+    "选中": selection || "（未选中文本）",
     bookTitle: book || "",
     chapterTitle: chapter || "",
     associatedChapters: chapters,
     associatedOutlines: outlines,
+    selection: selection,
   };
 
   return content.replace(/\{([^{}]+)\}/g, (match, key: string) => {
@@ -172,6 +177,10 @@ export function hasUnfilledPlaceholders(
       case "associatedOutlines":
         if (!(ctx.associatedOutlineTitles ?? []).filter(Boolean).length)
           missing.add("关联大纲");
+        break;
+      case "选中":
+      case "selection":
+        if (!(ctx.selection || "").trim()) missing.add("选中");
         break;
       default:
         break;

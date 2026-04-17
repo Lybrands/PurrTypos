@@ -25,6 +25,7 @@ from database.crud.outlines import (
     get_writing_outline,
     update_outline,
 )
+from database.crud.book_style import get_book_style
 from database.crud.story_background import get_story_background
 from dependencies import get_db
 from utils.outline_text import collect_text_outline_entries
@@ -445,6 +446,9 @@ def tool_will_hit_read_cache(ctx: dict, tc: dict, writing_chapters: list[dict]) 
         elif name == "getStoryBackground":
             bid = resolve_book_id_for_tools(ctx, args)
             return _read_tool_cache_get(ctx, f"getStoryBackground:{bid}") is not None
+        elif name == "getBookStyle":
+            bid = resolve_book_id_for_tools(ctx, args)
+            return _read_tool_cache_get(ctx, f"getBookStyle:{bid}") is not None
         elif name == "queryOutline":
             bid = resolve_book_id_for_tools(ctx, args)
             if not bid:
@@ -716,6 +720,31 @@ async def run_tools(
                     content = (row.get("content") if row else None) or "（暂无小说背景）"
                     _read_tool_cache_set(ctx, ck, content)
 
+            elif name == "getBookStyle":
+                bid = resolve_book_id_for_tools(ctx, args)
+                ck = f"getBookStyle:{bid}"
+                hit = _read_tool_cache_get(ctx, ck)
+                if hit is not None:
+                    content = hit
+                    tool_from_cache = True
+                else:
+                    row = await get_book_style(get_db(), bid)
+                    if not row:
+                        content = "（暂无风格基调）"
+                    else:
+                        content = json.dumps(
+                            {
+                                "pov": row.get("pov") or "",
+                                "tone": row.get("tone") or "",
+                                "pace": row.get("pace") or "",
+                                "banned_rules": row.get("banned_rules") or "",
+                                "reference_chapter_ids": row.get("reference_chapter_ids") or "",
+                                "free_notes": row.get("free_notes") or "",
+                            },
+                            ensure_ascii=False,
+                        )
+                    _read_tool_cache_set(ctx, ck, content)
+
             elif name == "queryOutline":
                 bid = resolve_book_id_for_tools(ctx, args)
                 if not bid:
@@ -849,6 +878,10 @@ async def run_tools(
                                 content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
             elif name == "editChapterContent":
+                # 自 v3.1：editChapterContent 不再直接落库，改为提交 diff 提议给前端，
+                # 由用户在 DiffOverlay 接受/拒绝后通过 commitChapterDiff 真正写库。
+                # - 协作模式（collabWriting）也走 diff，避免 AI "暗改" 用户正文
+                # - 返回给 LLM 的提示明确说明"等待用户确认"，防止 LLM 基于"已写入"假设继续动作
                 resolved = resolve_chapter_id_strict(args, runtime_writing_chapters, runtime_chapter_id)
                 cid = resolved.get("chapterId", "") if resolved["ok"] else ""
                 new_content = args.get("content", "") if isinstance(args.get("content"), str) else ""
@@ -864,22 +897,42 @@ async def run_tools(
                         content = json.dumps({"success": False, "error": p["error"], **({"chapterId": p["chapterId"]} if p.get("chapterId") else {})}, ensure_ascii=False)
                     else:
                         try:
+                            old_plain = (await _read_chapter_plain_full(cid) or {}).get("plainTextFull") or ""
+                            old_trim = str(old_plain).strip()
                             merged_content = new_content
-                            if ctx.get("collabWriting") is True and new_content.strip():
-                                old_plain = (await _read_chapter_plain_full(cid) or {}).get("plainTextFull") or ""
-                                old_trim = str(old_plain).strip()
+                            is_collab = ctx.get("collabWriting") is True
+                            if is_collab and new_content.strip():
                                 new_trim = new_content.strip()
                                 if old_trim and new_trim and not new_trim.startswith(old_trim):
                                     merged_content = f"{old_trim}\n\n{new_trim}"
-                            await save_article(get_db(), cid, merged_content)
-                            _invalidate_chapter_content_cache(ctx, cid)
-                            if send_chunk:
-                                latest_paragraph = extract_latest_paragraph(new_content)
-                                send_chunk({
-                                    "chapterContentUpdated": cid,
-                                    **({"collabLatestParagraph": latest_paragraph} if latest_paragraph else {}),
-                                })
-                            content = json.dumps({"success": True, "message": "章节正文已保存", "chapterId": cid}, ensure_ascii=False)
+
+                            # 与现有正文完全一致时，没有任何可应用的差异，
+                            # 直接告诉 LLM"无需变更"，避免在前端弹一个空 diff
+                            if (merged_content or "").strip() == old_trim and old_trim != "":
+                                content = json.dumps({
+                                    "success": True,
+                                    "message": "新内容与现有正文一致，无需变更",
+                                    "chapterId": cid,
+                                    "noop": True,
+                                }, ensure_ascii=False)
+                            else:
+                                if send_chunk:
+                                    send_chunk({
+                                        "proposedChapterDiff": {
+                                            "chapterId": cid,
+                                            "beforeText": old_plain,
+                                            "proposedText": merged_content,
+                                            "source": "ai_tool_edit_collab" if is_collab else "ai_tool_edit",
+                                        },
+                                    })
+                                # 注意：返回给 LLM 的语义是"已提交差异，等待用户确认"，
+                                # 不要再自称"已保存"，否则模型可能基于该假设继续动作
+                                content = json.dumps({
+                                    "success": True,
+                                    "message": "已向用户提交差异预览，需用户在编辑器接受/拒绝后才会写入正文",
+                                    "chapterId": cid,
+                                    "pendingUserApproval": True,
+                                }, ensure_ascii=False)
                         except Exception as e:
                             content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 

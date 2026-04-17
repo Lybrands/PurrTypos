@@ -109,6 +109,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getStoryBackgroundAttachments: (data) => apiGet(`/story-background/${data.bookId}/attachments`),
   deleteStoryBackgroundAttachment: (data) => apiDelete(`/story-background/attachments/${data.id}`),
 
+  // ─── Book style — HTTP ─────────────────────────────────────────
+  getBookStyle: (data) => apiGet(`/book-style/${data.bookId}`),
+  saveBookStyle: (data) => apiPut(`/book-style/${data.bookId}`, {
+    pov: data.pov || '',
+    tone: data.tone || '',
+    pace: data.pace || '',
+    banned_rules: data.banned_rules || '',
+    reference_chapter_ids: data.reference_chapter_ids || '',
+    free_notes: data.free_notes || '',
+  }),
+
+  // ─── Chapter diff history — HTTP ───────────────────────────────
+  commitChapterDiff: (data) => apiPost(`/chapter-diff/${data.chapterId}/commit`, {
+    content: data.content,
+    before_text: data.beforeText || '',
+    after_text: data.afterText || '',
+    source: data.source || 'ai_rewrite',
+    accepted_segments: data.acceptedSegments || 0,
+    rejected_segments: data.rejectedSegments || 0,
+  }),
+  listChapterDiff: (data) => apiGet(`/chapter-diff/${data.chapterId}?limit=${data.limit ?? 50}`),
+  getChapterDiff: (data) => apiGet(`/chapter-diff/by-id/${data.diffId}`),
+  rollbackChapterDiff: (data) => apiPost(`/chapter-diff/by-id/${data.diffId}/rollback`, {}),
+
   // ─── Sessions — HTTP ───────────────────────────────────────────
   createSession: (data) => apiPost('/sessions', data),
   getSessions: (data) => {

@@ -207,6 +207,45 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
+    # ── book_style ───────────────────────────────────────────────
+    # 每本书一份「风格基调」，强制注入 system prompt（写作专家模式）
+    await db.execute("""CREATE TABLE IF NOT EXISTS book_style (
+        book_id TEXT NOT NULL PRIMARY KEY,
+        pov TEXT DEFAULT '',
+        tone TEXT DEFAULT '',
+        pace TEXT DEFAULT '',
+        banned_rules TEXT DEFAULT '',
+        reference_chapter_ids TEXT DEFAULT '',
+        free_notes TEXT DEFAULT '',
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── chapter_canvas ───────────────────────────────────────────
+    # 每章一个 AI 草稿区（与 articles 一对一），AI 写到 canvas 上不污染正文，
+    # 用户点「合并到正文」走 diff 流程后才落地到 articles。
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_canvas (
+        chapter_id TEXT NOT NULL PRIMARY KEY,
+        content TEXT NOT NULL DEFAULT '',
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── chapter_diff_history ─────────────────────────────────────
+    # AI 改正文产生的 diff 历史；commit 时同时落盘 articles
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_diff_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chapter_id TEXT NOT NULL,
+        before_text TEXT NOT NULL DEFAULT '',
+        after_text TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'ai_rewrite',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chapter_diff_history_chapter "
+        "ON chapter_diff_history(chapter_id, create_time DESC)"
+    )
+
     # ── story_background_attachments ─────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS story_background_attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

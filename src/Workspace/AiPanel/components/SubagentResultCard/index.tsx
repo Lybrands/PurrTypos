@@ -15,6 +15,8 @@ export default function SubagentResultCard({
   payload,
   chapterId,
 }: SubagentResultCardProps) {
+  // 自 v3.1：所有"AI 改正文"入口统一走 diff 提议，
+  // 由 DiffProvider 监听 ai-propose-chapter-diff 事件并启动 diff 会话。
   const applyChapter = React.useCallback(
     async (content: string) => {
       if (!chapterId) {
@@ -25,22 +27,26 @@ export default function SubagentResultCard({
         antdMessage.warning("无正文可写入");
         return;
       }
-      const res = await window.electronAPI.saveArticle({
-        chapterId,
-        content,
-      });
-      if (res.success) {
-        antdMessage.success("已保存到当前章节");
+      try {
+        const res = await window.electronAPI.getArticle({ chapterId });
+        const beforeText = res?.success && res.data ? res.data.content || "" : "";
         window.dispatchEvent(
-          new CustomEvent("chapter-content-updated", {
-            detail: { chapterId },
+          new CustomEvent("ai-propose-chapter-diff", {
+            detail: {
+              chapterId,
+              beforeText,
+              proposedText: content,
+              source: `subagent_${role}`,
+            },
           }),
         );
-      } else {
-        antdMessage.error(res.error || "保存失败");
+        antdMessage.success("已生成 diff，请到写作区接受/拒绝");
+      } catch (e) {
+        console.error("[SubagentResultCard] propose diff failed", e);
+        antdMessage.error("生成 diff 失败");
       }
     },
-    [chapterId],
+    [chapterId, role],
   );
 
   if (role === "review") {
@@ -142,7 +148,7 @@ export default function SubagentResultCard({
           disabled={!body}
           onClick={() => void applyChapter(body)}
         >
-          应用到当前章
+          生成 diff 应用到当前章
         </Button>
       </div>
     );
@@ -181,7 +187,7 @@ export default function SubagentResultCard({
         disabled={!body}
         onClick={() => void applyChapter(body)}
       >
-        应用到当前章
+        生成 diff 应用到当前章
       </Button>
     </div>
   );

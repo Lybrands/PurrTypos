@@ -394,6 +394,17 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
             ):
                 from utils.writing_prompt import build_writing_main_system_prompt
 
+                # Layer 1：强制注入风格基调
+                try:
+                    from database.crud.book_style import get_book_style
+                    from dependencies import get_db as _get_db_for_style
+                    tool_ctx_book["bookStyle"] = await get_book_style(
+                        _get_db_for_style(), str(body.bookId)
+                    )
+                except Exception:
+                    logger.exception("[ai/chat/stream] load book_style failed")
+                    tool_ctx_book["bookStyle"] = None
+
                 writing_inject = build_writing_main_system_prompt(tool_ctx_book)
                 if writing_inject:
                     _seen_w = False

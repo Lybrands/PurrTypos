@@ -154,6 +154,8 @@ function toolCallDisplayRow(
         return { label: "查看人物列表", outcome: "ok" };
       case "getStoryBackground":
         return { label: "查看小说背景", outcome: "ok" };
+      case "getBookStyle":
+        return { label: "查看风格基调", outcome: "ok" };
       case "getGlobalOutline":
         return { label: "查看总纲", outcome: "ok" };
       case "editGlobalOutline":
@@ -440,7 +442,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             { role: "user", content: resend.content.trim() },
             {
               role: "assistant",
-              content: "⚠️ 请先在设置中添加模型并填写 API Key",
+              content: "请先在设置中添加模型并填写 API Key",
               isError: true,
             },
           ]);
@@ -450,7 +452,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             { role: "user", content: userText },
             {
               role: "assistant",
-              content: "⚠️ 请先在设置中添加模型并填写 API Key",
+              content: "请先在设置中添加模型并填写 API Key",
               isError: true,
             },
           ]);
@@ -833,6 +835,24 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           window.dispatchEvent(
             new CustomEvent("chapter-content-updated", {
               detail: { chapterId: chunk.chapterContentUpdated },
+            }),
+          );
+        }
+      }
+
+      // AI 工具 editChapterContent 不再直接落库，改为推送 diff 提议给前端，
+      // 由 DiffProvider 监听并 startDiff，最终用户在 overlay 接受后走 commitChapterDiff
+      if (chunk.proposedChapterDiff && isVisibleSession()) {
+        const p = chunk.proposedChapterDiff;
+        if (p.chapterId != null && typeof p.proposedText === "string") {
+          window.dispatchEvent(
+            new CustomEvent("ai-propose-chapter-diff", {
+              detail: {
+                chapterId: p.chapterId,
+                beforeText: typeof p.beforeText === "string" ? p.beforeText : "",
+                proposedText: p.proposedText,
+                source: p.source || "ai_tool_edit",
+              },
             }),
           );
         }
