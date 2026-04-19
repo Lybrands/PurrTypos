@@ -83,6 +83,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOutlines: (typeFilter) => apiGet(`/outlines${typeFilter ? '?type=' + typeFilter : ''}`),
   getVolumeOutlines: (bookId) => apiGet(`/outlines/volume/${bookId}`),
   getOutlineByWritingChapter: (id) => apiGet(`/outlines/by-writing-chapter/${id}`),
+  getOutlineForChapter: (id) => apiGet(`/outlines/for-chapter/${id}`),
   getGlobalOutline: (bookId) => apiGet(`/outlines/global/${bookId}`),
   ensureGlobalOutline: (bookId) => apiPost(`/outlines/global/${bookId}/ensure`, {}),
   getWritingOutline: (bookId) => apiGet(`/outlines/writing/${bookId}`),
@@ -90,6 +91,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAssociableOutlines: (bookId) => apiGet(`/outlines/associable/${bookId}`),
   deleteOutline: (data) => apiDelete(`/outlines/${data.outlineId}`),
   updateOutline: (data) => apiPut(`/outlines/${data.outlineId}`, data),
+  listOutlineHistory: (data) => apiGet(`/outlines/${data.outlineId}/history${data && data.limit ? `?limit=${data.limit}` : ''}`),
+  getOutlineHistory: (data) => apiGet(`/outlines/history/${data.historyId}`),
+  restoreOutlineHistory: (data) => apiPost(`/outlines/history/${data.historyId}/restore`, {}),
 
   // ─── Chapters — HTTP ───────────────────────────────────────────
   saveChapters: (data) => apiPost(`/chapters/${data.outlineId}`, { chapters: data.chapters }),

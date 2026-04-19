@@ -1,6 +1,6 @@
 import React from 'react'
 import { Button, Tooltip } from 'antd'
-import { CloseOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons'
+import { CloseOutlined } from '@ant-design/icons'
 import './FloatingPanel.scss'
 
 /**
@@ -9,9 +9,10 @@ import './FloatingPanel.scss'
  * 设计要点：
  * - 绝对定位在 .app-body 内，不会盖住顶部 AppHeader。
  * - 拖动 header 改变位置；左/右把手改变宽度（高度始终撑满 app-body）。
- * - 钉住（pinned）= 持久显示；非钉住状态下，外层可在用户点击外部时关闭。
+ * - 浮窗永远「钉住」展示：点击外部不会自动收起，必须显式点击 × 或再按侧贴线/快捷键关闭。
+ *   早期还有 pinned 切换按钮，现已移除（语义被简化为单一状态）。
  * - 关闭仅触发 onClose，外层负责把 open 置 false。
- * - 默认带半透明阴影背景，强调"浮在 AI 之上"。
+ * - 默认带半透明阴影背景，强调「浮在 AI 之上」。
  */
 
 export interface FloatingPanelProps {
@@ -22,8 +23,6 @@ export interface FloatingPanelProps {
   y: number
   width: number
   onPositionChange: (next: { x: number; y: number; width: number }) => void
-  pinned: boolean
-  onTogglePin: () => void
   onClose: () => void
   children: React.ReactNode
 }
@@ -43,8 +42,6 @@ export default function FloatingPanel({
   y,
   width,
   onPositionChange,
-  pinned,
-  onTogglePin,
   onClose,
   children,
 }: FloatingPanelProps) {
@@ -131,7 +128,7 @@ export default function FloatingPanel({
   return (
     <div
       ref={ref}
-      className={`floating-panel floating-panel--${side} ${pinned ? 'is-pinned' : ''}`}
+      className={`floating-panel floating-panel--${side}`}
       style={{
         transform: `translate(${x}px, ${y}px)`,
         width,
@@ -140,15 +137,6 @@ export default function FloatingPanel({
       <div className="floating-panel-header" onMouseDown={startDrag('move')}>
         <span className="floating-panel-title">{title}</span>
         <div className="floating-panel-actions" onMouseDown={(e) => e.stopPropagation()}>
-          <Tooltip title={pinned ? '取消钉住（点 AI 区域将关闭浮窗）' : '钉住浮窗（点击外部不会关闭）'}>
-            <Button
-              type="text"
-              size="small"
-              icon={pinned ? <PushpinFilled style={{ fontSize: 14 }} /> : <PushpinOutlined style={{ fontSize: 14 }} />}
-              onClick={onTogglePin}
-              className={`floating-panel-action ${pinned ? 'is-active' : ''}`}
-            />
-          </Tooltip>
           <Tooltip title="关闭">
             <Button
               type="text"

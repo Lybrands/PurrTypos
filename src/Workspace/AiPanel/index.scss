@@ -775,14 +775,25 @@
 
 /* ─── 写作模式浮岛：ai-panel--compact ────────────────────────────
  * mainPanel === 'editor' 时 AI 栏收紧为浮岛形态：
- * - 隐藏 system prompt / session 标签 / 模式切换等次要控件，让出空间给写作
+ * - 隐藏 system prompt / 模式切换等次要控件，让出空间给写作
+ * - 保留 session 标签栏（其中的「+ 新建对话」/ 历史按钮是高频入口，悬浮态也要可达）
  * - 消息气泡字号与 padding 压缩；历史列表仍可滚动
  * - 输入区保留完整能力（写作中的 AI 召唤点）
  */
 .ai-panel--compact {
-  .system-prompt-area,
-  .session-tabs-bar {
+  .system-prompt-area {
     display: none;
+  }
+
+  /* session 标签栏在窄面板里收紧：单行水平滚，按钮区永远右贴 */
+  .session-tabs-bar.ant-tabs {
+    .ant-tabs-nav {
+      min-height: 30px;
+    }
+    .ant-tabs-tab {
+      padding: 2px 6px;
+      font-size: var(--font-size-sm);
+    }
   }
 
   .panel-header {

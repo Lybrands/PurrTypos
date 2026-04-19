@@ -154,6 +154,42 @@ export default function ChapterSection({
     } finally { addingRef.current = false }
   }
 
+  /** 列表末尾"点击新建"占位行专用：直接创建默认 `第N章`，跳过输入态。 */
+  const handleQuickAddChapter = async () => {
+    if (addingRef.current) return
+    const num = writableChapters.length + 1
+    const title = `第${num}章`
+    addingRef.current = true
+    try {
+      const outlineId = await getOutlineId()
+      if (!outlineId) return
+      const res = await window.electronAPI.addChapter({ outlineId, title })
+      if (res.success) {
+        await reloadChapters(outlineId)
+        onChapterSelect?.(res.data.id, res.data.title)
+        onItemCreated?.(res.data.id, title, false, null)
+      }
+    } finally { addingRef.current = false }
+  }
+
+  const handleQuickAddChapterUnderVolume = async (volumeId: EntityId) => {
+    if (addingRef.current) return
+    const volChapters = chaptersByVolId.get(volumeId) ?? []
+    const num = volChapters.length + 1
+    const title = `第${num}章`
+    addingRef.current = true
+    try {
+      const outlineId = await getOutlineId()
+      if (!outlineId) return
+      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: volumeId })
+      if (res.success) {
+        await reloadChapters(outlineId)
+        onChapterSelect?.(res.data.id, res.data.title)
+        onItemCreated?.(res.data.id, title, false, volumeId)
+      }
+    } finally { addingRef.current = false }
+  }
+
   const handleAddVolume = async () => {
     if (addingRef.current) return
     const subtitle = newVolSubtitle.trim()
@@ -441,6 +477,16 @@ export default function ChapterSection({
                     />
                   </div>
                 )}
+                {addingChapterVolId !== vol.id && !batchMode && volChaps.length > 0 && (
+                  <div
+                    className="nav-add-placeholder nav-add-placeholder--indent"
+                    onClick={() => handleQuickAddChapterUnderVolume(vol.id)}
+                    title="新建章节（如需自定义副标题，请用卷上的 + 按钮）"
+                  >
+                    <PlusOutlined />
+                    <span>新建第{volChaps.length + 1}章</span>
+                  </div>
+                )}
               </>
             )}
           </React.Fragment>
@@ -521,6 +567,16 @@ export default function ChapterSection({
               if (e.key === 'Escape') { setShowAddInput(false); setNewTitle('') }
             }}
           />
+        </div>
+      )}
+      {!showAddInput && !batchMode && chapters.length > 0 && (
+        <div
+          className="nav-add-placeholder"
+          onClick={handleQuickAddChapter}
+          title="新建章节（如需自定义副标题，请用顶部 + 按钮）"
+        >
+          <PlusOutlined />
+          <span>新建第{writableChapters.length + 1}章</span>
         </div>
       )}
     </div>

@@ -94,7 +94,21 @@
 
 - **用途**：写入一条本书设定（全局/大纲/人物/章节等层级）。
 - **参数**：`bookId` (number, 必填)、`layer` (number：0–3)、`content` (string, 必填)；`chapterId`、`characterId` (可选)。
-- **返回**：成功/失败信息。
+- **返回**：成功/失败信息（含 `id`，可用于后续 `updateSparkIdea`）。
+
+### updateSparkIdea
+
+- **用途**：编辑一条已有本书设定的内容或层级。
+- **参数**：`id` (number, 必填)；`content` (string, 可选)、`layer` (number：0–3, 可选) 至少一个。
+- **返回**：更新后的 `id` / `layer` / `content`，或 `success=false` 错误信息。
+- **如何拿 id**：`searchSparkIdeas` 返回内容里每行带 `[id:N]` 前缀；或 `addSparkIdea` 成功后返回 `id`。
+
+### deleteSparkIdea
+
+- **用途**：物理删除一条本书设定（**不可恢复**）。
+- **参数**：`id` (number, 必填)；id 必须先用 `searchSparkIdeas` 取到，不可凭空捏造。
+- **返回**：被删除条目的 `id` / `layer` / `content`，便于在回复中复述"已删除：XXX"。
+- **使用约束**：用户**明确要求删除**才调用；可改可删时优先 `updateSparkIdea`；调用前先复述目标内容、得到用户同意。
 
 ### addForeshadowing
 
@@ -115,6 +129,6 @@
 - **大纲**：先 **`listOutlines`** 拿 id/标题；只读详情用 **`queryOutline`**（可同时取章节树与文本大纲 Markdown）；修改用 **`updateOutline`**。需要总纲全文用 **`getGlobalOutline`** / **`editGlobalOutline`**。
 - **章节正文/目录**：先 **`listWritingChapters`** 再操作；新增目录用 **`createWritingChapter`**；正文读写用 **`getChapterContent`** / **`batchGetChapterContents`** / **`editChapterContent`**，其章节 id 必须来自写作目录。
 - **人物与背景**：**`getBookCharacters`** / **`listBookCharacters`** / **`getStoryBackground`**。
-- **本书设定与伏笔**：**`addSparkIdea`**、**`addForeshadowing`**、**`searchSparkIdeas`**。
+- **本书设定与伏笔**：新增用 **`addSparkIdea`** / **`addForeshadowing`**；查询用 **`searchSparkIdeas`**（结果含 `[id:N]`）；改写已有设定用 **`updateSparkIdea`**（必须先用 `searchSparkIdeas` 取 id）；明确要删除时用 **`deleteSparkIdea`**（不可恢复，可改可删先 update）。
 - 用户要求改写某章正文时，必须实际调用 **`editChapterContent`** 并收到成功后再宣称完成。
 - 回复用户时优先使用**章节名**等与界面一致的可见名称，避免直接暴露内部数字 id。

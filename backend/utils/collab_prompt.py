@@ -14,6 +14,8 @@ COLLAB_WRITE_TOOL_NAMES: set[str] = {
     "editGlobalOutline",
     "updateOutline",
     "addSparkIdea",
+    "updateSparkIdea",
+    "deleteSparkIdea",
     "addForeshadowing",
 }
 

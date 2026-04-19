@@ -1,7 +1,7 @@
 import React from 'react'
-import { Button, Checkbox, Empty, Input, Modal, Select, Spin, Tabs } from 'antd'
-import { DeleteOutlined } from '@ant-design/icons'
-import type { AiForeshadowing, AiSparkIdea, EntityId, SparkIdeaLayer } from '../../../../types'
+import { Button, Checkbox, Empty, Input, message, Modal, Popconfirm, Select, Spin, Tabs } from 'antd'
+import { CheckOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
+import type { AiForeshadowing, AiSparkIdea, Character, EntityId, SparkIdeaLayer } from '../../../../types'
 import {
   FORESHADOWING_TYPES,
   SparkIdeaLayerFour,
@@ -41,7 +41,13 @@ export default function MemoryModal({
   // 管理：四层记忆新增表单
   const [addLayer, setAddLayer] = React.useState<SparkIdeaLayerFour>(SparkIdeaLayerFour.Global)
   const [addContent, setAddContent] = React.useState('')
+  /** 关联实体：大纲/章节 用 chapterId，人物 用 characterId（同一控件按层级切换语义） */
+  const [addChapterId, setAddChapterId] = React.useState<EntityId | null>(null)
+  const [addCharacterId, setAddCharacterId] = React.useState<number | null>(null)
   const [adding, setAdding] = React.useState(false)
+
+  // 本书人物列表（用于"人物设定"关联选择）
+  const [characters, setCharacters] = React.useState<Character[]>([])
 
   // 管理：伏笔记忆新增表单
   const [foreshadowChapterId, setForeshadowChapterId] = React.useState<EntityId | null>(null)
@@ -57,12 +63,15 @@ export default function MemoryModal({
     Promise.all([
       window.electronAPI.getSparkIdeasByBook({ bookId }),
       window.electronAPI.getForeshadowingByBook({ bookId }),
-    ]).then(([memRes, forRes]) => {
+      window.electronAPI.getCharacters({ bookId }),
+    ]).then(([memRes, forRes, charRes]) => {
       setLoading(false)
       if (memRes.success && Array.isArray(memRes.data)) setSparkIdeas(memRes.data)
       else setSparkIdeas([])
       if (forRes.success && Array.isArray(forRes.data)) setForeshadowing(forRes.data)
       else setForeshadowing([])
+      if (charRes.success && Array.isArray(charRes.data)) setCharacters(charRes.data)
+      else setCharacters([])
     })
   }, [open, bookId, selectedIds, selectedForeshadowingIds])
 
@@ -83,24 +92,122 @@ export default function MemoryModal({
 
   const handleAdd = React.useCallback(async () => {
     if (bookId == null || !addContent.trim()) return
+    // 大纲 / 章节 必须选章节，人物 必须选人物，全局可不关联
+    const layerLabel = SPARK_IDEA_LAYER_LABELS[addLayer] as SparkIdeaLayer
+    const needsChapter = addLayer === SparkIdeaLayerFour.Outline || addLayer === SparkIdeaLayerFour.Chapter
+    const needsCharacter = addLayer === SparkIdeaLayerFour.Character
+    if (needsChapter && addChapterId == null) {
+      message.warning(`请先选择关联${addLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`)
+      return
+    }
+    if (needsCharacter && addCharacterId == null) {
+      message.warning('请先选择关联人物')
+      return
+    }
     setAdding(true)
     const res = await window.electronAPI.addSparkIdea({
       bookId,
-      layer: SPARK_IDEA_LAYER_LABELS[addLayer] as SparkIdeaLayer,
+      layer: layerLabel,
       content: addContent.trim(),
+      chapterId: needsChapter ? addChapterId ?? undefined : undefined,
+      characterId: needsCharacter ? addCharacterId ?? undefined : undefined,
     })
     setAdding(false)
     if (res.success && res.data) {
       setSparkIdeas((prev) => [res.data as AiSparkIdea, ...prev])
       setAddContent('')
+    } else if (!res.success) {
+      message.error(res.error || '添加失败')
     }
-  }, [bookId, addLayer, addContent])
+  }, [bookId, addLayer, addContent, addChapterId, addCharacterId])
+
+  // 切换层级时清掉与新层级无关的关联，避免污染下一次提交
+  const handleAddLayerChange = React.useCallback((next: SparkIdeaLayerFour) => {
+    setAddLayer(next)
+    setAddChapterId(null)
+    setAddCharacterId(null)
+  }, [])
 
   const handleDelete = React.useCallback(async (id: number | string) => {
     await window.electronAPI.deleteSparkIdea({ id })
     setSparkIdeas((prev) => prev.filter((m) => m.id !== id))
     setCheckedIds((prev) => prev.filter((x) => x !== id))
   }, [])
+
+  // 编辑「四层设定」：内联编辑（content + layer + 关联实体），保存后该条目可能换层归位。
+  const [editingId, setEditingId] = React.useState<number | string | null>(null)
+  const [editingContent, setEditingContent] = React.useState('')
+  const [editingLayer, setEditingLayer] = React.useState<SparkIdeaLayerFour>(SparkIdeaLayerFour.Global)
+  const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)
+  const [editingCharacterId, setEditingCharacterId] = React.useState<number | null>(null)
+  const [editSaving, setEditSaving] = React.useState(false)
+
+  const handleEditStart = React.useCallback((m: AiSparkIdea) => {
+    // 当前 layer 是中文 label（"全局"/"大纲"/"人物"/"章节"），反查回 SparkIdeaLayerFour 数值
+    const currentLayerLabel = String(m.layer)
+    const matchedValue =
+      SPARK_IDEA_LAYER_FOUR_VALUES.find(
+        (v) => SPARK_IDEA_LAYER_LABELS[v] === currentLayerLabel
+      ) ?? SparkIdeaLayerFour.Global
+    setEditingId(m.id)
+    setEditingContent(m.content || '')
+    setEditingLayer(matchedValue)
+    setEditingChapterId(m.chapter_id ?? null)
+    setEditingCharacterId(m.character_id ?? null)
+  }, [])
+
+  // 切换层级时清掉与新层级无关的关联实体
+  const handleEditLayerChange = React.useCallback((next: SparkIdeaLayerFour) => {
+    setEditingLayer(next)
+    setEditingChapterId(null)
+    setEditingCharacterId(null)
+  }, [])
+
+  const handleEditCancel = React.useCallback(() => {
+    setEditingId(null)
+    setEditingContent('')
+    setEditingChapterId(null)
+    setEditingCharacterId(null)
+  }, [])
+
+  const handleEditSave = React.useCallback(async () => {
+    if (editingId == null) return
+    const trimmed = editingContent.trim()
+    if (!trimmed) {
+      message.warning('设定内容不能为空')
+      return
+    }
+    const needsChapter =
+      editingLayer === SparkIdeaLayerFour.Outline || editingLayer === SparkIdeaLayerFour.Chapter
+    const needsCharacter = editingLayer === SparkIdeaLayerFour.Character
+    if (needsChapter && editingChapterId == null) {
+      message.warning(`请先选择关联${editingLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`)
+      return
+    }
+    if (needsCharacter && editingCharacterId == null) {
+      message.warning('请先选择关联人物')
+      return
+    }
+    setEditSaving(true)
+    const res = await window.electronAPI.updateSparkIdea({
+      id: editingId,
+      data: {
+        content: trimmed,
+        layer: SPARK_IDEA_LAYER_LABELS[editingLayer] as SparkIdeaLayer,
+        // 显式写 null 把不再需要的关联清除
+        chapter_id: needsChapter ? editingChapterId : null,
+        character_id: needsCharacter ? editingCharacterId : null,
+      },
+    })
+    setEditSaving(false)
+    if (res.success && res.data) {
+      const updated = res.data as AiSparkIdea
+      setSparkIdeas((prev) => prev.map((m) => (m.id === editingId ? updated : m)))
+      handleEditCancel()
+    } else {
+      message.error(res.error || '保存失败')
+    }
+  }, [editingId, editingContent, editingLayer, editingChapterId, editingCharacterId, handleEditCancel])
 
   const handleAddForeshadowing = React.useCallback(async () => {
     if (bookId == null || foreshadowChapterId == null || !foreshadowContent.trim()) return
@@ -141,6 +248,44 @@ export default function MemoryModal({
     for (const c of writingChapters) map.set(String(c.id), c.title)
     return map
   }, [writingChapters])
+
+  const characterNameById = React.useMemo(() => {
+    const map = new Map<string, string>()
+    for (const c of characters) map.set(String(c.id), c.name)
+    return map
+  }, [characters])
+
+  /**
+   * 关联实体小标签：纯文字「类别：实体名」，按类别配色，配色用于视觉分类。
+   */
+  const renderSparkIdeaMeta = React.useCallback(
+    (m: AiSparkIdea): React.ReactNode => {
+      const layerLabel = String(m.layer)
+      if (layerLabel === '大纲' || layerLabel === '章节') {
+        if (m.chapter_id == null) return null
+        const title = chapterTitleById.get(String(m.chapter_id)) ?? `#${m.chapter_id}`
+        const variant = layerLabel === '大纲' ? 'outline' : 'chapter'
+        return (
+          <span className={`memory-spark-meta memory-spark-meta--${variant}`} title={`${layerLabel}：${title}`}>
+            <span className="memory-spark-meta-label">{layerLabel}：</span>
+            <span className="memory-spark-meta-text">{title}</span>
+          </span>
+        )
+      }
+      if (layerLabel === '人物') {
+        if (m.character_id == null) return null
+        const name = characterNameById.get(String(m.character_id)) ?? `#${m.character_id}`
+        return (
+          <span className="memory-spark-meta memory-spark-meta--character" title={`人物：${name}`}>
+            <span className="memory-spark-meta-label">人物：</span>
+            <span className="memory-spark-meta-text">{name}</span>
+          </span>
+        )
+      }
+      return null
+    },
+    [chapterTitleById, characterNameById]
+  )
 
   const byLayer = React.useMemo(() => {
     const map = new Map<SparkIdeaLayer, AiSparkIdea[]>()
@@ -194,23 +339,27 @@ export default function MemoryModal({
                       list.length === 0 ? null : (
                         <div key={layer} className="memory-layer-block">
                           <div className="memory-layer-title">{layer}设定</div>
-                          {list.map((m) => (
-                            <div key={m.id} className="memory-select-item">
-                              <Checkbox
-                                checked={checkedIds.includes(m.id)}
-                                onChange={(e) => handleToggle(m.id, e.target.checked)}
-                              />
-                              <span
-                                className="memory-select-content"
-                                role="button"
-                                tabIndex={0}
-                                onClick={() => handleToggle(m.id, !checkedIds.includes(m.id))}
-                                onKeyDown={(e) => e.key === 'Enter' && handleToggle(m.id, !checkedIds.includes(m.id))}
-                              >
-                                {m.content || '（无内容）'}
-                              </span>
-                            </div>
-                          ))}
+                          {list.map((m) => {
+                            const meta = renderSparkIdeaMeta(m)
+                            return (
+                              <div key={m.id} className="memory-select-item">
+                                <Checkbox
+                                  checked={checkedIds.includes(m.id)}
+                                  onChange={(e) => handleToggle(m.id, e.target.checked)}
+                                />
+                                <span
+                                  className="memory-select-content"
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={() => handleToggle(m.id, !checkedIds.includes(m.id))}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleToggle(m.id, !checkedIds.includes(m.id))}
+                                >
+                                  {m.content || '（无内容）'}
+                                  {meta}
+                                </span>
+                              </div>
+                            )
+                          })}
                         </div>
                       )
                     )}
@@ -263,13 +412,45 @@ export default function MemoryModal({
                         <Select
                           size="small"
                           value={addLayer}
-                          onChange={setAddLayer}
+                          onChange={handleAddLayerChange}
                           options={SPARK_IDEA_LAYER_FOUR_VALUES.map((v) => ({
                             label: SPARK_IDEA_LAYER_LABELS[v],
                             value: v,
                           }))}
                           className="memory-add-layer-select"
                         />
+                        {(addLayer === SparkIdeaLayerFour.Outline ||
+                          addLayer === SparkIdeaLayerFour.Chapter) && (
+                          <Select
+                            size="small"
+                            placeholder={
+                              addLayer === SparkIdeaLayerFour.Outline ? '关联大纲（章节）' : '关联章节'
+                            }
+                            value={addChapterId}
+                            onChange={setAddChapterId}
+                            options={writingChapters.map((c) => ({ label: c.title, value: c.id }))}
+                            className="memory-add-relation-select"
+                            allowClear
+                            showSearch
+                            optionFilterProp="label"
+                            disabled={writingChapters.length === 0}
+                          />
+                        )}
+                        {addLayer === SparkIdeaLayerFour.Character && (
+                          <Select
+                            size="small"
+                            placeholder="关联人物"
+                            value={addCharacterId}
+                            onChange={setAddCharacterId}
+                            options={characters.map((c) => ({ label: c.name, value: c.id }))}
+                            className="memory-add-relation-select"
+                            allowClear
+                            showSearch
+                            optionFilterProp="label"
+                            disabled={characters.length === 0}
+                            notFoundContent="本书暂无人物，请先在人物管理中添加"
+                          />
+                        )}
                       </div>
                       <div className="memory-add-form-row memory-add-form-row--content">
                         <Input.TextArea
@@ -296,18 +477,136 @@ export default function MemoryModal({
                         list.length === 0 ? null : (
                           <div key={layer} className="memory-layer-block">
                             <div className="memory-layer-title">{layer}设定</div>
-                            {list.map((m) => (
-                              <div key={m.id} className="memory-manage-item">
-                                <span className="memory-manage-content">{m.content || '（无内容）'}</span>
-                                <Button
-                                  type="text"
-                                  size="small"
-                                  icon={<DeleteOutlined />}
-                                  className="memory-manage-delete-btn"
-                                  onClick={() => handleDelete(m.id)}
-                                />
-                              </div>
-                            ))}
+                            {list.map((m) => {
+                              const isEditing = editingId === m.id
+                              if (isEditing) {
+                                return (
+                                  <div key={m.id} className="memory-manage-item memory-manage-item--editing">
+                                    <div className="memory-manage-edit-form">
+                                      <Input.TextArea
+                                        autoFocus
+                                        value={editingContent}
+                                        onChange={(e) => setEditingContent(e.target.value)}
+                                        autoSize={{ minRows: 1, maxRows: 6 }}
+                                        className="memory-manage-edit-input"
+                                        onPressEnter={(e) => {
+                                          // Enter 保存，Shift+Enter 换行
+                                          if (!e.shiftKey) {
+                                            e.preventDefault()
+                                            handleEditSave()
+                                          }
+                                        }}
+                                      />
+                                      <div className="memory-manage-edit-actions">
+                                        <Select
+                                          size="small"
+                                          value={editingLayer}
+                                          onChange={handleEditLayerChange}
+                                          options={SPARK_IDEA_LAYER_FOUR_VALUES.map((v) => ({
+                                            label: SPARK_IDEA_LAYER_LABELS[v],
+                                            value: v,
+                                          }))}
+                                          className="memory-manage-edit-layer-select"
+                                        />
+                                        {(editingLayer === SparkIdeaLayerFour.Outline ||
+                                          editingLayer === SparkIdeaLayerFour.Chapter) && (
+                                          <Select
+                                            size="small"
+                                            placeholder={
+                                              editingLayer === SparkIdeaLayerFour.Outline
+                                                ? '关联大纲（章节）'
+                                                : '关联章节'
+                                            }
+                                            value={editingChapterId}
+                                            onChange={setEditingChapterId}
+                                            options={writingChapters.map((c) => ({
+                                              label: c.title,
+                                              value: c.id,
+                                            }))}
+                                            className="memory-manage-edit-relation-select"
+                                            allowClear
+                                            showSearch
+                                            optionFilterProp="label"
+                                            disabled={writingChapters.length === 0}
+                                          />
+                                        )}
+                                        {editingLayer === SparkIdeaLayerFour.Character && (
+                                          <Select
+                                            size="small"
+                                            placeholder="关联人物"
+                                            value={editingCharacterId}
+                                            onChange={setEditingCharacterId}
+                                            options={characters.map((c) => ({
+                                              label: c.name,
+                                              value: c.id,
+                                            }))}
+                                            className="memory-manage-edit-relation-select"
+                                            allowClear
+                                            showSearch
+                                            optionFilterProp="label"
+                                            disabled={characters.length === 0}
+                                          />
+                                        )}
+                                        <Button
+                                          type="primary"
+                                          size="small"
+                                          icon={<CheckOutlined />}
+                                          loading={editSaving}
+                                          onClick={handleEditSave}
+                                          disabled={!editingContent.trim()}
+                                        >
+                                          保存
+                                        </Button>
+                                        <Button
+                                          type="text"
+                                          size="small"
+                                          icon={<CloseOutlined />}
+                                          onClick={handleEditCancel}
+                                          disabled={editSaving}
+                                        >
+                                          取消
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )
+                              }
+                              const meta = renderSparkIdeaMeta(m)
+                              return (
+                                <div key={m.id} className="memory-manage-item">
+                                  <div className="memory-manage-content-wrap">
+                                    <span className="memory-manage-content">{m.content || '（无内容）'}</span>
+                                    {meta}
+                                  </div>
+                                  <div className="memory-manage-item-actions">
+                                    <Button
+                                      type="text"
+                                      size="small"
+                                      icon={<EditOutlined />}
+                                      className="memory-manage-edit-btn"
+                                      onClick={() => handleEditStart(m)}
+                                      title="编辑"
+                                    />
+                                    <Popconfirm
+                                      title="删除这条本书设定？"
+                                      description="删除后不可恢复，引用此设定的提示词将失效。"
+                                      okText="删除"
+                                      okButtonProps={{ danger: true }}
+                                      cancelText="取消"
+                                      placement="topRight"
+                                      onConfirm={() => handleDelete(m.id)}
+                                    >
+                                      <Button
+                                        type="text"
+                                        size="small"
+                                        icon={<DeleteOutlined />}
+                                        className="memory-manage-delete-btn"
+                                      />
+                                    </Popconfirm>
+                                  </div>
+                                </div>
+                              )
+                            })}
                           </div>
                         )
                       )}
@@ -396,13 +695,22 @@ export default function MemoryModal({
                                       className="memory-foreshadow-resolved-select"
                                     />
                                   )}
-                                  <Button
-                                    type="text"
-                                    size="small"
-                                    icon={<DeleteOutlined />}
-                                    className="memory-manage-delete-btn"
-                                    onClick={() => handleDeleteForeshadowing(f.id)}
-                                  />
+                                  <Popconfirm
+                                    title="删除这条伏笔？"
+                                    description="删除后不可恢复，已回收/未回收状态一并丢失。"
+                                    okText="删除"
+                                    okButtonProps={{ danger: true }}
+                                    cancelText="取消"
+                                    placement="topRight"
+                                    onConfirm={() => handleDeleteForeshadowing(f.id)}
+                                  >
+                                    <Button
+                                      type="text"
+                                      size="small"
+                                      icon={<DeleteOutlined />}
+                                      className="memory-manage-delete-btn"
+                                    />
+                                  </Popconfirm>
                                 </div>
                               </div>
                             ))}

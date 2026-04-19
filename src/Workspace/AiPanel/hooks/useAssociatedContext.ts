@@ -126,7 +126,7 @@ export function useAssociatedContext({
   // 查询当前章节对应的大纲并追加到关联大纲列表（已存在则跳过）
   const handleQuickAssociateOutline = React.useCallback(async () => {
     if (!chapterId) return;
-    const res = await window.electronAPI.getOutlineByWritingChapter(chapterId);
+    const res = await window.electronAPI.getOutlineForChapter(chapterId);
     if (res.success && res.data) {
       const id = res.data.id;
       setAssociatedOutlineIds((prev) =>

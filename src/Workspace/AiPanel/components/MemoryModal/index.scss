@@ -150,6 +150,12 @@
       width: 88px;
       flex-shrink: 0;
     }
+    /* 关联章节/人物 Select：跟 layer 同行，宽度比 layer 宽以容纳标题/姓名 */
+    .memory-add-relation-select {
+      flex: 1 1 160px;
+      min-width: 0;
+      max-width: 240px;
+    }
   }
 
   .memory-add-form--foreshadow {
@@ -185,8 +191,10 @@
     &:last-child {
       margin-bottom: 0;
     }
+    /* 编辑/删除按钮默认半透明，hover 行才完全显形 —— 避免列表被一片图标淹没 */
     &:hover {
       border-color: var(--border-light);
+      .memory-manage-edit-btn,
       .memory-manage-delete-btn {
         opacity: 1;
       }
@@ -199,21 +207,119 @@
       line-height: 1.45;
       color: var(--text-primary);
     }
+    .memory-manage-item-actions {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .memory-manage-edit-btn,
     .memory-manage-delete-btn {
       flex-shrink: 0;
       opacity: 0.6;
       transition: opacity 0.15s;
     }
   }
+
+  /* 编辑态：撑满整行，不再有右侧按钮列；输入框 + 第二行操作条 */
+  .memory-manage-item--editing {
+    border-color: var(--accent, #1677ff);
+    background: var(--bg-panel, var(--bg-active));
+    box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
+    .memory-manage-edit-form {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .memory-manage-edit-input.ant-input {
+      font-size: 13px;
+      line-height: 1.5;
+      border-radius: 6px;
+    }
+    .memory-manage-edit-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      .memory-manage-edit-layer-select {
+        width: 88px;
+      }
+      .memory-manage-edit-relation-select {
+        flex: 1 1 160px;
+        min-width: 0;
+        max-width: 220px;
+      }
+      /* save + cancel 始终贴右；不管前面有没有关联 Select */
+      .ant-btn-primary {
+        margin-left: auto;
+      }
+    }
+  }
+
+  /* ─── 关联实体小标签（管理 Tab + 选用 Tab 共用） ─────────────────
+   * 纯文字「类别：实体名」pill；按类别 tinted 配色，跟卡片底色拉开视觉层次。
+   * 类别字（label）轻一档，实体名（text）正常字重 —— 让"具体是哪一个"更突出。
+   */
+  .memory-spark-meta {
+    display: inline-flex;
+    align-items: baseline;
+    margin-left: 8px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    vertical-align: middle;
+    user-select: none;
+
+    .memory-spark-meta-label {
+      opacity: 0.75;
+    }
+    .memory-spark-meta-text {
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+
+    /* 三种类别用不同色调，深浅自适应主题色 */
+    &.memory-spark-meta--character {
+      color: #b07cf2;
+      background: rgba(176, 124, 242, 0.12);
+      border-color: rgba(176, 124, 242, 0.28);
+    }
+    &.memory-spark-meta--chapter {
+      color: #6dbdff;
+      background: rgba(109, 189, 255, 0.12);
+      border-color: rgba(109, 189, 255, 0.28);
+    }
+    &.memory-spark-meta--outline {
+      color: #5dd3a8;
+      background: rgba(93, 211, 168, 0.12);
+      border-color: rgba(93, 211, 168, 0.28);
+    }
+  }
+
+  /* 管理 Tab：meta 走 flex 列向自然挂在内容下方，gap 已由父级控制 */
+  .memory-manage-content-wrap .memory-spark-meta {
+    margin-left: 0;
+  }
   .memory-manage-content-wrap {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
   }
   .memory-foreshadow-meta {
     display: block;
     font-size: 11px;
     color: var(--text-muted);
-    margin-top: 4px;
     line-height: 1.35;
   }
   .memory-manage-item--foreshadow {

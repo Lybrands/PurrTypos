@@ -803,7 +803,12 @@ async def run_tools(
                         if not go or not go.get("id"):
                             content = json.dumps({"success": False, "error": "无法创建或获取总纲"}, ensure_ascii=False)
                         else:
-                            saved = await update_outline(db, {"outlineId": str(go["id"]), "markdown_content": args["markdownContent"]})
+                            saved = await update_outline(
+                                db,
+                                {"outlineId": str(go["id"]), "markdown_content": args["markdownContent"]},
+                                history_source="ai_tool",
+                                history_note="editGlobalOutline",
+                            )
                             _invalidate_read_tool_cache(ctx)
                             content = json.dumps({
                                 "success": True,
@@ -865,7 +870,12 @@ async def run_tools(
                             content = json.dumps({"success": False, "error": "outlineId 不属于当前书籍，或该大纲不存在", "outlineId": oid}, ensure_ascii=False)
                         else:
                             try:
-                                saved = await update_outline(get_db(), update_payload)
+                                saved = await update_outline(
+                                    get_db(),
+                                    update_payload,
+                                    history_source="ai_tool",
+                                    history_note="updateOutline",
+                                )
                                 _invalidate_read_tool_cache(ctx)
                                 content = json.dumps({
                                     "success": True,
@@ -943,7 +953,11 @@ async def run_tools(
                 character_id = args.get("characterId")
                 layer_num = args.get("layer") if isinstance(args.get("layer"), (int, float)) else None
                 layer_valid = layer_num is not None and int(layer_num) in (0, 1, 2, 3)
-                if not layer_valid or not mem_content:
+                if not bid:
+                    # ai_memories.book_id 是 NOT NULL，缺 bookId 必然在 INSERT 时抛 IntegrityError；
+                    # 在这里前置拦下，给 LLM 一个能看懂的错。
+                    content = json.dumps({"success": False, "error": "缺少有效 bookId，无法写入本书设定"}, ensure_ascii=False)
+                elif not layer_valid or not mem_content:
                     content = json.dumps({
                         "success": False,
                         "error": "设定内容不能为空" if not mem_content else f"layer 须为 0/1/2/3（{' / '.join(SPARK_IDEA_LAYER_ORDERED)}）",
@@ -957,12 +971,98 @@ async def run_tools(
                     except Exception as e:
                         content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
+            elif name == "updateSparkIdea":
+                # 修改一条已有设定（content / layer / chapterId / characterId），id 必填
+                raw_id = args.get("id")
+                sid = str(raw_id).strip() if raw_id is not None else ""
+                new_content_raw = args.get("content")
+                new_content = str(new_content_raw).strip() if isinstance(new_content_raw, str) else None
+                new_layer_raw = args.get("layer")
+                new_layer_num = int(new_layer_raw) if isinstance(new_layer_raw, (int, float)) else None
+                new_layer_valid = (
+                    new_layer_num is None or new_layer_num in (0, 1, 2, 3)
+                )
+                # 关联实体：显式传 None 视为清空；不传 (key 不在 args) 视为不变
+                has_chapter = "chapterId" in args
+                has_character = "characterId" in args
+                new_chapter_id = args.get("chapterId")
+                new_character_id = args.get("characterId")
+                if not sid:
+                    content = json.dumps({"success": False, "error": "缺少 id：updateSparkIdea 必须指定要更新的条目"}, ensure_ascii=False)
+                elif not new_layer_valid:
+                    content = json.dumps({"success": False, "error": f"layer 须为 0/1/2/3（{' / '.join(SPARK_IDEA_LAYER_ORDERED)}）"}, ensure_ascii=False)
+                elif (
+                    (new_content is None or new_content == "")
+                    and new_layer_num is None
+                    and not has_chapter
+                    and not has_character
+                ):
+                    content = json.dumps({"success": False, "error": "noop：content / layer / chapterId / characterId 至少需要传其中一个", "noop": True}, ensure_ascii=False)
+                else:
+                    try:
+                        from services import memory_service
+                        update_payload: dict[str, Any] = {}
+                        if new_content is not None and new_content != "":
+                            update_payload["content"] = new_content
+                        if new_layer_num is not None:
+                            update_payload["layer"] = SPARK_IDEA_LAYERS[new_layer_num]
+                        if has_chapter:
+                            update_payload["chapter_id"] = (
+                                str(new_chapter_id) if new_chapter_id is not None else None
+                            )
+                        if has_character:
+                            update_payload["character_id"] = (
+                                int(new_character_id) if new_character_id is not None else None
+                            )
+                        updated = await memory_service.update_spark_idea(sid, update_payload)
+                        if not updated:
+                            content = json.dumps({"success": False, "error": f"未找到 id={sid} 的设定条目"}, ensure_ascii=False)
+                        else:
+                            content = json.dumps({
+                                "success": True,
+                                "message": f"已更新【{updated.get('layer')}设定】",
+                                "id": updated.get("id"),
+                                "layer": updated.get("layer"),
+                                "content": updated.get("content"),
+                                "chapter_id": updated.get("chapter_id"),
+                                "character_id": updated.get("character_id"),
+                            }, ensure_ascii=False)
+                    except Exception as e:
+                        content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+            elif name == "deleteSparkIdea":
+                # 物理删除一条设定；删除前先取出 content/layer 用于回显，便于 LLM 在回复中复述
+                raw_id = args.get("id")
+                sid = str(raw_id).strip() if raw_id is not None else ""
+                if not sid:
+                    content = json.dumps({"success": False, "error": "缺少 id：deleteSparkIdea 必须指定要删除的条目"}, ensure_ascii=False)
+                else:
+                    try:
+                        from services import memory_service
+                        existed = await memory_service.get_spark_ideas_by_ids([sid])
+                        if not existed:
+                            content = json.dumps({"success": False, "error": f"未找到 id={sid} 的设定条目"}, ensure_ascii=False)
+                        else:
+                            target = existed[0]
+                            await memory_service.delete_spark_idea(sid)
+                            content = json.dumps({
+                                "success": True,
+                                "message": f"已删除【{target.get('layer')}设定】",
+                                "id": target.get("id"),
+                                "layer": target.get("layer"),
+                                "content": target.get("content"),
+                            }, ensure_ascii=False)
+                    except Exception as e:
+                        content = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
             elif name == "addForeshadowing":
                 bid = resolve_book_id_for_tools(ctx, args)
-                for_chapter_id = args.get("chapterId")
+                for_chapter_id = args.get("chapterId") or runtime_chapter_id or None
                 for_content = str(args.get("content") or "").strip() if isinstance(args.get("content"), str) else ""
                 for_type = args.get("type") or FORESHADOWING_TYPES[0]
-                if not for_chapter_id or not for_content:
+                if not bid:
+                    content = json.dumps({"success": False, "error": "缺少有效 bookId，无法写入伏笔"}, ensure_ascii=False)
+                elif not for_chapter_id or not for_content:
                     content = json.dumps({
                         "success": False,
                         "error": "缺少 chapterId（埋入章节）" if not for_chapter_id else "伏笔内容不能为空",
@@ -979,6 +1079,12 @@ async def run_tools(
 
             elif name == "searchSparkIdeas":
                 bid = resolve_book_id_for_tools(ctx, args)
+                if not bid:
+                    content = json.dumps({"success": False, "error": "缺少有效 bookId，无法检索本书设定"}, ensure_ascii=False)
+                    results.append({"tool_call_id": tc.get("id"), "content": content})
+                    if send_chunk:
+                        send_chunk({"toolIndexCompleted": i})
+                    continue
                 query = args.get("query") or ""
                 layer = args.get("layer")
                 cid = args.get("chapterId") or runtime_chapter_id or None
@@ -996,7 +1102,11 @@ async def run_tools(
                     if mem_res:
                         by_layer: dict[str, list[str]] = {}
                         for m in mem_res:
-                            by_layer.setdefault(m.get("layer", ""), []).append(str(m.get("content") or "").strip())
+                            # 行首带 [id:N] 前缀，便于 LLM 后续调 updateSparkIdea / 引用
+                            mid = m.get("id")
+                            mtxt = str(m.get("content") or "").strip()
+                            line = f"[id:{mid}] {mtxt}" if mid is not None else mtxt
+                            by_layer.setdefault(m.get("layer", ""), []).append(line)
                         for layer_name in SPARK_IDEA_LAYER_ORDERED:
                             arr = by_layer.get(layer_name)
                             if arr:

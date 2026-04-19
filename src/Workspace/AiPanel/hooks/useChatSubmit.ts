@@ -203,6 +203,10 @@ function toolCallDisplayRow(
         return { label: "更新大纲", outcome: "ok" };
       case "addSparkIdea":
         return { label: "添加设定", outcome: "ok" };
+      case "updateSparkIdea":
+        return { label: "更新设定", outcome: "ok" };
+      case "deleteSparkIdea":
+        return { label: "删除设定", outcome: "ok" };
       case "searchSparkIdeas":
         return { label: "检索设定", outcome: "ok" };
       case "addForeshadowing":
@@ -519,53 +523,115 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       return { role: cm.role, content: text };
     };
 
+    /**
+     * 把"关联章节/大纲"渲染成强约束块：直接列出 chapterId/outlineId，
+     * 并在末尾给出"必须立即调用 batchGetChapterContents / queryOutline"的硬指令。
+     * 如果只给标题（旧实现），LLM 经常忽略关联或匹配错 id，故统一改为 id-first。
+     */
+    const buildAssociationBlocks = (): string[] => {
+      const blocks: string[] = [];
+      if (associatedChapterIds.length > 0) {
+        const pairs = associatedChapterIds
+          .map((id) => {
+            const sid = String(id).trim();
+            if (!sid) return null;
+            const c = writingChapters.find((w) => String(w.id) === sid);
+            return { id: sid, title: c?.title || "（未匹配章节标题）" };
+          })
+          .filter((x): x is { id: string; title: string } => x != null);
+        if (pairs.length > 0) {
+          const idList = `[${pairs.map((p) => `"${p.id}"`).join(",")}]`;
+          const lines = [
+            "【用户在本轮已关联以下写作章节 — 回复前必须读取其正文，不读视为忽略用户上下文，回答无效】",
+            ...pairs.map((p) => `- chapterId=${p.id} 《${p.title}》`),
+            `→ 立即调用 batchGetChapterContents，参数 chapterIds=${idList}，一次性把上述全部章节正文读入；若已在前序工具结果中读过可复用，否则不得跳过。`,
+          ];
+          blocks.push(lines.join("\n"));
+        }
+      }
+      if (associatedOutlineIds.length > 0) {
+        const pairs = associatedOutlineIds
+          .map((oid) => {
+            const sid = String(oid).trim();
+            if (!sid) return null;
+            const o = availableOutlines.find((x) => String(x.id) === sid);
+            return { id: sid, title: o?.title || "（未匹配大纲标题）" };
+          })
+          .filter((x): x is { id: string; title: string } => x != null);
+        if (pairs.length > 0) {
+          const idList = `[${pairs.map((p) => `"${p.id}"`).join(",")}]`;
+          const lines = [
+            "【用户在本轮已关联以下大纲 — 回复前必须读取其完整内容，不读视为忽略用户上下文，回答无效】",
+            ...pairs.map((p) => `- outlineId=${p.id} 《${p.title}》`),
+            `→ 立即调用 queryOutline，参数 outlineIds=${idList}、includeText=true、includeChapters=false，一次性把上述全部大纲读入；若已在前序工具结果中读过可复用，否则不得跳过。`,
+          ];
+          blocks.push(lines.join("\n"));
+        }
+      }
+      return blocks;
+    };
+
     let subagentExtra = "";
     if (isWritingExpertPipeline(agentMode) && agentEnabled && bookId != null) {
-      const extra: string[] = [];
-      if (associatedChapterIds.length > 0 && writingChapters.length > 0) {
-        const bits = associatedChapterIds.map((id) => {
-          const c = writingChapters.find((w) => w.id === id);
-          return c ? `《${c.title}》` : `（未在目录中匹配的关联项）`;
-        });
-        extra.push(`用户在本轮对话中关联的写作章节：${bits.join("、")}。`);
-      }
-      if (associatedOutlineIds.length > 0 && availableOutlines.length > 0) {
-        const bits = associatedOutlineIds.map((oid) => {
-          const o = availableOutlines.find((x) => x.id === oid);
-          return o ? `《${o.title}》` : `（未在列表中匹配的关联项）`;
-        });
-        extra.push(`用户在本轮对话中关联的大纲：${bits.join("、")}。`);
-      }
-      if (extra.length > 0) {
+      const blocks = buildAssociationBlocks();
+      if (blocks.length > 0) {
         const brand = agentMode === "expert_team" ? "专家团" : "写作专家";
-        subagentExtra = `\n\n【${brand} — 主会话附加上下文】\n${extra.join("\n")}`;
+        subagentExtra = `\n\n【${brand} — 主会话附加上下文】\n${blocks.join("\n\n")}`;
       }
     }
 
     let collabExtra = "";
     if (writingMode === "collab" && agentEnabled && bookId != null) {
-      const extra: string[] = [];
-      if (associatedChapterIds.length > 0 && writingChapters.length > 0) {
-        const bits = associatedChapterIds.map((id) => {
-          const c = writingChapters.find((w) => w.id === id);
-          return c ? `《${c.title}》` : `（未在目录中匹配的关联项）`;
-        });
-        extra.push(`用户在本轮对话中关联的写作章节：${bits.join("、")}。`);
-      }
-      if (associatedOutlineIds.length > 0 && availableOutlines.length > 0) {
-        const bits = associatedOutlineIds.map((oid) => {
-          const o = availableOutlines.find((x) => x.id === oid);
-          return o ? `《${o.title}》` : `（未在列表中匹配的关联项）`;
-        });
-        extra.push(`用户在本轮对话中关联的大纲：${bits.join("、")}。`);
-      }
-      if (extra.length > 0) {
-        collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${extra.join("\n")}`;
+      const blocks = buildAssociationBlocks();
+      if (blocks.length > 0) {
+        collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${blocks.join("\n\n")}`;
       }
     }
 
-    // 本书设定由工具调用提供，不再拼入 system
-    const systemContent = [systemSuffix, subagentExtra, collabExtra].filter(Boolean).join("");
+    // 用户在 AiContextBar「本书设定」按钮里勾选的设定/伏笔条目：
+    // 不依赖 LLM 工具调用（后端没暴露查 spark idea 的工具，且即便有 LLM 也不知道用户选了哪些 id），
+    // 直接前置 fetch 出来作为高优先级上下文注入到 system 末尾，所有 mode 通用。
+    let memoryExtra = "";
+    try {
+      const memBlocks: string[] = [];
+      if (selectedMemoryIds && selectedMemoryIds.length > 0) {
+        const res = await window.electronAPI.getSparkIdeasByIds({
+          ids: selectedMemoryIds,
+        });
+        if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
+          const lines = res.data.map(
+            (m: { layer?: string; content?: string }) =>
+              `- [${m.layer ?? "?"}] ${(m.content ?? "").trim()}`,
+          );
+          memBlocks.push(
+            `【用户在本轮已勾选的本书设定 — 必须严格遵循，不得与之矛盾】\n${lines.join("\n")}`,
+          );
+        }
+      }
+      if (selectedForeshadowingIds && selectedForeshadowingIds.length > 0) {
+        const res = await window.electronAPI.getForeshadowingByIds({
+          ids: selectedForeshadowingIds,
+        });
+        if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
+          const lines = res.data.map(
+            (f: { type?: string; status?: string; content?: string }) =>
+              `- [${f.type ?? "?"}|${f.status ?? "?"}] ${(f.content ?? "").trim()}`,
+          );
+          memBlocks.push(
+            `【用户在本轮已勾选的伏笔 — 优先呼应或铺垫，不得与之矛盾】\n${lines.join("\n")}`,
+          );
+        }
+      }
+      if (memBlocks.length > 0) {
+        memoryExtra = `\n\n${memBlocks.join("\n\n")}`;
+      }
+    } catch {
+      // fetch 失败不阻断发送，让对话继续
+    }
+
+    const systemContent = [systemSuffix, subagentExtra, collabExtra, memoryExtra]
+      .filter(Boolean)
+      .join("");
 
     let historyMessages: { role: string; content: string }[];
     if (resend != null) {
@@ -616,6 +682,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       thinkingBlocks: [] as string[],
       contentAfterToolCalls: "",
       subagentPipelineDigest: "",
+      subagentResult: undefined as
+        | { role: WritingSubagentRole; payload: unknown }
+        | undefined,
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;
@@ -662,6 +731,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             });
           });
         }
+      }
+      if (chunk.writingSubagentResult) {
+        const wr = chunk.writingSubagentResult as {
+          role: WritingSubagentRole;
+          payload: unknown;
+        };
+        acc.subagentResult = { role: wr.role, payload: wr.payload };
       }
       if (chunk.writingSubagentResult && isVisibleSession()) {
         const wr = chunk.writingSubagentResult as {
@@ -1375,6 +1451,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               toolCallSegments: acc.toolCallSegments?.length
                 ? acc.toolCallSegments
                 : undefined,
+              subagentResult: acc.subagentResult ?? undefined,
             })
             .then((res) => {
               if (res && res.success) return;
@@ -1552,6 +1629,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setActiveSessionId,
     setSessions,
     selectedMemoryIds,
+    selectedForeshadowingIds,
     agentMode,
     writingMode,
     pendingSubagentRole,
