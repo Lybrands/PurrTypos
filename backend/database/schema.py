@@ -107,6 +107,8 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
+    # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")
 
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
@@ -228,6 +230,25 @@ async def init_schema(db: DatabaseConnection) -> None:
         content TEXT NOT NULL DEFAULT '',
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+
+    # ── outline_history ──────────────────────────────────────────
+    # 大纲修订历史；每次 update_outline / editGlobalOutline 落库前快照旧值，
+    # 让用户能把被 LLM 改坏的大纲一键回退。
+    await db.execute("""CREATE TABLE IF NOT EXISTS outline_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outline_id TEXT NOT NULL,
+        before_title TEXT DEFAULT NULL,
+        before_type TEXT DEFAULT NULL,
+        before_markdown_content TEXT DEFAULT NULL,
+        before_xmind_data TEXT DEFAULT NULL,
+        source TEXT NOT NULL DEFAULT 'user',
+        note TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outline_history_outline "
+        "ON outline_history(outline_id, create_time DESC)"
+    )
 
     # ── chapter_diff_history ─────────────────────────────────────
     # AI 改正文产生的 diff 历史；commit 时同时落盘 articles

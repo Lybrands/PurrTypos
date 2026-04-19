@@ -20,15 +20,17 @@ async def save_conversation(
     thinking: str | None = None,
     tool_call_segments_json: str | None = None,
     thinking_blocks_json: str | None = None,
+    subagent_result_json: str | None = None,
 ) -> None:
     await db.execute(
         "INSERT INTO ai_conversations "
         "(session_id, chapter_id, prompt, response, model, thinking, "
-        "tool_call_segments, thinking_blocks) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "tool_call_segments, thinking_blocks, subagent_result) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             session_id, chapter_id, prompt, response,
             model, thinking, tool_call_segments_json, thinking_blocks_json,
+            subagent_result_json,
         ],
     )
 

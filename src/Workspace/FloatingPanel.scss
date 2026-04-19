@@ -1,4 +1,6 @@
-/* 悬浮面板：盖在 AI 主区域之上，绝对定位在 .app-body 内 */
+/* 悬浮面板：盖在 AI 主区域之上，绝对定位在 .app-body 内
+ * 浮窗永远是「钉住」状态（pin 切换功能已移除），使用收一档的阴影 + 品牌色边框，
+ * 视觉上明确表达「已锚定，点击外部不会消失」。 */
 .floating-panel {
   position: absolute;
   top: 0;
@@ -9,22 +11,14 @@
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
-  border: 1px solid var(--border);
+  border: 1px solid var(--brand-color, var(--border-strong, var(--border)));
   border-radius: 8px;
   box-shadow:
-    0 12px 32px rgba(0, 0, 0, 0.18),
-    0 4px 12px rgba(0, 0, 0, 0.12);
+    0 6px 18px rgba(0, 0, 0, 0.14),
+    0 2px 6px rgba(0, 0, 0, 0.08);
   overflow: hidden;
   /* 拖动 / 改宽过程中由 JS 写 transform & width */
   will-change: transform, width;
-
-  &.is-pinned {
-    /* 钉住时收一档阴影，提示"已锚定" */
-    box-shadow:
-      0 6px 18px rgba(0, 0, 0, 0.14),
-      0 2px 6px rgba(0, 0, 0, 0.08);
-    border-color: var(--brand-color, var(--border-strong, var(--border)));
-  }
 }
 
 .floating-panel-header {

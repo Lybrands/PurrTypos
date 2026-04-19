@@ -180,6 +180,47 @@ export default function AiPanel({
     handleQuickAssociateOutline,
   } = useAssociatedContext({ bookId, chapterId, writingChapters });
 
+  /** 本章大纲 markdown 文本：activeChapterId 变化时按需拉取，给 {本章大纲} 占位符用。 */
+  const [currentChapterOutlineText, setCurrentChapterOutlineText] =
+    React.useState<string>("");
+  React.useEffect(() => {
+    if (!chapterId) {
+      setCurrentChapterOutlineText("");
+      return;
+    }
+    let aborted = false;
+    (async () => {
+      try {
+        const res =
+          await window.electronAPI.getOutlineForChapter(chapterId);
+        if (aborted) return;
+        const md = res?.success
+          ? (res.data?.markdown_content ?? "").toString()
+          : "";
+        setCurrentChapterOutlineText(md);
+      } catch {
+        if (!aborted) setCurrentChapterOutlineText("");
+      }
+    })();
+    return () => {
+      aborted = true;
+    };
+  }, [chapterId]);
+
+  /** 前文标题（最多 5 章）：从 writingChapters 中取当前章之前最近 5 个"可写"章节。
+   * volume 模式下卷条目不算章节（heuristic：一旦发现 parent_id 非 null 的章节即视作 volume 模式，过滤掉 parent_id 为 null 的卷头）。 */
+  const previousChapterTitles = React.useMemo(() => {
+    if (!chapterId || writingChapters.length === 0) return [] as string[];
+    const isVolumeMode = writingChapters.some((c) => c.parent_id != null);
+    const writable = isVolumeMode
+      ? writingChapters.filter((c) => c.parent_id != null)
+      : writingChapters;
+    const idx = writable.findIndex((c) => String(c.id) === String(chapterId));
+    if (idx <= 0) return [];
+    const start = Math.max(0, idx - 5);
+    return writable.slice(start, idx).map((c) => c.title);
+  }, [chapterId, writingChapters]);
+
   const promptTemplateContext = React.useMemo(() => {
     const chapterTitles = associatedChapterIds
       .map(
@@ -198,12 +239,16 @@ export default function AiPanel({
     return {
       bookTitle,
       currentChapterTitle: activeChapterTitle,
+      currentChapterOutline: currentChapterOutlineText,
+      previousChapterTitles,
       associatedChapterTitles: chapterTitles,
       associatedOutlineTitles: outlineTitles,
     };
   }, [
     bookTitle,
     activeChapterTitle,
+    currentChapterOutlineText,
+    previousChapterTitles,
     associatedChapterIds,
     associatedOutlineIds,
     chapterSelectOptions,
@@ -972,12 +1017,19 @@ export default function AiPanel({
                         const isStreaming = loading && isLast;
                         const currentThinking =
                           (msg as ChatMessage).thinking ?? "";
-                        const assistantMarkdown = getAssistantRenderableMarkdown(
+                        const assistantMarkdownRaw = getAssistantRenderableMarkdown(
                           msg as ChatMessage,
                         );
+                        // 子专家（润色 / 续写规划 / 审校 / 风格统一）会把 LLM 的 JSON
+                        // 原文流到 content 里，又另外通过 subagentResult 渲染成卡片；
+                        // 直播态 + 回显态都只显示卡片，不再露出裸 JSON 文本。
+                        const assistantMarkdown = (msg as ChatMessage).subagentResult
+                          ? ""
+                          : assistantMarkdownRaw;
                         const hasGeneratedContent = Boolean(
                           assistantMarkdown.trim() ||
-                            ((msg as ChatMessage).subagentPipelineDigest || "").trim(),
+                            ((msg as ChatMessage).subagentPipelineDigest || "").trim() ||
+                            (msg as ChatMessage).subagentResult,
                         );
 
                         return (

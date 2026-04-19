@@ -54,7 +54,6 @@ type MainPanelKey = 'ai' | 'editor'
 
 interface FloatingState {
   open: boolean
-  pinned: boolean
   x: number
   y: number
   width: number
@@ -77,9 +76,9 @@ function defaultRightX(width: number): number {
 
 const DEFAULT_STATE: PersistedPanelState = {
   mainPanel: 'ai',
-  ai: { open: false, pinned: true, x: defaultRightX(560), y: 8, width: 560 },
-  left: { open: false, pinned: false, x: 16, y: 8, width: 340 },
-  editor: { open: false, pinned: false, x: defaultRightX(620), y: 8, width: 620 },
+  ai: { open: false, x: defaultRightX(560), y: 8, width: 560 },
+  left: { open: false, x: 16, y: 8, width: 340 },
+  editor: { open: false, x: defaultRightX(620), y: 8, width: 620 },
 }
 
 function loadPanelState(): PersistedPanelState {
@@ -92,7 +91,6 @@ function loadPanelState(): PersistedPanelState {
         if (!v || typeof v !== 'object') return fallback
         return {
           open: !!v.open,
-          pinned: !!v.pinned,
           x: typeof v.x === 'number' ? v.x : fallback.x,
           y: typeof v.y === 'number' ? v.y : fallback.y,
           width: typeof v.width === 'number' ? v.width : fallback.width,
@@ -189,15 +187,14 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     setPanelState((prev) => ({ ...prev, [key]: { ...prev[key], open: false } }))
   }, [])
 
-  const togglePinFloating = React.useCallback((key: PanelKey) => {
-    setPanelState((prev) => ({ ...prev, [key]: { ...prev[key], pinned: !prev[key].pinned } }))
-  }, [])
-
   /**
    * 切换主区域（仅限 AI / Editor 两者互换）：
    * - 如果 next === current，noop
-   * - 原主区域自动转为钉住浮窗（open=true, pinned=true）便于一键切回
+   * - 原主区域自动转为浮窗（open=true）便于一键切回
    * - 新主区域的浮窗自动关闭（它现在是主，无须浮窗）
+   *
+   * 注：浮窗永远是「钉住」语义（不会被点击外部自动收起），
+   *     所以这里不再需要单独写 pinned 字段。
    */
   const setMain = React.useCallback((next: MainPanelKey) => {
     setPanelState((prev) => {
@@ -206,23 +203,10 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       return {
         ...prev,
         mainPanel: next,
-        [prevMain]: { ...prev[prevMain], open: true, pinned: true },
+        [prevMain]: { ...prev[prevMain], open: true },
         [next]: { ...prev[next], open: false },
       }
     })
-  }, [])
-
-  /**
-   * 关闭所有未钉住的浮窗（点击主区域时触发）
-   * - 主区域对应的 panel 不参与（它根本不是浮窗）
-   */
-  const closeUnpinnedFloating = React.useCallback(() => {
-    setPanelState((prev) => ({
-      ...prev,
-      ai: prev.mainPanel === 'ai' || prev.ai.pinned ? prev.ai : { ...prev.ai, open: false },
-      left: prev.left.pinned ? prev.left : { ...prev.left, open: false },
-      editor: prev.mainPanel === 'editor' || prev.editor.pinned ? prev.editor : { ...prev.editor, open: false },
-    }))
   }, [])
 
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
@@ -684,13 +668,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
         className="app-body app-body--ai-centric"
         id="workspace-search-scope"
         ref={containerRef}
-        onMouseDown={(e) => {
-          const target = e.target as HTMLElement | null
-          if (!target) return
-          if (target.closest('.floating-panel')) return
-          if (target.closest('.floating-rail')) return
-          closeUnpinnedFloating()
-        }}
       >
         {/* 主区域：mainPanel 只能是 'ai' 或 'editor'（章节列表只能浮窗） */}
         <div className={`panel panel-${mainPanel} panel-main panel-ai--fill workspace-search-include`}>
@@ -768,8 +745,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             y={panelState.ai.y}
             width={panelState.ai.width}
             onPositionChange={(p) => updateFloating('ai', p)}
-            pinned={panelState.ai.pinned}
-            onTogglePin={() => togglePinFloating('ai')}
             onClose={() => closeFloating('ai')}
           >
             <div className="panel panel-ai">
@@ -795,8 +770,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             y={panelState.left.y}
             width={panelState.left.width}
             onPositionChange={(p) => updateFloating('left', p)}
-            pinned={panelState.left.pinned}
-            onTogglePin={() => togglePinFloating('left')}
             onClose={() => closeFloating('left')}
           >
             <div className="panel panel-left workspace-search-include">
@@ -819,8 +792,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             y={panelState.editor.y}
             width={panelState.editor.width}
             onPositionChange={(p) => updateFloating('editor', p)}
-            pinned={panelState.editor.pinned}
-            onTogglePin={() => togglePinFloating('editor')}
             onClose={() => closeFloating('editor')}
           >
             <div className="panel panel-editor workspace-search-include">

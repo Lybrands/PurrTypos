@@ -64,6 +64,39 @@ export interface VolumeOutline extends Outline {
   chapters: Outline[];
 }
 
+/** 大纲历史来源标记 */
+export type OutlineHistorySource =
+  | "user"
+  | "ai_tool"
+  | `rollback_of:${number}`
+  | string;
+
+/** 历史列表项：长字段已截断为 preview，详情走 getOutlineHistory */
+export interface OutlineHistoryListItem {
+  id: number;
+  outline_id: EntityId;
+  before_title: string | null;
+  before_type: string | null;
+  markdown_preview: string | null;
+  markdown_length: number;
+  xmind_length: number;
+  source: OutlineHistorySource;
+  note: string | null;
+  create_time: string;
+}
+
+export interface OutlineHistoryDetail {
+  id: number;
+  outline_id: EntityId;
+  before_title: string | null;
+  before_type: string | null;
+  before_markdown_content: string | null;
+  before_xmind_data: string | null;
+  source: OutlineHistorySource;
+  note: string | null;
+  create_time: string;
+}
+
 export interface Article {
   id: number;
   chapter_id: EntityId;
@@ -140,6 +173,9 @@ export interface Conversation {
   thinking?: string;
   tool_call_segments?: string | null;
   thinking_blocks?: string | null;
+  /** 子专家结构化结果（润色 / 审校 / 续写规划 / 风格统一）的 JSON 字符串，
+   *  形如 { role, payload }，回显时还原 SubagentResultCard。 */
+  subagent_result?: string | null;
   create_time?: string;
 }
 
@@ -259,6 +295,11 @@ export interface ElectronAPI {
   getOutlineByWritingChapter: (
     writingChapterId: EntityId,
   ) => Promise<ApiResult<Outline | null>>;
+  /** 本章自身绑定的 outline（outlines.writing_chapter_id == id），
+   *  与 OutlinePanel 显示的章/卷大纲一致。 */
+  getOutlineForChapter: (
+    writingChapterId: EntityId,
+  ) => Promise<ApiResult<Outline | null>>;
   getOutlines: (
     typeFilter?: "global" | "chapter",
   ) => Promise<ApiResult<Outline[]>>;
@@ -282,6 +323,16 @@ export interface ElectronAPI {
     xmind_data?: string;
     file_path?: string;
     markdown_content?: string | null;
+  }) => Promise<ApiResult<Outline>>;
+  listOutlineHistory: (data: {
+    outlineId: EntityId;
+    limit?: number;
+  }) => Promise<ApiResult<OutlineHistoryListItem[]>>;
+  getOutlineHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<OutlineHistoryDetail | null>>;
+  restoreOutlineHistory: (data: {
+    historyId: number;
   }) => Promise<ApiResult<Outline>>;
   // 章节
   saveChapters: (data: {
@@ -362,6 +413,8 @@ export interface ElectronAPI {
       };
     }[];
     thinkingBlocks?: string[];
+    /** 子专家结构化结果，形如 { role, payload }；用于回显时还原 SubagentResultCard */
+    subagentResult?: { role: string; payload: unknown } | null;
   }) => Promise<ApiResult<void>>;
   getConversations: (data: {
     sessionId: number;
@@ -397,7 +450,7 @@ export interface ElectronAPI {
   reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
-  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
+  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
   deleteSparkIdea: (data: { id: number | string }) => Promise<ApiResult<void>>;
   getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
   getSparkIdeasByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiSparkIdea[]>>;
