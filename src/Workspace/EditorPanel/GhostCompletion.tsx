@@ -51,9 +51,13 @@ export default function GhostCompletion({
   }, [ghostText])
 
   const cleanup = React.useCallback(() => {
+    // 仅在本组件拥有活动流时才 abort，避免误杀 AiPanel 等其他模块的全局共享流。
+    const hadActiveStream = chunkUnsubRef.current != null
     chunkUnsubRef.current?.()
     chunkUnsubRef.current = null
-    window.electronAPI.abortAiStream?.()
+    if (hadActiveStream) {
+      window.electronAPI.abortAiStream?.()
+    }
   }, [])
 
   const clearGhost = React.useCallback(() => {
@@ -128,7 +132,7 @@ export default function GhostCompletion({
         max_tokens: 120,
       },
       tools: [],
-      useToolRouter: false,
+      enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,

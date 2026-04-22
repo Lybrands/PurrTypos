@@ -56,9 +56,7 @@ async def get_settings(db: DatabaseConnection) -> dict[str, Any]:
         else DEFAULT_SYSTEM_PROMPT,
         "ai_model_configs": _parse_ai_model_configs(kv["ai_model_configs"]),
         "ai_agent_mode": (
-            "expert_team"
-            if kv["ai_agent_mode"] == "expert_team"
-            else ("subagent" if kv["ai_agent_mode"] == "subagent" else "legacy")
+            "subagent" if kv["ai_agent_mode"] == "subagent" else "legacy"
         ),
     }
 

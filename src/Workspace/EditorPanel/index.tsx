@@ -267,9 +267,12 @@ export default function EditorPanel({
 
   React.useEffect(() => {
     return () => {
+      const hadActiveStream = aiChunkUnsubRef.current != null
       aiChunkUnsubRef.current?.()
       aiChunkUnsubRef.current = null
-      window.electronAPI.abortAiStream()
+      if (hadActiveStream) {
+        window.electronAPI.abortAiStream()
+      }
     }
   }, [])
 
@@ -357,7 +360,7 @@ export default function EditorPanel({
       ],
       options: streamOptions,
       tools: [],
-      useToolRouter: false,
+      enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,

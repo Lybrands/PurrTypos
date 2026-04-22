@@ -205,8 +205,11 @@ async def restore_outline_from_history(
 
 
 async def delete_outline(db: DatabaseConnection, outline_id: str) -> None:
-    await db.execute("DELETE FROM outline_chapters WHERE outline_id = ?", [outline_id])
-    await db.execute("DELETE FROM outlines WHERE id = ?", [outline_id])
+    async with db.transaction():
+        await db.execute(
+            "DELETE FROM outline_chapters WHERE outline_id = ?", [outline_id]
+        )
+        await db.execute("DELETE FROM outlines WHERE id = ?", [outline_id])
 
 
 async def get_outlines(
