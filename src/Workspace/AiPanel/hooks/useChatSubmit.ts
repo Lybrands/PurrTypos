@@ -1,354 +1,33 @@
 import React from "react";
-import { flushSync } from "react-dom";
 import { App as AntdApp } from "antd";
-import type { AiModelConfig, Outline, AiSession, EntityId } from "../../../types";
+import type { WritingSubagentRole } from "../pipelineStages";
+import { parseWritingSlashCommand } from "../pipelineStages";
 import {
-  appendAssistantTailMarkdown,
-  mergeAssistantErrorNotice,
-} from "../rendering";
+  isWritingExpertPipeline,
+  type ChatMessage,
+  type ToolCallLabelOutcome,
+  type ToolCallSegment,
+  type UseChatSubmitParams,
+} from "./chat.types";
 import {
-  parseWritingSlashCommand,
-  type WritingSubagentRole,
-} from "../pipelineStages";
+  buildAssociationBlocks,
+  buildHistoryConverter,
+} from "./chatHistory";
+import { fetchSelectedMemoryContext } from "./memoryContext";
+import { buildStreamOptions } from "./streamOptions";
+import {
+  dispatchChunk,
+  type AccState,
+  type ChunkCtx,
+} from "./chunkHandlers";
 
-/** 写作专家或专家团：共用子管线协议与 UI */
-export function isWritingExpertPipeline(
-  mode: "legacy" | "subagent" | "expert_team" | undefined,
-): boolean {
-  return mode === "subagent" || mode === "expert_team";
-}
-
-export type ToolCallLabelOutcome = "ok" | "context_error";
-
-function resolveChapterTitleInCatalog(
-  chapterId: EntityId | undefined,
-  writingChapters: { id: EntityId; title: string }[],
-): string | undefined {
-  if (chapterId == null || String(chapterId).trim() === "") return undefined;
-  const key = String(chapterId);
-  const ch = writingChapters.find((c) => String(c.id) === key);
-  const t = ch?.title?.trim();
-  return t || undefined;
-}
-
-function resolveChapterTitleByIndexInCatalog(
-  chapterIndex: unknown,
-  writingChapters: { id: EntityId; title: string }[],
-): string | undefined {
-  const idx = Number(chapterIndex);
-  if (!Number.isInteger(idx) || idx <= 0) return undefined;
-  const row = writingChapters[idx - 1];
-  const t = String(row?.title || "").trim();
-  return t || undefined;
-}
-
-function resolveOutlineTitleInCatalog(
-  outlineId: EntityId | undefined,
-  availableOutlines: Outline[],
-): string | undefined {
-  if (outlineId == null || String(outlineId).trim() === "") return undefined;
-  const key = String(outlineId).trim();
-  const row = availableOutlines.find((o) => String(o.id) === key);
-  const t = row?.title?.trim();
-  return t || undefined;
-}
-
-/** 工具气泡文案；章节类若在本地章节目录无对应标题则 outcome=context_error（视为参数/上下文有误） */
-function toolCallDisplayRow(
-  name: string,
-  args: Record<string, unknown>,
-  writingChapters: { id: EntityId; title: string }[],
-  availableOutlines: Outline[],
-): { label: string; outcome: ToolCallLabelOutcome } {
-  try {
-    switch (name) {
-      case "getChapterContent": {
-        const chapterTitleArg =
-          args.chapterTitle != null && String(args.chapterTitle).trim() !== ""
-            ? String(args.chapterTitle).trim()
-            : "";
-        if (chapterTitleArg) {
-          return { label: `查看《${chapterTitleArg}》章节内容`, outcome: "ok" };
-        }
-        const titleByIndex = resolveChapterTitleByIndexInCatalog(
-          args.chapterIndex,
-          writingChapters,
-        );
-        if (titleByIndex) {
-          return { label: `查看《${titleByIndex}》章节内容`, outcome: "ok" };
-        }
-        const cid =
-          args.chapterId != null && args.chapterId !== ""
-            ? String(args.chapterId).trim()
-            : "";
-        if (!cid) {
-          return { label: "查看章节内容", outcome: "ok" };
-        }
-        const title = resolveChapterTitleInCatalog(cid, writingChapters);
-        return { label: title ? `查看《${title}》章节内容` : "查看章节内容", outcome: "ok" };
-      }
-      case "editChapterContent": {
-        const chapterTitleArg =
-          args.chapterTitle != null && String(args.chapterTitle).trim() !== ""
-            ? String(args.chapterTitle).trim()
-            : "";
-        if (chapterTitleArg) {
-          return { label: `编辑《${chapterTitleArg}》章节内容`, outcome: "ok" };
-        }
-        const titleByIndex = resolveChapterTitleByIndexInCatalog(
-          args.chapterIndex,
-          writingChapters,
-        );
-        if (titleByIndex) {
-          return { label: `编辑《${titleByIndex}》章节内容`, outcome: "ok" };
-        }
-        const cid =
-          args.chapterId != null && args.chapterId !== ""
-            ? String(args.chapterId).trim()
-            : "";
-        if (!cid) {
-          return { label: "编辑章节内容", outcome: "ok" };
-        }
-        const title = resolveChapterTitleInCatalog(cid, writingChapters);
-        return { label: title ? `编辑《${title}》章节内容` : "编辑章节内容", outcome: "ok" };
-      }
-      case "batchGetChapterContents": {
-        const raw = args.chapterIds;
-        if (!Array.isArray(raw) || raw.length === 0) {
-          return { label: "查看多章内容", outcome: "ok" };
-        }
-        const ids = raw
-          .map((x) => String(x).trim())
-          .filter((s) => s !== "");
-        if (ids.length === 0) {
-          return {
-            label: "查看多章内容",
-            outcome: "context_error",
-          };
-        }
-        const bad = ids.filter((id) => !resolveChapterTitleInCatalog(id, writingChapters));
-        if (bad.length > 0) {
-          return {
-            label: "查看多章内容",
-            outcome: "context_error",
-          };
-        }
-        if (ids.length === 1) {
-          const t0 = resolveChapterTitleInCatalog(ids[0], writingChapters)!;
-          return { label: `查看《${t0}》章节内容`, outcome: "ok" };
-        }
-        const head = ids
-          .slice(0, 3)
-          .map((id) => `《${resolveChapterTitleInCatalog(id, writingChapters)}》`)
-          .join("");
-        if (ids.length <= 3) return { label: `查看${head}等多章内容`, outcome: "ok" };
-        return { label: `查看${head}等 ${ids.length} 章内容`, outcome: "ok" };
-      }
-      case "listWritingChapters":
-        return { label: "查看章节目录", outcome: "ok" };
-      case "createWritingChapter":
-        return { label: "创建章节", outcome: "ok" };
-      case "getBookCharacters":
-        return { label: "查看人物信息", outcome: "ok" };
-      case "listBookCharacters":
-        return { label: "查看人物列表", outcome: "ok" };
-      case "getStoryBackground":
-        return { label: "查看小说背景", outcome: "ok" };
-      case "getBookStyle":
-        return { label: "查看风格基调", outcome: "ok" };
-      case "getGlobalOutline":
-        return { label: "查看总纲", outcome: "ok" };
-      case "editGlobalOutline":
-        return { label: "编辑总纲", outcome: "ok" };
-      case "queryOutline":
-        {
-          const outlineIdArg =
-            args.outlineId != null && String(args.outlineId).trim() !== ""
-              ? String(args.outlineId).trim()
-              : "";
-          /** 本地 availableOutlines 可能与 listOutlines 时点不一致；只要模型传了合法 id 就不标 context_error（以服务端结果为准） */
-          const labelForUnknownId = (id: string) =>
-            id.length > 12 ? `查看大纲详情（${id.slice(0, 10)}…）` : `查看大纲详情（${id}）`;
-          if (outlineIdArg) {
-            const title = resolveOutlineTitleInCatalog(outlineIdArg, availableOutlines);
-            if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
-            return { label: labelForUnknownId(outlineIdArg), outcome: "ok" };
-          }
-          if (Array.isArray(args.outlineIds) && args.outlineIds.length > 0) {
-            const ids = args.outlineIds
-              .map((x) => String(x).trim())
-              .filter((s) => s !== "");
-            if (ids.length === 1) {
-              const title = resolveOutlineTitleInCatalog(ids[0], availableOutlines);
-              if (title) return { label: `查看《${title}》大纲详情`, outcome: "ok" };
-              return { label: labelForUnknownId(ids[0]), outcome: "ok" };
-            }
-            const titles = ids
-              .map((id) => resolveOutlineTitleInCatalog(id, availableOutlines))
-              .filter((t): t is string => Boolean(t));
-            if (titles.length > 0) {
-              const head = titles.slice(0, 3).map((t) => `《${t}》`).join("");
-              if (titles.length <= 3) return { label: `查看${head}等多条大纲详情`, outcome: "ok" };
-              return { label: `查看${head}等 ${titles.length} 条大纲详情`, outcome: "ok" };
-            }
-            if (ids.length > 0) {
-              return { label: `查看 ${ids.length} 条大纲详情`, outcome: "ok" };
-            }
-          }
-          return { label: "查看大纲详情", outcome: "context_error" };
-        }
-      case "listOutlines":
-        return { label: "查看大纲列表", outcome: "ok" };
-      case "updateOutline":
-        return { label: "更新大纲", outcome: "ok" };
-      case "addSparkIdea":
-        return { label: "添加设定", outcome: "ok" };
-      case "updateSparkIdea":
-        return { label: "更新设定", outcome: "ok" };
-      case "deleteSparkIdea":
-        return { label: "删除设定", outcome: "ok" };
-      case "searchSparkIdeas":
-        return { label: "检索设定", outcome: "ok" };
-      case "addForeshadowing":
-        return { label: "添加伏笔", outcome: "ok" };
-      default:
-        return { label: name, outcome: "ok" };
-    }
-  } catch {
-    return { label: name, outcome: "ok" };
-  }
-}
-
-/** 写作专家模式：助手轮仅有 tool 气泡、正文为空时，拼出可供模型阅读的摘要，避免主会话上下文断裂 */
-function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): string {
-  const segs = msg.toolCallSegments;
-  if (!segs?.length) return "";
-  const parts: string[] = [];
-  for (const s of segs) {
-    const tb = (s.textBefore || "").trim();
-    if (tb) parts.push(tb);
-    const labels = (s.labels || []).filter(Boolean);
-    if (labels.length) parts.push(`[已调用工具] ${labels.join("、")}`);
-  }
-  const after = (msg.contentAfterToolCalls || "").trim();
-  if (after) parts.push(after);
-  return parts.join("\n");
-}
-
-/** 一段「调用前文案 + 该次调用的正在查看列表」，按调用顺序排列 */
-export interface ToolCallSegment {
-  textBefore: string;
-  labels: string[];
-  /** 与 labels 同长度：目录/参数无法与当前书籍对齐时标记 context_error，气泡显示为失败 */
-  labelOutcomes?: ToolCallLabelOutcome[];
-  /** 与 labels 同长度：该次工具调用是否命中请求内只读缓存 */
-  cachedFlags?: boolean[];
-  /** 本段内已执行完成的工具数量（与后端 toolIndexCompleted 同步，顺序递增） */
-  completedToolCount?: number;
-  trace?: {
-    insertedByDag?: number;
-    insertedSkillNames?: string[];
-    plannedToolNames?: string[];
-    repairedRounds?: number;
-    repairReasons?: string[];
-    /** 当前工具执行阶段（如 subagent 的 analyze/plan） */
-    stage?: string;
-  };
-}
-
-export interface ChatMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-  isError?: boolean;
-  model?: string;
-  /** 当前/最后一轮思考（流式时持续追加） */
-  thinking?: string;
-  /** 多轮思考内容，与 toolCallSegments 交错：思考1、工具1、思考2、工具2… */
-  thinkingBlocks?: string[];
-  toolCalling?: boolean;
-  toolCallSegments?: ToolCallSegment[];
-  contentAfterToolCalls?: string;
-  /** Subagent：当前阶段 id（如 analyze） */
-  subagentStageId?: string;
-  /** 写作专家模式：当前阶段展示名（如「分析专家」） */
-  subagentStageName?: string;
-  /** Subagent：该阶段是否仍在执行（含工具调用） */
-  subagentStageWorking?: boolean;
-  /** Subagent：最近一次完成阶段的展示名 */
-  subagentLastCompletedStageName?: string;
-  /** Subagent：按返回顺序记录阶段状态 */
-  subagentStages?: Array<{
-    id: string;
-    name: string;
-    status: "running" | "done";
-  }>;
-  /** 主稿专家正在输出阶段间过渡文案 */
-  subagentBridging?: boolean;
-  /** 已进入最终主稿专家答复流 */
-  subagentMainPresenter?: boolean;
-  /** 写作专家：各阶段摘要（Markdown），在工具条与主答复之前展示 */
-  subagentPipelineDigest?: string;
-  /** 按需子专家进行中 */
-  writingSubagentActive?: boolean;
-  writingSubagentLabel?: string;
-  writingSubagentRole?: WritingSubagentRole;
-  /** 子专家结构化结果（审校 / 规划 / 润色 / 风格） */
-  subagentResult?: { role: WritingSubagentRole; payload: unknown };
-}
-
-function summarizeSubagentResult(cm: ChatMessage): string {
-  const sr = cm.subagentResult;
-  if (!sr) return "";
-  if (sr.role === "review") {
-    const n = ((sr.payload as { issues?: unknown[] })?.issues ?? []).length;
-    return `审校完成：共 ${n} 条问题（见下方卡片）。`;
-  }
-  if (sr.role === "continuation_plan") {
-    return "续写规划已生成（见下方 Blueprint 卡片）。";
-  }
-  if (sr.role === "polish") {
-    return "润色结果已生成（见下方卡片，可「应用到当前章」）。";
-  }
-  if (sr.role === "style_unify") {
-    return "风格统一结果已生成（见下方卡片，可「应用到当前章」）。";
-  }
-  return "";
-}
-
-export interface UseChatSubmitParams {
-  /** 当前选中的模型配置（含 apiKey、baseUrl、name）；为空时无法发送 */
-  selectedModelConfig: AiModelConfig | null;
-  prompt: string;
-  setPrompt: React.Dispatch<React.SetStateAction<string>>;
-  loading: boolean;
-  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
-  conversations: ChatMessage[];
-  setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  bookId: EntityId | null | undefined;
-  chapterId: EntityId | null | undefined;
-  activeSessionId: number | null;
-  setActiveSessionId: React.Dispatch<React.SetStateAction<number | null>>;
-  sessions: AiSession[];
-  setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>;
-  associatedChapterIds: EntityId[];
-  associatedOutlineIds: EntityId[];
-  writingChapters: { id: EntityId; title: string }[];
-  availableOutlines: Outline[];
-  currentChapterTitle?: string;
-  selectedModel: string;
-  thinkingEnabled: boolean;
-  agentEnabled: boolean;
-  /** 用于 max_tokens 等；temperature 由选中模型的 AiModelConfig 与思考开关决定 */
-  modelConfigs: Record<string, { label?: string; max_tokens?: number }>;
-  selectedMemoryIds?: (number | string)[];
-  selectedForeshadowingIds?: (number | string)[];
-  agentMode?: "legacy" | "subagent" | "expert_team";
-  /** legacy 下协作共创时传 collab，主进程注入协商提示并限制写入工具 */
-  writingMode?: "default" | "collab";
-  /** 写作专家：下次发送使用的子专家；发送后由 onPendingSubagentRoleConsumed 清空 */
-  pendingSubagentRole?: WritingSubagentRole | null;
-  onPendingSubagentRoleConsumed?: () => void;
-}
+export {
+  isWritingExpertPipeline,
+  type ChatMessage,
+  type ToolCallLabelOutcome,
+  type ToolCallSegment,
+  type UseChatSubmitParams,
+};
 
 export function useChatSubmit(params: UseChatSubmitParams) {
   const {
@@ -415,9 +94,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       const slash = parseWritingSlashCommand(rawUserText);
       const effectiveUserText = slash.stripped || rawUserText;
       const effSubagentRole: WritingSubagentRole | null =
-        agentMode === "expert_team"
-          ? null
-          : (slash.role ?? pendingSubagentRole ?? null);
+        slash.role ?? pendingSubagentRole ?? null;
       onPendingSubagentRoleConsumed?.();
 
       const userText = effectiveUserText;
@@ -502,132 +179,39 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           : `\n\n当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用章节名等界面可见名称，不暴露 id。`
         : "";
 
-    const toHistoryApiMessage = (
-      m: ChatMessage | { role: "user" | "assistant"; content: string },
-    ): { role: string; content: string } | null => {
-      const cm = m as ChatMessage;
-      if (cm.isError || cm.role === "system") return null;
-      let text = String(cm.content ?? "").trim();
-      const pipeDigest = (cm.subagentPipelineDigest ?? "").trim();
-      if (pipeDigest && cm.role === "assistant") {
-        text = text ? `${pipeDigest}\n\n${text}` : pipeDigest;
-      }
-      if (
-        !text &&
-        isWritingExpertPipeline(agentMode) &&
-        cm.role === "assistant"
-      ) {
-        text = synthesizeAssistantTextFromToolSegments(cm).trim();
-      }
-      if (!text) return null;
-      return { role: cm.role, content: text };
-    };
+    const toHistoryApiMessage = buildHistoryConverter(agentMode);
 
-    /**
-     * 把"关联章节/大纲"渲染成强约束块：直接列出 chapterId/outlineId，
-     * 并在末尾给出"必须立即调用 batchGetChapterContents / queryOutline"的硬指令。
-     * 如果只给标题（旧实现），LLM 经常忽略关联或匹配错 id，故统一改为 id-first。
-     */
-    const buildAssociationBlocks = (): string[] => {
-      const blocks: string[] = [];
-      if (associatedChapterIds.length > 0) {
-        const pairs = associatedChapterIds
-          .map((id) => {
-            const sid = String(id).trim();
-            if (!sid) return null;
-            const c = writingChapters.find((w) => String(w.id) === sid);
-            return { id: sid, title: c?.title || "（未匹配章节标题）" };
-          })
-          .filter((x): x is { id: string; title: string } => x != null);
-        if (pairs.length > 0) {
-          const idList = `[${pairs.map((p) => `"${p.id}"`).join(",")}]`;
-          const lines = [
-            "【用户在本轮已关联以下写作章节 — 回复前必须读取其正文，不读视为忽略用户上下文，回答无效】",
-            ...pairs.map((p) => `- chapterId=${p.id} 《${p.title}》`),
-            `→ 立即调用 batchGetChapterContents，参数 chapterIds=${idList}，一次性把上述全部章节正文读入；若已在前序工具结果中读过可复用，否则不得跳过。`,
-          ];
-          blocks.push(lines.join("\n"));
-        }
-      }
-      if (associatedOutlineIds.length > 0) {
-        const pairs = associatedOutlineIds
-          .map((oid) => {
-            const sid = String(oid).trim();
-            if (!sid) return null;
-            const o = availableOutlines.find((x) => String(x.id) === sid);
-            return { id: sid, title: o?.title || "（未匹配大纲标题）" };
-          })
-          .filter((x): x is { id: string; title: string } => x != null);
-        if (pairs.length > 0) {
-          const idList = `[${pairs.map((p) => `"${p.id}"`).join(",")}]`;
-          const lines = [
-            "【用户在本轮已关联以下大纲 — 回复前必须读取其完整内容，不读视为忽略用户上下文，回答无效】",
-            ...pairs.map((p) => `- outlineId=${p.id} 《${p.title}》`),
-            `→ 立即调用 queryOutline，参数 outlineIds=${idList}、includeText=true、includeChapters=false，一次性把上述全部大纲读入；若已在前序工具结果中读过可复用，否则不得跳过。`,
-          ];
-          blocks.push(lines.join("\n"));
-        }
-      }
-      return blocks;
-    };
+    const associationBlocks = buildAssociationBlocks(
+      associatedChapterIds,
+      associatedOutlineIds,
+      writingChapters,
+      availableOutlines,
+    );
 
     let subagentExtra = "";
-    if (isWritingExpertPipeline(agentMode) && agentEnabled && bookId != null) {
-      const blocks = buildAssociationBlocks();
-      if (blocks.length > 0) {
-        const brand = agentMode === "expert_team" ? "专家团" : "写作专家";
-        subagentExtra = `\n\n【${brand} — 主会话附加上下文】\n${blocks.join("\n\n")}`;
-      }
+    if (
+      isWritingExpertPipeline(agentMode) &&
+      agentEnabled &&
+      bookId != null &&
+      associationBlocks.length > 0
+    ) {
+      subagentExtra = `\n\n【写作专家 — 主会话附加上下文】\n${associationBlocks.join("\n\n")}`;
     }
 
     let collabExtra = "";
-    if (writingMode === "collab" && agentEnabled && bookId != null) {
-      const blocks = buildAssociationBlocks();
-      if (blocks.length > 0) {
-        collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${blocks.join("\n\n")}`;
-      }
+    if (
+      writingMode === "collab" &&
+      agentEnabled &&
+      bookId != null &&
+      associationBlocks.length > 0
+    ) {
+      collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${associationBlocks.join("\n\n")}`;
     }
 
-    // 用户在 AiContextBar「本书设定」按钮里勾选的设定/伏笔条目：
-    // 不依赖 LLM 工具调用（后端没暴露查 spark idea 的工具，且即便有 LLM 也不知道用户选了哪些 id），
-    // 直接前置 fetch 出来作为高优先级上下文注入到 system 末尾，所有 mode 通用。
-    let memoryExtra = "";
-    try {
-      const memBlocks: string[] = [];
-      if (selectedMemoryIds && selectedMemoryIds.length > 0) {
-        const res = await window.electronAPI.getSparkIdeasByIds({
-          ids: selectedMemoryIds,
-        });
-        if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
-          const lines = res.data.map(
-            (m: { layer?: string; content?: string }) =>
-              `- [${m.layer ?? "?"}] ${(m.content ?? "").trim()}`,
-          );
-          memBlocks.push(
-            `【用户在本轮已勾选的本书设定 — 必须严格遵循，不得与之矛盾】\n${lines.join("\n")}`,
-          );
-        }
-      }
-      if (selectedForeshadowingIds && selectedForeshadowingIds.length > 0) {
-        const res = await window.electronAPI.getForeshadowingByIds({
-          ids: selectedForeshadowingIds,
-        });
-        if (res?.success && Array.isArray(res.data) && res.data.length > 0) {
-          const lines = res.data.map(
-            (f: { type?: string; status?: string; content?: string }) =>
-              `- [${f.type ?? "?"}|${f.status ?? "?"}] ${(f.content ?? "").trim()}`,
-          );
-          memBlocks.push(
-            `【用户在本轮已勾选的伏笔 — 优先呼应或铺垫，不得与之矛盾】\n${lines.join("\n")}`,
-          );
-        }
-      }
-      if (memBlocks.length > 0) {
-        memoryExtra = `\n\n${memBlocks.join("\n\n")}`;
-      }
-    } catch {
-      // fetch 失败不阻断发送，让对话继续
-    }
+    const memoryExtra = await fetchSelectedMemoryContext({
+      selectedMemoryIds,
+      selectedForeshadowingIds,
+    });
 
     const systemContent = [systemSuffix, subagentExtra, collabExtra, memoryExtra]
       .filter(Boolean)
@@ -670,907 +254,63 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       currentSessionTitle.trim() === "" || currentSessionTitle === "新对话";
     const needsTitle =
       !hasHistoryBeforeThisQuestion && isUntitledSession;
-    const acc = {
+    const acc: AccState = {
       response: "",
       thinking: "",
       sessionId,
       chapterId,
       needsTitle,
       userText,
-      model: "" as string,
-      toolCallSegments: undefined as ToolCallSegment[] | undefined,
-      thinkingBlocks: [] as string[],
+      model: "",
+      toolCallSegments: undefined,
+      thinkingBlocks: [],
       contentAfterToolCalls: "",
       subagentPipelineDigest: "",
-      subagentResult: undefined as
-        | { role: WritingSubagentRole; payload: unknown }
-        | undefined,
+      subagentResult: undefined,
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;
 
-    const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
-      const isVisibleSession = () => visibleSessionIdRef.current === sessionId;
-      if (chunk.toolRouterWarning) {
-        appMessage.warning(chunk.toolRouterWarning);
-      }
-      if (chunk.writingSubagentStart && isVisibleSession()) {
-        const w = chunk.writingSubagentStart as {
-          role?: WritingSubagentRole;
-          label?: string;
-        };
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              writingSubagentActive: true,
-              writingSubagentLabel: w.label,
-              writingSubagentRole: w.role,
-            };
-            return next;
-          });
-        });
-      }
-      if (chunk.writingSubagentDelta?.delta) {
-        const delta = chunk.writingSubagentDelta.delta;
-        acc.response += delta;
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              next[next.length - 1] = {
-                ...last,
-                content: (last.content || "") + delta,
-              };
-              return next;
-            });
-          });
-        }
-      }
-      if (chunk.writingSubagentResult) {
-        const wr = chunk.writingSubagentResult as {
-          role: WritingSubagentRole;
-          payload: unknown;
-        };
-        acc.subagentResult = { role: wr.role, payload: wr.payload };
-      }
-      if (chunk.writingSubagentResult && isVisibleSession()) {
-        const wr = chunk.writingSubagentResult as {
-          role: WritingSubagentRole;
-          payload: unknown;
-        };
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              subagentResult: { role: wr.role, payload: wr.payload },
-            };
-            return next;
-          });
-        });
-      }
-      if (chunk.writingSubagentDone && isVisibleSession()) {
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              writingSubagentActive: false,
-            };
-            return next;
-          });
-        });
-      }
-      if (chunk.orchestratorRepair?.repairedRounds) {
-        if (isVisibleSession()) {
-          const repairedRounds = chunk.orchestratorRepair.repairedRounds;
-          const repairReasons = (chunk.orchestratorRepair?.events || [])
-            .map((x) => String(x?.reason || "").trim())
-            .filter(Boolean);
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const lastMsg = next[next.length - 1];
-              if (lastMsg?.role !== "assistant") return prev;
-              const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
-              if (segs.length === 0) return prev;
-              const lastSeg = segs[segs.length - 1];
-              const nextSegs = [
-                ...segs.slice(0, -1),
-                {
-                  ...lastSeg,
-                  trace: {
-                    ...(lastSeg.trace ?? {}),
-                    repairedRounds,
-                    repairReasons,
-                  },
-                },
-              ];
-              next[next.length - 1] = {
-                ...(lastMsg as ChatMessage),
-                toolCallSegments: nextSegs,
-              };
-              return next;
-            });
-          });
-        }
-      }
-      if (chunk.error) {
-        if (isVisibleSession()) {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            const merged = mergeAssistantErrorNotice(
-              {
-                content: acc.response || (last as ChatMessage).content || "",
-                contentAfterToolCalls:
-                  acc.toolCallSegments?.length
-                    ? (acc.contentAfterToolCalls ??
-                      (last as ChatMessage).contentAfterToolCalls)
-                    : (last as ChatMessage).contentAfterToolCalls,
-                toolCallSegments:
-                  acc.toolCallSegments ?? (last as ChatMessage).toolCallSegments,
-              },
-              chunk.error,
-            );
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              content: merged.content ?? (last as ChatMessage).content,
-              contentAfterToolCalls: merged.contentAfterToolCalls,
-              toolCalling: false,
-              ...(merged.isError ? { isError: true } : {}),
-            };
-            return next;
-          });
-          setLoading(false);
-        }
+    const { options: streamOptions, apiModelName } = buildStreamOptions({
+      cfg,
+      modelConfigs,
+      selectedModel,
+      agentMode,
+      thinkingEnabled,
+    });
+
+    let unsubscribe = (): void => {};
+    const ctx: ChunkCtx = {
+      acc,
+      sessionId,
+      agentMode,
+      cfg,
+      apiModelName,
+      writingChapters,
+      availableOutlines,
+      setConversations,
+      setLoading,
+      setSessions,
+      appMessage,
+      isVisibleSession: () => visibleSessionIdRef.current === sessionId,
+      cleanup: () => {
         unsubscribe();
         unsubscribeRef.current = null;
         runningSessionIdRef.current = null;
         runningAccRef.current = null;
-        return;
-      }
-
-      if (chunk.thinkingDelta) {
-        acc.thinking += chunk.thinkingDelta;
-        const td = chunk.thinkingDelta;
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              next[next.length - 1] = {
-                ...last,
-                thinking: (last.thinking || "") + td,
-                toolCalling: false,
-              };
-              return next;
-            });
-          });
-        }
-      }
-
-      if (chunk.delta) {
-        const delta = chunk.delta;
-        if (acc.toolCallSegments?.length) {
-          let after = (acc.contentAfterToolCalls ?? "") + delta;
-          if (!isWritingExpertPipeline(agentMode)) {
-            const lastS = acc.toolCallSegments[acc.toolCallSegments.length - 1];
-            if (lastS?.textBefore && after.startsWith(lastS.textBefore)) {
-              after = after.slice(lastS.textBefore.length);
-            }
-          }
-          acc.contentAfterToolCalls = after;
-          acc.response =
-            acc.toolCallSegments.map((s) => s.textBefore).join("") + after;
-        } else {
-          acc.contentAfterToolCalls = "";
-          acc.response += delta;
-        }
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const segs = (last as ChatMessage).toolCallSegments;
-              if (segs?.length) {
-                next[next.length - 1] = {
-                  ...last,
-                  contentAfterToolCalls: acc.contentAfterToolCalls,
-                  content: acc.response,
-                  toolCalling: false,
-                };
-              } else {
-                next[next.length - 1] = {
-                  ...last,
-                  content: (last.content || "") + delta,
-                  toolCalling: false,
-                };
-              }
-              return next;
-            });
-          });
-        }
-      }
-
-      if (chunk.chapterContentUpdated != null) {
-        if (isVisibleSession()) {
-          window.dispatchEvent(
-            new CustomEvent("chapter-content-updated", {
-              detail: { chapterId: chunk.chapterContentUpdated },
-            }),
-          );
-        }
-      }
-
-      // AI 工具 editChapterContent 不再直接落库，改为推送 diff 提议给前端，
-      // 由 DiffProvider 监听并 startDiff，最终用户在 overlay 接受后走 commitChapterDiff
-      if (chunk.proposedChapterDiff && isVisibleSession()) {
-        const p = chunk.proposedChapterDiff;
-        if (p.chapterId != null && typeof p.proposedText === "string") {
-          window.dispatchEvent(
-            new CustomEvent("ai-propose-chapter-diff", {
-              detail: {
-                chapterId: p.chapterId,
-                beforeText: typeof p.beforeText === "string" ? p.beforeText : "",
-                proposedText: p.proposedText,
-                source: p.source || "ai_tool_edit",
-              },
-            }),
-          );
-        }
-      }
-
-      if (chunk.chapterCreated != null) {
-        if (isVisibleSession()) {
-          window.dispatchEvent(
-            new CustomEvent("chapter-created", {
-              detail: {
-                chapterId: chunk.chapterCreated.chapterId,
-                title: chunk.chapterCreated.title,
-                parentId: chunk.chapterCreated.parentId ?? null,
-              },
-            }),
-          );
-        }
-      }
-
-      if (typeof chunk.collabLatestParagraph === "string" && chunk.collabLatestParagraph.trim()) {
-        const para = chunk.collabLatestParagraph.trim();
-        const wrapped = `\n\n### 最新段落（已写入正文）\n\n\`\`\`text\n${para}\n\`\`\`\n`;
-        const accTailPatched = appendAssistantTailMarkdown(
-          {
-            content: acc.response,
-            contentAfterToolCalls: acc.contentAfterToolCalls,
-            toolCallSegments: acc.toolCallSegments,
-          },
-          wrapped,
-        );
-        acc.response = accTailPatched.content ?? acc.response;
-        if (acc.toolCallSegments?.length) {
-          acc.contentAfterToolCalls = accTailPatched.contentAfterToolCalls ?? "";
-        }
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            const tailPatched = appendAssistantTailMarkdown(
-              {
-                content: (last as ChatMessage).content,
-                contentAfterToolCalls: (last as ChatMessage).contentAfterToolCalls,
-                toolCallSegments: (last as ChatMessage).toolCallSegments,
-              },
-              wrapped,
-            );
-            next[next.length - 1] = {
-              ...(last as ChatMessage),
-              content: tailPatched.content ?? (last.content || ""),
-              contentAfterToolCalls: tailPatched.contentAfterToolCalls,
-            };
-            return next;
-          });
-        });
-      }
-
-      if (Array.isArray(chunk.toolReadCacheMask) && chunk.toolReadCacheMask.length > 0) {
-        const mask = chunk.toolReadCacheMask;
-        if (!isVisibleSession()) {
-          if (
-            !chunk.delta &&
-            !chunk.thinkingDelta &&
-            !chunk.done &&
-            !chunk.error &&
-            typeof chunk.toolIndexCompleted !== "number"
-          ) {
-            return;
-          }
-        }
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg?.role !== "assistant") return prev;
-            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
-            if (segs.length === 0) return prev;
-            const lastSeg = segs[segs.length - 1];
-            const n = lastSeg.labels.length;
-            const flags = [
-              ...(lastSeg.cachedFlags ?? new Array(n).fill(false)),
-            ];
-            const m = Math.min(n, mask.length);
-            for (let i = 0; i < m; i++) {
-              if (mask[i]) flags[i] = true;
-            }
-            const nextSegs = [
-              ...segs.slice(0, -1),
-              { ...lastSeg, cachedFlags: flags },
-            ];
-            next[next.length - 1] = {
-              ...(lastMsg as ChatMessage),
-              toolCallSegments: nextSegs,
-            };
-            return next;
-          });
-        });
-        if (
-          !chunk.delta &&
-          !chunk.thinkingDelta &&
-          !chunk.done &&
-          !chunk.error &&
-          typeof chunk.toolIndexCompleted !== "number"
-        ) {
-          return;
-        }
-      }
-
-      if (typeof chunk.toolIndexCompleted === "number") {
-        const idx = chunk.toolIndexCompleted;
-        const fromCache = chunk.toolFromCache === true;
-        if (!isVisibleSession()) {
-          if (
-            !chunk.delta &&
-            !chunk.thinkingDelta &&
-            !chunk.done &&
-            !chunk.error
-          ) {
-            return;
-          }
-        }
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg?.role !== "assistant") return prev;
-            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
-            if (segs.length === 0) return prev;
-            const lastSeg = segs[segs.length - 1];
-            const n = lastSeg.labels.length;
-            const nextCount = Math.min(idx + 1, n);
-            const flags = [
-              ...(lastSeg.cachedFlags ?? new Array(n).fill(false)),
-            ];
-            if (fromCache && idx >= 0 && idx < flags.length) flags[idx] = true;
-            const nextSegs = [
-              ...segs.slice(0, -1),
-              {
-                ...lastSeg,
-                completedToolCount: nextCount,
-                cachedFlags: flags,
-              },
-            ];
-            next[next.length - 1] = {
-              ...(lastMsg as ChatMessage),
-              toolCallSegments: nextSegs,
-            };
-            return next;
-          });
-        });
-        if (
-          !chunk.delta &&
-          !chunk.thinkingDelta &&
-          !chunk.done &&
-          !chunk.error
-        ) {
-          return;
-        }
-      }
-      if (typeof chunk.toolCallCachedIndex === "number") {
-        const idx = chunk.toolCallCachedIndex;
-        if (!isVisibleSession()) {
-          if (
-            !chunk.delta &&
-            !chunk.thinkingDelta &&
-            !chunk.done &&
-            !chunk.error
-          ) {
-            return;
-          }
-        }
-        flushSync(() => {
-          setConversations((prev) => {
-            const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg?.role !== "assistant") return prev;
-            const segs = (lastMsg as ChatMessage).toolCallSegments ?? [];
-            if (segs.length === 0) return prev;
-            const lastSeg = segs[segs.length - 1];
-            const flags = [...(lastSeg.cachedFlags ?? new Array(lastSeg.labels.length).fill(false))];
-            if (idx >= 0 && idx < flags.length) flags[idx] = true;
-            const nextSegs = [
-              ...segs.slice(0, -1),
-              { ...lastSeg, cachedFlags: flags },
-            ];
-            next[next.length - 1] = {
-              ...(lastMsg as ChatMessage),
-              toolCallSegments: nextSegs,
-            };
-            return next;
-          });
-        });
-        if (
-          !chunk.delta &&
-          !chunk.thinkingDelta &&
-          !chunk.done &&
-          !chunk.error
-        ) {
-          return;
-        }
-      }
-
-      if (chunk.toolCalls?.length && chunk.toolCallsInProgress) {
-        const partialContent = chunk.partialContent ?? "";
-        const partialThinking = chunk.partialThinking ?? "";
-        const insertedByDag = chunk.orchestratorInfo?.insertedByDag ?? 0;
-        const repairReasons = (chunk.orchestratorRepair?.events || [])
-          .map((x) => String(x?.reason || "").trim())
-          .filter(Boolean);
-        const visibleToolCalls = (chunk.toolCalls || []).filter((tc) => {
-          const callId = String((tc as { id?: string })?.id || "");
-          return !callId.startsWith("repair_") && !callId.startsWith("sys_");
-        });
-        if (
-          visibleToolCalls.length === 0 &&
-          !partialContent.trim() &&
-          !partialThinking.trim()
-        ) {
-          return;
-        }
-        const rows = visibleToolCalls.map(
-          (tc: { function?: { name?: string; arguments?: string }; id?: string }) => {
-            const fn = tc.function?.name;
-            if (!fn) {
-              return { label: "（未识别工具）", outcome: "ok" as ToolCallLabelOutcome };
-            }
-            try {
-              const args = JSON.parse(tc.function?.arguments || "{}") as Record<
-                string,
-                unknown
-              >;
-              const row = toolCallDisplayRow(
-                fn,
-                args,
-                writingChapters || [],
-                availableOutlines || [],
-              );
-              if (
-                (fn === "getChapterContent" || fn === "editChapterContent") &&
-                row.outcome === "context_error"
-              ) {
-              }
-              return row;
-            } catch {
-              if (fn === "queryOutline") {
-                return {
-                  label: "查看大纲详情",
-                  outcome: "ok" as ToolCallLabelOutcome,
-                };
-              }
-              const row = toolCallDisplayRow(
-                fn,
-                {},
-                writingChapters || [],
-                availableOutlines || [],
-              );
-              if (
-                (fn === "getChapterContent" || fn === "editChapterContent") &&
-                row.outcome === "context_error"
-              ) {
-              }
-              return row;
-            }
-          },
-        );
-        const taggedLabels = rows.map((row, idx) => {
-          const base = row.label;
-          const tc = visibleToolCalls[idx];
-          const callId = String(tc?.id || "");
-          let label = base;
-          if (callId.startsWith("repair_")) label = `${base}（自动修复）`;
-          else if (callId.startsWith("sys_")) label = `${base}（自动补前置）`;
-          return label;
-        });
-        const labelOutcomes = rows.map((row) => row.outcome);
-        let rebuiltAssistantText = "";
-        if (isVisibleSession()) {
-          flushSync(() => {
-            setConversations((prev) => {
-              const next = [...prev];
-              const lastMsg = next[next.length - 1];
-              if (lastMsg?.role === "assistant") {
-                const prevSeg = (lastMsg as ChatMessage).toolCallSegments ?? [];
-                const prevBlocks = (lastMsg as ChatMessage).thinkingBlocks ?? [];
-                const currentThinking = (lastMsg.thinking || "").trim();
-                const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
-                /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，否则渲染顺序会变成「新工具段在旧尾稿之上」 */
-                const tailAcc =
-                  acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "";
-                const hasPartial = Boolean(partialContent && partialContent.trim());
-                const flushTailSegments: ToolCallSegment[] =
-                  !hasPartial && tailAcc.trim().length > 0
-                    ? [{ textBefore: tailAcc, labels: [], cachedFlags: [] }]
-                    : [];
-                const baseSegs = [...prevSeg, ...flushTailSegments];
-                const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
-                const textBefore =
-                  partialContent && partialContent.trim()
-                    ? partialContent
-                    : !hasPriorToolRound
-                      ? isWritingExpertPipeline(agentMode)
-                        ? ""
-                        : acc.response || lastMsg.content || ""
-                      : "";
-                const newSegment: ToolCallSegment = {
-                  textBefore,
-                  labels: taggedLabels,
-                  labelOutcomes,
-                  cachedFlags: visibleToolCalls.map((tc) =>
-                    Boolean((tc as { cached?: boolean }).cached),
-                  ),
-                  trace: {
-                    insertedByDag,
-                    insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
-                    plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
-                    repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
-                    repairReasons,
-                    stage: chunk.subagentStage || undefined,
-                  },
-                };
-                const nextSegments = [...baseSegs, newSegment];
-                let afterToolCalls =
-                  flushTailSegments.length > 0
-                    ? ""
-                    : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
-                if (
-                  !isWritingExpertPipeline(agentMode) &&
-                  flushTailSegments.length === 0 &&
-                  textBefore &&
-                  afterToolCalls.startsWith(textBefore)
-                ) {
-                  afterToolCalls = afterToolCalls.slice(textBefore.length);
-                }
-                rebuiltAssistantText =
-                  nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
-                acc.toolCallSegments = nextSegments;
-                acc.contentAfterToolCalls = afterToolCalls;
-                acc.thinkingBlocks = nextBlocks;
-                next[next.length - 1] = {
-                  ...lastMsg,
-                  content: rebuiltAssistantText,
-                  thinking: "",
-                  thinkingBlocks: nextBlocks,
-                  toolCalling: true,
-                  toolCallSegments: nextSegments,
-                  contentAfterToolCalls: afterToolCalls,
-                };
-              }
-              return next;
-            });
-          });
-        } else {
-          const prevSeg = acc.toolCallSegments ?? [];
-          const prevBlocks = acc.thinkingBlocks ?? [];
-          const currentThinking = (acc.thinking || "").trim();
-          const nextBlocks = currentThinking ? [...prevBlocks, currentThinking] : prevBlocks;
-          const tailBg = acc.contentAfterToolCalls ?? "";
-          const hasPartialBg = Boolean(partialContent && partialContent.trim());
-          const flushTailSegments: ToolCallSegment[] =
-            !hasPartialBg && tailBg.trim().length > 0
-              ? [{ textBefore: tailBg, labels: [], cachedFlags: [] }]
-              : [];
-          const baseSegs = [...prevSeg, ...flushTailSegments];
-          const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
-          const textBefore =
-            partialContent && partialContent.trim()
-              ? partialContent
-              : !hasPriorToolRound
-                ? isWritingExpertPipeline(agentMode)
-                  ? ""
-                  : acc.response || ""
-                : "";
-          const newSegment: ToolCallSegment = {
-            textBefore,
-            labels: taggedLabels,
-            labelOutcomes,
-            cachedFlags: visibleToolCalls.map((tc) =>
-              Boolean((tc as { cached?: boolean }).cached),
-            ),
-            trace: {
-              insertedByDag,
-              insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
-              plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
-              repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
-              repairReasons,
-              stage: chunk.subagentStage || undefined,
-            },
-          };
-          const nextSegments = [...baseSegs, newSegment];
-          let afterToolCallsBg =
-            flushTailSegments.length > 0 ? "" : tailBg;
-          if (
-            !isWritingExpertPipeline(agentMode) &&
-            flushTailSegments.length === 0 &&
-            textBefore &&
-            afterToolCallsBg.startsWith(textBefore)
-          ) {
-            afterToolCallsBg = afterToolCallsBg.slice(textBefore.length);
-          }
-          rebuiltAssistantText =
-            nextSegments.map((s) => s.textBefore).join("") + afterToolCallsBg;
-          acc.toolCallSegments = nextSegments;
-          acc.contentAfterToolCalls = afterToolCallsBg;
-          acc.thinkingBlocks = nextBlocks;
-        }
-        acc.response =
-          rebuiltAssistantText ||
-          (partialContent && partialContent.trim() ? partialContent : acc.response);
-        acc.thinking = partialThinking;
-        return;
-      }
-
-      if (chunk.done) {
-        if (chunk.model) acc.model = chunk.model;
-        const finalThinking = (acc.thinking || "").trim();
-        const savedThinkingBlocks = finalThinking
-          ? [...(acc.thinkingBlocks ?? []), finalThinking]
-          : (acc.thinkingBlocks ?? []);
-        let resolvedAssistantContent =
-          acc.response ||
-          synthesizeAssistantTextFromToolSegments({
-            role: "assistant",
-            content: "",
-            toolCallSegments: acc.toolCallSegments,
-          } as ChatMessage).trim();
-        if (isVisibleSession()) {
-          setConversations((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (last?.role === "assistant") {
-              const blocks = (last as ChatMessage).thinkingBlocks ?? [];
-              const thinkingBlocks = finalThinking ? [...blocks, finalThinking] : blocks;
-              const cm = last as ChatMessage;
-              const stages = cm.subagentStages ?? [];
-              const subagentStagesFinalized =
-                isWritingExpertPipeline(agentMode) && stages.length > 0
-                  ? stages.map((s) =>
-                      s.status === "running"
-                        ? { ...s, status: "done" as const }
-                        : s,
-                    )
-                  : cm.subagentStages;
-              const digestTrim = (cm.subagentPipelineDigest ?? "").trim();
-              const currentContent = String(last.content || "");
-              const accContent = (acc.response || "").trim();
-              let finalContent = currentContent;
-              if (!currentContent.trim()) {
-                if (accContent) {
-                  finalContent = acc.response!;
-                } else {
-                  const synthesized = synthesizeAssistantTextFromToolSegments(
-                    cm,
-                  ).trim();
-                  if (synthesized) {
-                    finalContent = synthesized;
-                  } else {
-                    const subSummary = summarizeSubagentResult(cm);
-                    finalContent = subSummary || "内容同步中。";
-                  }
-                }
-              }
-              if (digestTrim) {
-                finalContent = finalContent.trim()
-                  ? `${digestTrim}\n\n${finalContent.trim()}`
-                  : digestTrim;
-              }
-              resolvedAssistantContent = finalContent;
-              next[next.length - 1] = {
-                ...last,
-                content: finalContent,
-                subagentPipelineDigest: undefined,
-                model: acc.model || undefined,
-                thinking: finalThinking || last.thinking,
-                thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
-                toolCalling: false,
-                subagentStageWorking: false,
-                ...(isWritingExpertPipeline(agentMode)
-                  ? {
-                      subagentBridging: false,
-                      ...(subagentStagesFinalized
-                        ? { subagentStages: subagentStagesFinalized }
-                        : {}),
-                    }
-                  : {}),
-              };
-            }
-            return next;
-          });
-          setLoading(false);
-        }
-        unsubscribe();
-        unsubscribeRef.current = null;
-        runningSessionIdRef.current = null;
-        runningAccRef.current = null;
-        acc.response = resolvedAssistantContent;
-
-        const respTrim = (acc.response || "").trim();
-        const thinkTrim = (acc.thinking || "").trim();
-        const shouldSave =
-          Boolean(acc.sessionId) &&
-          Boolean(
-            respTrim ||
-              thinkTrim ||
-              savedThinkingBlocks.length > 0 ||
-              (acc.toolCallSegments?.length ?? 0) > 0,
-          );
-
-        if (shouldSave) {
-          void window.electronAPI
-            .saveConversation({
-              sessionId: acc.sessionId,
-              chapterId: acc.chapterId ?? null,
-              prompt: acc.userText,
-              response: acc.response || "",
-              model: acc.model || undefined,
-              thinking: acc.thinking || undefined,
-              thinkingBlocks: savedThinkingBlocks.length
-                ? savedThinkingBlocks
-                : undefined,
-              toolCallSegments: acc.toolCallSegments?.length
-                ? acc.toolCallSegments
-                : undefined,
-              subagentResult: acc.subagentResult ?? undefined,
-            })
-            .then((res) => {
-              if (res && res.success) return;
-              const detail = (res as { detail?: unknown })?.detail;
-              const msg =
-                typeof (res as { error?: string })?.error === "string"
-                  ? (res as { error: string }).error
-                  : Array.isArray(detail)
-                    ? detail
-                        .map(
-                          (d: { msg?: string }) =>
-                            String(d?.msg ?? d ?? "").trim(),
-                        )
-                        .filter(Boolean)
-                        .join("；")
-                    : "";
-              appMessage.warning(
-                msg
-                  ? `本轮对话未能写入本地库：${msg}`
-                  : "本轮对话未能写入本地库（保存接口异常）。",
-              );
-            });
-        }
-
-        const titleSource = (acc.response || acc.thinking || "").trim();
-        if (acc.needsTitle && acc.sessionId && titleSource) {
-          console.log("[AI 对话] 请求生成标题", {
-            sessionId: acc.sessionId,
-            apiProvider: cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
-            model: apiModelName,
-          });
-          window.electronAPI
-            .generateSessionTitle({
-              apiKey: cfg.apiKey,
-              baseURL: cfg.baseUrl || undefined,
-              prompt: `User:\n${acc.userText}\n\nAssistant:\n${titleSource}`.trim(),
-              apiProvider:
-                cfg.apiProvider === "anthropic"
-                  ? "anthropic"
-                  : "openai",
-              model: apiModelName,
-            })
-            .then(async (titleRes) => {
-              if (!titleRes.success || !titleRes.data?.trim()) {
-                console.warn("[AI 对话] 标题生成失败或为空", {
-                  success: titleRes.success,
-                  error: titleRes.error ?? null,
-                  hasData: Boolean(titleRes.data),
-                  dataPreview:
-                    typeof titleRes.data === "string"
-                      ? titleRes.data.slice(0, 40)
-                      : null,
-                });
-                return;
-              }
-              const nextTitle = titleRes.data.trim();
-              await window.electronAPI.updateSessionTitle({
-                sessionId: acc.sessionId!,
-                title: nextTitle,
-              });
-              setSessions((prev) =>
-                prev.map((s) =>
-                  s.id === acc.sessionId
-                    ? { ...s, title: nextTitle }
-                    : s,
-                ),
-              );
-            })
-            .catch((err) => {
-              console.warn("[AI 对话] 标题生成请求异常：", err);
-            });
-        }
-      }
+      },
+    };
+    unsubscribe = window.electronAPI.onAiChunk((chunk) => {
+      dispatchChunk(chunk, ctx);
     });
 
     unsubscribeRef.current = unsubscribe;
 
-    const modelConfig = modelConfigs[selectedModel];
-    const effectiveThinking =
-      isWritingExpertPipeline(agentMode)
-        ? false
-        : Boolean(
-            cfg?.thinkingOnly ||
-              (cfg?.supportsThinking && thinkingEnabled) ||
-              (!cfg && thinkingEnabled),
-          );
-    const apiModelName = cfg?.name ?? selectedModel;
-    /** false：不传 temperature；undefined / true：按配置传 temperature */
-    const useConfiguredTemperature =
-      cfg?.customizeTemperature === undefined || cfg?.customizeTemperature === true;
-    const streamOptions: {
-      model: string;
-      temperature?: number;
-      thinking: { type: "enabled" | "disabled" };
-      max_tokens: number;
-      top_k?: number;
-    } = {
-      model: apiModelName,
-      ...(useConfiguredTemperature
-        ? {
-            temperature: effectiveThinking
-              ? (cfg?.temperatureThinking ?? 0.6)
-              : (cfg?.temperatureNonThinking ?? 0.6),
-          }
-        : {}),
-      thinking: {
-        type: (effectiveThinking ? "enabled" : "disabled") as
-          | "enabled"
-          | "disabled",
-      },
-      max_tokens: modelConfig?.max_tokens ?? 8192,
-      ...(isWritingExpertPipeline(agentMode) ? { top_k: 45 } : {}),
-    };
-
     const hasBookContext = bookId != null;
-    const useToolRouter = Boolean(hasBookContext && agentEnabled);
+    const enableAgentTools = Boolean(hasBookContext && agentEnabled);
 
     if (import.meta.env.DEV) {
-      console.log('[AI 对话] 传入内容:', { messages: newMessages, options: streamOptions, useToolRouter });
+      console.log('[AI 对话] 传入内容:', { messages: newMessages, options: streamOptions, enableAgentTools });
     }
 
     window.electronAPI.aiChatStream({
@@ -1581,7 +321,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       messages: newMessages,
       options: streamOptions,
       tools: [],
-      useToolRouter,
+      enableAgentTools,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: currentChapterTitle ?? undefined,
@@ -1595,13 +335,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       chatAgentMode:
         writingMode === "collab"
           ? "collab"
-          : agentMode === "expert_team"
-            ? "expert_team"
-            : agentMode === "subagent"
-              ? "expert"
-              : agentEnabled
-                ? "agent"
-                : "ask",
+          : agentMode === "subagent"
+            ? "expert"
+            : agentEnabled
+              ? "agent"
+              : "ask",
       ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
       ...(effSubagentRole ? { subagentRole: effSubagentRole } : {}),
     });

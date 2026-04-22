@@ -15,6 +15,10 @@ from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
+from services.ai_capabilities import (
+    build_anthropic_thinking_param,
+    normalize_reasoning_mode,
+)
 from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
@@ -154,19 +158,9 @@ def _openai_chunk(
 
 
 # ── Thinking parameter helpers ──────────────────────────────────
-
-def _build_thinking_and_max(
-    thinking: dict | None,
-    max_tokens: int | None,
-) -> tuple[dict | None, int]:
-    max_out = max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 8192
-    if not thinking or thinking.get("type") != "enabled":
-        return None, max_out
-    budget = min(32000, max(1024, max_out // 2))
-    if budget >= max_out:
-        max_out = budget + 2048
-    return {"type": "enabled", "budget_tokens": budget}, max_out
-
+# 注：``thinking={"type":"enabled","budget_tokens":N}`` 这种形状的构造
+# 已搬到 ``services.ai_capabilities.build_anthropic_thinking_param``。
+# 本文件只保留对错误返回的"自动降级重试"。
 
 _THINKING_ERR_RE = re.compile(r"thinking|not support|unrecogniz|invalid", re.IGNORECASE)
 
@@ -187,7 +181,7 @@ async def chat_stream_as_openai_format(
     opts = options or {}
     model: str = str(opts.get("model") or "").strip()
     temperature = opts.get("temperature")
-    thinking = opts.get("thinking")
+    reasoning = normalize_reasoning_mode(opts)
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
@@ -200,7 +194,7 @@ async def chat_stream_as_openai_format(
     if not anth_messages:
         raise ValueError("消息为空")
 
-    thinking_param, max_out = _build_thinking_and_max(thinking, max_tokens)
+    thinking_param, max_out = build_anthropic_thinking_param(reasoning, max_tokens)
     thinking_on = thinking_param is not None
     anthropic_tools = openai_tools_to_anthropic(tools)
 
@@ -314,7 +308,7 @@ async def chat_no_stream_as_openai_format(
     opts = options or {}
     model: str = str(opts.get("model") or "").strip()
     temperature = opts.get("temperature")
-    thinking = opts.get("thinking")
+    reasoning = normalize_reasoning_mode(opts)
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
@@ -327,7 +321,7 @@ async def chat_no_stream_as_openai_format(
     if not anth_messages:
         raise ValueError("消息为空")
 
-    thinking_param, max_out = _build_thinking_and_max(thinking, max_tokens)
+    thinking_param, max_out = build_anthropic_thinking_param(reasoning, max_tokens)
     anthropic_tools = openai_tools_to_anthropic(tools)
 
     params: dict[str, Any] = {
@@ -442,10 +436,10 @@ async def generate_title(
     client = _create_client(api_key, base_url)
     user_text = str(text or "").strip()[:4000]
 
+    # 标题生成走窄任务：禁用思考。Anthropic 的 "off" → 不传 thinking 字段。
     payload: dict[str, Any] = {
         "model": model,
         "max_tokens": 512,
-        "thinking": {"type": "disabled"},
         "system": SESSION_TITLE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_text}],
     }

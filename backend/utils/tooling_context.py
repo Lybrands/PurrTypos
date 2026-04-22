@@ -1,8 +1,8 @@
 """
-Session-bound tooling context appendix for writing / expert-team prompts.
+Session-bound tooling context appendix for writing prompts.
 
-Extracted from the former subagent pipeline so expert_team_autogen and
-writing flows can share one implementation.
+Extracted from the former subagent pipeline so all writing flows can share
+one implementation.
 """
 
 from __future__ import annotations

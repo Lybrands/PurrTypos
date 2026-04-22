@@ -41,11 +41,7 @@ export function loadModelPrefs(
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
   const defaultChatAgentMode: ChatAgentMode =
-    settingsDefaultAgentMode === 'subagent'
-      ? 'expert'
-      : settingsDefaultAgentMode === 'expert_team'
-        ? 'expert_team'
-        : 'agent'
+    settingsDefaultAgentMode === 'subagent' ? 'expert' : 'agent'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {

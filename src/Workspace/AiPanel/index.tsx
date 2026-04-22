@@ -75,7 +75,7 @@ interface AiPanelProps {
 }
 
 function isExpertPipelineChatMode(m: ChatAgentMode): boolean {
-  return m === "expert" || m === "expert_team";
+  return m === "expert";
 }
 
 const validModelIds = (configs: AiModelConfig[]) => configs.map((c) => c.id);
@@ -280,12 +280,7 @@ export default function AiPanel({
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode:
-      chatAgentMode === "expert_team"
-        ? "expert_team"
-        : chatAgentMode === "expert"
-          ? "subagent"
-          : "legacy",
+    agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
     writingMode: chatAgentMode === "collab" ? "collab" : "default",
     pendingSubagentRole:
       chatAgentMode === "expert" ? pendingSubagentRole : null,

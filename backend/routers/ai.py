@@ -199,12 +199,11 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
             _am = (body.agentMode or "").strip().lower()
             _cam = (body.chatAgentMode or "").strip().lower()
-            is_expert_team = _am == "expert_team" or _cam == "expert_team"
             is_writing_expert_book = bool(
                 body.bookId
                 and (
-                    _am in ("subagent", "expert_team")
-                    or _cam in ("expert", "subagent", "expert_team")
+                    _am == "subagent"
+                    or _cam in ("expert", "subagent")
                 )
             )
 
@@ -224,53 +223,6 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
             }
             if temperature is not None:
                 sub_rp["temperature"] = temperature
-
-            # ── 专家团：AutoGen 多智能体多轮对话 ─────────────────────────────
-            if is_writing_expert_book and is_expert_team:
-                progress_queue: asyncio.Queue = asyncio.Queue()
-
-                def _send_writing_progress(ev: dict[str, Any]) -> None:
-                    try:
-                        progress_queue.put_nowait(ev)
-                    except Exception:
-                        pass
-
-                async def _writing_runner() -> None:
-                    try:
-                        from services.expert_team_autogen import run_expert_team_autogen
-
-                        await run_expert_team_autogen(
-                            send_chunk=_send_writing_progress,
-                            signal=abort,
-                            tool_ctx=tool_ctx_book,
-                            messages=list(body.messages or []),
-                            model=model,
-                            api_provider=body.apiProvider,
-                            key=key,
-                            request_params=sub_rp,
-                        )
-                    except Exception as e:
-                        logger.exception("[ai/chat/stream] expert team")
-                        await progress_queue.put({"error": str(e)})
-                    finally:
-                        await progress_queue.put(None)
-
-                sub_task = asyncio.create_task(_writing_runner())
-                try:
-                    while True:
-                        item = await progress_queue.get()
-                        if item is None:
-                            break
-                        yield json.dumps(item)
-                finally:
-                    if not sub_task.done():
-                        sub_task.cancel()
-                        try:
-                            await sub_task
-                        except asyncio.CancelledError:
-                            pass
-
-                return
 
             # ── 写作专家：按需子专家（单次调用，非管线）────────────────────────
             if is_writing_expert_book and body.subagentRole:
@@ -322,9 +274,12 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                     yield json.dumps({"done": True, "model": model})
                 return
 
-            # ── Agent mode: load tools from skill definitions ─────────────
+            # ── Agent mode: 装载全量 skills 工具列表 ───────────────────────
+            # 历史名 useToolRouter 是个误导词：这里并不做语义路由，只是
+            # "是否把 skills/<name>/SKILL.md 解析出的工具一股脑塞给 LLM"开关。
+            # 真正的工具选择由 LLM 自行基于 schema + description 决定。
             agent_tools: list[dict] = []
-            if body.useToolRouter and body.bookId and not request_params.get("tools"):
+            if body.enableAgentTools and body.bookId and not request_params.get("tools"):
                 try:
                     from services.tool_router import get_api_skill_items
                     from services.agent_tool_definitions import to_openai_tools

@@ -324,7 +324,6 @@ export default function SettingsPage({
                 >
                   <Radio value="legacy">经典智能体（ReAct 工具流）</Radio>
                   <Radio value="subagent">写作专家</Radio>
-                  <Radio value="expert_team">专家团（网文向多角色分工）</Radio>
                 </Radio.Group>
               </div>
             </div>
