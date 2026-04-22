@@ -70,9 +70,15 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="PurrTypos Backend", version="0.4.0", lifespan=lifespan)
 
+# CORS：本服务**仅供本机 Electron 渲染进程**调用。
+# - "null" 来自打包后 file:// 加载的页面发起 fetch 时 Origin 为 "null"。
+# - regex 覆盖 Vite dev server (http://localhost:5173) 与本机其他端口。
+# 之前的 ``allow_origins=["*"]`` 让任何跨域脚本都能命中本机 API，对桌面端
+# 是不必要的攻击面。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["null"],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -83,7 +89,18 @@ app.add_exception_handler(Exception, generic_error_handler)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """健康检查：连同数据库连接一起探活。
+
+    返回 ``status="ok"`` 表示后端进程 + DB 连接都可用；
+    ``status="degraded"`` 表示进程活着但 DB 不可用——前端可据此显示红灯
+    而不是任由请求挂死。
+    """
+    from dependencies import _db_instance
+    db_ok = bool(_db_instance) and await _db_instance.is_healthy()
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": "up" if db_ok else "down",
+    }
 
 
 @app.post("/api/debug-log")

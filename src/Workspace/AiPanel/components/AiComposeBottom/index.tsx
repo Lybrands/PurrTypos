@@ -52,7 +52,7 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--accent)' },
       } as const
     }
-    if (chatAgentMode === 'expert' || chatAgentMode === 'expert_team') {
+    if (chatAgentMode === 'expert') {
       return {
         root: {
           border: 'none',
@@ -89,12 +89,11 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' || chatAgentMode === 'expert_team' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
-            { value: 'expert_team', label: '专家团' },
             { value: 'expert', label: '写作专家' },
             { value: 'collab', label: '协作共创' },
             { value: 'agent', label: '智能体' },
@@ -114,7 +113,7 @@ export default function AiComposeBottom({
           variant="borderless"
           popupMatchSelectWidth={false}
           popupRender={(menu) =>
-            chatAgentMode === 'expert' || chatAgentMode === 'expert_team' ? (
+            chatAgentMode === 'expert' ? (
               menu
             ) : (
               <>

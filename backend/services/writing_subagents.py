@@ -322,19 +322,30 @@ async def _run_streaming_tool_loop(
 
 def _build_messages(
     *,
-    role: str,
     base_system: str,
     expert_system: str,
-    messages: list[dict],
     user_task: str,
 ) -> list[dict]:
+    """子专家是一次性独立调用：只看 system + 本轮 user_task。
+
+    刻意**不**回放主会话历史的原因：
+      1. token 浪费：主会话动辄数十条；子专家任务是窄的（审校/润色/规划/风格），
+         无关历史只会稀释注意力。
+      2. 上下文污染：主会话里曾经的工具调用/角色台词会让子专家偏题。
+      3. tool_call_id 错位：主会话里 assistant.tool_calls 的 id 与子专家自己后续
+         发起的 tool_calls id 互不匹配，OpenAI/Anthropic API 会因找不到配对的
+         tool 消息而报错（典型："tool_call_id not found"）。
+      4. 缓存命中率：固定模板 + 短上下文更利于 LLM 端 prompt 缓存。
+
+    主会话需要传给子专家的关键信息（最新一条用户文本、tooling_context 摘要、
+    前文章节提示等）已由 run_writing_subagent 在 user_task 里显式拼装，因此
+    丢弃整段对话历史是安全的。
+    """
     system_content = "\n\n".join(filter(None, [base_system, expert_system]))
-    out: list[dict] = [{"role": "system", "content": system_content}]
-    for m in messages or []:
-        if isinstance(m, dict) and m.get("role") != "system":
-            out.append(dict(m))
-    out.append({"role": "user", "content": user_task})
-    return out
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_task},
+    ]
 
 
 async def run_writing_subagent(
@@ -383,10 +394,8 @@ async def run_writing_subagent(
         user_task = f"{style_hint}\n\n【待统一初稿与用户说明】\n{user_text}"
 
     loop_messages = _build_messages(
-        role=role,
         base_system=base_system,
         expert_system=expert,
-        messages=messages,
         user_task=user_task,
     )
 
@@ -395,7 +404,7 @@ async def run_writing_subagent(
     allowed = set(TOOL_NAMES_BY_ROLE.get(role, []))
     stage_tools = _filter_tools(all_api, allowed)
 
-    rp = {**request_params, "model": model, "thinking": {"type": "disabled"}}
+    rp = {**request_params, "model": model, "reasoning_mode": "off"}
     prev_allow = tool_ctx.get("subagentAllowedToolNames")
     tool_ctx["subagentAllowedToolNames"] = allowed
 

@@ -403,8 +403,11 @@ function InlineEditPopover({
   React.useEffect(() => {
     textareaRef.current?.focus()
     return () => {
+      const hadActiveStream = chunkUnsubRef.current != null
       cleanupStream()
-      window.electronAPI.abortAiStream?.()
+      if (hadActiveStream) {
+        window.electronAPI.abortAiStream?.()
+      }
     }
   }, [cleanupStream])
 
@@ -584,7 +587,7 @@ function InlineEditPopover({
           max_tokens: 4096,
         },
         tools: [],
-        useToolRouter: false,
+        enableAgentTools: false,
         bookId: bookId ?? undefined,
         chapterId: chapterId ?? undefined,
         currentChapterTitle: chapterTitle || undefined,
