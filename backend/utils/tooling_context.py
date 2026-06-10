@@ -19,8 +19,6 @@ def build_tooling_context_appendix(tool_ctx: dict) -> str:
     wc_raw = tool_ctx.get("writingChapters") or []
     wc = get_writable_chapters_for_agent(wc_raw)
     ao = tool_ctx.get("availableOutlines") or []
-    acc_ch = tool_ctx.get("associatedChapterIds") or []
-    acc_ol = tool_ctx.get("associatedOutlineIds") or []
 
     lines: list[str] = []
     lines.append("【会话同步 — 工具与界面上下文】")
@@ -36,50 +34,8 @@ def build_tooling_context_appendix(tool_ctx: dict) -> str:
     )
     lines.append(f"当前写作章节：{ch_desc}")
 
-    # ── 关联章节：列出 chapterId 并强约束「回复前必须读取」──────────
-    # 旧版只给标题，LLM 经常无视；这里直接给 id，并明确要求一次性 batchGetChapterContents
-    if acc_ch:
-        valid_pairs: list[tuple[str, str]] = []
-        for cid in acc_ch:
-            sid = str(cid).strip()
-            if not sid:
-                continue
-            c = next((x for x in wc if str(x.get("id")) == sid), None) if wc else None
-            title = re.sub(r"\r?\n", " ", str(c.get("title") or "")).strip() if c else ""
-            valid_pairs.append((sid, title or "（未匹配章节标题）"))
-        if valid_pairs:
-            lines.append(
-                "【用户在本轮已关联以下写作章节 — 回复前必须读取其正文，不读视为忽略用户上下文，回答无效】"
-            )
-            for sid, title in valid_pairs:
-                lines.append(f"- chapterId={sid} 《{title}》")
-            id_list_literal = "[" + ",".join(f'"{sid}"' for sid, _ in valid_pairs) + "]"
-            lines.append(
-                f"→ 立即调用 batchGetChapterContents，参数 chapterIds={id_list_literal}，"
-                "一次性把上述全部章节正文读入；若已在前序工具结果中读过可复用，否则不得跳过。"
-            )
-
-    # ── 关联大纲：同样的硬约束 ─────────────────────────────────────
-    if acc_ol:
-        valid_pairs_ol: list[tuple[str, str]] = []
-        for oid in acc_ol:
-            sid = str(oid).strip()
-            if not sid:
-                continue
-            o = next((x for x in ao if str(x.get("id")) == sid), None) if ao else None
-            title = re.sub(r"\r?\n", " ", str(o.get("title") or "")).strip() if o else ""
-            valid_pairs_ol.append((sid, title or "（未匹配大纲标题）"))
-        if valid_pairs_ol:
-            lines.append(
-                "【用户在本轮已关联以下大纲 — 回复前必须读取其完整内容，不读视为忽略用户上下文，回答无效】"
-            )
-            for sid, title in valid_pairs_ol:
-                lines.append(f"- outlineId={sid} 《{title}》")
-            id_list_literal = "[" + ",".join(f'"{sid}"' for sid, _ in valid_pairs_ol) + "]"
-            lines.append(
-                f"→ 立即调用 queryOutline，参数 outlineIds={id_list_literal}、includeText=true、"
-                "includeChapters=false，一次性把上述全部大纲读入；若已在前序工具结果中读过可复用，否则不得跳过。"
-            )
+    # 注：关联章节/大纲不再在这里生成「必须立即调工具读取」的指令块——
+    # 其内容已由 utils.chat_preflight.build_associated_context_block 预取注入。
 
     WC_CAP = 100
     if wc:

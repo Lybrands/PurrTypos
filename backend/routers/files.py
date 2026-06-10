@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from dependencies import get_db
 
@@ -59,10 +59,16 @@ async def export_database():
     if not buf:
         return {"success": False, "error": "数据库未就绪"}
     db_path = str(db.get_db_path())
-    return {
-        "success": True,
-        "data": {"dbPath": db_path, "size": len(buf)},
-    }
+    filename = db_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "purrtypos.db"
+    return Response(
+        content=buf,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-PurrTypos-Db-Path": db_path,
+            "X-PurrTypos-Db-Size": str(len(buf)),
+        },
+    )
 
 
 @router.post("/database/import")

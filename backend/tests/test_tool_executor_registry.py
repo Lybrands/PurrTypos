@@ -28,6 +28,11 @@ from services.tool_executor import (
     tool,
     tool_will_hit_read_cache,
 )
+from services.tool_runtime import (
+    READ_CACHE_KEYS,
+    _read_tool_cache_set,
+    build_read_cache_key,
+)
 
 
 # 当前所有"公开"工具名 —— 任何一项被意外删除/改名 这里会先红
@@ -38,7 +43,10 @@ EXPECTED_TOOLS = {
     "batchGetChapterContents",
     "getBookCharacters",
     "listBookCharacters",
+    "createCharacter",
+    "updateCharacter",
     "getStoryBackground",
+    "editStoryBackground",
     "getBookStyle",
     "queryOutline",
     "getGlobalOutline",
@@ -251,3 +259,58 @@ def test_module_imports_clean():
 def test_no_event_loop_assumptions_at_import():
     # 不应该在 import 时启动 loop
     assert asyncio.get_event_loop_policy() is not None
+
+
+# ---------------------------------------------------------------------------
+# 读缓存键单一事实源
+#
+# handler 写缓存与 predictor 判命中共用 build_read_cache_key，二者再也不会漂移。
+# 用 builder 生成的 key 预热读缓存后，predictor 必须预测命中。
+# ---------------------------------------------------------------------------
+
+# (name, args) —— 每个走 readToolCache 的工具一组“可缓存”样例
+_CACHEABLE_CASES = [
+    ("listWritingChapters", {"bookId": "b1"}),
+    ("getBookCharacters", {"bookId": "b1"}),
+    ("listBookCharacters", {"bookId": "b1"}),
+    ("getStoryBackground", {"bookId": "b1"}),
+    ("getBookStyle", {"bookId": "b1"}),
+    ("queryOutline", {"bookId": "b1", "outlineIds": ["o1", "o2"]}),
+    ("getGlobalOutline", {"bookId": "b1"}),
+    ("listOutlines", {"bookId": "b1"}),
+]
+
+
+class TestReadCacheKeySingleSource:
+    def test_every_read_cache_key_has_handler_and_predictor(self):
+        for name in READ_CACHE_KEYS:
+            assert name in TOOL_HANDLERS, name
+            assert name in CACHE_PREDICTORS, name
+
+    @pytest.mark.parametrize("name,args", _CACHEABLE_CASES)
+    def test_predictor_hits_cache_warmed_via_builder_key(self, name: str, args: dict):
+        ctx = {"bookId": "b1"}
+        tc = {"function": {"name": name, "arguments": json.dumps(args)}}
+        # 未预热 → 不命中
+        assert tool_will_hit_read_cache(ctx, tc, []) is False, name
+        key = build_read_cache_key(name, ctx, args)
+        assert key is not None, name
+        _read_tool_cache_set(ctx, key, "warmed")
+        # 用 builder 的 key 预热后 → predictor 必须命中（证明二者同源）
+        assert tool_will_hit_read_cache(ctx, tc, []) is True, name
+
+    def test_query_outline_single_outline_id_predicts_hit(self):
+        # 回归：handler 接受单个 outlineId，旧 predictor 只看 outlineIds → 永远 miss。
+        ctx = {"bookId": "b1"}
+        args = {"bookId": "b1", "outlineId": "o1"}
+        key = build_read_cache_key("queryOutline", ctx, args)
+        assert key is not None
+        _read_tool_cache_set(ctx, key, "warmed")
+        tc = {"function": {"name": "queryOutline", "arguments": json.dumps(args)}}
+        assert tool_will_hit_read_cache(ctx, tc, []) is True
+
+    def test_filtered_get_book_characters_not_cached(self):
+        # 带过滤条件 → 不走读缓存，builder 返回 None
+        ctx = {"bookId": "b1"}
+        assert build_read_cache_key("getBookCharacters", ctx, {"bookId": "b1", "names": ["x"]}) is None
+        assert build_read_cache_key("getBookCharacters", ctx, {"bookId": "b1", "characterIds": [1]}) is None

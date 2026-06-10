@@ -4,16 +4,31 @@ import re
 
 from fastapi import APIRouter
 
+from config import DATA_DIR
 from constants import BOOK_COLORS
 from database.crud.articles import get_article
 from database.crud.chapters import get_chapters
 from database.crud.outlines import get_or_create_writing_outline
 from dependencies import get_db
 from schemas.books import CreateBookRequest, RenameBookRequest
+from utils.file_storage import safe_unlink_stored_file
 from utils.id_utils import short_id8
 from utils.text import extract_text_from_lexical
 
 router = APIRouter(tags=["books"])
+
+
+def _placeholders(values: list[object]) -> str:
+    return ",".join("?" for _ in values)
+
+
+async def _delete_where_in(db, table: str, column: str, values: list[object]) -> None:
+    if not values:
+        return
+    await db.execute(
+        f"DELETE FROM {table} WHERE {column} IN ({_placeholders(values)})",
+        values,
+    )
 
 
 @router.get("/books/{bookId}/word-count")
@@ -67,33 +82,68 @@ async def create_book(body: CreateBookRequest):
 @router.delete("/books/{bookId}")
 async def delete_book(bookId: str):
     db = get_db()
-    outlines = await db.fetch_all(
-        "SELECT id FROM outlines WHERE book_id = ?", [bookId]
-    )
-    for o in outlines:
-        chapters = await db.fetch_all(
-            "SELECT id FROM outline_chapters WHERE outline_id = ?", [o["id"]]
+    attachment_paths: list[str] = []
+    async with db.transaction():
+        outlines = await db.fetch_all(
+            "SELECT id FROM outlines WHERE book_id = ?", [bookId]
         )
-        for ch in chapters:
-            await db.execute("DELETE FROM articles WHERE chapter_id = ?", [ch["id"]])
-            await db.execute(
-                "DELETE FROM ai_conversations WHERE chapter_id = ?", [ch["id"]]
+        outline_ids = [str(o["id"]) for o in outlines if o.get("id") is not None]
+
+        chapters = []
+        if outline_ids:
+            chapters = await db.fetch_all(
+                f"SELECT id FROM outline_chapters WHERE outline_id IN ({_placeholders(outline_ids)})",
+                outline_ids,
             )
-        await db.execute(
-            "DELETE FROM outline_chapters WHERE outline_id = ?", [o["id"]]
+        chapter_ids = [str(ch["id"]) for ch in chapters if ch.get("id") is not None]
+
+        session_rows = await db.fetch_all(
+            "SELECT id FROM ai_sessions WHERE book_id = ?", [bookId]
         )
-        await db.execute("DELETE FROM outlines WHERE id = ?", [o["id"]])
-    await db.execute("DELETE FROM characters WHERE book_id = ?", [bookId])
-    await db.execute("DELETE FROM story_background WHERE book_id = ?", [bookId])
-    attachments = await db.fetch_all(
-        "SELECT stored_path FROM story_background_attachments WHERE book_id = ?",
-        [bookId],
-    )
-    await db.execute(
-        "DELETE FROM story_background_attachments WHERE book_id = ?", [bookId]
-    )
-    await db.execute("DELETE FROM books WHERE id = ?", [bookId])
-    attachment_paths = [a["stored_path"] for a in (attachments or []) if a.get("stored_path")]
+        if chapter_ids:
+            session_rows.extend(await db.fetch_all(
+                f"SELECT id FROM ai_sessions WHERE chapter_id IN ({_placeholders(chapter_ids)})",
+                chapter_ids,
+            ))
+        session_ids = sorted({
+            int(row["id"])
+            for row in session_rows
+            if row.get("id") is not None
+        })
+
+        attachments = await db.fetch_all(
+            "SELECT stored_path FROM story_background_attachments WHERE book_id = ?",
+            [bookId],
+        )
+        attachment_paths = [
+            a["stored_path"]
+            for a in (attachments or [])
+            if a.get("stored_path")
+        ]
+
+        await _delete_where_in(db, "ai_favorites", "session_id", session_ids)
+        await _delete_where_in(db, "ai_conversations", "session_id", session_ids)
+        await _delete_where_in(db, "ai_conversations", "chapter_id", chapter_ids)
+        await _delete_where_in(db, "ai_sessions", "id", session_ids)
+
+        await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
+
+        await _delete_where_in(db, "articles", "chapter_id", chapter_ids)
+        await _delete_where_in(db, "chapter_canvas", "chapter_id", chapter_ids)
+        await _delete_where_in(db, "chapter_diff_history", "chapter_id", chapter_ids)
+        await _delete_where_in(db, "outline_history", "outline_id", outline_ids)
+        await _delete_where_in(db, "outline_chapters", "outline_id", outline_ids)
+        await _delete_where_in(db, "outlines", "id", outline_ids)
+
+        await db.execute("DELETE FROM characters WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM story_background WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM story_background_attachments WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM book_style WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM books WHERE id = ?", [bookId])
+
+    for stored_path in attachment_paths:
+        safe_unlink_stored_file(stored_path, DATA_DIR)
     return {"success": True, "data": {"attachmentPaths": attachment_paths}}
 
 

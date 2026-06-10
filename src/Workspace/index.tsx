@@ -2,22 +2,14 @@ import React, { Suspense, lazy } from 'react'
 import {
   ArrowLeftOutlined,
   HomeOutlined,
-  ReadOutlined,
-  EditOutlined,
-  CommentOutlined,
-  AlignLeftOutlined,
-  CopyOutlined,
-  BorderlessTableOutlined,
-  HistoryOutlined,
-  SettingOutlined,
-  BookOutlined,
 } from '@ant-design/icons'
 import { Button, Tooltip, Spin } from 'antd'
 import type { LexicalEditor } from 'lexical'
-import AppHeader from '../components/AppHeader'
+import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
+import ChapterListIcon from '../icons/ChapterListIcon'
+import WritingPenIcon from '../icons/WritingPenIcon'
+import AiChatIcon from '../icons/AiChatIcon'
 import type { Chapter, AiAgentMode, AiModelConfig, EntityId } from '../types'
-import { editorStateToText } from './EditorPanel/LexicalEditor'
-import { findAllMatchStarts, selectLexicalSearchMatch } from './search/lexicalSearch'
 import { getWritingOutlineWithChapters } from './utils'
 import WorkspaceContext from './WorkspaceContext'
 import type { WorkspaceContextValue } from './WorkspaceContext'
@@ -25,6 +17,11 @@ import WorkspaceSearchPanel from './WorkspaceSearchPanel'
 import { DiffProvider } from './diff/DiffContext'
 import CommandPalette, { type CommandItem } from './CommandPalette'
 import FloatingPanel from './FloatingPanel'
+import { usePanelLayout } from './hooks/usePanelLayout'
+import { useActiveChapter } from './hooks/useActiveChapter'
+import { useWorkspaceSearch } from './hooks/useWorkspaceSearch'
+import { useWorkspaceShortcuts } from './hooks/useWorkspaceShortcuts'
+import { buildPaletteCommands } from './workspaceCommands'
 import './FloatingPanel.scss'
 import './workspaceSearch.scss'
 
@@ -39,113 +36,12 @@ const PanelFallback = () => (
 /**
  * AI-Centric 工作区：默认 AI 占满中央，「设定」「写作」以悬浮 panel 形式弹出。
  *
- * 主区域规则：
- * - 只有 AI 与 写作（editor）能成为主区域，章节列表 (left) 永远是浮窗
- * - 切换主区域时，原主区域自动降为钉住浮窗，便于用户一键切回
- * - AI 浮窗的关闭按钮就是真正关闭（用户可以通过左/右侧边线把 AI 重新唤起：
- *   实际上 AI 没有专属侧边线，所以"关闭 AI"等价于「让 AI 退场，专心写作 / 看设定」，
- *   再次需要 AI 时可通过 Ctrl+Shift+2 / 命令面板 / 写作面板内的入口召回为主）
- *
- * 状态存于 localStorage（按 mainPanel + 三个 floatingState 持久化）。
+ * 主区域规则见 hooks/usePanelLayout；本组件只负责组合：
+ * - 布局状态（usePanelLayout）+ 快捷键（useWorkspaceShortcuts）
+ * - 活跃章节持久化（useActiveChapter）+ 写作目录加载
+ * - 全局搜索（useWorkspaceSearch）
+ * - WorkspaceContext 组装与各 panel / 浮窗 / 命令面板渲染
  */
-type PanelKey = 'ai' | 'left' | 'editor'
-/** 能成为主区域的 panel 子集（章节列表只能浮窗） */
-type MainPanelKey = 'ai' | 'editor'
-
-interface FloatingState {
-  open: boolean
-  x: number
-  y: number
-  width: number
-}
-
-const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_floating_state_v2'
-
-interface PersistedPanelState {
-  mainPanel: MainPanelKey
-  ai: FloatingState
-  left: FloatingState
-  editor: FloatingState
-}
-
-/** 给 right 浮窗一个估算的 x（窗口 - 自身宽度 - 12 边距），运行时再据容器纠正 */
-function defaultRightX(width: number): number {
-  if (typeof window === 'undefined') return 800
-  return Math.max(0, window.innerWidth - width - 12)
-}
-
-const DEFAULT_STATE: PersistedPanelState = {
-  mainPanel: 'ai',
-  ai: { open: false, x: defaultRightX(560), y: 8, width: 560 },
-  left: { open: false, x: 16, y: 8, width: 340 },
-  editor: { open: false, x: defaultRightX(620), y: 8, width: 620 },
-}
-
-function loadPanelState(): PersistedPanelState {
-  try {
-    const raw = localStorage.getItem(WORKSPACE_PANEL_STORAGE_KEY)
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<PersistedPanelState>
-      const mergeFloating = (key: 'ai' | 'left' | 'editor', fallback: FloatingState): FloatingState => {
-        const v = p[key]
-        if (!v || typeof v !== 'object') return fallback
-        return {
-          open: !!v.open,
-          x: typeof v.x === 'number' ? v.x : fallback.x,
-          y: typeof v.y === 'number' ? v.y : fallback.y,
-          width: typeof v.width === 'number' ? v.width : fallback.width,
-        }
-      }
-      const main: MainPanelKey =
-        p.mainPanel === 'ai' || p.mainPanel === 'editor' ? p.mainPanel : 'ai'
-      return {
-        mainPanel: main,
-        ai: mergeFloating('ai', DEFAULT_STATE.ai),
-        left: mergeFloating('left', DEFAULT_STATE.left),
-        editor: mergeFloating('editor', DEFAULT_STATE.editor),
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return DEFAULT_STATE
-}
-
-function savePanelState(state: PersistedPanelState) {
-  try {
-    localStorage.setItem(WORKSPACE_PANEL_STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // ignore
-  }
-}
-
-// ─── 活跃章节按 bookId 持久化 ─────────────────────────────────
-const ACTIVE_CHAPTER_STORAGE_KEY = 'purrtypos_active_chapter_by_book'
-
-interface ActiveChapterEntry {
-  id: EntityId
-  title: string
-}
-
-function loadActiveChapterMap(): Record<string, ActiveChapterEntry> {
-  try {
-    const raw = localStorage.getItem(ACTIVE_CHAPTER_STORAGE_KEY)
-    if (!raw) return {}
-    const obj = JSON.parse(raw)
-    return obj && typeof obj === 'object' ? obj : {}
-  } catch {
-    return {}
-  }
-}
-
-function saveActiveChapterMap(map: Record<string, ActiveChapterEntry>) {
-  try {
-    localStorage.setItem(ACTIVE_CHAPTER_STORAGE_KEY, JSON.stringify(map))
-  } catch {
-    // ignore
-  }
-}
-
 interface WorkspaceProps {
   bookId?: EntityId | null
   bookTitle?: string
@@ -159,95 +55,30 @@ interface WorkspaceProps {
 }
 
 export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, aiAgentMode = 'legacy' }: WorkspaceProps = {}) {
-  const initialState = React.useMemo(loadPanelState, [])
-  const [panelState, setPanelState] = React.useState<PersistedPanelState>(initialState)
-
-  React.useEffect(() => {
-    savePanelState(panelState)
-  }, [panelState])
-
-  const mainPanel = panelState.mainPanel
-
-  const updateFloating = React.useCallback(
-    (key: PanelKey, patch: Partial<FloatingState>) => {
-      setPanelState((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
-    },
-    [],
-  )
-
-  const toggleFloating = React.useCallback((key: PanelKey) => {
-    setPanelState((prev) => {
-      // 如果该 panel 已是主区域，toggle 浮窗无意义
-      if (prev.mainPanel === key) return prev
-      return { ...prev, [key]: { ...prev[key], open: !prev[key].open } }
-    })
-  }, [])
-
-  const closeFloating = React.useCallback((key: PanelKey) => {
-    setPanelState((prev) => ({ ...prev, [key]: { ...prev[key], open: false } }))
-  }, [])
-
-  /**
-   * 切换主区域（仅限 AI / Editor 两者互换）：
-   * - 如果 next === current，noop
-   * - 原主区域自动转为浮窗（open=true）便于一键切回
-   * - 新主区域的浮窗自动关闭（它现在是主，无须浮窗）
-   *
-   * 注：浮窗永远是「钉住」语义（不会被点击外部自动收起），
-   *     所以这里不再需要单独写 pinned 字段。
-   */
-  const setMain = React.useCallback((next: MainPanelKey) => {
-    setPanelState((prev) => {
-      if (prev.mainPanel === next) return prev
-      const prevMain = prev.mainPanel
-      return {
-        ...prev,
-        mainPanel: next,
-        [prevMain]: { ...prev[prevMain], open: true },
-        [next]: { ...prev[next], open: false },
-      }
-    })
-  }, [])
+  const {
+    panelState,
+    mainPanel,
+    updateFloating,
+    toggleFloating,
+    closeFloating,
+    setMain,
+  } = usePanelLayout()
 
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
+  const toggleCommandPalette = React.useCallback(
+    () => setCommandPaletteOpen((open) => !open),
+    [],
+  )
+  useWorkspaceShortcuts({ toggleFloating, setMain, toggleCommandPalette })
 
   const [writingOutlineId, setWritingOutlineId] = React.useState<EntityId | null>(null)
   const [writingChapters, setWritingChapters] = React.useState<Chapter[]>([])
 
-  const [activeWritingChapterId, setActiveWritingChapterId] = React.useState<EntityId | null>(() => {
-    if (bookId == null) return null
-    const entry = loadActiveChapterMap()[String(bookId)]
-    return entry?.id ?? null
-  })
-  const [activeWritingChapterTitle, setActiveWritingChapterTitle] = React.useState<string>(() => {
-    if (bookId == null) return ''
-    return loadActiveChapterMap()[String(bookId)]?.title ?? ''
-  })
-
-  /** bookId 变化时：恢复该书之前选中的章节（如 localStorage 里有） */
-  React.useEffect(() => {
-    if (bookId == null) return
-    const entry = loadActiveChapterMap()[String(bookId)]
-    if (entry?.id != null) {
-      setActiveWritingChapterId(entry.id)
-      setActiveWritingChapterTitle(entry.title ?? '')
-    } else {
-      setActiveWritingChapterId(null)
-      setActiveWritingChapterTitle('')
-    }
-  }, [bookId])
-
-  /** 持久化当前活跃章节 */
-  React.useEffect(() => {
-    if (bookId == null) return
-    const map = loadActiveChapterMap()
-    if (activeWritingChapterId == null) {
-      delete map[String(bookId)]
-    } else {
-      map[String(bookId)] = { id: activeWritingChapterId, title: activeWritingChapterTitle }
-    }
-    saveActiveChapterMap(map)
-  }, [bookId, activeWritingChapterId, activeWritingChapterTitle])
+  const {
+    activeChapterId: activeWritingChapterId,
+    activeChapterTitle: activeWritingChapterTitle,
+    setActiveChapter: handleWritingSelect,
+  } = useActiveChapter(bookId)
 
   /** 本书总字数（万），与后端规则一致；null 表示尚未拉取 */
   const [bookWordWanDisplay, setBookWordWanDisplay] = React.useState<string | null>(null)
@@ -259,37 +90,17 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     lexicalEditorRef.current = e
   }, [])
 
-  const [workspaceSearchQuery, setWorkspaceSearchQuery] = React.useState('')
-  const [workspaceSearchActiveIndex, setWorkspaceSearchActiveIndex] = React.useState(0)
-  const [workspaceSearchMatchTotal, setWorkspaceSearchMatchTotal] = React.useState(0)
-  const [searchContentVersion, setSearchContentVersion] = React.useState(0)
-  const notifyWorkspaceSearchContentChanged = React.useCallback(() => {
-    setSearchContentVersion((v) => v + 1)
-  }, [])
-
-  React.useEffect(() => {
-    setWorkspaceSearchActiveIndex(0)
-  }, [workspaceSearchQuery])
-
-  const goToNextWorkspaceSearch = React.useCallback(() => {
-    setWorkspaceSearchActiveIndex((i) => {
-      const t = Math.max(workspaceSearchMatchTotal, 1)
-      return (i + 1) % t
-    })
-  }, [workspaceSearchMatchTotal])
-
-  const goToPrevWorkspaceSearch = React.useCallback(() => {
-    setWorkspaceSearchActiveIndex((i) => {
-      const t = Math.max(workspaceSearchMatchTotal, 1)
-      return (i - 1 + t) % t
-    })
-  }, [workspaceSearchMatchTotal])
-
-  React.useEffect(() => {
-    if (workspaceSearchMatchTotal > 0 && workspaceSearchActiveIndex >= workspaceSearchMatchTotal) {
-      setWorkspaceSearchActiveIndex(0)
-    }
-  }, [workspaceSearchMatchTotal, workspaceSearchActiveIndex])
+  const {
+    workspaceSearchQuery,
+    setWorkspaceSearchQuery,
+    workspaceSearchActiveIndex,
+    setWorkspaceSearchActiveIndex,
+    workspaceSearchMatchTotal,
+    searchContentVersion,
+    goToNextWorkspaceSearch,
+    goToPrevWorkspaceSearch,
+    notifyWorkspaceSearchContentChanged,
+  } = useWorkspaceSearch({ lexicalEditorRef, activeChapterId: activeWritingChapterId })
 
   const loadWritingChapters = React.useCallback(async () => {
     const data = await getWritingOutlineWithChapters(bookId)
@@ -325,14 +136,12 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       const nextId = detail?.chapterId ?? null
       const nextTitle = detail?.title ?? ''
       if (nextId == null || String(nextId).trim() === '') return
-      setActiveWritingChapterId(nextId)
-      setActiveWritingChapterTitle(nextTitle)
+      handleWritingSelect(nextId, nextTitle)
       loadWritingChapters()
     }
     window.addEventListener('chapter-created', handler)
     return () => window.removeEventListener('chapter-created', handler)
-  }, [loadWritingChapters])
-
+  }, [loadWritingChapters, handleWritingSelect])
 
   /**
    * 删除写作章节后清理对应的 chapter / volume 大纲记录。
@@ -359,12 +168,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       }
     }
   }, [bookId])
-
-  // ─── Context 方法（useCallback 保证引用稳定）──────────────────
-  const handleWritingSelect = React.useCallback((id: EntityId, title: string) => {
-    setActiveWritingChapterId(id)
-    setActiveWritingChapterTitle(title || '')
-  }, [])
 
   const handleWritingChaptersChange = React.useCallback((outlineId: EntityId, chapterList: Chapter[]) => {
     setWritingOutlineId(outlineId)
@@ -400,223 +203,69 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     writingChapters, writingOutlineId,
     handleWritingSelect, handleWritingChaptersChange, loadWritingChapters,
     workspaceSearchQuery,
+    setWorkspaceSearchQuery,
     workspaceSearchActiveIndex,
+    setWorkspaceSearchActiveIndex,
     goToNextWorkspaceSearch,
     goToPrevWorkspaceSearch,
     notifyWorkspaceSearchContentChanged,
+    setLexicalEditorRef,
     workspaceSearchMatchTotal,
   ])
 
   /**
-   * 全局快捷键体系：
-   * - Ctrl/Cmd+K          命令面板
-   * - Ctrl/Cmd+Shift+1    Toggle「设定」浮窗
-   * - Ctrl/Cmd+Shift+2    关闭所有浮窗（聚焦 AI 主区）
-   * - Ctrl/Cmd+Shift+3    Toggle「写作」浮窗
-   * - Ctrl/Cmd+Shift+H    打开本章 diff 历史
+   * 顶栏面板 toggle：与左右贴线（floating-rail）等价的显式入口，解决贴线
+   * 「几乎不可见」导致新用户找不到章节列表 / 编辑器的可发现性问题。
+   * 已是主区域的面板按钮高亮且不可点（toggleFloating 对主区域本就是 noop）。
    */
-  React.useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const isMod = e.ctrlKey || e.metaKey
-      if (!isMod) return
+  const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
+    {
+      key: 'left',
+      icon: <ChapterListIcon size={16} />,
+      tooltip: panelState.left.open ? '关闭章节列表（Ctrl+Shift+1）' : '章节列表（Ctrl+Shift+1）',
+      active: panelState.left.open,
+      onClick: () => toggleFloating('left'),
+    },
+    {
+      key: 'editor',
+      icon: <WritingPenIcon size={16} />,
+      tooltip: mainPanel === 'editor'
+        ? '写作已是主区域'
+        : panelState.editor.open
+          ? '关闭写作浮窗（Ctrl+Shift+3）'
+          : '写作 / 正文编辑器（Ctrl+Shift+3）',
+      active: mainPanel === 'editor' || panelState.editor.open,
+      disabled: mainPanel === 'editor',
+      onClick: () => toggleFloating('editor'),
+    },
+    {
+      key: 'ai',
+      icon: <AiChatIcon size={16} />,
+      tooltip: mainPanel === 'ai'
+        ? 'AI 已是主区域'
+        : panelState.ai.open
+          ? '收起 AI 浮窗（Ctrl+Shift+2 切回主区域）'
+          : 'AI 对话浮窗（Ctrl+Shift+2 切回主区域）',
+      active: mainPanel === 'ai' || panelState.ai.open,
+      disabled: mainPanel === 'ai',
+      onClick: () => toggleFloating('ai'),
+    },
+  ], [panelState, mainPanel, toggleFloating])
 
-      if (!e.shiftKey && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault()
-        setCommandPaletteOpen((open) => !open)
-        return
-      }
-
-      if (!e.shiftKey) return
-
-      const key = e.key
-      const code = e.code
-
-      if (code === 'Digit1') {
-        e.preventDefault()
-        toggleFloating('left')
-        return
-      }
-      if (code === 'Digit2') {
-        e.preventDefault()
-        // 聚焦 AI 主区：直接 setMain('ai')，原非 ai 主区会自动转为浮窗
-        setMain('ai')
-        return
-      }
-      if (code === 'Digit3') {
-        e.preventDefault()
-        toggleFloating('editor')
-        return
-      }
-
-      if (key === 'H' || key === 'h') {
-        e.preventDefault()
-        window.dispatchEvent(new CustomEvent('editor-open-diff-history'))
-        return
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [toggleFloating, setMain])
-
-  /** 命令面板命令集合（按分类聚合） */
-  const paletteCommands = React.useMemo<CommandItem[]>(() => {
-    const base: CommandItem[] = [
-      {
-        id: 'panel:toggle-left',
-        label: panelState.left.open ? '关闭章节列表' : '打开章节列表',
-        hint: 'Ctrl+Shift+1',
-        icon: <BookOutlined />,
-        category: '浮窗',
-        keywords: ['setting', 'notebook', 'left', '设定', 'chapter', '章节'],
-        run: () => toggleFloating('left'),
-      },
-      {
-        id: 'panel:focus-ai',
-        label:
-          mainPanel === 'ai'
-            ? panelState.ai.open
-              ? 'AI 已是主区域（点击聚焦）'
-              : 'AI 已是主区域'
-            : '切回 AI 主区域',
-        hint: 'Ctrl+Shift+2',
-        icon: <CommentOutlined />,
-        category: '浮窗',
-        keywords: ['ai', 'chat', 'director', '导演', 'focus'],
-        run: () => setMain('ai'),
-      },
-      {
-        id: 'panel:toggle-ai-floating',
-        label:
-          mainPanel === 'ai'
-            ? 'AI 是主区域（无需浮窗）'
-            : panelState.ai.open
-              ? '收起 AI 浮窗'
-              : '展开 AI 浮窗',
-        icon: <CommentOutlined />,
-        category: '浮窗',
-        keywords: ['ai', 'float', '浮窗', '收起', '展开'],
-        run: () => toggleFloating('ai'),
-      },
-      {
-        id: 'panel:toggle-editor',
-        label:
-          mainPanel === 'editor'
-            ? '写作已是主区域'
-            : panelState.editor.open
-              ? '关闭写作浮窗'
-              : '打开写作浮窗',
-        hint: 'Ctrl+Shift+3',
-        icon: <EditOutlined />,
-        category: '浮窗',
-        keywords: ['edit', 'writer', '写作'],
-        run: () => toggleFloating('editor'),
-      },
-      {
-        id: 'panel:focus-editor',
-        label: mainPanel === 'editor' ? '写作已是主区域' : '切到写作主区域',
-        icon: <EditOutlined />,
-        category: '浮窗',
-        keywords: ['edit', 'writer', '写作', 'main', '主'],
-        run: () => setMain('editor'),
-      },
-      {
-        id: 'action:diff-history',
-        label: '打开本章 diff 历史',
-        hint: 'Ctrl+Shift+H · 回滚某一次 AI 改动',
-        icon: <HistoryOutlined />,
-        category: '动作',
-        keywords: ['diff', 'history', '历史', '回滚'],
-        run: () => { window.dispatchEvent(new CustomEvent('editor-open-diff-history')) },
-      },
-      {
-        id: 'action:reformat',
-        label: '一键排版正文',
-        hint: '去首行空白 / 删空行',
-        icon: <AlignLeftOutlined />,
-        category: '动作',
-        keywords: ['format', 'reformat', '排版'],
-        run: () => { window.dispatchEvent(new CustomEvent('editor-reformat')) },
-      },
-      {
-        id: 'action:copy-title',
-        label: '复制章节标题',
-        hint: '剔除「第 X 章」前缀',
-        icon: <BorderlessTableOutlined />,
-        category: '动作',
-        keywords: ['copy', 'title', '标题'],
-        run: () => { window.dispatchEvent(new CustomEvent('editor-copy-title')) },
-      },
-      {
-        id: 'action:copy-content',
-        label: '复制章节正文',
-        icon: <CopyOutlined />,
-        category: '动作',
-        keywords: ['copy', 'content', '正文'],
-        run: () => { window.dispatchEvent(new CustomEvent('editor-copy-content')) },
-      },
-    ]
-
-    if (onOpenSettings) {
-      base.push({
-        id: 'action:settings',
-        label: '打开设置',
-        icon: <SettingOutlined />,
-        category: '动作',
-        keywords: ['settings', '设置', '配置'],
-        run: () => onOpenSettings(),
-      })
-    }
-
-    // 章节导航（动态）
-    const chapterCommands: CommandItem[] = writingChapters.map((c, i) => ({
-      id: `chapter:${c.id}`,
-      label: c.title || `章节 ${i + 1}`,
-      hint: activeWritingChapterId === c.id ? '当前章节' : undefined,
-      icon: <ReadOutlined />,
-      category: '章节',
-      keywords: ['chapter', '章节', String(i + 1)],
-      run: () => handleWritingSelect(c.id, c.title),
-    }))
-
-    return [...base, ...chapterCommands]
-  }, [toggleFloating, setMain, mainPanel, handleWritingSelect, writingChapters, activeWritingChapterId, panelState.left.open, panelState.editor.open, panelState.ai.open, onOpenSettings])
-
-  React.useLayoutEffect(() => {
-    const q = workspaceSearchQuery.trim()
-    document.querySelectorAll('.workspace-search-hit--active').forEach((el) => {
-      el.classList.remove('workspace-search-hit--active')
-    })
-    if (!q) {
-      setWorkspaceSearchMatchTotal(0)
-      return
-    }
-    const scope = document.getElementById('workspace-search-scope')
-    if (!scope) return
-    const domHits = [...scope.querySelectorAll('.workspace-search-include [data-ws-search-hit]')]
-    domHits.forEach((el) => el.classList.remove('workspace-search-hit--active'))
-    const lex = lexicalEditorRef.current
-    let lexCount = 0
-    if (lex) {
-      const flat = editorStateToText(lex.getEditorState())
-      lexCount = findAllMatchStarts(flat, q).length
-    }
-    const total = domHits.length + lexCount
-    setWorkspaceSearchMatchTotal(total)
-    if (total === 0) return
-
-    const idx = ((workspaceSearchActiveIndex % total) + total) % total
-    if (idx < domHits.length) {
-      domHits[idx].classList.add('workspace-search-hit--active')
-      domHits[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    } else if (lex) {
-      selectLexicalSearchMatch(lex, q, idx - domHits.length)
-    }
-  }, [
-    workspaceSearchQuery,
-    workspaceSearchActiveIndex,
-    searchContentVersion,
-    activeWritingChapterId,
-  ])
+  const paletteCommands = React.useMemo<CommandItem[]>(
+    () =>
+      buildPaletteCommands({
+        panelState,
+        mainPanel,
+        toggleFloating,
+        setMain,
+        writingChapters,
+        activeWritingChapterId,
+        onChapterSelect: handleWritingSelect,
+        onOpenSettings,
+      }),
+    [panelState, mainPanel, toggleFloating, setMain, writingChapters, activeWritingChapterId, handleWritingSelect, onOpenSettings],
+  )
 
   return (
     <WorkspaceContext.Provider value={workspaceContextValue}>
@@ -659,6 +308,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
           </>
         }
         showActions
+        panelToggles={headerPanelToggles}
         onOpenSettings={onOpenSettings}
       />
 

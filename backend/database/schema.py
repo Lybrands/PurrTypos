@@ -20,6 +20,34 @@ async def _try_exec(db: DatabaseConnection, sql: str) -> None:
         pass
 
 
+# 人物设定 Markdown 化迁移：旧表单字段 → profile_md 的小节布局
+_CHAR_LEGACY_BASICS = [
+    ("gender", "性别"), ("age", "年龄"), ("height", "身高"),
+    ("occupation", "职业"), ("origin", "籍贯"),
+]
+_CHAR_LEGACY_SECTIONS = [
+    ("appearance", "外貌"), ("personality", "性格"), ("background", "背景"),
+    ("biography", "人物小传"), ("remark", "备注"),
+]
+
+
+def _legacy_character_profile_md(row: dict) -> str:
+    """把旧的固定字段拼成 Markdown 人物档案；全空时返回空串。"""
+    parts: list[str] = []
+    basics = [
+        f"- {label}：{str(row.get(key) or '').strip()}"
+        for key, label in _CHAR_LEGACY_BASICS
+        if str(row.get(key) or "").strip()
+    ]
+    if basics:
+        parts.append("## 基本信息\n" + "\n".join(basics))
+    for key, label in _CHAR_LEGACY_SECTIONS:
+        val = str(row.get(key) or "").strip()
+        if val:
+            parts.append(f"## {label}\n{val}")
+    return "\n\n".join(parts)
+
+
 async def init_schema(db: DatabaseConnection) -> None:
     # ── books ────────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS books (
@@ -310,6 +338,18 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN origin TEXT DEFAULT ''")
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN personality TEXT DEFAULT ''")
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN remark TEXT DEFAULT ''")
+
+    # ── 人物设定 Markdown 化迁移 ──────────────────────────────────
+    # 表单字段（性别/年龄/…/小传/备注）合并为一篇 profile_md；name / tags 仍保留
+    # 结构化（卡片列表与 AI 工具按姓名/标签定位需要）。旧列保留不再写入。
+    # NULL 作为「尚未迁移」哨兵：迁移后至少写入空串，保证幂等。
+    await _try_exec(db, "ALTER TABLE characters ADD COLUMN profile_md TEXT DEFAULT NULL")
+    unmigrated = await db.fetch_all("SELECT * FROM characters WHERE profile_md IS NULL")
+    for row in unmigrated:
+        await db.execute(
+            "UPDATE characters SET profile_md = ? WHERE id = ?",
+            [_legacy_character_profile_md(row), row["id"]],
+        )
 
     # ── seed character_options defaults ───────────────────────────
     personality_seed = ["开朗", "内敛", "沉稳", "冲动", "善良", "冷酷", "腹黑", "正义"]

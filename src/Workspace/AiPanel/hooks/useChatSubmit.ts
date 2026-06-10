@@ -9,11 +9,7 @@ import {
   type ToolCallSegment,
   type UseChatSubmitParams,
 } from "./chat.types";
-import {
-  buildAssociationBlocks,
-  buildHistoryConverter,
-} from "./chatHistory";
-import { fetchSelectedMemoryContext } from "./memoryContext";
+import { buildHistoryConverter } from "./chatHistory";
 import { buildStreamOptions } from "./streamOptions";
 import {
   dispatchChunk,
@@ -151,7 +147,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
       const sessionId = activeSessionId;
 
-    // 先立刻把用户消息 + 助手占位推到 UI，并进入 loading，再去做拉记忆等异步
+    // 立刻把用户消息 + 助手占位推到 UI，并进入 loading
     if (resend != null) {
       const nextConversations = [
         ...conversations.slice(0, resend.editIndex),
@@ -171,51 +167,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       setLoading(true);
     }
 
-    const chapterName = currentChapterTitle?.trim() || "（未选章节）";
-    const systemSuffix =
-      bookId != null
-        ? agentEnabled
-          ? `\n\n当前写作章节：《${chapterName}》。宿主已为当前会话绑定作品上下文；需要 bookId/chapterId/outlineId 的工具参数由宿主按当前界面自动注入；若需操作**非当前**章节或大纲，只能先读取列表中的真实 id，再传 **chapterId** / **outlineId(outlineIds)**。不支持 chapterTitle/chapterIndex/outlineTitle/outlineIndex。勿猜测数据库 id。向用户回复时使用章节名等界面可见名称，不要暴露 id。`
-          : `\n\n当前写作章节：《${chapterName}》。你无法访问书籍内容，仅能基于用户描述或用户主动提供的信息作答。回复时使用章节名等界面可见名称，不暴露 id。`
-        : "";
-
+    // 系统提示（会话绑定说明、关联章节/大纲内容、勾选记忆）统一由后端组装注入；
+    // 前端只传结构化字段（ids / 模式），不再拼接任何 prompt 文案。
     const toHistoryApiMessage = buildHistoryConverter(agentMode);
-
-    const associationBlocks = buildAssociationBlocks(
-      associatedChapterIds,
-      associatedOutlineIds,
-      writingChapters,
-      availableOutlines,
-    );
-
-    let subagentExtra = "";
-    if (
-      isWritingExpertPipeline(agentMode) &&
-      agentEnabled &&
-      bookId != null &&
-      associationBlocks.length > 0
-    ) {
-      subagentExtra = `\n\n【写作专家 — 主会话附加上下文】\n${associationBlocks.join("\n\n")}`;
-    }
-
-    let collabExtra = "";
-    if (
-      writingMode === "collab" &&
-      agentEnabled &&
-      bookId != null &&
-      associationBlocks.length > 0
-    ) {
-      collabExtra = `\n\n【协作共创 — 主会话附加上下文】\n${associationBlocks.join("\n\n")}`;
-    }
-
-    const memoryExtra = await fetchSelectedMemoryContext({
-      selectedMemoryIds,
-      selectedForeshadowingIds,
-    });
-
-    const systemContent = [systemSuffix, subagentExtra, collabExtra, memoryExtra]
-      .filter(Boolean)
-      .join("");
 
     let historyMessages: { role: string; content: string }[];
     if (resend != null) {
@@ -242,7 +196,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     }
 
     const newMessages = [
-      { role: "system", content: systemContent },
       ...historyMessages,
       { role: "user", content: userText },
     ];
@@ -331,6 +284,14 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         associatedChapterIds.length > 0 ? associatedChapterIds : undefined,
       associatedOutlineIds:
         associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
+      selectedMemoryIds:
+        selectedMemoryIds && selectedMemoryIds.length > 0
+          ? selectedMemoryIds
+          : undefined,
+      selectedForeshadowingIds:
+        selectedForeshadowingIds && selectedForeshadowingIds.length > 0
+          ? selectedForeshadowingIds
+          : undefined,
       agentMode,
       chatAgentMode:
         writingMode === "collab"

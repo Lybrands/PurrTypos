@@ -127,8 +127,18 @@ export function toolCallDisplayRow(
         return { label: "查看人物信息", outcome: "ok" };
       case "listBookCharacters":
         return { label: "查看人物列表", outcome: "ok" };
+      case "createCharacter": {
+        const n = args.name != null ? String(args.name).trim() : "";
+        return { label: n ? `创建人物「${n}」` : "创建人物", outcome: "ok" };
+      }
+      case "updateCharacter": {
+        const n = args.name != null ? String(args.name).trim() : "";
+        return { label: n ? `更新人物「${n}」设定` : "更新人物设定", outcome: "ok" };
+      }
       case "getStoryBackground":
         return { label: "查看小说背景", outcome: "ok" };
+      case "editStoryBackground":
+        return { label: "编辑小说背景", outcome: "ok" };
       case "getBookStyle":
         return { label: "查看风格基调", outcome: "ok" };
       case "getGlobalOutline":

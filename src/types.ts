@@ -30,17 +30,29 @@ export interface Character {
   id: number;
   book_id: EntityId;
   name: string;
-  gender?: string;
-  age?: string;
-  height?: string;
-  occupation?: string;
-  appearance?: string;
-  origin?: string;
-  personality?: string;
-  background: string;
-  biography: string;
+  /** 标签，逗号分隔（卡片列表识别用，保持结构化） */
   tags: string;
-  /** 备注（自由补充说明） */
+  /** 人物档案 Markdown 全文（基本信息/外貌/性格/经历等，已取代旧表单字段） */
+  profile_md?: string;
+  /** @deprecated 旧表单字段，已迁移进 profile_md，仅历史数据读取 */
+  gender?: string;
+  /** @deprecated 同上 */
+  age?: string;
+  /** @deprecated 同上 */
+  height?: string;
+  /** @deprecated 同上 */
+  occupation?: string;
+  /** @deprecated 同上 */
+  appearance?: string;
+  /** @deprecated 同上 */
+  origin?: string;
+  /** @deprecated 同上 */
+  personality?: string;
+  /** @deprecated 同上 */
+  background?: string;
+  /** @deprecated 同上 */
+  biography?: string;
+  /** @deprecated 同上 */
   remark?: string;
   create_time?: string;
 }
@@ -500,9 +512,12 @@ export interface ElectronAPI {
     currentChapterTitle?: string;
     writingChapters?: { id: EntityId; title: string }[];
     availableOutlines?: { id: EntityId; title: string; type?: string }[];
-    /** 与界面「关联章节」一致，主进程并入 toolCtx 供写作专家 system 附录 */
+    /** 与界面「关联章节」一致，后端预取内容直接注入 system */
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
+    /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
+    selectedMemoryIds?: (number | string)[];
+    selectedForeshadowingIds?: (number | string)[];
     agentMode?: "legacy" | "subagent";
     chatAgentMode?: "ask" | "agent" | "expert" | "collab";
     /** legacy 下协作共创 */
@@ -531,6 +546,13 @@ export interface ElectronAPI {
         chapterId: EntityId;
         title: string;
         parentId?: EntityId | null;
+      };
+      /** AI 写工具改动了设定类数据（人物/背景/大纲），前端面板据此刷新 */
+      settingUpdated?: {
+        kind: "character" | "background" | "outline";
+        action?: string;
+        id?: EntityId;
+        name?: string;
       };
       /**
        * AI 工具 editChapterContent 提交的差异提议：
