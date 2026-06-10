@@ -32,6 +32,11 @@ const MAX_WIDTH_RATIO = 0.7
 const MIN_X = 0
 const TOP_OFFSET = 0
 const HANDLE_SIZE = 6
+/* 与 FloatingPanel.scss 的 z-index: 50 对齐；点击置顶时从这里向上递增 */
+const Z_INDEX_BASE = 50
+
+/** 跨实例共享的置顶计数器：mousedown 的浮窗拿最大值，浮到其它浮窗之上 */
+let zIndexCounter = Z_INDEX_BASE
 
 type DragMode = 'move' | 'resize-left' | 'resize-right' | null
 
@@ -60,6 +65,44 @@ export default function FloatingPanel({
   React.useEffect(() => {
     liveRef.current = { x, y, width }
   }, [x, y, width])
+
+  const [zIndex, setZIndex] = React.useState(() => ++zIndexCounter)
+  const zIndexRef = React.useRef(zIndex)
+  React.useEffect(() => {
+    zIndexRef.current = zIndex
+  }, [zIndex])
+  const bringToFront = React.useCallback(() => {
+    // 已经在最顶层就不再抬升，避免计数器无意义增长
+    if (zIndexRef.current === zIndexCounter) return
+    zIndexCounter += 1
+    setZIndex(zIndexCounter)
+  }, [])
+
+  /**
+   * 持久化坐标可能是在更大的窗口里拖出来的：挂载与窗口 resize 时
+   * 把 x/y/width 收回容器内，避免浮窗整体跑到视口外、看起来像「打不开」。
+   * （拖拽过程中的边界约束在 onMove 里，这里只兜挂载/缩窗两个时机。）
+   */
+  React.useEffect(() => {
+    const clampIntoContainer = () => {
+      if (dragRef.current) return
+      const container = ref.current?.parentElement
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+
+      const cur = liveRef.current
+      const width = Math.max(MIN_WIDTH, Math.min(cur.width, rect.width * MAX_WIDTH_RATIO))
+      const x = Math.max(MIN_X, Math.min(cur.x, rect.width - width))
+      const y = Math.max(TOP_OFFSET, Math.min(cur.y, rect.height - 80))
+      if (x !== cur.x || y !== cur.y || width !== cur.width) {
+        onPositionChange({ x, y, width })
+      }
+    }
+    clampIntoContainer()
+    window.addEventListener('resize', clampIntoContainer)
+    return () => window.removeEventListener('resize', clampIntoContainer)
+  }, [onPositionChange])
 
   const startDrag = React.useCallback(
     (mode: Exclude<DragMode, null>) => (e: React.MouseEvent) => {
@@ -132,7 +175,9 @@ export default function FloatingPanel({
       style={{
         transform: `translate(${x}px, ${y}px)`,
         width,
+        zIndex,
       }}
+      onMouseDownCapture={bringToFront}
     >
       <div className="floating-panel-header" onMouseDown={startDrag('move')}>
         <span className="floating-panel-title">{title}</span>

@@ -142,6 +142,9 @@ class DatabaseConnection:
     async def export_to_buffer(self) -> bytes | None:
         if self._conn is None:
             return None
+        cursor = await self._conn.execute("PRAGMA wal_checkpoint(FULL)")
+        await cursor.fetchall()
+        await cursor.close()
         await self._conn.commit()
         return self._db_path.read_bytes()
 

@@ -22,6 +22,10 @@ class ChatStreamRequest(BaseModel):
     availableOutlines: Optional[List[Any]] = None
     associatedChapterIds: Optional[List[str]] = None
     associatedOutlineIds: Optional[List[str]] = None
+    # 用户在 AiContextBar 勾选的设定/伏笔 id：后端前置 fetch 后注入 system，
+    # 前端不再自行拼接记忆文案。
+    selectedMemoryIds: Optional[List[Any]] = None
+    selectedForeshadowingIds: Optional[List[Any]] = None
     agentMode: Optional[str] = None
     chatAgentMode: Optional[str] = None
     writingMode: str = "default"

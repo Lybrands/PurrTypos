@@ -29,6 +29,17 @@ export const handleProposedChapterDiff: ChunkHandler = (chunk, ctx) => {
   );
 };
 
+/**
+ * AI 写工具改动了设定类数据（人物 / 故事背景 / 大纲）：
+ * 广播给打开中的设定面板（CharacterTab / StoryBackgroundTab 等）刷新展示。
+ */
+export const handleSettingUpdated: ChunkHandler = (chunk, ctx) => {
+  if (!chunk.settingUpdated || !ctx.isVisibleSession()) return;
+  window.dispatchEvent(
+    new CustomEvent("setting-updated", { detail: chunk.settingUpdated }),
+  );
+};
+
 export const handleChapterCreated: ChunkHandler = (chunk, ctx) => {
   if (chunk.chapterCreated == null || !ctx.isVisibleSession()) return;
   window.dispatchEvent(

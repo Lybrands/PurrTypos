@@ -134,101 +134,69 @@ export default function ChapterSection({
     if (chapRes.success) onChaptersChange?.(outlineId, chapRes.data)
   }
 
-  const handleAddChapter = async () => {
+  /** `第N章` / `第N卷`（+ 可选副标题）编号标题 */
+  const numberedTitle = (unit: '章' | '卷', num: number, subtitle = '') => {
+    const s = subtitle.trim()
+    return s ? `第${num}${unit} ${s}` : `第${num}${unit}`
+  }
+
+  /**
+   * 五个"新建"入口共用的核心：防重入 → 解析 outlineId → addChapter →
+   * 重载列表 → 重置输入态 → 选中新章（卷不选中）→ 通知父组件。
+   */
+  const createItem = async (opts: {
+    title: string
+    parentId?: EntityId | null
+    isVolume?: boolean
+    /** 创建成功后重置对应输入态 */
+    resetInput?: () => void
+  }) => {
     if (addingRef.current) return
-    const subtitle = newTitle.trim()
-    const num = writableChapters.length + 1
-    const title = subtitle ? `第${num}章 ${subtitle}` : `第${num}章`
     addingRef.current = true
     try {
       const outlineId = await getOutlineId()
       if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title })
+      const res = await window.electronAPI.addChapter({
+        outlineId,
+        title: opts.title,
+        parentId: opts.parentId ?? undefined,
+        ...(opts.isVolume ? { isVolume: true } : {}),
+      })
       if (res.success) {
         await reloadChapters(outlineId)
-        setNewTitle('')
-        setShowAddInput(false)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, null)
+        opts.resetInput?.()
+        if (!opts.isVolume) onChapterSelect?.(res.data.id, res.data.title)
+        onItemCreated?.(res.data.id, opts.title, !!opts.isVolume, opts.parentId ?? null)
       }
     } finally { addingRef.current = false }
   }
+
+  const handleAddChapter = () => createItem({
+    title: numberedTitle('章', writableChapters.length + 1, newTitle),
+    resetInput: () => { setNewTitle(''); setShowAddInput(false) },
+  })
 
   /** 列表末尾"点击新建"占位行专用：直接创建默认 `第N章`，跳过输入态。 */
-  const handleQuickAddChapter = async () => {
-    if (addingRef.current) return
-    const num = writableChapters.length + 1
-    const title = `第${num}章`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, null)
-      }
-    } finally { addingRef.current = false }
-  }
+  const handleQuickAddChapter = () => createItem({
+    title: numberedTitle('章', writableChapters.length + 1),
+  })
 
-  const handleQuickAddChapterUnderVolume = async (volumeId: EntityId) => {
-    if (addingRef.current) return
-    const volChapters = chaptersByVolId.get(volumeId) ?? []
-    const num = volChapters.length + 1
-    const title = `第${num}章`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: volumeId })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, volumeId)
-      }
-    } finally { addingRef.current = false }
-  }
+  const handleQuickAddChapterUnderVolume = (volumeId: EntityId) => createItem({
+    title: numberedTitle('章', (chaptersByVolId.get(volumeId) ?? []).length + 1),
+    parentId: volumeId,
+  })
 
-  const handleAddVolume = async () => {
-    if (addingRef.current) return
-    const subtitle = newVolSubtitle.trim()
-    const num = volumes.length + 1
-    const title = subtitle ? `第${num}卷 ${subtitle}` : `第${num}卷`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: undefined, isVolume: true })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        setNewVolSubtitle('')
-        setAddingVolume(false)
-        onItemCreated?.(res.data.id, title, true, null)
-      }
-    } finally { addingRef.current = false }
-  }
+  const handleAddVolume = () => createItem({
+    title: numberedTitle('卷', volumes.length + 1, newVolSubtitle),
+    isVolume: true,
+    resetInput: () => { setNewVolSubtitle(''); setAddingVolume(false) },
+  })
 
-  const handleAddChapterUnderVolume = async (volumeId: EntityId) => {
-    if (addingRef.current) return
-    const subtitle = newChapterSubtitle.trim()
-    const volChapters = chaptersByVolId.get(volumeId) ?? []
-    const num = volChapters.length + 1
-    const title = subtitle ? `第${num}章 ${subtitle}` : `第${num}章`
-    addingRef.current = true
-    try {
-      const outlineId = await getOutlineId()
-      if (!outlineId) return
-      const res = await window.electronAPI.addChapter({ outlineId, title, parentId: volumeId })
-      if (res.success) {
-        await reloadChapters(outlineId)
-        setNewChapterSubtitle('')
-        setAddingChapterVolId(null)
-        onChapterSelect?.(res.data.id, res.data.title)
-        onItemCreated?.(res.data.id, title, false, volumeId)
-      }
-    } finally { addingRef.current = false }
-  }
+  const handleAddChapterUnderVolume = (volumeId: EntityId) => createItem({
+    title: numberedTitle('章', (chaptersByVolId.get(volumeId) ?? []).length + 1, newChapterSubtitle),
+    parentId: volumeId,
+    resetInput: () => { setNewChapterSubtitle(''); setAddingChapterVolId(null) },
+  })
 
   const handleRenameChapter = async (ch: Chapter) => {
     const title = editingTitle.trim()
@@ -237,6 +205,16 @@ export default function ChapterSection({
     setEditingChapterId(null)
     if (writingOutlineId) await reloadChapters(writingOutlineId)
     if (chapterId === ch.id) onChapterSelect?.(ch.id, title)
+  }
+
+  /** 单删/批删共用：逐个删除 → 重载列表 → 清空被删的当前选中 → 按需通知父组件删大纲 */
+  const deleteByIds = async (ids: EntityId[], notifyOutlineDeleted: boolean) => {
+    for (const id of ids) await window.electronAPI.deleteChapter({ id })
+    if (writingOutlineId) await reloadChapters(writingOutlineId)
+    if (chapterId != null && ids.includes(chapterId)) onChapterSelect?.('', '')
+    if (notifyOutlineDeleted) {
+      for (const id of ids) onWritingChapterDeleted?.(id)
+    }
   }
 
   const handleDeleteItem = async (ch: Chapter) => {
@@ -248,12 +226,7 @@ export default function ChapterSection({
       chapter: ch,
       onConfirm: async (checked) => {
         setDeleteModal(null)
-        for (const id of allIds) await window.electronAPI.deleteChapter({ id })
-        if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (chapterId != null && allIds.includes(chapterId)) onChapterSelect?.('', '')
-        if (checked) {
-          for (const id of allIds) onWritingChapterDeleted?.(id)
-        }
+        await deleteByIds(allIds, checked)
       },
       checkboxLabel: '同时删除对应大纲',
     })
@@ -285,10 +258,7 @@ export default function ChapterSection({
       ids,
       onConfirm: async () => {
         setBatchDeleteModal(null); setBatchMode(false); setSelectedIds(new Set())
-        for (const id of ids) await window.electronAPI.deleteChapter({ id })
-        if (writingOutlineId) await reloadChapters(writingOutlineId)
-        if (chapterId != null && ids.includes(chapterId)) onChapterSelect?.('', '')
-        for (const id of ids) onWritingChapterDeleted?.(id)
+        await deleteByIds(ids, true)
       },
     })
   }
@@ -364,6 +334,54 @@ export default function ChapterSection({
     />
   )
 
+  /** 单条章节行：卷内/平铺两种导航共用（checkbox + 标题/重命名 + 大纲/重命名/删除按钮） */
+  const renderChapterRow = (
+    ch: Chapter,
+    opts?: { extraClass?: string; style?: React.CSSProperties },
+  ) => {
+    const cls = [
+      'nav-chapter-item',
+      opts?.extraClass,
+      chapterId === ch.id ? 'active' : '',
+      batchMode && selectedIds.has(ch.id) ? 'selected' : '',
+    ].filter(Boolean).join(' ')
+    return (
+      <div
+        key={ch.id}
+        className={cls}
+        style={opts?.style}
+        onClick={() => { if (editingChapterId !== ch.id) onChapterSelect?.(ch.id, ch.title) }}
+      >
+        {batchMode && (
+          <Checkbox
+            checked={selectedIds.has(ch.id)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => toggleSelect(ch.id)}
+            className="nav-chapter-checkbox"
+          />
+        )}
+        {editingChapterId === ch.id ? renderRenameInput(ch) : (
+          <>
+            <span className="nav-chapter-title">
+              <HighlightText text={ch.title} query={workspaceSearchQuery} />
+            </span>
+            <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
+              <Tooltip title="大纲">
+                <Button type="text" size="small" icon={<ProfileOutlined style={{ fontSize: 14 }} />}
+                  onClick={() => openChapterOutline(ch)} className="nav-action-btn" />
+              </Tooltip>
+              <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
+                onClick={() => { setEditingChapterId(ch.id); setEditingTitle(ch.title) }}
+                className="nav-action-btn" />
+              <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
+                onClick={() => handleDeleteItem(ch)} className="nav-action-btn" />
+            </div>
+          </>
+        )}
+      </div>
+    )
+  }
+
   const renderVolumeNav = () => (
     <div className="nav-chapter-list">
       {volumes.length === 0 && !addingVolume && (
@@ -423,42 +441,9 @@ export default function ChapterSection({
 
             {!collapsed && (
               <>
-                {volChaps.map((ch) => (
-                  <div
-                    key={ch.id}
-                    className={`nav-chapter-item nav-chapter-under-volume ${chapterId === ch.id ? 'active' : ''} ${batchMode && selectedIds.has(ch.id) ? 'selected' : ''}`}
-                    onClick={() => { if (editingChapterId !== ch.id) onChapterSelect?.(ch.id, ch.title) }}
-                  >
-                    {batchMode && (
-                      <Checkbox
-                        checked={selectedIds.has(ch.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={() => toggleSelect(ch.id)}
-                        className="nav-chapter-checkbox"
-                      />
-                    )}
-                    {editingChapterId === ch.id ? (
-                      renderRenameInput(ch)
-                    ) : (
-                      <>
-                        <span className="nav-chapter-title">
-                          <HighlightText text={ch.title} query={workspaceSearchQuery} />
-                        </span>
-                        <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
-                          <Tooltip title="大纲">
-                            <Button type="text" size="small" icon={<ProfileOutlined style={{ fontSize: 14 }} />}
-                              onClick={() => openChapterOutline(ch)} className="nav-action-btn" />
-                          </Tooltip>
-                          <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
-                            onClick={() => { setEditingChapterId(ch.id); setEditingTitle(ch.title) }}
-                            className="nav-action-btn" />
-                          <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
-                            onClick={() => handleDeleteItem(ch)} className="nav-action-btn" />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
+                {volChaps.map((ch) =>
+                  renderChapterRow(ch, { extraClass: 'nav-chapter-under-volume' }),
+                )}
 
                 {addingChapterVolId === vol.id && (
                   <div className="nav-add-row nav-add-row-indent">
@@ -518,40 +503,11 @@ export default function ChapterSection({
       {chapters.length === 0 && !showAddInput && (
         <Empty image={false} description={<><span>暂无章节，点击 + 新建</span><br /><small>或打开 XMind 导入大纲</small></>} className="nav-empty" />
       )}
-      {chapters.map((ch) => (
-        <div
-          key={ch.id}
-          className={`nav-chapter-item ${chapterId === ch.id ? 'active' : ''} ${batchMode && selectedIds.has(ch.id) ? 'selected' : ''}`}
-          style={{ paddingLeft: `${((ch.level || 1) - 1) * 12 + 8}px` }}
-          onClick={() => { if (editingChapterId !== ch.id) onChapterSelect?.(ch.id, ch.title) }}
-        >
-          {batchMode && (
-            <Checkbox
-              checked={selectedIds.has(ch.id)}
-              onClick={(e) => e.stopPropagation()}
-              onChange={() => toggleSelect(ch.id)}
-              className="nav-chapter-checkbox"
-            />
-          )}
-          {editingChapterId === ch.id ? renderRenameInput(ch) : (
-            <>
-              <span className="nav-chapter-title">
-                <HighlightText text={ch.title} query={workspaceSearchQuery} />
-              </span>
-              <div className="nav-chapter-actions" onClick={(e) => e.stopPropagation()}>
-                <Tooltip title="大纲">
-                  <Button type="text" size="small" icon={<ProfileOutlined style={{ fontSize: 14 }} />}
-                    onClick={() => openChapterOutline(ch)} className="nav-action-btn" />
-                </Tooltip>
-                <Button type="text" size="small" icon={<EditOutlined style={{ fontSize: 14 }} />} title="重命名"
-                  onClick={() => { setEditingChapterId(ch.id); setEditingTitle(ch.title) }} className="nav-action-btn" />
-                <Button type="text" size="small" icon={<DeleteOutlined style={{ fontSize: 14 }} />} title="删除"
-                  onClick={() => handleDeleteItem(ch)} className="nav-action-btn" />
-              </div>
-            </>
-          )}
-        </div>
-      ))}
+      {chapters.map((ch) =>
+        renderChapterRow(ch, {
+          style: { paddingLeft: `${((ch.level || 1) - 1) * 12 + 8}px` },
+        }),
+      )}
       {showAddInput && (
         <div className="nav-add-row">
           <span className="nav-add-prefix">第{writableChapters.length + 1}章</span>

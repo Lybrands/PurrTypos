@@ -3,15 +3,24 @@ import { Divider, Select, Switch, Tooltip } from 'antd'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
 
-export interface AiComposeBottomProps {
-  /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
-  modelConfigs: AiModelConfig[]
+/**
+ * 模型选择的绑定集合 —— 对话模式、所选模型、思考开关及其 setter。
+ *
+ * 这一组 prop 既用于主输入区，也会透传到编辑气泡里的 AiComposeBottom。
+ * 打成一个对象后沿途只传一个 prop，叶子处用 `{...modelSelection}` 展开。
+ */
+export interface ModelSelectionBindings {
   chatAgentMode: ChatAgentMode
   setChatAgentMode: (v: ChatAgentMode) => void
   selectedModel: string
   setSelectedModel: (v: string) => void
   thinkingEnabled: boolean
   setThinkingEnabled: (v: boolean) => void
+}
+
+export interface AiComposeBottomProps extends ModelSelectionBindings {
+  /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
+  modelConfigs: AiModelConfig[]
   /** 必须开启思考、不可关闭的模型 id 列表 */
   thinkingOnlyModelIds: string[]
   loading: boolean

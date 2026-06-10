@@ -16,6 +16,7 @@ import {
   handleChapterContentUpdated,
   handleChapterCreated,
   handleProposedChapterDiff,
+  handleSettingUpdated,
 } from "./sideEffects";
 import {
   handleToolCallCachedIndex,
@@ -54,6 +55,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleChapterContentUpdated(chunk, ctx);
   handleProposedChapterDiff(chunk, ctx);
   handleChapterCreated(chunk, ctx);
+  handleSettingUpdated(chunk, ctx);
   handleCollabLatestParagraph(chunk, ctx);
 
   // 5. 工具进度三连：仅当 chunk 只含进度信号时短路（与原行为一致）
