@@ -7,258 +7,12 @@
   position: relative;
 }
 
-.editor-body {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-
-.editor-nav {
-  display: flex;
-  width: 200px;
-  min-width: 200px;
-  border-right: 1px solid var(--border);
-  background: var(--bg-surface);
-  &.collapsed {
-    width: 16px;
-    min-width: 16px;
-    flex-direction: column;
-    justify-content: center;
-    align-items: stretch;
-    background: var(--bg-panel);
-    border-right-color: var(--border-light);
-    cursor: pointer;
-
-    .nav-content {
-      display: none;
-    }
-
-    .nav-collapse-bar {
-      width: 100%;
-      flex: 1;
-      min-height: 80px;
-      cursor: pointer;
-      transition: background 0.15s;
-
-      &:hover {
-        background: var(--bg-hover);
-      }
-    }
-  }
-}
-
-.nav-toggle {
-  flex-shrink: 0;
-  margin: auto;
-  color: var(--text-muted);
-  line-height: 1;
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-title-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-
-  .ant-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 4px;
-    line-height: 1;
-  }
-}
-
-.nav-toggle-inline {
-  color: var(--text-muted);
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-content {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.nav-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-light);
-}
-
-.nav-title {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  color: var(--text-muted);
-}
-
-.nav-add-btn {
-  color: var(--text-muted);
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-batch-delete {
-  color: var(--text-muted);
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-batch-btn,
-.nav-batch-cancel {
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-add-row {
-  display: flex;
-  gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-light);
-}
-
-.nav-add-prefix {
-  flex-shrink: 0;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  color: var(--accent);
-  white-space: nowrap;
-  padding: 4px 4px 4px 0;
-  user-select: none;
-}
-
-.nav-add-input {
-  flex: 1;
-  font-size: var(--font-size-sm);
-}
-
-.nav-chapter-list {
-  flex: 1;
-  overflow-y: auto;
-}
-
-.nav-chapter-item {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-xs);
-  padding: var(--spacing-xs) var(--spacing-sm);
-  font-size: var(--font-size);
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: all 0.12s;
-  white-space: nowrap;
-
-  &.nav-volume-item {
-    cursor: default;
-    font-weight: var(--font-weight-medium);
-    color: var(--text-secondary);
-    background: var(--bg-surface);
-
-    &:hover {
-      background: var(--bg-hover-list);
-    }
-  }
-
-  &.nav-chapter-under-volume {
-    padding-left: 28px;
-  }
-
-  .nav-chapter-checkbox {
-    flex-shrink: 0;
-    margin: 0;
-  }
-
-  &:hover {
-    background: var(--bg-hover-list);
-
-    .nav-chapter-actions {
-      display: flex;
-    }
-  }
-
-  &.active {
-    background: var(--bg-active);
-    border-left: 2px solid var(--accent);
-
-    .nav-chapter-actions {
-      display: flex;
-    }
-  }
-
-  &.selected {
-    background: var(--accent-dim);
-  }
-}
-
-.nav-chapter-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-
-  &.nav-volume-title {
-    font-weight: var(--font-weight-medium);
-  }
-}
-
-.nav-chapter-actions {
-  flex-shrink: 0;
-  display: none;
-  align-items: center;
-  gap: 2px;
-  transition: display 0.12s;
-}
-
-.nav-action-btn {
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
-
-  &:hover {
-    color: var(--accent);
-  }
-}
-
-.nav-rename-input {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--font-size-sm);
-}
-
-.nav-empty {
-  padding: var(--spacing-lg) var(--spacing-sm);
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
-  text-align: center;
-  line-height: var(--line-height);
-
-  small {
-    font-size: var(--font-size-sm);
-    opacity: 0.8;
-  }
-}
-
 .editor-main {
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 .editor-footer {
@@ -354,6 +108,8 @@
 .lexical-content {
   min-height: 100%;
   padding: var(--spacing-xl);
+  /* 右侧让出一段「字数标尺」专用槽，避免 .lexical-word-ruler 浮签压到行尾文字 */
+  padding-right: calc(var(--spacing-xl) + 64px);
   outline: none;
   font-size: var(--font-size-lg);
   line-height: 1.9;
@@ -371,6 +127,41 @@
   }
 }
 
+/* ─── 字数标尺：每 500 字浮签，贴在跨过该阈值的段落顶部右侧 ───── */
+/* 位置：坐在 .lexical-content 让出的 padding-right 槽里，不与正文重叠 */
+.lexical-word-ruler {
+  position: absolute;
+  right: 8px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-family: var(--font-family);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  border-radius: 999px;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  opacity: 0.65;
+  transition: opacity 0.18s, color 0.18s;
+
+  /* 整数千字位高亮一点 */
+  &:nth-child(2n) {
+    color: var(--text-secondary, var(--text-muted));
+  }
+}
+
+.editor-lexical-wrap:hover .lexical-word-ruler,
+.editor-lexical-wrap.lexical-focused .lexical-word-ruler {
+  opacity: 1;
+}
+
 .lexical-placeholder {
   position: absolute;
   top: var(--spacing-xl);
@@ -385,6 +176,56 @@
   /* 编辑器获得焦点时隐藏 placeholder */
   .editor-lexical-wrap.lexical-focused & {
     visibility: hidden;
+  }
+}
+
+/*
+ * ─── 主区域形态：与 AI 主区域一致的居中限宽 ─────────────────
+ * 约束：写作面板被设为「主区域」时，正文不再撑满全宽，而是与 AI 面板共用
+ *      :root 上的 --main-col-width / --main-col-gutter（70% 宽 + 720px 兜底）。
+ *      浮窗形态（无 .panel-main）仍保持原来的全宽行为，避免双滚动条/挤压。
+ */
+.editor-panel.panel-main {
+  /*
+   * 让出右侧 14px 给 .floating-rail--right（z-index: 30，绝对定位贴 .app-body 右边）。
+   * 否则 .editor-lexical-wrap 的原生滚动条会被贴线完全盖住，无法点击/拖动。
+   * 用 margin-right 让 wrap 横向收缩，scroll thumb 自然落到贴线内侧；居中正文/字数浮签
+   * 都基于 wrap 重新计算，整体仍然居中、不破坏布局。
+   *
+   * 浮窗形态（无 .panel-main）的 EditorPanel 不会撞贴线，且滚动条由 FloatingPanel
+   * 自己的 padding-right: 8px 让位，所以这里只针对主区域。
+   */
+  .editor-lexical-wrap {
+    margin-right: 16px;
+  }
+
+  /* 正文：居中限宽。注意 .lexical-content 是 .editor-lexical-wrap 的直接子节点，
+     用 width + margin: auto 即可实现「滚动条贴 wrap 右边、文本列居中」。 */
+  .lexical-content {
+    width: var(--main-col-width);
+    max-width: 100%;
+    margin: 0 auto;
+  }
+
+  /* placeholder 是绝对定位，需要跟着居中列对齐到首行起始位置 */
+  .lexical-placeholder {
+    left: max(
+      var(--spacing-xl),
+      calc(var(--main-col-gutter) + var(--spacing-xl))
+    );
+  }
+
+  /* 字数浮签贴在「居中列」右边内侧，而非 wrap 最右；窄屏退化贴 wrap 右侧 */
+  .lexical-word-ruler {
+    right: max(8px, calc(var(--main-col-gutter) + 16px));
+  }
+
+  /* 底部工具栏（撤销/排版/字数）也居中限宽，与正文对齐
+     用左右 padding = max(spacing-sm, gutter) 把两段往居中列两端推 */
+  .editor-footer {
+    width: 100%;
+    padding-left: max(var(--spacing-sm), var(--main-col-gutter));
+    padding-right: max(var(--spacing-sm), var(--main-col-gutter));
   }
 }
 

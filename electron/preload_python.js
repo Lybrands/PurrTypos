@@ -83,6 +83,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOutlines: (typeFilter) => apiGet(`/outlines${typeFilter ? '?type=' + typeFilter : ''}`),
   getVolumeOutlines: (bookId) => apiGet(`/outlines/volume/${bookId}`),
   getOutlineByWritingChapter: (id) => apiGet(`/outlines/by-writing-chapter/${id}`),
+  getOutlineForChapter: (id) => apiGet(`/outlines/for-chapter/${id}`),
   getGlobalOutline: (bookId) => apiGet(`/outlines/global/${bookId}`),
   ensureGlobalOutline: (bookId) => apiPost(`/outlines/global/${bookId}/ensure`, {}),
   getWritingOutline: (bookId) => apiGet(`/outlines/writing/${bookId}`),
@@ -90,6 +91,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAssociableOutlines: (bookId) => apiGet(`/outlines/associable/${bookId}`),
   deleteOutline: (data) => apiDelete(`/outlines/${data.outlineId}`),
   updateOutline: (data) => apiPut(`/outlines/${data.outlineId}`, data),
+  listOutlineHistory: (data) => apiGet(`/outlines/${data.outlineId}/history${data && data.limit ? `?limit=${data.limit}` : ''}`),
+  getOutlineHistory: (data) => apiGet(`/outlines/history/${data.historyId}`),
+  restoreOutlineHistory: (data) => apiPost(`/outlines/history/${data.historyId}/restore`, {}),
 
   // ─── Chapters — HTTP ───────────────────────────────────────────
   saveChapters: (data) => apiPost(`/chapters/${data.outlineId}`, { chapters: data.chapters }),
@@ -108,6 +112,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveStoryBackground: (data) => apiPut(`/story-background/${data.bookId}`, { content: data.content }),
   getStoryBackgroundAttachments: (data) => apiGet(`/story-background/${data.bookId}/attachments`),
   deleteStoryBackgroundAttachment: (data) => apiDelete(`/story-background/attachments/${data.id}`),
+
+  // ─── Book style — HTTP ─────────────────────────────────────────
+  getBookStyle: (data) => apiGet(`/book-style/${data.bookId}`),
+  saveBookStyle: (data) => apiPut(`/book-style/${data.bookId}`, {
+    pov: data.pov || '',
+    tone: data.tone || '',
+    pace: data.pace || '',
+    banned_rules: data.banned_rules || '',
+    reference_chapter_ids: data.reference_chapter_ids || '',
+    free_notes: data.free_notes || '',
+  }),
+
+  // ─── Chapter diff history — HTTP ───────────────────────────────
+  commitChapterDiff: (data) => apiPost(`/chapter-diff/${data.chapterId}/commit`, {
+    content: data.content,
+    before_text: data.beforeText || '',
+    after_text: data.afterText || '',
+    source: data.source || 'ai_rewrite',
+    accepted_segments: data.acceptedSegments || 0,
+    rejected_segments: data.rejectedSegments || 0,
+  }),
+  listChapterDiff: (data) => apiGet(`/chapter-diff/${data.chapterId}?limit=${data.limit ?? 50}`),
+  getChapterDiff: (data) => apiGet(`/chapter-diff/by-id/${data.diffId}`),
+  rollbackChapterDiff: (data) => apiPost(`/chapter-diff/by-id/${data.diffId}/rollback`, {}),
 
   // ─── Sessions — HTTP ───────────────────────────────────────────
   createSession: (data) => apiPost('/sessions', data),

@@ -1,8 +1,9 @@
 import React, { forwardRef, useImperativeHandle } from 'react'
-import { EditOutlined, ImportOutlined, UserOutlined } from '@ant-design/icons'
+import { EditOutlined, HistoryOutlined, ImportOutlined, UserOutlined } from '@ant-design/icons'
 import { App as AntdApp, Button, Empty, Tooltip } from 'antd'
 import FloatingPanel from '../../components/FloatingPanel'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
+import OutlineHistoryDrawer from './OutlineHistoryDrawer'
 import { useWorkspace } from '../WorkspaceContext'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
@@ -48,6 +49,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       notifyWorkspaceSearchContentChanged()
     }, [markdownContent, notifyWorkspaceSearchContentChanged])
     const [editing, setEditing] = React.useState(false)
+    const [historyOpen, setHistoryOpen] = React.useState(false)
     const editingRef = React.useRef(false)
     React.useEffect(() => {
       editingRef.current = editing
@@ -249,6 +251,14 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
                   }}
                 />
               </Tooltip>
+              <Tooltip title="历史">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<HistoryOutlined />}
+                  onClick={() => setHistoryOpen(true)}
+                />
+              </Tooltip>
               <Tooltip title="编辑">
                 <Button type="text" size="small" icon={<EditOutlined />} onClick={handleEdit} />
               </Tooltip>
@@ -274,6 +284,12 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
               </div>
             </FloatingPanel>
           )}
+          <OutlineHistoryDrawer
+            outlineId={outlineId}
+            open={historyOpen}
+            onClose={() => setHistoryOpen(false)}
+            onRestored={onSaved}
+          />
         </div>
       )
     }
@@ -297,6 +313,14 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
                   }
                   setCharacterPanelOpen((v) => !v)
                 }}
+              />
+            </Tooltip>
+            <Tooltip title="历史">
+              <Button
+                type="text"
+                size="small"
+                icon={<HistoryOutlined />}
+                onClick={() => setHistoryOpen(true)}
               />
             </Tooltip>
             <Tooltip title="导入文件">
@@ -332,6 +356,16 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
             </div>
           </FloatingPanel>
         )}
+        <OutlineHistoryDrawer
+          outlineId={outlineId}
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => {
+            // 回退会让正在编辑的草稿与最新内容失去对齐，统一退出编辑模式刷新
+            setEditing(false)
+            onSaved()
+          }}
+        />
       </div>
     )
   }

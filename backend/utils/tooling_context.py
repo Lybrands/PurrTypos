@@ -1,8 +1,8 @@
 """
-Session-bound tooling context appendix for writing / expert-team prompts.
+Session-bound tooling context appendix for writing prompts.
 
-Extracted from the former subagent pipeline so expert_team_autogen and
-writing flows can share one implementation.
+Extracted from the former subagent pipeline so all writing flows can share
+one implementation.
 """
 
 from __future__ import annotations
@@ -19,8 +19,6 @@ def build_tooling_context_appendix(tool_ctx: dict) -> str:
     wc_raw = tool_ctx.get("writingChapters") or []
     wc = get_writable_chapters_for_agent(wc_raw)
     ao = tool_ctx.get("availableOutlines") or []
-    acc_ch = tool_ctx.get("associatedChapterIds") or []
-    acc_ol = tool_ctx.get("associatedOutlineIds") or []
 
     lines: list[str] = []
     lines.append("【会话同步 — 工具与界面上下文】")
@@ -36,20 +34,8 @@ def build_tooling_context_appendix(tool_ctx: dict) -> str:
     )
     lines.append(f"当前写作章节：{ch_desc}")
 
-    if acc_ch and wc:
-        bits = []
-        for cid in acc_ch:
-            c = next((x for x in wc if str(x.get("id")) == str(cid)), None)
-            title = re.sub(r"\r?\n", " ", str(c.get("title") or "")).strip() if c else ""
-            bits.append(f"《{title}》" if title else "（未匹配章节）")
-        lines.append(f"用户在本轮关联的写作章节：{'、'.join(bits)}")
-    if acc_ol and ao:
-        bits = []
-        for oid in acc_ol:
-            o = next((x for x in ao if str(x.get("id")) == str(oid)), None)
-            title = re.sub(r"\r?\n", " ", str(o.get("title") or "")).strip() if o else ""
-            bits.append(f"《{title}》" if title else "（未匹配大纲）")
-        lines.append(f"用户在本轮关联的大纲：{'、'.join(bits)}")
+    # 注：关联章节/大纲不再在这里生成「必须立即调工具读取」的指令块——
+    # 其内容已由 utils.chat_preflight.build_associated_context_block 预取注入。
 
     WC_CAP = 100
     if wc:

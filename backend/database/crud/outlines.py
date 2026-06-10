@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
-from database.crud.chapters import get_chapters
 from utils.id_utils import short_id8
 
 
@@ -21,14 +20,16 @@ async def save_outline(
         outline_type = "chapter"
         xmind_data = None
         file_path = None
+        markdown_content = None
         book_id = None
         writing_chapter_id = None
         parent_outline_id = None
     else:
         title = data.get("title", "")
-        outline_type = data.get("type", "chapter")
+        outline_type = data.get("type") or "chapter"
         xmind_data = data.get("xmind_data")
         file_path = data.get("file_path")
+        markdown_content = data.get("markdown_content")
         book_id = data.get("book_id")
         writing_chapter_id = data.get("writing_chapter_id")
         parent_outline_id = data.get("parent_outline_id")
@@ -76,11 +77,11 @@ async def save_outline(
     new_id = short_id8()
     await db.execute(
         "INSERT INTO outlines (id, title, type, sort, xmind_data, file_path, "
-        "book_id, writing_chapter_id, parent_outline_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "markdown_content, book_id, writing_chapter_id, parent_outline_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             new_id, title, outline_type, sort, xmind_data, file_path,
-            book_id, writing_chapter_id, parent_outline_id,
+            markdown_content, book_id, writing_chapter_id, parent_outline_id,
         ],
     )
     return {
@@ -94,8 +95,19 @@ async def save_outline(
 
 
 async def update_outline(
-    db: DatabaseConnection, data: dict[str, Any]
+    db: DatabaseConnection,
+    data: dict[str, Any],
+    *,
+    history_source: str | None = "user",
+    history_note: str | None = None,
 ) -> dict[str, Any] | None:
+    """更新大纲。
+
+    在写入新值之前会调用 ``insert_outline_history`` 把旧值整行快照写进
+    ``outline_history``，便于用户回退（尤其是 LLM 改坏总纲的场景）。
+    若调用方明确不想入历史（例如 restore 流程自己已经处理了快照），
+    可以传 ``history_source=None`` 关闭。
+    """
     outline_id = data.get("outlineId")
     if not outline_id:
         raise ValueError("outlineId required")
@@ -114,6 +126,78 @@ async def update_outline(
         vals.append(data["markdown_content"])
     if not parts:
         return await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outline_id])
+
+    if history_source:
+        prev = await db.fetch_one(
+            "SELECT title, type, markdown_content, xmind_data "
+            "FROM outlines WHERE id = ?",
+            [outline_id],
+        )
+        if prev is not None:
+            from database.crud.outline_history import insert_outline_history
+            try:
+                await insert_outline_history(
+                    db,
+                    outline_id=str(outline_id),
+                    before_title=prev.get("title"),
+                    before_type=prev.get("type"),
+                    before_markdown_content=prev.get("markdown_content"),
+                    before_xmind_data=prev.get("xmind_data"),
+                    source=history_source,
+                    note=history_note,
+                )
+            except Exception:
+                # 快照失败不应阻塞主写入；最坏情况是这一笔无回退点。
+                pass
+
+    vals.append(outline_id)
+    await db.execute(
+        f"UPDATE outlines SET {', '.join(parts)} WHERE id = ?", vals
+    )
+    return await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outline_id])
+
+
+async def restore_outline_from_history(
+    db: DatabaseConnection,
+    history_id: int,
+) -> dict[str, Any] | None:
+    """把指定历史快照写回 outlines；同时为本次回退再创建一条 history，
+    这样回退本身也能再次回退（相当于 redo）。"""
+    from database.crud.outline_history import (
+        get_outline_history,
+        insert_outline_history,
+    )
+
+    target = await get_outline_history(db, history_id)
+    if not target:
+        raise ValueError(f"outline_history id={history_id} not found")
+
+    outline_id = str(target["outline_id"])
+    current = await db.fetch_one(
+        "SELECT title, type, markdown_content, xmind_data "
+        "FROM outlines WHERE id = ?",
+        [outline_id],
+    )
+    if current is None:
+        raise ValueError(f"outline id={outline_id} not found")
+
+    await insert_outline_history(
+        db,
+        outline_id=outline_id,
+        before_title=current.get("title"),
+        before_type=current.get("type"),
+        before_markdown_content=current.get("markdown_content"),
+        before_xmind_data=current.get("xmind_data"),
+        source=f"rollback_of:{history_id}",
+        note=f"恢复至 #{history_id}",
+    )
+
+    parts = ["title = ?", "markdown_content = ?", "xmind_data = ?"]
+    vals: list[Any] = [
+        target.get("before_title"),
+        target.get("before_markdown_content"),
+        target.get("before_xmind_data"),
+    ]
     vals.append(outline_id)
     await db.execute(
         f"UPDATE outlines SET {', '.join(parts)} WHERE id = ?", vals
@@ -122,14 +206,17 @@ async def update_outline(
 
 
 async def delete_outline(db: DatabaseConnection, outline_id: str) -> None:
-    await db.execute("DELETE FROM outline_chapters WHERE outline_id = ?", [outline_id])
-    await db.execute("DELETE FROM outlines WHERE id = ?", [outline_id])
+    async with db.transaction():
+        await db.execute(
+            "DELETE FROM outline_chapters WHERE outline_id = ?", [outline_id]
+        )
+        await db.execute("DELETE FROM outlines WHERE id = ?", [outline_id])
 
 
 async def get_outlines(
     db: DatabaseConnection, type_filter: str | None = None
 ) -> list[dict[str, Any]]:
-    if type_filter in ("global", "chapter"):
+    if type_filter:
         return await db.fetch_all(
             "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
             [type_filter],

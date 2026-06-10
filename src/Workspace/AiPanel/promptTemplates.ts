@@ -44,6 +44,17 @@ export const PROMPT_PLACEHOLDERS: PromptPlaceholderSpec[] = [
     description: "当前正在写作的章节标题",
   },
   {
+    token: "{本章大纲}",
+    label: "本章大纲",
+    description:
+      "当前章节绑定的大纲 Markdown 正文（自动从本章对应的大纲读取，无需手动关联）",
+  },
+  {
+    token: "{前文}",
+    label: "前文",
+    description: "当前章节之前的最近 5 章标题（顿号分隔，自动取，无需手动关联）",
+  },
+  {
     token: "{关联章节}",
     label: "关联章节",
     description: "输入框上方「关联章节」选中的标题（顿号分隔）",
@@ -98,14 +109,49 @@ export const BUILTIN_PROMPT_TEMPLATES: PromptTemplateItem[] = [
       "基于关联大纲：{关联大纲}\n以及已写章节：{关联章节}\n请为《{书名}》的下一章产出 3 段式大纲（开局/冲突/结尾钩子），每段 60–100 字。",
     builtin: true,
   },
+  {
+    id: -7,
+    title: "按本章大纲写正文（去 AI 味）",
+    content:
+      "请严格按本章大纲生成《{书名}·{当前章节}》的正文。\n\n" +
+      "【本章大纲】\n{本章大纲}\n\n" +
+      "【前文衔接参考（最近 5 章）】{前文}\n\n" +
+      "硬性要求：\n" +
+      "1. 按大纲节拍依次落地，不跳节拍、不加大纲外的关键剧情；用大纲的逻辑骨架，但用小说语言写出血肉。\n" +
+      "2. 与前后章连贯：人物动机、称谓、时间线、战力/设定、已埋伏笔与前文一致；不重复前章已交代的事实，也不透支后章悬念。\n" +
+      "3. 对白像真人讲话，自然生动，绝不能像机器人对话——\n" +
+      "   - 按人物身份、教育程度、当前情绪选词；同一个人在熟人面前 vs 陌生人面前的语气要区分；\n" +
+      "   - 真人会有半句话、停顿、打断对方、走神、岔题、沉默、重复、口头禅、语气词（'啊''嗯''诶''那个'），适度用，不要密集到滑稽；\n" +
+      "   - 答非所问、绕开话题、欲言又止、阴阳怪气都比'问什么答什么'真实；\n" +
+      "   - 别让人物每句都说完整长句，别每句都补主语；短句、断句、省略主语都是常态；\n" +
+      "   - 避免'温柔地说''轻声道''冷冷地说''意味深长地''若有所思地'这类情绪副词堆砌；动作或环境侧写比副词更可信；\n" +
+      "   - 避免'您好''请问''多谢您''承蒙关照'连发的礼貌敬语墙——除非身份明确要求；\n" +
+      "   - 避免对白里大段解释设定、复述前情，那是说明文，不是说话；让信息通过冲突、追问、误解自然漏出；\n" +
+      "   - 称呼要稳定也要随情境波动（亲密时变称呼、生气时变称呼），不要全章一个口径。\n" +
+      "4. 去 AI 味（明确禁忌）：\n" +
+      "   - 不要'是…是…也是…''不是…而是…'的排比堆砌；\n" +
+      "   - 不要'仿佛 / 宛如 / 犹如 / 像极了'等比喻成串出现；\n" +
+      "   - 不要套路化氛围烘托（'空气仿佛凝固''时间似乎静止''心跳漏了一拍''一种说不出的感觉'）；\n" +
+      "   - 不要每段以总结句收尾，不要'这一刻他明白了…''他终于懂得…'式煽情；\n" +
+      "   - 不要给所有人物都加心理活动旁白，留白比解释更可信。\n" +
+      "5. 节奏：长短句交替，能用一句不用三句；细节该铺则铺，转场该跳则跳。\n" +
+      "6. 直接产出正文，**不复述大纲、不加章节标题、不写「以下是」「希望对你有帮助」之类话**。",
+    builtin: true,
+  },
 ];
 
 /** 构造替换上下文 */
 export interface PromptTemplateContext {
   bookTitle?: string | null;
   currentChapterTitle?: string | null;
+  /** 当前章节绑定的大纲 markdown 正文；对应 {本章大纲} */
+  currentChapterOutline?: string | null;
+  /** 当前章节之前的最近 N 章（默认 5）标题列表；对应 {前文} */
+  previousChapterTitles?: string[];
   associatedChapterTitles?: string[];
   associatedOutlineTitles?: string[];
+  /** Inline 改写场景下传入：当前选区文本，对应模板变量 {选中} / selection */
+  selection?: string | null;
 }
 
 /** 将内容中的自动占位符替换为上下文值 */
@@ -124,16 +170,28 @@ export function applyPromptPlaceholders(
     .map((s) => s.trim())
     .filter(Boolean)
     .join("、");
+  const selection = (ctx.selection || "").trim();
+  const chapterOutline = (ctx.currentChapterOutline || "").trim();
+  const previousTitles = (ctx.previousChapterTitles ?? [])
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join("、");
 
   const map: Record<string, string> = {
     "书名": book || "（未命名书籍）",
     "当前章节": chapter || "（未选择章节）",
+    "本章大纲": chapterOutline || "（本章暂无大纲，建议先在大纲面板补一份）",
+    "前文": previousTitles || "（无前文章节）",
     "关联章节": chapters || "（未关联章节）",
     "关联大纲": outlines || "（未关联大纲）",
+    "选中": selection || "（未选中文本）",
     bookTitle: book || "",
     chapterTitle: chapter || "",
+    chapterOutline: chapterOutline,
+    previousChapters: previousTitles,
     associatedChapters: chapters,
     associatedOutlines: outlines,
+    selection: selection,
   };
 
   return content.replace(/\{([^{}]+)\}/g, (match, key: string) => {
@@ -172,6 +230,17 @@ export function hasUnfilledPlaceholders(
       case "associatedOutlines":
         if (!(ctx.associatedOutlineTitles ?? []).filter(Boolean).length)
           missing.add("关联大纲");
+        break;
+      // 本章大纲 / 前文 是「自动从当前章上下文取」的占位符，模板里已带友好兜底
+      // 文案，再弹 warning 是双重提醒，体验差，这里不报缺。
+      case "本章大纲":
+      case "chapterOutline":
+      case "前文":
+      case "previousChapters":
+        break;
+      case "选中":
+      case "selection":
+        if (!(ctx.selection || "").trim()) missing.add("选中");
         break;
       default:
         break;

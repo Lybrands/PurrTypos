@@ -20,6 +20,34 @@ async def _try_exec(db: DatabaseConnection, sql: str) -> None:
         pass
 
 
+# 人物设定 Markdown 化迁移：旧表单字段 → profile_md 的小节布局
+_CHAR_LEGACY_BASICS = [
+    ("gender", "性别"), ("age", "年龄"), ("height", "身高"),
+    ("occupation", "职业"), ("origin", "籍贯"),
+]
+_CHAR_LEGACY_SECTIONS = [
+    ("appearance", "外貌"), ("personality", "性格"), ("background", "背景"),
+    ("biography", "人物小传"), ("remark", "备注"),
+]
+
+
+def _legacy_character_profile_md(row: dict) -> str:
+    """把旧的固定字段拼成 Markdown 人物档案；全空时返回空串。"""
+    parts: list[str] = []
+    basics = [
+        f"- {label}：{str(row.get(key) or '').strip()}"
+        for key, label in _CHAR_LEGACY_BASICS
+        if str(row.get(key) or "").strip()
+    ]
+    if basics:
+        parts.append("## 基本信息\n" + "\n".join(basics))
+    for key, label in _CHAR_LEGACY_SECTIONS:
+        val = str(row.get(key) or "").strip()
+        if val:
+            parts.append(f"## {label}\n{val}")
+    return "\n\n".join(parts)
+
+
 async def init_schema(db: DatabaseConnection) -> None:
     # ── books ────────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS books (
@@ -107,6 +135,8 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
+    # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")
 
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
@@ -207,6 +237,64 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
+    # ── book_style ───────────────────────────────────────────────
+    # 每本书一份「风格基调」，强制注入 system prompt（写作专家模式）
+    await db.execute("""CREATE TABLE IF NOT EXISTS book_style (
+        book_id TEXT NOT NULL PRIMARY KEY,
+        pov TEXT DEFAULT '',
+        tone TEXT DEFAULT '',
+        pace TEXT DEFAULT '',
+        banned_rules TEXT DEFAULT '',
+        reference_chapter_ids TEXT DEFAULT '',
+        free_notes TEXT DEFAULT '',
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── chapter_canvas ───────────────────────────────────────────
+    # 每章一个 AI 草稿区（与 articles 一对一），AI 写到 canvas 上不污染正文，
+    # 用户点「合并到正文」走 diff 流程后才落地到 articles。
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_canvas (
+        chapter_id TEXT NOT NULL PRIMARY KEY,
+        content TEXT NOT NULL DEFAULT '',
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── outline_history ──────────────────────────────────────────
+    # 大纲修订历史；每次 update_outline / editGlobalOutline 落库前快照旧值，
+    # 让用户能把被 LLM 改坏的大纲一键回退。
+    await db.execute("""CREATE TABLE IF NOT EXISTS outline_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outline_id TEXT NOT NULL,
+        before_title TEXT DEFAULT NULL,
+        before_type TEXT DEFAULT NULL,
+        before_markdown_content TEXT DEFAULT NULL,
+        before_xmind_data TEXT DEFAULT NULL,
+        source TEXT NOT NULL DEFAULT 'user',
+        note TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outline_history_outline "
+        "ON outline_history(outline_id, create_time DESC)"
+    )
+
+    # ── chapter_diff_history ─────────────────────────────────────
+    # AI 改正文产生的 diff 历史；commit 时同时落盘 articles
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_diff_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chapter_id TEXT NOT NULL,
+        before_text TEXT NOT NULL DEFAULT '',
+        after_text TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'ai_rewrite',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chapter_diff_history_chapter "
+        "ON chapter_diff_history(chapter_id, create_time DESC)"
+    )
+
     # ── story_background_attachments ─────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS story_background_attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -250,6 +338,18 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN origin TEXT DEFAULT ''")
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN personality TEXT DEFAULT ''")
     await _try_exec(db, "ALTER TABLE characters ADD COLUMN remark TEXT DEFAULT ''")
+
+    # ── 人物设定 Markdown 化迁移 ──────────────────────────────────
+    # 表单字段（性别/年龄/…/小传/备注）合并为一篇 profile_md；name / tags 仍保留
+    # 结构化（卡片列表与 AI 工具按姓名/标签定位需要）。旧列保留不再写入。
+    # NULL 作为「尚未迁移」哨兵：迁移后至少写入空串，保证幂等。
+    await _try_exec(db, "ALTER TABLE characters ADD COLUMN profile_md TEXT DEFAULT NULL")
+    unmigrated = await db.fetch_all("SELECT * FROM characters WHERE profile_md IS NULL")
+    for row in unmigrated:
+        await db.execute(
+            "UPDATE characters SET profile_md = ? WHERE id = ?",
+            [_legacy_character_profile_md(row), row["id"]],
+        )
 
     # ── seed character_options defaults ───────────────────────────
     personality_seed = ["开朗", "内敛", "沉稳", "冲动", "善良", "冷酷", "腹黑", "正义"]

@@ -95,8 +95,9 @@ async def add_chapter(
 
 
 async def delete_chapter(db: DatabaseConnection, chapter_id: str) -> None:
-    await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapter_id])
-    await db.execute("DELETE FROM articles WHERE chapter_id = ?", [chapter_id])
+    async with db.transaction():
+        await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapter_id])
+        await db.execute("DELETE FROM articles WHERE chapter_id = ?", [chapter_id])
 
 
 async def rename_chapter(

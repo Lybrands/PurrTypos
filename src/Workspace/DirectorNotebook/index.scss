@@ -1,0 +1,473 @@
+.director-notebook {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.director-notebook-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-surface);
+
+  .director-notebook-title {
+    font-size: var(--font-size);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .director-notebook-header-right {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .director-notebook-fullscreen-btn {
+    color: var(--text-muted);
+    &:hover {
+      color: var(--accent);
+    }
+  }
+}
+
+/**
+ * 章节列表模式（v3 起的默认形态）：左栏直接就是章节列表，无任何分组/折叠包裹。
+ * - body flex 列方向；操作条 + 列表两行
+ * - nav-chapter-list 撑满剩余空间，内部自滚动
+ */
+.director-notebook--list {
+  .director-notebook-body {
+    overflow: hidden;
+  }
+
+  .nav-chapter-list {
+    max-height: none;
+    flex: 1;
+    min-height: 0;
+  }
+}
+
+/* 章节列表顶部操作条（替代原 CollapsibleSection 的 header） */
+.chapter-list-actionbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 4px var(--spacing-sm);
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-surface);
+
+  .chapter-list-count {
+    font-size: var(--font-size-xs, 11px);
+    color: var(--text-muted);
+    flex: 1;
+  }
+
+  .chapter-list-actionbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+}
+
+.chapter-list-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.director-notebook-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── 可折叠分组 ─── */
+.notebook-section {
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  &.collapsed {
+    flex-shrink: 0;
+  }
+
+  &.expanded {
+    /* 展开时允许内部滚动 */
+    flex: 0 0 auto;
+  }
+}
+
+.notebook-section-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--spacing-sm);
+  cursor: pointer;
+  user-select: none;
+  background: var(--bg-surface);
+  transition: background 0.15s;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+
+  .notebook-section-arrow {
+    font-size: 10px;
+    color: var(--text-muted);
+    transition: transform 0.15s;
+    width: 12px;
+    text-align: center;
+
+    &.collapsed {
+      transform: rotate(-90deg);
+    }
+  }
+
+  .notebook-section-icon {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .notebook-section-title {
+    flex: 1;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .notebook-section-count {
+    font-size: var(--font-size-xs, 11px);
+    color: var(--text-muted);
+    background: var(--bg-hover);
+    padding: 1px 6px;
+    border-radius: 8px;
+    min-width: 18px;
+    text-align: center;
+  }
+
+  .notebook-section-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }
+}
+
+.notebook-section-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  padding: 4px 0;
+}
+
+/* placeholder 占位分组 */
+.notebook-placeholder {
+  padding: var(--spacing) var(--spacing-sm);
+  text-align: center;
+
+  .notebook-placeholder-title {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    margin: 0 0 4px 0;
+  }
+  .notebook-placeholder-desc {
+    font-size: var(--font-size-xs, 11px);
+    color: var(--text-disabled, var(--text-muted));
+    line-height: 1.5;
+    margin: 0;
+  }
+}
+
+/* ─── 章节分组样式（从 EditorPanel/index.scss 迁移） ─── */
+/* 笔记本里不再有外部折叠按钮、标题行等容器 */
+.notebook-section .nav-toggle,
+.notebook-section .nav-title-row {
+  display: none;
+}
+
+.nav-add-btn,
+.nav-batch-btn,
+.nav-batch-cancel {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+
+  &:hover {
+    color: var(--accent);
+  }
+}
+
+.nav-batch-delete {
+  font-size: var(--font-size-sm);
+  color: var(--color-error, #ff4d4f);
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+.nav-add-row {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.nav-add-row-indent {
+  padding-left: 28px;
+}
+
+/* 列表末尾的"点击新建章节"占位行：克制的虚线 + 居中弱化文字，hover 升亮。
+   尺寸/边框跟 .nav-chapter-item 对齐，看起来就是一条空白章节占位。 */
+.nav-add-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  margin: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  border: 1px dashed var(--border);
+  border-radius: var(--border-radius);
+  background: transparent;
+  transition: all 0.12s;
+  user-select: none;
+  white-space: nowrap;
+
+  &:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--bg-hover);
+  }
+
+  &.nav-add-placeholder--indent {
+    margin-left: 28px;
+  }
+
+  .anticon {
+    font-size: var(--font-size-sm);
+  }
+}
+
+.nav-add-prefix {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--accent);
+  white-space: nowrap;
+  padding: 4px 4px 4px 0;
+  user-select: none;
+}
+
+.nav-add-input {
+  flex: 1;
+  font-size: var(--font-size-sm);
+}
+
+.nav-chapter-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: 360px;
+}
+
+.nav-chapter-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--font-size);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+
+  &.nav-volume-item {
+    cursor: default;
+    font-weight: var(--font-weight-medium);
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+
+    &:hover {
+      background: var(--bg-hover-list);
+    }
+  }
+
+  &.nav-chapter-under-volume {
+    padding-left: 28px;
+  }
+
+  .nav-chapter-checkbox {
+    flex-shrink: 0;
+    margin: 0;
+  }
+
+  .nav-volume-collapse-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+  }
+
+  .nav-volume-arrow {
+    transition: transform 0.15s;
+    display: inline-block;
+    &.collapsed {
+      transform: rotate(-90deg);
+    }
+  }
+
+  &:hover {
+    background: var(--bg-hover-list);
+
+    .nav-chapter-actions {
+      display: flex;
+    }
+  }
+
+  &.active {
+    background: var(--bg-active);
+    border-left: 2px solid var(--accent);
+
+    .nav-chapter-actions {
+      display: flex;
+    }
+  }
+
+  &.selected {
+    background: var(--accent-dim);
+  }
+}
+
+.nav-chapter-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+
+  &.nav-volume-title {
+    font-weight: var(--font-weight-medium);
+  }
+}
+
+.nav-chapter-actions {
+  flex-shrink: 0;
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.nav-action-btn {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+
+  &:hover {
+    color: var(--accent);
+  }
+}
+
+.nav-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+}
+
+.nav-empty {
+  padding: var(--spacing-lg) var(--spacing-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  text-align: center;
+  line-height: var(--line-height);
+
+  small {
+    font-size: var(--font-size-sm);
+    opacity: 0.8;
+  }
+}
+
+/* ─── 大纲分组 detail 视图覆盖（去除原 outline-panel 的全屏占位） ─── */
+.notebook-section .outline-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  &.view-detail {
+    /* 详情视图占据笔记本中较大的空间 */
+    height: 480px;
+    max-height: 70vh;
+  }
+}
+
+/* ─── 人物 / 故事背景 wrapper ─── */
+.notebook-section .character-tab-wrapper,
+.notebook-section .story-background-tab-wrapper {
+  height: 360px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* ─── 风格基调表单 ─── */
+.style-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-sm);
+
+  .style-form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .style-form-label {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--text);
+    display: flex;
+    align-items: baseline;
+    gap: var(--spacing-xs);
+  }
+
+  .style-form-hint {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  .style-form-footer {
+    margin-top: var(--spacing-xs);
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: help;
+  }
+}
