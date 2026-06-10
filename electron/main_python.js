@@ -38,6 +38,8 @@ function getFrozenBackendExe(backendDir) {
 }
 
 function startPythonBackend() {
+  if (pythonProcess) return
+
   const backendDir = app.isPackaged
     ? path.join(process.resourcesPath, 'backend')
     : path.join(__dirname, '..', 'backend')
@@ -90,10 +92,42 @@ async function waitForBackend(maxRetries = 30, intervalMs = 500) {
   throw new Error('Python backend failed to start')
 }
 
-function stopPythonBackend() {
-  if (pythonProcess) {
-    pythonProcess.kill()
-    pythonProcess = null
+async function fetchDatabaseInfo() {
+  const res = await fetch(`${BACKEND_URL}/api/database/info`)
+  return await res.json()
+}
+
+async function stopPythonBackend(timeoutMs = 5000) {
+  const proc = pythonProcess
+  if (!proc) return
+  await new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (pythonProcess === proc) pythonProcess = null
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch (_) {}
+      finish()
+    }, timeoutMs)
+    proc.once('close', () => {
+      clearTimeout(timer)
+      finish()
+    })
+    try {
+      proc.kill()
+    } catch (_) {
+      clearTimeout(timer)
+      finish()
+    }
+  })
+}
+
+function removeDatabaseSidecars(dbPath) {
+  for (const suffix of ['-wal', '-shm']) {
+    try { fs.rmSync(`${dbPath}${suffix}`, { force: true }) } catch (_) {}
   }
 }
 
@@ -275,16 +309,21 @@ ipcMain.handle('story-background-pick-attachments', async (_, { bookId }) => {
     })
     if (result.canceled || result.filePaths.length === 0) return { success: false, error: 'canceled' }
 
-    const formData = new FormData()
+    const attachmentDir = path.join(app.getPath('userData'), 'story-background-attachments', String(bookId))
+    fs.mkdirSync(attachmentDir, { recursive: true })
+    const attachments = []
     for (const fp of result.filePaths) {
       const name = path.basename(fp)
-      const buf = fs.readFileSync(fp)
-      formData.append('files', new Blob([buf]), name)
+      const storedName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${name}`
+      const relativePath = path.join('story-background-attachments', String(bookId), storedName)
+      fs.copyFileSync(fp, path.join(app.getPath('userData'), relativePath))
+      attachments.push({ name, storedPath: relativePath })
     }
 
-    const res = await fetch(`${BACKEND_URL}/api/story-background/${bookId}/upload-attachments`, {
+    const res = await fetch(`${BACKEND_URL}/api/story-background/${bookId}/attachments`, {
       method: 'POST',
-      body: formData,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attachments }),
     })
     return await res.json()
   } catch (err) {
@@ -344,7 +383,7 @@ ipcMain.handle('write-export-files', async (_, { entries, exportAsZip }) => {
 
 ipcMain.handle('export-database', async () => {
   try {
-    const res = await fetch(`${BACKEND_URL}/api/database/export`)
+    const res = await fetch(`${BACKEND_URL}/api/database/export`, { method: 'POST' })
     if (!res.ok) return { success: false, error: '导出失败' }
     const buffer = Buffer.from(await res.arrayBuffer())
     const defaultName = `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.db`
@@ -363,6 +402,12 @@ ipcMain.handle('export-database', async () => {
 
 ipcMain.handle('import-database', async () => {
   try {
+    let beforeStats = null
+    try {
+      const before = await fetchDatabaseInfo()
+      if (before.success) beforeStats = before.data
+    } catch (_) {}
+
     const result = await dialog.showOpenDialog(mainWindow, {
       title: '选择要导入的数据库备份文件',
       filters: [
@@ -374,18 +419,41 @@ ipcMain.handle('import-database', async () => {
     if (result.canceled || result.filePaths.length === 0) return { success: false, error: 'canceled' }
 
     const sourcePath = result.filePaths[0]
-    const fileBuffer = fs.readFileSync(sourcePath)
-    const res = await fetch(`${BACKEND_URL}/api/database/import`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: fileBuffer,
-    })
-    const data = await res.json()
-    if (data.success && mainWindow && !mainWindow.isDestroyed()) {
+    if (!fs.existsSync(sourcePath)) return { success: false, error: '备份文件不存在' }
+
+    const dbPath = path.join(app.getPath('userData'), 'purrtypos.db')
+    if (path.resolve(sourcePath).toLowerCase() === path.resolve(dbPath).toLowerCase()) {
+      return { success: false, error: '不能导入当前正在使用的数据库文件' }
+    }
+
+    await stopPythonBackend()
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+    if (fs.existsSync(dbPath)) {
+      fs.copyFileSync(dbPath, `${dbPath}.before-import-${Date.now()}.bak`)
+    }
+    fs.copyFileSync(sourcePath, dbPath)
+    removeDatabaseSidecars(dbPath)
+
+    startPythonBackend()
+    await waitForBackend()
+
+    let afterStats = null
+    try {
+      const after = await fetchDatabaseInfo()
+      if (after.success) afterStats = after.data
+    } catch (_) {}
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.reload()
     }
-    return data
+    return { success: true, data: { beforeStats, afterStats } }
   } catch (err) {
+    try {
+      if (!pythonProcess) {
+        startPythonBackend()
+        await waitForBackend()
+      }
+    } catch (_) {}
     return { success: false, error: err.message }
   }
 })

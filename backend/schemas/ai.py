@@ -12,7 +12,9 @@ class ChatStreamRequest(BaseModel):
     apiProvider: str = "openai"
     options: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
-    useToolRouter: bool = False
+    # 是否在请求中携带 skills/<name>/SKILL.md 解析出的工具列表。
+    # 名字曾叫 useToolRouter（误导：实际并无路由，只是"是否加载工具"开关）。
+    enableAgentTools: bool = False
     bookId: Optional[str] = None
     chapterId: Optional[str] = None
     currentChapterTitle: Optional[str] = None
@@ -20,6 +22,10 @@ class ChatStreamRequest(BaseModel):
     availableOutlines: Optional[List[Any]] = None
     associatedChapterIds: Optional[List[str]] = None
     associatedOutlineIds: Optional[List[str]] = None
+    # 用户在 AiContextBar 勾选的设定/伏笔 id：后端前置 fetch 后注入 system，
+    # 前端不再自行拼接记忆文案。
+    selectedMemoryIds: Optional[List[Any]] = None
+    selectedForeshadowingIds: Optional[List[Any]] = None
     agentMode: Optional[str] = None
     chatAgentMode: Optional[str] = None
     writingMode: str = "default"

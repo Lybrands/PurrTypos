@@ -100,49 +100,16 @@
   display: flex;
   flex: 1;
   overflow: hidden;
+  position: relative; /* 用于浮窗的绝对定位锚点 */
 }
 
-.panel-left {
-  flex-shrink: 0;
-  overflow: hidden;
-
-  &.collapsed {
-    border-right: 1px solid var(--border);
+/* AI-Centric 工作区：AI 主区域占满 */
+.app-body--ai-centric {
+  > .panel-ai--fill {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
   }
-}
-
-.panel-ai {
-  &.collapsed {
-    border-left: 1px solid var(--border);
-  }
-}
-
-.panel-collapse-bar {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-panel);
-  min-height: 0;
-  cursor: pointer;
-  color: var(--text-muted);
-
-  &:hover {
-    background: var(--bg-hover);
-  }
-}
-
-.panel-right {
-  display: flex;
-  overflow: hidden;
-  flex-shrink: 0;
-  transition: width 0s;
-}
-
-.panel-editor,
-.panel-ai {
-  flex-shrink: 0;
-  overflow: hidden;
 }
 
 .workspace-panel-fallback {

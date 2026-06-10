@@ -1,0 +1,181 @@
+/* 悬浮面板：盖在 AI 主区域之上，绝对定位在 .app-body 内
+ * 浮窗永远是「钉住」状态（pin 切换功能已移除），使用收一档的阴影 + 品牌色边框，
+ * 视觉上明确表达「已锚定，点击外部不会消失」。 */
+.floating-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 80vh;
+  max-height: calc(100% - 16px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--brand-color, var(--border-strong, var(--border)));
+  border-radius: 8px;
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.14),
+    0 2px 6px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  /* 拖动 / 改宽过程中由 JS 写 transform & width */
+  will-change: transform, width;
+}
+
+.floating-panel-header {
+  flex-shrink: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+  background: var(--bg-surface, var(--bg-base));
+  border-bottom: 1px solid var(--border-light, var(--border));
+  cursor: grab;
+  user-select: none;
+
+  &:active {
+    cursor: grabbing;
+  }
+}
+
+.floating-panel-title {
+  font-size: var(--font-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary, var(--text));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.floating-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.floating-panel-action {
+  &.is-active {
+    color: var(--brand-color, var(--text));
+  }
+}
+
+.floating-panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  /*
+   * 让出右侧 8px：避免内部容器（如 .editor-lexical-wrap、章节列表）的滚动条
+   * 跟 .floating-panel-resize--right (6px) 重叠导致无法拖动。
+   * resize 把手仍坐在面板最右；滚动条被推到 8px 内侧，互不干扰。
+   */
+  padding-right: 8px;
+
+  /* 让内嵌的 .panel 撑满 + 拿掉它自己的圆角/边框，避免和外壳冲突 */
+  > .panel {
+    flex: 1;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+}
+
+.floating-panel-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  cursor: ew-resize;
+  z-index: 1;
+
+  &--left {
+    left: 0;
+  }
+  &--right {
+    right: 0;
+  }
+
+  &:hover {
+    background: var(--brand-color, var(--border-strong, var(--border)));
+    opacity: 0.4;
+  }
+}
+
+/* ─── 侧边竖线触发器（参考 VSCode / Cursor 侧边栏入口）─────────
+ * - 默认：左/右边缘 14px 宽热区 + 3px 细线，几乎不可见（弱化提示）
+ * - hover：细线变粗变亮，由外层 Tooltip 显示文字提示
+ * - 激活（对应浮窗已打开）：变成主色细条
+ * - disabled：该 panel 已是主区域，无需 toggle
+ */
+.floating-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  z-index: 30;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.18s;
+
+  /* 默认细线：低对比，仅作为暗示 */
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--border);
+    opacity: 0.6;
+    transition:
+      width 0.2s,
+      opacity 0.2s,
+      background 0.2s;
+  }
+
+  &--left {
+    left: 0;
+    &::before {
+      left: 0;
+    }
+  }
+  &--right {
+    right: 0;
+    &::before {
+      right: 0;
+    }
+  }
+
+  /* hover：细线变粗变亮 */
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+
+    &::before {
+      width: 4px;
+      opacity: 1;
+      background: var(--text-muted);
+    }
+  }
+
+  /* 激活态：浮窗已打开 → 细线变主色 */
+  &.is-active {
+    &::before {
+      width: 4px;
+      opacity: 1;
+      background: var(--accent);
+    }
+  }
+
+  /* disabled：该 panel 已经是主区域，无需 toggle 浮窗 */
+  &:disabled {
+    cursor: default;
+    opacity: 0.4;
+
+    &::before {
+      opacity: 0.3;
+    }
+  }
+}

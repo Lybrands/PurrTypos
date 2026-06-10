@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
+from config import DATA_DIR
 from database.crud import story_background as story_background_crud
 from dependencies import get_db
 from schemas.story_background import SaveStoryBackgroundRequest
+from utils.file_storage import safe_unlink_stored_file
 
 router = APIRouter(tags=["story-background"])
+
+
+class AttachmentInput(BaseModel):
+    name: str
+    storedPath: str = Field(alias="stored_path")
+
+    model_config = {"populate_by_name": True}
+
+
+class AddAttachmentsRequest(BaseModel):
+    attachments: list[AttachmentInput] = Field(default_factory=list)
 
 
 @router.get("/story-background/{bookId}")
@@ -34,8 +48,21 @@ async def get_attachments(bookId: str):
 
 
 @router.post("/story-background/{bookId}/attachments")
-async def add_attachment(bookId: str):
-    return {"success": False, "error": "File upload via API not supported — use Electron dialog"}
+async def add_attachment(bookId: str, body: AddAttachmentsRequest):
+    db = get_db()
+    added = []
+    async with db.transaction():
+        for item in body.attachments:
+            row = await story_background_crud.add_story_background_attachment(
+                db,
+                bookId,
+                item.name,
+                item.storedPath,
+            )
+            if row:
+                added.append(row)
+    rows = await story_background_crud.get_story_background_attachments(db, bookId)
+    return {"success": True, "data": rows, "addedCount": len(added)}
 
 
 @router.delete("/story-background/attachments/{id}")
@@ -48,4 +75,5 @@ async def delete_attachment(id: int):
     await db.execute(
         "DELETE FROM story_background_attachments WHERE id = ?", [id]
     )
+    safe_unlink_stored_file(stored_path, DATA_DIR)
     return {"success": True, "data": {"storedPath": stored_path}}

@@ -60,19 +60,17 @@ def format_chapters_as_text(chapters: list[dict]) -> str:
 
 
 def format_characters_as_text(characters: list[dict]) -> str:
+    """人物档案 Markdown 拼接（人物档案已 Markdown 化，按人物分节直出）。"""
     if not characters:
         return ""
     parts: list[str] = []
     for c in characters:
-        segs = [f"【{c.get('name', '未命名')}】", f"人物ID:{c.get('id', '')}"]
-        for key, label in [
-            ("gender", "性别"), ("age", "年龄"), ("occupation", "职业"),
-            ("personality", "性格"), ("appearance", "外貌"), ("origin", "来历"),
-            ("background", "背景"), ("biography", "经历"), ("tags", "标签"),
-            ("remark", "备注"),
-        ]:
-            val = c.get(key)
-            if val:
-                segs.append(f"{label}：{val}")
-        parts.append("，".join(segs))
-    return "\n".join(parts)
+        lines = [f"### {c.get('name', '未命名')}（人物ID:{c.get('id', '')}）"]
+        tags = str(c.get("tags") or "").strip()
+        if tags:
+            lines.append(f"标签：{tags}")
+        profile = str(c.get("profile_md") or "").strip()
+        if profile:
+            lines.append(profile)
+        parts.append("\n".join(lines))
+    return "\n\n---\n\n".join(parts)

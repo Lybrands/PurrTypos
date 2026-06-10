@@ -44,3 +44,11 @@
 .subagent-result-copy {
   margin-top: 8px;
 }
+
+// ── 续写规划 (continuation_plan) 文案展示 ──────────────────────────
+.subagent-plan-text {
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: inherit; // 用正文字体，不要等宽
+  max-height: 480px;
+}

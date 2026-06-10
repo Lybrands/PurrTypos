@@ -44,9 +44,12 @@ async def update_spark_idea(id_: str, data: dict) -> dict | None:
         return None
     content = data.get("content", row["content"])
     layer = data.get("layer", row["layer"])
+    # chapter_id / character_id 显式传 None 视为清空（如把"章节设定"改成"全局设定"时）
+    chapter_id = data.get("chapter_id", row["chapter_id"]) if "chapter_id" in data else row["chapter_id"]
+    character_id = data.get("character_id", row["character_id"]) if "character_id" in data else row["character_id"]
     await db.execute(
-        "UPDATE ai_memories SET content = ?, layer = ? WHERE id = ?",
-        [content, layer, id_],
+        "UPDATE ai_memories SET content = ?, layer = ?, chapter_id = ?, character_id = ? WHERE id = ?",
+        [content, layer, chapter_id, character_id, id_],
     )
     updated = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [id_])
     return _spark_idea_row(updated)

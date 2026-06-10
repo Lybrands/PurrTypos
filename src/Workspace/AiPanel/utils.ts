@@ -41,11 +41,7 @@ export function loadModelPrefs(
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
   const defaultChatAgentMode: ChatAgentMode =
-    settingsDefaultAgentMode === 'subagent'
-      ? 'expert'
-      : settingsDefaultAgentMode === 'expert_team'
-        ? 'expert_team'
-        : 'agent'
+    settingsDefaultAgentMode === 'subagent' ? 'expert' : 'agent'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {
@@ -115,12 +111,26 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         } catch (_) {}
       }
       if (!thinkingBlocks && item.thinking?.trim()) thinkingBlocks = [item.thinking.trim()]
+      let subagentResult: ChatMessage['subagentResult']
+      if (item.subagent_result) {
+        try {
+          const parsed = JSON.parse(item.subagent_result) as unknown
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            typeof (parsed as { role?: unknown }).role === 'string'
+          ) {
+            subagentResult = parsed as ChatMessage['subagentResult']
+          }
+        } catch (_) {}
+      }
       let assistantMsg: ChatMessage = {
         role: 'assistant',
         content: item.response,
         model: item.model || undefined,
         thinking: item.thinking || undefined,
         thinkingBlocks,
+        subagentResult,
       }
       const rawSegments = item.tool_call_segments
       if (rawSegments) {
