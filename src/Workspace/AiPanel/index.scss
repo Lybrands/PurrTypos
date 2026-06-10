@@ -36,9 +36,12 @@
 
   // 让 editable-card 的卡片样式贴合整体风格
   .ant-tabs-tab {
+    display: flex;
+    align-items: center;
     height: 34px;
     padding: 0 6px 0 12px !important;
     font-size: var(--font-size-sm);
+    line-height: 1;
     color: var(--text-muted);
     background: transparent !important;
     border-color: var(--border-light) !important;
@@ -47,6 +50,12 @@
     transition:
       color 0.12s,
       background 0.12s;
+
+    .ant-tabs-tab-btn {
+      display: inline-flex;
+      align-items: center;
+      line-height: 1;
+    }
 
     &:hover {
       color: var(--text-primary);
@@ -186,6 +195,7 @@
     .bubble-label {
       text-align: right;
       color: var(--accent);
+      padding-right: var(--spacing-sm);
     }
 
     .bubble-content {
@@ -193,6 +203,7 @@
       border: 1px solid rgba(79, 195, 247, 0.2);
       color: var(--text-primary);
       margin-left: 12px;
+      margin-right: var(--spacing-xs);
     }
 
     .bubble-user-actions {
@@ -200,6 +211,7 @@
       justify-content: flex-end;
       margin-top: 4px;
       margin-left: 12px;
+      margin-right: var(--spacing-xs);
       opacity: 0;
       transition: opacity 0.15s;
     }
@@ -560,5 +572,259 @@
   .bubble-content--waiting-dots {
     color: var(--text-muted);
     margin-top: 2px;
+  }
+}
+
+/* ─── AI 主区域：参考 Cursor 主页的极简风格 ──────────────────────
+ * - 背景下沉到 --bg-base，与悬浮 panel/输入卡片形成层级感
+ * - panel-header 移到右上角浮起、隐藏标题，让顶部纯净
+ * - session tabs 居中限宽 + 透明化
+ * - 聊天历史限宽 860px 居中，左右大留白
+ * - 输入区重构为大圆角卡片（阴影 + 居中），输入框融入卡片内
+ */
+.ai-panel.panel-main {
+  background: var(--bg-base);
+  border-left: none;
+  position: relative;
+
+  /* panel-header 弱化：右上角浮起 */
+  > .panel-header {
+    position: absolute;
+    top: 6px;
+    right: 12px;
+    background: transparent;
+    border-bottom: none;
+    height: 28px;
+    padding: 0 4px;
+    z-index: 5;
+    width: auto;
+    pointer-events: auto;
+
+    .panel-title {
+      display: none;
+    }
+
+    .panel-header-actions .ant-btn {
+      opacity: 0.4;
+      transition: opacity 0.18s;
+      &:hover {
+        opacity: 1;
+      }
+    }
+  }
+
+  /* session tabs：居中 + 透明 + 顶部留白 */
+  .session-tabs-bar.ant-tabs {
+    background: transparent;
+    width: var(--main-col-width);
+    max-width: 100%;
+    margin: 18px auto 4px;
+
+    .ant-tabs-nav {
+      min-height: 36px;
+      padding: 0;
+      &::before {
+        border-color: transparent;
+      }
+    }
+
+    .ant-tabs-tab {
+      align-self: center;
+      height: 30px;
+      padding: 0 8px 0 14px !important;
+      background: transparent !important;
+      border-color: transparent !important;
+      border-radius: 8px !important;
+
+      &.ant-tabs-tab-active {
+        background: var(--bg-panel) !important;
+        border-color: var(--border-light) !important;
+      }
+    }
+  }
+
+  /* 聊天列表：居中限宽 */
+  .chat-history-wrap {
+    background: transparent;
+    justify-content: center;
+  }
+
+  .chat-history {
+    /*
+     * 基础样式里是 `flex: 1`（等价于 flex-basis: 0%），会盖掉这里的 width
+     * 让对话列被父级 .chat-history-wrap 横向撑满。
+     * 改成 `flex: 0 1 auto` —— 不主动 grow、可以 shrink、basis 取自 width，
+     * 这样下面的 width / max-width / margin auto 才真正生效。
+     */
+    flex: 0 1 auto;
+    width: var(--main-col-width);
+    max-width: 100%;
+    margin: 0 auto;
+    padding: var(--spacing) 24px;
+  }
+
+  /*
+   * 主区域里聊天列被居中限宽到 --main-col-width，而「回到底部」按钮是 .chat-history-wrap
+   * 的绝对子元素，默认 right: var(--spacing) 会贴到 panel 最右边、远离对话列。
+   * 这里把它拉回到居中列的右边缘内侧；窄屏（panel 比最小列宽更窄）退化为面板右侧。
+   */
+  .chat-scroll-to-bottom-btn {
+    right: max(var(--spacing), calc(var(--main-col-gutter) + 16px));
+  }
+
+  /* divider 弱化：默认透明，hover 才出来 */
+  .chat-input-area-divider {
+    background: transparent;
+    height: 6px;
+    width: var(--main-col-width);
+    max-width: 100%;
+    margin: 0 auto;
+    border-radius: 3px;
+    transition: background 0.2s;
+    flex-shrink: 0;
+
+    &:hover {
+      background: var(--border);
+    }
+  }
+
+  /* 输入区 = 大圆角卡片 */
+  .chat-input-area {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    box-shadow:
+      0 12px 36px rgba(0, 0, 0, 0.22),
+      0 2px 8px rgba(0, 0, 0, 0.10);
+    width: var(--main-col-width);
+    max-width: 100%;
+    margin: 0 auto 24px;
+    padding: 12px 14px;
+    gap: 8px;
+  }
+
+  /* 输入框透明融入卡片 */
+  .chat-input.ant-input,
+  textarea.chat-input.ant-input {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 4px 2px !important;
+    font-size: var(--font-size);
+    line-height: 1.6;
+
+    &:focus,
+    &:hover {
+      box-shadow: none !important;
+      border: none !important;
+    }
+  }
+
+  /* 发送按钮：右下角圆形主色按钮 */
+  .btn-submit--icon.ant-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow:
+      0 4px 12px color-mix(in srgb, var(--accent) 40%, transparent),
+      0 1px 2px rgba(0, 0, 0, 0.20);
+    transition: transform 0.15s, box-shadow 0.18s, opacity 0.15s;
+
+    &:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow:
+        0 6px 16px color-mix(in srgb, var(--accent) 55%, transparent),
+        0 2px 4px rgba(0, 0, 0, 0.24);
+    }
+
+    &:disabled,
+    &.ant-btn-disabled {
+      box-shadow: none;
+      opacity: 0.45;
+    }
+
+    .anticon {
+      font-size: 16px;
+      line-height: 0;
+    }
+  }
+
+  .btn-submit--icon.btn-stop {
+    box-shadow: none;
+    background: var(--bg-hover);
+    &:hover {
+      background: var(--bg-active) !important;
+    }
+  }
+
+  /* 空状态：上下大留白，让"开始对话"提示居中 */
+  .chat-empty {
+    padding: 80px var(--spacing) 40px;
+    color: var(--text-muted);
+    opacity: 0.7;
+
+    .ant-empty-description {
+      font-size: var(--font-size-lg);
+    }
+  }
+}
+
+/* ─── 写作模式浮岛：ai-panel--compact ────────────────────────────
+ * mainPanel === 'editor' 时 AI 栏收紧为浮岛形态：
+ * - 隐藏 system prompt / 模式切换等次要控件，让出空间给写作
+ * - 保留 session 标签栏（其中的「+ 新建对话」/ 历史按钮是高频入口，悬浮态也要可达）
+ * - 消息气泡字号与 padding 压缩；历史列表仍可滚动
+ * - 输入区保留完整能力（写作中的 AI 召唤点）
+ */
+.ai-panel--compact {
+  .system-prompt-area {
+    display: none;
+  }
+
+  /* session 标签栏在窄面板里收紧：单行水平滚，按钮区永远右贴 */
+  .session-tabs-bar.ant-tabs {
+    .ant-tabs-nav {
+      min-height: 30px;
+    }
+    .ant-tabs-tab {
+      padding: 2px 6px;
+      font-size: var(--font-size-sm);
+    }
+  }
+
+  .panel-header {
+    min-height: 32px;
+    padding: 0 var(--spacing-sm);
+
+    .panel-title {
+      font-size: var(--font-size-sm);
+      color: var(--text-secondary);
+    }
+  }
+
+  .chat-bubble {
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-sm);
+
+    &.user .bubble-content,
+    &.assistant .bubble-assistant-body {
+      padding: var(--spacing-xs) var(--spacing-sm);
+    }
+
+    .bubble-label {
+      font-size: var(--font-size-xs);
+    }
+  }
+
+  .chat-input-area {
+    padding: var(--spacing-xs) var(--spacing-sm);
+  }
+
+  .chat-input-inner textarea.ant-input {
+    font-size: var(--font-size-sm);
   }
 }

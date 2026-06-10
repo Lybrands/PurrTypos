@@ -68,6 +68,19 @@
   --spacing-lg: 16px;
   --spacing-xl: 24px;
 
+  /* ─── 「主区域」居中正文列尺寸（AI 主面板 / 写作主面板共用） ─────────────
+   * 设计：固定百分比宽度 + 最小宽度兜底；
+   *      宽屏跟随面板放大，窄屏到 720px 触底，避免行长过短或过长。
+   *      要整体调档只改这两处即可，所有相关居中、内偏移、浮签都会自动跟随。
+   */
+  --main-col-pct: 70%;
+  --main-col-min: 720px;
+  --main-col-width: max(var(--main-col-min), var(--main-col-pct));
+  /* 单侧外侧留白：(panel_width - col_width) / 2，用于把绝对/边距元素吸到居中列两端 */
+  --main-col-gutter: calc(
+    (100% - max(var(--main-col-min), var(--main-col-pct))) / 2
+  );
+
   /* ─── 颜色（Ant Design 中性色 + 功能色） ──────────── */
   --bg-base: #f5f5f5;
   --bg-panel: #ffffff;

@@ -1,0 +1,235 @@
+// Inline Edit 工具条 + Popover
+
+// ─── 选区浮起工具条 ──────────────────────────────────────────────
+.inline-edit-toolbar {
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  // 防止被选区 selection 颜色覆盖
+  user-select: none;
+
+  &-btn {
+    height: 26px;
+    padding: 0 var(--spacing-sm);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+
+    &:hover {
+      background: var(--bg-hover);
+      color: var(--accent);
+    }
+  }
+
+  &-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin: 0 var(--spacing-xs);
+  }
+}
+
+// ─── Inline Edit Popover ────────────────────────────────────────
+// 设计：只有一条滚动条 → header / footer 固定，中间 body 是唯一滚动容器，
+// 内部各分区（原文 / 输入 / 结果）通过分隔线区分，不再各自 overflow。
+.inline-edit-popover {
+  z-index: 1200;
+  width: 520px;
+  max-width: calc(100vw - 48px);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+
+  &-header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-sm) var(--spacing);
+    border-bottom: 1px solid var(--border-light);
+    font-size: var(--font-size);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-primary);
+  }
+
+  /* 唯一滚动容器：包住「原文 / 指令 / 结果」三段 */
+  &-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  &-origin {
+    flex-shrink: 0;
+    padding: var(--spacing-sm) var(--spacing);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-light);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    line-height: var(--line-height);
+  }
+
+  /* 上下文工具条（关联 / 注入 / 提示词模板）紧贴输入区上方，与输入卡片视觉一组 */
+  &-context-bar {
+    flex-shrink: 0;
+    margin: var(--spacing-sm) var(--spacing) 0;
+    padding: 2px 4px;
+    display: flex;
+    align-items: center;
+
+    .ai-context-bar {
+      padding: 0;
+      margin: 0;
+      gap: 2px;
+    }
+  }
+
+  /* 上下文工具条紧接着输入区时，去掉输入区上 margin，视觉上是同一卡片 */
+  &-context-bar + &-input-wrap {
+    margin-top: 4px;
+  }
+
+  /* 输入区外壳：让内部 textarea 看起来像 ChatGPT/Cursor 的输入框（圆角卡片 + focus 高亮） */
+  &-input-wrap {
+    flex-shrink: 0;
+    margin: var(--spacing-sm) var(--spacing);
+    padding: 6px 10px;
+    background: var(--bg-base, var(--bg-surface));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+
+    &:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+  }
+
+  &-textarea {
+    width: 100%;
+    display: block;
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 4px 2px;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    line-height: var(--line-height);
+
+    &::placeholder {
+      color: var(--text-muted);
+    }
+
+    &:disabled {
+      color: var(--text-muted);
+      cursor: not-allowed;
+    }
+  }
+
+  &-result {
+    flex: 1 0 auto;
+    padding: var(--spacing-sm) var(--spacing);
+    background: var(--bg-surface);
+    font-size: var(--font-size);
+    color: var(--text-primary);
+    line-height: var(--line-height);
+  }
+
+  &-result-body {
+    p {
+      margin: 0 0 var(--spacing-sm);
+      white-space: pre-wrap;
+    }
+
+    p:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  &-loading {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  &-error {
+    color: var(--danger);
+    font-size: var(--font-size-sm);
+  }
+
+  &-footer {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-sm) var(--spacing);
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border-light);
+    gap: var(--spacing-sm);
+  }
+
+  &-footer-left {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+  }
+
+  &-footer-right {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+  }
+
+  &-model {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+  }
+
+  &-model-select.ant-select {
+    font-size: var(--font-size-sm);
+    min-width: 96px;
+
+    .ant-select-selector {
+      padding-inline: 4px 22px !important;
+      height: 26px !important;
+    }
+    .ant-select-selection-item {
+      color: var(--text-muted);
+      line-height: 24px !important;
+    }
+    &:hover .ant-select-selection-item {
+      color: var(--text-primary);
+    }
+  }
+
+  &-thinking-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 12px 8px;
+    gap: 12px;
+    user-select: none;
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary, var(--text-muted));
+  }
+
+  &-stop {
+    color: var(--danger);
+  }
+}

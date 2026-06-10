@@ -18,16 +18,6 @@ SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
 HOST: str = _env("PURRTYPOS_HOST", "127.0.0.1")
 PORT: int = int(_env("PURRTYPOS_PORT", "18321"))
 
-# Ollama
-OLLAMA_HOST: str = _env("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-MEM0_USE_OLLAMA: bool = _env("MEM0_USE_OLLAMA", "1") != "0"
-MEM0_EMBED_MODEL: str = _env("MEM0_EMBED_MODEL", "")
-MEM0_LLM_MODEL: str = _env("MEM0_LLM_MODEL", "")
-
-# OpenAI (used by embedding / mem0 fallback)
-OPENAI_API_KEY: str = _env("OPENAI_API_KEY", "")
-OPENAI_BASE_URL: str = _env("OPENAI_BASE_URL", "")
-
-# Tool router
-TOOL_ROUTER_INTENT_MODEL: str = _env("TOOL_ROUTER_INTENT_MODEL", "qwen2.5:3b")
-TOOL_ROUTER_USE_LLM_INTENT: bool = _env("TOOL_ROUTER_USE_LLM_INTENT", "1") != "0"
+# 注：曾有 Ollama / mem0 / 工具路由意图模型相关配置（OLLAMA_HOST、MEM0_*、
+# TOOL_ROUTER_INTENT_MODEL 等）。记忆栈已迁 SQLite FTS、工具路由已废弃
+# （由主模型基于全部工具 schema 自行选择），本应用不再依赖任何本地模型。

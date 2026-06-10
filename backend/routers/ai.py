@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -11,8 +12,17 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from schemas.ai import ChatStreamRequest, GenerateTitleRequest, ListModelsRequest
+from utils.chat_stream import (
+    StreamAccumulator,
+    build_chat_request_params,
+    build_tool_results_display,
+    build_tool_round_messages,
+    inject_system_prompt,
+    last_user_message_text,
+    resolve_chat_modes,
+    valid_named_tool_calls,
+)
 from utils.session_title import normalize_session_title
-from utils.streaming import text_from_chat_delta, append_model_content
 from utils.url import normalize_base_url
 
 router = APIRouter(tags=["ai"])
@@ -125,30 +135,97 @@ async def generate_title(body: GenerateTitleRequest):
 
 # ── POST /ai/chat/stream (SSE) ──────────────────────────────────
 
-def _merge_stream_tool_calls(
-    accumulated: list[dict], delta_tool_calls: list[dict] | None
-) -> list[dict]:
-    """Merge incremental tool_calls deltas (by index) into a running list."""
-    if not delta_tool_calls:
-        return accumulated
-    result = list(accumulated)
-    for dtc in delta_tool_calls:
-        idx = dtc.get("index", 0)
-        while len(result) <= idx:
-            result.append({})
-        cur = result[idx]
-        if "id" not in cur and dtc.get("id") is not None:
-            cur["id"] = dtc["id"]
-        if "type" not in cur and dtc.get("type") is not None:
-            cur["type"] = dtc["type"]
-        fn_delta = dtc.get("function") or {}
-        fn_cur = cur.setdefault("function", {})
-        if fn_delta.get("name") is not None:
-            fn_cur["name"] = fn_delta["name"]
-        if fn_delta.get("arguments") is not None:
-            fn_cur["arguments"] = fn_cur.get("arguments", "") + fn_delta["arguments"]
-        result[idx] = cur
-    return result
+async def _stream_writing_subagent(
+    *,
+    abort: asyncio.Event,
+    key: str,
+    api_provider: str | None,
+    sub_rp: dict[str, Any],
+    tool_ctx: dict[str, Any],
+    messages: list[dict],
+    model: str,
+    subagent_role: str,
+):
+    """运行单次写作子专家，把其进度事件作为 SSE json 串逐条 yield 出来。
+
+    子专家在后台 task 里跑，进度经 queue 回传；结束（或异常）后补一个终止哨兵。
+    断开/取消时负责清理后台 task，正常收尾再补一个 ``done``。
+    """
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
+    def _send_sub(ev: dict[str, Any]) -> None:
+        try:
+            progress_queue.put_nowait(ev)
+        except Exception:
+            pass
+
+    async def _sub_runner() -> None:
+        try:
+            from services.writing_subagents import run_writing_subagent
+
+            await run_writing_subagent(
+                role=subagent_role,
+                send_chunk=_send_sub,
+                signal=abort,
+                key=key,
+                api_provider=api_provider,
+                request_params=sub_rp,
+                tool_ctx=dict(tool_ctx),
+                messages=list(messages),
+                model=model,
+            )
+        except Exception as e:
+            logger.exception("[ai/chat/stream] writing subagent")
+            await progress_queue.put({"error": str(e)})
+        finally:
+            await progress_queue.put(None)
+
+    sub_task = asyncio.create_task(_sub_runner())
+    try:
+        while True:
+            item = await progress_queue.get()
+            if item is None:
+                break
+            yield json.dumps(item)
+    finally:
+        if not sub_task.done():
+            sub_task.cancel()
+            try:
+                await sub_task
+            except asyncio.CancelledError:
+                pass
+
+    if not abort.is_set():
+        yield json.dumps({"done": True, "model": model})
+
+
+async def _run_agent_tool_round(
+    valid_calls: list[dict],
+    tool_exec_ctx: dict[str, Any],
+    acc_content: str,
+    acc_thinking: str,
+) -> tuple[list[dict], list[dict]]:
+    """执行一轮工具调用。
+
+    返回 ``(events, appended_messages)``：``events`` 是要原样 yield 给前端的事件
+    （逐工具进度 + 结果汇总），``appended_messages`` 是要追加进对话历史的
+    ``[assistant, *tool]`` 序列。``run_tools`` 的进度经回调收集，待其结束后统一发出
+    （与原 endpoint 行为一致，中间无交错 yield）。
+    """
+    from services.tool_executor import run_tools
+
+    progress_events: list[dict] = []
+    tool_results = await run_tools(
+        valid_calls, tool_exec_ctx, send_chunk=progress_events.append,
+    )
+    events: list[dict] = list(progress_events)
+    events.append({
+        "toolResults": build_tool_results_display(tool_results, valid_calls),
+    })
+    appended = build_tool_round_messages(
+        valid_calls, acc_content, acc_thinking, tool_results,
+    )
+    return events, appended
 
 
 @router.post("/ai/chat/stream")
@@ -170,19 +247,11 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
     rest = {k: v for k, v in opts.items() if k not in ("model", "temperature")}
 
     base_url = normalize_base_url(body.baseURL)
-    request_params: dict[str, Any] = {
-        "model": model,
-        **rest,
-        "baseURL": base_url,
-    }
-    if temperature is not None:
-        request_params["temperature"] = temperature
-    if body.tools:
-        request_params["tools"] = body.tools
+    request_params = build_chat_request_params(
+        model, rest, base_url, temperature, body.tools,
+    )
 
     async def _event_generator():
-        import asyncio
-
         abort = asyncio.Event()
 
         async def _check_disconnect():
@@ -197,15 +266,12 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
         try:
             from services.ai_provider import create_chat_stream
 
-            _am = (body.agentMode or "").strip().lower()
-            _cam = (body.chatAgentMode or "").strip().lower()
-            is_expert_team = _am == "expert_team" or _cam == "expert_team"
-            is_writing_expert_book = bool(
-                body.bookId
-                and (
-                    _am in ("subagent", "expert_team")
-                    or _cam in ("expert", "subagent", "expert_team")
-                )
+            modes = resolve_chat_modes(
+                body.agentMode,
+                body.chatAgentMode,
+                body.writingMode,
+                body.bookId,
+                body.subagentRole,
             )
 
             tool_ctx_book: dict[str, Any] = {
@@ -217,114 +283,45 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "associatedChapterIds": list(body.associatedChapterIds or []),
                 "associatedOutlineIds": list(body.associatedOutlineIds or []),
             }
-            sub_rp: dict[str, Any] = {
-                "model": model,
-                **rest,
-                "baseURL": base_url,
-            }
-            if temperature is not None:
-                sub_rp["temperature"] = temperature
+            sub_rp = build_chat_request_params(model, rest, base_url, temperature)
 
-            # ── 专家团：AutoGen 多智能体多轮对话 ─────────────────────────────
-            if is_writing_expert_book and is_expert_team:
-                progress_queue: asyncio.Queue = asyncio.Queue()
+            # ── 前置上下文：勾选记忆 + 关联章节/大纲内容，宿主预取后直接注入 ──
+            # （取代旧的"前端拼文案 + 命令模型自己调工具去读"两套机制）
+            from utils.chat_preflight import (
+                build_associated_context_block,
+                build_selected_memory_block,
+                build_session_binding_prompt,
+            )
 
-                def _send_writing_progress(ev: dict[str, Any]) -> None:
-                    try:
-                        progress_queue.put_nowait(ev)
-                    except Exception:
-                        pass
-
-                async def _writing_runner() -> None:
-                    try:
-                        from services.expert_team_autogen import run_expert_team_autogen
-
-                        await run_expert_team_autogen(
-                            send_chunk=_send_writing_progress,
-                            signal=abort,
-                            tool_ctx=tool_ctx_book,
-                            messages=list(body.messages or []),
-                            model=model,
-                            api_provider=body.apiProvider,
-                            key=key,
-                            request_params=sub_rp,
-                        )
-                    except Exception as e:
-                        logger.exception("[ai/chat/stream] expert team")
-                        await progress_queue.put({"error": str(e)})
-                    finally:
-                        await progress_queue.put(None)
-
-                sub_task = asyncio.create_task(_writing_runner())
-                try:
-                    while True:
-                        item = await progress_queue.get()
-                        if item is None:
-                            break
-                        yield json.dumps(item)
-                finally:
-                    if not sub_task.done():
-                        sub_task.cancel()
-                        try:
-                            await sub_task
-                        except asyncio.CancelledError:
-                            pass
-
-                return
+            messages: list[dict] = list(body.messages or [])
+            memory_block = await build_selected_memory_block(
+                body.selectedMemoryIds, body.selectedForeshadowingIds,
+            )
+            inject_system_prompt(messages, memory_block)
+            assoc_block = await build_associated_context_block(tool_ctx_book)
+            inject_system_prompt(messages, assoc_block)
 
             # ── 写作专家：按需子专家（单次调用，非管线）────────────────────────
-            if is_writing_expert_book and body.subagentRole:
-                progress_queue2: asyncio.Queue = asyncio.Queue()
-
-                def _send_sub(ev: dict[str, Any]) -> None:
-                    try:
-                        progress_queue2.put_nowait(ev)
-                    except Exception:
-                        pass
-
-                async def _sub_runner() -> None:
-                    try:
-                        from services.writing_subagents import run_writing_subagent
-
-                        await run_writing_subagent(
-                            role=str(body.subagentRole),
-                            send_chunk=_send_sub,
-                            signal=abort,
-                            key=key,
-                            api_provider=body.apiProvider,
-                            request_params=sub_rp,
-                            tool_ctx=dict(tool_ctx_book),
-                            messages=list(body.messages or []),
-                            model=model,
-                        )
-                    except Exception as e:
-                        logger.exception("[ai/chat/stream] writing subagent")
-                        await progress_queue2.put({"error": str(e)})
-                    finally:
-                        await progress_queue2.put(None)
-
-                sub_task2 = asyncio.create_task(_sub_runner())
-                try:
-                    while True:
-                        item = await progress_queue2.get()
-                        if item is None:
-                            break
-                        yield json.dumps(item)
-                finally:
-                    if not sub_task2.done():
-                        sub_task2.cancel()
-                        try:
-                            await sub_task2
-                        except asyncio.CancelledError:
-                            pass
-
-                if not abort.is_set():
-                    yield json.dumps({"done": True, "model": model})
+            if modes.is_writing_expert_book and body.subagentRole:
+                async for evt in _stream_writing_subagent(
+                    abort=abort,
+                    key=key,
+                    api_provider=body.apiProvider,
+                    sub_rp=sub_rp,
+                    tool_ctx=tool_ctx_book,
+                    messages=messages,
+                    model=model,
+                    subagent_role=str(body.subagentRole),
+                ):
+                    yield evt
                 return
 
-            # ── Agent mode: load tools from skill definitions ─────────────
+            # ── Agent mode: 装载全量 skills 工具列表 ───────────────────────
+            # 历史名 useToolRouter 是个误导词：这里并不做语义路由，只是
+            # "是否把 skills/<name>/SKILL.md 解析出的工具一股脑塞给 LLM"开关。
+            # 真正的工具选择由 LLM 自行基于 schema + description 决定。
             agent_tools: list[dict] = []
-            if body.useToolRouter and body.bookId and not request_params.get("tools"):
+            if body.enableAgentTools and body.bookId and not request_params.get("tools"):
                 try:
                     from services.tool_router import get_api_skill_items
                     from services.agent_tool_definitions import to_openai_tools
@@ -336,18 +333,11 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 except Exception:
                     logger.warning("[agent] 工具加载失败", exc_info=True)
 
-            is_collab = (
-                (body.chatAgentMode or "").strip().lower() == "collab"
-                or (body.writingMode or "").strip().lower() == "collab"
-            )
+            is_collab = modes.is_collab
             if is_collab and agent_tools:
                 from utils.collab_prompt import filter_collab_tools
 
-                last_user = ""
-                for m in reversed(body.messages or []):
-                    if isinstance(m, dict) and m.get("role") == "user":
-                        last_user = str(m.get("content") or "")
-                        break
+                last_user = last_user_message_text(body.messages)
                 agent_tools = filter_collab_tools(list(agent_tools), last_user)
                 request_params["tools"] = agent_tools
                 logger.info("[agent][collab] 工具过滤后 %d 个", len(agent_tools))
@@ -363,7 +353,15 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "collabWriting": is_collab,
             }
 
-            messages: list[dict] = list(body.messages or [])
+            # ── 会话绑定说明（原前端 systemSuffix，文案权收归后端）────────────
+            # 写作专家模式跳过：其 system prompt 的 tooling appendix 已含同等规则。
+            if not modes.should_inject_writing_prompt:
+                binding = build_session_binding_prompt(
+                    tool_ctx_book,
+                    tools_enabled=bool(body.enableAgentTools and body.bookId),
+                )
+                inject_system_prompt(messages, binding)
+
             if is_collab:
                 from utils.collab_prompt import (
                     build_collab_system_prompt,
@@ -376,35 +374,24 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         build_collab_turn_appendix(messages),
                     ) if p
                 )
-                if collab_inject:
-                    _seen_system = False
-                    for m in messages:
-                        if isinstance(m, dict) and m.get("role") == "system":
-                            cur = str(m.get("content") or "")
-                            m["content"] = f"{collab_inject}\n\n{cur}" if cur else collab_inject
-                            _seen_system = True
-                            break
-                    if not _seen_system:
-                        messages.insert(0, {"role": "system", "content": collab_inject})
+                inject_system_prompt(messages, collab_inject)
 
-            if (
-                body.bookId
-                and not body.subagentRole
-                and (_cam == "expert" or _am == "subagent")
-            ):
+            if modes.should_inject_writing_prompt:
                 from utils.writing_prompt import build_writing_main_system_prompt
 
+                # Layer 1：强制注入风格基调
+                try:
+                    from database.crud.book_style import get_book_style
+                    from dependencies import get_db as _get_db_for_style
+                    tool_ctx_book["bookStyle"] = await get_book_style(
+                        _get_db_for_style(), str(body.bookId)
+                    )
+                except Exception:
+                    logger.exception("[ai/chat/stream] load book_style failed")
+                    tool_ctx_book["bookStyle"] = None
+
                 writing_inject = build_writing_main_system_prompt(tool_ctx_book)
-                if writing_inject:
-                    _seen_w = False
-                    for m in messages:
-                        if isinstance(m, dict) and m.get("role") == "system":
-                            cur = str(m.get("content") or "")
-                            m["content"] = f"{writing_inject}\n\n{cur}" if cur else writing_inject
-                            _seen_w = True
-                            break
-                    if not _seen_w:
-                        messages.insert(0, {"role": "system", "content": writing_inject})
+                inject_system_prompt(messages, writing_inject)
 
             used_model = model
             _MAX_ROUNDS = 6
@@ -419,59 +406,23 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 stream = result["stream"]
                 used_model = result.get("model", model)
 
-                accumulated_content = ""
-                accumulated_thinking = ""
-                accumulated_tool_calls: list[dict] = []
+                acc = StreamAccumulator()
                 got_tool_calls = False
 
                 async for chunk in stream:
                     if abort.is_set():
                         break
 
-                    choices = chunk.get("choices") or []
-                    if not choices:
+                    outcome = acc.process_chunk(chunk)
+                    for evt in outcome.events:
+                        yield json.dumps(evt)
+                    if not outcome.has_choice:
                         continue
-                    c0 = choices[0]
-                    delta = c0.get("delta") or {}
 
-                    content_delta = delta.get("content") or ""
-                    thinking_delta = delta.get("reasoning_content") or ""
-
-                    if thinking_delta:
-                        accumulated_thinking += thinking_delta
-                        yield json.dumps({"thinkingDelta": thinking_delta})
-
-                    if content_delta:
-                        new_acc, emitted = append_model_content(
-                            accumulated_content, content_delta,
-                        )
-                        accumulated_content = new_acc
-                        if emitted:
-                            yield json.dumps({"delta": emitted})
-                    elif not content_delta:
-                        msg_content = (c0.get("message") or {}).get("content")
-                        if isinstance(msg_content, str) and msg_content:
-                            new_acc, emitted = append_model_content(
-                                accumulated_content, "", msg_content,
-                            )
-                            accumulated_content = new_acc
-                            if emitted:
-                                yield json.dumps({"delta": emitted})
-
-                    raw_tool_calls = delta.get("tool_calls")
-                    if raw_tool_calls and isinstance(raw_tool_calls, list):
-                        accumulated_tool_calls = _merge_stream_tool_calls(
-                            accumulated_tool_calls, raw_tool_calls,
-                        )
-
-                    finish_reason = c0.get("finish_reason")
+                    finish_reason = outcome.finish_reason
                     if finish_reason in ("stop", "length"):
-                        if accumulated_tool_calls:
-                            valid_stop = [
-                                tc for tc in accumulated_tool_calls
-                                if tc.get("function", {}).get("name")
-                            ]
-                            if valid_stop:
+                        if acc.tool_calls:
+                            if valid_named_tool_calls(acc.tool_calls):
                                 finish_reason = "tool_calls"
                             else:
                                 yield json.dumps({"done": True, "model": used_model})
@@ -481,10 +432,7 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                             return
 
                     if finish_reason in ("tool_calls", "function_call"):
-                        valid_calls = [
-                            tc for tc in accumulated_tool_calls
-                            if tc.get("function", {}).get("name")
-                        ]
+                        valid_calls = valid_named_tool_calls(acc.tool_calls)
                         if not valid_calls:
                             yield json.dumps({"done": True, "model": used_model})
                             return
@@ -493,8 +441,8 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         yield json.dumps({
                             "toolCalls": valid_calls,
                             "toolCallsInProgress": True,
-                            "partialContent": accumulated_content,
-                            "partialThinking": accumulated_thinking,
+                            "partialContent": acc.content,
+                            "partialThinking": acc.thinking,
                             "model": used_model,
                         })
 
@@ -503,50 +451,12 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                             return
 
                         # ── Agent loop: execute tools then continue ───────
-                        from services.tool_executor import run_tools
-                        _progress_events: list[dict] = []
-                        try:
-                            tool_results = await run_tools(
-                                valid_calls, tool_exec_ctx,
-                                send_chunk=_progress_events.append,
-                            )
-                        except Exception:
-                            raise
-                        # Emit per-tool completion events for frontend progress bar
-                        for evt in _progress_events:
+                        round_events, appended = await _run_agent_tool_round(
+                            valid_calls, tool_exec_ctx, acc.content, acc.thinking,
+                        )
+                        for evt in round_events:
                             yield json.dumps(evt)
-
-                        # Emit results summary
-                        results_display = []
-                        for r in tool_results:
-                            tc_name = next(
-                                (tc.get("function", {}).get("name", "")
-                                 for tc in valid_calls if tc.get("id") == r.get("tool_call_id")),
-                                "",
-                            )
-                            results_display.append({
-                                "tool_call_id": r.get("tool_call_id"),
-                                "name": tc_name,
-                                "content": r.get("content"),
-                            })
-                        yield json.dumps({"toolResults": results_display})
-
-                        # Append assistant message + tool results to history
-                        asst_msg: dict[str, Any] = {
-                            "role": "assistant",
-                            "tool_calls": valid_calls,
-                        }
-                        if accumulated_content:
-                            asst_msg["content"] = accumulated_content
-                        if accumulated_thinking:
-                            asst_msg["reasoning_content"] = accumulated_thinking
-                        messages = messages + [asst_msg]
-                        for r in tool_results:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": r.get("tool_call_id"),
-                                "content": r.get("content", ""),
-                            })
+                        messages = messages + appended
 
                         got_tool_calls = True
                         break  # restart with updated messages

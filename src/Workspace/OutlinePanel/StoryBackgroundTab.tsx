@@ -120,6 +120,20 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     loadContent()
   }, [loadContent])
 
+  // AI 工具改写背景后刷新；正在手动编辑时不动（避免覆盖未保存草稿）
+  const editingRef = React.useRef(editing)
+  React.useEffect(() => {
+    editingRef.current = editing
+  }, [editing])
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ kind?: string }>).detail
+      if (detail?.kind === 'background' && !editingRef.current) loadContent()
+    }
+    window.addEventListener('setting-updated', handler)
+    return () => window.removeEventListener('setting-updated', handler)
+  }, [loadContent])
+
   React.useEffect(() => {
     notifyWorkspaceSearchContentChanged()
   }, [content, notifyWorkspaceSearchContentChanged])

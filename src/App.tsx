@@ -30,7 +30,7 @@ export default function App() {
         setModelConfigs(res.data.ai_model_configs)
       }
       const m = res.data.ai_agent_mode
-      if (m === 'subagent' || m === 'legacy' || m === 'expert_team') {
+      if (m === 'subagent' || m === 'legacy') {
         setAiAgentMode(m)
       }
     })

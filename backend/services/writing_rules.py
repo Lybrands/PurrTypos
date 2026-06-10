@@ -2,14 +2,25 @@
 Writing-expert hard rules, JSON extraction, and structured-output normalisers.
 
 Formerly part of subagent_config.py; registry / stages / pipeline validation removed.
+
+—— 2026 重构记录 ——
+6 个 ``normalize_*`` 函数原本各自重复手写 ``str(val.get(...) or "")[:N]`` /
+``isinstance(x, list)`` / ``isinstance(x, dict)`` 模板。本轮把这套模板
+抽成 ``_truncated_str / _str_list / _dict_list / _safe_int / _coerce_dict``
+五个 helper，行为**完全不变**（由 ``tests/test_writing_rules.py`` 用例保证），
+只是去重 + 让"字段截断长度"这种业务约束直接显形为 helper 调用的参数。
+未来想加 schema 校验或 logging，只需改 helper。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +62,7 @@ BODY_DIALOGUE_QUOTE_RULE = (
 # ---------------------------------------------------------------------------
 
 def extract_structured_json_from_model_text(text: str) -> dict | list | None:
-    """Extract JSON (object or array) from model output that may be wrapped in markdown fences."""
+    """从模型输出里抽 JSON，依次尝试：纯 JSON → ```json fence``` → 第一个 {...} → 第一个 [...]。"""
     s = str(text or "").strip()
     if not s:
         return None
@@ -89,23 +100,73 @@ def extract_structured_json_from_model_text(text: str) -> dict | list | None:
 
 
 # ---------------------------------------------------------------------------
-# Normalisation helpers
+# Helpers —— 6 个 normalize 函数共享的"截断 / 类型兜底"原语
+# ---------------------------------------------------------------------------
+
+def _truncated_str(val: Any, max_len: int, default: str = "") -> str:
+    """``str(val or default)[:max_len]`` 的语义化版本。
+
+    注意：保留原 ``or`` 语义 —— ``val`` 为 falsy（None / "" / 0 / []）时落到 ``default``。
+    历史上 normalize 函数全是字符串字段，这种 falsy 兜底没有副作用；引入到数字字段
+    时请改用 ``_safe_int``。
+    """
+    s = str(val or default or "")
+    return s[:max_len]
+
+
+def _str_list(val: Any, max_each: int, max_count: int) -> list[str]:
+    """list[str] 字段：非 list → []；按 ``max_count`` 截断、每项 ``str(x)[:max_each]``。"""
+    if not isinstance(val, list):
+        return []
+    return [str(x)[:max_each] for x in val[:max_count]]
+
+
+def _coerce_dict(x: Any) -> dict:
+    """list 中遇到非 dict 元素时统一兜底为空 dict（保持原行为：字段全部回落 default）。"""
+    return x if isinstance(x, dict) else {}
+
+
+def _dict_list(
+    val: Any, mapper: Callable[[Any], dict], max_count: int,
+) -> list[dict]:
+    """list[dict] 字段：非 list → []；按 ``max_count`` 截断；每项喂 ``mapper`` 产出归一化 dict。
+
+    ``mapper`` 自己负责 isinstance 兜底（推荐配合 ``_coerce_dict``）。
+    """
+    if not isinstance(val, list):
+        return []
+    return [mapper(x) for x in val[:max_count]]
+
+
+def _safe_int(val: Any) -> int:
+    """数字字段：转 float → int，nan/inf/异常一律 0。"""
+    try:
+        n = float(val)
+        return int(n) if math.isfinite(n) else 0
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Normalisation —— 每个函数现在只负责"声明字段 → 调 helper"
 # ---------------------------------------------------------------------------
 
 def normalize_analyze_report(raw: Any, fallback_user_text: str = "") -> dict:
-    val = raw if isinstance(raw, dict) else {}
+    val = _coerce_dict(raw)
+
+    def _evidence(x: Any) -> dict:
+        e = _coerce_dict(x)
+        return {
+            "source": str(e.get("source", "")),
+            "snippet": _truncated_str(e.get("snippet", ""), 400),
+        }
+
     return {
-        "summary": str(val.get("summary") or fallback_user_text or "")[:1200],
-        "goals": [str(x) for x in val.get("goals", [])][:12] if isinstance(val.get("goals"), list) else [],
-        "constraints": [str(x) for x in val.get("constraints", [])][:12] if isinstance(val.get("constraints"), list) else [],
-        "risks": [str(x) for x in val.get("risks", [])][:12] if isinstance(val.get("risks"), list) else [],
-        "evidence": [
-            {
-                "source": str((x or {}).get("source", "") if isinstance(x, dict) else ""),
-                "snippet": str((x or {}).get("snippet", "") if isinstance(x, dict) else "")[:400],
-            }
-            for x in (val.get("evidence") or [])
-        ][:12] if isinstance(val.get("evidence"), list) else [],
+        "summary": _truncated_str(val.get("summary"), 1200, default=fallback_user_text),
+        "goals": _str_list(val.get("goals"), max_each=10_000, max_count=12),
+        "constraints": _str_list(val.get("constraints"), max_each=10_000, max_count=12),
+        "risks": _str_list(val.get("risks"), max_each=10_000, max_count=12),
+        "evidence": _dict_list(val.get("evidence"), _evidence, max_count=12),
     }
 
 
@@ -130,6 +191,8 @@ def _normalize_beat_entry(x: Any) -> dict | str | None:
                 sv = str(v).strip()
                 if not sv:
                     continue
+                # 节拍正文类字段（content/body/text/description/summary/plot）放宽到 8000；
+                # 其余字段（title/note/...）截 2000，防止模型把整段塞到非正文键里
                 lim = (
                     8000
                     if key.lower()
@@ -143,7 +206,8 @@ def _normalize_beat_entry(x: Any) -> dict | str | None:
 
 
 def normalize_writing_blueprint(raw: Any) -> dict:
-    val = raw if isinstance(raw, dict) else {}
+    val = _coerce_dict(raw)
+
     beats_out: list[dict | str] = []
     raw_beats = val.get("beats")
     if isinstance(raw_beats, list):
@@ -151,85 +215,81 @@ def normalize_writing_blueprint(raw: Any) -> dict:
             nb = _normalize_beat_entry(item)
             if nb is not None:
                 beats_out.append(nb)
+
+    def _material(x: Any) -> dict:
+        m = _coerce_dict(x)
+        return {
+            "type": str(m.get("type", "")),
+            "ref": str(m.get("ref", "")),
+            "note": _truncated_str(m.get("note", ""), 300),
+        }
+
     return {
-        "chapterGoal": str(val.get("chapterGoal") or "")[:1000],
+        "chapterGoal": _truncated_str(val.get("chapterGoal"), 1000),
         "beats": beats_out,
-        "tone": str(val.get("tone") or "")[:200],
-        "constraints": [str(x) for x in val.get("constraints", [])][:20] if isinstance(val.get("constraints"), list) else [],
-        "requiredMaterials": [
-            {
-                "type": str((x or {}).get("type", "") if isinstance(x, dict) else ""),
-                "ref": str((x or {}).get("ref", "") if isinstance(x, dict) else ""),
-                "note": str((x or {}).get("note", "") if isinstance(x, dict) else "")[:300],
-            }
-            for x in (val.get("requiredMaterials") or [])
-        ][:40] if isinstance(val.get("requiredMaterials"), list) else [],
+        "tone": _truncated_str(val.get("tone"), 200),
+        "constraints": _str_list(val.get("constraints"), max_each=10_000, max_count=20),
+        "requiredMaterials": _dict_list(val.get("requiredMaterials"), _material, max_count=40),
     }
 
 
 def normalize_draft_document(raw: Any) -> dict:
-    val = raw if isinstance(raw, dict) else {}
+    val = _coerce_dict(raw)
     return {
         "title": str(val.get("title") or ""),
         "content": str(val.get("content") or ""),
-        "notes": [str(x) for x in val.get("notes", [])][:12] if isinstance(val.get("notes"), list) else [],
+        "notes": _str_list(val.get("notes"), max_each=10_000, max_count=12),
     }
 
 
 def normalize_style_unify_result(raw: Any) -> dict:
-    val = raw if isinstance(raw, dict) else {}
+    val = _coerce_dict(raw)
 
-    prior = []
-    if isinstance(val.get("priorChaptersRead"), list):
-        for x in val["priorChaptersRead"][:8]:
-            if not isinstance(x, dict):
-                x = {}
-            ci = x.get("chapterIndex")
-            idx = int(ci) if isinstance(ci, (int, float)) and math.isfinite(ci) else 0
-            prior.append({
-                "chapterIndex": idx,
-                "title": str(x.get("title") or "")[:120],
-            })
+    def _prior_chapter(x: Any) -> dict:
+        e = _coerce_dict(x)
+        return {
+            "chapterIndex": _safe_int(e.get("chapterIndex")),
+            "title": _truncated_str(e.get("title"), 120),
+        }
 
     return {
-        "styleAnchors": str(val.get("styleAnchors") or "")[:4000],
-        "content": str(val.get("content") or "")[:500000],
-        "changeSummary": str(val.get("changeSummary") or "")[:2000],
-        "priorChaptersRead": prior,
+        "styleAnchors": _truncated_str(val.get("styleAnchors"), 4000),
+        "content": _truncated_str(val.get("content"), 500_000),
+        "changeSummary": _truncated_str(val.get("changeSummary"), 2000),
+        "priorChaptersRead": _dict_list(val.get("priorChaptersRead"), _prior_chapter, max_count=8),
     }
 
 
 def normalize_polished_result(raw: Any) -> dict:
-    """Polish stage: finalText + changeSummary."""
-    val = raw if isinstance(raw, dict) else {}
+    """Polish stage: ``finalText`` 优先，缺失则回落到 ``content``。"""
+    val = _coerce_dict(raw)
+    final_raw = val.get("finalText") or val.get("content") or ""
     return {
-        "finalText": str(val.get("finalText") or val.get("content") or "")[:500000],
-        "changeSummary": str(val.get("changeSummary") or "")[:2000],
+        "finalText": _truncated_str(final_raw, 500_000),
+        "changeSummary": _truncated_str(val.get("changeSummary"), 2000),
     }
 
 
 def normalize_review_issues(raw: Any) -> list[dict]:
-    lst: list = []
+    """Review stage：接受 ``[...]`` 或 ``{"issues": [...]}`` 两种形态。"""
     if isinstance(raw, list):
-        lst = raw
+        lst: list = raw
     elif isinstance(raw, dict) and isinstance(raw.get("issues"), list):
         lst = raw["issues"]
+    else:
+        if raw is not None:
+            logger.debug("normalize_review_issues: unexpected input type=%s", type(raw).__name__)
+        return []
 
-    def _safe_int(v: Any) -> int:
-        try:
-            n = float(v)
-            return int(n) if math.isfinite(n) else 0
-        except Exception:
-            return 0
-
-    return [
-        {
-            "segmentIndex": _safe_int((x or {}).get("segmentIndex") if isinstance(x, dict) else 0),
-            "span": str((x or {}).get("span", "") if isinstance(x, dict) else "")[:200],
-            "issueType": str((x or {}).get("issueType", "general") if isinstance(x, dict) else "general")[:80],
-            "severity": str((x or {}).get("severity", "medium") if isinstance(x, dict) else "medium")[:20],
-            "suggestion": str((x or {}).get("suggestion", "") if isinstance(x, dict) else "")[:600],
-            "context": str((x or {}).get("context", "") if isinstance(x, dict) else "")[:500],
+    def _issue(x: Any) -> dict:
+        e = _coerce_dict(x)
+        return {
+            "segmentIndex": _safe_int(e.get("segmentIndex")),
+            "span": _truncated_str(e.get("span", ""), 200),
+            "issueType": _truncated_str(e.get("issueType"), 80, default="general"),
+            "severity": _truncated_str(e.get("severity"), 20, default="medium"),
+            "suggestion": _truncated_str(e.get("suggestion", ""), 600),
+            "context": _truncated_str(e.get("context", ""), 500),
         }
-        for x in lst
-    ][:120]
+
+    return _dict_list(lst, _issue, max_count=120)

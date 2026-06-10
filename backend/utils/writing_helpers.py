@@ -1,5 +1,5 @@
 """
-Pure helpers for writing / subagent flows (prior-chapter hints, draft text).
+Pure helpers for writing / subagent flows (prior-chapter hints).
 """
 
 from __future__ import annotations
@@ -7,70 +7,6 @@ from __future__ import annotations
 import re
 
 from utils.writing_chapters import get_writable_chapters_for_agent
-
-# Stages that need chapter body from user message when model omits content
-_ACTIONS_NEEDING_BODY = frozenset({"review", "polish", "styleUnify", "full"})
-
-
-def split_draft_into_segments(text: str, max_chars: int = 1600) -> list[str]:
-    source = str(text or "").strip()
-    if not source:
-        return []
-    paras = [p.strip() for p in re.split(r"\n{2,}", source) if p.strip()]
-    if not paras:
-        return [source]
-    out: list[str] = []
-    buf = ""
-    for p in paras:
-        if not buf:
-            buf = p
-            continue
-        if len(buf + "\n\n" + p) > max_chars:
-            out.append(buf)
-            buf = p
-        else:
-            buf += "\n\n" + p
-    if buf:
-        out.append(buf)
-    return out
-
-
-def extract_context_around_span(text: str, span: str, radius: int = 240) -> str:
-    src = str(text or "")
-    s = str(span or "").strip()
-    if not src or not s:
-        return ""
-    idx = src.find(s)
-    if idx < 0:
-        return s
-    start = max(0, idx - radius)
-    end = min(len(src), idx + len(s) + radius)
-    return src[start:end]
-
-
-def resolve_draft_plain_text(draft_doc: dict | None, user_text: str, action: str = "") -> str:
-    """Resolve plain draft text from model JSON or long user paste for review/polish-style stages."""
-    from_model = str((draft_doc or {}).get("content") or "").strip()
-    if from_model:
-        return from_model
-    need_body = str(action or "").strip().lower() in _ACTIONS_NEEDING_BODY
-    u = str(user_text or "").strip()
-    if need_body and len(u) >= 40:
-        return u
-    return ""
-
-
-def looks_like_body_text(text: str) -> bool:
-    s = str(text or "").strip()
-    if not s:
-        return False
-    if re.fullmatch(r"【?\s*已写入编辑器\s*】?", s):
-        return False
-    if re.fullmatch(r"【?\s*正文以已写入编辑器为准\s*】?", s):
-        return False
-    if len(s) >= 80:
-        return True
-    return bool(re.search(r"[\n。！？；]", s) and len(s) >= 20)
 
 
 def build_prior_chapter_hint(

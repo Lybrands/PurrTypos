@@ -30,17 +30,29 @@ export interface Character {
   id: number;
   book_id: EntityId;
   name: string;
-  gender?: string;
-  age?: string;
-  height?: string;
-  occupation?: string;
-  appearance?: string;
-  origin?: string;
-  personality?: string;
-  background: string;
-  biography: string;
+  /** 标签，逗号分隔（卡片列表识别用，保持结构化） */
   tags: string;
-  /** 备注（自由补充说明） */
+  /** 人物档案 Markdown 全文（基本信息/外貌/性格/经历等，已取代旧表单字段） */
+  profile_md?: string;
+  /** @deprecated 旧表单字段，已迁移进 profile_md，仅历史数据读取 */
+  gender?: string;
+  /** @deprecated 同上 */
+  age?: string;
+  /** @deprecated 同上 */
+  height?: string;
+  /** @deprecated 同上 */
+  occupation?: string;
+  /** @deprecated 同上 */
+  appearance?: string;
+  /** @deprecated 同上 */
+  origin?: string;
+  /** @deprecated 同上 */
+  personality?: string;
+  /** @deprecated 同上 */
+  background?: string;
+  /** @deprecated 同上 */
+  biography?: string;
+  /** @deprecated 同上 */
   remark?: string;
   create_time?: string;
 }
@@ -64,11 +76,69 @@ export interface VolumeOutline extends Outline {
   chapters: Outline[];
 }
 
+/** 大纲历史来源标记 */
+export type OutlineHistorySource =
+  | "user"
+  | "ai_tool"
+  | `rollback_of:${number}`
+  | string;
+
+/** 历史列表项：长字段已截断为 preview，详情走 getOutlineHistory */
+export interface OutlineHistoryListItem {
+  id: number;
+  outline_id: EntityId;
+  before_title: string | null;
+  before_type: string | null;
+  markdown_preview: string | null;
+  markdown_length: number;
+  xmind_length: number;
+  source: OutlineHistorySource;
+  note: string | null;
+  create_time: string;
+}
+
+export interface OutlineHistoryDetail {
+  id: number;
+  outline_id: EntityId;
+  before_title: string | null;
+  before_type: string | null;
+  before_markdown_content: string | null;
+  before_xmind_data: string | null;
+  source: OutlineHistorySource;
+  note: string | null;
+  create_time: string;
+}
+
 export interface Article {
   id: number;
   chapter_id: EntityId;
   content: string;
   update_time?: string;
+}
+
+export interface BookStyle {
+  book_id: EntityId;
+  pov: string;
+  tone: string;
+  pace: string;
+  banned_rules: string;
+  /** JSON 字符串：number[] 或 string[]，参考章节 id */
+  reference_chapter_ids: string;
+  free_notes: string;
+  update_time?: string;
+}
+
+export type SaveBookStylePayload = Omit<BookStyle, 'book_id' | 'update_time'> & { bookId: EntityId };
+
+export interface ChapterDiffHistory {
+  id: number;
+  chapter_id: EntityId;
+  before_text: string;
+  after_text: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
 }
 
 export interface StoryBackgroundAttachment {
@@ -115,6 +185,9 @@ export interface Conversation {
   thinking?: string;
   tool_call_segments?: string | null;
   thinking_blocks?: string | null;
+  /** 子专家结构化结果（润色 / 审校 / 续写规划 / 风格统一）的 JSON 字符串，
+   *  形如 { role, payload }，回显时还原 SubagentResultCard。 */
+  subagent_result?: string | null;
   create_time?: string;
 }
 
@@ -122,11 +195,11 @@ export interface Conversation {
 export type SparkIdeaLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
 /** AI 对话模式（与 UI 模式选择一致） */
-export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'expert_team', 'collab'] as const;
+export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'collab'] as const;
 export type ChatAgentMode = (typeof CHAT_AGENT_MODES)[number];
 
 /** 设置中「默认写作智能体」档位（工作区对话默认来源） */
-export type AiAgentMode = 'legacy' | 'subagent' | 'expert_team';
+export type AiAgentMode = 'legacy' | 'subagent';
 
 export interface AiSparkIdea {
   id: number | string;  // mem0 使用 UUID 字符串
@@ -234,6 +307,11 @@ export interface ElectronAPI {
   getOutlineByWritingChapter: (
     writingChapterId: EntityId,
   ) => Promise<ApiResult<Outline | null>>;
+  /** 本章自身绑定的 outline（outlines.writing_chapter_id == id），
+   *  与 OutlinePanel 显示的章/卷大纲一致。 */
+  getOutlineForChapter: (
+    writingChapterId: EntityId,
+  ) => Promise<ApiResult<Outline | null>>;
   getOutlines: (
     typeFilter?: "global" | "chapter",
   ) => Promise<ApiResult<Outline[]>>;
@@ -257,6 +335,16 @@ export interface ElectronAPI {
     xmind_data?: string;
     file_path?: string;
     markdown_content?: string | null;
+  }) => Promise<ApiResult<Outline>>;
+  listOutlineHistory: (data: {
+    outlineId: EntityId;
+    limit?: number;
+  }) => Promise<ApiResult<OutlineHistoryListItem[]>>;
+  getOutlineHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<OutlineHistoryDetail | null>>;
+  restoreOutlineHistory: (data: {
+    historyId: number;
   }) => Promise<ApiResult<Outline>>;
   // 章节
   saveChapters: (data: {
@@ -295,6 +383,22 @@ export interface ElectronAPI {
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
+  // Book style
+  getBookStyle: (data: { bookId: EntityId }) => Promise<ApiResult<BookStyle | null>>;
+  saveBookStyle: (data: SaveBookStylePayload) => Promise<ApiResult<void>>;
+  // Chapter diff history
+  commitChapterDiff: (data: {
+    chapterId: EntityId;
+    content: string;
+    beforeText?: string;
+    afterText?: string;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number } | null>>;
+  listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
+  getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
+  rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
   // AI
   createSession: (data: { bookId: EntityId; chapterId?: EntityId | null }) => Promise<ApiResult<AiSession>>;
   getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
@@ -321,6 +425,8 @@ export interface ElectronAPI {
       };
     }[];
     thinkingBlocks?: string[];
+    /** 子专家结构化结果，形如 { role, payload }；用于回显时还原 SubagentResultCard */
+    subagentResult?: { role: string; payload: unknown } | null;
   }) => Promise<ApiResult<void>>;
   getConversations: (data: {
     sessionId: number;
@@ -356,7 +462,7 @@ export interface ElectronAPI {
   reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
-  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
+  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
   deleteSparkIdea: (data: { id: number | string }) => Promise<ApiResult<void>>;
   getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
   getSparkIdeasByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiSparkIdea[]>>;
@@ -399,17 +505,21 @@ export interface ElectronAPI {
       top_k?: number;
     };
     tools?: unknown[];
-    useToolRouter?: boolean;
+    /** 是否在请求里携带 skills 工具列表（旧名 useToolRouter；并不做语义路由） */
+    enableAgentTools?: boolean;
     bookId?: EntityId | null;
     chapterId?: EntityId | null;
     currentChapterTitle?: string;
     writingChapters?: { id: EntityId; title: string }[];
     availableOutlines?: { id: EntityId; title: string; type?: string }[];
-    /** 与界面「关联章节」一致，主进程并入 toolCtx 供写作专家 system 附录 */
+    /** 与界面「关联章节」一致，后端预取内容直接注入 system */
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
-    agentMode?: "legacy" | "subagent" | "expert_team";
-    chatAgentMode?: "ask" | "agent" | "expert" | "expert_team" | "collab";
+    /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
+    selectedMemoryIds?: (number | string)[];
+    selectedForeshadowingIds?: (number | string)[];
+    agentMode?: "legacy" | "subagent";
+    chatAgentMode?: "ask" | "agent" | "expert" | "collab";
     /** legacy 下协作共创 */
     writingMode?: "default" | "collab";
     /** @deprecated 已由 subagentRole 替代，后端忽略 */
@@ -437,7 +547,29 @@ export interface ElectronAPI {
         title: string;
         parentId?: EntityId | null;
       };
-      /** 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示） */
+      /** AI 写工具改动了设定类数据（人物/背景/大纲），前端面板据此刷新 */
+      settingUpdated?: {
+        kind: "character" | "background" | "outline";
+        action?: string;
+        id?: EntityId;
+        name?: string;
+      };
+      /**
+       * AI 工具 editChapterContent 提交的差异提议：
+       * 后端不再直接 save_article，改为把 before/after 推给前端，
+       * 由 DiffProvider 启动 diff 会话，等用户在 DiffOverlay 接受后才落库。
+       */
+      proposedChapterDiff?: {
+        chapterId: EntityId;
+        beforeText: string;
+        proposedText: string;
+        source?: string;
+      };
+      /**
+       * 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
+       * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
+       * @deprecated
+       */
       collabLatestParagraph?: string;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;

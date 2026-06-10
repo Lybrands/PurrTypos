@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, Query
@@ -27,24 +26,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["spark-ideas"])
 
 
-# ---------------------------------------------------------------------------
-# Error helper — port of main.js:811-831 mem0ErrMessage()
-# ---------------------------------------------------------------------------
+def _err_message(err: Exception) -> str:
+    """记录异常并返回原始信息。
 
-def _mem0_err_message(err: Exception) -> str:
-    """Turn mem0-related exceptions into user/model-friendly Chinese messages."""
-    msg = str(err)
-    logger.error("[mem0] %s: %s", type(err).__name__, msg, exc_info=True)
-
-    if re.search(r"ECONNREFUSED|127\.0\.0\.1:11434|localhost:11434|fetch failed|socket hang up|ConnectError", msg, re.I):
-        return "本书设定功能需要 Ollama 在本地运行。请先打开 Ollama 应用（或从开始菜单启动），再试一次。"
-    if re.search(r"Cannot find module|MODULE_NOT_FOUND|ModuleNotFoundError|No module named", msg, re.I):
-        return f"本书设定服务依赖未正确加载：{msg}。请确认已安装 mem0ai（pip install mem0ai）。"
-    if re.search(r"nomic-embed|embed.*model|ollama.*pull", msg, re.I):
-        return "请先在终端执行：ollama pull nomic-embed-text，再试添加本书设定。"
-    if re.search(r"mem0 需要 Embedder|OPENAI_API_KEY", msg, re.I):
-        return "未检测到本地 Ollama 或 OpenAI 配置。请安装并启动 Ollama，或设置 OPENAI_API_KEY 后重试。"
-    return msg
+    （旧版 _mem0_err_message 会把错误归类成「请安装 Ollama / pip install mem0ai」
+    等修复指引——但记忆栈已迁 SQLite，这些错误不可能发生，文案只会误导用户。）
+    """
+    logger.error("[memories] %s: %s", type(err).__name__, err, exc_info=True)
+    return str(err)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +50,7 @@ async def add_spark_idea(body: AddSparkIdeaRequest):
         )
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.put("/spark-ideas/{id}")
@@ -70,7 +59,7 @@ async def update_spark_idea(id: str, body: UpdateSparkIdeaRequest):
         data = await memory_service.update_spark_idea(id, body.data)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.delete("/spark-ideas/{id}")
@@ -79,7 +68,7 @@ async def delete_spark_idea(id: str):
         await memory_service.delete_spark_idea(id)
         return {"success": True}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.get("/spark-ideas/by-book")
@@ -91,7 +80,7 @@ async def get_spark_ideas_by_book(
         data = await memory_service.get_spark_ideas_by_book(bookId, layer=layer)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.post("/spark-ideas/by-ids")
@@ -100,7 +89,7 @@ async def get_spark_ideas_by_ids(body: GetSparkIdeasByIdsRequest):
         data = await memory_service.get_spark_ideas_by_ids(body.ids)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.post("/spark-ideas/for-prompt")
@@ -111,7 +100,7 @@ async def get_spark_ideas_for_prompt(body: SearchSparkIdeasRequest):
         )
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +119,7 @@ async def add_foreshadowing(body: AddForeshadowingRequest):
         )
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.put("/foreshadowing/{id}")
@@ -139,7 +128,7 @@ async def update_foreshadowing(id: str, body: UpdateForeshadowingRequest):
         data = await memory_service.update_foreshadowing(id, body.data)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.delete("/foreshadowing/{id}")
@@ -148,7 +137,7 @@ async def delete_foreshadowing(id: str):
         await memory_service.delete_foreshadowing(id)
         return {"success": True}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.get("/foreshadowing/by-book")
@@ -160,7 +149,7 @@ async def get_foreshadowing_by_book(
         data = await memory_service.get_foreshadowing_by_book(bookId, status_filter=status)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.post("/foreshadowing/by-ids")
@@ -169,7 +158,7 @@ async def get_foreshadowing_by_ids(body: GetForeshadowingByIdsRequest):
         data = await memory_service.get_foreshadowing_by_ids(body.ids)
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}
 
 
 @router.post("/foreshadowing/for-prompt")
@@ -180,4 +169,4 @@ async def get_foreshadowing_for_prompt(body: ForeshadowingForPromptRequest):
         )
         return {"success": True, "data": data}
     except Exception as exc:
-        return {"success": False, "error": _mem0_err_message(exc)}
+        return {"success": False, "error": _err_message(exc)}

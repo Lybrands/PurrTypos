@@ -23,10 +23,16 @@ async def save_conversation(body: SaveConversationRequest):
         if body.thinkingBlocks is not None
         else None
     )
+    subagent_result_json = (
+        json.dumps(body.subagentResult, ensure_ascii=False)
+        if body.subagentResult is not None
+        else None
+    )
     await db.execute(
         """INSERT INTO ai_conversations
-           (session_id, chapter_id, prompt, response, model, thinking, tool_call_segments, thinking_blocks)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (session_id, chapter_id, prompt, response, model, thinking,
+            tool_call_segments, thinking_blocks, subagent_result)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             body.sessionId,
             body.chapterId,
@@ -36,6 +42,7 @@ async def save_conversation(body: SaveConversationRequest):
             body.thinking,
             tool_call_segments_json,
             thinking_blocks_json,
+            subagent_result_json,
         ],
     )
     return {"success": True}

@@ -132,10 +132,8 @@
 .character-info-tooltip {
   font-size: var(--font-size-sm);
   line-height: 1.6;
-
-  > div {
-    white-space: nowrap;
-  }
+  max-width: 320px;
+  white-space: pre-line;
 }
 
 .character-card-tags {
@@ -169,8 +167,28 @@
   }
 }
 
-.character-form-modal .ant-form-item {
-  margin-bottom: 12px;
+/* ─── 人物编辑弹窗：姓名 + 标签 + Markdown 档案（复用小说背景的 tiptap 版式） ─── */
+.character-edit-meta {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+
+  .character-edit-name {
+    flex: 0 0 180px;
+  }
+
+  .character-edit-tags {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.character-edit-profile {
+  height: 52vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  padding: var(--spacing-sm) var(--spacing);
 }
 
 .char-options-tab-content {

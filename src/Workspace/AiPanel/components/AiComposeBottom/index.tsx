@@ -3,15 +3,24 @@ import { Divider, Select, Switch, Tooltip } from 'antd'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
 
-export interface AiComposeBottomProps {
-  /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
-  modelConfigs: AiModelConfig[]
+/**
+ * 模型选择的绑定集合 —— 对话模式、所选模型、思考开关及其 setter。
+ *
+ * 这一组 prop 既用于主输入区，也会透传到编辑气泡里的 AiComposeBottom。
+ * 打成一个对象后沿途只传一个 prop，叶子处用 `{...modelSelection}` 展开。
+ */
+export interface ModelSelectionBindings {
   chatAgentMode: ChatAgentMode
   setChatAgentMode: (v: ChatAgentMode) => void
   selectedModel: string
   setSelectedModel: (v: string) => void
   thinkingEnabled: boolean
   setThinkingEnabled: (v: boolean) => void
+}
+
+export interface AiComposeBottomProps extends ModelSelectionBindings {
+  /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
+  modelConfigs: AiModelConfig[]
   /** 必须开启思考、不可关闭的模型 id 列表 */
   thinkingOnlyModelIds: string[]
   loading: boolean
@@ -52,7 +61,7 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--accent)' },
       } as const
     }
-    if (chatAgentMode === 'expert' || chatAgentMode === 'expert_team') {
+    if (chatAgentMode === 'expert') {
       return {
         root: {
           border: 'none',
@@ -89,12 +98,11 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' || chatAgentMode === 'expert_team' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
-            { value: 'expert_team', label: '专家团' },
             { value: 'expert', label: '写作专家' },
             { value: 'collab', label: '协作共创' },
             { value: 'agent', label: '智能体' },
@@ -114,7 +122,7 @@ export default function AiComposeBottom({
           variant="borderless"
           popupMatchSelectWidth={false}
           popupRender={(menu) =>
-            chatAgentMode === 'expert' || chatAgentMode === 'expert_team' ? (
+            chatAgentMode === 'expert' ? (
               menu
             ) : (
               <>
