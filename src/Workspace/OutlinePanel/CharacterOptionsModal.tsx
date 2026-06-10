@@ -1,6 +1,6 @@
 import React from 'react'
 import { DeleteOutlined, PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
-import { Modal, Tabs, Button, Input, Tooltip } from 'antd'
+import { Modal, Button, Input, Tooltip } from 'antd'
 import type { CharacterOption } from '../../types'
 import { useAntdApp } from '../../hooks/useAntdApp'
 
@@ -10,7 +10,8 @@ interface Props {
   onOptionsChange?: () => void
 }
 
-type Category = 'personality' | 'tag'
+/** 人物档案 Markdown 化后，结构化选项只剩「标签」（性格已并入档案正文） */
+type Category = 'tag'
 
 function OptionList({
   category,
@@ -164,7 +165,7 @@ function OptionList({
 export default function CharacterOptionsModal({ open, onClose, onOptionsChange }: Props) {
   return (
     <Modal
-      title="选项配置"
+      title="标签选项"
       open={open}
       onCancel={onClose}
       footer={null}
@@ -172,28 +173,9 @@ export default function CharacterOptionsModal({ open, onClose, onOptionsChange }
       destroyOnHidden
       styles={{ body: { overflow: 'hidden' } }}
     >
-      <Tabs
-        items={[
-          {
-            key: 'personality',
-            label: '性格',
-            children: (
-              <div className="char-options-tab-content">
-                <OptionList category="personality" onOptionsChange={onOptionsChange} />
-              </div>
-            ),
-          },
-          {
-            key: 'tag',
-            label: '标签',
-            children: (
-              <div className="char-options-tab-content">
-                <OptionList category="tag" onOptionsChange={onOptionsChange} />
-              </div>
-            ),
-          },
-        ]}
-      />
+      <div className="char-options-tab-content">
+        <OptionList category="tag" onOptionsChange={onOptionsChange} />
+      </div>
     </Modal>
   )
 }

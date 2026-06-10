@@ -1,67 +1,62 @@
 import React from 'react'
-import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, InfoCircleOutlined } from '@ant-design/icons'
-import { Button, Modal, Form, Input, InputNumber, Radio, Select, Tag, Tooltip, Empty } from 'antd'
+import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined } from '@ant-design/icons'
+import { Button, Modal, Input, Select, Tag, Tooltip, Empty } from 'antd'
+import type { Editor } from '@tiptap/core'
+import { Extension } from '@tiptap/core'
+import { useEditor, EditorContent } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
 import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAntdApp } from '../../hooks/useAntdApp'
 import { getBookCharacters } from '../utils'
+import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import CharacterOptionsModal from './CharacterOptionsModal'
+import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
 
-const { TextArea } = Input
+/** Tab 键：列表内缩进，非列表插入制表符（与小说背景编辑器一致） */
+const LiteralTab = Extension.create({
+  name: 'literalTab',
+  addKeyboardShortcuts() {
+    return {
+      Tab: () => {
+        if (this.editor.commands.sinkListItem('listItem')) return true
+        this.editor.commands.insertContent('\t')
+        return true
+      },
+    }
+  },
+})
 
-interface CharacterFormValues {
-  name: string
-  gender: string
-  age: number | null
-  height: string
-  occupation: string
-  appearance: string
-  origin: string
-  personality: string[]
-  background: string
-  biography: string
-  remark?: string
-  tags: string[]
-}
+/** 新建人物时的档案脚手架：提供引导但不强制，小节可按需增删 */
+const PROFILE_TEMPLATE = `## 基本信息
+- 性别：
+- 年龄：
+- 职业：
+
+## 外貌
+
+## 性格
+
+## 经历
+
+## 在故事中的定位
+`
 
 function splitToArray(str?: string): string[] {
   if (!str) return []
   return str.split(/[,，]/).map((t) => t.trim()).filter(Boolean)
 }
 
-function toFormValues(c: Character | null): Partial<CharacterFormValues> {
-  if (!c) return {}
-  return {
-    name: c.name ?? '',
-    gender: c.gender ?? '',
-    age: c.age ? parseInt(c.age) || null : null,
-    height: c.height ?? '',
-    occupation: c.occupation ?? '',
-    appearance: c.appearance ?? '',
-    origin: c.origin ?? '',
-    personality: splitToArray(c.personality),
-    background: c.background ?? '',
-    biography: c.biography ?? '',
-    remark: c.remark ?? '',
-    tags: splitToArray(c.tags),
-  }
-}
-
-function toSaveData(values: CharacterFormValues): Partial<Character> {
-  return {
-    name: values.name?.trim() ?? '',
-    gender: values.gender ?? '',
-    age: values.age != null ? String(values.age) : '',
-    height: values.height?.trim() ?? '',
-    occupation: values.occupation?.trim() ?? '',
-    appearance: values.appearance?.trim() ?? '',
-    origin: values.origin?.trim() ?? '',
-    personality: (values.personality ?? []).join(', '),
-    background: values.background?.trim() ?? '',
-    biography: values.biography?.trim() ?? '',
-    remark: values.remark?.trim() ?? '',
-    tags: (values.tags ?? []).join(', '),
-  }
+/** 卡片悬停预览：粗暴去掉 Markdown 标记后截断 */
+function profilePreview(md?: string, max = 160): string {
+  const plain = (md ?? '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^\s*[-*+]\s*/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+  if (!plain) return ''
+  return plain.length > max ? `${plain.slice(0, max)}…` : plain
 }
 
 interface CharacterTabProps {
@@ -73,15 +68,49 @@ interface CharacterTabProps {
 export default function CharacterTab({ bookId, hideHeader = false, onActionActiveChange }: CharacterTabProps) {
   const { message } = useAntdApp()
   const [characters, setCharacters] = React.useState<Character[]>([])
-  const [createModalOpen, setCreateModalOpen] = React.useState(false)
+  const [editModalOpen, setEditModalOpen] = React.useState(false)
   const [editTarget, setEditTarget] = React.useState<Character | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Character | null>(null)
   const [configOpen, setConfigOpen] = React.useState(false)
+  const [saving, setSaving] = React.useState(false)
 
-  const [personalityOptions, setPersonalityOptions] = React.useState<CharacterOption[]>([])
+  const [draftName, setDraftName] = React.useState('')
+  const [draftTags, setDraftTags] = React.useState<string[]>([])
   const [tagOptions, setTagOptions] = React.useState<CharacterOption[]>([])
 
-  const [form] = Form.useForm<CharacterFormValues>()
+  const editorRef = React.useRef<Editor | null>(null)
+  const editor = useEditor({
+    immediatelyRender: true,
+    extensions: [
+      LiteralTab,
+      StarterKit.configure({
+        heading: { levels: [1, 2, 3, 4] },
+      }),
+    ],
+    content: '<p></p>',
+    editorProps: {
+      attributes: {
+        class: 'story-background-tiptap-editable',
+        spellcheck: 'false',
+      },
+      handlePaste: (_view, event) => {
+        const text = event.clipboardData?.getData('text/plain') ?? ''
+        if (!text.trim()) return false
+        const looksLikeMarkdown =
+          /^#+\s|^\s*[-*+]\s|^\s*\d+\.\s|\*\*[^*]+|\n\s*[-*+]\s|\n#+\s|^>\s|^\s*\|.+\|/m.test(text)
+        if (looksLikeMarkdown) {
+          event.preventDefault()
+          editorRef.current?.commands.insertContent(markdownToHtml(text))
+          return true
+        }
+        return false
+      },
+    },
+  }, [editModalOpen])
+
+  React.useEffect(() => {
+    editorRef.current = editor ?? null
+  }, [editor])
 
   const loadCharacters = React.useCallback(async () => {
     if (bookId == null) return
@@ -90,12 +119,8 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
   }, [bookId])
 
   const loadOptions = React.useCallback(async () => {
-    const [pRes, tRes] = await Promise.all([
-      window.electronAPI.getCharacterOptions({ category: 'personality' }),
-      window.electronAPI.getCharacterOptions({ category: 'tag' }),
-    ])
-    if (pRes.success && pRes.data) setPersonalityOptions(pRes.data)
-    if (tRes.success && tRes.data) setTagOptions(tRes.data)
+    const res = await window.electronAPI.getCharacterOptions({ category: 'tag' })
+    if (res.success && res.data) setTagOptions(res.data)
   }, [])
 
   React.useEffect(() => {
@@ -103,58 +128,75 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
     loadOptions()
   }, [loadCharacters, loadOptions])
 
+  // AI 工具创建/修改人物后刷新列表（面板可能与 AI 对话同屏开着）
   React.useEffect(() => {
-    if (createModalOpen) {
-      form.setFieldsValue(toFormValues(editTarget))
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ kind?: string }>).detail
+      if (detail?.kind === 'character') loadCharacters()
     }
-  }, [createModalOpen, editTarget, form])
+    window.addEventListener('setting-updated', handler)
+    return () => window.removeEventListener('setting-updated', handler)
+  }, [loadCharacters])
+
+  // 打开编辑弹窗时灌入草稿（新建给模板脚手架）
+  React.useEffect(() => {
+    if (!editModalOpen || !editor) return
+    const md = editTarget ? (editTarget.profile_md ?? '') : PROFILE_TEMPLATE
+    editor.commands.setContent(markdownToHtml(md))
+  }, [editModalOpen, editTarget, editor])
 
   React.useEffect(() => {
-    onActionActiveChange?.(createModalOpen || !!deleteTarget || configOpen)
-  }, [createModalOpen, deleteTarget, configOpen, onActionActiveChange])
+    onActionActiveChange?.(editModalOpen || !!deleteTarget || configOpen)
+  }, [editModalOpen, deleteTarget, configOpen, onActionActiveChange])
 
   const openCreate = React.useCallback(() => {
     setEditTarget(null)
-    setCreateModalOpen(true)
+    setDraftName('')
+    setDraftTags([])
+    setEditModalOpen(true)
   }, [])
 
   const openEdit = React.useCallback((c: Character) => {
     setEditTarget(c)
-    setCreateModalOpen(true)
+    setDraftName(c.name ?? '')
+    setDraftTags(splitToArray(c.tags))
+    setEditModalOpen(true)
   }, [])
 
-  const handleFormSubmit = React.useCallback(async () => {
-    try {
-      const values = await form.validateFields()
-      const data = toSaveData(values)
-      if (bookId == null) return
+  const closeModal = React.useCallback(() => {
+    setEditModalOpen(false)
+    setEditTarget(null)
+  }, [])
 
-      if (editTarget) {
-        const res = await window.electronAPI.updateCharacter({ id: editTarget.id, data })
-        if (res.success) {
-          message.success('已保存')
-          setCreateModalOpen(false)
-          setEditTarget(null)
-          form.resetFields()
-          loadCharacters()
-        } else {
-          message.error(res.error || '保存失败')
-        }
-      } else {
-        const res = await window.electronAPI.createCharacter({ bookId, data })
-        if (res.success) {
-          message.success('人物已创建')
-          setCreateModalOpen(false)
-          form.resetFields()
-          loadCharacters()
-        } else {
-          message.error(res.error || '创建失败')
-        }
-      }
-    } catch {
-      // 校验失败，Form 会展示错误
+  const handleSave = React.useCallback(async () => {
+    const name = draftName.trim()
+    if (!name) {
+      message.error('请输入人物名称')
+      return
     }
-  }, [bookId, editTarget, form, loadCharacters, message])
+    if (bookId == null) return
+    const ed = editorRef.current
+    const data: Partial<Character> = {
+      name,
+      tags: draftTags.join(', '),
+      profile_md: ed ? htmlToMarkdown(ed.getHTML()) : '',
+    }
+    setSaving(true)
+    try {
+      const res = editTarget
+        ? await window.electronAPI.updateCharacter({ id: editTarget.id, data })
+        : await window.electronAPI.createCharacter({ bookId, data })
+      if (res.success) {
+        message.success(editTarget ? '已保存' : '人物已创建')
+        closeModal()
+        loadCharacters()
+      } else {
+        message.error(res.error || '保存失败')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }, [bookId, draftName, draftTags, editTarget, closeModal, loadCharacters, message])
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
@@ -167,12 +209,6 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
       message.error(res.error || '删除失败')
     }
   }, [deleteTarget, loadCharacters, message])
-
-  const closeModal = React.useCallback(() => {
-    setCreateModalOpen(false)
-    setEditTarget(null)
-    form.resetFields()
-  }, [form])
 
   if (bookId == null) {
     return (
@@ -187,7 +223,7 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
       <div className="character-tab-header">
         {!hideHeader && <span className="character-tab-title">人物列表</span>}
         <div style={{ display: 'flex', gap: 2, marginLeft: hideHeader ? 'auto' : undefined }}>
-          <Tooltip title="配置选项">
+          <Tooltip title="配置标签选项">
             <Button
               type="text"
               size="small"
@@ -215,149 +251,75 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
             <small>点击「新建人物」添加角色</small>
           </div>
         ) : (
-          characters.map((c, index) => (
-            <div key={c.id} className="character-card">
-              <div className="character-card-main">
-                <div className="character-card-name-row">
-                  <span className="character-card-index">{index + 1}.</span>
-                  <span className="character-card-name">{c.name}</span>
-                  <Tooltip
-                    zIndex={1301}
-                    title={
-                      <div className="character-info-tooltip">
-                        <div>性别：{c.gender || '-'}</div>
-                        <div>年龄：{c.age || '-'}</div>
-                        <div>身高：{c.height || '-'}</div>
-                        <div>职业：{c.occupation || '-'}</div>
-                        <div>性格：{c.personality || '-'}</div>
-                      </div>
-                    }
-                  >
-                    <span className="character-info-btn" onClick={(e) => e.stopPropagation()}>
-                      <InfoCircleOutlined />
-                    </span>
-                  </Tooltip>
-                </div>
-                {c.tags && (
-                  <div className="character-card-tags">
-                    {splitToArray(c.tags).map((t, i) => (
-                      <Tag key={i} variant="filled" color="default">{t}</Tag>
-                    ))}
+          characters.map((c, index) => {
+            const preview = profilePreview(c.profile_md)
+            return (
+              <div key={c.id} className="character-card">
+                <div className="character-card-main">
+                  <div className="character-card-name-row">
+                    <span className="character-card-index">{index + 1}.</span>
+                    {preview ? (
+                      <Tooltip
+                        zIndex={1301}
+                        title={<div className="character-info-tooltip">{preview}</div>}
+                      >
+                        <span className="character-card-name">{c.name}</span>
+                      </Tooltip>
+                    ) : (
+                      <span className="character-card-name">{c.name}</span>
+                    )}
                   </div>
-                )}
+                  {c.tags && (
+                    <div className="character-card-tags">
+                      {splitToArray(c.tags).map((t, i) => (
+                        <Tag key={i} variant="filled" color="default">{t}</Tag>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="character-card-actions">
+                  <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEdit(c)} title="编辑" />
+                  <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => setDeleteTarget(c)} title="删除" className="character-add-btn" />
+                </div>
               </div>
-              <div className="character-card-actions">
-                <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEdit(c)} title="编辑" />
-                <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => setDeleteTarget(c)} title="删除" className="character-add-btn" />
-              </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
 
       <Modal
         title={editTarget ? '编辑人物' : '新建人物'}
-        open={createModalOpen}
-        onOk={handleFormSubmit}
+        open={editModalOpen}
+        onOk={handleSave}
         onCancel={closeModal}
         okText={editTarget ? '保存' : '创建'}
         cancelText="取消"
-        width={540}
+        okButtonProps={{ loading: saving }}
+        width={680}
         destroyOnHidden
-        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
+        className="character-edit-modal"
       >
-        <Form form={form} layout="vertical" className="character-form-modal">
-          <Form.Item
-            name="name"
-            label="名称"
-            rules={[{ required: true, message: '请输入人物名称' }]}
-          >
-            <Input placeholder="请输入人物姓名" maxLength={50} />
-          </Form.Item>
-
-          <Form.Item name="gender" label="性别">
-            <Radio.Group>
-              <Radio value="男">男</Radio>
-              <Radio value="女">女</Radio>
-              <Radio value="其他">其他</Radio>
-            </Radio.Group>
-          </Form.Item>
-
-          <Form.Item name="age" label="年龄">
-            <InputNumber
-              placeholder="请输入年龄"
-              min={0}
-              max={999}
-              style={{ width: '100%' }}
-            />
-          </Form.Item>
-
-          <Form.Item name="height" label="身高">
-            <Input placeholder="如：175cm、中等、一米八" maxLength={30} />
-          </Form.Item>
-
-          <Form.Item name="occupation" label="职业">
-            <Input placeholder="如：程序员、学生、侠客" maxLength={50} />
-          </Form.Item>
-
-          <Form.Item name="origin" label="籍贯">
-            <Input placeholder="如：北京、江南" maxLength={50} />
-          </Form.Item>
-
-          <Form.Item name="appearance" label="外貌">
-            <TextArea
-              placeholder="体型、五官特征、标志性外观等"
-              rows={2}
-              maxLength={300}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item name="personality" label="性格">
-            <Select
-              mode="tags"
-              placeholder="选择或输入性格标签，回车确认"
-              options={personalityOptions.map((p) => ({ label: p.value, value: p.value }))}
-              maxCount={10}
-            />
-          </Form.Item>
-
-          <Form.Item name="background" label="背景">
-            <TextArea
-              placeholder="人物的出身、经历、社会背景等"
-              rows={3}
-              maxLength={1000}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item name="biography" label="人物小传">
-            <TextArea
-              placeholder="人物的简要介绍、在故事中的定位、核心动机等"
-              rows={4}
-              maxLength={2000}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item name="tags" label="标签">
-            <Select
-              mode="tags"
-              placeholder="选择或输入标签，回车确认"
-              options={tagOptions.map((t) => ({ label: t.value, value: t.value }))}
-              maxCount={10}
-            />
-          </Form.Item>
-
-          <Form.Item name="remark" label="备注">
-            <TextArea
-              placeholder="其他需要记录的说明"
-              rows={2}
-              maxLength={500}
-              showCount
-            />
-          </Form.Item>
-        </Form>
+        <div className="character-edit-meta">
+          <Input
+            placeholder="人物姓名（必填）"
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            maxLength={50}
+            className="character-edit-name"
+          />
+          <Select
+            mode="tags"
+            placeholder="标签：选择或输入，回车确认"
+            value={draftTags}
+            onChange={setDraftTags}
+            options={tagOptions.map((t) => ({ label: t.value, value: t.value }))}
+            maxCount={10}
+            className="character-edit-tags"
+          />
+        </div>
+        <div className="character-edit-profile story-background-tiptap-wrap">
+          <EditorContent editor={editor} className="story-background-tiptap-container" />
+        </div>
       </Modal>
 
       <CharacterOptionsModal

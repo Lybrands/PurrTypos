@@ -24,26 +24,18 @@ async def get_characters(
 async def create_character(
     db: DatabaseConnection, book_id: str, data: dict[str, Any]
 ) -> dict[str, Any] | None:
-    name = data.get("name", "")
-    gender = data.get("gender", "")
-    age = data.get("age", "")
-    height = data.get("height", "")
-    occupation = data.get("occupation", "")
-    appearance = data.get("appearance", "")
-    origin = data.get("origin", "")
-    personality = data.get("personality", "")
-    background = data.get("background", "")
-    biography = data.get("biography", "")
-    tags = data.get("tags", "")
-    remark = data.get("remark", "")
+    """人物档案已 Markdown 化：除 name / tags 外的内容统一存 profile_md。
+
+    旧的固定字段列（gender/age/…/remark）仅供历史数据读取，不再写入。
+    """
     await db.execute(
-        "INSERT INTO characters "
-        "(book_id, name, gender, age, height, occupation, appearance, "
-        "origin, personality, background, biography, tags, remark) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO characters (book_id, name, tags, profile_md) "
+        "VALUES (?, ?, ?, ?)",
         [
-            book_id, name, gender, age, height, occupation, appearance,
-            origin, personality, background, biography, tags, remark,
+            book_id,
+            data.get("name", ""),
+            data.get("tags", ""),
+            data.get("profile_md", ""),
         ],
     )
     return await db.fetch_one(
@@ -54,31 +46,18 @@ async def create_character(
 async def update_character(
     db: DatabaseConnection, character_id: int, data: dict[str, Any]
 ) -> dict[str, Any] | None:
+    """部分更新：只覆盖显式传入的 name / tags / profile_md。"""
     row = await db.fetch_one(
         "SELECT * FROM characters WHERE id = ?", [character_id]
     )
     if not row:
         return None
     name = data.get("name", row["name"])
-    gender = data.get("gender", row.get("gender", ""))
-    age = data.get("age", row.get("age", ""))
-    height = data.get("height", row.get("height", ""))
-    occupation = data.get("occupation", row.get("occupation", ""))
-    appearance = data.get("appearance", row.get("appearance", ""))
-    origin = data.get("origin", row.get("origin", ""))
-    personality = data.get("personality", row.get("personality", ""))
-    background = data.get("background", row.get("background", ""))
-    biography = data.get("biography", row.get("biography", ""))
     tags = data.get("tags", row.get("tags", ""))
-    remark = data.get("remark", row.get("remark", ""))
+    profile_md = data.get("profile_md", row.get("profile_md") or "")
     await db.execute(
-        "UPDATE characters SET name = ?, gender = ?, age = ?, height = ?, "
-        "occupation = ?, appearance = ?, origin = ?, personality = ?, "
-        "background = ?, biography = ?, tags = ?, remark = ? WHERE id = ?",
-        [
-            name, gender, age, height, occupation, appearance, origin,
-            personality, background, biography, tags, remark, character_id,
-        ],
+        "UPDATE characters SET name = ?, tags = ?, profile_md = ? WHERE id = ?",
+        [name, tags, profile_md, character_id],
     )
     return await db.fetch_one(
         "SELECT * FROM characters WHERE id = ?", [character_id]

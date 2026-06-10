@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
-from database.crud.chapters import get_chapters
 from utils.id_utils import short_id8
 
 
@@ -21,14 +20,16 @@ async def save_outline(
         outline_type = "chapter"
         xmind_data = None
         file_path = None
+        markdown_content = None
         book_id = None
         writing_chapter_id = None
         parent_outline_id = None
     else:
         title = data.get("title", "")
-        outline_type = data.get("type", "chapter")
+        outline_type = data.get("type") or "chapter"
         xmind_data = data.get("xmind_data")
         file_path = data.get("file_path")
+        markdown_content = data.get("markdown_content")
         book_id = data.get("book_id")
         writing_chapter_id = data.get("writing_chapter_id")
         parent_outline_id = data.get("parent_outline_id")
@@ -76,11 +77,11 @@ async def save_outline(
     new_id = short_id8()
     await db.execute(
         "INSERT INTO outlines (id, title, type, sort, xmind_data, file_path, "
-        "book_id, writing_chapter_id, parent_outline_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "markdown_content, book_id, writing_chapter_id, parent_outline_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             new_id, title, outline_type, sort, xmind_data, file_path,
-            book_id, writing_chapter_id, parent_outline_id,
+            markdown_content, book_id, writing_chapter_id, parent_outline_id,
         ],
     )
     return {
@@ -215,7 +216,7 @@ async def delete_outline(db: DatabaseConnection, outline_id: str) -> None:
 async def get_outlines(
     db: DatabaseConnection, type_filter: str | None = None
 ) -> list[dict[str, Any]]:
-    if type_filter in ("global", "chapter"):
+    if type_filter:
         return await db.fetch_all(
             "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
             [type_filter],

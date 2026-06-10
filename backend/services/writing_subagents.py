@@ -19,6 +19,12 @@ from services.writing_rules import (
     normalize_style_unify_result,
     normalize_writing_blueprint,
 )
+from utils.chat_stream import (
+    build_tool_results_display,
+    build_tool_round_messages,
+    merge_stream_tool_calls,
+    valid_named_tool_calls,
+)
 from utils.tool_call_utils import normalize_tool_calls_list
 from utils.writing_helpers import build_prior_chapter_hint, build_style_unify_prior_chapter_hint
 from utils.writing_prompt import (
@@ -85,31 +91,6 @@ def _tool_result_looks_like_json_error(content: str) -> bool:
         return isinstance(o, dict) and isinstance(o.get("error"), str) and len(o["error"]) > 0
     except Exception:
         return False
-
-
-def _merge_stream_tool_calls(
-    accumulated: list[dict], delta_tool_calls: list[dict] | None,
-) -> list[dict]:
-    if not delta_tool_calls:
-        return accumulated
-    result = list(accumulated)
-    for dtc in delta_tool_calls:
-        idx = dtc.get("index", 0)
-        while len(result) <= idx:
-            result.append({})
-        cur = result[idx]
-        if "id" not in cur and dtc.get("id") is not None:
-            cur["id"] = dtc["id"]
-        if "type" not in cur and dtc.get("type") is not None:
-            cur["type"] = dtc["type"]
-        fn_delta = dtc.get("function") or {}
-        fn_cur = cur.setdefault("function", {})
-        if fn_delta.get("name") is not None:
-            fn_cur["name"] = fn_delta["name"]
-        if fn_delta.get("arguments") is not None:
-            fn_cur["arguments"] = fn_cur.get("arguments", "") + fn_delta["arguments"]
-        result[idx] = cur
-    return result
 
 
 async def _run_non_stream_tool_loop(
@@ -244,29 +225,18 @@ async def _run_streaming_tool_loop(
 
             raw_tool_calls = delta.get("tool_calls")
             if raw_tool_calls and isinstance(raw_tool_calls, list):
-                accumulated_tool_calls = _merge_stream_tool_calls(accumulated_tool_calls, raw_tool_calls)
+                accumulated_tool_calls = merge_stream_tool_calls(accumulated_tool_calls, raw_tool_calls)
 
             finish_reason = c0.get("finish_reason")
             if finish_reason in ("stop", "length"):
-                if accumulated_tool_calls:
-                    valid_stop = [
-                        tc for tc in accumulated_tool_calls
-                        if tc.get("function", {}).get("name")
-                    ]
-                    if valid_stop:
-                        finish_reason = "tool_calls"
-                    else:
-                        accumulated_final = accumulated_content
-                        return accumulated_final
+                if accumulated_tool_calls and valid_named_tool_calls(accumulated_tool_calls):
+                    finish_reason = "tool_calls"
                 else:
                     accumulated_final = accumulated_content
                     return accumulated_final
 
             if finish_reason in ("tool_calls", "function_call"):
-                valid_calls = [
-                    tc for tc in accumulated_tool_calls
-                    if tc.get("function", {}).get("name")
-                ]
+                valid_calls = valid_named_tool_calls(accumulated_tool_calls)
                 if not valid_calls:
                     accumulated_final = accumulated_content
                     return accumulated_final
@@ -283,33 +253,13 @@ async def _run_streaming_tool_loop(
                     valid_calls, tool_ctx, lambda ev: send_chunk(ev) if ev else None,
                 )
 
-                results_display = []
-                for r in tool_results:
-                    tc_name = next(
-                        (tc.get("function", {}).get("name", "")
-                         for tc in valid_calls if tc.get("id") == r.get("tool_call_id")),
-                        "",
-                    )
-                    results_display.append({
-                        "tool_call_id": r.get("tool_call_id"),
-                        "name": tc_name,
-                        "content": r.get("content"),
-                    })
-                send_chunk({"toolResults": results_display})
+                send_chunk({
+                    "toolResults": build_tool_results_display(tool_results, valid_calls),
+                })
 
-                asst_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "tool_calls": valid_calls,
-                }
-                if accumulated_content:
-                    asst_msg["content"] = accumulated_content
-                loop_messages = loop_messages + [asst_msg]
-                for r in tool_results:
-                    loop_messages.append({
-                        "role": "tool",
-                        "tool_call_id": r.get("tool_call_id"),
-                        "content": r.get("content", ""),
-                    })
+                loop_messages = loop_messages + build_tool_round_messages(
+                    valid_calls, accumulated_content, "", tool_results,
+                )
                 got_tool_calls = True
                 break
 

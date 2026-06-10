@@ -3,14 +3,23 @@ import { SunOutlined, MoonOutlined, FontSizeOutlined, SettingOutlined } from '@a
 import { Button, Tooltip } from 'antd'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useFontSize } from '../../contexts/FontSizeContext'
-import PanelLeftIcon from '../../icons/PanelLeftIcon'
-import PanelCenterIcon from '../../icons/PanelCenterIcon'
-import PanelRightIcon from '../../icons/PanelRightIcon'
 import homeLogoLight from '../../imgs/home_logo_light.png'
 import homeLogoDark from '../../imgs/home_logo_dark.png'
 import './index.scss'
 
 const FONT_SIZE_LABELS: Record<string, string> = { small: '小', medium: '中', large: '大' }
+
+/** 顶栏面板 toggle 按钮描述（工作台用来唤起/关闭浮窗） */
+export interface HeaderPanelToggle {
+  key: string
+  icon: React.ReactNode
+  tooltip: string
+  /** 对应面板当前可见（浮窗已开 / 已是主区域） */
+  active?: boolean
+  /** 该面板已是主区域等场景：按钮仅作状态展示，点击无效 */
+  disabled?: boolean
+  onClick?: () => void
+}
 
 interface AppHeaderProps {
   title?: React.ReactNode
@@ -19,18 +28,8 @@ interface AppHeaderProps {
   searchSlot?: React.ReactNode
   right?: React.ReactNode
   showActions?: boolean
-  /** 工作台专属：左侧面板折叠状态 */
-  leftCollapsed?: boolean
-  /** 工作台专属：右侧面板折叠状态 */
-  rightCollapsed?: boolean
-  /** 工作台专属：中间写作区域折叠状态 */
-  editorCollapsed?: boolean
-  /** 工作台专属：切换左侧面板 */
-  onToggleLeft?: () => void
-  /** 工作台专属：切换右侧面板 */
-  onToggleRight?: () => void
-  /** 工作台专属：切换中间写作区域 */
-  onToggleEditor?: () => void
+  /** 工作台专属：面板可见性 toggle 按钮组 */
+  panelToggles?: HeaderPanelToggle[]
   /** 打开设置页 */
   onOpenSettings?: () => void
 }
@@ -41,18 +40,11 @@ export default function AppHeader({
   searchSlot,
   right,
   showActions = false,
-  leftCollapsed,
-  rightCollapsed,
-  editorCollapsed,
-  onToggleLeft,
-  onToggleRight,
-  onToggleEditor,
+  panelToggles,
   onOpenSettings,
 }: AppHeaderProps) {
   const { theme, toggleTheme } = useTheme()
   const { fontSize, cycleFontSize } = useFontSize()
-
-  const showPanelToggles = showActions && (onToggleLeft != null || onToggleRight != null || onToggleEditor != null)
 
   const headerLogo = theme === 'dark' ? homeLogoDark : homeLogoLight
 
@@ -74,38 +66,21 @@ export default function AppHeader({
         {right}
 
         {/* 面板切换（仅工作台） */}
-        {showPanelToggles && onToggleLeft && (
-          <Tooltip title={leftCollapsed ? '展开左侧面板' : '收起左侧面板'}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelLeftIcon size={16} />}
-              onClick={onToggleLeft}
-              className={`app-header-action-btn${leftCollapsed ? ' panel-toggle-inactive' : ''}`}
-            />
-          </Tooltip>
-        )}
-        {showPanelToggles && onToggleEditor && (
-          <Tooltip title={editorCollapsed ? '展开写作区域' : '收起写作区域'}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelCenterIcon size={16} />}
-              onClick={onToggleEditor}
-              className={`app-header-action-btn${editorCollapsed ? ' panel-toggle-inactive' : ''}`}
-            />
-          </Tooltip>
-        )}
-        {showPanelToggles && onToggleRight && (
-          <Tooltip title={rightCollapsed ? '展开右侧面板' : '收起右侧面板'}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelRightIcon size={16} />}
-              onClick={onToggleRight}
-              className={`app-header-action-btn${rightCollapsed ? ' panel-toggle-inactive' : ''}`}
-            />
-          </Tooltip>
+        {panelToggles && panelToggles.length > 0 && (
+          <div className="app-header-panel-toggles">
+            {panelToggles.map((t) => (
+              <Tooltip key={t.key} title={t.tooltip}>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={t.icon}
+                  onClick={t.disabled ? undefined : t.onClick}
+                  className={`app-header-action-btn panel-toggle-btn${t.active ? ' panel-toggle-active' : ''}${t.disabled ? ' panel-toggle-static' : ''}`}
+                  aria-pressed={!!t.active}
+                />
+              </Tooltip>
+            ))}
+          </div>
         )}
 
         {showActions && (

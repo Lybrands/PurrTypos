@@ -224,42 +224,6 @@ export async function getBookCharacters(bookId: EntityId): Promise<Character[]> 
   return res.success && res.data ? res.data : []
 }
 
-/**
- * 批量获取指定 ID 的人物信息；若 characterIds 为空则返回全部人物
- */
-export async function batchGetCharacters(
-  bookId: EntityId,
-  characterIds?: number[],
-): Promise<Character[]> {
-  const all = await getBookCharacters(bookId)
-  if (!characterIds || characterIds.length === 0) return all
-  const idSet = new Set(characterIds)
-  return all.filter((c) => idSet.has(c.id))
-}
-
-/**
- * 将人物列表格式化为文本摘要（用于 AI 上下文）
- */
-export function formatCharactersAsText(characters: Character[]): string {
-  if (!characters.length) return ''
-  return characters
-    .map((c) => {
-      const parts: string[] = [`【${c.name}】`]
-      if (c.gender) parts.push(`性别：${c.gender}`)
-      if (c.age) parts.push(`年龄：${c.age}`)
-      if (c.occupation) parts.push(`职业：${c.occupation}`)
-      if (c.personality) parts.push(`性格：${c.personality}`)
-      if (c.appearance) parts.push(`外貌：${c.appearance}`)
-      if (c.origin) parts.push(`来历：${c.origin}`)
-      if (c.background) parts.push(`背景：${c.background}`)
-      if (c.biography) parts.push(`经历：${c.biography}`)
-      if (c.tags) parts.push(`标签：${c.tags}`)
-      if (c.remark) parts.push(`备注：${c.remark}`)
-      return parts.join('，')
-    })
-    .join('\n')
-}
-
 // ─── 4. 获取小说背景内容 ──────────────────────────────────────
 
 export interface StoryBackground {

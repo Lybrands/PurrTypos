@@ -87,6 +87,24 @@ SKILL_SPECS: dict[str, dict[str, Any]] = {
         "provides": ["bookCharactersDetails"],
         "consumes": ["bookId"],
     },
+    "createCharacter": {
+        "riskLevel": "write",
+        "requires": ["listBookCharacters"],
+        "consumes": ["bookId", "name"],
+        "autoResolveArgs": ["bookId"],
+    },
+    "updateCharacter": {
+        "riskLevel": "write",
+        "requires": ["listBookCharacters"],
+        "consumes": ["bookId", "characterId"],
+        "autoResolveArgs": ["bookId"],
+    },
+    "editStoryBackground": {
+        "riskLevel": "write",
+        "requires": ["getStoryBackground"],
+        "consumes": ["bookId", "content"],
+        "autoResolveArgs": ["bookId"],
+    },
 }
 
 
