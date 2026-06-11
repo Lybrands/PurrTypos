@@ -75,10 +75,12 @@
    */
   --main-col-pct: 70%;
   --main-col-min: 720px;
-  --main-col-width: max(var(--main-col-min), var(--main-col-pct));
+  /* 上限：超宽屏下 70% 会让行长过长（阅读舒适行长约 60-90 字符），封顶 920px */
+  --main-col-max: 920px;
+  --main-col-width: clamp(var(--main-col-min), var(--main-col-pct), var(--main-col-max));
   /* 单侧外侧留白：(panel_width - col_width) / 2，用于把绝对/边距元素吸到居中列两端 */
   --main-col-gutter: calc(
-    (100% - max(var(--main-col-min), var(--main-col-pct))) / 2
+    (100% - clamp(var(--main-col-min), var(--main-col-pct), var(--main-col-max))) / 2
   );
 
   /* ─── 颜色（Ant Design 中性色 + 功能色） ──────────── */

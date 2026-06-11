@@ -19,6 +19,36 @@
   font-size: var(--font-size-sm);
 }
 
+/* ─── 会话作用域切换（章节对话 / 设定对话） ──────────── */
+.chat-scope-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 6px 8px 0;
+  background: var(--bg-surface);
+}
+
+/* ─── 会话标签栏左侧：当前章节标题（与新建/历史按钮同一行） */
+.session-tabs-bar.ant-tabs .ant-tabs-extra-content {
+  /* 左右两侧的 extra 区域都与 tab 行垂直居中 */
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+}
+
+.session-tabs-chapter-title {
+  display: inline-block;
+  max-width: 180px;
+  margin-right: 10px;
+  padding-left: 4px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ─── Session 切换栏（antd Tabs editable-card） ──────── */
 .session-tabs-bar.ant-tabs {
   flex-shrink: 0;

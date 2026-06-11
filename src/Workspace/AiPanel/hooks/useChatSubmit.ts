@@ -53,6 +53,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedForeshadowingIds,
     agentMode = "legacy",
     writingMode = "default",
+    sessionScope = "chapter",
     pendingSubagentRole = null,
     onPendingSubagentRoleConsumed,
   } = params;
@@ -137,7 +138,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         setPrompt("");
         return;
       }
-      if (bookId == null || chapterId == null) {
+      if (bookId == null || (sessionScope !== "setting" && chapterId == null)) {
         appMessage.warning("请先选择一个章节，再开始对话");
         return;
       }
@@ -331,6 +332,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedForeshadowingIds,
     agentMode,
     writingMode,
+    sessionScope,
     pendingSubagentRole,
     onPendingSubagentRoleConsumed,
     appMessage,

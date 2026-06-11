@@ -13,9 +13,10 @@ router = APIRouter(tags=["sessions"])
 @router.post("/sessions")
 async def create_session(body: CreateSessionRequest):
     db = get_db()
+    scope = "setting" if body.scope == "setting" else "chapter"
     session_id = await db.execute_and_get_id(
-        "INSERT INTO ai_sessions (book_id, chapter_id) VALUES (?, ?)",
-        [body.bookId, body.chapterId],
+        "INSERT INTO ai_sessions (book_id, chapter_id, scope) VALUES (?, ?, ?)",
+        [body.bookId, None if scope == "setting" else body.chapterId, scope],
     )
     row = await db.fetch_one("SELECT * FROM ai_sessions WHERE id = ?", [session_id])
     return {"success": True, "data": row}
@@ -26,16 +27,22 @@ async def get_sessions(
     bookId: Optional[str] = Query(None),
     chapterId: Optional[str] = Query(None),
     includeClosed: Optional[bool] = Query(False),
+    scope: Optional[str] = Query(None),
 ):
+    """scope=setting 时仅返回显式标记的「设定会话」；章节查询排除设定会话。"""
     db = get_db()
     conditions = []
     params: list = []
     if bookId:
         conditions.append("book_id = ?")
         params.append(bookId)
-    if chapterId:
-        conditions.append("chapter_id = ?")
-        params.append(chapterId)
+    if scope == "setting":
+        conditions.append("scope = 'setting'")
+    else:
+        conditions.append("(scope IS NULL OR scope != 'setting')")
+        if chapterId:
+            conditions.append("chapter_id = ?")
+            params.append(chapterId)
     if not includeClosed:
         conditions.append("closed = 0")
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""

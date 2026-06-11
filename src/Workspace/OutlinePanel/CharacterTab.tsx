@@ -1,5 +1,5 @@
 import React from 'react'
-import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined } from '@ant-design/icons'
+import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, HistoryOutlined, CommentOutlined } from '@ant-design/icons'
 import { Button, Modal, Input, Select, Tag, Tooltip, Empty } from 'antd'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
@@ -10,6 +10,9 @@ import { useAntdApp } from '../../hooks/useAntdApp'
 import { getBookCharacters } from '../utils'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import CharacterOptionsModal from './CharacterOptionsModal'
+import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
+import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
+import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
 import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
 
@@ -63,16 +66,30 @@ interface CharacterTabProps {
   bookId: EntityId | null
   hideHeader?: boolean
   onActionActiveChange?: (active: boolean) => void
+  focusCharacterId?: number | null
+  onFocusCharacterHandled?: () => void
 }
 
-export default function CharacterTab({ bookId, hideHeader = false, onActionActiveChange }: CharacterTabProps) {
+export default function CharacterTab({
+  bookId,
+  hideHeader = false,
+  onActionActiveChange,
+  focusCharacterId = null,
+  onFocusCharacterHandled,
+}: CharacterTabProps) {
   const { message } = useAntdApp()
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [editModalOpen, setEditModalOpen] = React.useState(false)
   const [editTarget, setEditTarget] = React.useState<Character | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Character | null>(null)
   const [configOpen, setConfigOpen] = React.useState(false)
+  const [historyOpen, setHistoryOpen] = React.useState(false)
+  const [historyCharacter, setHistoryCharacter] = React.useState<Character | null>(null)
   const [saving, setSaving] = React.useState(false)
+  const cardRefs = React.useRef<Record<number, HTMLDivElement | null>>({})
+
+  const activeDiffSession = useActiveSettingDiffSession('character', focusCharacterId)
+  const diff = useSettingDiff()
 
   const [draftName, setDraftName] = React.useState('')
   const [draftTags, setDraftTags] = React.useState<string[]>([])
@@ -149,6 +166,15 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
     onActionActiveChange?.(editModalOpen || !!deleteTarget || configOpen)
   }, [editModalOpen, deleteTarget, configOpen, onActionActiveChange])
 
+  React.useEffect(() => {
+    if (focusCharacterId == null) return
+    const el = cardRefs.current[focusCharacterId]
+    if (el) {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      onFocusCharacterHandled?.()
+    }
+  }, [focusCharacterId, characters, onFocusCharacterHandled])
+
   const openCreate = React.useCallback(() => {
     setEditTarget(null)
     setDraftName('')
@@ -157,11 +183,12 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
   }, [])
 
   const openEdit = React.useCallback((c: Character) => {
+    if (diff.hasSession(settingSessionKey('character', c.id))) return
     setEditTarget(c)
     setDraftName(c.name ?? '')
     setDraftTags(splitToArray(c.tags))
     setEditModalOpen(true)
-  }, [])
+  }, [diff])
 
   const closeModal = React.useCallback(() => {
     setEditModalOpen(false)
@@ -197,6 +224,14 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
       setSaving(false)
     }
   }, [bookId, draftName, draftTags, editTarget, closeModal, loadCharacters, message])
+
+  /** 打开 AI 设定对话并携带人物上下文（不依赖章节对话区） */
+  const openAiChat = React.useCallback((c: Character) => {
+    window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
+    window.dispatchEvent(new CustomEvent('open-setting-chat', {
+      detail: { prefill: `关于人物「${c.name}」：` },
+    }))
+  }, [])
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
@@ -253,8 +288,14 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
         ) : (
           characters.map((c, index) => {
             const preview = profilePreview(c.profile_md)
+            const isFocus = focusCharacterId === c.id
+            const hasDiff = diff.hasSession(settingSessionKey('character', c.id))
             return (
-              <div key={c.id} className="character-card">
+              <div
+                key={c.id}
+                ref={(el) => { cardRefs.current[c.id] = el }}
+                className={`character-card${isFocus || hasDiff ? ' is-diff-focus' : ''}`}
+              >
                 <div className="character-card-main">
                   <div className="character-card-name-row">
                     <span className="character-card-index">{index + 1}.</span>
@@ -278,14 +319,58 @@ export default function CharacterTab({ bookId, hideHeader = false, onActionActiv
                   )}
                 </div>
                 <div className="character-card-actions">
-                  <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEdit(c)} title="编辑" />
-                  <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => setDeleteTarget(c)} title="删除" className="character-add-btn" />
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={() => openEdit(c)}
+                    title={hasDiff ? '审阅 diff 中，暂不可编辑' : '编辑'}
+                    disabled={hasDiff}
+                  />
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CommentOutlined />}
+                    onClick={() => openAiChat(c)}
+                    title="与 AI 讨论此人物"
+                  />
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<HistoryOutlined />}
+                    onClick={() => { setHistoryCharacter(c); setHistoryOpen(true) }}
+                    title="历史"
+                  />
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    onClick={() => setDeleteTarget(c)}
+                    title="删除"
+                    className="character-add-btn"
+                    disabled={hasDiff}
+                  />
                 </div>
               </div>
             )
           })
         )}
       </div>
+
+      {activeDiffSession ? (
+        <div className="character-tab-diff-wrap">
+          <SettingDiffView sessionKey={activeDiffSession.sessionKey} />
+        </div>
+      ) : null}
+
+      <SettingHistoryDrawer
+        kind="character"
+        characterId={historyCharacter?.id ?? null}
+        entityTitle={historyCharacter?.name}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onRestored={loadCharacters}
+      />
 
       <Modal
         title={editTarget ? '编辑人物' : '新建人物'}

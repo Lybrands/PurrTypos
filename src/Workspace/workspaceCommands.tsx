@@ -91,6 +91,14 @@ export function buildPaletteCommands({
       run: () => toggleFloating('editor'),
     },
     {
+      id: 'panel:toggle-setting',
+      label: panelState.setting.open ? '关闭设定面板' : '打开设定面板',
+      icon: <ReadOutlined />,
+      category: '浮窗',
+      keywords: ['setting', 'character', 'background', '人物', '背景', '设定'],
+      run: () => toggleFloating('setting'),
+    },
+    {
       id: 'panel:focus-editor',
       label: mainPanel === 'editor' ? '写作已是主区域' : '切到写作主区域',
       icon: <EditOutlined />,

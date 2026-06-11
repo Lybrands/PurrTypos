@@ -137,6 +137,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getChapterDiff: (data) => apiGet(`/chapter-diff/by-id/${data.diffId}`),
   rollbackChapterDiff: (data) => apiPost(`/chapter-diff/by-id/${data.diffId}/rollback`, {}),
 
+  // ─── Setting diff history — HTTP ───────────────────────────────
+  commitCharacterSettingDiff: (data) => apiPost(`/setting-diff/character/${data.characterId}/commit`, {
+    name: data.name,
+    tags: data.tags,
+    profileMd: data.profileMd,
+    before: data.before,
+    after: data.after,
+    source: data.source || 'ai_tool',
+    accepted_segments: data.acceptedSegments || 0,
+    rejected_segments: data.rejectedSegments || 0,
+  }),
+  commitBackgroundSettingDiff: (data) => apiPost(`/setting-diff/background/${data.bookId}/commit`, {
+    content: data.content,
+    before_content: data.beforeContent || '',
+    after_content: data.afterContent || '',
+    source: data.source || 'ai_tool',
+    accepted_segments: data.acceptedSegments || 0,
+    rejected_segments: data.rejectedSegments || 0,
+  }),
+  listCharacterSettingHistory: (data) =>
+    apiGet(`/setting-diff/character/${data.characterId}/history?limit=${data.limit ?? 50}`),
+  getCharacterSettingHistory: (data) => apiGet(`/setting-diff/character/history/${data.historyId}`),
+  rollbackCharacterSettingHistory: (data) =>
+    apiPost(`/setting-diff/character/history/${data.historyId}/rollback`, {}),
+  listBackgroundSettingHistory: (data) =>
+    apiGet(`/setting-diff/background/${data.bookId}/history?limit=${data.limit ?? 50}`),
+  getBackgroundSettingHistory: (data) => apiGet(`/setting-diff/background/history/${data.historyId}`),
+  rollbackBackgroundSettingHistory: (data) =>
+    apiPost(`/setting-diff/background/history/${data.historyId}/rollback`, {}),
+
   // ─── Sessions — HTTP ───────────────────────────────────────────
   createSession: (data) => apiPost('/sessions', data),
   getSessions: (data) => {
@@ -144,6 +174,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (data.bookId != null) params.set('bookId', data.bookId)
     if (data.chapterId != null) params.set('chapterId', data.chapterId)
     if (data.includeClosed) params.set('includeClosed', 'true')
+    if (data.scope) params.set('scope', data.scope)
     return apiGet(`/sessions?${params}`)
   },
   setSessionClosed: (data) => apiPut(`/sessions/${data.sessionId}/close`, {}),

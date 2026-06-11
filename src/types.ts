@@ -141,6 +141,60 @@ export interface ChapterDiffHistory {
   create_time?: string;
 }
 
+/** 人物设定快照（diff 前后对比） */
+export interface CharacterSettingSnapshot {
+  name: string;
+  tags: string;
+  profileMd: string;
+}
+
+export interface CharacterSettingHistory {
+  id: number;
+  character_id: number;
+  before_name: string;
+  before_tags: string;
+  before_profile_md: string;
+  after_name: string;
+  after_tags: string;
+  after_profile_md: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
+export interface StoryBackgroundSettingHistory {
+  id: number;
+  book_id: EntityId;
+  before_content: string;
+  after_content: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
+/** AI 工具提交的设定 diff 提议（人物 / 故事背景） */
+export interface ProposedSettingDiff {
+  kind: "character" | "background";
+  bookId: EntityId;
+  characterId?: number;
+  characterName?: string;
+  before: CharacterSettingSnapshot | { content: string };
+  proposed: CharacterSettingSnapshot | { content: string };
+  source?: string;
+}
+
+/** 设定 diff 卡片终态（提交 / 放弃后持久化到消息） */
+export interface SettingDiffCardState {
+  sessionKey: string;
+  kind: "character" | "background";
+  title: string;
+  status: "pending" | "committed" | "rejected";
+  acceptedSegments?: number;
+  rejectedSegments?: number;
+}
+
 export interface StoryBackgroundAttachment {
   id: number;
   book_id: EntityId;
@@ -399,9 +453,50 @@ export interface ElectronAPI {
   listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
   getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
   rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
+  // Setting diff history (character / story background)
+  commitCharacterSettingDiff: (data: {
+    characterId: number;
+    name: string;
+    tags: string;
+    profileMd: string;
+    before: CharacterSettingSnapshot;
+    after: CharacterSettingSnapshot;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
+  commitBackgroundSettingDiff: (data: {
+    bookId: EntityId;
+    content: string;
+    beforeContent?: string;
+    afterContent?: string;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
+  listCharacterSettingHistory: (data: {
+    characterId: number;
+    limit?: number;
+  }) => Promise<ApiResult<CharacterSettingHistory[]>>;
+  getCharacterSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<CharacterSettingHistory | null>>;
+  rollbackCharacterSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
+  listBackgroundSettingHistory: (data: {
+    bookId: EntityId;
+    limit?: number;
+  }) => Promise<ApiResult<StoryBackgroundSettingHistory[]>>;
+  getBackgroundSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<StoryBackgroundSettingHistory | null>>;
+  rollbackBackgroundSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
   // AI
-  createSession: (data: { bookId: EntityId; chapterId?: EntityId | null }) => Promise<ApiResult<AiSession>>;
-  getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
+  createSession: (data: { bookId: EntityId; chapterId?: EntityId | null; scope?: "setting" }) => Promise<ApiResult<AiSession>>;
+  getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean; scope?: "setting" }) => Promise<ApiResult<AiSession[]>>;
   setSessionClosed: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   setSessionReopened: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   deleteSession: (data: { sessionId: number }) => Promise<ApiResult<void>>;
@@ -565,6 +660,8 @@ export interface ElectronAPI {
         proposedText: string;
         source?: string;
       };
+      /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
+      proposedSettingDiff?: ProposedSettingDiff;
       /**
        * 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
        * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
