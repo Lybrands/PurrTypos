@@ -5,6 +5,7 @@ import type { EntityId } from "../../../../types";
 import { getAssistantRenderableMarkdown } from "../../rendering";
 import { type ChatMessage } from "../../hooks";
 import ToolCallStatus from "../ToolCallStatus";
+import SettingDiffCard from "../SettingDiffCard";
 import ThinkingRegion from "../ThinkingRegion";
 import SubagentResultCard from "../SubagentResultCard";
 
@@ -169,13 +170,16 @@ export default function AssistantMessageBody({
           </span>
         </div>
       ) : null}
-      {message.subagentResult ? (
+          {message.subagentResult ? (
         <SubagentResultCard
           role={message.subagentResult.role}
           payload={message.subagentResult.payload}
           chapterId={chapterId}
         />
       ) : null}
+      {(message.settingDiffCards || []).map((card) => (
+        <SettingDiffCard key={card.sessionKey} card={card} />
+      ))}
     </div>
   );
 }

@@ -1,0 +1,57 @@
+.setting-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.setting-history-item {
+  border: 1px solid var(--border-light, var(--border));
+  border-radius: 6px;
+  padding: var(--spacing-sm);
+  background: var(--bg-surface);
+}
+
+.setting-history-item-header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+  font-size: 12px;
+}
+
+.setting-history-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
+.setting-history-item-time {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.setting-history-item-preview {
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+  margin-bottom: var(--spacing-xs);
+}
+
+.setting-history-item-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+}
+
+.setting-history-item-full,
+.setting-history-restore-preview {
+  margin-top: var(--spacing-xs);
+  padding: var(--spacing-xs);
+  background: var(--bg-panel);
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+}

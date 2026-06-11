@@ -32,6 +32,8 @@ const DATE_GROUP_ORDER = ['今天', '昨天', '近 7 天', '更早']
 export interface SessionHistoryPopoverProps {
   bookId: EntityId | null | undefined
   chapterId: EntityId | null | undefined
+  /** setting 时查询不绑章节的设定会话历史 */
+  scope?: 'chapter' | 'setting'
   activeSessionId: number | null
   /** 用户点击某条历史对话时回调，父组件负责加入标签栏并激活 */
   onOpen: (session: AiSession) => void
@@ -44,6 +46,7 @@ export interface SessionHistoryPopoverProps {
 export default function SessionHistoryPopover({
   bookId,
   chapterId,
+  scope = 'chapter',
   activeSessionId,
   onOpen,
   onDelete,
@@ -57,11 +60,17 @@ export default function SessionHistoryPopover({
     if (bookId == null) return
     setSearch('')
     setLoading(true)
-    window.electronAPI.getSessions({ bookId, chapterId: chapterId ?? null, includeClosed: true }).then((res) => {
-      if (res.success) setAllSessions(res.data)
-      setLoading(false)
-    })
-  }, [bookId, chapterId])
+    window.electronAPI
+      .getSessions(
+        scope === 'setting'
+          ? { bookId, includeClosed: true, scope: 'setting' }
+          : { bookId, chapterId: chapterId ?? null, includeClosed: true },
+      )
+      .then((res) => {
+        if (res.success) setAllSessions(res.data)
+        setLoading(false)
+      })
+  }, [bookId, chapterId, scope])
 
   const handleOpenChange = React.useCallback((visible: boolean) => {
     setPopoverOpen(visible)

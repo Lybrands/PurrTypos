@@ -7,8 +7,6 @@ import {
   HighlightOutlined,
 } from '@ant-design/icons'
 import { useWorkspace } from '../WorkspaceContext'
-import CharacterTab from '../OutlinePanel/CharacterTab'
-import StoryBackgroundTab from '../OutlinePanel/StoryBackgroundTab'
 import StyleForm, { type StyleFormStatus } from './StyleForm'
 import './NotebookToolbar.scss'
 
@@ -36,7 +34,19 @@ export default function NotebookToolbar() {
   const [open, setOpen] = React.useState<ToolKey | null>(null)
   const [styleStatus, setStyleStatus] = React.useState<StyleFormStatus>({ hasRemote: false, saving: false })
 
-  const handleOpen = React.useCallback((key: ToolKey) => () => setOpen(key), [])
+  const handleOpen = React.useCallback((key: ToolKey) => () => {
+    if (key === 'characters') {
+      window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'setting', open: true } }))
+      window.dispatchEvent(new CustomEvent('open-setting-panel', { detail: { tab: 'characters' } }))
+      return
+    }
+    if (key === 'background') {
+      window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'setting', open: true } }))
+      window.dispatchEvent(new CustomEvent('open-setting-panel', { detail: { tab: 'background' } }))
+      return
+    }
+    setOpen(key)
+  }, [])
   const handleClose = React.useCallback(() => setOpen(null), [])
 
   const styleStatusTag = React.useMemo(() => {
@@ -68,37 +78,7 @@ export default function NotebookToolbar() {
         ))}
       </div>
 
-      {/* 人物 */}
-      <Modal
-        open={open === 'characters'}
-        onCancel={handleClose}
-        title={renderModalTitle(TOOLS[0])}
-        footer={null}
-        width={960}
-        destroyOnClose
-        className="notebook-toolbar-modal"
-        styles={{ body: { padding: 0 } }}
-      >
-        <div className="notebook-toolbar-modal-body notebook-toolbar-modal-body--tab">
-          <CharacterTab bookId={bookId ?? null} />
-        </div>
-      </Modal>
-
-      {/* 故事背景 */}
-      <Modal
-        open={open === 'background'}
-        onCancel={handleClose}
-        title={renderModalTitle(TOOLS[1])}
-        footer={null}
-        width={960}
-        destroyOnClose
-        className="notebook-toolbar-modal"
-        styles={{ body: { padding: 0 } }}
-      >
-        <div className="notebook-toolbar-modal-body notebook-toolbar-modal-body--tab">
-          <StoryBackgroundTab bookId={bookId ?? null} />
-        </div>
-      </Modal>
+      {/* 人物 / 故事背景已迁移至设定浮窗；保留 memory / style 弹窗 */}
 
       {/* 记忆 / 伏笔（占位） */}
       <Modal

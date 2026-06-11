@@ -120,6 +120,9 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN closed INTEGER DEFAULT 0")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN book_id TEXT")
+    # scope: chapter = 章节会话（默认）；setting = 设定会话（人物/背景，不绑章节）。
+    # 历史遗留的无章节会话保持默认 chapter，不会被误判为设定会话。
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN scope TEXT DEFAULT 'chapter'")
 
     # ── ai_conversations ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_conversations (
@@ -293,6 +296,43 @@ async def init_schema(db: DatabaseConnection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_chapter_diff_history_chapter "
         "ON chapter_diff_history(chapter_id, create_time DESC)"
+    )
+
+    # ── character_history ────────────────────────────────────────
+    # 人物设定修订历史；commit diff 或手动保存前快照旧值，支持回滚。
+    await db.execute("""CREATE TABLE IF NOT EXISTS character_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id INTEGER NOT NULL,
+        before_name TEXT DEFAULT '',
+        before_tags TEXT DEFAULT '',
+        before_profile_md TEXT DEFAULT '',
+        after_name TEXT DEFAULT '',
+        after_tags TEXT DEFAULT '',
+        after_profile_md TEXT DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_character_history_character "
+        "ON character_history(character_id, create_time DESC)"
+    )
+
+    # ── story_background_history ─────────────────────────────────
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_background_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        before_content TEXT NOT NULL DEFAULT '',
+        after_content TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_background_history_book "
+        "ON story_background_history(book_id, create_time DESC)"
     )
 
     # ── story_background_attachments ─────────────────────────────

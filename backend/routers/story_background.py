@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from config import DATA_DIR
 from database.crud import story_background as story_background_crud
+from database.crud import story_background_history as bg_hist_crud
 from dependencies import get_db
 from schemas.story_background import SaveStoryBackgroundRequest
 from utils.file_storage import safe_unlink_stored_file
@@ -33,7 +34,16 @@ async def get_story_background(bookId: str):
 @router.put("/story-background/{bookId}")
 async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
     db = get_db()
+    before_row = await story_background_crud.get_story_background(db, bookId)
+    before_content = (before_row.get("content") if before_row else None) or ""
     await story_background_crud.save_story_background(db, bookId, body.content)
+    await bg_hist_crud.insert_story_background_history(
+        db,
+        book_id=bookId,
+        before_content=before_content,
+        after_content=body.content,
+        source="user",
+    )
     return {"success": True}
 
 

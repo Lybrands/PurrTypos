@@ -3,9 +3,13 @@ import { App as AntdApp } from "antd";
 import type { AiSession, EntityId } from "../../../types";
 import type { ChatMessage } from "./chat.types";
 
+export type ChatSessionScope = "chapter" | "setting";
+
 interface UseAiSessionsParams {
   bookId: EntityId | null | undefined;
   chapterId: EntityId | null | undefined;
+  /** 会话作用域：chapter = 按章节隔离（默认）；setting = 不绑章节的设定会话 */
+  scope?: ChatSessionScope;
   conversations: ChatMessage[];
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   loading: boolean;
@@ -15,6 +19,7 @@ interface UseAiSessionsParams {
 export function useAiSessions({
   bookId,
   chapterId,
+  scope = "chapter",
   conversations,
   setConversations,
   loading,
@@ -30,34 +35,46 @@ export function useAiSessions({
   );
   const [editingTabId, setEditingTabId] = React.useState<number | null>(null);
   const [editingTitle, setEditingTitle] = React.useState("");
+  /** 当前 book+scope(+chapter) 维度的会话列表是否已完成首次拉取 */
+  const [sessionsLoaded, setSessionsLoaded] = React.useState(false);
   const loadKeyRef = React.useRef<string>("");
 
   React.useEffect(() => {
-    if (bookId == null || chapterId == null) {
+    const isSettingScope = scope === "setting";
+    if (bookId == null || (!isSettingScope && chapterId == null)) {
       setConversations([]);
       setSessions([]);
       setActiveSessionId(null);
+      setSessionsLoaded(false);
       setLoading(false);
       return;
     }
-    const key = `${bookId}-${chapterId}`;
+    const key = isSettingScope
+      ? `${bookId}-__setting__`
+      : `${bookId}-${chapterId}`;
     if (loadKeyRef.current === key) return;
     loadKeyRef.current = key;
     setConversations([]);
     setSessions([]);
     setActiveSessionId(null);
+    setSessionsLoaded(false);
     setLoading(false);
 
     window.electronAPI
-      .getSessions({ bookId, chapterId })
+      .getSessions(
+        isSettingScope
+          ? { bookId, scope: "setting" }
+          : { bookId, chapterId },
+      )
       .then((res) => {
         if (loadKeyRef.current !== key) return;
         if (res.success && res.data.length > 0) {
           setSessions(res.data);
           setActiveSessionId(res.data[res.data.length - 1].id);
         }
+        setSessionsLoaded(true);
       });
-  }, [bookId, chapterId, setConversations, setLoading]);
+  }, [bookId, chapterId, scope, setConversations, setLoading]);
 
   React.useEffect(() => {
     setPrependedHistory([]);
@@ -65,7 +82,8 @@ export function useAiSessions({
 
   const handleNewSession = React.useCallback(async () => {
     if (bookId == null) return;
-    if (chapterId == null) {
+    const isSettingScope = scope === "setting";
+    if (!isSettingScope && chapterId == null) {
       appMessage.warning("请选择一个章节，再创建对话");
       return;
     }
@@ -76,7 +94,8 @@ export function useAiSessions({
     if (sessions.length > 0 && conversations.length === 0) return;
     const res = await window.electronAPI.createSession({
       bookId,
-      chapterId,
+      chapterId: isSettingScope ? null : chapterId,
+      ...(isSettingScope ? { scope: "setting" as const } : {}),
     });
     if (!res.success || !res.data) return;
     setSessions((prev) => [...prev, res.data]);
@@ -84,6 +103,7 @@ export function useAiSessions({
   }, [
     bookId,
     chapterId,
+    scope,
     sessions.length,
     conversations.length,
     loading,
@@ -160,6 +180,7 @@ export function useAiSessions({
   return {
     sessions,
     setSessions,
+    sessionsLoaded,
     activeSessionId,
     setActiveSessionId,
     prependedHistory,

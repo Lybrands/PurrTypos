@@ -1,5 +1,5 @@
 import React from 'react'
-import { EditOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '@ant-design/icons'
+import { CommentOutlined, EditOutlined, HistoryOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '@ant-design/icons'
 import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from 'antd'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
@@ -13,6 +13,8 @@ import type { EntityId, StoryBackgroundAttachment } from '../../types'
 import { getStoryBackground } from '../utils'
 import { useAntdApp } from '../../hooks/useAntdApp'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
+import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
+import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
 import './StoryBackgroundTab.scss'
 
 /** 悬停标题时显示原生 tooltip：第几级标题（与 StarterKit 默认 heading 二选一） */
@@ -57,7 +59,11 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   const [editing, setEditing] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
   const [attachmentModalOpen, setAttachmentModalOpen] = React.useState(false)
+  const [historyOpen, setHistoryOpen] = React.useState(false)
   const initialDraftRef = React.useRef('')
+
+  const activeDiffSession = useActiveSettingDiffSession('background', bookId)
+  const diffLocked = Boolean(activeDiffSession)
 
   const editor = useEditor({
     immediatelyRender: true,
@@ -139,9 +145,10 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   }, [content, notifyWorkspaceSearchContentChanged])
 
   const handleAdd = React.useCallback(() => {
+    if (diffLocked) return
     initialDraftRef.current = content
     setEditing(true)
-  }, [content])
+  }, [content, diffLocked])
 
   const handleSave = React.useCallback(async () => {
     if (bookId == null) return
@@ -264,6 +271,22 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     )
   }
 
+  if (activeDiffSession) {
+    return (
+      <div className="story-background-tab story-background-diff-wrap">
+        <SettingDiffView sessionKey={activeDiffSession.sessionKey} />
+        <SettingHistoryDrawer
+          kind="background"
+          bookId={bookId}
+          entityTitle="故事背景"
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={loadContent}
+        />
+      </div>
+    )
+  }
+
   if (editing) {
     return (
       <div className="story-background-tab story-background-editing">
@@ -350,7 +373,21 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
         <div className="story-background-view-header">
           <div className="story-background-toolbar story-background-toolbar-top">
             <Tooltip title="编辑">
-              <Button type="text" size="small" icon={<EditOutlined />} onClick={handleAdd} />
+              <Button type="text" size="small" icon={<EditOutlined />} onClick={handleAdd} disabled={diffLocked} />
+            </Tooltip>
+            <Tooltip title="与 AI 讨论背景设定">
+              <Button
+                type="text"
+                size="small"
+                icon={<CommentOutlined />}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
+                  window.dispatchEvent(new CustomEvent('open-setting-chat', { detail: { prefill: '关于小说背景设定：' } }))
+                }}
+              />
+            </Tooltip>
+            <Tooltip title="历史">
+              <Button type="text" size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)} />
             </Tooltip>
             <Tooltip title={attachments.length > 0 ? `附件 (${attachments.length})` : '附件'}>
               <Button
@@ -377,6 +414,14 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
         >
           {attachmentModalContent}
         </Modal>
+        <SettingHistoryDrawer
+          kind="background"
+          bookId={bookId}
+          entityTitle="故事背景"
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={loadContent}
+        />
       </div>
     </div>
   )

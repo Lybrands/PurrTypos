@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
+from database.crud import character_history as char_hist_crud
 from database.crud import characters as characters_crud
 from dependencies import get_db
 from schemas.characters import (
@@ -42,9 +43,23 @@ async def update_character(id: str, body: UpdateCharacterRequest):
         cid = int(id)
     except (TypeError, ValueError):
         return {"success": False, "error": "无效的人物 ID"}
+    before = await db.fetch_one("SELECT * FROM characters WHERE id = ?", [cid])
+    if not before:
+        return {"success": False, "error": "人物不存在"}
     row = await characters_crud.update_character(db, cid, body.data)
     if not row:
         return {"success": False, "error": "人物不存在"}
+    await char_hist_crud.insert_character_history(
+        db,
+        character_id=cid,
+        before_name=before.get("name") or "",
+        before_tags=before.get("tags") or "",
+        before_profile_md=before.get("profile_md") or "",
+        after_name=row.get("name") or "",
+        after_tags=row.get("tags") or "",
+        after_profile_md=row.get("profile_md") or "",
+        source="user",
+    )
     return {"success": True, "data": row}
 
 
