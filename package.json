@@ -1,6 +1,6 @@
 {
   "name": "purrtypos",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "写作",
   "author": "Lybrand",
   "main": "electron/main_python.js",

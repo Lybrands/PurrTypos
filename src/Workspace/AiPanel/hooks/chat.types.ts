@@ -3,6 +3,7 @@ import type {
   Outline,
   AiSession,
   EntityId,
+  SettingDiffCardState,
 } from "../../../types";
 import type { WritingSubagentRole } from "../pipelineStages";
 
@@ -67,6 +68,8 @@ export interface ChatMessage {
   writingSubagentRole?: WritingSubagentRole;
   /** 子专家结构化结果（审校 / 规划 / 润色 / 风格） */
   subagentResult?: { role: WritingSubagentRole; payload: unknown };
+  /** AI 提议的设定 diff 卡片（人物 / 故事背景） */
+  settingDiffCards?: SettingDiffCardState[];
 }
 
 export interface UseChatSubmitParams {
@@ -99,6 +102,11 @@ export interface UseChatSubmitParams {
   agentMode?: "legacy" | "subagent";
   /** legacy 下协作共创时传 collab，主进程注入协商提示并限制写入工具 */
   writingMode?: "default" | "collab";
+  /**
+   * 会话作用域：setting = 设定会话（人物/背景），不要求选中章节即可发送；
+   * 默认 chapter（必须先选章节）。
+   */
+  sessionScope?: "chapter" | "setting";
   /** 写作专家：下次发送使用的子专家；发送后由 onPendingSubagentRoleConsumed 清空 */
   pendingSubagentRole?: WritingSubagentRole | null;
   onPendingSubagentRoleConsumed?: () => void;

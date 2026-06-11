@@ -18,6 +18,7 @@ import {
   handleProposedChapterDiff,
   handleSettingUpdated,
 } from "./sideEffects";
+import { handleProposedSettingDiff } from "./settingDiff";
 import {
   handleToolCallCachedIndex,
   handleToolIndexCompleted,
@@ -54,6 +55,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   // 4. 副作用：派发 DOM 事件（无短路）
   handleChapterContentUpdated(chunk, ctx);
   handleProposedChapterDiff(chunk, ctx);
+  handleProposedSettingDiff(chunk, ctx);
   handleChapterCreated(chunk, ctx);
   handleSettingUpdated(chunk, ctx);
   handleCollabLatestParagraph(chunk, ctx);

@@ -9,7 +9,7 @@ import React from 'react'
  * - 新主区域的浮窗自动关闭（它现在是主，无须浮窗）。
  */
 
-export type PanelKey = 'ai' | 'left' | 'editor'
+export type PanelKey = 'ai' | 'left' | 'editor' | 'setting'
 /** 能成为主区域的 panel 子集（章节列表只能浮窗） */
 export type MainPanelKey = 'ai' | 'editor'
 
@@ -27,6 +27,7 @@ export interface PersistedPanelState {
   ai: FloatingState
   left: FloatingState
   editor: FloatingState
+  setting: FloatingState
 }
 
 /** 给 right 浮窗一个估算的 x（窗口 - 自身宽度 - 12 边距），运行时再据容器纠正 */
@@ -40,6 +41,7 @@ const DEFAULT_STATE: PersistedPanelState = {
   ai: { open: false, x: defaultRightX(560), y: 8, width: 560 },
   left: { open: false, x: 16, y: 8, width: 340 },
   editor: { open: false, x: defaultRightX(620), y: 8, width: 620 },
+  setting: { open: false, x: defaultRightX(480), y: 48, width: 480 },
 }
 
 function loadPanelState(): PersistedPanelState {
@@ -64,6 +66,7 @@ function loadPanelState(): PersistedPanelState {
         ai: mergeFloating('ai', DEFAULT_STATE.ai),
         left: mergeFloating('left', DEFAULT_STATE.left),
         editor: mergeFloating('editor', DEFAULT_STATE.editor),
+        setting: mergeFloating('setting', DEFAULT_STATE.setting),
       }
     }
   } catch {

@@ -8,6 +8,7 @@ import {
   App as AntdApp,
   Button,
   Input,
+  Segmented,
   Tooltip,
 } from "antd";
 import type { MenuProps } from "antd";
@@ -25,7 +26,7 @@ import {
 import {
   parseConversationsFromApi,
 } from "./utils";
-import { thinkingOnlyModelIds, useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage } from "./hooks";
+import { thinkingOnlyModelIds, useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage, type ChatSessionScope } from "./hooks";
 import FavoritesModal from "./components/FavoritesModal";
 import MemoryModal from "./components/MemoryModal";
 import AiPanelHeader from "./components/AiPanelHeader";
@@ -72,6 +73,29 @@ export default function AiPanel({
   const [prompt, setPrompt] = React.useState("");
   const [conversations, setConversations] = React.useState<ChatMessage[]>([]);
   const [loading, setLoading] = React.useState(false);
+  /** 会话作用域：chapter = 章节对话（默认）；setting = 设定对话（人物/背景，不绑章节） */
+  const [chatScope, setChatScope] = React.useState<ChatSessionScope>("chapter");
+  /** 设定入口（人物卡/背景「与 AI 讨论」）触发后，待会话列表就绪时自动建会话 */
+  const pendingSettingSessionRef = React.useRef(false);
+  const effectiveChapterId = chatScope === "setting" ? null : chapterId;
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<import("../../types").SettingDiffCardState>).detail;
+      if (!detail?.sessionKey) return;
+      setConversations((prev) =>
+        prev.map((msg) => {
+          if (!msg.settingDiffCards?.length) return msg;
+          const cards = msg.settingDiffCards.map((c) =>
+            c.sessionKey === detail.sessionKey ? { ...c, ...detail } : c,
+          );
+          return { ...msg, settingDiffCards: cards };
+        }),
+      );
+    };
+    window.addEventListener("setting-diff-resolved", handler as EventListener);
+    return () => window.removeEventListener("setting-diff-resolved", handler as EventListener);
+  }, []);
   const {
     selectedModel,
     setSelectedModel,
@@ -97,6 +121,7 @@ export default function AiPanel({
   const {
     sessions,
     setSessions,
+    sessionsLoaded,
     activeSessionId,
     setActiveSessionId,
     prependedHistory,
@@ -112,12 +137,32 @@ export default function AiPanel({
     handleSaveTabTitle,
   } = useAiSessions({
     bookId,
-    chapterId,
+    chapterId: effectiveChapterId,
+    scope: chatScope,
     conversations,
     setConversations,
     loading,
     setLoading,
   });
+
+  // 设定入口事件：切到设定作用域 + 预填上下文；会话列表就绪后若无会话自动新建
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ prefill?: string }>).detail;
+      setChatScope("setting");
+      pendingSettingSessionRef.current = true;
+      if (detail?.prefill) setPrompt(detail.prefill);
+    };
+    window.addEventListener("open-setting-chat", handler as EventListener);
+    return () => window.removeEventListener("open-setting-chat", handler as EventListener);
+  }, []);
+
+  React.useEffect(() => {
+    if (!pendingSettingSessionRef.current) return;
+    if (chatScope !== "setting" || !sessionsLoaded) return;
+    pendingSettingSessionRef.current = false;
+    if (sessions.length === 0) void handleNewSession();
+  }, [chatScope, sessionsLoaded, sessions.length, handleNewSession]);
 
   const handleInsertPrompt = React.useCallback(
     (text: string) => setPrompt(text),
@@ -226,7 +271,7 @@ export default function AiPanel({
     conversations,
     setConversations,
     bookId: bookId ?? undefined,
-    chapterId,
+    chapterId: effectiveChapterId,
     activeSessionId,
     setActiveSessionId,
     sessions,
@@ -235,7 +280,8 @@ export default function AiPanel({
     associatedOutlineIds,
     writingChapters,
     availableOutlines,
-    currentChapterTitle: activeChapterTitle || undefined,
+    currentChapterTitle:
+      chatScope === "setting" ? undefined : activeChapterTitle || undefined,
     selectedModel,
     thinkingEnabled,
     agentEnabled: chatAgentMode !== "ask",
@@ -244,6 +290,7 @@ export default function AiPanel({
     selectedForeshadowingIds,
     agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
     writingMode: chatAgentMode === "collab" ? "collab" : "default",
+    sessionScope: chatScope,
     pendingSubagentRole:
       chatAgentMode === "expert" ? pendingSubagentRole : null,
     onPendingSubagentRoleConsumed: () => setPendingSubagentRole(null),
@@ -360,11 +407,36 @@ export default function AiPanel({
         menuItems={ellipsisMenuItems}
       />
 
-      {/* Session 切换栏：仅在已选章节时显示（按章节隔离） */}
-      {bookId != null && chapterId != null && (
+      {/* 会话作用域切换：章节对话（按章节隔离） / 设定对话（人物、背景，不绑章节） */}
+      {bookId != null && (
+        <div className="chat-scope-bar">
+          <Segmented
+            size="small"
+            value={chatScope}
+            onChange={(v) => {
+              if (loading) {
+                appMessage.warning("当前对话进行中，请先等待完成或停止");
+                return;
+              }
+              setChatScope(v as ChatSessionScope);
+            }}
+            options={[
+              { label: "章节对话", value: "chapter" },
+              { label: "设定对话", value: "setting" },
+            ]}
+          />
+        </div>
+      )}
+
+      {/* Session 切换栏：章节作用域需已选章节；设定作用域直接显示 */}
+      {bookId != null && (chatScope === "setting" || chapterId != null) && (
         <SessionTabsBar
           bookId={bookId}
-          chapterId={chapterId}
+          chapterId={effectiveChapterId}
+          scope={chatScope}
+          chapterTitle={
+            chatScope === "chapter" ? activeChapterTitle || undefined : undefined
+          }
           sessions={sessions}
           activeSessionId={activeSessionId}
           loading={loading}
@@ -406,7 +478,7 @@ export default function AiPanel({
             setScrolledUpByReason={setScrolledUpByReason}
             onScrollToBottom={handleScrollToBottom}
             bookId={bookId}
-            chapterId={chapterId}
+            chapterId={effectiveChapterId}
             contextBar={contextBar}
             editingMessageIndex={editingMessageIndex}
             setEditingMessageIndex={setEditingMessageIndex}
@@ -438,7 +510,7 @@ export default function AiPanel({
         {bookId != null && (
           <AiContextBar
             bookId={bookId}
-            chapterId={chapterId ?? null}
+            chapterId={effectiveChapterId ?? null}
             {...contextBar}
             currentPrompt={prompt}
             onInsertPrompt={handleInsertPrompt}
@@ -460,11 +532,9 @@ export default function AiPanel({
                 if (
                   !prompt.trim() ||
                   bookId == null ||
-                  chapterId == null ||
+                  (chatScope === "chapter" && chapterId == null) ||
                   loading ||
-                  (bookId != null &&
-                    chapterId != null &&
-                    activeSessionId == null)
+                  activeSessionId == null
                 ) {
                   return;
                 }
@@ -507,11 +577,9 @@ export default function AiPanel({
                     disabled={
                       !prompt.trim() ||
                       bookId == null ||
-                      chapterId == null ||
+                      (chatScope === "chapter" && chapterId == null) ||
                       loading ||
-                      (bookId != null &&
-                        chapterId != null &&
-                        activeSessionId == null)
+                      activeSessionId == null
                     }
                   />
                 </Tooltip>

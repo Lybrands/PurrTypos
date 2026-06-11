@@ -2,6 +2,7 @@ import React, { Suspense, lazy } from 'react'
 import {
   ArrowLeftOutlined,
   HomeOutlined,
+  TeamOutlined,
 } from '@ant-design/icons'
 import { Button, Tooltip, Spin } from 'antd'
 import type { LexicalEditor } from 'lexical'
@@ -15,6 +16,7 @@ import WorkspaceContext from './WorkspaceContext'
 import type { WorkspaceContextValue } from './WorkspaceContext'
 import WorkspaceSearchPanel from './WorkspaceSearchPanel'
 import { DiffProvider } from './diff/DiffContext'
+import { SettingDiffProvider } from './settingDiff/SettingDiffContext'
 import CommandPalette, { type CommandItem } from './CommandPalette'
 import FloatingPanel from './FloatingPanel'
 import { usePanelLayout } from './hooks/usePanelLayout'
@@ -28,6 +30,7 @@ import './workspaceSearch.scss'
 const DirectorNotebook = lazy(() => import('./DirectorNotebook'))
 const EditorPanel = lazy(() => import('./EditorPanel'))
 const AiPanel = lazy(() => import('./AiPanel'))
+const SettingPanel = lazy(() => import('./SettingPanel'))
 
 const PanelFallback = () => (
   <div className="workspace-panel-fallback"><Spin size="small" /></div>
@@ -70,6 +73,21 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     [],
   )
   useWorkspaceShortcuts({ toggleFloating, setMain, toggleCommandPalette })
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ panel?: string; open?: boolean }>).detail
+      if (detail?.open === false) return
+      if (detail?.panel === 'setting') {
+        updateFloating('setting', { open: true })
+      } else if (detail?.panel === 'ai' && mainPanel !== 'ai') {
+        // AI 是主区域时本就可见；否则展开 AI 浮窗
+        updateFloating('ai', { open: true })
+      }
+    }
+    window.addEventListener('workspace-open-panel', handler as EventListener)
+    return () => window.removeEventListener('workspace-open-panel', handler as EventListener)
+  }, [updateFloating, mainPanel])
 
   const [writingOutlineId, setWritingOutlineId] = React.useState<EntityId | null>(null)
   const [writingChapters, setWritingChapters] = React.useState<Chapter[]>([])
@@ -227,6 +245,13 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       onClick: () => toggleFloating('left'),
     },
     {
+      key: 'setting',
+      icon: <TeamOutlined style={{ fontSize: 16 }} />,
+      tooltip: panelState.setting.open ? '关闭设定面板' : '人物 / 故事背景设定',
+      active: panelState.setting.open,
+      onClick: () => toggleFloating('setting'),
+    },
+    {
       key: 'editor',
       icon: <WritingPenIcon size={16} />,
       tooltip: mainPanel === 'editor'
@@ -270,6 +295,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   return (
     <WorkspaceContext.Provider value={workspaceContextValue}>
     <DiffProvider>
+    <SettingDiffProvider>
       <AppHeader
         title={
           bookId ? (
@@ -457,12 +483,31 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             </div>
           </FloatingPanel>
         )}
+
+        {panelState.setting.open && (
+          <FloatingPanel
+            side="right"
+            title="设定"
+            x={panelState.setting.x}
+            y={panelState.setting.y}
+            width={panelState.setting.width}
+            onPositionChange={(p) => updateFloating('setting', p)}
+            onClose={() => closeFloating('setting')}
+          >
+            <div className="panel panel-setting">
+              <Suspense fallback={<PanelFallback />}>
+                <SettingPanel bookId={bookId ?? null} />
+              </Suspense>
+            </div>
+          </FloatingPanel>
+        )}
       </div>
       <CommandPalette
         open={commandPaletteOpen}
         commands={paletteCommands}
         onClose={() => setCommandPaletteOpen(false)}
       />
+    </SettingDiffProvider>
     </DiffProvider>
     </WorkspaceContext.Provider>
   )
