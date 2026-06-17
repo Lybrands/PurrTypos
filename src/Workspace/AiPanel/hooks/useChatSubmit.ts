@@ -1,7 +1,5 @@
 import React from "react";
 import { App as AntdApp } from "antd";
-import type { WritingSubagentRole } from "../pipelineStages";
-import { parseWritingSlashCommand } from "../pipelineStages";
 import {
   isWritingExpertPipeline,
   type ChatMessage,
@@ -16,6 +14,7 @@ import {
   type AccState,
   type ChunkCtx,
 } from "./chunkHandlers";
+import { createCommitScheduler } from "./chunkHandlers/commitScheduler";
 
 export {
   isWritingExpertPipeline,
@@ -51,26 +50,14 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     modelConfigs,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode = "legacy",
-    writingMode = "default",
     sessionScope = "chapter",
-    pendingSubagentRole = null,
-    onPendingSubagentRoleConsumed,
   } = params;
 
   const { message: appMessage } = AntdApp.useApp();
   const unsubscribeRef = React.useRef<(() => void) | null>(null);
   const visibleSessionIdRef = React.useRef<number | null>(activeSessionId);
   const runningSessionIdRef = React.useRef<number | null>(null);
-  const runningAccRef = React.useRef<{
-    response: string;
-    thinking: string;
-    userText: string;
-    toolCallSegments?: ToolCallSegment[];
-    thinkingBlocks?: string[];
-    /** 与 React 消息 state 一致：本轮工具批次之后的流式正文后缀 */
-    contentAfterToolCalls?: string;
-  } | null>(null);
+  const runningAccRef = React.useRef<AccState | null>(null);
 
   React.useEffect(() => {
     visibleSessionIdRef.current = activeSessionId;
@@ -82,31 +69,23 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setLoading(false);
   }, [setLoading]);
 
-  /** 可选：从某条用户消息重新编辑并发送，会丢弃该条之后的所有消息 */
+  /** 可选：从某条用户消息重新编辑并发送，或直接发送指定内容 */
   const handleSubmit = React.useCallback(
-    async (resend?: { editIndex: number; content: string }) => {
-      const rawUserText = (resend?.content ?? prompt).trim();
+    async (submitOverride?: { editIndex?: number; content: string }) => {
+      const isResend = typeof submitOverride?.editIndex === "number";
+      const rawUserText = (submitOverride?.content ?? prompt).trim();
       if (!rawUserText || loading) return;
 
-      const slash = parseWritingSlashCommand(rawUserText);
-      const effectiveUserText = slash.stripped || rawUserText;
-      const effSubagentRole: WritingSubagentRole | null =
-        slash.role ?? pendingSubagentRole ?? null;
-      onPendingSubagentRoleConsumed?.();
-
-      const userText = effectiveUserText;
+      const userText = rawUserText;
       if (!userText) {
         appMessage.warning("请输入有效内容");
         return;
       }
 
       const cfg = selectedModelConfig;
-      const forceNoThinking = isWritingExpertPipeline(agentMode);
-      const expectThinking = forceNoThinking
-        ? false
-        : cfg
-          ? cfg.thinkingOnly || (cfg.supportsThinking && thinkingEnabled)
-          : thinkingEnabled;
+      const expectThinking = cfg
+        ? cfg.thinkingOnly || (cfg.supportsThinking && thinkingEnabled)
+        : thinkingEnabled;
       const assistantPlaceholder = {
         role: "assistant" as const,
         content: "",
@@ -114,10 +93,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       };
 
       if (!cfg?.apiKey?.trim()) {
-        if (resend != null) {
+        if (isResend) {
           setConversations((prev) => [
-            ...prev.slice(0, resend.editIndex),
-            { role: "user", content: resend.content.trim() },
+            ...prev.slice(0, submitOverride.editIndex!),
+            { role: "user", content: submitOverride.content.trim() },
             {
               role: "assistant",
               content: "请先在设置中添加模型并填写 API Key",
@@ -149,10 +128,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       const sessionId = activeSessionId;
 
     // 立刻把用户消息 + 助手占位推到 UI，并进入 loading
-    if (resend != null) {
+    if (isResend) {
       const nextConversations = [
-        ...conversations.slice(0, resend.editIndex),
-        { role: "user" as const, content: resend.content.trim() },
+        ...conversations.slice(0, submitOverride.editIndex!),
+        { role: "user" as const, content: submitOverride.content.trim() },
         assistantPlaceholder,
       ];
       setConversations(nextConversations);
@@ -170,13 +149,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
     // 系统提示（会话绑定说明、关联章节/大纲内容、勾选记忆）统一由后端组装注入；
     // 前端只传结构化字段（ids / 模式），不再拼接任何 prompt 文案。
-    const toHistoryApiMessage = buildHistoryConverter(agentMode);
+    const toHistoryApiMessage = buildHistoryConverter("legacy");
 
     let historyMessages: { role: string; content: string }[];
-    if (resend != null) {
+    if (isResend) {
       const nextConversations = [
-        ...conversations.slice(0, resend.editIndex),
-        { role: "user" as const, content: resend.content.trim() },
+        ...conversations.slice(0, submitOverride.editIndex!),
+        { role: "user" as const, content: submitOverride.content.trim() },
         assistantPlaceholder,
       ];
       historyMessages = nextConversations
@@ -185,7 +164,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         .filter((row): row is { role: string; content: string } => row != null)
         .slice(-50);
       // 从数据库删除「该条之后」的对话记录，与界面截断一致
-      const keepTurnCount = Math.floor(resend.editIndex / 2);
+      const keepTurnCount = Math.floor(submitOverride.editIndex! / 2);
       if (sessionId != null && keepTurnCount >= 0) {
         window.electronAPI.deleteConversationsAfterTurn({ sessionId, keepTurnCount }).catch(() => {});
       }
@@ -218,9 +197,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       model: "",
       toolCallSegments: undefined,
       thinkingBlocks: [],
+      thinkingDurationsMs: [],
       contentAfterToolCalls: "",
       subagentPipelineDigest: "",
       subagentResult: undefined,
+      agentRunId: undefined,
+      taskPlan: undefined,
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;
@@ -229,25 +211,28 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       cfg,
       modelConfigs,
       selectedModel,
-      agentMode,
       thinkingEnabled,
     });
 
     let unsubscribe = (): void => {};
+    const { scheduleCommit, flushCommits } = createCommitScheduler(setConversations);
     const ctx: ChunkCtx = {
       acc,
       sessionId,
-      agentMode,
+      agentMode: "legacy",
       cfg,
       apiModelName,
       writingChapters,
       availableOutlines,
       setConversations,
+      scheduleCommit,
+      flushCommits,
       setLoading,
       setSessions,
       appMessage,
       isVisibleSession: () => visibleSessionIdRef.current === sessionId,
       cleanup: () => {
+        flushCommits();
         unsubscribe();
         unsubscribeRef.current = null;
         runningSessionIdRef.current = null;
@@ -272,6 +257,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       baseURL: cfg.baseUrl || undefined,
       apiProvider:
         cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
+      sessionId,
       messages: newMessages,
       options: streamOptions,
       tools: [],
@@ -293,17 +279,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         selectedForeshadowingIds && selectedForeshadowingIds.length > 0
           ? selectedForeshadowingIds
           : undefined,
-      agentMode,
-      chatAgentMode:
-        writingMode === "collab"
-          ? "collab"
-          : agentMode === "subagent"
-            ? "expert"
-            : agentEnabled
-              ? "agent"
-              : "ask",
-      ...(writingMode === "collab" ? { writingMode: "collab" as const } : {}),
-      ...(effSubagentRole ? { subagentRole: effSubagentRole } : {}),
+      chatAgentMode: agentEnabled ? "agent" : "ask",
     });
   }, [
     prompt,
@@ -330,11 +306,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setSessions,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode,
-    writingMode,
     sessionScope,
-    pendingSubagentRole,
-    onPendingSubagentRoleConsumed,
     appMessage,
   ]);
 

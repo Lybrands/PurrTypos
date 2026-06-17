@@ -1,5 +1,6 @@
 import { EditOutlined, StarOutlined } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
+import React from "react";
 import { formatModelName } from "../../utils";
 import { type ChatMessage } from "../../hooks";
 import MessageEditor from "../MessageEditor";
@@ -9,7 +10,6 @@ import type { ChatMessageListProps } from "./index";
 export interface ChatMessageBubbleProps
   extends Pick<
     ChatMessageListProps,
-    | "combinedData"
     | "loading"
     | "bookId"
     | "chapterId"
@@ -26,18 +26,18 @@ export interface ChatMessageBubbleProps
     | "setScrolledUpByReason"
   > {
   index: number;
-  dataIndex: number;
   convIndex: number;
   message: ChatMessage;
+  isLast: boolean;
+  prevUserContent: string;
 }
 
-/** 单条消息气泡：按 role 分发为用户消息（含编辑态）、错误消息、助手消息体。 */
-export default function ChatMessageBubble({
+function ChatMessageBubbleInner({
   index,
-  dataIndex,
   convIndex,
   message,
-  combinedData,
+  isLast,
+  prevUserContent,
   loading,
   bookId,
   chapterId,
@@ -69,10 +69,10 @@ export default function ChatMessageBubble({
   const isEmpty =
     !message.content &&
     !message.toolCallSegments?.length &&
+    !message.taskPlan &&
     !hasAnyThinking &&
     !hasSubagentProgress &&
     !(message.subagentPipelineDigest || "").trim();
-  const isLast = dataIndex === combinedData.length - 1;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;
   const showPlaceholder = isLastAssistant && isEmpty;
@@ -173,12 +173,7 @@ export default function ChatMessageBubble({
                 size="small"
                 icon={<StarOutlined style={{ fontSize: 12 }} />}
                 className="bubble-bookmark-btn"
-                onClick={() =>
-                  onAddFavorite(
-                    combinedData[dataIndex - 1]?.content ?? "",
-                    message.content,
-                  )
-                }
+                onClick={() => onAddFavorite(prevUserContent, message.content)}
               />
             </Tooltip>
           </div>
@@ -186,3 +181,21 @@ export default function ChatMessageBubble({
     </div>
   );
 }
+
+function bubblePropsEqual(
+  prev: ChatMessageBubbleProps,
+  next: ChatMessageBubbleProps,
+): boolean {
+  if (prev.message !== next.message) return false;
+  if (prev.loading !== next.loading) return false;
+  if (prev.isLast !== next.isLast) return false;
+  if (prev.index !== next.index) return false;
+  if (prev.convIndex !== next.convIndex) return false;
+  if (prev.editingMessageIndex !== next.editingMessageIndex) return false;
+  if (prev.prevUserContent !== next.prevUserContent) return false;
+  if (prev.chapterId !== next.chapterId) return false;
+  return true;
+}
+
+const ChatMessageBubble = React.memo(ChatMessageBubbleInner, bubblePropsEqual);
+export default ChatMessageBubble;

@@ -1,6 +1,7 @@
 import React, { Suspense, lazy } from 'react'
 import {
   ArrowLeftOutlined,
+  DashboardOutlined,
   HomeOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
@@ -10,7 +11,7 @@ import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
 import ChapterListIcon from '../icons/ChapterListIcon'
 import WritingPenIcon from '../icons/WritingPenIcon'
 import AiChatIcon from '../icons/AiChatIcon'
-import type { Chapter, AiAgentMode, AiModelConfig, EntityId } from '../types'
+import type { Chapter, AiModelConfig, EntityId } from '../types'
 import { getWritingOutlineWithChapters } from './utils'
 import WorkspaceContext from './WorkspaceContext'
 import type { WorkspaceContextValue } from './WorkspaceContext'
@@ -31,6 +32,7 @@ const DirectorNotebook = lazy(() => import('./DirectorNotebook'))
 const EditorPanel = lazy(() => import('./EditorPanel'))
 const AiPanel = lazy(() => import('./AiPanel'))
 const SettingPanel = lazy(() => import('./SettingPanel'))
+const DashboardPanel = lazy(() => import('./DashboardPanel'))
 
 const PanelFallback = () => (
   <div className="workspace-panel-fallback"><Spin size="small" /></div>
@@ -54,10 +56,9 @@ interface WorkspaceProps {
   onOpenSettings?: () => void
   modelConfigs?: AiModelConfig[]
   syncOutlineChapter?: boolean
-  aiAgentMode?: AiAgentMode
 }
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, aiAgentMode = 'legacy' }: WorkspaceProps = {}) {
+export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false }: WorkspaceProps = {}) {
   const {
     panelState,
     mainPanel,
@@ -80,6 +81,8 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       if (detail?.open === false) return
       if (detail?.panel === 'setting') {
         updateFloating('setting', { open: true })
+      } else if (detail?.panel === 'dashboard') {
+        updateFloating('dashboard', { open: true })
       } else if (detail?.panel === 'ai' && mainPanel !== 'ai') {
         // AI 是主区域时本就可见；否则展开 AI 浮窗
         updateFloating('ai', { open: true })
@@ -247,9 +250,16 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     {
       key: 'setting',
       icon: <TeamOutlined style={{ fontSize: 16 }} />,
-      tooltip: panelState.setting.open ? '关闭设定面板' : '人物 / 故事背景设定',
+      tooltip: panelState.setting.open ? '关闭设定面板' : '人物 / 故事背景 / 世界设定',
       active: panelState.setting.open,
       onClick: () => toggleFloating('setting'),
+    },
+    {
+      key: 'dashboard',
+      icon: <DashboardOutlined style={{ fontSize: 16 }} />,
+      tooltip: panelState.dashboard.open ? '关闭仪表盘' : '仪表盘：故事健康 / 写作统计',
+      active: panelState.dashboard.open,
+      onClick: () => toggleFloating('dashboard'),
     },
     {
       key: 'editor',
@@ -351,7 +361,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             {mainPanel === 'ai' && (
               <AiPanel
                 modelConfigs={modelConfigs}
-                aiAgentMode={aiAgentMode}
                 isMain={true}
                 onSetMain={() => { /* AI 已是主区域，noop */ }}
                 compact={false}
@@ -427,7 +436,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
               <Suspense fallback={<PanelFallback />}>
                 <AiPanel
                   modelConfigs={modelConfigs}
-                  aiAgentMode={aiAgentMode}
                   isMain={false}
                   onSetMain={() => setMain('ai')}
                   compact={true}
@@ -497,6 +505,24 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             <div className="panel panel-setting">
               <Suspense fallback={<PanelFallback />}>
                 <SettingPanel bookId={bookId ?? null} />
+              </Suspense>
+            </div>
+          </FloatingPanel>
+        )}
+
+        {panelState.dashboard.open && (
+          <FloatingPanel
+            side="right"
+            title="仪表盘"
+            x={panelState.dashboard.x}
+            y={panelState.dashboard.y}
+            width={panelState.dashboard.width}
+            onPositionChange={(p) => updateFloating('dashboard', p)}
+            onClose={() => closeFloating('dashboard')}
+          >
+            <div className="panel panel-dashboard">
+              <Suspense fallback={<PanelFallback />}>
+                <DashboardPanel bookId={bookId ?? null} />
               </Suspense>
             </div>
           </FloatingPanel>

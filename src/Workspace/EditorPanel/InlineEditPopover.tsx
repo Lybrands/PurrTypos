@@ -250,7 +250,6 @@ export default function InlineEditPopover({
         currentChapterTitle: chapterTitle || undefined,
         writingChapters: [],
         availableOutlines: [],
-        agentMode: 'legacy',
         chatAgentMode: 'ask',
       })
     },

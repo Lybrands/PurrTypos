@@ -1,13 +1,13 @@
 import React from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type { EntityId } from "../../../../types";
-import { getAssistantRenderableMarkdown } from "../../rendering";
 import { type ChatMessage } from "../../hooks";
+import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
 import ThinkingRegion from "../ThinkingRegion";
 import SubagentResultCard from "../SubagentResultCard";
+import TaskPlanCard from "../TaskPlanCard";
+import { buildAssistantTimeline } from "./assistantTimeline";
 
 export interface AssistantMessageBodyProps {
   index: number;
@@ -19,8 +19,7 @@ export interface AssistantMessageBodyProps {
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
 }
 
-/** 助手消息体：思考区（流式/历史分段）、工具调用状态、正文 markdown、子专家进度与结果卡片。 */
-export default function AssistantMessageBody({
+function AssistantMessageBodyInner({
   index,
   message,
   loading,
@@ -29,19 +28,24 @@ export default function AssistantMessageBody({
   chapterId,
   setScrolledUpByReason,
 }: AssistantMessageBodyProps) {
-  const segments = message.toolCallSegments ?? [];
-  const blocks = message.thinkingBlocks ?? [];
   const isStreaming = loading && isLastAssistant;
-  const currentThinking = message.thinking ?? "";
-  const assistantMarkdownRaw = getAssistantRenderableMarkdown(message);
-  const assistantMarkdown = message.subagentResult ? "" : assistantMarkdownRaw;
-  const hasGeneratedContent = Boolean(
-    assistantMarkdown.trim() ||
-      (message.subagentPipelineDigest || "").trim() ||
-      message.subagentResult,
-  );
   const handleWheelUp = () =>
     setScrolledUpByReason(true, "thinking-region-wheel-up");
+
+  const timeline = React.useMemo(
+    () =>
+      buildAssistantTimeline(message, {
+        messageIndex: index,
+        isStreaming,
+        isLastAssistant,
+        loading,
+      }),
+    [message, index, isStreaming, isLastAssistant, loading],
+  );
+
+  const hasGeneratedContent = timeline.some(
+    (p) => p.type === "text" || p.type === "digest" || p.type === "tools",
+  );
 
   return (
     <div className="bubble-assistant-body">
@@ -51,117 +55,75 @@ export default function AssistantMessageBody({
           <span className="a-blink-dots">...</span>
         </div>
       )}
-      {!showPlaceholder && (
-        <>
-          {(message.subagentPipelineDigest || "").trim() ? (
-            <div className="bubble-content bubble-content--subagent-digest">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {(message.subagentPipelineDigest || "").trim()}
-              </ReactMarkdown>
-            </div>
-          ) : null}
-          {segments.map((seg, segIdx) => {
-            const isToolLive =
-              isLastAssistant &&
-              loading &&
-              segIdx === segments.length - 1 &&
-              Boolean(message.toolCalling) &&
-              seg.labels.length > 0;
-            const toolCompletedCount = isToolLive
+      {!showPlaceholder &&
+        timeline.map((part, partIdx) => {
+          if (part.type === "digest") {
+            return (
+              <div
+                key={`digest-${partIdx}`}
+                className="bubble-content bubble-content--subagent-digest"
+              >
+                <Markdown>{part.md}</Markdown>
+              </div>
+            );
+          }
+          if (part.type === "taskPlan") {
+            return (
+              <TaskPlanCard
+                key={`task-plan-${message.agentRunId || part.plan.title || "local"}`}
+                plan={part.plan}
+              />
+            );
+          }
+          if (part.type === "thinking") {
+            const isActiveStream =
+              isStreaming &&
+              part.regionKey.includes("-stream-") &&
+              partIdx === timeline.length - 1;
+            return (
+              <ThinkingRegion
+                key={part.regionKey}
+                regionKey={part.regionKey}
+                content={part.text}
+                streaming={isActiveStream}
+                startedAt={part.startedAt}
+                durationMs={part.durationMs}
+                showCursor={
+                  isActiveStream &&
+                  !(message.content || message.contentAfterToolCalls)
+                }
+                onWheelUp={handleWheelUp}
+              />
+            );
+          }
+          if (part.type === "tools") {
+            const seg = part.segment;
+            const toolCompletedCount = part.isLive
               ? (seg.completedToolCount ?? 0)
               : seg.labels.length;
             return (
-              <React.Fragment key={segIdx}>
-                {blocks[segIdx]?.trim() && (
-                  <ThinkingRegion
-                    key={`${index}-seg-${segIdx}`}
-                    regionKey={`${index}-seg-${segIdx}`}
-                    content={blocks[segIdx]}
-                    streaming={false}
-                    defaultOpen={false}
-                    onWheelUp={handleWheelUp}
-                  />
-                )}
-                <div className="bubble-content">
-                  {seg.textBefore && (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {seg.textBefore}
-                    </ReactMarkdown>
-                  )}
-                  {seg.labels.length > 0 ? (
-                    <ToolCallStatus
-                      labels={seg.labels}
-                      labelOutcomes={seg.labelOutcomes}
-                      cachedFlags={seg.cachedFlags}
-                      completedToolCount={toolCompletedCount}
-                      trace={seg.trace}
-                    />
-                  ) : null}
-                </div>
-              </React.Fragment>
+              <ToolCallStatus
+                key={`tools-${part.segmentIndex}`}
+                labels={seg.labels}
+                labelOutcomes={seg.labelOutcomes}
+                cachedFlags={seg.cachedFlags}
+                completedToolCount={toolCompletedCount}
+              />
             );
-          })}
-          {isStreaming &&
-            currentThinking !== undefined &&
-            currentThinking !== "" &&
-            !hasGeneratedContent && (
-              <ThinkingRegion
-                key={`${index}-stream-th`}
-                regionKey={`${index}-stream-main`}
-                content={currentThinking}
-                streaming
-                streamingHeader
-                showCursor={!(message.content || message.contentAfterToolCalls)}
-                defaultOpen
-                onWheelUp={handleWheelUp}
-              />
-            )}
-          {isStreaming &&
-            currentThinking !== undefined &&
-            currentThinking !== "" &&
-            hasGeneratedContent && (
-              <ThinkingRegion
-                key={`${index}-stream-pa`}
-                regionKey={`${index}-stream-main`}
-                content={currentThinking}
-                streaming
-                defaultOpen={false}
-                onWheelUp={handleWheelUp}
-              />
-            )}
-          {!isStreaming && segments.length > 0 && blocks[segments.length]?.trim() && (
-            <ThinkingRegion
-              key={`${index}-tail-main`}
-              regionKey={`${index}-stream-main`}
-              content={blocks[segments.length]}
-              streaming={false}
-              defaultOpen={false}
-              onWheelUp={handleWheelUp}
-            />
-          )}
-          {!isStreaming && segments.length === 0 && blocks[0]?.trim() && (
-            <ThinkingRegion
-              key={`${index}-tail-main`}
-              regionKey={`${index}-stream-main`}
-              content={blocks[0]}
-              streaming={false}
-              defaultOpen={false}
-              onWheelUp={handleWheelUp}
-            />
-          )}
-          {assistantMarkdown && (
-            <div className="bubble-content">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {assistantMarkdown}
-              </ReactMarkdown>
-            </div>
-          )}
-          {!showPlaceholder && isLastAssistant && loading && (
-            <div className="bubble-content bubble-content--waiting-dots">
-              <span className="a-blink-dots">...</span>
-            </div>
-          )}
-        </>
+          }
+          if (part.type === "text") {
+            return (
+              <div key={`text-${partIdx}`} className="bubble-content">
+                <Markdown>{part.md}</Markdown>
+              </div>
+            );
+          }
+          return null;
+        })}
+      {!showPlaceholder && isLastAssistant && loading && hasGeneratedContent && (
+        <div className="bubble-content bubble-content--waiting-dots">
+          <span className="a-blink-dots">...</span>
+        </div>
       )}
       {message.writingSubagentActive ? (
         <div className="bubble-content bubble-content--waiting-dots">
@@ -170,7 +132,7 @@ export default function AssistantMessageBody({
           </span>
         </div>
       ) : null}
-          {message.subagentResult ? (
+      {message.subagentResult ? (
         <SubagentResultCard
           role={message.subagentResult.role}
           payload={message.subagentResult.payload}
@@ -183,3 +145,5 @@ export default function AssistantMessageBody({
     </div>
   );
 }
+
+export default React.memo(AssistantMessageBodyInner);

@@ -307,9 +307,9 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
         />
       </div>
 
-      <Tooltip title="所有非空字段都会作为「强制规则」自动拼入写作专家的 system prompt（无需勾选）">
+      <Tooltip title="所有非空字段都会作为「强制规则」自动拼入 AI 智能体的 system prompt（无需勾选）">
         <div className="style-form-footer">
-          <ThunderboltOutlined /> 已自动强制注入 AI 写作专家
+          <ThunderboltOutlined /> 已自动强制注入 AI 智能体
         </div>
       </Tooltip>
     </div>

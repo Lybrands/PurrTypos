@@ -99,11 +99,56 @@ SKILL_SPECS: dict[str, dict[str, Any]] = {
         "consumes": ["bookId", "characterId"],
         "autoResolveArgs": ["bookId"],
     },
+    "deleteCharacter": {
+        "riskLevel": "write",
+        "requires": ["listBookCharacters"],
+        "consumes": ["bookId", "characterId"],
+        "autoResolveArgs": ["bookId"],
+    },
     "editStoryBackground": {
         "riskLevel": "write",
         "requires": ["getStoryBackground"],
         "consumes": ["bookId", "content"],
         "autoResolveArgs": ["bookId"],
+    },
+    "listSettingEntities": {
+        "riskLevel": "read",
+        "provides": ["settingEntitiesIndex"],
+        "consumes": ["bookId"],
+    },
+    "getSettingEntities": {
+        "riskLevel": "read",
+        "requires": ["listSettingEntities"],
+        "provides": ["settingEntitiesDetails"],
+        "consumes": ["bookId"],
+    },
+    "createSettingEntity": {
+        "riskLevel": "write",
+        "requires": ["listSettingEntities"],
+        "consumes": ["bookId", "name"],
+        "autoResolveArgs": ["bookId"],
+    },
+    "updateSettingEntity": {
+        "riskLevel": "write",
+        "requires": ["listSettingEntities"],
+        "consumes": ["bookId", "entityId"],
+        "autoResolveArgs": ["bookId"],
+    },
+    "deleteSettingEntity": {
+        "riskLevel": "write",
+        "requires": ["listSettingEntities"],
+        "consumes": ["bookId", "entityId"],
+        "autoResolveArgs": ["bookId"],
+    },
+    "getStoryHealthDashboard": {
+        "riskLevel": "read",
+        "provides": ["storyHealthDashboard"],
+        "consumes": ["bookId"],
+    },
+    "getWritingStatsDashboard": {
+        "riskLevel": "read",
+        "provides": ["writingStatsDashboard"],
+        "consumes": ["bookId"],
     },
 }
 

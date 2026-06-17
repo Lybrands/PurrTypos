@@ -1,8 +1,9 @@
 """
-设定类写工具（人物 / 故事背景）的表征测试：
-createCharacter / updateCharacter / editStoryBackground 的成功路径、
-归属校验、部分更新语义、settingUpdated 副作用 chunk，
-以及人物档案 Markdown 化的存量数据迁移。
+设定类写工具（人物 / 故事背景 / 世界设定实体）的表征测试：
+createCharacter / updateCharacter / deleteCharacter / editStoryBackground /
+createSettingEntity / updateSettingEntity / deleteSettingEntity
+的成功路径、归属校验、提议制（不直接落库，发 proposedSettingDiff chunk）语义、
+settingUpdated 副作用 chunk，以及人物档案 Markdown 化的存量数据迁移。
 """
 
 from __future__ import annotations
@@ -80,7 +81,8 @@ async def test_create_character_requires_name(temp_db):
 # ── updateCharacter ──────────────────────────────────────────────
 
 
-async def test_update_character_partial_update(temp_db):
+async def test_update_character_proposes_diff_without_writing(temp_db):
+    """提议制：updateCharacter 不直接落库，发 proposedSettingDiff 等待用户审阅。"""
     await _run(
         "createCharacter",
         {"bookId": "b1"},
@@ -96,14 +98,23 @@ async def test_update_character_partial_update(temp_db):
         send,
     )
     assert out["success"] is True
-    assert out["updatedFields"] == ["tags"]
+    assert out["pendingUserApproval"] is True
 
+    # 库内值保持不变（等待用户在设定面板接受）
     row = (await get_characters(temp_db, "b1"))[0]
-    assert row["tags"] == "配角, 医生"
-    # 部分更新：未传字段保持原值
+    assert row["tags"] == "配角"
     assert row["profile_md"] == "## 经历\n幼年随父行医"
     assert row["name"] == "苏棠"
-    assert any(c.get("settingUpdated", {}).get("kind") == "character" for c in chunks)
+
+    proposals = [c["proposedSettingDiff"] for c in chunks if "proposedSettingDiff" in c]
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert p["kind"] == "character"
+    assert p["characterId"] == cid
+    # 部分更新语义体现在 proposed 快照里：未传字段保持原值
+    assert p["proposed"]["tags"] == "配角, 医生"
+    assert p["proposed"]["profileMd"] == "## 经历\n幼年随父行医"
+    assert p["before"]["tags"] == "配角"
 
 
 async def test_update_character_rejects_other_books_character(temp_db):
@@ -122,6 +133,37 @@ async def test_update_character_requires_updatable_field(temp_db):
     out = await _run("updateCharacter", {"bookId": "b1"}, {"characterId": cid})
     assert out["success"] is False
     assert "缺少可更新字段" in out["error"]
+
+
+# ── deleteCharacter ──────────────────────────────────────────────
+
+
+async def test_delete_character_success_and_side_effect(temp_db):
+    await _run("createCharacter", {"bookId": "b1"}, {"name": "龙套甲", "tags": "路人"})
+    cid = (await get_characters(temp_db, "b1"))[0]["id"]
+
+    chunks, send = _collect_chunks()
+    out = await _run("deleteCharacter", {"bookId": "b1"}, {"characterId": cid}, send)
+    assert out["success"] is True
+    assert out["name"] == "龙套甲"
+
+    assert await get_characters(temp_db, "b1") == []
+    assert any(
+        c.get("settingUpdated", {}).get("kind") == "character"
+        and c["settingUpdated"].get("action") == "delete"
+        for c in chunks
+    )
+
+
+async def test_delete_character_rejects_other_books_character(temp_db):
+    await _run("createCharacter", {"bookId": "b1"}, {"name": "甲"})
+    cid = (await get_characters(temp_db, "b1"))[0]["id"]
+
+    out = await _run("deleteCharacter", {"bookId": "b2"}, {"characterId": cid})
+    assert out["success"] is False
+    assert "不属于当前书籍" in out["error"]
+    # 原书人物不受影响
+    assert len(await get_characters(temp_db, "b1")) == 1
 
 
 # ── 人物档案 Markdown 化：迁移 + prompt 文本 ─────────────────────
@@ -174,7 +216,8 @@ async def test_format_characters_as_text_renders_markdown(temp_db):
 # ── editStoryBackground ──────────────────────────────────────────
 
 
-async def test_edit_story_background_overwrites(temp_db):
+async def test_edit_story_background_proposes_diff_without_writing(temp_db):
+    """提议制：editStoryBackground 不直接落库，发 proposedSettingDiff 等待用户审阅。"""
     chunks, send = _collect_chunks()
     out = await _run(
         "editStoryBackground",
@@ -183,17 +226,131 @@ async def test_edit_story_background_overwrites(temp_db):
         send,
     )
     assert out["success"] is True
+    assert out["pendingUserApproval"] is True
 
+    # 库内不写入（等待用户接受）
     row = await get_story_background(temp_db, "b1")
-    assert "灵气复苏" in row["content"]
-    assert any(c.get("settingUpdated", {}).get("kind") == "background" for c in chunks)
+    assert row is None or not (row.get("content") or "").strip()
 
-    # 二次覆盖写入
-    await _run("editStoryBackground", {"bookId": "b1"}, {"content": "新版本"})
-    row = await get_story_background(temp_db, "b1")
-    assert row["content"] == "新版本"
+    proposals = [c["proposedSettingDiff"] for c in chunks if "proposedSettingDiff" in c]
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert p["kind"] == "background"
+    assert "灵气复苏" in p["proposed"]["content"]
+    assert p["before"]["content"] == ""
 
 
 async def test_edit_story_background_requires_string_content(temp_db):
     out = await _run("editStoryBackground", {"bookId": "b1"}, {"content": None})
     assert out["success"] is False
+
+
+# ── 世界设定实体（createSettingEntity / updateSettingEntity）─────
+
+
+async def test_create_setting_entity_success_and_side_effect(temp_db):
+    from database.crud.setting_entities import get_setting_entities
+
+    chunks, send = _collect_chunks()
+    out = await _run(
+        "createSettingEntity",
+        {"bookId": "b1"},
+        {"entityType": "location", "name": "青云山", "tags": "宗门驻地", "profileMd": "## 概述\n云雾缭绕"},
+        send,
+    )
+    assert out["success"] is True
+    assert out["entityType"] == "location"
+
+    rows = await get_setting_entities(temp_db, "b1")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "青云山"
+    assert rows[0]["entity_type"] == "location"
+
+    assert any(
+        c.get("settingUpdated", {}).get("kind") == "entity"
+        and c["settingUpdated"].get("action") == "create"
+        for c in chunks
+    )
+
+
+async def test_update_setting_entity_proposes_diff_without_writing(temp_db):
+    from database.crud.setting_entities import get_setting_entities
+
+    await _run(
+        "createSettingEntity",
+        {"bookId": "b1"},
+        {"entityType": "faction", "name": "天机阁", "profileMd": "## 概述\n情报组织"},
+    )
+    eid = (await get_setting_entities(temp_db, "b1"))[0]["id"]
+
+    chunks, send = _collect_chunks()
+    out = await _run(
+        "updateSettingEntity",
+        {"bookId": "b1"},
+        {"entityId": eid, "profileMd": "## 概述\n情报组织\n\n## 关键人物\n阁主玄机子"},
+        send,
+    )
+    assert out["success"] is True
+    assert out["pendingUserApproval"] is True
+
+    # 不直接落库
+    row = (await get_setting_entities(temp_db, "b1"))[0]
+    assert row["profile_md"] == "## 概述\n情报组织"
+
+    proposals = [c["proposedSettingDiff"] for c in chunks if "proposedSettingDiff" in c]
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert p["kind"] == "entity"
+    assert p["entityId"] == eid
+    assert p["entityType"] == "faction"
+    assert "玄机子" in p["proposed"]["profileMd"]
+
+
+async def test_update_setting_entity_rejects_other_books_entity(temp_db):
+    from database.crud.setting_entities import get_setting_entities
+
+    await _run("createSettingEntity", {"bookId": "b1"}, {"entityType": "item", "name": "诛仙剑"})
+    eid = (await get_setting_entities(temp_db, "b1"))[0]["id"]
+
+    out = await _run("updateSettingEntity", {"bookId": "b2"}, {"entityId": eid, "name": "改名"})
+    assert out["success"] is False
+    assert "不属于当前书籍" in out["error"]
+
+
+async def test_delete_setting_entity_removes_row_and_history(temp_db):
+    from database.crud.setting_entities import get_setting_entities
+    from database.crud.setting_entity_history import insert_entity_history
+
+    await _run("createSettingEntity", {"bookId": "b1"}, {"entityType": "location", "name": "废弃矿洞"})
+    eid = (await get_setting_entities(temp_db, "b1"))[0]["id"]
+    await insert_entity_history(
+        temp_db, entity_id=eid, before_name="旧名", after_name="废弃矿洞", source="user",
+    )
+
+    chunks, send = _collect_chunks()
+    out = await _run("deleteSettingEntity", {"bookId": "b1"}, {"entityId": eid}, send)
+    assert out["success"] is True
+    assert out["name"] == "废弃矿洞"
+
+    assert await get_setting_entities(temp_db, "b1") == []
+    hist = await temp_db.fetch_all(
+        "SELECT id FROM setting_entity_history WHERE entity_id = ?", [eid]
+    )
+    assert hist == []
+    assert any(
+        c.get("settingUpdated", {}).get("kind") == "entity"
+        and c["settingUpdated"].get("action") == "delete"
+        for c in chunks
+    )
+
+
+async def test_delete_setting_entity_rejects_other_books_entity(temp_db):
+    from database.crud.setting_entities import get_setting_entities
+
+    await _run("createSettingEntity", {"bookId": "b1"}, {"entityType": "faction", "name": "影阁"})
+    eid = (await get_setting_entities(temp_db, "b1"))[0]["id"]
+
+    out = await _run("deleteSettingEntity", {"bookId": "b2"}, {"entityId": eid})
+    assert out["success"] is False
+    assert "不属于当前书籍" in out["error"]
+    assert len(await get_setting_entities(temp_db, "b1")) == 1

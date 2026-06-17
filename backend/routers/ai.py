@@ -19,7 +19,6 @@ from utils.chat_stream import (
     build_tool_round_messages,
     inject_system_prompt,
     last_user_message_text,
-    resolve_chat_modes,
     valid_named_tool_calls,
 )
 from utils.session_title import normalize_session_title
@@ -135,70 +134,6 @@ async def generate_title(body: GenerateTitleRequest):
 
 # ── POST /ai/chat/stream (SSE) ──────────────────────────────────
 
-async def _stream_writing_subagent(
-    *,
-    abort: asyncio.Event,
-    key: str,
-    api_provider: str | None,
-    sub_rp: dict[str, Any],
-    tool_ctx: dict[str, Any],
-    messages: list[dict],
-    model: str,
-    subagent_role: str,
-):
-    """运行单次写作子专家，把其进度事件作为 SSE json 串逐条 yield 出来。
-
-    子专家在后台 task 里跑，进度经 queue 回传；结束（或异常）后补一个终止哨兵。
-    断开/取消时负责清理后台 task，正常收尾再补一个 ``done``。
-    """
-    progress_queue: asyncio.Queue = asyncio.Queue()
-
-    def _send_sub(ev: dict[str, Any]) -> None:
-        try:
-            progress_queue.put_nowait(ev)
-        except Exception:
-            pass
-
-    async def _sub_runner() -> None:
-        try:
-            from services.writing_subagents import run_writing_subagent
-
-            await run_writing_subagent(
-                role=subagent_role,
-                send_chunk=_send_sub,
-                signal=abort,
-                key=key,
-                api_provider=api_provider,
-                request_params=sub_rp,
-                tool_ctx=dict(tool_ctx),
-                messages=list(messages),
-                model=model,
-            )
-        except Exception as e:
-            logger.exception("[ai/chat/stream] writing subagent")
-            await progress_queue.put({"error": str(e)})
-        finally:
-            await progress_queue.put(None)
-
-    sub_task = asyncio.create_task(_sub_runner())
-    try:
-        while True:
-            item = await progress_queue.get()
-            if item is None:
-                break
-            yield json.dumps(item)
-    finally:
-        if not sub_task.done():
-            sub_task.cancel()
-            try:
-                await sub_task
-            except asyncio.CancelledError:
-                pass
-
-    if not abort.is_set():
-        yield json.dumps({"done": True, "model": model})
-
-
 async def _run_agent_tool_round(
     valid_calls: list[dict],
     tool_exec_ctx: dict[str, Any],
@@ -266,14 +201,6 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
         try:
             from services.ai_provider import create_chat_stream
 
-            modes = resolve_chat_modes(
-                body.agentMode,
-                body.chatAgentMode,
-                body.writingMode,
-                body.bookId,
-                body.subagentRole,
-            )
-
             tool_ctx_book: dict[str, Any] = {
                 "bookId": body.bookId,
                 "chapterId": body.chapterId,
@@ -301,21 +228,6 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
             assoc_block = await build_associated_context_block(tool_ctx_book)
             inject_system_prompt(messages, assoc_block)
 
-            # ── 写作专家：按需子专家（单次调用，非管线）────────────────────────
-            if modes.is_writing_expert_book and body.subagentRole:
-                async for evt in _stream_writing_subagent(
-                    abort=abort,
-                    key=key,
-                    api_provider=body.apiProvider,
-                    sub_rp=sub_rp,
-                    tool_ctx=tool_ctx_book,
-                    messages=messages,
-                    model=model,
-                    subagent_role=str(body.subagentRole),
-                ):
-                    yield evt
-                return
-
             # ── Agent mode: 装载全量 skills 工具列表 ───────────────────────
             # 历史名 useToolRouter 是个误导词：这里并不做语义路由，只是
             # "是否把 skills/<name>/SKILL.md 解析出的工具一股脑塞给 LLM"开关。
@@ -333,15 +245,6 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 except Exception:
                     logger.warning("[agent] 工具加载失败", exc_info=True)
 
-            is_collab = modes.is_collab
-            if is_collab and agent_tools:
-                from utils.collab_prompt import filter_collab_tools
-
-                last_user = last_user_message_text(body.messages)
-                agent_tools = filter_collab_tools(list(agent_tools), last_user)
-                request_params["tools"] = agent_tools
-                logger.info("[agent][collab] 工具过滤后 %d 个", len(agent_tools))
-
             tool_exec_ctx = {
                 "bookId": body.bookId,
                 "chapterId": body.chapterId,
@@ -350,48 +253,61 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "availableOutlines": list(body.availableOutlines or []),
                 "associatedChapterIds": list(body.associatedChapterIds or []),
                 "associatedOutlineIds": list(body.associatedOutlineIds or []),
-                "collabWriting": is_collab,
             }
 
             # ── 会话绑定说明（原前端 systemSuffix，文案权收归后端）────────────
-            # 写作专家模式跳过：其 system prompt 的 tooling appendix 已含同等规则。
-            if not modes.should_inject_writing_prompt:
-                binding = build_session_binding_prompt(
-                    tool_ctx_book,
-                    tools_enabled=bool(body.enableAgentTools and body.bookId),
-                )
-                inject_system_prompt(messages, binding)
+            binding = build_session_binding_prompt(
+                tool_ctx_book,
+                tools_enabled=bool(body.enableAgentTools and body.bookId),
+            )
+            inject_system_prompt(messages, binding)
 
-            if is_collab:
-                from utils.collab_prompt import (
-                    build_collab_system_prompt,
-                    build_collab_turn_appendix,
-                )
+            # ── Agent Run To-dos：后端权威 run 状态机 + SSE 事件流 ───────────
+            agent_run = None
+            agent_run_events: list[dict[str, Any]] = []
 
-                collab_inject = "\n\n".join(
-                    p for p in (
-                        build_collab_system_prompt(),
-                        build_collab_turn_appendix(messages),
-                    ) if p
-                )
-                inject_system_prompt(messages, collab_inject)
+            def _drain_agent_run_events() -> list[dict[str, Any]]:
+                drained = list(agent_run_events)
+                agent_run_events.clear()
+                return drained
 
-            if modes.should_inject_writing_prompt:
-                from utils.writing_prompt import build_writing_main_system_prompt
+            latest_user_text = last_user_message_text(messages)
+            available_tool_names = {
+                str((tool.get("function") or {}).get("name") or "").strip()
+                for tool in agent_tools
+                if isinstance(tool, dict)
+            }
+            available_tool_names = {name for name in available_tool_names if name}
+            try:
+                from dependencies import get_db
+                from services.agent_run_controller import AgentRunController
+                from services.task_planner import should_request_task_plan
 
-                # Layer 1：强制注入风格基调
-                try:
-                    from database.crud.book_style import get_book_style
-                    from dependencies import get_db as _get_db_for_style
-                    tool_ctx_book["bookStyle"] = await get_book_style(
-                        _get_db_for_style(), str(body.bookId)
+                if should_request_task_plan(
+                    user_text=latest_user_text,
+                    book_id=body.bookId,
+                    enable_agent_tools=bool(body.enableAgentTools),
+                    chat_agent_mode=body.chatAgentMode,
+                ):
+                    agent_run = AgentRunController(
+                        db=get_db(),
+                        send_chunk=agent_run_events.append,
                     )
-                except Exception:
-                    logger.exception("[ai/chat/stream] load book_style failed")
-                    tool_ctx_book["bookStyle"] = None
-
-                writing_inject = build_writing_main_system_prompt(tool_ctx_book)
-                inject_system_prompt(messages, writing_inject)
+                    await agent_run.start(
+                        session_id=body.sessionId,
+                        prompt=latest_user_text,
+                        mode=body.chatAgentMode,
+                        key=key,
+                        api_provider=body.apiProvider,
+                        planner_options=sub_rp,
+                        chat_agent_mode=body.chatAgentMode,
+                        available_tool_names=available_tool_names,
+                        signal=abort,
+                    )
+                    for evt in _drain_agent_run_events():
+                        yield json.dumps(evt)
+            except Exception:
+                logger.exception("[ai/chat/stream] agent run planner failed")
 
             used_model = model
             _MAX_ROUNDS = 6
@@ -415,6 +331,10 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
                     outcome = acc.process_chunk(chunk)
                     for evt in outcome.events:
+                        if agent_run and evt.get("delta"):
+                            await agent_run.on_model_delta()
+                            for run_evt in _drain_agent_run_events():
+                                yield json.dumps(run_evt)
                         yield json.dumps(evt)
                     if not outcome.has_choice:
                         continue
@@ -425,17 +345,38 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                             if valid_named_tool_calls(acc.tool_calls):
                                 finish_reason = "tool_calls"
                             else:
+                                if agent_run:
+                                    await agent_run.complete(final_response=acc.content)
+                                    for run_evt in _drain_agent_run_events():
+                                        yield json.dumps(run_evt)
                                 yield json.dumps({"done": True, "model": used_model})
                                 return
                         else:
+                            if agent_run:
+                                await agent_run.complete(final_response=acc.content)
+                                for run_evt in _drain_agent_run_events():
+                                    yield json.dumps(run_evt)
                             yield json.dumps({"done": True, "model": used_model})
                             return
 
                     if finish_reason in ("tool_calls", "function_call"):
                         valid_calls = valid_named_tool_calls(acc.tool_calls)
                         if not valid_calls:
+                            if agent_run:
+                                await agent_run.complete(final_response=acc.content)
+                                for run_evt in _drain_agent_run_events():
+                                    yield json.dumps(run_evt)
                             yield json.dumps({"done": True, "model": used_model})
                             return
+
+                        if agent_run:
+                            tool_names = [
+                                str((tc.get("function") or {}).get("name") or "").strip()
+                                for tc in valid_calls
+                            ]
+                            await agent_run.on_tool_calls_started([n for n in tool_names if n])
+                            for run_evt in _drain_agent_run_events():
+                                yield json.dumps(run_evt)
 
                         # Emit tool calls for frontend display
                         yield json.dumps({
@@ -447,6 +388,10 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         })
 
                         if not agent_tools:
+                            if agent_run:
+                                await agent_run.complete(final_response=acc.content)
+                                for run_evt in _drain_agent_run_events():
+                                    yield json.dumps(run_evt)
                             yield json.dumps({"done": True, "model": used_model})
                             return
 
@@ -456,6 +401,10 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         )
                         for evt in round_events:
                             yield json.dumps(evt)
+                        if agent_run:
+                            await agent_run.on_tool_round_completed()
+                            for run_evt in _drain_agent_run_events():
+                                yield json.dumps(run_evt)
                         messages = messages + appended
 
                         got_tool_calls = True
@@ -463,15 +412,27 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
                 if not got_tool_calls:
                     if not abort.is_set():
+                        if agent_run:
+                            await agent_run.complete(final_response=acc.content)
+                            for run_evt in _drain_agent_run_events():
+                                yield json.dumps(run_evt)
                         yield json.dumps({"done": True, "model": used_model})
                     return
 
             # Max rounds reached
             if not abort.is_set():
+                if agent_run:
+                    await agent_run.complete(final_response="")
+                    for run_evt in _drain_agent_run_events():
+                        yield json.dumps(run_evt)
                 yield json.dumps({"done": True, "model": used_model})
 
         except Exception as e:
             logger.exception("[ai/chat/stream] error")
+            if 'agent_run' in locals() and agent_run:
+                await agent_run.fail(error=str(e))
+                for run_evt in _drain_agent_run_events():
+                    yield json.dumps(run_evt)
             yield json.dumps({"error": str(e)})
         finally:
             abort.set()

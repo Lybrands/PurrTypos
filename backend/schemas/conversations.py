@@ -15,6 +15,9 @@ class SaveConversationRequest(BaseModel):
     thinking: Optional[str] = None
     toolCallSegments: Optional[List[Any]] = None
     thinkingBlocks: Optional[List[Any]] = None
+    thinkingDurationsMs: Optional[List[Any]] = None
+    taskPlan: Optional[Any] = None
+    agentRunId: Optional[str] = None
     # 子专家结构化结果：{ role: 'polish'|'review'|'continuation_plan'|'style_unify', payload: any }
     subagentResult: Optional[Any] = None
 

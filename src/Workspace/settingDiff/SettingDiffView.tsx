@@ -38,7 +38,9 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
   const displayTitle = title || (
     session.kind === 'character'
       ? session.characterName || '人物设定'
-      : '故事背景'
+      : session.kind === 'entity'
+        ? session.entityName || '世界设定'
+        : '故事背景'
   )
 
   const handleAcceptAll = () => diff.acceptAllPending(sessionKey)
@@ -285,13 +287,10 @@ function DiffParagraphRow({
 }
 
 export function useActiveSettingDiffSession(
-  kind: 'character' | 'background',
+  kind: 'character' | 'background' | 'entity',
   entityId: number | string | null | undefined,
 ): SettingDiffSession | undefined {
   const diff = useSettingDiff()
   if (entityId == null) return undefined
-  const key = kind === 'character'
-    ? `character:${entityId}`
-    : `background:${entityId}`
-  return diff.getSession(key)
+  return diff.getSession(`${kind}:${entityId}`)
 }

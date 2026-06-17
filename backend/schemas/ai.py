@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class ChatStreamRequest(BaseModel):
@@ -12,6 +12,7 @@ class ChatStreamRequest(BaseModel):
     apiProvider: str = "openai"
     options: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
+    sessionId: Optional[int] = None
     # 是否在请求中携带 skills/<name>/SKILL.md 解析出的工具列表。
     # 名字曾叫 useToolRouter（误导：实际并无路由，只是"是否加载工具"开关）。
     enableAgentTools: bool = False
@@ -26,17 +27,7 @@ class ChatStreamRequest(BaseModel):
     # 前端不再自行拼接记忆文案。
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
-    agentMode: Optional[str] = None
     chatAgentMode: Optional[str] = None
-    writingMode: str = "default"
-    agentActions: Optional[List[str]] = Field(
-        default=None,
-        deprecated=True,
-        description="Deprecated: ignored by server; on-demand experts use subagentRole",
-    )
-    subagentRole: Optional[
-        Literal["review", "polish", "continuation_plan", "style_unify"]
-    ] = None
 
 
 class ListModelsRequest(BaseModel):
