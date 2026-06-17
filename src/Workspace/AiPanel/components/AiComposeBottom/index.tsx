@@ -61,28 +61,6 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--accent)' },
       } as const
     }
-    if (chatAgentMode === 'expert') {
-      return {
-        root: {
-          border: 'none',
-          boxShadow: '0 0 2px var(--warning), 0 0 2px var(--warning)',
-          background: 'color-mix(in srgb, var(--warning) 18%, var(--bg-surface))',
-          color: 'var(--warning)',
-        },
-        suffix: { color: 'var(--warning)' },
-      } as const
-    }
-    if (chatAgentMode === 'collab') {
-      return {
-        root: {
-          border: 'none',
-          boxShadow: '0 0 2px var(--collab), 0 0 2px var(--collab)',
-          background: 'color-mix(in srgb, var(--collab) 12%, var(--bg-surface))',
-          color: 'var(--collab)',
-        },
-        suffix: { color: 'var(--collab)' },
-      } as const
-    }
     return {
       root: {
         border: 'none',
@@ -98,13 +76,11 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
-            { value: 'expert', label: '写作专家' },
-            { value: 'collab', label: '协作共创' },
             { value: 'agent', label: '智能体' },
             { value: 'ask', label: '问答' },
           ]}
@@ -121,32 +97,28 @@ export default function AiComposeBottom({
           placeholder={modelOptions.length ? undefined : '无模型配置'}
           variant="borderless"
           popupMatchSelectWidth={false}
-          popupRender={(menu) =>
-            chatAgentMode === 'expert' ? (
-              menu
-            ) : (
-              <>
-                {menu}
-                <Divider style={{ margin: '4px 0' }} />
-                <div
-                  className="ai-model-dropdown-footer"
-                  onMouseDown={(e) => e.preventDefault()}
+          popupRender={(menu) => (
+            <>
+              {menu}
+              <Divider style={{ margin: '4px 0' }} />
+              <div
+                className="ai-model-dropdown-footer"
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                <span className="ai-model-dropdown-label">思考模式</span>
+                <Tooltip
+                  title={thinkingOnly ? '该模型不可关闭思考模式' : ''}
                 >
-                  <span className="ai-model-dropdown-label">思考模式</span>
-                  <Tooltip
-                    title={thinkingOnly ? '该模型不可关闭思考模式' : ''}
-                  >
-                    <Switch
-                      size="small"
-                      checked={thinkingEnabled || thinkingOnly}
-                      disabled={thinkingOnly}
-                      onChange={setThinkingEnabled}
-                    />
-                  </Tooltip>
-                </div>
-              </>
-            )
-          }
+                  <Switch
+                    size="small"
+                    checked={thinkingEnabled || thinkingOnly}
+                    disabled={thinkingOnly}
+                    onChange={setThinkingEnabled}
+                  />
+                </Tooltip>
+              </div>
+            </>
+          )}
         />
       </div>
       {rightContent}

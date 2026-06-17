@@ -4,15 +4,18 @@ import { HistoryOutlined, RollbackOutlined } from '@ant-design/icons'
 import type {
   CharacterSettingHistory,
   EntityId,
+  SettingEntityHistory,
   StoryBackgroundSettingHistory,
 } from '../../types'
 import './SettingHistoryDrawer.scss'
 
-type HistoryKind = 'character' | 'background'
+type HistoryKind = 'character' | 'background' | 'entity'
 
 interface SettingHistoryDrawerProps {
   kind: HistoryKind
   characterId?: number | null
+  /** 世界设定实体 ID（kind='entity' 时必传） */
+  settingEntityId?: number | null
   bookId?: EntityId | null
   entityTitle?: string
   open: boolean
@@ -42,6 +45,7 @@ function previewText(text: string, max = 200): string {
 export default function SettingHistoryDrawer({
   kind,
   characterId,
+  settingEntityId,
   bookId,
   entityTitle,
   open,
@@ -51,11 +55,12 @@ export default function SettingHistoryDrawer({
   const { message: appMessage } = AntdApp.useApp()
   const [modal, modalCtx] = Modal.useModal()
   const [loading, setLoading] = React.useState(false)
-  const [charItems, setCharItems] = React.useState<CharacterSettingHistory[]>([])
+  // 人物与世界设定实体的历史结构同形（name/tags/profile 三字段），共用渲染
+  const [charItems, setCharItems] = React.useState<Array<CharacterSettingHistory | SettingEntityHistory>>([])
   const [bgItems, setBgItems] = React.useState<StoryBackgroundSettingHistory[]>([])
   const [expandedId, setExpandedId] = React.useState<number | null>(null)
   const [detailLoadingId, setDetailLoadingId] = React.useState<number | null>(null)
-  const [charDetail, setCharDetail] = React.useState<CharacterSettingHistory | null>(null)
+  const [charDetail, setCharDetail] = React.useState<CharacterSettingHistory | SettingEntityHistory | null>(null)
   const [bgDetail, setBgDetail] = React.useState<StoryBackgroundSettingHistory | null>(null)
   const [restoringId, setRestoringId] = React.useState<number | null>(null)
 
@@ -66,6 +71,10 @@ export default function SettingHistoryDrawer({
         const res = await window.electronAPI.listCharacterSettingHistory({ characterId, limit: 100 })
         if (res?.success) setCharItems(res.data ?? [])
         else appMessage.error('加载人物历史失败')
+      } else if (kind === 'entity' && settingEntityId != null) {
+        const res = await window.electronAPI.listEntitySettingHistory({ entityId: settingEntityId, limit: 100 })
+        if (res?.success) setCharItems(res.data ?? [])
+        else appMessage.error('加载设定历史失败')
       } else if (kind === 'background' && bookId != null) {
         const res = await window.electronAPI.listBackgroundSettingHistory({ bookId, limit: 100 })
         if (res?.success) setBgItems(res.data ?? [])
@@ -76,7 +85,7 @@ export default function SettingHistoryDrawer({
     } finally {
       setLoading(false)
     }
-  }, [kind, characterId, bookId, appMessage])
+  }, [kind, characterId, settingEntityId, bookId, appMessage])
 
   React.useEffect(() => {
     if (open) {
@@ -92,6 +101,9 @@ export default function SettingHistoryDrawer({
     try {
       if (kind === 'character') {
         const res = await window.electronAPI.getCharacterSettingHistory({ historyId })
+        if (res?.success && res.data) setCharDetail(res.data)
+      } else if (kind === 'entity') {
+        const res = await window.electronAPI.getEntitySettingHistory({ historyId })
         if (res?.success && res.data) setCharDetail(res.data)
       } else {
         const res = await window.electronAPI.getBackgroundSettingHistory({ historyId })
@@ -119,7 +131,9 @@ export default function SettingHistoryDrawer({
         try {
           const res = kind === 'character'
             ? await window.electronAPI.rollbackCharacterSettingHistory({ historyId })
-            : await window.electronAPI.rollbackBackgroundSettingHistory({ historyId })
+            : kind === 'entity'
+              ? await window.electronAPI.rollbackEntitySettingHistory({ historyId })
+              : await window.electronAPI.rollbackBackgroundSettingHistory({ historyId })
           if (res?.success) {
             appMessage.success('已回退到该版本')
             onRestored?.()
@@ -134,8 +148,8 @@ export default function SettingHistoryDrawer({
     })
   }
 
-  const titleLabel = kind === 'character' ? '人物历史' : '背景历史'
-  const items = kind === 'character' ? charItems : bgItems
+  const titleLabel = kind === 'character' ? '人物历史' : kind === 'entity' ? '设定历史' : '背景历史'
+  const items = kind === 'background' ? bgItems : charItems
 
   return (
     <Drawer
@@ -163,7 +177,7 @@ export default function SettingHistoryDrawer({
         <Empty description="还没有修改历史" />
       ) : (
         <div className="setting-history-list">
-          {kind === 'character'
+          {kind !== 'background'
             ? charItems.map((item) => {
               const preview = previewText(item.before_profile_md || item.after_profile_md)
               const isExpanded = expandedId === item.id

@@ -34,46 +34,6 @@ def build_chat_request_params(
     return params
 
 
-@dataclass(frozen=True)
-class ChatModes:
-    """从请求里解析出的对话模式判定。"""
-
-    agent_mode: str
-    chat_agent_mode: str
-    is_writing_expert_book: bool
-    is_collab: bool
-    should_inject_writing_prompt: bool
-
-
-def resolve_chat_modes(
-    agent_mode: str | None,
-    chat_agent_mode: str | None,
-    writing_mode: str | None,
-    book_id: Any,
-    subagent_role: Any,
-) -> ChatModes:
-    """归一化各模式字段并算出派生布尔量。"""
-    am = (agent_mode or "").strip().lower()
-    cam = (chat_agent_mode or "").strip().lower()
-    wm = (writing_mode or "").strip().lower()
-    has_book = bool(book_id)
-
-    is_writing_expert_book = bool(
-        has_book and (am == "subagent" or cam in ("expert", "subagent"))
-    )
-    is_collab = cam == "collab" or wm == "collab"
-    should_inject_writing_prompt = bool(
-        has_book and not subagent_role and (cam == "expert" or am == "subagent")
-    )
-    return ChatModes(
-        agent_mode=am,
-        chat_agent_mode=cam,
-        is_writing_expert_book=is_writing_expert_book,
-        is_collab=is_collab,
-        should_inject_writing_prompt=should_inject_writing_prompt,
-    )
-
-
 def valid_named_tool_calls(tool_calls: list[dict] | None) -> list[dict]:
     """只保留 ``function.name`` 非空的 tool_call（过滤掉流式过程中还没拼出名字的占位项）。"""
     return [

@@ -1,5 +1,11 @@
 import type { AiStreamChunk, ChunkCtx } from "./types";
 import {
+  handleAgentRunStarted,
+  handleAgentRunTerminal,
+  handleAgentRunTodoUpdated,
+  handleAgentRunTodosUpdated,
+} from "./agentRun";
+import {
   handleOrchestratorRepair,
   handleWritingSubagentDelta,
   handleWritingSubagentDone,
@@ -19,6 +25,7 @@ import {
   handleSettingUpdated,
 } from "./sideEffects";
 import { handleProposedSettingDiff } from "./settingDiff";
+import { handleTaskPlan } from "./taskPlan";
 import {
   handleToolCallCachedIndex,
   handleToolIndexCompleted,
@@ -59,6 +66,11 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleChapterCreated(chunk, ctx);
   handleSettingUpdated(chunk, ctx);
   handleCollabLatestParagraph(chunk, ctx);
+  handleAgentRunStarted(chunk, ctx);
+  handleAgentRunTodosUpdated(chunk, ctx);
+  handleAgentRunTodoUpdated(chunk, ctx);
+  handleAgentRunTerminal(chunk, ctx);
+  handleTaskPlan(chunk, ctx);
 
   // 5. 工具进度三连：仅当 chunk 只含进度信号时短路（与原行为一致）
   if (handleToolReadCacheMask(chunk, ctx)) return;

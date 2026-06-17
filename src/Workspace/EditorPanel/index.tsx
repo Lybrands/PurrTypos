@@ -366,7 +366,6 @@ export default function EditorPanel({
       currentChapterTitle: chapterTitle || undefined,
       writingChapters: chapters.map((c) => ({ id: c.id, title: c.title })),
       availableOutlines: [],
-      agentMode: 'legacy',
       chatAgentMode: 'ask',
     })
   }

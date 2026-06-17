@@ -1,6 +1,5 @@
 import {
   CHAT_AGENT_MODES,
-  type AiAgentMode,
   type Chapter,
   type Conversation,
   type EntityId,
@@ -35,13 +34,11 @@ export function getPrefsKey(bookId: EntityId | null): string {
 export function loadModelPrefs(
   bookId: EntityId | null,
   validModelIds?: string[],
-  settingsDefaultAgentMode: AiAgentMode = 'legacy'
 ): { model: string; chatAgentMode: ChatAgentMode; thinkingEnabled: boolean } {
   const defaultModel = validModelIds?.length ? validModelIds[0] : ''
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
-  const defaultChatAgentMode: ChatAgentMode =
-    settingsDefaultAgentMode === 'subagent' ? 'expert' : 'agent'
+  const defaultChatAgentMode: ChatAgentMode = 'agent'
   try {
     const raw = localStorage.getItem(getPrefsKey(bookId))
     if (raw) {
@@ -56,10 +53,13 @@ export function loadModelPrefs(
       let chatAgentMode: ChatAgentMode
       if (isChatAgentMode(p.chatAgentMode)) {
         chatAgentMode = p.chatAgentMode
-      } else if (p.chatAgentMode === 'legacy') {
+      } else if (
+        p.chatAgentMode === 'legacy' ||
+        p.chatAgentMode === 'subagent' ||
+        p.chatAgentMode === 'expert' ||
+        p.chatAgentMode === 'collab'
+      ) {
         chatAgentMode = 'agent'
-      } else if (p.chatAgentMode === 'subagent') {
-        chatAgentMode = 'expert'
       } else if (p.agentEnabled === false) {
         chatAgentMode = 'ask'
       } else {
@@ -111,6 +111,33 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         } catch (_) {}
       }
       if (!thinkingBlocks && item.thinking?.trim()) thinkingBlocks = [item.thinking.trim()]
+      let taskPlan: ChatMessage['taskPlan']
+      if (item.task_plan) {
+        try {
+          const parsed = JSON.parse(item.task_plan) as unknown
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            typeof (parsed as { title?: unknown }).title === 'string' &&
+            typeof (parsed as { status?: unknown }).status === 'string' &&
+            Array.isArray((parsed as { steps?: unknown }).steps)
+          ) {
+            taskPlan = parsed as ChatMessage['taskPlan']
+          }
+        } catch (_) {}
+      }
+      let thinkingDurationsMs: number[] | undefined
+      if (item.thinking_durations_ms) {
+        try {
+          const parsed = JSON.parse(item.thinking_durations_ms) as unknown
+          if (
+            Array.isArray(parsed) &&
+            parsed.every((x) => typeof x === 'number' && Number.isFinite(x))
+          ) {
+            thinkingDurationsMs = parsed
+          }
+        } catch (_) {}
+      }
       let subagentResult: ChatMessage['subagentResult']
       if (item.subagent_result) {
         try {
@@ -127,9 +154,12 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
       let assistantMsg: ChatMessage = {
         role: 'assistant',
         content: item.response,
+        conversationId: item.id,
         model: item.model || undefined,
         thinking: item.thinking || undefined,
         thinkingBlocks,
+        thinkingDurationsMs,
+        taskPlan,
         subagentResult,
       }
       const rawSegments = item.tool_call_segments

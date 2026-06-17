@@ -8,9 +8,11 @@ import type {
   Outline,
 } from "../../../../types";
 import type {
+  AiTaskPlan,
   ChatMessage,
   ToolCallSegment,
 } from "../chat.types";
+import type { ConversationUpdater } from "./commitScheduler";
 import type { WritingSubagentRole } from "../../pipelineStages";
 
 /** 主进程 SSE chunk 的真实类型（直接从 ElectronAPI 接口提取，避免重复声明漂移） */
@@ -32,9 +34,14 @@ export interface AccState {
   model: string;
   toolCallSegments?: ToolCallSegment[];
   thinkingBlocks?: string[];
+  thinkingDurationsMs?: number[];
   contentAfterToolCalls?: string;
+  /** 当前思考块开始时间（performance.now），用于计算 thinkingDurationsMs */
+  thinkingBlockStartedAt?: number;
   subagentPipelineDigest: string;
   subagentResult?: { role: WritingSubagentRole; payload: unknown };
+  agentRunId?: string;
+  taskPlan?: AiTaskPlan;
 }
 
 /**
@@ -52,6 +59,8 @@ export interface ChunkCtx {
 
   // React 写入入口
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  scheduleCommit: (updater: ConversationUpdater) => void;
+  flushCommits: () => void;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>;
   appMessage: AppMessage;

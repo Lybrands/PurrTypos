@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from 'react'
 import { App as AntdApp, Spin } from 'antd'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiAgentMode, type AiModelConfig, type EntityId } from './types'
+import { Book, type AiModelConfig, type EntityId } from './types'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -20,7 +20,6 @@ export default function App() {
   const [showSettings, setShowSettings] = React.useState(false)
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
-  const [aiAgentMode, setAiAgentMode] = React.useState<AiAgentMode>('legacy')
 
   React.useEffect(() => {
     window.electronAPI.getSettings().then((res) => {
@@ -28,10 +27,6 @@ export default function App() {
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
-      }
-      const m = res.data.ai_agent_mode
-      if (m === 'subagent' || m === 'legacy') {
-        setAiAgentMode(m)
       }
     })
   }, [])
@@ -136,7 +131,6 @@ export default function App() {
               onOpenSettings={() => setShowSettings(true)}
               modelConfigs={modelConfigs}
               syncOutlineChapter={syncOutlineChapter}
-              aiAgentMode={aiAgentMode}
             />
           )}
         </Suspense>
@@ -154,11 +148,6 @@ export default function App() {
             onClose={() => setShowSettings(false)}
             syncOutlineChapter={syncOutlineChapter}
             onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
-            aiAgentMode={aiAgentMode}
-            onAiAgentModeChange={(mode) => {
-              setAiAgentMode(mode)
-              void window.electronAPI.setSettings({ ai_agent_mode: mode })
-            }}
           />
           </Suspense>
         </div>

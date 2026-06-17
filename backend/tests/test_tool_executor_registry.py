@@ -59,6 +59,14 @@ EXPECTED_TOOLS = {
     "deleteSparkIdea",
     "addForeshadowing",
     "searchSparkIdeas",
+    "listSettingEntities",
+    "getSettingEntities",
+    "createSettingEntity",
+    "updateSettingEntity",
+    "deleteCharacter",
+    "deleteSettingEntity",
+    "getStoryHealthDashboard",
+    "getWritingStatsDashboard",
 }
 
 
@@ -99,7 +107,9 @@ class TestRegistryShape:
                                               "batchGetChapterContents", "getBookCharacters",
                                               "listBookCharacters", "getStoryBackground",
                                               "getBookStyle", "queryOutline",
-                                              "getGlobalOutline", "listOutlines"]))
+                                              "getGlobalOutline", "listOutlines",
+                                              "getStoryHealthDashboard",
+                                              "getWritingStatsDashboard"]))
     def test_read_cache_predictor_exists_for_cacheable_tools(self, name: str):
         # 这些工具的 handler 内部走了 _read_tool_cache_get/set，必须有 predictor 配套
         assert name in CACHE_PREDICTORS, (

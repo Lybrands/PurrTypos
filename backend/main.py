@@ -47,6 +47,9 @@ async def lifespan(application: FastAPI):
         story_background, files, prompt_templates, book_style,
         chapter_diff,
         setting_diff,
+        setting_entities,
+        dashboard,
+        export,
     )
     application.include_router(books.router, prefix="/api")
     application.include_router(outlines.router, prefix="/api")
@@ -64,6 +67,9 @@ async def lifespan(application: FastAPI):
     application.include_router(book_style.router, prefix="/api")
     application.include_router(chapter_diff.router, prefix="/api")
     application.include_router(setting_diff.router, prefix="/api")
+    application.include_router(setting_entities.router, prefix="/api")
+    application.include_router(dashboard.router, prefix="/api")
+    application.include_router(export.router, prefix="/api")
 
     yield
 

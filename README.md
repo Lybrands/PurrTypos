@@ -114,7 +114,6 @@ PurrTypos/
 │   │   ├── anthropic_chat.py    # Anthropic Messages API 适配
 │   │   ├── tool_router.py       # SKILL.md 加载器
 │   │   ├── tool_executor.py     # 工具调用执行
-│   │   ├── writing_subagents.py # 写作专家的按需子专家调用
 │   │   └── memory_service.py    # mem0 集成（长期记忆）
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理

@@ -4,10 +4,16 @@ from fastapi import APIRouter
 
 from database.crud import character_history as char_hist_crud
 from database.crud import characters as characters_crud
+from database.crud import setting_entities as entities_crud
+from database.crud import setting_entity_history as ent_hist_crud
 from database.crud import story_background as bg_crud
 from database.crud import story_background_history as bg_hist_crud
 from dependencies import get_db
-from schemas.setting_diff import CommitBackgroundDiffRequest, CommitCharacterDiffRequest
+from schemas.setting_diff import (
+    CommitBackgroundDiffRequest,
+    CommitCharacterDiffRequest,
+    CommitEntityDiffRequest,
+)
 
 router = APIRouter(tags=["setting-diff"])
 
@@ -103,6 +109,99 @@ async def rollback_character_history(historyId: int):
         rejected_segments=0,
     )
     return {"success": True, "data": {"id": new_id, "characterId": cid}}
+
+
+@router.post("/setting-diff/entity/{entityId}/commit")
+async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
+    db = get_db()
+    try:
+        eid = int(entityId)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "无效的实体 ID"}
+
+    row = await entities_crud.update_setting_entity(
+        db,
+        eid,
+        {
+            "name": body.name,
+            "tags": body.tags,
+            "profile_md": body.profileMd,
+        },
+    )
+    if not row:
+        return {"success": False, "error": "实体不存在"}
+
+    hist_id = await ent_hist_crud.insert_entity_history(
+        db,
+        entity_id=eid,
+        before_name=body.before.name,
+        before_tags=body.before.tags,
+        before_profile_md=body.before.profileMd,
+        after_name=body.after.name,
+        after_tags=body.after.tags,
+        after_profile_md=body.after.profileMd,
+        source=body.source,
+        accepted_segments=body.accepted_segments,
+        rejected_segments=body.rejected_segments,
+    )
+    return {"success": True, "data": {"id": hist_id, "entityId": eid}}
+
+
+@router.get("/setting-diff/entity/{entityId}/history")
+async def list_entity_history(entityId: str, limit: int = 50):
+    db = get_db()
+    try:
+        eid = int(entityId)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "无效的实体 ID"}
+    rows = await ent_hist_crud.list_entity_history(db, eid, limit=limit)
+    return {"success": True, "data": rows}
+
+
+@router.get("/setting-diff/entity/history/{historyId}")
+async def get_entity_history(historyId: int):
+    db = get_db()
+    row = await ent_hist_crud.get_entity_history(db, historyId)
+    return {"success": True, "data": row}
+
+
+@router.post("/setting-diff/entity/history/{historyId}/rollback")
+async def rollback_entity_history(historyId: int):
+    db = get_db()
+    target = await ent_hist_crud.get_entity_history(db, historyId)
+    if not target:
+        return {"success": False, "error": "history not found"}
+
+    eid = int(target["entity_id"])
+    rollback_to = {
+        "name": target.get("before_name") or "",
+        "tags": target.get("before_tags") or "",
+        "profile_md": target.get("before_profile_md") or "",
+    }
+    rollback_from = {
+        "name": target.get("after_name") or "",
+        "tags": target.get("after_tags") or "",
+        "profile_md": target.get("after_profile_md") or "",
+    }
+
+    row = await entities_crud.update_setting_entity(db, eid, rollback_to)
+    if not row:
+        return {"success": False, "error": "实体不存在"}
+
+    new_id = await ent_hist_crud.insert_entity_history(
+        db,
+        entity_id=eid,
+        before_name=rollback_from["name"],
+        before_tags=rollback_from["tags"],
+        before_profile_md=rollback_from["profile_md"],
+        after_name=rollback_to["name"],
+        after_tags=rollback_to["tags"],
+        after_profile_md=rollback_to["profile_md"],
+        source=f"rollback_of:{historyId}",
+        accepted_segments=0,
+        rejected_segments=0,
+    )
+    return {"success": True, "data": {"id": new_id, "entityId": eid}}
 
 
 @router.post("/setting-diff/background/{bookId}/commit")

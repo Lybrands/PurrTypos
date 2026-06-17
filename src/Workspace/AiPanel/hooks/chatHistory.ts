@@ -1,7 +1,7 @@
 import type { ChatMessage } from "./chat.types";
 import { isWritingExpertPipeline } from "./chat.types";
 
-/** 写作专家模式：助手轮仅有 tool 气泡、正文为空时，拼出可供模型阅读的摘要，避免主会话上下文断裂 */
+/** 历史子专家轮仅有 tool 气泡、正文为空时，拼出可供模型阅读的摘要，避免主会话上下文断裂。 */
 export function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): string {
   const segs = msg.toolCallSegments;
   if (!segs?.length) return "";
@@ -38,7 +38,7 @@ export function summarizeSubagentResult(cm: ChatMessage): string {
 
 /**
  * 将界面 ChatMessage 转成发给后端的 history 项；
- * 错误轮、system 轮和空内容都过滤掉，并对写作专家模式的"仅工具气泡"轮做摘要回填。
+ * 错误轮、system 轮和空内容都过滤掉，并对历史子专家的"仅工具气泡"轮做摘要回填。
  */
 export function buildHistoryConverter(
   agentMode: "legacy" | "subagent" | undefined,

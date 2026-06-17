@@ -1,4 +1,3 @@
-import { flushSync } from "react-dom";
 import {
   isWritingExpertPipeline,
   type ChatMessage,
@@ -6,13 +5,11 @@ import {
   type ToolCallSegment,
 } from "../chat.types";
 import { toolCallDisplayRow } from "../toolCallLabels";
+import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
 /**
  * 工具批次开始：把后端的 toolCalls 数组转成"工具气泡 + 进度区段"，并把流式正文挂到段头。
- *
- * 这是 onAiChunk 里最复杂的分支，且无条件 return（吞掉本 chunk 后续 if）。
- * 拆分后逻辑保持 1:1：可见会话走 setConversations 重建段；不可见会话只更新 acc 累加器。
  */
 export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
   if (!chunk.toolCalls?.length || !chunk.toolCallsInProgress) return;
@@ -106,76 +103,82 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
   let rebuiltAssistantText = "";
   const { acc, agentMode } = ctx;
 
-  if (ctx.isVisibleSession()) {
-    flushSync(() => {
-      ctx.setConversations((prev) => {
-        const next = [...prev];
-        const lastMsg = next[next.length - 1];
-        if (lastMsg?.role !== "assistant") return next;
+  const applyThinkingFinalize = (currentThinking: string) => {
+    if (!currentThinking.trim()) {
+      return {
+        blocks: acc.thinkingBlocks ?? [],
+        durations: acc.thinkingDurationsMs ?? [],
+      };
+    }
+    return finalizeThinkingBlock(ctx, currentThinking);
+  };
 
-        const prevSeg = (lastMsg as ChatMessage).toolCallSegments ?? [];
-        const prevBlocks = (lastMsg as ChatMessage).thinkingBlocks ?? [];
-        const currentThinking = (lastMsg.thinking || "").trim();
-        const nextBlocks = currentThinking
-          ? [...prevBlocks, currentThinking]
-          : prevBlocks;
-        /** 仅含「主稿专家过渡 / 最终答复」等流式尾稿；新工具批开始前须并入上方片段，
-         *  否则渲染顺序会变成「新工具段在旧尾稿之上」 */
-        const tailAcc =
-          acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "";
-        const hasPartial = Boolean(partialContent && partialContent.trim());
-        const flushTailSegments: ToolCallSegment[] =
-          !hasPartial && tailAcc.trim().length > 0
-            ? [{ textBefore: tailAcc, labels: [], cachedFlags: [] }]
-            : [];
-        const baseSegs = [...prevSeg, ...flushTailSegments];
-        const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
-        const textBefore =
-          partialContent && partialContent.trim()
-            ? partialContent
-            : !hasPriorToolRound
-              ? isWritingExpertPipeline(agentMode)
-                ? ""
-                : acc.response || lastMsg.content || ""
-              : "";
-        const newSegment = buildSegment(textBefore, initialCachedFlags);
-        const nextSegments = [...baseSegs, newSegment];
-        let afterToolCalls =
-          flushTailSegments.length > 0
-            ? ""
-            : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
-        if (
-          !isWritingExpertPipeline(agentMode) &&
-          flushTailSegments.length === 0 &&
-          textBefore &&
-          afterToolCalls.startsWith(textBefore)
-        ) {
-          afterToolCalls = afterToolCalls.slice(textBefore.length);
-        }
-        rebuiltAssistantText =
-          nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
-        acc.toolCallSegments = nextSegments;
-        acc.contentAfterToolCalls = afterToolCalls;
-        acc.thinkingBlocks = nextBlocks;
-        next[next.length - 1] = {
-          ...lastMsg,
-          content: rebuiltAssistantText,
-          thinking: "",
-          thinkingBlocks: nextBlocks,
-          toolCalling: true,
-          toolCallSegments: nextSegments,
-          contentAfterToolCalls: afterToolCalls,
-        };
-        return next;
-      });
+  if (ctx.isVisibleSession()) {
+    ctx.scheduleCommit((prev) => {
+      const next = [...prev];
+      const lastMsg = next[next.length - 1];
+      if (lastMsg?.role !== "assistant") return next;
+
+      const prevSeg = (lastMsg as ChatMessage).toolCallSegments ?? [];
+      const currentThinking = (lastMsg.thinking || "").trim();
+      const { blocks: nextBlocks, durations: nextDurations } =
+        applyThinkingFinalize(currentThinking);
+      const tailAcc =
+        acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "";
+      const hasPartial = Boolean(partialContent && partialContent.trim());
+      const flushTailSegments: ToolCallSegment[] =
+        !hasPartial && tailAcc.trim().length > 0
+          ? [{ textBefore: tailAcc, labels: [], cachedFlags: [] }]
+          : [];
+      const baseSegs = [...prevSeg, ...flushTailSegments];
+      const hasPriorToolRound = prevSeg.some((s) => s.labels.length > 0);
+      const textBefore =
+        partialContent && partialContent.trim()
+          ? partialContent
+          : !hasPriorToolRound
+            ? isWritingExpertPipeline(agentMode)
+              ? ""
+              : acc.response || lastMsg.content || ""
+            : "";
+      const newSegment = buildSegment(textBefore, initialCachedFlags);
+      const nextSegments = [...baseSegs, newSegment];
+      let afterToolCalls =
+        flushTailSegments.length > 0
+          ? ""
+          : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
+      if (
+        !isWritingExpertPipeline(agentMode) &&
+        flushTailSegments.length === 0 &&
+        textBefore &&
+        afterToolCalls.startsWith(textBefore)
+      ) {
+        afterToolCalls = afterToolCalls.slice(textBefore.length);
+      }
+      rebuiltAssistantText =
+        nextSegments.map((s) => s.textBefore).join("") + afterToolCalls;
+      acc.toolCallSegments = nextSegments;
+      acc.contentAfterToolCalls = afterToolCalls;
+      acc.thinkingBlocks = nextBlocks;
+      acc.thinkingDurationsMs = nextDurations;
+      next[next.length - 1] = {
+        ...lastMsg,
+        content: rebuiltAssistantText,
+        thinking: "",
+        thinkingStartedAt: undefined,
+        thinkingBlocks: nextBlocks.length ? nextBlocks : undefined,
+        thinkingDurationsMs: nextDurations.length ? nextDurations : undefined,
+        toolCalling: true,
+        toolCallSegments: nextSegments,
+        contentAfterToolCalls: afterToolCalls,
+        taskPlan: acc.taskPlan,
+      };
+      return next;
     });
   } else {
     const prevSeg = acc.toolCallSegments ?? [];
-    const prevBlocks = acc.thinkingBlocks ?? [];
     const currentThinking = (acc.thinking || "").trim();
-    const nextBlocks = currentThinking
-      ? [...prevBlocks, currentThinking]
-      : prevBlocks;
+    const { blocks: nextBlocks, durations: nextDurations } =
+      applyThinkingFinalize(currentThinking);
     const tailBg = acc.contentAfterToolCalls ?? "";
     const hasPartialBg = Boolean(partialContent && partialContent.trim());
     const flushTailSegments: ToolCallSegment[] =
@@ -208,6 +211,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
     acc.toolCallSegments = nextSegments;
     acc.contentAfterToolCalls = afterToolCallsBg;
     acc.thinkingBlocks = nextBlocks;
+    acc.thinkingDurationsMs = nextDurations;
   }
 
   acc.response =

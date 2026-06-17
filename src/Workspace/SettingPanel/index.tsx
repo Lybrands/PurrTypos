@@ -1,16 +1,18 @@
 import React from 'react'
 import { Tabs } from 'antd'
-import { TeamOutlined, GlobalOutlined } from '@ant-design/icons'
+import { TeamOutlined, GlobalOutlined, CompassOutlined } from '@ant-design/icons'
 import type { EntityId } from '../../types'
 import CharacterTab from '../OutlinePanel/CharacterTab'
 import StoryBackgroundTab from '../OutlinePanel/StoryBackgroundTab'
+import WorldEntityTab from '../OutlinePanel/WorldEntityTab'
 import './SettingPanel.scss'
 
-export type SettingPanelTab = 'characters' | 'background'
+export type SettingPanelTab = 'characters' | 'background' | 'entities'
 
 export interface OpenSettingPanelDetail {
   tab?: SettingPanelTab
   characterId?: number | null
+  entityId?: number | null
 }
 
 interface SettingPanelProps {
@@ -20,12 +22,14 @@ interface SettingPanelProps {
 export default function SettingPanel({ bookId }: SettingPanelProps) {
   const [activeTab, setActiveTab] = React.useState<SettingPanelTab>('characters')
   const [focusCharacterId, setFocusCharacterId] = React.useState<number | null>(null)
+  const [focusEntityId, setFocusEntityId] = React.useState<number | null>(null)
 
   React.useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<OpenSettingPanelDetail>).detail
       if (detail?.tab) setActiveTab(detail.tab)
       if (detail?.characterId != null) setFocusCharacterId(detail.characterId)
+      if (detail?.entityId != null) setFocusEntityId(detail.entityId)
     }
     window.addEventListener('open-setting-panel', handler as EventListener)
     return () => window.removeEventListener('open-setting-panel', handler as EventListener)
@@ -50,6 +54,18 @@ export default function SettingPanel({ bookId }: SettingPanelProps) {
       label: '故事背景',
       icon: <GlobalOutlined />,
       children: <StoryBackgroundTab bookId={bookId} />,
+    },
+    {
+      key: 'entities',
+      label: '世界设定',
+      icon: <CompassOutlined />,
+      children: (
+        <WorldEntityTab
+          bookId={bookId}
+          focusEntityId={focusEntityId}
+          onFocusEntityHandled={() => setFocusEntityId(null)}
+        />
+      ),
     },
   ]
 

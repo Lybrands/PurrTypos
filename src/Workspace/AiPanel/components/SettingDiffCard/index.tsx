@@ -59,7 +59,7 @@ export default function SettingDiffCard({ card }: SettingDiffCardProps) {
       <div className="setting-diff-card-header">
         <div>
           <div className="setting-diff-card-title">
-            提议修改{session.kind === 'character' ? '人物' : '故事背景'}
+            提议修改{session.kind === 'character' ? '人物' : session.kind === 'entity' ? '世界设定' : '故事背景'}
             <span className="setting-diff-card-subtitle"> · {card.title}</span>
           </div>
           <Space size={4} wrap className="setting-diff-card-tags">

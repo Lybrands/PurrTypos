@@ -1,0 +1,73 @@
+.task-plan-card {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--border-radius);
+  background: color-mix(in srgb, var(--bg-surface) 88%, var(--bg-active));
+  color: var(--text-muted);
+}
+
+.task-plan-card__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.task-plan-card__header-icon {
+  color: currentColor;
+  font-size: 13px;
+}
+
+.task-plan-card__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.task-plan-card__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 8px;
+}
+
+.task-plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.task-plan-step__icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: currentColor;
+}
+
+.task-plan-step--done {
+  color: var(--text-muted);
+}
+
+.task-plan-step--running {
+  color: var(--text-primary);
+}
+
+.task-plan-step--blocked,
+.task-plan-step--failed {
+  color: var(--text-muted);
+}
+
+.task-plan-step__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: currentColor;
+}
+
+.task-plan-step--done .task-plan-step__title {
+  text-decoration: line-through;
+}

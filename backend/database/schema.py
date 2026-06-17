@@ -138,8 +138,46 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
     # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")
+
+    # ── ai_agent_runs / todos / events ───────────────────────────
+    # Agent Run 是一次用户请求的运行记录；To-dos 属于 run，而不是跨对话任务中心。
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        session_id INTEGER DEFAULT NULL,
+        conversation_id INTEGER DEFAULT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        mode TEXT DEFAULT NULL,
+        prompt TEXT NOT NULL DEFAULT '',
+        final_response TEXT DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        executor TEXT NOT NULL DEFAULT 'model',
+        expected_tools TEXT DEFAULT NULL,
+        expert_role TEXT DEFAULT NULL,
+        result_summary TEXT DEFAULT NULL,
+        error TEXT DEFAULT NULL,
+        sort INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
@@ -342,6 +380,54 @@ async def init_schema(db: DatabaseConnection) -> None:
         name TEXT NOT NULL,
         stored_path TEXT NOT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── setting_entities ─────────────────────────────────────────
+    # 世界设定实体（地点 / 势力 / 物品 / 其他），结构与人物卡一致：
+    # name / tags 结构化，正文统一 profile_md。
+    await db.execute("""CREATE TABLE IF NOT EXISTS setting_entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL DEFAULT 'location',
+        name TEXT NOT NULL,
+        tags TEXT DEFAULT '',
+        profile_md TEXT DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_setting_entities_book "
+        "ON setting_entities(book_id, entity_type)"
+    )
+
+    # ── setting_entity_history ───────────────────────────────────
+    # 设定实体修订历史；与 character_history 同构，支持 diff 审阅与回滚。
+    await db.execute("""CREATE TABLE IF NOT EXISTS setting_entity_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id INTEGER NOT NULL,
+        before_name TEXT DEFAULT '',
+        before_tags TEXT DEFAULT '',
+        before_profile_md TEXT DEFAULT '',
+        after_name TEXT DEFAULT '',
+        after_tags TEXT DEFAULT '',
+        after_profile_md TEXT DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_setting_entity_history_entity "
+        "ON setting_entity_history(entity_id, create_time DESC)"
+    )
+
+    # ── book_word_stats ──────────────────────────────────────────
+    # 每书每日字数快照（当日结束时的全书总字数），用于日更统计 / 连续达标。
+    # 正文保存时增量更新当日行；统计接口读取时用全量字数自校正。
+    await db.execute("""CREATE TABLE IF NOT EXISTS book_word_stats (
+        book_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        total_words INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (book_id, date)
     )""")
 
     # ── characters ───────────────────────────────────────────────

@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFilePath: (filePath) => ipcRenderer.invoke('open-file-path', filePath),
   readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
+  writeSingleTextFile: (data) => ipcRenderer.invoke('write-single-text-file', data),
+  exportEpub: (data) => ipcRenderer.invoke('export-epub', data),
   exportDatabase: () => ipcRenderer.invoke('export-database'),
   importDatabase: () => ipcRenderer.invoke('import-database'),
   getDatabaseInfo: () => apiGet('/database/info'),
@@ -71,6 +73,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createCharacter: (data) => apiPost(`/books/${data.bookId}/characters`, { data: data.data }),
   updateCharacter: (data) => apiPut(`/characters/${data.id}`, { data: data.data }),
   deleteCharacter: (data) => apiDelete(`/characters/${data.id}`),
+
+  // ─── Setting entities（世界设定实体）— HTTP ─────────────────────
+  getSettingEntities: (data) =>
+    apiGet(`/books/${data.bookId}/setting-entities${data.type ? `?type=${data.type}` : ''}`),
+  createSettingEntity: (data) => apiPost(`/books/${data.bookId}/setting-entities`, {
+    entityType: data.entityType,
+    name: data.name,
+    tags: data.tags || '',
+    profileMd: data.profileMd || '',
+  }),
+  updateSettingEntity: (data) => apiPut(`/setting-entities/${data.id}`, data.data ?? {}),
+  deleteSettingEntity: (data) => apiDelete(`/setting-entities/${data.id}`),
 
   // ─── Character options — HTTP ──────────────────────────────────
   getCharacterOptions: (data) => apiGet(`/character-options?category=${data.category}`),
@@ -166,6 +180,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getBackgroundSettingHistory: (data) => apiGet(`/setting-diff/background/history/${data.historyId}`),
   rollbackBackgroundSettingHistory: (data) =>
     apiPost(`/setting-diff/background/history/${data.historyId}/rollback`, {}),
+  commitEntitySettingDiff: (data) => apiPost(`/setting-diff/entity/${data.entityId}/commit`, {
+    name: data.name,
+    tags: data.tags,
+    profileMd: data.profileMd,
+    before: data.before,
+    after: data.after,
+    source: data.source || 'ai_tool',
+    accepted_segments: data.acceptedSegments || 0,
+    rejected_segments: data.rejectedSegments || 0,
+  }),
+  listEntitySettingHistory: (data) =>
+    apiGet(`/setting-diff/entity/${data.entityId}/history?limit=${data.limit ?? 50}`),
+  getEntitySettingHistory: (data) => apiGet(`/setting-diff/entity/history/${data.historyId}`),
+  rollbackEntitySettingHistory: (data) =>
+    apiPost(`/setting-diff/entity/history/${data.historyId}/rollback`, {}),
 
   // ─── Sessions — HTTP ───────────────────────────────────────────
   createSession: (data) => apiPost('/sessions', data),
@@ -302,4 +331,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── Settings — HTTP ───────────────────────────────────────────
   getSettings: () => apiGet('/settings'),
   setSettings: (data) => apiPut('/settings', { data }),
+
+  // ─── Dashboard（故事健康度 / 写作统计）— HTTP ───────────────────
+  getStoryHealth: (data) => apiGet(`/dashboard/health?bookId=${data.bookId}`),
+  getWritingStats: (data) => apiGet(`/dashboard/writing-stats?bookId=${data.bookId}`),
+  setWritingGoal: (data) => apiPost('/dashboard/writing-goal', {
+    bookId: String(data.bookId),
+    dailyWords: data.dailyWords || 0,
+  }),
 })

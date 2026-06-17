@@ -232,11 +232,6 @@ async def _tool_edit_chapter_content(ctx: dict, args: dict, send_chunk: Callable
         old_plain = (await _read_chapter_plain_full(cid) or {}).get("plainTextFull") or ""
         old_trim = str(old_plain).strip()
         merged_content = new_content
-        is_collab = ctx.get("collabWriting") is True
-        if is_collab and new_content.strip():
-            new_trim = new_content.strip()
-            if old_trim and new_trim and not new_trim.startswith(old_trim):
-                merged_content = f"{old_trim}\n\n{new_trim}"
 
         # 与现有正文完全一致时无 diff 可提，告诉 LLM "无需变更" 即可
         if (merged_content or "").strip() == old_trim and old_trim != "":
@@ -253,7 +248,7 @@ async def _tool_edit_chapter_content(ctx: dict, args: dict, send_chunk: Callable
                     "chapterId": cid,
                     "beforeText": old_plain,
                     "proposedText": merged_content,
-                    "source": "ai_tool_edit_collab" if is_collab else "ai_tool_edit",
+                    "source": "ai_tool_edit",
                 },
             })
         return ToolResult(json.dumps({

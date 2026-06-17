@@ -17,11 +17,13 @@ export const handleProposedSettingDiff: ChunkHandler = (chunk, ctx) => {
   const sessionKey =
     p.kind === "character"
       ? `character:${p.characterId}`
-      : `background:${p.bookId}`;
+      : p.kind === "entity"
+        ? `entity:${p.entityId}`
+        : `background:${p.bookId}`;
 
   const proposedName =
-    p.kind === "character"
-      ? p.characterName ||
+    p.kind === "character" || p.kind === "entity"
+      ? (p.kind === "character" ? p.characterName : p.entityName) ||
         (p.proposed as { name?: string }).name ||
         (p.before as { name?: string }).name ||
         ""
@@ -31,7 +33,11 @@ export const handleProposedSettingDiff: ChunkHandler = (chunk, ctx) => {
       ? proposedName
         ? `人物「${proposedName}」`
         : "人物设定"
-      : "故事背景";
+      : p.kind === "entity"
+        ? proposedName
+          ? `设定「${proposedName}」`
+          : "世界设定"
+        : "故事背景";
 
   const card: SettingDiffCardState = {
     sessionKey,
