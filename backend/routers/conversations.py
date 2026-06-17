@@ -23,16 +23,27 @@ async def save_conversation(body: SaveConversationRequest):
         if body.thinkingBlocks is not None
         else None
     )
+    thinking_durations_ms_json = (
+        json.dumps(body.thinkingDurationsMs, ensure_ascii=False)
+        if body.thinkingDurationsMs is not None
+        else None
+    )
+    task_plan_json = (
+        json.dumps(body.taskPlan, ensure_ascii=False)
+        if body.taskPlan is not None
+        else None
+    )
     subagent_result_json = (
         json.dumps(body.subagentResult, ensure_ascii=False)
         if body.subagentResult is not None
         else None
     )
-    await db.execute(
+    conversation_id = await db.execute_and_get_id(
         """INSERT INTO ai_conversations
            (session_id, chapter_id, prompt, response, model, thinking,
-            tool_call_segments, thinking_blocks, subagent_result)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tool_call_segments, thinking_blocks, thinking_durations_ms, task_plan,
+            subagent_result)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             body.sessionId,
             body.chapterId,
@@ -42,10 +53,16 @@ async def save_conversation(body: SaveConversationRequest):
             body.thinking,
             tool_call_segments_json,
             thinking_blocks_json,
+            thinking_durations_ms_json,
+            task_plan_json,
             subagent_result_json,
         ],
     )
-    return {"success": True}
+    if body.agentRunId and conversation_id is not None:
+        from services.agent_run_store import set_run_conversation_id
+
+        await set_run_conversation_id(db, str(body.agentRunId), int(conversation_id))
+    return {"success": True, "data": {"id": conversation_id}}
 
 
 @router.get("/conversations/{sessionId}")

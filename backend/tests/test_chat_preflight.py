@@ -1,6 +1,4 @@
-"""
-表征测试：对话前置上下文（utils/chat_preflight）与协作模式简化后的行为。
-"""
+"""表征测试：对话前置上下文（utils/chat_preflight）的行为。"""
 
 from __future__ import annotations
 
@@ -17,11 +15,6 @@ from utils.chat_preflight import (
     build_associated_context_block,
     build_selected_memory_block,
     build_session_binding_prompt,
-)
-from utils.collab_prompt import (
-    COLLAB_WRITE_TOOL_NAMES,
-    build_collab_turn_appendix,
-    filter_collab_tools,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -153,37 +146,3 @@ async def test_binding_prompt_variants():
     assert "《第三章》" in agent and "勿猜测数据库 id" in agent
     assert "《第三章》" in ask and "无法调用工具" in ask
 
-
-# ── 协作模式：turn appendix 简化 + 写意图过滤拓宽 ─────────────────
-
-
-async def test_collab_appendix_first_turn_vs_later():
-    first = build_collab_turn_appendix([{"role": "user", "content": "想写个故事"}])
-    assert "对话尚浅" in first
-    later = build_collab_turn_appendix([
-        {"role": "user", "content": "想写个故事"},
-        {"role": "assistant", "content": "提案……"},
-        {"role": "user", "content": "不同意，换个方向"},
-    ])
-    # 旧版关键词正则会让「不同意」命中「同意」分支；现在意图判断交给模型
-    assert "用户已倾向确认" not in later
-    assert "延续协商" in later
-
-
-def _tools_with_write():
-    return [
-        {"function": {"name": "editChapterContent"}},
-        {"function": {"name": "listWritingChapters"}},
-    ]
-
-
-async def test_filter_collab_tools_keeps_write_on_broad_intent():
-    # 拓宽后的意图词：改成 / 修改 / 更新 等也算写意图
-    kept = filter_collab_tools(_tools_with_write(), "把第三章结尾改成开放式")
-    assert any(t["function"]["name"] in COLLAB_WRITE_TOOL_NAMES for t in kept)
-
-
-async def test_filter_collab_tools_strips_write_on_pure_discussion():
-    kept = filter_collab_tools(_tools_with_write(), "你觉得主角的动机够吗")
-    assert all(t["function"]["name"] not in COLLAB_WRITE_TOOL_NAMES for t in kept)
-    assert any(t["function"]["name"] == "listWritingChapters" for t in kept)

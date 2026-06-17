@@ -15,7 +15,6 @@ from utils.chat_stream import (
     inject_system_prompt,
     last_user_message_text,
     merge_stream_tool_calls,
-    resolve_chat_modes,
     valid_named_tool_calls,
 )
 
@@ -50,39 +49,6 @@ class TestBuildChatRequestParams:
         assert "tools" not in build_chat_request_params("m", {}, "u", tools=None)
         tools = [{"type": "function"}]
         assert build_chat_request_params("m", {}, "u", tools=tools)["tools"] == tools
-
-
-class TestResolveChatModes:
-    def test_plain_chat(self):
-        modes = resolve_chat_modes("", "", "", None, None)
-        assert modes.is_writing_expert_book is False
-        assert modes.is_collab is False
-        assert modes.should_inject_writing_prompt is False
-
-    def test_expert_book_triggers_writing_expert_and_prompt(self):
-        modes = resolve_chat_modes(None, "Expert", None, "book1", None)
-        assert modes.is_writing_expert_book is True
-        assert modes.should_inject_writing_prompt is True
-
-    def test_subagent_role_suppresses_writing_prompt(self):
-        # 单次子专家调用（带 subagentRole）不应再注入主写作 system prompt
-        modes = resolve_chat_modes("subagent", "", None, "book1", "polish")
-        assert modes.is_writing_expert_book is True
-        assert modes.should_inject_writing_prompt is False
-
-    def test_expert_without_book_is_not_writing_expert(self):
-        modes = resolve_chat_modes("", "expert", None, None, None)
-        assert modes.is_writing_expert_book is False
-        assert modes.should_inject_writing_prompt is False
-
-    def test_collab_via_either_field(self):
-        assert resolve_chat_modes("", "collab", "", None, None).is_collab is True
-        assert resolve_chat_modes("", "", "collab", None, None).is_collab is True
-
-    def test_fields_are_normalized(self):
-        modes = resolve_chat_modes("  SubAgent ", "  EXPERT ", None, "b", None)
-        assert modes.agent_mode == "subagent"
-        assert modes.chat_agent_mode == "expert"
 
 
 class TestValidNamedToolCalls:

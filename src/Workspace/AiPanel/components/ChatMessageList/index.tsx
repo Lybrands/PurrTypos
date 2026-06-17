@@ -9,6 +9,24 @@ import { type AiContextBarBindings } from "../AiContextBar";
 import { type ModelSelectionBindings } from "../AiComposeBottom";
 import ChatMessageBubble from "./ChatMessageBubble";
 
+const VirtuosoList = React.forwardRef<HTMLDivElement, ListProps>(
+  ({ style, children, ...rest }, ref) => (
+    <div
+      ref={ref}
+      style={style}
+      className="chat-virtuoso-list"
+      {...rest}
+    >
+      {children}
+    </div>
+  ),
+);
+VirtuosoList.displayName = "AiChatVirtuosoList";
+
+const VIRTUOSO_COMPONENTS = {
+  List: VirtuosoList,
+};
+
 export interface ChatMessageListProps {
   virtuosoRef: React.RefObject<VirtuosoHandle | null>;
   combinedData: ChatMessage[];
@@ -88,31 +106,23 @@ export default function ChatMessageList({
           /* 向上滚动加载历史：可在此接入分页 API */
         }}
         computeItemKey={(index) => firstItemIndex + index}
-        components={{
-          List: React.forwardRef<HTMLDivElement, ListProps>(
-            ({ style, children, ...rest }, ref) => (
-              <div
-                ref={ref}
-                style={style}
-                className="chat-virtuoso-list"
-                {...rest}
-              >
-                {children}
-              </div>
-            ),
-          ),
-        }}
+        components={VIRTUOSO_COMPONENTS}
         style={{ flex: 1, minHeight: 0 }}
         itemContent={(index, msg) => {
           const dataIndex = index - firstItemIndex;
           const convIndex = dataIndex - prependedHistoryLength;
+          const isLast = dataIndex === combinedData.length - 1;
+          const prevMsg =
+            dataIndex > 0 ? combinedData[dataIndex - 1] : undefined;
+          const prevUserContent =
+            prevMsg?.role === "user" ? (prevMsg.content ?? "") : "";
           return (
             <ChatMessageBubble
               index={index}
-              dataIndex={dataIndex}
               convIndex={convIndex}
               message={msg}
-              combinedData={combinedData}
+              isLast={isLast}
+              prevUserContent={prevUserContent}
               loading={loading}
               bookId={bookId}
               chapterId={chapterId}

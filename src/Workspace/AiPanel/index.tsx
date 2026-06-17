@@ -13,7 +13,6 @@ import {
 } from "antd";
 import type { MenuProps } from "antd";
 import type {
-  AiAgentMode,
   AiModelConfig,
   Conversation,
 } from "../../types";
@@ -37,13 +36,10 @@ import AiContextBar, { type AiContextBarBindings } from "./components/AiContextB
 import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
-import SubagentPicker from "./components/SubagentPicker";
-import type { WritingSubagentRole } from "./pipelineStages";
 import "./index.scss";
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
-  aiAgentMode?: AiAgentMode;
   /** 是否为当前主区域（占 56%）。 */
   isMain: boolean;
   /** 点击扩展按钮时回调：非主时切换为主，主时回到默认（导演模式 = AI 主）。 */
@@ -57,7 +53,6 @@ interface AiPanelProps {
 
 export default function AiPanel({
   modelConfigs = [],
-  aiAgentMode = "legacy",
   isMain,
   onSetMain,
   compact = false,
@@ -105,7 +100,7 @@ export default function AiPanel({
     setThinkingEnabled,
     selectedModelConfig,
     modelConfigsRecord,
-  } = useAiModelPrefs(bookId, modelConfigs, aiAgentMode);
+  } = useAiModelPrefs(bookId, modelConfigs);
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
   const {
@@ -115,8 +110,6 @@ export default function AiPanel({
     setSelectedForeshadowingIds,
   } = useMemorySelection(bookId);
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false);
-  const [pendingSubagentRole, setPendingSubagentRole] =
-    React.useState<WritingSubagentRole | null>(null);
 
   const {
     sessions,
@@ -288,12 +281,7 @@ export default function AiPanel({
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
-    writingMode: chatAgentMode === "collab" ? "collab" : "default",
     sessionScope: chatScope,
-    pendingSubagentRole:
-      chatAgentMode === "expert" ? pendingSubagentRole : null,
-    onPendingSubagentRoleConsumed: () => setPendingSubagentRole(null),
   });
 
   const {
@@ -349,6 +337,7 @@ export default function AiPanel({
               role: "assistant" as const,
               content: acc.response || "",
               thinking: acc.thinking || undefined,
+              thinkingStartedAt: acc.thinkingBlockStartedAt,
               toolCallSegments: acc.toolCallSegments,
               contentAfterToolCalls: acc.toolCallSegments?.length
                 ? (acc.contentAfterToolCalls ?? "")
@@ -552,13 +541,6 @@ export default function AiPanel({
           onAbort={handleAbort}
           rightContent={
             <div className="chat-compose-right">
-              {chatAgentMode === "expert" && bookId != null ? (
-                <SubagentPicker
-                  value={pendingSubagentRole}
-                  onChange={setPendingSubagentRole}
-                  disabled={loading}
-                />
-              ) : null}
               {loading ? (
                 <Button
                   className="btn-submit btn-stop btn-submit--icon"

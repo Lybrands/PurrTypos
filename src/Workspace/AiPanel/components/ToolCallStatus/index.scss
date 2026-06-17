@@ -1,6 +1,35 @@
-/* ─── 工具调用状态（气泡内每条调用） ───────────────────────────────────── */
+/* 工具调用：逐行列表，无卡片边框，与思考区区分 */
 .bubble-tool-calls {
   margin: 6px 0;
+}
+
+.bubble-tool-call-summary.ant-btn {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+
+  &:hover,
+  &:focus {
+    color: var(--text-muted);
+    background: transparent;
+  }
+
+  .ant-btn-icon {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  span:not(.ant-btn-icon) {
+    color: currentColor;
+  }
+}
+
+.bubble-tool-call-details {
+  margin-top: 3px;
+  padding-left: 18px;
 }
 
 .bubble-tool-call-line {
@@ -18,37 +47,19 @@
 
   .bubble-tool-call-icon {
     font-size: 14px;
+    flex-shrink: 0;
   }
 
   .bubble-tool-call-icon--pending {
     opacity: 0.55;
   }
 
+  &--running span {
+    opacity: 0.92;
+  }
+
   &--error .bubble-tool-call-icon,
   &--error span {
     color: var(--text-muted);
   }
-}
-
-.bubble-tool-trace {
-  margin-top: 4px;
-  color: var(--text-muted);
-
-  .ant-collapse-header {
-    color: var(--text-muted) !important;
-    padding: 0 !important;
-    font-size: var(--font-size-sm);
-  }
-
-  .ant-collapse-content-box {
-    padding: 4px 0 0 0 !important;
-  }
-}
-
-.bubble-tool-trace-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
 }

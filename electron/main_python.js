@@ -381,6 +381,51 @@ ipcMain.handle('write-export-files', async (_, { entries, exportAsZip }) => {
   }
 })
 
+// 整本导出为单个 TXT 文件（保存对话框 + 写盘）
+ipcMain.handle('write-single-text-file', async (_, { defaultName, content }) => {
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '保存导出文件',
+      defaultPath: defaultName || '导出.txt',
+      filters: [{ name: '文本文件', extensions: ['txt'] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, error: 'canceled' }
+    fs.writeFileSync(result.filePath, content || '', 'utf8')
+    return { success: true, data: { path: result.filePath } }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
+// EPUB 导出：后端生成字节流，这里负责保存对话框与写盘
+ipcMain.handle('export-epub', async (_, { bookId, chapterIds, defaultName }) => {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/export/epub`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookId: String(bookId), chapterIds: chapterIds || null }),
+    })
+    const contentType = res.headers.get('content-type') || ''
+    if (!res.ok) return { success: false, error: 'EPUB 生成失败' }
+    if (contentType.includes('application/json')) {
+      // 后端以 JSON 返回了业务错误
+      const body = await res.json()
+      return { success: false, error: body.error || 'EPUB 生成失败' }
+    }
+    const buffer = Buffer.from(await res.arrayBuffer())
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出 EPUB',
+      defaultPath: `${defaultName || '书籍'}.epub`,
+      filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, error: 'canceled' }
+    fs.writeFileSync(result.filePath, buffer)
+    return { success: true, data: { path: result.filePath } }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
 ipcMain.handle('export-database', async () => {
   try {
     const res = await fetch(`${BACKEND_URL}/api/database/export`, { method: 'POST' })

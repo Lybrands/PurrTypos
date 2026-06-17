@@ -1,7 +1,7 @@
 import React from 'react'
 import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined } from '@ant-design/icons'
 import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tooltip } from 'antd'
-import type { AiAgentMode, AiModelConfig } from '../types'
+import type { AiModelConfig } from '../types'
 import { useAntdApp } from '../hooks/useAntdApp'
 import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
@@ -22,8 +22,6 @@ interface SettingsPageProps {
   onClose: () => void
   syncOutlineChapter: boolean
   onSyncOutlineChapterChange: (value: boolean) => void
-  aiAgentMode: AiAgentMode
-  onAiAgentModeChange: (mode: AiAgentMode) => void
 }
 
 export default function SettingsPage({
@@ -32,8 +30,6 @@ export default function SettingsPage({
   onClose,
   syncOutlineChapter,
   onSyncOutlineChapterChange,
-  aiAgentMode,
-  onAiAgentModeChange,
 }: SettingsPageProps) {
   const { message } = useAntdApp()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
@@ -247,19 +243,6 @@ export default function SettingsPage({
               >
                 点击章节大纲或章节列表时，同步切换另一侧选中项
               </Checkbox>
-              <div className="settings-field" style={{ marginTop: 20 }}>
-                <div className="settings-field-label">打开作品时 AI 对话默认档位</div>
-                <p className="settings-field-desc" style={{ marginBottom: 8 }}>
-                  控制进入工作区后对话模式首选项；仍可在面板中临时切换。
-                </p>
-                <Radio.Group
-                  value={aiAgentMode}
-                  onChange={(e) => onAiAgentModeChange(e.target.value as AiAgentMode)}
-                >
-                  <Radio value="legacy">经典智能体（ReAct 工具流）</Radio>
-                  <Radio value="subagent">写作专家</Radio>
-                </Radio.Group>
-              </div>
             </div>
           )}
           {activeTab === 'ai' && (

@@ -10,8 +10,7 @@ Tool executor —— Agent 工具调用的 dispatch 层。
   把自己注册进 ``TOOL_HANDLERS``
 
 为保持对外 import 路径不变，本模块从 ``tool_runtime`` re-export 了
-``ToolResult`` / ``tool`` / ``TOOL_HANDLERS`` / ``CACHE_PREDICTORS`` 等公共符号
-（``ai.py`` / ``writing_subagents.py`` / 测试仍 ``from services.tool_executor import ...``）。
+``ToolResult`` / ``tool`` / ``TOOL_HANDLERS`` / ``CACHE_PREDICTORS`` 等公共符号。
 
 依赖方向：``tool_runtime`` ← ``tool_handlers.*`` ← ``tool_executor``，无环。
 
@@ -107,6 +106,7 @@ def _predict_batch_get_chapter_contents(ctx: dict, args: dict) -> bool:
 
 from services.tool_handlers import chapter_tools as _chapter_tools  # noqa: E402,F401
 from services.tool_handlers import context_tools as _context_tools  # noqa: E402,F401
+from services.tool_handlers import dashboard_tools as _dashboard_tools  # noqa: E402,F401
 from services.tool_handlers import memory_tools as _memory_tools  # noqa: E402,F401
 from services.tool_handlers import outline_tools as _outline_tools  # noqa: E402,F401
 

@@ -10,8 +10,8 @@ import type { Chapter, EntityId, Outline } from '../../types'
 import { useWorkspace } from '../WorkspaceContext'
 import { HighlightText } from '../search/highlightText'
 import ConfirmModal from '../../components/ConfirmModal'
-import ExportModal from '../../components/ExportModal'
-import { buildExportEntries } from '../../utils/exportBooks'
+import ExportModal, { type ExportFormat } from '../../components/ExportModal'
+import { buildExportEntries, buildSingleTxtContent } from '../../utils/exportBooks'
 import type { ExportChapter } from '../../utils/exportBooks'
 import ChapterOutlineModal, { type ChapterOutlineModalTarget } from './ChapterOutlineModal'
 
@@ -286,13 +286,33 @@ export default function ChapterSection({
   )
 
   const handleExportConfirm = React.useCallback(
-    async (selectedIds: EntityId[], format: 'md' | 'txt', exportAsZip: boolean) => {
+    async (selectedIds: EntityId[], format: ExportFormat, exportAsZip: boolean) => {
       if (selectedIds.length === 0) {
         appMessage.warning('请至少选择一章')
         return
       }
       setExportLoading(true)
       try {
+        // EPUB：后端按章节 ID 重新组装，无需前端拉正文
+        if (format === 'epub') {
+          if (bookId == null) {
+            appMessage.error('未找到当前书籍')
+            return
+          }
+          const res = await window.electronAPI.exportEpub({
+            bookId,
+            chapterIds: selectedIds,
+            defaultName: bookTitle,
+          })
+          if (res.success) {
+            appMessage.success('EPUB 导出成功')
+            setExportModalOpen(false)
+          } else if (res.error !== 'canceled') {
+            appMessage.error(res.error || '导出失败')
+          }
+          return
+        }
+
         const chaptersWithContent: ExportChapter[] = await Promise.all(
           selectedIds.map(async (chId) => {
             const ch = idToChapter.get(chId)
@@ -304,6 +324,21 @@ export default function ChapterSection({
           })
         )
         const bookData = { title: bookTitle, chapters: chaptersWithContent }
+
+        if (format === 'txt-single') {
+          const res = await window.electronAPI.writeSingleTextFile({
+            defaultName: `${bookTitle || '导出'}.txt`,
+            content: buildSingleTxtContent(bookData),
+          })
+          if (res.success) {
+            appMessage.success('导出成功')
+            setExportModalOpen(false)
+          } else if (res.error !== 'canceled') {
+            appMessage.error(res.error || '导出失败')
+          }
+          return
+        }
+
         const entries = buildExportEntries([bookData], format)
         const res = await window.electronAPI.writeExportFiles({ entries, exportAsZip })
         if (res.success) {
@@ -316,7 +351,7 @@ export default function ChapterSection({
         setExportLoading(false)
       }
     },
-    [bookTitle, enableVolume, idToChapter, appMessage]
+    [bookId, bookTitle, enableVolume, idToChapter, appMessage]
   )
 
   const renderRenameInput = (ch: Chapter) => (

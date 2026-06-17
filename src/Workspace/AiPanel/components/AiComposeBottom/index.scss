@@ -46,7 +46,7 @@
   }
 
   /* Ask 模式：绿色边框 + 绿色柔光 + 绿色文字 */
-  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent):not(.ai-agent-select--collab) .ant-select-selector {
+  &:not(.ai-agent-select--on) .ant-select-selector {
     border-color: var(--success) !important;
     color: var(--success);
     box-shadow:
@@ -54,7 +54,7 @@
       0 0 12px var(--success);
   }
 
-  &:not(.ai-agent-select--on):not(.ai-agent-select--subagent):not(.ai-agent-select--collab) .ant-select-selector:hover {
+  &:not(.ai-agent-select--on) .ant-select-selector:hover {
     border-color: var(--success) !important;
     box-shadow:
       0 0 6px var(--success),
@@ -62,7 +62,7 @@
   }
 
   /* Agent 模式：蓝色边框 + 蓝色柔光 + 蓝色文字 */
-  &.ai-agent-select--on:not(.ai-agent-select--subagent) .ant-select-selector {
+  &.ai-agent-select--on .ant-select-selector {
     border-color: var(--accent) !important;
     background: var(--accent-dim) !important;
     color: var(--accent);
@@ -71,7 +71,7 @@
       0 0 12px var(--accent);
   }
 
-  &.ai-agent-select--on:not(.ai-agent-select--subagent) .ant-select-selector:hover {
+  &.ai-agent-select--on .ant-select-selector:hover {
     border-color: var(--accent-hover) !important;
     color: var(--accent-hover);
     box-shadow:
@@ -79,39 +79,6 @@
       0 0 16px var(--accent-hover);
   }
 
-  /* 写作专家模式（第三档，不改变原 Ask/Agent 两套样式规则） */
-  &.ai-agent-select--subagent .ant-select-selector {
-    border-color: var(--warning) !important;
-    background: color-mix(in srgb, var(--warning) 18%, var(--bg-surface)) !important;
-    color: var(--warning);
-    box-shadow:
-      0 0 4px var(--warning),
-      0 0 12px var(--warning);
-  }
-
-  &.ai-agent-select--subagent .ant-select-selector:hover {
-    border-color: var(--warning) !important;
-    box-shadow:
-      0 0 6px var(--warning),
-      0 0 16px var(--warning);
-  }
-
-  &.ai-agent-select--collab .ant-select-selector {
-    border-color: var(--collab) !important;
-    background: color-mix(in srgb, var(--collab) 18%, var(--bg-surface)) !important;
-    color: var(--collab);
-    box-shadow:
-      0 0 4px var(--collab),
-      0 0 12px var(--collab);
-  }
-
-  &.ai-agent-select--collab .ant-select-selector:hover {
-    border-color: var(--collab-hover) !important;
-    color: var(--collab-hover);
-    box-shadow:
-      0 0 6px var(--collab-hover),
-      0 0 16px var(--collab-hover);
-  }
 }
 
 .ai-model-select.ant-select {

@@ -14,7 +14,7 @@ async def save_article(
     db: DatabaseConnection, chapter_id: str, content: str
 ) -> None:
     existing = await db.fetch_one(
-        "SELECT id FROM articles WHERE chapter_id = ?", [chapter_id]
+        "SELECT id, content FROM articles WHERE chapter_id = ?", [chapter_id]
     )
     if existing:
         await db.execute(
@@ -27,6 +27,12 @@ async def save_article(
             "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
             [chapter_id, content],
         )
+
+    # 旁路：把字数变化累加到当日写作统计快照（失败不影响保存）
+    from database.crud.word_stats import record_article_word_delta
+    await record_article_word_delta(
+        db, chapter_id, (existing or {}).get("content"), content
+    )
 
 
 async def get_article(

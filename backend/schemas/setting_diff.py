@@ -31,3 +31,16 @@ class CommitBackgroundDiffRequest(BaseModel):
     source: str = "ai_tool"
     accepted_segments: int = 0
     rejected_segments: int = 0
+
+
+class CommitEntityDiffRequest(BaseModel):
+    """提交设定实体 diff：写 setting_entities 表并记录历史。"""
+
+    name: str = ""
+    tags: str = ""
+    profileMd: str = ""
+    before: CharacterSnapshot = CharacterSnapshot()
+    after: CharacterSnapshot = CharacterSnapshot()
+    source: str = "ai_tool"
+    accepted_segments: int = 0
+    rejected_segments: int = 0

@@ -57,10 +57,42 @@ def _rck_get_story_background(ctx: dict, args: dict) -> str | None:
     return f"getStoryBackground:{bid}"
 
 
+@read_cache_key("listSettingEntities")
+def _rck_list_setting_entities(ctx: dict, args: dict) -> str | None:
+    bid = resolve_book_id_for_tools(ctx, args)
+    return f"listSettingEntities:{bid}" if bid else None
+
+
+@read_cache_key("getSettingEntities")
+def _rck_get_setting_entities(ctx: dict, args: dict) -> str | None:
+    ent_ids = args.get("entityIds")
+    name_queries = args.get("names")
+    type_filter = str(args.get("entityType") or "").strip()
+    filtered = (isinstance(ent_ids, list) and len(ent_ids) > 0) or (
+        isinstance(name_queries, list) and len(name_queries) > 0
+    ) or bool(type_filter)
+    if filtered:
+        return None
+    bid = resolve_book_id_for_tools(ctx, args)
+    return f"getSettingEntities:all:{bid}"
+
+
 @read_cache_key("getBookStyle")
 def _rck_get_book_style(ctx: dict, args: dict) -> str | None:
     bid = resolve_book_id_for_tools(ctx, args)
     return f"getBookStyle:{bid}"
+
+
+@read_cache_key("getStoryHealthDashboard")
+def _rck_get_story_health_dashboard(ctx: dict, args: dict) -> str | None:
+    bid = resolve_book_id_for_tools(ctx, args)
+    return f"getStoryHealthDashboard:{bid}" if bid else None
+
+
+@read_cache_key("getWritingStatsDashboard")
+def _rck_get_writing_stats_dashboard(ctx: dict, args: dict) -> str | None:
+    bid = resolve_book_id_for_tools(ctx, args)
+    return f"getWritingStatsDashboard:{bid}" if bid else None
 
 
 @read_cache_key("queryOutline")

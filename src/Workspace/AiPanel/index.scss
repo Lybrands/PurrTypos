@@ -362,20 +362,6 @@
   white-space: pre-wrap;
   word-break: break-word;
 
-  .bubble-content--thinking {
-    display: flex;
-    align-items: center;
-    color: var(--text-muted);
-  }
-
-  .bubble-thinking-spin {
-    margin-right: var(--spacing-xs);
-  }
-
-  .bubble-content--thinking-with-content {
-    margin-top: var(--spacing-sm);
-  }
-
   // AI markdown 区域覆盖 pre-wrap
   > p,
   > ul,
@@ -571,7 +557,7 @@
 .chat-bubble.assistant .bubble-assistant-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   margin-right: 12px;
   padding: var(--spacing-sm);
   background: var(--bg-active);

@@ -17,7 +17,7 @@ import {
 
 const DIFF_ASYNC_THRESHOLD = 8000
 
-export type SettingKind = 'character' | 'background'
+export type SettingKind = 'character' | 'background' | 'entity'
 
 export interface MetaDiffOp {
   index: number
@@ -33,6 +33,9 @@ export interface SettingDiffSession {
   bookId: EntityId
   characterId?: number
   characterName?: string
+  /** 世界设定实体（kind='entity'）专用 */
+  entityId?: number
+  entityName?: string
   before: CharacterSettingSnapshot | { content: string }
   proposed: CharacterSettingSnapshot | { content: string }
   profileOps: DiffOp[]
@@ -43,7 +46,7 @@ export interface SettingDiffSession {
 }
 
 export function settingSessionKey(kind: SettingKind, id: number | EntityId): string {
-  return kind === 'character' ? `character:${id}` : `background:${id}`
+  return `${kind}:${id}`
 }
 
 function buildMetaOps(
@@ -98,7 +101,10 @@ interface SettingDiffContextValue {
   rejectAllPending: (sessionKey: string) => void
   exitDiff: (sessionKey: string) => void
   commit: (sessionKey: string) => Promise<void>
-  openPanelForSession: (sessionKey: string) => void
+  openPanelForSession: (
+    sessionKey: string,
+    sessionHint?: Pick<SettingDiffSession, 'kind' | 'characterId' | 'entityId'>,
+  ) => void
 }
 
 const SettingDiffContext = React.createContext<SettingDiffContextValue | null>(null)
@@ -120,16 +126,25 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
   const getSession = React.useCallback((sessionKey: string) => sessions[sessionKey], [sessions])
   const getResolvedCard = React.useCallback((sessionKey: string) => resolvedCards[sessionKey], [resolvedCards])
 
-  const openPanelForSession = React.useCallback((sessionKey: string) => {
-    const session = sessionsRef.current[sessionKey]
+  const openPanelForSession = React.useCallback((
+    sessionKey: string,
+    /** startDiff 中 setSessions 还没刷新 ref，可直接传入会话定位信息 */
+    sessionHint?: Pick<SettingDiffSession, 'kind' | 'characterId' | 'entityId'>,
+  ) => {
+    const session = sessionHint ?? sessionsRef.current[sessionKey]
     if (!session) return
     window.dispatchEvent(new CustomEvent('workspace-open-panel', {
       detail: { panel: 'setting', open: true },
     }))
     window.dispatchEvent(new CustomEvent('open-setting-panel', {
       detail: {
-        tab: session.kind === 'character' ? 'characters' : 'background',
+        tab: session.kind === 'character'
+          ? 'characters'
+          : session.kind === 'entity'
+            ? 'entities'
+            : 'background',
         characterId: session.characterId ?? null,
+        entityId: session.entityId ?? null,
       },
     }))
   }, [])
@@ -138,7 +153,9 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     const kind = proposal.kind
     const sessionKey = kind === 'character'
       ? settingSessionKey('character', proposal.characterId!)
-      : settingSessionKey('background', proposal.bookId)
+      : kind === 'entity'
+        ? settingSessionKey('entity', proposal.entityId!)
+        : settingSessionKey('background', proposal.bookId)
 
     if (sessionsRef.current[sessionKey]) {
       appMessage.warning('该设定已有未完成的差异，请先在设定面板接受/拒绝后再继续')
@@ -148,51 +165,43 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     const startedAt = Date.now()
     const source = proposal.source || 'ai_tool_edit'
 
-    if (kind === 'character') {
+    // 人物与世界设定实体共用 name/tags/profileMd 快照结构
+    if (kind === 'character' || kind === 'entity') {
       const before = proposal.before as CharacterSettingSnapshot
       const proposed = proposal.proposed as CharacterSettingSnapshot
       const metaOps = buildMetaOps(before, proposed)
       const totalLen = (before.profileMd?.length ?? 0) + (proposed.profileMd?.length ?? 0)
+      const displayName = (kind === 'character' ? proposal.characterName : proposal.entityName)
+        || proposed.name || before.name
 
-      const finish = (profileOps: DiffOp[]) => {
-        setSessions((prev) => ({
-          ...prev,
-          [sessionKey]: {
-            sessionKey,
-            kind,
-            bookId: proposal.bookId,
-            characterId: proposal.characterId,
-            characterName: proposal.characterName || proposed.name || before.name,
-            before,
-            proposed,
-            profileOps,
-            metaOps,
-            source,
-            startedAt,
-          },
-        }))
-        openPanelForSession(sessionKey)
+      const baseSession = {
+        sessionKey,
+        kind,
+        bookId: proposal.bookId,
+        characterId: kind === 'character' ? proposal.characterId : undefined,
+        characterName: kind === 'character' ? displayName : undefined,
+        entityId: kind === 'entity' ? proposal.entityId : undefined,
+        entityName: kind === 'entity' ? displayName : undefined,
+        before,
+        proposed,
+        metaOps,
+        source,
+        startedAt,
       }
 
       if (totalLen < DIFF_ASYNC_THRESHOLD) {
-        finish(diffParagraphs(before.profileMd || '', proposed.profileMd || ''))
-      } else {
         setSessions((prev) => ({
           ...prev,
           [sessionKey]: {
-            sessionKey,
-            kind,
-            bookId: proposal.bookId,
-            characterId: proposal.characterId,
-            characterName: proposal.characterName || proposed.name || before.name,
-            before,
-            proposed,
-            profileOps: [],
-            metaOps,
-            computing: true,
-            source,
-            startedAt,
+            ...baseSession,
+            profileOps: diffParagraphs(before.profileMd || '', proposed.profileMd || ''),
           },
+        }))
+        openPanelForSession(sessionKey, baseSession)
+      } else {
+        setSessions((prev) => ({
+          ...prev,
+          [sessionKey]: { ...baseSession, profileOps: [], computing: true },
         }))
         diffParagraphsAsync(before.profileMd || '', proposed.profileMd || '').then((ops) => {
           setSessions((prev) => {
@@ -225,7 +234,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
           startedAt,
         },
       }))
-      openPanelForSession(sessionKey)
+      openPanelForSession(sessionKey, { kind: 'background' })
     }
 
     if (totalLen < DIFF_ASYNC_THRESHOLD) {
@@ -331,7 +340,9 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
   ) => {
     const title = session.kind === 'character'
       ? `人物「${session.characterName || (session.before as CharacterSettingSnapshot).name}」`
-      : '故事背景'
+      : session.kind === 'entity'
+        ? `设定「${session.entityName || (session.before as CharacterSettingSnapshot).name}」`
+        : '故事背景'
     const card: SettingDiffCardState = {
       sessionKey: session.sessionKey,
       kind: session.kind,
@@ -388,6 +399,25 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       if (!res?.success) throw new Error('提交设定 diff 失败')
       window.dispatchEvent(new CustomEvent('setting-updated', {
         detail: { kind: 'character', action: 'update', id: cur.characterId, name: finalSnap.name },
+      }))
+    } else if (cur.kind === 'entity') {
+      const finalSnap = composeCharacterFields(cur)
+      const before = cur.before as CharacterSettingSnapshot
+      const proposed = cur.proposed as CharacterSettingSnapshot
+      const res = await window.electronAPI.commitEntitySettingDiff({
+        entityId: cur.entityId!,
+        name: finalSnap.name,
+        tags: finalSnap.tags,
+        profileMd: finalSnap.profileMd,
+        before,
+        after: proposed,
+        source: cur.source,
+        acceptedSegments: accepted,
+        rejectedSegments: rejected,
+      })
+      if (!res?.success) throw new Error('提交设定 diff 失败')
+      window.dispatchEvent(new CustomEvent('setting-updated', {
+        detail: { kind: 'entity', action: 'update', id: cur.entityId, name: finalSnap.name },
       }))
     } else {
       const beforeContent = (cur.before as { content: string }).content || ''

@@ -138,7 +138,6 @@ export default function GhostCompletion({
       currentChapterTitle: chapterTitle || undefined,
       writingChapters: [],
       availableOutlines: [],
-      agentMode: 'legacy',
       chatAgentMode: 'ask',
     })
 
