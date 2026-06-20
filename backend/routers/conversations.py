@@ -62,6 +62,20 @@ async def save_conversation(body: SaveConversationRequest):
         from services.agent_run_store import set_run_conversation_id
 
         await set_run_conversation_id(db, str(body.agentRunId), int(conversation_id))
+    try:
+        from services import memory_deposition_service
+        book_id = body.bookId or await memory_deposition_service.resolve_book_id_for_session(
+            db,
+            int(body.sessionId) if body.sessionId is not None else None,
+        )
+        await memory_deposition_service.deposit_explicit_memory_from_conversation(
+            book_id=book_id,
+            conversation_id=int(conversation_id) if conversation_id is not None else None,
+            prompt=body.prompt,
+        )
+    except Exception:
+        # 对话保存是主路径；记忆沉淀失败不应影响历史记录。
+        pass
     return {"success": True, "data": {"id": conversation_id}}
 
 

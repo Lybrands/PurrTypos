@@ -130,43 +130,34 @@ async def build_associated_context_block(tool_ctx: dict) -> str:
 async def build_selected_memory_block(
     memory_ids: list[Any] | None,
     foreshadowing_ids: list[Any] | None,
+    book_id: Any | None = None,
+    user_prompt: str = "",
+    mode: str = "",
 ) -> str:
     """用户在 AiContextBar 勾选的设定/伏笔条目，前置 fetch 后注入。
 
     失败时返回空串 —— 拉记忆失败不应阻断对话发送（与旧前端实现语义一致）。
     """
-    blocks: list[str] = []
     try:
-        from services import memory_service
+        from services import memory_orchestrator
 
         mids = [str(x) for x in (memory_ids or []) if str(x).strip()]
-        if mids:
-            rows = await memory_service.get_spark_ideas_by_ids(mids)
-            if rows:
-                items = "\n".join(
-                    f"- [{r.get('layer') or '?'}] {str(r.get('content') or '').strip()}"
-                    for r in rows
-                )
-                blocks.append(
-                    f"【用户在本轮已勾选的本书设定 — 必须严格遵循，不得与之矛盾】\n{items}"
-                )
-
         fids = [str(x) for x in (foreshadowing_ids or []) if str(x).strip()]
-        if fids:
-            rows = await memory_service.get_foreshadowing_by_ids(fids)
-            if rows:
-                items = "\n".join(
-                    f"- [{r.get('type') or '?'}|{r.get('status') or '?'}] "
-                    f"{str(r.get('content') or '').strip()}"
-                    for r in rows
-                )
-                blocks.append(
-                    f"【用户在本轮已勾选的伏笔 — 优先呼应或铺垫，不得与之矛盾】\n{items}"
-                )
+        if not book_id:
+            return ""
+        block = await memory_orchestrator.build_memory_context(
+            {
+                "bookId": book_id,
+                "selectedMemoryIds": mids,
+                "selectedForeshadowingIds": fids,
+            },
+            user_prompt,
+            mode,
+        )
+        return block.text
     except Exception:
         logger.warning("[chat-preflight] 读取勾选记忆失败", exc_info=True)
         return ""
-    return "\n\n".join(blocks)
 
 
 def build_session_binding_prompt(tool_ctx: dict, tools_enabled: bool) -> str:

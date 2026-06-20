@@ -36,6 +36,11 @@ async def create_setting_entity(bookId: str, body: CreateSettingEntityRequest):
     })
     if not row:
         return {"success": False, "error": "创建失败"}
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_entity_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 
@@ -74,6 +79,11 @@ async def update_setting_entity(id: str, body: UpdateSettingEntityRequest):
         after_profile_md=row.get("profile_md") or "",
         source="user",
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_entity_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 

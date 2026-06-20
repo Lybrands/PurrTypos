@@ -199,8 +199,10 @@ export default function InlineEditPopover({
         .filter(Boolean)
         .join('\n')
 
-      // 关联与注入：客户端拼装到 user prompt（chatAgentMode='ask' 不会在后端注入）
+      // 关联章节/大纲仍在客户端拼装；记忆/伏笔改走后端统一长期记忆编排。
       const injectedContext = await buildInjectedContext({
+        bookId,
+        userPrompt: instr,
         associatedChapterIds,
         associatedOutlineIds,
         availableOutlines,
@@ -281,6 +283,9 @@ export default function InlineEditPopover({
   const handleAccept = () => {
     const clean = result.trim()
     if (!clean) return
+    window.dispatchEvent(new CustomEvent('inline-edit-accepted', {
+      detail: { chapterId, source: 'inline_edit' },
+    }))
     capture.replace(clean)
     onClose()
   }

@@ -10,12 +10,18 @@ from fastapi import APIRouter, Query
 from schemas.memories import (
     AddForeshadowingRequest,
     AddSparkIdeaRequest,
+    BuildMemoryContextRequest,
+    CreateMemoryRequest,
     ForeshadowingForPromptRequest,
+    GetMemoryByIdsRequest,
     GetForeshadowingByBookRequest,
     GetForeshadowingByIdsRequest,
     GetSparkIdeasByBookRequest,
     GetSparkIdeasByIdsRequest,
+    LinkMemoriesRequest,
+    SearchMemoriesRequest,
     SearchSparkIdeasRequest,
+    UpdateMemoryRequest,
     UpdateForeshadowingRequest,
     UpdateSparkIdeaRequest,
 )
@@ -26,6 +32,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["spark-ideas"])
 
 
+def _memory_payload(body: CreateMemoryRequest) -> dict:
+    return {
+        "book_id": body.bookId,
+        "kind": body.kind,
+        "content": body.content,
+        "scope_type": body.scopeType,
+        "scope_id": body.scopeId,
+        "summary": body.summary,
+        "keywords": body.keywords,
+        "importance": body.importance,
+        "confidence": body.confidence,
+        "status": body.status,
+        "pinned": body.pinned,
+        "source_type": body.sourceType,
+        "source_id": body.sourceId,
+    }
+
+
 def _err_message(err: Exception) -> str:
     """记录异常并返回原始信息。
 
@@ -34,6 +58,107 @@ def _err_message(err: Exception) -> str:
     """
     logger.error("[memories] %s: %s", type(err).__name__, err, exc_info=True)
     return str(err)
+
+
+# ---------------------------------------------------------------------------
+# Unified long-term memories
+# ---------------------------------------------------------------------------
+
+@router.post("/memories")
+async def create_memory(body: CreateMemoryRequest):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.create_memory_item(**_memory_payload(body))
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.put("/memories/{id}")
+async def update_memory(id: str, body: UpdateMemoryRequest):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.update_memory_item(id, body.data)
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.post("/memories/search")
+async def search_memories(body: SearchMemoriesRequest):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.search_memory_items(
+            body.bookId,
+            body.query,
+            options=body.options,
+        )
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.post("/memories/by-ids")
+async def get_memories_by_ids(body: GetMemoryByIdsRequest):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.get_memory_items_by_ids(body.ids)
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.post("/memories/{id}/archive")
+async def archive_memory(id: str):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.archive_memory_item(id)
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.post("/memories/link")
+async def link_memories(body: LinkMemoriesRequest):
+    try:
+        from services import long_term_memory_service
+        data = await long_term_memory_service.link_memory_items(
+            book_id=body.bookId,
+            from_memory_id=body.fromMemoryId,
+            to_memory_id=body.toMemoryId,
+            relation=body.relation,
+            note=body.note,
+        )
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
+
+
+@router.post("/memories/context")
+async def build_memory_context(body: BuildMemoryContextRequest):
+    try:
+        from services import memory_orchestrator
+        block = await memory_orchestrator.build_memory_context(
+            {
+                "bookId": body.bookId,
+                "selectedLongTermMemoryIds": body.selectedLongTermMemoryIds or [],
+                "selectedMemoryIds": body.selectedMemoryIds or [],
+                "selectedForeshadowingIds": body.selectedForeshadowingIds or [],
+                "memoryBudget": body.memoryBudget,
+                "memoryRecallLimit": body.memoryRecallLimit,
+            },
+            body.userPrompt,
+            body.mode,
+        )
+        return {"success": True, "data": {
+            "text": block.text,
+            "includedIds": block.included_ids,
+            "deferredIds": block.deferred_ids,
+            "tokenEstimate": block.token_estimate,
+            "diagnostics": block.diagnostics,
+        }}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
 
 
 # ---------------------------------------------------------------------------

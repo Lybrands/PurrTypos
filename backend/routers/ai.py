@@ -221,8 +221,17 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
             )
 
             messages: list[dict] = list(body.messages or [])
+            latest_user_prompt = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    latest_user_prompt = str(msg.get("content") or "")
+                    break
             memory_block = await build_selected_memory_block(
-                body.selectedMemoryIds, body.selectedForeshadowingIds,
+                body.selectedMemoryIds,
+                body.selectedForeshadowingIds,
+                book_id=body.bookId,
+                user_prompt=latest_user_prompt,
+                mode=body.chatAgentMode or "",
             )
             inject_system_prompt(messages, memory_block)
             assoc_block = await build_associated_context_block(tool_ctx_book)
