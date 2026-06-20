@@ -201,3 +201,161 @@ async def _tool_search_spark_ideas(ctx: dict, args: dict, send_chunk: Callable |
         return ToolResult("\n\n".join(parts) if parts else "（未找到与当前检索相关的本书设定）")
     except Exception as e:
         return _err({"error": str(e)})
+
+
+@tool("searchMemories")
+async def _tool_search_memories(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId，无法检索长期记忆"})
+    query = str(args.get("query") or "").strip()
+    options: dict[str, Any] = {
+        "limit": args.get("limit") or 12,
+    }
+    if args.get("kinds"):
+        options["kinds"] = args.get("kinds")
+    if args.get("statuses"):
+        options["statuses"] = args.get("statuses")
+    if args.get("scopeType"):
+        options["scopeType"] = args.get("scopeType")
+    if args.get("scopeId"):
+        options["scopeId"] = args.get("scopeId")
+    try:
+        from services import long_term_memory_service
+        rows = await long_term_memory_service.search_memory_items(bid, query, options=options)
+        if not rows:
+            return ToolResult("（未找到相关长期记忆）")
+        lines = [
+            f"[id:{r.get('id')}] [{r.get('kind')}|{r.get('status')}] {str(r.get('content') or '').strip()}"
+            for r in rows
+        ]
+        return ToolResult("\n".join(lines))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})
+
+
+@tool("createMemory")
+async def _tool_create_memory(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
+    content = str(args.get("content") or "").strip()
+    kind = str(args.get("kind") or "summary").strip()
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId，无法创建长期记忆"})
+    if not content:
+        return _err({"success": False, "error": "记忆内容不能为空"})
+    try:
+        from services import long_term_memory_service
+        row = await long_term_memory_service.create_memory_item(
+            book_id=bid,
+            kind=kind,
+            content=content,
+            scope_type=args.get("scopeType") or "book",
+            scope_id=args.get("scopeId"),
+            summary=args.get("summary") or "",
+            keywords=args.get("keywords") or "",
+            importance=int(args.get("importance") or 3),
+            confidence=float(args.get("confidence") or 1.0),
+            status=args.get("status") or "active",
+            pinned=bool(args.get("pinned") or False),
+            source_type="tool",
+            source_id=args.get("sourceId"),
+        )
+        return ToolResult(json.dumps({
+            "success": True,
+            "id": row.get("id"),
+            "deduped": row.get("deduped", False),
+            "message": "已保存长期记忆",
+        }, ensure_ascii=False))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})
+
+
+@tool("updateMemory")
+async def _tool_update_memory(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    raw_id = args.get("id")
+    mid = str(raw_id).strip() if raw_id is not None else ""
+    if not mid:
+        return _err({"success": False, "error": "缺少 id：updateMemory 必须指定要更新的记忆"})
+    allowed = {
+        "kind": "kind",
+        "content": "content",
+        "summary": "summary",
+        "keywords": "keywords",
+        "importance": "importance",
+        "confidence": "confidence",
+        "status": "status",
+        "pinned": "pinned",
+        "scopeType": "scope_type",
+        "scopeId": "scope_id",
+    }
+    payload = {dst: args[src] for src, dst in allowed.items() if src in args}
+    if not payload:
+        return _err({"success": False, "error": "noop：缺少可更新字段", "noop": True})
+    try:
+        from services import long_term_memory_service
+        row = await long_term_memory_service.update_memory_item(mid, payload)
+        if not row:
+            return _err({"success": False, "error": f"未找到 id={mid} 的长期记忆"})
+        return ToolResult(json.dumps({"success": True, "id": row.get("id"), "status": row.get("status")}, ensure_ascii=False))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})
+
+
+@tool("archiveMemory")
+async def _tool_archive_memory(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    raw_id = args.get("id")
+    mid = str(raw_id).strip() if raw_id is not None else ""
+    if not mid:
+        return _err({"success": False, "error": "缺少 id：archiveMemory 必须指定要归档的记忆"})
+    try:
+        from services import long_term_memory_service
+        row = await long_term_memory_service.archive_memory_item(mid)
+        if not row:
+            return _err({"success": False, "error": f"未找到 id={mid} 的长期记忆"})
+        return ToolResult(json.dumps({"success": True, "id": row.get("id"), "status": row.get("status")}, ensure_ascii=False))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})
+
+
+@tool("linkMemories")
+async def _tool_link_memories(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId，无法关联长期记忆"})
+    try:
+        from services import long_term_memory_service
+        row = await long_term_memory_service.link_memory_items(
+            book_id=bid,
+            from_memory_id=args.get("fromMemoryId"),
+            to_memory_id=args.get("toMemoryId"),
+            relation=str(args.get("relation") or ""),
+            note=str(args.get("note") or ""),
+        )
+        return ToolResult(json.dumps({"success": True, "id": row.get("id")}, ensure_ascii=False))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})
+
+
+@tool("resolveForeshadowing")
+async def _tool_resolve_foreshadowing(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    raw_id = args.get("id")
+    fid = str(raw_id).strip() if raw_id is not None else ""
+    resolved_chapter_id = args.get("resolvedChapterId") or _runtime_chapter_id(ctx)
+    if not fid:
+        return _err({"success": False, "error": "缺少 id：resolveForeshadowing 必须指定伏笔"})
+    try:
+        from services import memory_service
+        row = await memory_service.update_foreshadowing(fid, {
+            "status": "已回收",
+            "resolved_chapter_id": str(resolved_chapter_id) if resolved_chapter_id is not None else None,
+        })
+        if not row:
+            return _err({"success": False, "error": f"未找到 id={fid} 的伏笔"})
+        return ToolResult(json.dumps({
+            "success": True,
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "resolved_chapter_id": row.get("resolved_chapter_id"),
+        }, ensure_ascii=False))
+    except Exception as e:
+        return _err({"success": False, "error": str(e)})

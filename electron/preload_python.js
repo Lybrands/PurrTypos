@@ -118,7 +118,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateChapterProgress: (data) => apiPut(`/chapters/${data.chapterId}/progress`, { progress: data.progress }),
 
   // ─── Articles — HTTP ───────────────────────────────────────────
-  saveArticle: (data) => apiPut(`/articles/${data.chapterId}`, { content: data.content }),
+  saveArticle: (data) => apiPut(`/articles/${data.chapterId}`, { content: data.content, source: data.source }),
   getArticle: (data) => apiGet(`/articles/${data.chapterId}`),
 
   // ─── Story background — HTTP ───────────────────────────────────
@@ -246,6 +246,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     apiGet(`/foreshadowing/by-book?bookId=${data.bookId}${data.status ? '&status=' + data.status : ''}`),
   getForeshadowingByIds: (data) => apiPost('/foreshadowing/by-ids', data),
   getForeshadowingForPrompt: (data) => apiPost('/foreshadowing/for-prompt', data),
+
+  // ─── Long-term memories — HTTP ─────────────────────────────────
+  createMemory: (data) => apiPost('/memories', data),
+  updateMemory: (data) => apiPut(`/memories/${data.id}`, { data: data.data }),
+  archiveMemory: (data) => apiPost(`/memories/${data.id}/archive`, {}),
+  searchMemories: (data) => apiPost('/memories/search', data),
+  getMemoriesByIds: (data) => apiPost('/memories/by-ids', data),
+  linkMemories: (data) => apiPost('/memories/link', data),
+  buildMemoryContext: (data) => apiPost('/memories/context', data),
 
   // ─── AI — HTTP ─────────────────────────────────────────────────
   generateSessionTitle: (data) => apiPost('/ai/title', data),

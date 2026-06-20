@@ -27,6 +27,7 @@ export type AppMessage = ReturnType<typeof AntdApp.useApp>["message"];
 export interface AccState {
   response: string;
   thinking: string;
+  bookId: EntityId | null | undefined;
   sessionId: number;
   chapterId: EntityId | null | undefined;
   needsTitle: boolean;

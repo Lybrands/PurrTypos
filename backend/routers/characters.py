@@ -33,6 +33,11 @@ async def create_character(bookId: str, body: CreateCharacterRequest):
     row = await characters_crud.create_character(db, bookId, body.data)
     if not row:
         return {"success": False, "error": "创建失败"}
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_character_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 
@@ -60,6 +65,11 @@ async def update_character(id: str, body: UpdateCharacterRequest):
         after_profile_md=row.get("profile_md") or "",
         source="user",
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_character_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 

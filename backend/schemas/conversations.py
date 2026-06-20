@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class SaveConversationRequest(BaseModel):
     """与前端一致：sessionId 为数字；亦接受数字字符串（如 \"12\"）。"""
     sessionId: int
+    bookId: Optional[str] = None
     chapterId: Optional[str] = None
     prompt: str
     response: str

@@ -134,6 +134,7 @@ export default function EditorPanel({
 
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
+  const nextSaveSourceRef = React.useRef<string | null>(null)
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
 
   const refreshArticle = React.useCallback((cid: EntityId) => {
@@ -160,12 +161,24 @@ export default function EditorPanel({
     return () => window.removeEventListener('chapter-content-updated', handler)
   }, [chapterId, refreshArticle])
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ chapterId?: EntityId | null; source?: string }>).detail ?? {}
+      if (detail.chapterId != null && detail.chapterId !== chapterId) return
+      nextSaveSourceRef.current = detail.source || 'inline_edit'
+    }
+    window.addEventListener('inline-edit-accepted', handler)
+    return () => window.removeEventListener('inline-edit-accepted', handler)
+  }, [chapterId])
+
   const scheduleAutoSave = React.useCallback((text: string) => {
     if (!chapterId) return
     setSaveStatus('保存中...')
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(async () => {
-      const res = await window.electronAPI.saveArticle({ chapterId, content: text })
+      const source = nextSaveSourceRef.current
+      nextSaveSourceRef.current = null
+      const res = await window.electronAPI.saveArticle({ chapterId, content: text, source: source ?? undefined })
       setSaveStatus(res.success ? '已保存' : '保存失败')
     }, AUTOSAVE_DELAY)
   }, [chapterId])

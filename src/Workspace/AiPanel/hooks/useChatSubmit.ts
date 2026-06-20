@@ -190,6 +190,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const acc: AccState = {
       response: "",
       thinking: "",
+      bookId,
       sessionId,
       chapterId,
       needsTitle,

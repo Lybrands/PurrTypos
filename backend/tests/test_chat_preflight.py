@@ -117,6 +117,26 @@ async def test_memory_block_empty_without_ids(temp_db):
     assert await build_selected_memory_block([], []) == ""
 
 
+async def test_memory_block_auto_recalls_without_selected_ids(temp_db):
+    from services import long_term_memory_service
+
+    await long_term_memory_service.create_memory_item(
+        book_id="b1",
+        kind="plot",
+        content="玉佩在雨夜发光",
+    )
+
+    block = await build_selected_memory_block(
+        [],
+        [],
+        book_id="b1",
+        user_prompt="玉佩后来有什么异常？",
+    )
+
+    assert "长期记忆" in block
+    assert "玉佩在雨夜发光" in block
+
+
 async def test_memory_block_renders_sparks_and_foreshadowing(temp_db):
     from services import memory_service
 
@@ -125,11 +145,17 @@ async def test_memory_block_renders_sparks_and_foreshadowing(temp_db):
         "b1", "ch1", "主角的玉佩会发光", type_="悬念",
     )
 
-    block = await build_selected_memory_block([spark["id"]], [fs["id"]])
-    assert "已勾选的本书设定" in block
-    assert "- [世界观] 灵气复苏始于昆仑" in block
-    assert "已勾选的伏笔" in block
-    assert "- [悬念|未回收] 主角的玉佩会发光" in block
+    block = await build_selected_memory_block(
+        [spark["id"]],
+        [fs["id"]],
+        book_id="b1",
+        user_prompt="玉佩",
+    )
+    assert "长期记忆" in block
+    assert "必须遵循的设定" in block
+    assert "灵气复苏始于昆仑" in block
+    assert "待铺垫/待回收伏笔" in block
+    assert "主角的玉佩会发光" in block
 
 
 # ── build_session_binding_prompt ────────────────────────────────

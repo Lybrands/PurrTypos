@@ -7,6 +7,7 @@ import {
   HighlightOutlined,
 } from '@ant-design/icons'
 import { useWorkspace } from '../WorkspaceContext'
+import MemoryCenter from '../AiPanel/components/MemoryCenter'
 import StyleForm, { type StyleFormStatus } from './StyleForm'
 import './NotebookToolbar.scss'
 
@@ -80,24 +81,19 @@ export default function NotebookToolbar() {
 
       {/* 人物 / 故事背景已迁移至设定浮窗；保留 memory / style 弹窗 */}
 
-      {/* 记忆 / 伏笔（占位） */}
+      {/* 记忆 / 伏笔 */}
       <Modal
         open={open === 'memory'}
         onCancel={handleClose}
         title={renderModalTitle(TOOLS[2])}
         footer={null}
-        width={520}
+        width={860}
         destroyOnClose
         className="notebook-toolbar-modal"
         styles={{ body: { padding: 0 } }}
       >
-        <div className="notebook-toolbar-modal-body notebook-toolbar-modal-body--placeholder">
-          <p className="notebook-toolbar-placeholder-title">敬请期待</p>
-          <p className="notebook-toolbar-placeholder-desc">
-            此区域将记录长期记忆、伏笔、世界设定的关键点，作为 AI 的长期上下文。
-            <br />
-            目前可在 AI 面板里使用「记忆」功能。
-          </p>
+        <div className="notebook-toolbar-modal-body">
+          <MemoryCenter bookId={bookId} />
         </div>
       </Modal>
 
