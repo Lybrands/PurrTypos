@@ -7,8 +7,6 @@
  */
 
 import type {
-  AiForeshadowing,
-  AiSparkIdea,
   EntityId,
   Outline,
 } from '../../types'
@@ -17,6 +15,8 @@ import type {
 export const ASSOCIATED_CHAPTER_CHAR_LIMIT = 2000
 
 export interface BuildInjectedContextParams {
+  bookId: EntityId | null
+  userPrompt: string
   associatedChapterIds: EntityId[]
   associatedOutlineIds: EntityId[]
   availableOutlines: Outline[]
@@ -27,6 +27,8 @@ export interface BuildInjectedContextParams {
 
 /** 拉取关联章节正文、关联大纲 markdown、记忆/伏笔条目，拼成注入 user prompt 的文本 */
 export async function buildInjectedContext({
+  bookId,
+  userPrompt,
   associatedChapterIds,
   associatedOutlineIds,
   availableOutlines,
@@ -75,36 +77,18 @@ export async function buildInjectedContext({
     if (joined) blocks.push(`【关联大纲】\n${joined}`)
   }
 
-  // 记忆条目
-  if (selectedMemoryIds.length > 0) {
+  // 记忆 / 伏笔：统一交给后端长期记忆编排器生成；未手动选择时也允许按 prompt 自动召回。
+  if (bookId != null) {
     try {
-      const res = await window.electronAPI.getSparkIdeasByIds({
-        ids: selectedMemoryIds,
+      const res = await window.electronAPI.buildMemoryContext({
+        bookId,
+        userPrompt,
+        mode: 'inline',
+        selectedMemoryIds,
+        selectedForeshadowingIds,
       })
-      if (res.success && res.data && res.data.length > 0) {
-        const lines = (res.data as AiSparkIdea[]).map(
-          (m) => `- [${m.layer}] ${m.content}`,
-        )
-        blocks.push(
-          `【本书设定（参考，请勿与人物/世界观冲突）】\n${lines.join('\n')}`,
-        )
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  // 伏笔条目
-  if (selectedForeshadowingIds.length > 0) {
-    try {
-      const res = await window.electronAPI.getForeshadowingByIds({
-        ids: selectedForeshadowingIds,
-      })
-      if (res.success && res.data && res.data.length > 0) {
-        const lines = (res.data as AiForeshadowing[]).map(
-          (f) => `- [${f.type}|${f.status}] ${f.content}`,
-        )
-        blocks.push(`【伏笔（参考，可顺势呼应或铺垫）】\n${lines.join('\n')}`)
+      if (res.success && res.data?.text) {
+        blocks.push(res.data.text)
       }
     } catch {
       // ignore

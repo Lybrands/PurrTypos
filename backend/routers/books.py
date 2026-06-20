@@ -128,6 +128,8 @@ async def delete_book(bookId: str):
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM memory_links WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM memory_items WHERE book_id = ?", [bookId])
 
         await _delete_where_in(db, "articles", "chapter_id", chapter_ids)
         await _delete_where_in(db, "chapter_canvas", "chapter_id", chapter_ids)

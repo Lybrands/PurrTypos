@@ -44,6 +44,11 @@ async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
         after_content=body.content,
         source="user",
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_background_memory(bookId, body.content)
+    except Exception:
+        pass
     return {"success": True}
 
 

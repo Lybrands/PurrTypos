@@ -131,6 +131,18 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", "chapter1", "foreshadowing"],
     )
     await temp_db.execute(
+        "INSERT INTO memory_items (book_id, kind, content, fingerprint) VALUES (?, ?, ?, ?)",
+        ["book1", "plot", "memory item", "book1|plot|memory item"],
+    )
+    await temp_db.execute(
+        "INSERT INTO memory_items (book_id, kind, content, fingerprint) VALUES (?, ?, ?, ?)",
+        ["book1", "plot", "linked memory item", "book1|plot|linked memory item"],
+    )
+    await temp_db.execute(
+        "INSERT INTO memory_links (book_id, from_memory_id, to_memory_id, relation) VALUES (?, ?, ?, ?)",
+        ["book1", 1, 2, "relates_to"],
+    )
+    await temp_db.execute(
         "INSERT INTO story_background (book_id, content) VALUES (?, ?)",
         ["book1", "background"],
     )
@@ -175,6 +187,8 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",
+        "memory_items",
+        "memory_links",
         "story_background",
         "story_background_attachments",
         "characters",

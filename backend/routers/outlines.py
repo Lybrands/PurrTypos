@@ -40,6 +40,11 @@ async def save_outline(body: SaveOutlineRequest):
     db = get_db()
     created = await crud_save_outline(db, body.model_dump())
     row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [created["id"]])
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_outline_plan_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 
@@ -78,6 +83,11 @@ async def update_outline(outlineId: str, body: UpdateOutlineRequest):
         )
 
     row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outlineId])
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_outline_plan_memory(row)
+    except Exception:
+        pass
     return {"success": True, "data": row}
 
 

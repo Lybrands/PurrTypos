@@ -206,6 +206,7 @@ function saveConversationIfNeeded(
   void window.electronAPI
     .saveConversation({
       sessionId: acc.sessionId,
+      bookId: acc.bookId ?? undefined,
       chapterId: acc.chapterId ?? null,
       prompt: acc.userText,
       response: acc.response || "",

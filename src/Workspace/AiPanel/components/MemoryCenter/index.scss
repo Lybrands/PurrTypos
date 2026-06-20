@@ -1,0 +1,70 @@
+.memory-center {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+
+  .memory-center-intelligence {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-active);
+  }
+
+  .memory-center-intelligence-title {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .memory-center-intelligence-desc {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+  }
+
+  .memory-center-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .memory-center-create {
+    display: grid;
+    grid-template-columns: 128px 1fr auto;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-active);
+  }
+
+  .memory-center-list {
+    max-height: 52vh;
+    overflow: auto;
+    border-top: 1px solid var(--border);
+
+    .ant-list-item {
+      padding: 12px 2px;
+      align-items: flex-start;
+    }
+  }
+
+  .memory-center-item-source,
+  .memory-center-item-summary,
+  .memory-center-item-keywords {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+  }
+
+  .memory-center-item-body {
+    color: var(--text-primary);
+    line-height: 1.6;
+    word-break: break-word;
+  }
+}

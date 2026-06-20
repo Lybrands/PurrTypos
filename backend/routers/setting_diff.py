@@ -51,6 +51,20 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
         accepted_segments=body.accepted_segments,
         rejected_segments=body.rejected_segments,
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_character_memory(row)
+        await memory_deposition_service.deposit_character_diff_candidate(
+            book_id=str(row["book_id"]),
+            character_id=cid,
+            character_name=body.after.name or body.name,
+            after_profile_md=body.after.profileMd or body.profileMd,
+            source_id=hist_id,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+        )
+    except Exception:
+        pass
     return {"success": True, "data": {"id": hist_id, "characterId": cid}}
 
 
@@ -144,6 +158,20 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
         accepted_segments=body.accepted_segments,
         rejected_segments=body.rejected_segments,
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_entity_memory(row)
+        await memory_deposition_service.deposit_entity_diff_candidate(
+            book_id=str(row["book_id"]),
+            entity_id=eid,
+            entity_name=body.after.name or body.name,
+            after_profile_md=body.after.profileMd or body.profileMd,
+            source_id=hist_id,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+        )
+    except Exception:
+        pass
     return {"success": True, "data": {"id": hist_id, "entityId": eid}}
 
 
@@ -217,6 +245,21 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
         accepted_segments=body.accepted_segments,
         rejected_segments=body.rejected_segments,
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_manual_background_memory(
+            bookId,
+            body.content or body.after_content,
+        )
+        await memory_deposition_service.deposit_background_diff_candidate(
+            book_id=bookId,
+            after_content=body.after_content or body.content,
+            source_id=hist_id,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+        )
+    except Exception:
+        pass
     return {"success": True, "data": {"id": hist_id, "bookId": bookId}}
 
 

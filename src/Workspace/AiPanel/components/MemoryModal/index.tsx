@@ -305,7 +305,7 @@ export default function MemoryModal({
 
   return (
     <Modal
-      title="本书设定"
+      title="本轮强制注入"
       open={open}
       onCancel={onCancel}
       width={680}
@@ -314,7 +314,7 @@ export default function MemoryModal({
       footer={
         activeTab === 'select' ? (
           <Button type="primary" onClick={handleSelectOk}>
-            确定选用（{checkedIds.length + checkedForeshadowingIds.length} 条）
+            本轮带上（{checkedIds.length + checkedForeshadowingIds.length} 条）
           </Button>
         ) : null
       }
@@ -326,13 +326,13 @@ export default function MemoryModal({
         items={[
           {
             key: 'select',
-            label: '选用本书设定',
+            label: '本轮强制注入',
             children: (
               <>
                 {loading ? (
                   <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
                 ) : sparkIdeas.length === 0 && foreshadowing.length === 0 ? (
-                  <Empty image={false} description="本书暂无设定，请先在「管理本书设定」中添加" />
+                  <Empty image={false} description="暂无可强制注入的旧设定/伏笔，可在导演笔记本的「记忆 / 伏笔」中管理长期记忆" />
                 ) : (
                   <div className="memory-select-list">
                     {byLayer.map(({ layer, list }) =>
@@ -400,7 +400,7 @@ export default function MemoryModal({
           },
           {
             key: 'manage',
-            label: '管理本书设定',
+            label: '快速添加旧设定',
             children: (
               <div className="memory-manage-tab">
                 <section className="memory-manage-section">

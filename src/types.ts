@@ -386,6 +386,55 @@ export interface AiForeshadowing {
   update_time?: string;
 }
 
+export type MemoryKind =
+  | 'canon'
+  | 'plot'
+  | 'character'
+  | 'world'
+  | 'foreshadowing'
+  | 'style'
+  | 'summary';
+
+export type MemoryStatus = 'pending' | 'active' | 'archived' | 'superseded';
+export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline' | 'session';
+
+export interface MemoryItem {
+  id: number;
+  book_id: EntityId;
+  kind: MemoryKind;
+  scope_type: MemoryScopeType;
+  scope_id?: string | null;
+  content: string;
+  summary: string;
+  keywords: string;
+  importance: number;
+  confidence: number;
+  status: MemoryStatus;
+  pinned: number;
+  fingerprint: string;
+  source_type: string;
+  source_id?: string | null;
+  create_time?: string;
+  update_time?: string;
+  last_used_at?: string | null;
+  deduped?: boolean;
+}
+
+export interface MemoryContextDiagnostics {
+  forced: number;
+  recalled: number;
+  included: number;
+  deferred: number;
+}
+
+export interface MemoryContextBlock {
+  text: string;
+  includedIds: number[];
+  deferredIds: number[];
+  tokenEstimate: number;
+  diagnostics: MemoryContextDiagnostics;
+}
+
 export interface XmindTopic {
   title?: string;
   children?: { attached?: XmindTopic[] };
@@ -571,6 +620,7 @@ export interface ElectronAPI {
   saveArticle: (data: {
     chapterId: EntityId;
     content: string;
+    source?: string;
   }) => Promise<ApiResult<void>>;
   getArticle: (data: {
     chapterId: EntityId;
@@ -668,6 +718,7 @@ export interface ElectronAPI {
   deleteSession: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   saveConversation: (data: {
     sessionId: number;
+    bookId?: EntityId | null;
     chapterId?: EntityId | null;
     prompt: string;
     response: string;
@@ -742,6 +793,53 @@ export interface ElectronAPI {
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
+  // 长期记忆
+  createMemory: (data: {
+    bookId: EntityId;
+    kind: MemoryKind;
+    content: string;
+    scopeType?: MemoryScopeType;
+    scopeId?: string | null;
+    summary?: string;
+    keywords?: string;
+    importance?: number;
+    confidence?: number;
+    status?: MemoryStatus;
+    pinned?: boolean;
+    sourceType?: string;
+    sourceId?: string | null;
+  }) => Promise<ApiResult<MemoryItem>>;
+  updateMemory: (data: { id: number | string; data: Partial<MemoryItem> }) => Promise<ApiResult<MemoryItem>>;
+  archiveMemory: (data: { id: number | string }) => Promise<ApiResult<MemoryItem>>;
+  searchMemories: (data: {
+    bookId: EntityId;
+    query?: string;
+    options?: {
+      statuses?: MemoryStatus[];
+      kinds?: MemoryKind[];
+      scopeType?: MemoryScopeType;
+      scopeId?: string;
+      limit?: number;
+    };
+  }) => Promise<ApiResult<MemoryItem[]>>;
+  getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<MemoryItem[]>>;
+  linkMemories: (data: {
+    bookId: EntityId;
+    fromMemoryId: number;
+    toMemoryId: number;
+    relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
+    note?: string;
+  }) => Promise<ApiResult<unknown>>;
+  buildMemoryContext: (data: {
+    bookId: EntityId;
+    userPrompt?: string;
+    mode?: string;
+    selectedLongTermMemoryIds?: (number | string)[];
+    selectedMemoryIds?: (number | string)[];
+    selectedForeshadowingIds?: (number | string)[];
+    memoryBudget?: number;
+    memoryRecallLimit?: number;
+  }) => Promise<ApiResult<MemoryContextBlock>>;
   generateSessionTitle: (data: {
     apiKey: string;
     baseURL?: string;
@@ -908,6 +1006,10 @@ export interface GeneralSettings {
   ai_system_prompt: string;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
+  /** 开启后，AI 接受的改动会尝试用模型提炼待确认的长期记忆候选。 */
+  memory_intelligence_enabled?: boolean;
+  /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
+  memory_intelligence_model_id?: string;
   /** 历史设置字段：当前版本不再暴露默认专家模式切换。 */
   ai_agent_mode?: 'legacy' | 'subagent';
 }

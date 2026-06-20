@@ -114,7 +114,10 @@ PurrTypos/
 │   │   ├── anthropic_chat.py    # Anthropic Messages API 适配
 │   │   ├── tool_router.py       # SKILL.md 加载器
 │   │   ├── tool_executor.py     # 工具调用执行
-│   │   └── memory_service.py    # mem0 集成（长期记忆）
+│   │   ├── memory_service.py    # 本书设定/伏笔兼容服务
+│   │   ├── long_term_memory_service.py # SQLite 长期记忆池（FTS5）
+│   │   ├── memory_intelligence_service.py # 可选 LLM 记忆候选提炼
+│   │   └── memory_orchestrator.py # 长期记忆召回、预算与注入编排
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理
 │   │   ├── schema.py            # 建表 / 增量迁移
@@ -138,8 +141,14 @@ PurrTypos/
 
 - **位置**：用户数据目录下的 `purrtypos.db`（Windows：`%APPDATA%\purrtypos\purrtypos.db`，macOS：`~/Library/Application Support/purrtypos/purrtypos.db`，由 Electron `app.getPath('userData')` 决定，并通过 `PURRTYPOS_DATA_DIR` 环境变量传给 Python 后端）。
 - **驱动**：`aiosqlite`（异步 SQLite）+ WAL 日志模式，单连接复用，写锁 `busy_timeout=5000ms`。多步写操作通过 `db.transaction()` 上下文管理器原子化（如 `delete_book`）。
-- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
+- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories` / `ai_foreshadowing`、`memory_items` / `memory_links`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
 - **导入 / 导出**：设置面板 → 数据 → 数据库导出/导入，覆盖式导入会替换当前所有数据，请先备份。
+
+## 长期记忆
+
+- `memory_items` 是统一长期记忆池，覆盖设定、剧情事实、人物状态、世界观、伏笔、风格和阶段总结；`memory_links` 保存冲突、替代、支持、相关等关系。
+- 默认使用 SQLite FTS5 本地召回与规则沉淀，不依赖外部服务；AI 接受的 diff / inline edit 会生成 `pending` 候选，用户明确“记住”的内容和手动保存的设定会写入 `active`。
+- 记忆中心里的“高级智能记忆”开关默认关闭。开启后，AI 来源改动会使用已配置的第一个可用模型提炼更精细的 `pending` 候选，并尝试生成冲突/替代/伏笔等关系；模型不可用或输出无效时自动回退到本地规则候选。
 
 ## 健康检查
 

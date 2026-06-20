@@ -34,6 +34,11 @@ async def add_spark_idea(
         [book_id, layer, content.strip(), chapter_id, character_id],
     )
     row = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [row_id])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.mirror_spark_idea(dict(row) if row else None)
+    except Exception:
+        logger.warning("镜像本书设定到长期记忆失败", exc_info=True)
     return _spark_idea_row(row)
 
 
@@ -52,12 +57,22 @@ async def update_spark_idea(id_: str, data: dict) -> dict | None:
         [content, layer, chapter_id, character_id, id_],
     )
     updated = await db.fetch_one("SELECT * FROM ai_memories WHERE id = ?", [id_])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.update_spark_idea_mirror(dict(updated) if updated else None)
+    except Exception:
+        logger.warning("同步本书设定长期记忆失败", exc_info=True)
     return _spark_idea_row(updated)
 
 
 async def delete_spark_idea(id_: str) -> None:
     db = get_db()
     await db.execute("DELETE FROM ai_memories WHERE id = ?", [id_])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.archive_by_source("spark_idea", id_)
+    except Exception:
+        logger.warning("归档本书设定长期记忆失败", exc_info=True)
 
 
 async def get_spark_ideas_by_book(book_id: str, layer: str | None = None) -> list[dict]:
@@ -219,6 +234,11 @@ async def add_foreshadowing(
         [book_id, chapter_id, content.strip(), f_type, expected_chapter_id, f_status, resolved_chapter_id],
     )
     row = await db.fetch_one("SELECT * FROM ai_foreshadowing WHERE id = ?", [row_id])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.mirror_foreshadowing(dict(row) if row else None)
+    except Exception:
+        logger.warning("镜像伏笔到长期记忆失败", exc_info=True)
     return _foreshadowing_row(row)
 
 
@@ -242,12 +262,22 @@ async def update_foreshadowing(id_: str, data: dict) -> dict | None:
          fields["expected_chapter_id"], fields["resolved_chapter_id"], id_],
     )
     updated = await db.fetch_one("SELECT * FROM ai_foreshadowing WHERE id = ?", [id_])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.update_foreshadowing_mirror(dict(updated) if updated else None)
+    except Exception:
+        logger.warning("同步伏笔长期记忆失败", exc_info=True)
     return _foreshadowing_row(updated)
 
 
 async def delete_foreshadowing(id_: str) -> None:
     db = get_db()
     await db.execute("DELETE FROM ai_foreshadowing WHERE id = ?", [id_])
+    try:
+        from services import long_term_memory_service
+        await long_term_memory_service.archive_by_source("foreshadowing", id_)
+    except Exception:
+        logger.warning("归档伏笔长期记忆失败", exc_info=True)
 
 
 async def get_foreshadowing_by_book(
