@@ -8,6 +8,7 @@ routers.ai.chat_stream 抽出的纯函数辅助（utils.chat_stream）的特征�
 from __future__ import annotations
 
 from utils.chat_stream import (
+    RuntimeTodoExtractor,
     StreamAccumulator,
     build_chat_request_params,
     build_tool_results_display,
@@ -197,6 +198,22 @@ class TestStreamAccumulator:
             ]}}]
         })
         assert acc.tool_calls[0]["function"]["name"] == "getX"
+
+    def test_runtime_todo_event_is_hidden_and_extracted_across_chunks(self):
+        acc = StreamAccumulator(RuntimeTodoExtractor())
+        chunks = [
+            _content_chunk('先说<agent_'),
+            _content_chunk('todos>{"title":"计划","steps":[{"id":"a","title":"读上下文"}]}'),
+            _content_chunk("</agent_todos>后说"),
+        ]
+
+        outcomes = [acc.process_chunk(chunk) for chunk in chunks]
+
+        assert acc.content == "先说后说"
+        assert outcomes[0].events == [{"delta": "先说"}]
+        assert outcomes[1].events == []
+        assert outcomes[2].events == [{"delta": "后说"}]
+        assert outcomes[2].todo_events[0]["title"] == "计划"
 
 
 class TestBuildToolResultsDisplay:

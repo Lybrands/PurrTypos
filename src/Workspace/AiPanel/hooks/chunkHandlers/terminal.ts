@@ -17,6 +17,8 @@ import type { ChunkHandler } from "./types";
 export const handleError: ChunkHandler = (chunk, ctx) => {
   if (!chunk.error) return;
   const { acc } = ctx;
+  const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
+  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
   ctx.flushCommits();
 
   if (ctx.isVisibleSession()) {
@@ -42,6 +44,8 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
         content: merged.content ?? (last as ChatMessage).content,
         contentAfterToolCalls: merged.contentAfterToolCalls,
         taskPlan: acc.taskPlan ?? (last as ChatMessage).taskPlan,
+        durationMs,
+        turnStartedAt: undefined,
         toolCalling: false,
         ...(merged.isError ? { isError: true } : {}),
       };
@@ -60,6 +64,8 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
 export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done) return;
   const { acc } = ctx;
+  const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
+  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
   ctx.flushCommits();
   if (chunk.model) acc.model = chunk.model;
   if (chunk.aborted) {
@@ -133,6 +139,8 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           content: finalContent,
           subagentPipelineDigest: undefined,
           model: acc.model || undefined,
+          durationMs,
+          turnStartedAt: undefined,
           thinking: "",
           thinkingStartedAt: undefined,
           thinkingBlocks: thinkingBlocks?.length ? thinkingBlocks : undefined,
@@ -218,6 +226,7 @@ function saveConversationIfNeeded(
       thinkingDurationsMs: savedThinkingDurations.length
         ? savedThinkingDurations
         : undefined,
+      durationMs: Math.max(0, Math.round(performance.now() - acc.turnStartedAt)),
       toolCallSegments: acc.toolCallSegments?.length
         ? acc.toolCallSegments
         : undefined,
@@ -264,6 +273,21 @@ function saveConversationIfNeeded(
           : "本轮对话未能写入本地库（保存接口异常）。",
       );
     });
+}
+
+function finalizeToolDurations(
+  segments: ChatMessage["toolCallSegments"],
+): ChatMessage["toolCallSegments"] {
+  if (!segments?.length) return segments;
+  const now = performance.now();
+  return segments.map((segment) => {
+    if (segment.durationMs != null || segment.startedAt == null) return segment;
+    const { startedAt, ...rest } = segment;
+    return {
+      ...rest,
+      durationMs: Math.max(0, Math.round(now - startedAt)),
+    };
+  });
 }
 
 function findConversationMessageIndex(

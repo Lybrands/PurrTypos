@@ -38,7 +38,7 @@ export default function SettingsPage({
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
   const [form] = Form.useForm<Omit<AiModelConfig, 'id'>>()
   const apiProviderWatch = Form.useWatch('apiProvider', form)
-  const supportsThinkingWatch = Form.useWatch('supportsThinking', form)
+  const thinkingEnabledWatch = Form.useWatch('thinkingEnabled', form)
   const customizeTemperatureWatch = Form.useWatch('customizeTemperature', form)
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
@@ -48,14 +48,14 @@ export default function SettingsPage({
     setModelConfigList(modelConfigs)
   }, [modelConfigs])
 
-  /** 开启自定义 Temperature 且勾选「支持thinking模式」时，若尚未有思考温度则补默认值 */
+  /** 开启自定义 Temperature 且启用 Thinking 时，若尚未有思考温度则补默认值 */
   React.useEffect(() => {
-    if (!modelModalOpen || customizeTemperatureWatch !== true || supportsThinkingWatch !== true) return
+    if (!modelModalOpen || customizeTemperatureWatch !== true || thinkingEnabledWatch !== true) return
     const t = form.getFieldValue('temperatureThinking')
     if (t === undefined || t === null) {
       form.setFieldValue('temperatureThinking', 0.6)
     }
-  }, [modelModalOpen, customizeTemperatureWatch, supportsThinkingWatch, form])
+  }, [modelModalOpen, customizeTemperatureWatch, thinkingEnabledWatch, form])
 
   const openAddModel = () => {
     setEditingConfig(null)
@@ -63,8 +63,10 @@ export default function SettingsPage({
       apiProvider: 'openai',
       name: '',
       nickname: '',
-      supportsThinking: true,
+      supportsThinking: false,
       thinkingOnly: false,
+      thinkingEnabled: false,
+      contextWindow: '200k',
       customizeTemperature: false,
       temperatureThinking: 0.6,
       temperatureNonThinking: 0.6,
@@ -80,8 +82,10 @@ export default function SettingsPage({
       apiProvider: config.apiProvider ?? 'openai',
       name: config.name,
       nickname: config.nickname ?? '',
-      supportsThinking: config.supportsThinking,
-      thinkingOnly: config.thinkingOnly,
+      supportsThinking: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      thinkingOnly: false,
+      thinkingEnabled: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      contextWindow: config.contextWindow ?? '200k',
       customizeTemperature: config.customizeTemperature ?? true,
       temperatureThinking: config.temperatureThinking ?? 0.6,
       temperatureNonThinking: config.temperatureNonThinking ?? 0.6,
@@ -97,14 +101,15 @@ export default function SettingsPage({
       const nickname = (values.nickname ?? '').trim()
       const apiKey = (values.apiKey ?? '').trim()
       const baseUrl = (values.baseUrl ?? '').trim()
-      const supportsThinking = !!values.supportsThinking
+      const thinkingEnabled = !!values.thinkingEnabled
+      const contextWindow = values.contextWindow ?? '200k'
       const customizeTemperature = !!values.customizeTemperature
       let temperatureNonThinking = editingConfig?.temperatureNonThinking ?? 0.6
       let temperatureThinking = editingConfig?.temperatureThinking ?? 0.6
       if (customizeTemperature) {
         temperatureNonThinking =
           values.temperatureNonThinking != null ? Number(values.temperatureNonThinking) : 0.6
-        temperatureThinking = supportsThinking
+        temperatureThinking = thinkingEnabled
           ? (values.temperatureThinking != null ? Number(values.temperatureThinking) : 0.6)
           : (editingConfig?.temperatureThinking ?? 0.6)
       } else {
@@ -133,8 +138,10 @@ export default function SettingsPage({
                 apiProvider: prov,
                 name,
                 nickname: nickname || undefined,
-                supportsThinking,
-                thinkingOnly: !!values.thinkingOnly,
+                supportsThinking: thinkingEnabled,
+                thinkingOnly: false,
+                thinkingEnabled,
+                contextWindow,
                 customizeTemperature,
                 temperatureThinking,
                 temperatureNonThinking,
@@ -152,8 +159,10 @@ export default function SettingsPage({
           apiProvider: prov,
           name,
           nickname: nickname || undefined,
-          supportsThinking,
-          thinkingOnly: !!values.thinkingOnly,
+          supportsThinking: thinkingEnabled,
+          thinkingOnly: false,
+          thinkingEnabled,
+          contextWindow,
           customizeTemperature,
           temperatureThinking,
           temperatureNonThinking,
@@ -277,7 +286,10 @@ export default function SettingsPage({
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>{c.name}</span>
                         ) : null}
                         <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                          {c.supportsThinking ? (c.thinkingOnly ? '仅thinking模式' : '支持thinking模式') : '不支持thinking'}
+                          Context {(c.contextWindow ?? '200k').toUpperCase()}
+                        </span>
+                        <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                          {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
                         </span>
                         <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                           {c.apiProvider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'}
@@ -347,10 +359,14 @@ export default function SettingsPage({
                   <Form.Item name="nickname" label="昵称">
                     <Input placeholder="选填，AI 对话中优先显示昵称" />
                   </Form.Item>
-                  <Form.Item name="supportsThinking" valuePropName="checked" label="支持thinking模式">
-                    <Switch size='small' />
+                  <Form.Item name="contextWindow" label="Context" rules={[{ required: true, message: '请选择 Context' }]}>
+                    <Radio.Group optionType="button" buttonStyle="solid">
+                      <Radio.Button value="200k">200K</Radio.Button>
+                      <Radio.Button value="300k">300K</Radio.Button>
+                      <Radio.Button value="1m">1M</Radio.Button>
+                    </Radio.Group>
                   </Form.Item>
-                  <Form.Item name="thinkingOnly" valuePropName="checked" label="仅thinking模式">
+                  <Form.Item name="thinkingEnabled" valuePropName="checked" label="Thinking">
                     <Switch size='small' />
                   </Form.Item>
                   <Form.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
@@ -359,10 +375,10 @@ export default function SettingsPage({
                   {customizeTemperatureWatch === true ? (
                   <div className="settings-model-temperature-panel">
                     <div className="settings-model-temperature-panel-title">Temperature</div>
-                    {supportsThinkingWatch !== false ? (
+                    {thinkingEnabledWatch === true ? (
                       <Form.Item
                         name="temperatureThinking"
-                        label="思考模式开启时"
+                        label="Thinking 请求"
                         rules={[
                           { required: true, message: '请设置 temperature' },
                           { type: 'number', min: 0, max: 1, message: '范围为 0～1' },
@@ -378,7 +394,7 @@ export default function SettingsPage({
                     ) : null}
                     <Form.Item
                       name="temperatureNonThinking"
-                      label={supportsThinkingWatch === false ? '非思考模式' : '思考模式关闭时'}
+                      label={thinkingEnabledWatch === true ? '普通请求（备用）' : '普通请求'}
                       rules={[
                         { required: true, message: '请设置 temperature' },
                         { type: 'number', min: 0, max: 1, message: '范围为 0～1' },

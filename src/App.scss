@@ -105,10 +105,67 @@
 
 /* AI-Centric 工作区：AI 主区域占满 */
 .app-body--ai-centric {
+  isolation: isolate;
+
   > .panel-ai--fill {
     flex: 1;
     width: 100%;
     min-width: 0;
+  }
+}
+
+.workspace-primary-panel {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  width: auto !important;
+  min-width: 280px !important;
+}
+
+/* 收起后不占布局宽度；窗口最左侧仅保留不可见的 hover 感应区。 */
+.workspace-chapter-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 8;
+  width: 10px;
+  background: transparent;
+  outline: none;
+}
+
+.workspace-chapter-hover-panel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: clamp(240px, var(--chapter-hover-width), 420px);
+  z-index: 12;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: 12px 0 28px rgba(0, 0, 0, .22);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-8px);
+  transition:
+    opacity .16s ease .1s,
+    transform .16s ease .1s,
+    visibility 0s linear .26s;
+}
+
+.workspace-chapter-rail:hover .workspace-chapter-hover-panel,
+.workspace-chapter-rail:focus-within .workspace-chapter-hover-panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+  transition-delay: .08s, .08s, 0s;
+}
+
+@media (max-width: 900px) {
+  .workspace-primary-panel {
+    min-width: 240px !important;
   }
 }
 

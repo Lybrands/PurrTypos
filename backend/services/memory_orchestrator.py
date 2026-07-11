@@ -8,6 +8,11 @@ from typing import Any
 from services import long_term_memory_service
 
 DEFAULT_MEMORY_BUDGET = 6000
+CONTEXT_WINDOW_CHARS = {
+    "200k": 200_000,
+    "300k": 300_000,
+    "1m": 1_000_000,
+}
 
 GROUP_LABELS = {
     "canon": "必须遵循的设定",
@@ -39,12 +44,12 @@ async def build_memory_context(
     if book_id is None:
         return MemoryContextBlock("", diagnostics=_diagnostics())
 
-    budget = int(ctx.get("memoryBudget") or DEFAULT_MEMORY_BUDGET)
+    budget = _memory_budget(ctx)
     forced = await _resolve_forced_items(ctx, str(book_id))
     recalled = await long_term_memory_service.search_memory_items(
         str(book_id),
         _build_query(ctx, user_prompt),
-        options={"limit": int(ctx.get("memoryRecallLimit") or 16)},
+        options={"limit": _memory_recall_limit(ctx)},
     )
 
     by_id: dict[int, dict] = {}
@@ -212,3 +217,28 @@ def _diagnostics(
         "included": included,
         "deferred": deferred,
     }
+
+
+def _context_window_chars(value: Any) -> int:
+    key = str(value or "").strip().lower()
+    return CONTEXT_WINDOW_CHARS.get(key, CONTEXT_WINDOW_CHARS["200k"])
+
+
+def _memory_budget(ctx: dict) -> int:
+    explicit = ctx.get("memoryBudget")
+    if explicit:
+        return int(explicit)
+    total_window = _context_window_chars(ctx.get("contextWindow"))
+    return min(40_000, max(DEFAULT_MEMORY_BUDGET, total_window // 25))
+
+
+def _memory_recall_limit(ctx: dict) -> int:
+    explicit = ctx.get("memoryRecallLimit")
+    if explicit:
+        return int(explicit)
+    total_window = _context_window_chars(ctx.get("contextWindow"))
+    if total_window >= 1_000_000:
+        return 64
+    if total_window >= 300_000:
+        return 32
+    return 16

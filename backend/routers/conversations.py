@@ -41,9 +41,9 @@ async def save_conversation(body: SaveConversationRequest):
     conversation_id = await db.execute_and_get_id(
         """INSERT INTO ai_conversations
            (session_id, chapter_id, prompt, response, model, thinking,
-            tool_call_segments, thinking_blocks, thinking_durations_ms, task_plan,
-            subagent_result)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tool_call_segments, thinking_blocks, thinking_durations_ms, duration_ms,
+            task_plan, subagent_result)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             body.sessionId,
             body.chapterId,
@@ -54,6 +54,7 @@ async def save_conversation(body: SaveConversationRequest):
             tool_call_segments_json,
             thinking_blocks_json,
             thinking_durations_ms_json,
+            body.durationMs,
             task_plan_json,
             subagent_result_json,
         ],

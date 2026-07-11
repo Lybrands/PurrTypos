@@ -2,7 +2,6 @@ import React from "react";
 import { Button, Input } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import type { AiModelConfig, EntityId } from "../../../../types";
-import { thinkingOnlyModelIds } from "../../hooks";
 import AiContextBar, { type AiContextBarBindings } from "../AiContextBar";
 import AiComposeBottom, {
   type ModelSelectionBindings,
@@ -69,7 +68,6 @@ export default function MessageEditor({
       />
       <AiComposeBottom
         modelConfigs={modelConfigs}
-        thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}
         {...modelSelection}
         loading={false}
         onAbort={onAbort}

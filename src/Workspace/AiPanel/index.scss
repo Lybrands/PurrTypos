@@ -7,6 +7,22 @@
   overflow: hidden;
 }
 
+.ai-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.ai-conversation-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .system-prompt-area {
   padding: var(--spacing-sm) var(--spacing-sm);
   border-bottom: 1px solid var(--border);
@@ -19,7 +35,7 @@
   font-size: var(--font-size-sm);
 }
 
-/* ─── 会话作用域切换（章节对话 / 设定对话） ──────────── */
+/* ─── 会话作用域切换（章节对话 / 全局对话） ──────────── */
 .chat-scope-bar {
   flex-shrink: 0;
   display: flex;
@@ -222,26 +238,24 @@
   position: relative;
 
   &.user {
-    .bubble-label {
-      text-align: right;
-      color: var(--accent);
-      padding-right: var(--spacing-sm);
-    }
+    align-items: flex-end;
+    margin-top: 18px;
 
     .bubble-content {
+      width: fit-content;
+      max-width: min(78%, 680px);
       background: var(--accent-dim);
-      border: 1px solid rgba(79, 195, 247, 0.2);
+      border: none;
       color: var(--text-primary);
-      margin-left: 12px;
-      margin-right: var(--spacing-xs);
+      padding: 9px 13px;
+      border-radius: 15px 15px 4px 15px;
     }
 
     .bubble-user-actions {
       display: flex;
       justify-content: flex-end;
       margin-top: 4px;
-      margin-left: 12px;
-      margin-right: var(--spacing-xs);
+      margin-right: 2px;
       opacity: 0;
       transition: opacity 0.15s;
     }
@@ -293,11 +307,9 @@
     }
   }
 
-  &.assistant .bubble-content {
-    background: var(--bg-active);
-    border: 1px solid var(--border-light);
-    color: var(--text-primary);
-    margin-right: 12px;
+  &.assistant {
+    width: 100%;
+    margin: 2px 0 18px;
   }
 
   .bubble-footer {
@@ -308,7 +320,7 @@
   }
 
   &.assistant .bubble-footer {
-    margin-right: 12px;
+    min-height: 24px;
   }
 
   .bubble-model-tag {
@@ -316,7 +328,7 @@
     color: var(--text-muted);
     opacity: 0.7;
     line-height: 1.4;
-    padding-left: 2px;
+    padding-left: 0;
   }
 
   .bubble-bookmark-btn {
@@ -341,17 +353,12 @@
   }
 
   &.error .bubble-content {
-    background: rgba(244, 67, 54, 0.1);
-    border-color: rgba(244, 67, 54, 0.3);
+    padding: 8px 12px;
+    background: rgba(244, 67, 54, 0.06);
+    border: none;
+    border-left: 2px solid rgba(244, 67, 54, 0.5);
     color: #ef9a9a;
   }
-}
-
-.bubble-label {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  color: var(--text-muted);
-  padding: 0 var(--spacing-xs);
 }
 
 .bubble-content {
@@ -483,17 +490,6 @@
   }
 }
 
-.chat-input-area-divider {
-  flex-shrink: 0;
-  height: 3px;
-  cursor: ns-resize;
-  background: var(--border);
-  transition: background 0.15s;
-  &:hover {
-    background: var(--accent);
-  }
-}
-
 .chat-input-area {
   padding: var(--spacing);
   border-top: 1px solid var(--border);
@@ -506,19 +502,14 @@
 }
 
 .chat-input-inner {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  & > * {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
+
   textarea.ant-input {
     resize: none;
-    flex: 1;
+    flex: 0 0 auto;
     min-height: 0;
   }
 }
@@ -557,12 +548,10 @@
 .chat-bubble.assistant .bubble-assistant-body {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-right: 12px;
-  padding: var(--spacing-sm);
-  background: var(--bg-active);
-  border: 1px solid var(--border-light);
-  border-radius: var(--border-radius);
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: none;
   color: var(--text-primary);
 
   .bubble-content {
@@ -588,6 +577,42 @@
   .bubble-content--waiting-dots {
     color: var(--text-muted);
     margin-top: 2px;
+  }
+}
+
+.assistant-turn-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 22px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+
+  > .anticon:first-child {
+    color: var(--success, #52c41a);
+  }
+
+  &.is-streaming {
+    margin-top: 4px;
+
+    > .anticon:first-child {
+      color: var(--accent);
+    }
+  }
+}
+
+.assistant-turn-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+
+  &::before {
+    content: "·";
+    margin-right: 1px;
+    opacity: .55;
   }
 }
 
@@ -688,22 +713,6 @@
     right: max(var(--spacing), calc(var(--main-col-gutter) + 16px));
   }
 
-  /* divider 弱化：默认透明，hover 才出来 */
-  .chat-input-area-divider {
-    background: transparent;
-    height: 6px;
-    width: var(--main-col-width);
-    max-width: 100%;
-    margin: 0 auto;
-    border-radius: 3px;
-    transition: background 0.2s;
-    flex-shrink: 0;
-
-    &:hover {
-      background: var(--border);
-    }
-  }
-
   /* 输入区 = 大圆角卡片 */
   .chat-input-area {
     background: var(--bg-panel);
@@ -786,61 +795,5 @@
     .ant-empty-description {
       font-size: var(--font-size-lg);
     }
-  }
-}
-
-/* ─── 写作模式浮岛：ai-panel--compact ────────────────────────────
- * mainPanel === 'editor' 时 AI 栏收紧为浮岛形态：
- * - 隐藏 system prompt / 模式切换等次要控件，让出空间给写作
- * - 保留 session 标签栏（其中的「+ 新建对话」/ 历史按钮是高频入口，悬浮态也要可达）
- * - 消息气泡字号与 padding 压缩；历史列表仍可滚动
- * - 输入区保留完整能力（写作中的 AI 召唤点）
- */
-.ai-panel--compact {
-  .system-prompt-area {
-    display: none;
-  }
-
-  /* session 标签栏在窄面板里收紧：单行水平滚，按钮区永远右贴 */
-  .session-tabs-bar.ant-tabs {
-    .ant-tabs-nav {
-      min-height: 30px;
-    }
-    .ant-tabs-tab {
-      padding: 2px 6px;
-      font-size: var(--font-size-sm);
-    }
-  }
-
-  .panel-header {
-    min-height: 32px;
-    padding: 0 var(--spacing-sm);
-
-    .panel-title {
-      font-size: var(--font-size-sm);
-      color: var(--text-secondary);
-    }
-  }
-
-  .chat-bubble {
-    font-size: var(--font-size-sm);
-    line-height: var(--line-height-sm);
-
-    &.user .bubble-content,
-    &.assistant .bubble-assistant-body {
-      padding: var(--spacing-xs) var(--spacing-sm);
-    }
-
-    .bubble-label {
-      font-size: var(--font-size-xs);
-    }
-  }
-
-  .chat-input-area {
-    padding: var(--spacing-xs) var(--spacing-sm);
-  }
-
-  .chat-input-inner textarea.ant-input {
-    font-size: var(--font-size-sm);
   }
 }

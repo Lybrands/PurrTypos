@@ -36,6 +36,26 @@ export default function App() {
     window.electronAPI.setSettings({ ai_model_configs: configs })
   }, [])
 
+  const updateModelConfig = React.useCallback((
+    id: string,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+  ) => {
+    setModelConfigs((prev) => {
+      const next = prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              ...patch,
+              supportsThinking: patch.thinkingEnabled ?? item.supportsThinking,
+              thinkingOnly: false,
+            }
+          : item,
+      )
+      void window.electronAPI.setSettings({ ai_model_configs: next })
+      return next
+    })
+  }, [])
+
   const handleSyncOutlineChapterChange = React.useCallback((value: boolean) => {
     setSyncOutlineChapter(value)
     window.electronAPI.setSettings({ sync_outline_chapter: value })
@@ -130,6 +150,7 @@ export default function App() {
               onGoHome={handleBackToHome}
               onOpenSettings={() => setShowSettings(true)}
               modelConfigs={modelConfigs}
+              onUpdateModelConfig={updateModelConfig}
               syncOutlineChapter={syncOutlineChapter}
             />
           )}

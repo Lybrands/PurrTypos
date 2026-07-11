@@ -7,16 +7,15 @@
  */
 
 import type {
+  AiContextWindow,
   EntityId,
   Outline,
 } from '../../types'
 
-/** 单条关联章节的内容截断阈值，避免 prompt 爆炸 */
-export const ASSOCIATED_CHAPTER_CHAR_LIMIT = 2000
-
 export interface BuildInjectedContextParams {
   bookId: EntityId | null
   userPrompt: string
+  contextWindow: AiContextWindow
   associatedChapterIds: EntityId[]
   associatedOutlineIds: EntityId[]
   availableOutlines: Outline[]
@@ -29,6 +28,7 @@ export interface BuildInjectedContextParams {
 export async function buildInjectedContext({
   bookId,
   userPrompt,
+  contextWindow,
   associatedChapterIds,
   associatedOutlineIds,
   availableOutlines,
@@ -49,9 +49,10 @@ export async function buildInjectedContext({
         try {
           const res = await window.electronAPI.getArticle({ chapterId: id })
           const content = res.success ? res.data?.content?.trim() ?? '' : ''
+          const charLimit = contextWindow === '1m' ? 12000 : contextWindow === '300k' ? 6000 : 4000
           const truncated =
-            content.length > ASSOCIATED_CHAPTER_CHAR_LIMIT
-              ? content.slice(0, ASSOCIATED_CHAPTER_CHAR_LIMIT) +
+            content.length > charLimit
+              ? content.slice(0, charLimit) +
                 `\n……（已截断，原文约 ${content.length} 字）`
               : content
           return truncated
@@ -86,6 +87,7 @@ export async function buildInjectedContext({
         mode: 'inline',
         selectedMemoryIds,
         selectedForeshadowingIds,
+        contextWindow,
       })
       if (res.success && res.data?.text) {
         blocks.push(res.data.text)

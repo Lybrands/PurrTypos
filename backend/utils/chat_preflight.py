@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from database.crud.articles import get_article
@@ -22,10 +23,18 @@ from utils.text import extract_text_from_lexical
 
 logger = logging.getLogger(__name__)
 
-# 注入预算：单章/单大纲上限 + 总预算。超出部分降级为"仅列条目 + 提示用工具读取"。
-PER_CHAPTER_CAP = 6000
-PER_OUTLINE_CAP = 4000
-TOTAL_BUDGET = 24000
+@dataclass(frozen=True)
+class AssociatedContextBudget:
+    total: int
+    per_chapter: int
+    per_outline: int
+
+
+CONTEXT_WINDOW_CHARS: dict[str, int] = {
+    "200k": 200_000,
+    "300k": 300_000,
+    "1m": 1_000_000,
+}
 
 
 def _clean_title(s: Any) -> str:
@@ -52,12 +61,13 @@ async def build_associated_context_block(tool_ctx: dict) -> str:
     if book_id is None or (not acc_ch and not acc_ol):
         return ""
 
+    budget_cfg = _associated_context_budget(ctx.get("contextWindow"))
     lines: list[str] = [
         "【关联上下文 — 用户在本轮勾选的章节/大纲，内容已由宿主注入】",
         "以下内容是用户明确要求你参考的素材，直接依据它们回答；"
         "除标注「已截断」或「未注入」的条目外，无需再调工具重复读取。",
     ]
-    budget = TOTAL_BUDGET
+    budget = budget_cfg.total
     deferred: list[str] = []
 
     for cid in acc_ch:
@@ -75,7 +85,7 @@ async def build_associated_context_block(tool_ctx: dict) -> str:
             deferred.append(f"- 章节 chapterId={cid} 《{title}》")
             continue
 
-        cap = min(PER_CHAPTER_CAP, budget)
+        cap = min(budget_cfg.per_chapter, budget)
         truncated = len(text) > cap
         shown = text[:cap]
         budget -= len(shown)
@@ -108,7 +118,7 @@ async def build_associated_context_block(tool_ctx: dict) -> str:
             if budget <= 0:
                 deferred.append(f"- 大纲 outlineId={oid} 《{title}》")
                 continue
-            cap = min(PER_OUTLINE_CAP, budget)
+            cap = min(budget_cfg.per_outline, budget)
             truncated = len(md) > cap
             shown = md[:cap]
             budget -= len(shown)
@@ -133,6 +143,7 @@ async def build_selected_memory_block(
     book_id: Any | None = None,
     user_prompt: str = "",
     mode: str = "",
+    context_window: str | None = None,
 ) -> str:
     """用户在 AiContextBar 勾选的设定/伏笔条目，前置 fetch 后注入。
 
@@ -145,11 +156,15 @@ async def build_selected_memory_block(
         fids = [str(x) for x in (foreshadowing_ids or []) if str(x).strip()]
         if not book_id:
             return ""
+        memory_budget, memory_recall_limit = _memory_budget(context_window)
         block = await memory_orchestrator.build_memory_context(
             {
                 "bookId": book_id,
                 "selectedMemoryIds": mids,
                 "selectedForeshadowingIds": fids,
+                "memoryBudget": memory_budget,
+                "memoryRecallLimit": memory_recall_limit,
+                "contextWindow": context_window,
             },
             user_prompt,
             mode,
@@ -158,6 +173,32 @@ async def build_selected_memory_block(
     except Exception:
         logger.warning("[chat-preflight] 读取勾选记忆失败", exc_info=True)
         return ""
+
+
+def _context_window_chars(value: Any) -> int:
+    key = str(value or "").strip().lower()
+    return CONTEXT_WINDOW_CHARS.get(key, CONTEXT_WINDOW_CHARS["200k"])
+
+
+def _associated_context_budget(value: Any) -> AssociatedContextBudget:
+    total_window = _context_window_chars(value)
+    return AssociatedContextBudget(
+        total=min(120_000, max(24_000, total_window // 5)),
+        per_chapter=min(30_000, max(6_000, total_window // 25)),
+        per_outline=min(20_000, max(4_000, total_window // 35)),
+    )
+
+
+def _memory_budget(value: Any) -> tuple[int, int]:
+    total_window = _context_window_chars(value)
+    budget = min(40_000, max(6_000, total_window // 25))
+    if total_window >= 1_000_000:
+        recall_limit = 64
+    elif total_window >= 300_000:
+        recall_limit = 32
+    else:
+        recall_limit = 16
+    return budget, recall_limit
 
 
 def build_session_binding_prompt(tool_ctx: dict, tools_enabled: bool) -> str:

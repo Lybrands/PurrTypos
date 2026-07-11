@@ -8,6 +8,7 @@ I/O 无关的判定 / 拼装 / 消息改写逻辑抽出来，便于单测，也�
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,8 +77,71 @@ class ChunkOutcome:
     """
 
     events: list[dict] = field(default_factory=list)
+    todo_events: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str | None = None
     has_choice: bool = False
+
+
+class RuntimeTodoExtractor:
+    """Extract hidden ``<agent_todos>{...}</agent_todos>`` events from content deltas."""
+
+    START = "<agent_todos>"
+    END = "</agent_todos>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    def feed(self, text: str) -> tuple[str, list[dict[str, Any]]]:
+        if not text:
+            return "", []
+        self._buffer += text
+        visible: list[str] = []
+        todos: list[dict[str, Any]] = []
+
+        while self._buffer:
+            if not self._inside:
+                start_idx = self._buffer.find(self.START)
+                if start_idx < 0:
+                    flush_len = self._safe_flush_len(self._buffer)
+                    if flush_len <= 0:
+                        break
+                    visible.append(self._buffer[:flush_len])
+                    self._buffer = self._buffer[flush_len:]
+                    continue
+                if start_idx > 0:
+                    visible.append(self._buffer[:start_idx])
+                self._buffer = self._buffer[start_idx + len(self.START):]
+                self._inside = True
+                continue
+
+            end_idx = self._buffer.find(self.END)
+            if end_idx < 0:
+                break
+            raw = self._buffer[:end_idx].strip()
+            parsed = self._parse_payload(raw)
+            if parsed is not None:
+                todos.append(parsed)
+            self._buffer = self._buffer[end_idx + len(self.END):]
+            self._inside = False
+
+        return "".join(visible), todos
+
+    def _safe_flush_len(self, text: str) -> int:
+        marker_start = text.rfind("<")
+        if marker_start < 0:
+            return len(text)
+        suffix = text[marker_start:]
+        if self.START.startswith(suffix):
+            return marker_start
+        return len(text)
+
+    def _parse_payload(self, raw: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 class StreamAccumulator:
@@ -87,10 +151,11 @@ class StreamAccumulator:
     结束原因驱动的控制流（done / 工具回合）仍留在 endpoint 里。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, todo_extractor: RuntimeTodoExtractor | None = None) -> None:
         self.content = ""
         self.thinking = ""
         self.tool_calls: list[dict] = []
+        self.todo_extractor = todo_extractor
 
     def process_chunk(self, chunk: dict) -> ChunkOutcome:
         choices = chunk.get("choices") or []
@@ -108,14 +173,21 @@ class StreamAccumulator:
             self.thinking += thinking_delta
             events.append({"thinkingDelta": thinking_delta})
 
+        todo_events: list[dict[str, Any]] = []
+
         if content_delta:
-            self.content, emitted = append_model_content(self.content, content_delta)
+            visible_delta = content_delta
+            if self.todo_extractor:
+                visible_delta, todo_events = self.todo_extractor.feed(content_delta)
+            self.content, emitted = append_model_content(self.content, visible_delta)
             if emitted:
                 events.append({"delta": emitted})
         else:
             # 非流式 / 一次性返回的 message.content 兜底
             msg_content = (c0.get("message") or {}).get("content")
             if isinstance(msg_content, str) and msg_content:
+                if self.todo_extractor:
+                    msg_content, todo_events = self.todo_extractor.feed(msg_content)
                 self.content, emitted = append_model_content(
                     self.content, "", msg_content,
                 )
@@ -128,6 +200,7 @@ class StreamAccumulator:
 
         return ChunkOutcome(
             events=events,
+            todo_events=todo_events,
             finish_reason=c0.get("finish_reason"),
             has_choice=True,
         )

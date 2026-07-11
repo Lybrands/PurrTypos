@@ -3,12 +3,13 @@ import { App as AntdApp } from "antd";
 import type { AiSession, EntityId } from "../../../types";
 import type { ChatMessage } from "./chat.types";
 
+// "setting" 为历史存储值，对应 UI 上的「全局对话」（不绑章节、整本书共享）
 export type ChatSessionScope = "chapter" | "setting";
 
 interface UseAiSessionsParams {
   bookId: EntityId | null | undefined;
   chapterId: EntityId | null | undefined;
-  /** 会话作用域：chapter = 按章节隔离（默认）；setting = 不绑章节的设定会话 */
+  /** 会话作用域：chapter = 按章节隔离（默认）；setting = 不绑章节的全局会话 */
   scope?: ChatSessionScope;
   conversations: ChatMessage[];
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;

@@ -86,6 +86,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
     labels: taggedLabels,
     labelOutcomes,
     cachedFlags,
+    startedAt: performance.now(),
     trace: {
       insertedByDag,
       insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],

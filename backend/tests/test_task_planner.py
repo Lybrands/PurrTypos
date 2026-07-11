@@ -99,8 +99,8 @@ class TestNormalizeModelTaskPlan:
             available_tool_names={"getChapterContent"},
         ) is None
 
-    def test_write_plan_without_confirm_boundary_is_rejected(self):
-        assert normalize_model_task_plan(
+    def test_write_plan_without_confirm_boundary_gets_confirm_step(self):
+        plan = normalize_model_task_plan(
             {
                 "needsTodos": True,
                 "title": "写入",
@@ -121,7 +121,31 @@ class TestNormalizeModelTaskPlan:
                 ],
             },
             available_tool_names=set(),
-        ) is None
+        )
+
+        assert plan is not None
+        assert plan["steps"][-1]["type"] == "confirm"
+        assert plan["steps"][-1]["title"] == "确认修改"
+
+    def test_string_needs_todos_true_is_accepted(self):
+        plan = normalize_model_task_plan(
+            {
+                "needsTodos": "true",
+                "title": "单步分析",
+                "steps": [
+                    {
+                        "id": "analyze",
+                        "title": "分析请求",
+                        "type": "analyze",
+                        "executor": "model",
+                    },
+                ],
+            },
+            available_tool_names=set(),
+        )
+
+        assert plan is not None
+        assert [step["id"] for step in plan["steps"]] == ["analyze"]
 
     def test_expert_executor_is_rejected(self):
         assert normalize_model_task_plan(
@@ -205,6 +229,36 @@ class TestNormalizeModelTaskPlan:
 
         assert plan is not None
         assert [s["title"] for s in plan["steps"]] == ["读取人物设定", "分析前后一致性"]
+
+    @pytest.mark.asyncio
+    async def test_generate_model_task_plan_preserves_model_temperature(self, monkeypatch):
+        import services.ai_provider as ai_provider
+
+        captured_options = {}
+
+        async def fake_create_chat_no_stream(key, messages, options, api_provider, signal):
+            captured_options.update(options)
+            return {
+                "message": {
+                    "content": '{"needsTodos":true,"title":"计划","todos":[{"id":"read","title":"读取","type":"read","executor":"tool","expectedTools":["getChapterContent"]},{"id":"analyze","title":"分析","type":"analyze","executor":"model"}]}'
+                },
+                "model": "fake",
+            }
+
+        monkeypatch.setattr(ai_provider, "create_chat_no_stream", fake_create_chat_no_stream)
+
+        plan = await generate_model_task_plan(
+            key="k",
+            api_provider="openai",
+            planner_options={"model": "kimi-k2.6", "temperature": 1, "max_tokens": 8192},
+            user_text="帮我分析当前章节的问题",
+            chat_agent_mode="agent",
+            available_tool_names={"getChapterContent"},
+        )
+
+        assert plan is not None
+        assert captured_options["temperature"] == 1
+        assert captured_options["max_tokens"] == 1200
 
     @pytest.mark.asyncio
     async def test_generate_model_task_plan_rejects_invalid_model_tools(self, monkeypatch):

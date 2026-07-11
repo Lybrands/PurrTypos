@@ -6,9 +6,9 @@ import SessionHistoryPopover from "../SessionHistoryPopover";
 
 interface SessionTabsBarProps {
   bookId: EntityId;
-  /** 设定作用域会话不绑章节，传 null */
+  /** 全局作用域会话不绑章节，传 null */
   chapterId: EntityId | null;
-  /** 会话作用域；setting 时历史列表查询不绑章节的设定会话 */
+  /** 会话作用域；setting 时历史列表查询不绑章节的全局会话 */
   scope?: "chapter" | "setting";
   /** 章节作用域下显示在标签栏左侧的当前章节标题 */
   chapterTitle?: string;
