@@ -2,13 +2,13 @@
 import React from "react";
 import {
   ArrowUpOutlined,
+  MessageOutlined,
 } from "@ant-design/icons";
 import StopCircleIcon from "../../icons/StopCircleIcon";
 import {
   App as AntdApp,
   Button,
   Input,
-  Segmented,
   Tooltip,
 } from "antd";
 import type { MenuProps } from "antd";
@@ -18,20 +18,18 @@ import type {
 } from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
 import {
-  INPUT_AREA_MAX,
-  INPUT_AREA_MIN,
   INITIAL_FIRST_ITEM_INDEX,
 } from "./constants";
 import {
   parseConversationsFromApi,
 } from "./utils";
-import { thinkingOnlyModelIds, useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage, type ChatSessionScope } from "./hooks";
+import { useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage, type ChatSessionScope } from "./hooks";
 import FavoritesModal from "./components/FavoritesModal";
 import MemoryModal from "./components/MemoryModal";
 import AiPanelHeader from "./components/AiPanelHeader";
 import ChatEmptyState from "./components/ChatEmptyState";
 import ChatMessageList from "./components/ChatMessageList";
-import SessionTabsBar from "./components/SessionTabsBar";
+import ConversationSidebar from "./components/ConversationSidebar";
 import AiContextBar, { type AiContextBarBindings } from "./components/AiContextBar";
 import AiComposeBottom, {
   type ModelSelectionBindings,
@@ -40,22 +38,16 @@ import "./index.scss";
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
-  /** 是否为当前主区域（占 56%）。 */
-  isMain: boolean;
-  /** 点击扩展按钮时回调：非主时切换为主，主时回到默认（导演模式 = AI 主）。 */
-  onSetMain: () => void;
-  /**
-   * 写作模式浮岛：用于 mainPanel === 'editor' 时收紧 AI 面板视觉。
-   * 隐藏 system prompt 区、会话栏，最近消息超出自动截断滚动。
-   */
-  compact?: boolean;
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void;
+  conversationSidebarOpen?: boolean;
+  onConversationSidebarOpenChange?: (open: boolean) => void;
 }
 
 export default function AiPanel({
   modelConfigs = [],
-  isMain,
-  onSetMain,
-  compact = false,
+  onUpdateModelConfig,
+  conversationSidebarOpen = true,
+  onConversationSidebarOpenChange,
 }: AiPanelProps) {
   const { message: appMessage } = AntdApp.useApp();
   const {
@@ -68,9 +60,9 @@ export default function AiPanel({
   const [prompt, setPrompt] = React.useState("");
   const [conversations, setConversations] = React.useState<ChatMessage[]>([]);
   const [loading, setLoading] = React.useState(false);
-  /** 会话作用域：chapter = 章节对话（默认）；setting = 设定对话（人物/背景，不绑章节） */
+  /** 会话作用域：chapter = 章节对话（默认）；setting = 全局对话（不绑章节，整本书共享；存储值仍为 setting 以兼容历史） */
   const [chatScope, setChatScope] = React.useState<ChatSessionScope>("chapter");
-  /** 设定入口（人物卡/背景「与 AI 讨论」）触发后，待会话列表就绪时自动建会话 */
+  /** 人物卡/背景「与 AI 讨论」入口触发后，待会话列表就绪时自动建会话 */
   const pendingSettingSessionRef = React.useRef(false);
   const effectiveChapterId = chatScope === "setting" ? null : chapterId;
 
@@ -96,8 +88,6 @@ export default function AiPanel({
     setSelectedModel,
     chatAgentMode,
     setChatAgentMode,
-    thinkingEnabled,
-    setThinkingEnabled,
     selectedModelConfig,
     modelConfigsRecord,
   } = useAiModelPrefs(bookId, modelConfigs);
@@ -138,7 +128,7 @@ export default function AiPanel({
     setLoading,
   });
 
-  // 设定入口事件：切到设定作用域 + 预填上下文；会话列表就绪后若无会话自动新建
+  // 「与 AI 讨论」入口事件：切到全局作用域 + 预填上下文；会话列表就绪后若无会话自动新建
   React.useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ prefill?: string }>).detail;
@@ -174,9 +164,7 @@ export default function AiPanel({
     setScrolledUpByReason,
     isAtBottom,
     setIsAtBottom,
-    inputAreaHeight,
     handleScrollToBottom,
-    handleInputAreaDividerMouseDown,
     pinNewTurnToTop,
   } = useChatScroll({ loading, combinedData });
 
@@ -224,23 +212,21 @@ export default function AiPanel({
     ],
   );
 
-  /** 模型选择的整组绑定：对话模式、所选模型、思考开关（见 ModelSelectionBindings）。 */
+  /** 模型选择的整组绑定：对话模式、所选模型（见 ModelSelectionBindings）。 */
   const modelSelection = React.useMemo<ModelSelectionBindings>(
     () => ({
       chatAgentMode,
       setChatAgentMode,
       selectedModel,
       setSelectedModel,
-      thinkingEnabled,
-      setThinkingEnabled,
+      updateModelConfig: onUpdateModelConfig,
     }),
     [
       chatAgentMode,
       setChatAgentMode,
       selectedModel,
       setSelectedModel,
-      thinkingEnabled,
-      setThinkingEnabled,
+      onUpdateModelConfig,
     ],
   );
 
@@ -276,7 +262,6 @@ export default function AiPanel({
     currentChapterTitle:
       chatScope === "setting" ? undefined : activeChapterTitle || undefined,
     selectedModel,
-    thinkingEnabled,
     agentEnabled: chatAgentMode !== "ask",
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
@@ -338,6 +323,7 @@ export default function AiPanel({
               content: acc.response || "",
               thinking: acc.thinking || undefined,
               thinkingStartedAt: acc.thinkingBlockStartedAt,
+              turnStartedAt: acc.turnStartedAt,
               toolCallSegments: acc.toolCallSegments,
               contentAfterToolCalls: acc.toolCallSegments?.length
                 ? (acc.contentAfterToolCalls ?? "")
@@ -387,67 +373,54 @@ export default function AiPanel({
   ];
 
   return (
-    <div
-      className={`ai-panel ${isMain ? "panel-main" : ""} ${compact && !isMain ? "ai-panel--compact" : ""}`.trim()}
-    >
-      <AiPanelHeader
-        isMain={isMain}
-        onSetMain={onSetMain}
-        menuItems={ellipsisMenuItems}
-      />
+    <div className="ai-panel panel-main">
+      <AiPanelHeader menuItems={ellipsisMenuItems} />
 
-      {/* 会话作用域切换：章节对话（按章节隔离） / 设定对话（人物、背景，不绑章节） */}
-      {bookId != null && (
-        <div className="chat-scope-bar">
-          <Segmented
-            size="small"
-            value={chatScope}
-            onChange={(v) => {
-              if (loading) {
-                appMessage.warning("当前对话进行中，请先等待完成或停止");
-                return;
-              }
-              setChatScope(v as ChatSessionScope);
-            }}
-            options={[
-              { label: "章节对话", value: "chapter" },
-              { label: "设定对话", value: "setting" },
-            ]}
-          />
-        </div>
-      )}
-
-      {/* Session 切换栏：章节作用域需已选章节；设定作用域直接显示 */}
-      {bookId != null && (chatScope === "setting" || chapterId != null) && (
-        <SessionTabsBar
+      <div className="ai-panel-body">
+        {bookId != null && conversationSidebarOpen && (
+          <ConversationSidebar
           bookId={bookId}
           chapterId={effectiveChapterId}
+          bookTitle={bookTitle}
           scope={chatScope}
-          chapterTitle={
-            chatScope === "chapter" ? activeChapterTitle || undefined : undefined
-          }
+          chapterTitle={chatScope === "chapter" ? activeChapterTitle || undefined : undefined}
           sessions={sessions}
           activeSessionId={activeSessionId}
           loading={loading}
           isCurrentSessionEmpty={conversations.length === 0}
-          editingTabId={editingTabId}
+          editingSessionId={editingTabId}
           editingTitle={editingTitle}
+          onScopeChange={setChatScope}
           onActiveSessionChange={setActiveSessionId}
-          onEditingTabIdChange={setEditingTabId}
+          onEditingSessionIdChange={setEditingTabId}
           onEditingTitleChange={setEditingTitle}
-          onSaveTabTitle={handleSaveTabTitle}
+          onSaveTitle={handleSaveTabTitle}
           onNewSession={handleNewSession}
-          onCloseTab={handleCloseTab}
+          onCloseSession={handleCloseTab}
           onOpenFromHistory={handleOpenFromHistory}
           onDeleteFromHistory={handleDeleteFromHistory}
           onBlockedByLoading={() => {
             appMessage.warning("当前对话进行中，请先等待完成或停止");
           }}
+          onCollapse={() => onConversationSidebarOpenChange?.(false)}
         />
-      )}
+        )}
 
-      <div className="chat-history-wrap">
-        <div className="chat-history">
+        {bookId != null && !conversationSidebarOpen && (
+          <Tooltip title="展开对话列表" placement="right">
+            <Button
+              type="text"
+              className="conversation-sidebar-reopen"
+              icon={<MessageOutlined />}
+              onClick={() => onConversationSidebarOpenChange?.(true)}
+              aria-label="展开对话列表"
+            />
+          </Tooltip>
+        )}
+
+        <div className="ai-conversation-main">
+          <div className="chat-history-wrap">
+            <div className="chat-history">
           {combinedData.length === 0 && !loading && (
             <ChatEmptyState
               hasBook={bookId != null}
@@ -479,35 +452,9 @@ export default function AiPanel({
             onAbort={handleAbort}
             onAddFavorite={handleAddFavorite}
           />
-        </div>
-      </div>
-      <div
-        className="chat-input-area-divider"
-        onMouseDown={handleInputAreaDividerMouseDown}
-        role="separator"
-        aria-orientation="horizontal"
-        title="拖拽调整输入区域高度"
-      />
-      <div
-        className="chat-input-area"
-        style={{
-          height: inputAreaHeight,
-          minHeight: INPUT_AREA_MIN,
-          maxHeight: INPUT_AREA_MAX,
-        }}
-      >
-        {bookId != null && (
-          <AiContextBar
-            bookId={bookId}
-            chapterId={effectiveChapterId ?? null}
-            {...contextBar}
-            currentPrompt={prompt}
-            onInsertPrompt={handleInsertPrompt}
-            promptTemplateContext={promptTemplateContext}
-            promptTemplateDisabled={loading}
-          />
-        )}
-
+            </div>
+          </div>
+          <div className="chat-input-area">
         <div className="chat-input-inner">
           <Input.TextArea
             className="chat-input"
@@ -515,7 +462,7 @@ export default function AiPanel({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧"
             disabled={loading}
-            autoSize={false}
+            autoSize={{ minRows: 1, maxRows: 5 }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 if (
@@ -533,12 +480,24 @@ export default function AiPanel({
             }}
           />
         </div>
-        <AiComposeBottom
+            <AiComposeBottom
           modelConfigs={modelConfigs}
-          thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}
           {...modelSelection}
           loading={loading}
           onAbort={handleAbort}
+          leftContent={
+            bookId != null ? (
+              <AiContextBar
+                bookId={bookId}
+                chapterId={effectiveChapterId ?? null}
+                {...contextBar}
+                currentPrompt={prompt}
+                onInsertPrompt={handleInsertPrompt}
+                promptTemplateContext={promptTemplateContext}
+                promptTemplateDisabled={loading}
+              />
+            ) : null
+          }
           rightContent={
             <div className="chat-compose-right">
               {loading ? (
@@ -568,7 +527,9 @@ export default function AiPanel({
               )}
             </div>
           }
-        />
+            />
+          </div>
+        </div>
       </div>
 
       <FavoritesModal

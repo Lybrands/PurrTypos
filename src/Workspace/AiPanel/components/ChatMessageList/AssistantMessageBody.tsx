@@ -108,6 +108,9 @@ function AssistantMessageBodyInner({
                 labelOutcomes={seg.labelOutcomes}
                 cachedFlags={seg.cachedFlags}
                 completedToolCount={toolCompletedCount}
+                startedAt={seg.startedAt}
+                durationMs={seg.durationMs}
+                streaming={Boolean(part.isLive)}
               />
             );
           }

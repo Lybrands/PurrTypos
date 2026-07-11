@@ -29,7 +29,7 @@ async def get_sessions(
     includeClosed: Optional[bool] = Query(False),
     scope: Optional[str] = Query(None),
 ):
-    """scope=setting 时仅返回显式标记的「设定会话」；章节查询排除设定会话。"""
+    """scope=setting 时仅返回显式标记的「全局会话」；章节查询排除全局会话。"""
     db = get_db()
     conditions = []
     params: list = []

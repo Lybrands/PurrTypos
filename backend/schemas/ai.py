@@ -28,6 +28,7 @@ class ChatStreamRequest(BaseModel):
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
     chatAgentMode: Optional[str] = None
+    contextWindow: Optional[str] = None
 
 
 class ListModelsRequest(BaseModel):

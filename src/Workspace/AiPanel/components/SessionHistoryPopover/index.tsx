@@ -32,7 +32,7 @@ const DATE_GROUP_ORDER = ['今天', '昨天', '近 7 天', '更早']
 export interface SessionHistoryPopoverProps {
   bookId: EntityId | null | undefined
   chapterId: EntityId | null | undefined
-  /** setting 时查询不绑章节的设定会话历史 */
+  /** setting 时查询不绑章节的全局会话历史 */
   scope?: 'chapter' | 'setting'
   activeSessionId: number | null
   /** 用户点击某条历史对话时回调，父组件负责加入标签栏并激活 */

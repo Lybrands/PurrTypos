@@ -34,7 +34,10 @@ export function getPrefsKey(bookId: EntityId | null): string {
 export function loadModelPrefs(
   bookId: EntityId | null,
   validModelIds?: string[],
-): { model: string; chatAgentMode: ChatAgentMode; thinkingEnabled: boolean } {
+): {
+  model: string
+  chatAgentMode: ChatAgentMode
+} {
   const defaultModel = validModelIds?.length ? validModelIds[0] : ''
   const isValid = (id: string) =>
     Array.isArray(validModelIds) && validModelIds.length > 0 && validModelIds.includes(id)
@@ -45,11 +48,9 @@ export function loadModelPrefs(
       const p = JSON.parse(raw) as {
         model?: string
         agentEnabled?: boolean
-        thinkingEnabled?: boolean
         chatAgentMode?: unknown
       }
       const model = typeof p.model === 'string' && isValid(p.model) ? p.model : defaultModel
-      const thinkingEnabled = typeof p.thinkingEnabled === 'boolean' ? p.thinkingEnabled : false
       let chatAgentMode: ChatAgentMode
       if (isChatAgentMode(p.chatAgentMode)) {
         chatAgentMode = p.chatAgentMode
@@ -65,24 +66,26 @@ export function loadModelPrefs(
       } else {
         chatAgentMode = defaultChatAgentMode
       }
-      return { model, chatAgentMode, thinkingEnabled }
+      return { model, chatAgentMode }
     }
   } catch {
     // ignore
   }
-  return { model: defaultModel, chatAgentMode: defaultChatAgentMode, thinkingEnabled: false }
+  return {
+    model: defaultModel,
+    chatAgentMode: defaultChatAgentMode,
+  }
 }
 
 export function saveModelPrefs(
   bookId: EntityId | null,
   model: string,
-  chatAgentMode: ChatAgentMode,
-  thinkingEnabled: boolean
+  chatAgentMode: ChatAgentMode
 ): void {
   try {
     localStorage.setItem(
       getPrefsKey(bookId),
-      JSON.stringify({ model, chatAgentMode, thinkingEnabled })
+      JSON.stringify({ model, chatAgentMode })
     )
   } catch {
     // ignore
@@ -156,6 +159,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         content: item.response,
         conversationId: item.id,
         model: item.model || undefined,
+        durationMs: typeof item.duration_ms === 'number' ? item.duration_ms : undefined,
         thinking: item.thinking || undefined,
         thinkingBlocks,
         thinkingDurationsMs,

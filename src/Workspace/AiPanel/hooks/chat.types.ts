@@ -65,6 +65,10 @@ export interface ToolCallSegment {
   cachedFlags?: boolean[];
   /** 本段内已执行完成的工具数量（与后端 toolIndexCompleted 同步，顺序递增） */
   completedToolCount?: number;
+  /** 工具批次开始时间（performance.now），仅实时 UI 使用。 */
+  startedAt?: number;
+  /** 整个工具批次耗时；完成时写入历史。 */
+  durationMs?: number;
   trace?: {
     insertedByDag?: number;
     insertedSkillNames?: string[];
@@ -85,6 +89,10 @@ export interface ChatMessage {
   agentRunId?: string;
   isError?: boolean;
   model?: string;
+  /** 本轮开始时间（performance.now），仅实时 UI 使用。 */
+  turnStartedAt?: number;
+  /** 从发送到完成/中止/报错的整轮耗时。 */
+  durationMs?: number;
   /** 当前/最后一轮思考（流式时持续追加） */
   thinking?: string;
   /** 当前流式思考块开始时间（performance.now），仅实时 UI 使用，不持久化。 */
@@ -149,14 +157,13 @@ export interface UseChatSubmitParams {
   availableOutlines: Outline[];
   currentChapterTitle?: string;
   selectedModel: string;
-  thinkingEnabled: boolean;
   agentEnabled: boolean;
   /** 用于 max_tokens 等；temperature 由选中模型的 AiModelConfig 与思考开关决定 */
   modelConfigs: Record<string, { label?: string; max_tokens?: number }>;
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
   /**
-   * 会话作用域：setting = 设定会话（人物/背景），不要求选中章节即可发送；
+   * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
    * 默认 chapter（必须先选章节）。
    */
   sessionScope?: "chapter" | "setting";

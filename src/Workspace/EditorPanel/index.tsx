@@ -1,13 +1,13 @@
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import {
-  ExpandOutlined, CompressOutlined, CloseOutlined,
+  CloseOutlined,
   UndoOutlined, RedoOutlined, AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
   HistoryOutlined,
 } from '@ant-design/icons'
-import { App as AntdApp, Button, Input, Empty, Tooltip, Select, Switch } from 'antd'
+import { App as AntdApp, Button, Input, Empty, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import type { AiModelConfig, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
@@ -20,6 +20,7 @@ import DiffOverlay from '../diff/DiffOverlay'
 import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
 import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
+import ModelPicker from '../AiPanel/components/ModelPicker'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
@@ -46,16 +47,12 @@ interface AiFloatState {
   visible: boolean; x: number; y: number
   prompt: string; loading: boolean; result: string
   selectedModelId: string
-  thinkingEnabled: boolean
 }
 
 interface EditorPanelProps {
   bookTitle: string
   modelConfigs?: AiModelConfig[]
-  /** 是否为当前主区域（占 56%）。 */
-  isMain: boolean
-  /** 点击 ⤢ 时回调：非主时切换为主，主时回到默认。 */
-  onSetMain: () => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   /** 工作台搜索：注册 Lexical 实例 */
   onLexicalEditor?: (editor: import('lexical').LexicalEditor | null) => void
 }
@@ -63,8 +60,7 @@ interface EditorPanelProps {
 export default function EditorPanel({
   bookTitle: _bookTitle,
   modelConfigs = [],
-  isMain,
-  onSetMain,
+  onUpdateModelConfig,
   onLexicalEditor,
 }: EditorPanelProps) {
   const { message: appMessage } = AntdApp.useApp()
@@ -127,7 +123,6 @@ export default function EditorPanel({
       loading: false,
       result: '',
       selectedModelId: initialModelId,
-      thinkingEnabled: false,
     }
   )
   const aiChunkUnsubRef = React.useRef<(() => void) | null>(null)
@@ -346,19 +341,21 @@ export default function EditorPanel({
       model: string
       temperature?: number
       thinking: { type: 'enabled' | 'disabled' }
+      context_window: '200k' | '300k' | '1m'
       max_tokens: number
     } = {
       model: selectedModelConfig.name,
       ...(useConfiguredTemperature
         ? {
-            temperature: aiFloat.thinkingEnabled
+            temperature: (selectedModelConfig.thinkingEnabled ?? selectedModelConfig.thinkingOnly ?? false)
               ? (selectedModelConfig.temperatureThinking ?? 0.6)
               : (selectedModelConfig.temperatureNonThinking ?? 0.6),
           }
         : {}),
       thinking: {
-        type: (aiFloat.thinkingEnabled ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
+        type: ((selectedModelConfig.thinkingEnabled ?? selectedModelConfig.thinkingOnly ?? false) ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
       },
+      context_window: selectedModelConfig.contextWindow ?? '200k',
       max_tokens: 8192,
     }
 
@@ -380,11 +377,12 @@ export default function EditorPanel({
       writingChapters: chapters.map((c) => ({ id: c.id, title: c.title })),
       availableOutlines: [],
       chatAgentMode: 'ask',
+      contextWindow: streamOptions.context_window,
     })
   }
 
   return (
-    <div className={`editor-panel ${isMain ? 'panel-main' : ''}`}>
+    <div className="editor-panel">
       <div className="panel-header">
         <span className="panel-title">{chapterTitle || '选择章节开始写作'}</span>
         <div className="panel-header-actions">
@@ -407,9 +405,6 @@ export default function EditorPanel({
               }}
             />
           </Tooltip>
-          <Button type="text" size="small"
-            icon={isMain ? <CompressOutlined style={{ fontSize: 16 }} /> : <ExpandOutlined style={{ fontSize: 16 }} />}
-            title={isMain ? '已是主区域' : '扩大此区域为主'} onClick={onSetMain} />
         </div>
       </div>
 
@@ -483,13 +478,10 @@ export default function EditorPanel({
           selection={inlineSelection}
           onClearSelection={clearInlineSelection}
           modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
           selectedModelId={aiFloat.selectedModelId}
           onSelectedModelChange={(id) =>
             setAiFloat((prev) => ({ ...prev, selectedModelId: id }))
-          }
-          thinkingEnabled={aiFloat.thinkingEnabled}
-          onThinkingChange={(v) =>
-            setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))
           }
           bookId={bookId}
           chapterId={chapterId}
@@ -519,11 +511,10 @@ export default function EditorPanel({
           loading={aiFloat.loading}
           result={aiFloat.result}
           modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
           selectedModelId={aiFloat.selectedModelId}
-          thinkingEnabled={aiFloat.thinkingEnabled}
           onPromptChange={(v) => setAiFloat((prev) => ({ ...prev, prompt: v }))}
           onModelChange={(v) => setAiFloat((prev) => ({ ...prev, selectedModelId: v }))}
-          onThinkingChange={(v) => setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))}
           onSubmit={handleAiFloatSubmit}
           onAbort={handleAiFloatAbort}
           onClose={closeAiFloat}
@@ -540,11 +531,10 @@ interface AiFloatBoxProps {
   loading: boolean
   result: string
   modelConfigs: AiModelConfig[]
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   selectedModelId: string
-  thinkingEnabled: boolean
   onPromptChange: (v: string) => void
   onModelChange: (v: string) => void
-  onThinkingChange: (v: boolean) => void
   onSubmit: () => void
   onAbort: () => void
   onClose: () => void
@@ -557,22 +547,16 @@ function AiFloatBox({
   loading,
   result,
   modelConfigs,
+  onUpdateModelConfig,
   selectedModelId,
-  thinkingEnabled,
   onPromptChange,
   onModelChange,
-  onThinkingChange,
   onSubmit,
   onAbort,
   onClose,
 }: AiFloatBoxProps) {
   const textareaRef = React.useRef<TextAreaRef>(null)
   React.useEffect(() => { textareaRef.current?.focus() }, [])
-  const modelOptions = React.useMemo(
-    () => modelConfigs.map((c) => ({ label: (c.nickname?.trim() || c.name) || '未命名', value: c.id })),
-    [modelConfigs]
-  )
-
   return (
     <div className="ai-float-box" style={{ left: x, top: y }}>
       <div className="ai-float-header">
@@ -599,18 +583,13 @@ function AiFloatBox({
       </div>
       <div className="ai-float-bottom">
         <div className="ai-float-bottom-left">
-          <Select
+          <ModelPicker
+            modelConfigs={modelConfigs}
+            selectedModelId={selectedModelId}
+            onModelChange={onModelChange}
+            onUpdateModelConfig={onUpdateModelConfig}
             className="ai-float-model-select"
-            size="small"
-            value={modelOptions.length ? selectedModelId : undefined}
-            onChange={onModelChange}
-            options={modelOptions}
-            placeholder={modelOptions.length ? undefined : '无模型配置'}
-            variant="borderless"
-            popupMatchSelectWidth={false}
           />
-          <span className="ai-float-thinking-label">思考模式</span>
-          <Switch size="small" checked={thinkingEnabled} onChange={onThinkingChange} />
         </div>
         <div className="ai-float-bottom-right">
           {loading ? (

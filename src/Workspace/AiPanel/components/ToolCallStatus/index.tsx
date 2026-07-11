@@ -18,6 +18,9 @@ export interface ToolCallStatusProps {
   labelOutcomes?: ToolCallLabelOutcome[];
   cachedFlags?: boolean[];
   completedToolCount: number;
+  startedAt?: number;
+  durationMs?: number;
+  streaming?: boolean;
 }
 
 type RowPhase = "done" | "running" | "pending";
@@ -101,14 +104,22 @@ function renderToolRow(row: ToolRow) {
 }
 
 function getSummaryText(rows: ToolRow[], done: number, total: number): string {
-  const noun = rows.length === 1 ? "工具" : `${rows.length} 个工具`;
+  const labels = rows.map((row) => row.label);
+  const operation = labels.length <= 2
+    ? labels.join("、")
+    : `${labels.slice(0, 2).join("、")}等 ${labels.length} 项`;
   const hasError = rows.some((row) => row.outcome === "context_error");
   if (hasError) return rows.length === 1 ? "工具执行异常" : `工具执行异常 · ${rows.length} 项`;
-  if (done >= total) return `已完成 ${noun}`;
+  if (done >= total) return `已操作：${operation}`;
   if (rows.some((row) => row.phase === "running")) {
-    return rows.length === 1 ? "正在执行工具" : `正在执行 ${noun} · ${done}/${total}`;
+    const running = rows.find((row) => row.phase === "running");
+    return `正在操作：${running?.label ?? operation} · ${done}/${total}`;
   }
-  return `待执行 ${noun}`;
+  return `准备操作：${operation}`;
+}
+
+function formatDuration(ms: number) {
+  return ms < 1000 ? `${Math.max(1, Math.round(ms))}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}秒`;
 }
 
 /** 工具调用：逐条展示完成 / 进行中 / 待执行（与思考区卡片样式区分） */
@@ -117,8 +128,17 @@ export default function ToolCallStatus({
   labelOutcomes,
   cachedFlags,
   completedToolCount,
+  startedAt,
+  durationMs,
+  streaming = false,
 }: ToolCallStatusProps) {
   const [expanded, setExpanded] = React.useState(false);
+  const [now, setNow] = React.useState(() => performance.now());
+  React.useEffect(() => {
+    if (!streaming || startedAt == null) return;
+    const timer = window.setInterval(() => setNow(performance.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [streaming, startedAt]);
   const n = labels.length;
   const done = Math.min(Math.max(0, completedToolCount), n);
   const rows = labels
@@ -134,6 +154,7 @@ export default function ToolCallStatus({
     .filter((row): row is ToolRow => Boolean(row));
 
   if (rows.length === 0) return null;
+  const elapsed = durationMs ?? (streaming && startedAt != null ? Math.max(0, now - startedAt) : undefined);
 
   return (
     <div className="bubble-tool-calls">
@@ -150,7 +171,8 @@ export default function ToolCallStatus({
         }
         onClick={() => setExpanded((v) => !v)}
       >
-        {getSummaryText(rows, done, n)}
+        <span>{getSummaryText(rows, done, n)}</span>
+        {elapsed != null && <span className="bubble-tool-call-duration">{formatDuration(elapsed)}</span>}
       </Button>
       {expanded ? (
         <div className="bubble-tool-call-details">

@@ -227,7 +227,7 @@ export default function WorldEntityTab({
     }
   }, [bookId, draftType, draftName, draftTags, editTarget, closeModal, loadEntities, message])
 
-  /** 打开 AI 设定对话并携带条目上下文（不依赖章节对话区） */
+  /** 打开 AI 全局对话并携带条目上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((ent: SettingEntity) => {
     window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
     window.dispatchEvent(new CustomEvent('open-setting-chat', {

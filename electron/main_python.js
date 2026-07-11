@@ -2,6 +2,13 @@ const { app, BrowserWindow, ipcMain, dialog, shell, protocol } = require('electr
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
+const {
+  BACKEND_PORT,
+  BACKEND_URL,
+  createBackendProcessManager,
+} = require('./backend_process')
+const { createAppProtocolHandler } = require('./app_protocol')
+const { registerDatabaseIpcHandlers } = require('./database_ipc')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -12,124 +19,13 @@ if (!isDev) {
 }
 
 let mainWindow = null
-let pythonProcess = null
-const BACKEND_PORT = 18321
-const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
+const backendProcess = createBackendProcessManager({ app })
 
 // ─── Python backend lifecycle ────────────────────────────────────
 
-function getPythonCommand() {
-  if (process.platform === 'win32') {
-    try {
-      require('child_process').execSync('py --version', { stdio: 'ignore' })
-      return 'py'
-    } catch {}
-  }
-  return 'python'
-}
-
-function getFrozenBackendExe(backendDir) {
-  if (process.platform === 'win32') {
-    const p = path.join(backendDir, 'purrtypos-backend.exe')
-    return fs.existsSync(p) ? p : null
-  }
-  const unix = path.join(backendDir, 'purrtypos-backend')
-  return fs.existsSync(unix) ? unix : null
-}
-
-function startPythonBackend() {
-  if (pythonProcess) return
-
-  const backendDir = app.isPackaged
-    ? path.join(process.resourcesPath, 'backend')
-    : path.join(__dirname, '..', 'backend')
-
-  const skillsDir = app.isPackaged
-    ? path.join(process.resourcesPath, 'backend', 'skills')
-    : path.join(__dirname, '..', 'backend', 'skills')
-
-  const env = {
-    ...process.env,
-    PURRTYPOS_DATA_DIR: app.getPath('userData'),
-    PURRTYPOS_SKILLS_DIR: skillsDir,
-    PURRTYPOS_PORT: String(BACKEND_PORT),
-  }
-
-  const frozen = app.isPackaged ? getFrozenBackendExe(backendDir) : null
-  if (frozen) {
-    console.log('[python] starting frozen backend:', frozen)
-    pythonProcess = spawn(frozen, [String(BACKEND_PORT)], {
-      cwd: backendDir,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-  } else {
-    const pythonCmd = getPythonCommand()
-    console.log(`[python] using command: ${pythonCmd}`)
-    pythonProcess = spawn(pythonCmd, ['-u', 'main.py', String(BACKEND_PORT)], {
-      cwd: backendDir,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-  }
-
-  pythonProcess.stdout.on('data', (d) => console.log('[python]', d.toString().trim()))
-  pythonProcess.stderr.on('data', (d) => console.error('[python]', d.toString().trim()))
-  pythonProcess.on('close', (code) => {
-    console.log('[python] exited with code', code)
-    pythonProcess = null
-  })
-}
-
-async function waitForBackend(maxRetries = 30, intervalMs = 500) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const res = await fetch(`${BACKEND_URL}/health`)
-      if (res.ok) return true
-    } catch {}
-    await new Promise((r) => setTimeout(r, intervalMs))
-  }
-  throw new Error('Python backend failed to start')
-}
-
-async function fetchDatabaseInfo() {
-  const res = await fetch(`${BACKEND_URL}/api/database/info`)
-  return await res.json()
-}
-
-async function stopPythonBackend(timeoutMs = 5000) {
-  const proc = pythonProcess
-  if (!proc) return
-  await new Promise((resolve) => {
-    let settled = false
-    const finish = () => {
-      if (settled) return
-      settled = true
-      if (pythonProcess === proc) pythonProcess = null
-      resolve()
-    }
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch (_) {}
-      finish()
-    }, timeoutMs)
-    proc.once('close', () => {
-      clearTimeout(timer)
-      finish()
-    })
-    try {
-      proc.kill()
-    } catch (_) {
-      clearTimeout(timer)
-      finish()
-    }
-  })
-}
-
-function removeDatabaseSidecars(dbPath) {
-  for (const suffix of ['-wal', '-shm']) {
-    try { fs.rmSync(`${dbPath}${suffix}`, { force: true }) } catch (_) {}
-  }
-}
+const startPythonBackend = () => backendProcess.start()
+const waitForBackend = (...args) => backendProcess.waitUntilReady(...args)
+const stopPythonBackend = (...args) => backendProcess.stop(...args)
 
 // ─── Window ──────────────────────────────────────────────────────
 
@@ -186,47 +82,10 @@ app.whenReady().then(async () => {
   }
 
   if (!isDev) {
-    const mimeTypes = {
-      '.html': 'text/html; charset=utf-8',
-      '.js': 'application/javascript; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.json': 'application/json',
-      '.png': 'image/png',
-      '.ico': 'image/x-icon',
-      '.svg': 'image/svg+xml',
-      '.woff2': 'font/woff2',
-      '.woff': 'font/woff',
-    }
-    protocol.handle('app', (request) => {
-      const u = new URL(request.url)
-      const segments = decodeURIComponent(u.pathname).split('/').filter(Boolean)
-      if (segments.length === 0) {
-        return new Response('', { status: 404 })
-      }
-      const resourcesPath = process.resourcesPath
-      const pathsToTry = [
-        path.join(resourcesPath, ...segments),
-        ...(segments[0] === 'assets' ? [path.join(resourcesPath, 'dist', ...segments)] : []),
-        path.join(resourcesPath, 'app', ...segments),
-        path.join(resourcesPath, 'app.asar.unpacked', ...segments),
-        path.join(app.getAppPath(), ...segments),
-      ]
-      let buf = null
-      let filePathUsed = ''
-      for (const fp of pathsToTry) {
-        try {
-          buf = fs.readFileSync(fp)
-          filePathUsed = fp
-          break
-        } catch (_) {}
-      }
-      if (buf) {
-        const ext = path.extname(filePathUsed)
-        const contentType = mimeTypes[ext] || 'application/octet-stream'
-        return new Response(buf, { headers: { 'Content-Type': contentType } })
-      }
-      return new Response('', { status: 404 })
-    })
+    protocol.handle('app', createAppProtocolHandler({
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    }))
   }
 
   createWindow()
@@ -426,95 +285,13 @@ ipcMain.handle('export-epub', async (_, { bookId, chapterIds, defaultName }) => 
   }
 })
 
-ipcMain.handle('export-database', async () => {
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/database/export`, { method: 'POST' })
-    if (!res.ok) return { success: false, error: '导出失败' }
-    const buffer = Buffer.from(await res.arrayBuffer())
-    const defaultName = `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.db`
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: '导出数据库备份',
-      defaultPath: defaultName,
-      filters: [{ name: '数据库文件', extensions: ['db'] }],
-    })
-    if (result.canceled || !result.filePath) return { success: false, error: 'canceled' }
-    fs.writeFileSync(result.filePath, buffer)
-    return { success: true }
-  } catch (err) {
-    return { success: false, error: err.message }
-  }
-})
-
-ipcMain.handle('import-database', async () => {
-  try {
-    let beforeStats = null
-    try {
-      const before = await fetchDatabaseInfo()
-      if (before.success) beforeStats = before.data
-    } catch (_) {}
-
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择要导入的数据库备份文件',
-      filters: [
-        { name: '数据库文件', extensions: ['db'] },
-        { name: '全部', extensions: ['*'] },
-      ],
-      properties: ['openFile'],
-    })
-    if (result.canceled || result.filePaths.length === 0) return { success: false, error: 'canceled' }
-
-    const sourcePath = result.filePaths[0]
-    if (!fs.existsSync(sourcePath)) return { success: false, error: '备份文件不存在' }
-
-    const dbPath = path.join(app.getPath('userData'), 'purrtypos.db')
-    if (path.resolve(sourcePath).toLowerCase() === path.resolve(dbPath).toLowerCase()) {
-      return { success: false, error: '不能导入当前正在使用的数据库文件' }
-    }
-
-    await stopPythonBackend()
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true })
-    if (fs.existsSync(dbPath)) {
-      fs.copyFileSync(dbPath, `${dbPath}.before-import-${Date.now()}.bak`)
-    }
-    fs.copyFileSync(sourcePath, dbPath)
-    removeDatabaseSidecars(dbPath)
-
-    startPythonBackend()
-    await waitForBackend()
-
-    let afterStats = null
-    try {
-      const after = await fetchDatabaseInfo()
-      if (after.success) afterStats = after.data
-    } catch (_) {}
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.reload()
-    }
-    return { success: true, data: { beforeStats, afterStats } }
-  } catch (err) {
-    try {
-      if (!pythonProcess) {
-        startPythonBackend()
-        await waitForBackend()
-      }
-    } catch (_) {}
-    return { success: false, error: err.message }
-  }
-})
-
-ipcMain.handle('open-database-directory', async () => {
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/database/info`)
-    const info = await res.json()
-    if (!info.success || !info.data?.dbPath) return { success: false, error: '数据库路径未知' }
-    const dir = path.dirname(info.data.dbPath)
-    const openResult = await shell.openPath(dir)
-    if (openResult) return { success: false, error: openResult }
-    return { success: true }
-  } catch (err) {
-    return { success: false, error: err.message }
-  }
+registerDatabaseIpcHandlers({
+  ipcMain,
+  dialog,
+  shell,
+  app,
+  backendProcess,
+  getMainWindow: () => mainWindow,
 })
 
 ipcMain.handle('open-file-path', async (_, filePath) => {

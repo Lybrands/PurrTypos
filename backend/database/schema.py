@@ -120,8 +120,8 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN closed INTEGER DEFAULT 0")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN book_id TEXT")
-    # scope: chapter = 章节会话（默认）；setting = 设定会话（人物/背景，不绑章节）。
-    # 历史遗留的无章节会话保持默认 chapter，不会被误判为设定会话。
+    # scope: chapter = 章节会话（默认）；setting = 全局会话（不绑章节，整本书共享；UI 显示为「全局对话」）。
+    # 历史遗留的无章节会话保持默认 chapter，不会被误判为全局会话。
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN scope TEXT DEFAULT 'chapter'")
 
     # ── ai_conversations ─────────────────────────────────────────
@@ -139,6 +139,7 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN duration_ms INTEGER DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
     # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")

@@ -11,7 +11,6 @@ import pytest_asyncio
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from utils.chat_preflight import (
-    PER_CHAPTER_CAP,
     build_associated_context_block,
     build_selected_memory_block,
     build_session_binding_prompt,
@@ -70,7 +69,7 @@ async def test_assoc_block_injects_chapter_text(temp_db):
 
 
 async def test_assoc_block_truncates_long_chapter(temp_db):
-    long_text = "字" * (PER_CHAPTER_CAP + 500)
+    long_text = "字" * 9000
     await _seed_chapter(temp_db, "ch1", long_text)
     block = await build_associated_context_block({
         "bookId": "b1",
@@ -80,7 +79,29 @@ async def test_assoc_block_truncates_long_chapter(temp_db):
     assert "已截断" in block
     assert 'getChapterContent 读取，参数 chapterId="ch1"' in block
     # 注入内容不超过单章上限（允许格式行的额外长度）
-    assert len(block) < PER_CHAPTER_CAP + 1000
+    assert len(block) < 9000
+
+
+async def test_assoc_block_expands_budget_by_context_window(temp_db):
+    long_text = "字" * 20000
+    await _seed_chapter(temp_db, "ch1", long_text)
+
+    small_block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": ["ch1"],
+        "writingChapters": [{"id": "ch1", "title": "长章"}],
+        "contextWindow": "200k",
+    })
+    large_block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": ["ch1"],
+        "writingChapters": [{"id": "ch1", "title": "长章"}],
+        "contextWindow": "1m",
+    })
+
+    assert len(large_block) > len(small_block)
+    assert "…（已截断" in small_block
+    assert "…（已截断" not in large_block
 
 
 async def test_assoc_block_injects_outline_markdown(temp_db):
@@ -156,6 +177,27 @@ async def test_memory_block_renders_sparks_and_foreshadowing(temp_db):
     assert "灵气复苏始于昆仑" in block
     assert "待铺垫/待回收伏笔" in block
     assert "主角的玉佩会发光" in block
+
+
+async def test_memory_block_uses_agent_recall_budget(temp_db):
+    from services import long_term_memory_service
+
+    for idx in range(20):
+        await long_term_memory_service.create_memory_item(
+            book_id="b1",
+            kind="plot",
+            content=f"玉佩相关事实 {idx} " + "字" * 500,
+        )
+
+    block = await build_selected_memory_block(
+        [],
+        [],
+        book_id="b1",
+        user_prompt="玉佩",
+        mode="agent",
+    )
+
+    assert "未注入" in block
 
 
 # ── build_session_binding_prompt ────────────────────────────────

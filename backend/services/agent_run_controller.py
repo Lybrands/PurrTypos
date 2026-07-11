@@ -47,6 +47,7 @@ class AgentRunController:
         chat_agent_mode: str | None,
         available_tool_names: set[str],
         signal: Any = None,
+        use_planner: bool = True,
     ) -> None:
         self.run_id = await create_run(
             self.db,
@@ -54,6 +55,15 @@ class AgentRunController:
             prompt=prompt,
             mode=mode,
         )
+        if not use_planner:
+            await self._emit("agentRunStarted", {
+                "runId": self.run_id,
+                "status": self.status,
+                "title": self.title,
+                "goal": self.goal,
+            })
+            return
+
         try:
             plan = await task_planner.generate_model_task_plan(
                 key=key,
@@ -80,6 +90,31 @@ class AgentRunController:
             "title": self.title,
             "goal": self.goal,
         })
+        await self._emit("agentRunTodosUpdated", self._todos_payload())
+
+    async def apply_runtime_todos(
+        self,
+        payload: dict[str, Any],
+        *,
+        available_tool_names: set[str],
+    ) -> None:
+        if not self.run_id:
+            return
+        raw = dict(payload)
+        raw["needsTodos"] = True
+        if "todos" not in raw and "steps" in raw:
+            raw["todos"] = raw.get("steps")
+        plan = task_planner.normalize_model_task_plan(
+            raw,
+            available_tool_names=available_tool_names,
+        )
+        if not plan:
+            return
+
+        self.title = str(plan.get("title") or self.title or "To-dos")
+        self.goal = _optional_str(plan.get("goal")) or self.goal
+        self._steps = _merge_runtime_steps(self._steps, list(plan.get("steps") or []))
+        await upsert_todos(self.db, self.run_id, self._steps)
         await self._emit("agentRunTodosUpdated", self._todos_payload())
 
     async def on_tool_calls_started(self, tool_names: list[str] | None = None) -> None:
@@ -306,6 +341,40 @@ def _initialize_steps(raw_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 steps[idx] = {**step, "status": "running"}
                 break
     return steps
+
+
+def _merge_runtime_steps(
+    current_steps: list[dict[str, Any]],
+    raw_steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    current_by_id = {
+        str(step.get("id") or ""): dict(step)
+        for step in current_steps
+        if step.get("id")
+    }
+    merged: list[dict[str, Any]] = []
+    for idx, raw in enumerate(raw_steps):
+        step = dict(raw)
+        step_id = str(step.get("id") or f"step-{idx + 1}")
+        previous = current_by_id.get(step_id, {})
+        step["id"] = step_id
+        step["title"] = str(step.get("title") or previous.get("title") or f"步骤 {idx + 1}")
+        step["type"] = str(step.get("type") or previous.get("type") or "analyze")
+        step["executor"] = str(
+            step.get("executor")
+            or previous.get("executor")
+            or ("tool" if step["type"] == "read" else "model")
+        )
+        step["status"] = str(step.get("status") or previous.get("status") or "pending")
+        if previous.get("resultSummary") and not step.get("resultSummary"):
+            step["resultSummary"] = previous.get("resultSummary")
+        merged.append({k: v for k, v in step.items() if v not in (None, "", [])})
+    if not any(step.get("status") == "running" for step in merged):
+        for idx, step in enumerate(merged):
+            if step.get("status") not in {"done", "failed", "blocked"} and step.get("type") != "confirm":
+                merged[idx] = {**step, "status": "running"}
+                break
+    return merged
 
 
 def _is_tool_step(step: dict[str, Any]) -> bool:
