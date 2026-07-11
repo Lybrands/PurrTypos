@@ -8,10 +8,13 @@ plan, then validates that plan against local executor/tool constraints.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from services.task_step_executor import TaskStepValidationError, validate_task_plan_steps
+
+logger = logging.getLogger(__name__)
 
 
 PLANNER_SYSTEM_PROMPT = """你是 Agent Run 的 To-dos 规划器。
@@ -115,22 +118,33 @@ def normalize_model_task_plan(
     *,
     available_tool_names: set[str],
 ) -> dict[str, Any] | None:
-    if not raw or raw.get("needsTodos") is not True:
+    if not raw:
+        logger.info("[agent-run][planner] rejected plan: empty or unparsable output")
         return None
-    todos_raw = raw.get("todos")
-    if not isinstance(todos_raw, list) or not (2 <= len(todos_raw) <= 8):
+    if not _truthy(raw.get("needsTodos")):
+        logger.info("[agent-run][planner] rejected plan: needsTodos is not true")
+        return None
+    todos_raw = raw.get("todos", raw.get("steps"))
+    if not isinstance(todos_raw, list) or not (1 <= len(todos_raw) <= 8):
+        logger.info("[agent-run][planner] rejected plan: todos must contain 1-8 steps")
         return None
 
     steps: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for idx, item in enumerate(todos_raw):
         if not isinstance(item, dict):
+            logger.info("[agent-run][planner] rejected plan: todo item is not object")
             return None
         expected_tools = item.get("expectedTools", item.get("suggestedTools")) or []
         if not isinstance(expected_tools, list):
+            logger.info("[agent-run][planner] rejected plan: expectedTools is not list")
             return None
         expected_tool_names = [str(x).strip() for x in expected_tools if str(x).strip()]
         if any(tool not in available_tool_names for tool in expected_tool_names):
+            logger.info(
+                "[agent-run][planner] rejected plan: unknown expected tool(s) %s",
+                [tool for tool in expected_tool_names if tool not in available_tool_names],
+            )
             return None
 
         step_id = _clean_id(item.get("id")) or f"todo-{idx + 1}"
@@ -155,19 +169,33 @@ def normalize_model_task_plan(
         })
 
     if _has_write_risk(steps) and not any(step["type"] == "confirm" for step in steps):
-        return None
+        if len(steps) >= 8:
+            logger.info("[agent-run][planner] rejected plan: write-risk plan has no confirm boundary")
+            return None
+        steps.append({
+            "id": "confirm-changes",
+            "title": "确认修改",
+            "description": "涉及写入或覆盖内容，需要你确认后继续。",
+            "type": "confirm",
+            "status": "pending",
+            "riskLevel": "write",
+            "executor": "model",
+        })
 
     try:
         validate_task_plan_steps(steps)
-    except TaskStepValidationError:
+    except TaskStepValidationError as exc:
+        logger.info("[agent-run][planner] rejected plan: %s", exc)
         return None
 
-    return {
+    plan = {
         "title": _clean_title(raw.get("title")) or "To-dos",
         "goal": _clean_optional(raw.get("goal")),
         "status": "planned",
         "steps": steps,
     }
+    logger.info("[agent-run][planner] accepted plan with %d step(s)", len(steps))
+    return plan
 
 
 async def generate_model_task_plan(
@@ -189,10 +217,10 @@ async def generate_model_task_plan(
     )
     options = dict(planner_options)
     options.pop("tools", None)
-    options["temperature"] = 0
     options["max_tokens"] = min(int(options.get("max_tokens") or 900), 1200)
     result = await create_chat_no_stream(key, messages, options, api_provider, signal)
     content = ((result.get("message") or {}).get("content") or "").strip()
+    logger.info("[agent-run][planner] raw model output: %s", content[:1000])
     return normalize_model_task_plan(
         parse_planner_json(content),
         available_tool_names=available_tool_names,
@@ -204,6 +232,14 @@ def _has_write_risk(steps: list[dict[str, Any]]) -> bool:
         step.get("type") == "write" or step.get("riskLevel") in {"write", "destructive"}
         for step in steps
     )
+
+
+def _truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "是", "需要"}
+    return False
 
 
 def _clean_id(value: Any) -> str:

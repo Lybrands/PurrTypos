@@ -12,6 +12,48 @@ if TYPE_CHECKING:
 from utils.id_utils import short_id8
 
 
+async def _get_outlines_by_type(
+    db: DatabaseConnection,
+    outline_type: str,
+    book_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return one outline type in its stable display order."""
+    if book_id:
+        return await db.fetch_all(
+            "SELECT * FROM outlines WHERE type = ? AND book_id = ? "
+            "ORDER BY create_time ASC",
+            [outline_type, book_id],
+        )
+    return await db.fetch_all(
+        "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
+        [outline_type],
+    )
+
+
+async def _get_child_chapters_by_parent(
+    db: DatabaseConnection,
+    parent_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Batch-load child outlines and group them by parent outline ID."""
+    if not parent_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in parent_ids)
+    rows = await db.fetch_all(
+        "SELECT * FROM outlines WHERE type = ? "
+        f"AND parent_outline_id IN ({placeholders}) ORDER BY create_time ASC",
+        ["chapter", *parent_ids],
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {
+        parent_id: [] for parent_id in parent_ids
+    }
+    for row in rows:
+        parent_id = str(row.get("parent_outline_id") or "")
+        if parent_id in grouped:
+            grouped[parent_id].append(row)
+    return grouped
+
+
 async def save_outline(
     db: DatabaseConnection, data: dict[str, Any] | str
 ) -> dict[str, Any]:
@@ -311,41 +353,23 @@ async def get_or_create_writing_outline(
 async def get_chapter_outlines(
     db: DatabaseConnection, book_id: str | None = None
 ) -> list[dict[str, Any]]:
-    if book_id:
-        return await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? AND book_id = ? "
-            "ORDER BY create_time ASC",
-            ["chapter", book_id],
-        )
-    return await db.fetch_all(
-        "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
-        ["chapter"],
-    )
+    return await _get_outlines_by_type(db, "chapter", book_id)
 
 
 async def get_volume_outlines(
     db: DatabaseConnection, book_id: str | None = None
 ) -> list[dict[str, Any]]:
-    if book_id:
-        vols = await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? AND book_id = ? "
-            "ORDER BY create_time ASC",
-            ["volume", book_id],
-        )
-    else:
-        vols = await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? ORDER BY create_time ASC",
-            ["volume"],
-        )
-    result = []
-    for vol in vols:
-        chapters = await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? AND parent_outline_id = ? "
-            "ORDER BY create_time ASC",
-            ["chapter", vol["id"]],
-        )
-        result.append({**vol, "chapters": chapters})
-    return result
+    volumes = await _get_outlines_by_type(db, "volume", book_id)
+    chapters_by_parent = await _get_child_chapters_by_parent(
+        db, [str(volume["id"]) for volume in volumes]
+    )
+    return [
+        {
+            **volume,
+            "chapters": chapters_by_parent.get(str(volume["id"]), []),
+        }
+        for volume in volumes
+    ]
 
 
 async def get_associable_outlines(
@@ -378,27 +402,18 @@ async def get_associable_outlines(
         result.append(dict(row))
 
     if enable_volume:
-        # 分卷模式：卷按创建时间升序，卷内章节也按创建时间升序
-        vols = await db.fetch_all(
-            "SELECT * FROM outlines WHERE type = ? AND book_id = ? ORDER BY create_time ASC",
-            ["volume", bid],
-        )
-        for vol in vols:
-            add_row(dict(vol))
-            chapters = await db.fetch_all(
-                "SELECT * FROM outlines WHERE type = ? AND parent_outline_id = ? ORDER BY create_time ASC",
-                ["chapter", vol["id"]],
-            )
-            for ch in chapters:
-                add_row(dict(ch))
+        # 分卷模式：批量读取所有卷内章节，避免每卷一次查询。
+        for volume_group in await get_volume_outlines(db, bid):
+            chapters = volume_group.get("chapters") or []
+            volume = dict(volume_group)
+            volume.pop("chapters", None)
+            add_row(volume)
+            for chapter in chapters:
+                add_row(dict(chapter))
         return result
 
     # 非分卷模式：章节大纲按创建时间升序
-    chapter_outlines = await db.fetch_all(
-        "SELECT * FROM outlines WHERE type = ? AND book_id = ? ORDER BY create_time ASC",
-        ["chapter", bid],
-    )
-    return chapter_outlines
+    return await _get_outlines_by_type(db, "chapter", bid)
 
 
 async def get_outline_by_writing_chapter_id(

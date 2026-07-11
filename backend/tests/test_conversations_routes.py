@@ -54,6 +54,22 @@ async def test_save_conversation_persists_task_plan_json(temp_db: DatabaseConnec
     assert json.loads(row["task_plan"])["status"] == "done"
 
 
+async def test_save_conversation_persists_turn_duration(temp_db: DatabaseConnection):
+    created = await save_conversation(SaveConversationRequest(
+        sessionId=1,
+        chapterId="chapter1",
+        prompt="p",
+        response="r",
+        durationMs=12_345,
+    ))
+
+    row = await temp_db.fetch_one(
+        "SELECT duration_ms FROM ai_conversations WHERE id = ?",
+        [created["data"]["id"]],
+    )
+    assert row["duration_ms"] == 12_345
+
+
 async def test_save_conversation_links_agent_run(temp_db: DatabaseConnection):
     from services.agent_run_store import create_run
 

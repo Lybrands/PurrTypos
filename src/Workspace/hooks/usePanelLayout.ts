@@ -1,17 +1,7 @@
 import React from 'react'
 
-/**
- * AI-Centric 工作区的浮窗 / 主区域布局状态（localStorage 持久化）。
- *
- * 规则：
- * - 只有 AI 与 写作（editor）能成为主区域，章节列表 (left) 永远是浮窗；
- * - 切换主区域时，原主区域自动降为钉住浮窗，便于一键切回；
- * - 新主区域的浮窗自动关闭（它现在是主，无须浮窗）。
- */
-
-export type PanelKey = 'ai' | 'left' | 'editor' | 'setting' | 'dashboard'
-/** 能成为主区域的 panel 子集（章节列表只能浮窗） */
-export type MainPanelKey = 'ai' | 'editor'
+/** 固定三栏工作区的持久化布局状态。AI 永远居中，正文永远在右侧。 */
+export type PanelKey = 'left' | 'conversation' | 'editor' | 'setting' | 'dashboard'
 
 export interface FloatingState {
   open: boolean
@@ -20,28 +10,28 @@ export interface FloatingState {
   width: number
 }
 
-const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_floating_state_v2'
+const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_layout_v4'
 
 export interface PersistedPanelState {
-  mainPanel: MainPanelKey
-  ai: FloatingState
   left: FloatingState
+  conversation: FloatingState
   editor: FloatingState
   setting: FloatingState
   dashboard: FloatingState
 }
 
-/** 给 right 浮窗一个估算的 x（窗口 - 自身宽度 - 12 边距），运行时再据容器纠正 */
 function defaultRightX(width: number): number {
   if (typeof window === 'undefined') return 800
   return Math.max(0, window.innerWidth - width - 12)
 }
 
 const DEFAULT_STATE: PersistedPanelState = {
-  mainPanel: 'ai',
-  ai: { open: false, x: defaultRightX(560), y: 8, width: 560 },
-  left: { open: false, x: 16, y: 8, width: 340 },
-  editor: { open: false, x: defaultRightX(620), y: 8, width: 620 },
+  // 默认使用窄轨道；悬停即可临时查看，点击则固定展开。
+  left: { open: false, x: 0, y: 0, width: 300 },
+  // AI 区域内部导航，只通过 AI 内部按钮收起/展开。
+  conversation: { open: true, x: 0, y: 0, width: 220 },
+  // open 为兼容统一状态结构而保留；正文栏在布局中始终显示。
+  editor: { open: true, x: defaultRightX(480), y: 0, width: 480 },
   setting: { open: false, x: defaultRightX(480), y: 48, width: 480 },
   dashboard: { open: false, x: defaultRightX(640), y: 48, width: 640 },
 }
@@ -50,30 +40,28 @@ function loadPanelState(): PersistedPanelState {
   try {
     const raw = localStorage.getItem(WORKSPACE_PANEL_STORAGE_KEY)
     if (raw) {
-      const p = JSON.parse(raw) as Partial<PersistedPanelState>
-      const mergeFloating = (key: PanelKey, fallback: FloatingState): FloatingState => {
-        const v = p[key]
-        if (!v || typeof v !== 'object') return fallback
+      const persisted = JSON.parse(raw) as Partial<PersistedPanelState>
+      const merge = (key: PanelKey): FloatingState => {
+        const fallback = DEFAULT_STATE[key]
+        const value = persisted[key]
+        if (!value || typeof value !== 'object') return fallback
         return {
-          open: !!v.open,
-          x: typeof v.x === 'number' ? v.x : fallback.x,
-          y: typeof v.y === 'number' ? v.y : fallback.y,
-          width: typeof v.width === 'number' ? v.width : fallback.width,
+          open: !!value.open,
+          x: typeof value.x === 'number' ? value.x : fallback.x,
+          y: typeof value.y === 'number' ? value.y : fallback.y,
+          width: typeof value.width === 'number' ? value.width : fallback.width,
         }
       }
-      const main: MainPanelKey =
-        p.mainPanel === 'ai' || p.mainPanel === 'editor' ? p.mainPanel : 'ai'
       return {
-        mainPanel: main,
-        ai: mergeFloating('ai', DEFAULT_STATE.ai),
-        left: mergeFloating('left', DEFAULT_STATE.left),
-        editor: mergeFloating('editor', DEFAULT_STATE.editor),
-        setting: mergeFloating('setting', DEFAULT_STATE.setting),
-        dashboard: mergeFloating('dashboard', DEFAULT_STATE.dashboard),
+        left: merge('left'),
+        conversation: merge('conversation'),
+        editor: merge('editor'),
+        setting: merge('setting'),
+        dashboard: merge('dashboard'),
       }
     }
   } catch {
-    // ignore
+    // 损坏的持久化状态直接回退默认布局。
   }
   return DEFAULT_STATE
 }
@@ -82,13 +70,12 @@ function savePanelState(state: PersistedPanelState) {
   try {
     localStorage.setItem(WORKSPACE_PANEL_STORAGE_KEY, JSON.stringify(state))
   } catch {
-    // ignore
+    // localStorage 不可用时不影响工作区使用。
   }
 }
 
 export function usePanelLayout() {
-  const initialState = React.useMemo(loadPanelState, [])
-  const [panelState, setPanelState] = React.useState<PersistedPanelState>(initialState)
+  const [panelState, setPanelState] = React.useState<PersistedPanelState>(() => loadPanelState())
 
   React.useEffect(() => {
     savePanelState(panelState)
@@ -102,45 +89,15 @@ export function usePanelLayout() {
   )
 
   const toggleFloating = React.useCallback((key: PanelKey) => {
-    setPanelState((prev) => {
-      // 如果该 panel 已是主区域，toggle 浮窗无意义
-      if (prev.mainPanel === key) return prev
-      return { ...prev, [key]: { ...prev[key], open: !prev[key].open } }
-    })
+    setPanelState((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], open: !prev[key].open },
+    }))
   }, [])
 
   const closeFloating = React.useCallback((key: PanelKey) => {
     setPanelState((prev) => ({ ...prev, [key]: { ...prev[key], open: false } }))
   }, [])
 
-  /**
-   * 切换主区域（仅限 AI / Editor 两者互换）：
-   * - 如果 next === current，noop
-   * - 原主区域自动转为浮窗（open=true）便于一键切回
-   * - 新主区域的浮窗自动关闭（它现在是主，无须浮窗）
-   *
-   * 注：浮窗永远是「钉住」语义（不会被点击外部自动收起），
-   *     所以这里不再需要单独写 pinned 字段。
-   */
-  const setMain = React.useCallback((next: MainPanelKey) => {
-    setPanelState((prev) => {
-      if (prev.mainPanel === next) return prev
-      const prevMain = prev.mainPanel
-      return {
-        ...prev,
-        mainPanel: next,
-        [prevMain]: { ...prev[prevMain], open: true },
-        [next]: { ...prev[next], open: false },
-      }
-    })
-  }, [])
-
-  return {
-    panelState,
-    mainPanel: panelState.mainPanel,
-    updateFloating,
-    toggleFloating,
-    closeFloating,
-    setMain,
-  }
+  return { panelState, updateFloating, toggleFloating, closeFloating }
 }

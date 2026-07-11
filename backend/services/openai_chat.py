@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 
 from services.ai_capabilities import (
     build_openai_thinking_extra_body,
-    normalize_reasoning_mode,
+    normalize_thinking_enabled,
 )
 from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
@@ -45,7 +45,7 @@ async def chat_no_stream(
     opts = options or {}
     model: str = opts.get("model", "")
     temperature = opts.get("temperature")
-    reasoning = normalize_reasoning_mode(opts)
+    thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
@@ -56,7 +56,7 @@ async def chat_no_stream(
     params: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
     if temperature is not None:
         params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(reasoning))
+    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(thinking_enabled))
     if max_tokens:
         params["max_tokens"] = max_tokens
     if tools:
@@ -87,7 +87,7 @@ async def chat_stream(
     opts = options or {}
     model: str = opts.get("model", "")
     temperature = opts.get("temperature")
-    reasoning = normalize_reasoning_mode(opts)
+    thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
@@ -100,14 +100,14 @@ async def chat_stream(
     )
     temp_log = f"temperature={temperature}" if temperature is not None else "temperature=(omit)"
     tools_log = f" tools={tool_names}" if tool_names else ""
-    logger.info("[OpenAI] %s %s reasoning=%s%s", model, temp_log, reasoning, tools_log)
+    logger.info("[OpenAI] %s %s thinking=%s%s", model, temp_log, thinking_enabled, tools_log)
 
     client = _create_client(api_key, base_url)
 
     params: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if temperature is not None:
         params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(reasoning))
+    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(thinking_enabled))
     if max_tokens:
         params["max_tokens"] = max_tokens
     if tools:
@@ -152,7 +152,7 @@ async def generate_title(
             {"role": "user", "content": str(text or "").strip()},
         ],
         max_tokens=32,
-        extra_body=build_openai_thinking_extra_body("off"),
+        extra_body=build_openai_thinking_extra_body(False),
         stream=False,
     )
     raw = (res.choices[0].message.content if res.choices and res.choices[0].message else "") or ""

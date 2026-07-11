@@ -1,0 +1,113 @@
+.workspace-dock {
+  --workspace-dock-viewport-max: 48vw;
+  position: relative;
+  z-index: 4;
+  flex: 0 0 clamp(
+    var(--workspace-dock-min-width),
+    var(--workspace-dock-width),
+    min(var(--workspace-dock-max-width), var(--workspace-dock-viewport-max))
+  );
+  width: clamp(
+    var(--workspace-dock-min-width),
+    var(--workspace-dock-width),
+    min(var(--workspace-dock-max-width), var(--workspace-dock-viewport-max))
+  );
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-panel);
+
+  &--left {
+    --workspace-dock-viewport-max: 36vw;
+    border-right: 1px solid var(--border-light);
+  }
+
+  &--right {
+    --workspace-dock-viewport-max: 48vw;
+    border-left: 1px solid var(--border-light);
+  }
+
+  &.is-collapse-armed {
+    .workspace-dock-resize-grip {
+      opacity: 1;
+      background: var(--accent);
+    }
+
+    .workspace-dock-content {
+      opacity: .72;
+    }
+  }
+}
+
+.workspace-dock-content {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  transition: opacity .12s;
+
+  > .panel,
+  > .director-notebook,
+  > .editor-panel {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+.workspace-dock-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+
+  &--left {
+    right: -5px;
+  }
+
+  &--right {
+    left: -5px;
+  }
+
+  &:hover .workspace-dock-resize-grip,
+  &:focus-visible .workspace-dock-resize-grip {
+    opacity: 1;
+    background: var(--accent);
+  }
+
+  &:focus-visible {
+    outline: none;
+  }
+}
+
+.workspace-dock-resize-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: var(--border);
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+body.workspace-dock-resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
+
+  * {
+    cursor: col-resize !important;
+  }
+}
+
+@media (max-width: 1000px) {
+  .workspace-dock--left {
+    --workspace-dock-viewport-max: 27vw;
+  }
+
+  .workspace-dock--right {
+    --workspace-dock-viewport-max: 41vw;
+  }
+}

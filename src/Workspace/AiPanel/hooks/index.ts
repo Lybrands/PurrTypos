@@ -1,5 +1,5 @@
 export { useAssociatedContext, type UseAssociatedContextParams } from "./useAssociatedContext";
-export { thinkingOnlyModelIds, useAiModelPrefs } from "./useAiModelPrefs";
+export { useAiModelPrefs } from "./useAiModelPrefs";
 export { useAiSessions, type ChatSessionScope } from "./useAiSessions";
 export { useMemorySelection } from "./useMemorySelection";
 export { useChatScroll } from "./useChatScroll";

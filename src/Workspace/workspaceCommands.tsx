@@ -1,28 +1,19 @@
 import {
   ReadOutlined,
-  EditOutlined,
-  CommentOutlined,
   AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
   DashboardOutlined,
   HistoryOutlined,
   SettingOutlined,
-  BookOutlined,
 } from '@ant-design/icons'
 import type { Chapter, EntityId } from '../types'
 import type { CommandItem } from './CommandPalette'
-import type {
-  MainPanelKey,
-  PanelKey,
-  PersistedPanelState,
-} from './hooks/usePanelLayout'
+import type { PanelKey, PersistedPanelState } from './hooks/usePanelLayout'
 
 export interface BuildPaletteCommandsDeps {
   panelState: PersistedPanelState
-  mainPanel: MainPanelKey
   toggleFloating: (key: PanelKey) => void
-  setMain: (key: MainPanelKey) => void
   writingChapters: Chapter[]
   activeWritingChapterId: EntityId | null
   onChapterSelect: (id: EntityId, title: string) => void
@@ -32,65 +23,13 @@ export interface BuildPaletteCommandsDeps {
 /** 命令面板命令集合（浮窗控制 / 编辑动作 / 章节导航） */
 export function buildPaletteCommands({
   panelState,
-  mainPanel,
   toggleFloating,
-  setMain,
   writingChapters,
   activeWritingChapterId,
   onChapterSelect,
   onOpenSettings,
 }: BuildPaletteCommandsDeps): CommandItem[] {
   const base: CommandItem[] = [
-    {
-      id: 'panel:toggle-left',
-      label: panelState.left.open ? '关闭章节列表' : '打开章节列表',
-      hint: 'Ctrl+Shift+1',
-      icon: <BookOutlined />,
-      category: '浮窗',
-      keywords: ['setting', 'notebook', 'left', '设定', 'chapter', '章节'],
-      run: () => toggleFloating('left'),
-    },
-    {
-      id: 'panel:focus-ai',
-      label:
-        mainPanel === 'ai'
-          ? panelState.ai.open
-            ? 'AI 已是主区域（点击聚焦）'
-            : 'AI 已是主区域'
-          : '切回 AI 主区域',
-      hint: 'Ctrl+Shift+2',
-      icon: <CommentOutlined />,
-      category: '浮窗',
-      keywords: ['ai', 'chat', 'director', '导演', 'focus'],
-      run: () => setMain('ai'),
-    },
-    {
-      id: 'panel:toggle-ai-floating',
-      label:
-        mainPanel === 'ai'
-          ? 'AI 是主区域（无需浮窗）'
-          : panelState.ai.open
-            ? '收起 AI 浮窗'
-            : '展开 AI 浮窗',
-      icon: <CommentOutlined />,
-      category: '浮窗',
-      keywords: ['ai', 'float', '浮窗', '收起', '展开'],
-      run: () => toggleFloating('ai'),
-    },
-    {
-      id: 'panel:toggle-editor',
-      label:
-        mainPanel === 'editor'
-          ? '写作已是主区域'
-          : panelState.editor.open
-            ? '关闭写作浮窗'
-            : '打开写作浮窗',
-      hint: 'Ctrl+Shift+3',
-      icon: <EditOutlined />,
-      category: '浮窗',
-      keywords: ['edit', 'writer', '写作'],
-      run: () => toggleFloating('editor'),
-    },
     {
       id: 'panel:toggle-setting',
       label: panelState.setting.open ? '关闭设定面板' : '打开设定面板',
@@ -107,14 +46,6 @@ export function buildPaletteCommands({
       category: '浮窗',
       keywords: ['dashboard', 'stats', 'health', '仪表盘', '统计', '伏笔', '健康'],
       run: () => toggleFloating('dashboard'),
-    },
-    {
-      id: 'panel:focus-editor',
-      label: mainPanel === 'editor' ? '写作已是主区域' : '切到写作主区域',
-      icon: <EditOutlined />,
-      category: '浮窗',
-      keywords: ['edit', 'writer', '写作', 'main', '主'],
-      run: () => setMain('editor'),
     },
     {
       id: 'action:diff-history',

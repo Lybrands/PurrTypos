@@ -33,6 +33,7 @@ export interface AccState {
   needsTitle: boolean;
   userText: string;
   model: string;
+  turnStartedAt: number;
   toolCallSegments?: ToolCallSegment[];
   thinkingBlocks?: string[];
   thinkingDurationsMs?: number[];

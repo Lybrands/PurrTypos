@@ -34,11 +34,10 @@ interface InlineEditLayerProps {
   /** 外部清空选区状态（点击关闭后） */
   onClearSelection: () => void
   modelConfigs: AiModelConfig[]
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   selectedModelId: string
   /** 用户在 popover 内切换模型时回调，让外层持久化（与 ai-floating 共享一份选择） */
   onSelectedModelChange?: (id: string) => void
-  thinkingEnabled?: boolean
-  onThinkingChange?: (v: boolean) => void
   bookId: EntityId | null
   chapterId: EntityId | null
   chapterTitle: string
@@ -53,10 +52,9 @@ export default function InlineEditLayer({
   selection,
   onClearSelection,
   modelConfigs,
+  onUpdateModelConfig,
   selectedModelId,
   onSelectedModelChange,
-  thinkingEnabled = false,
-  onThinkingChange,
   bookId,
   chapterId,
   chapterTitle,
@@ -67,19 +65,13 @@ export default function InlineEditLayer({
   const [capture, setCapture] = React.useState<InlineCapture | null>(null)
   const [initialPrompt, setInitialPrompt] = React.useState('')
 
-  // 若外部没传 onSelectedModelChange / onThinkingChange，本地兜底 state 让 popover 仍可切换
+  // 若外部没传回调，本地兜底 state 让 popover 仍可切换
   const [localModelId, setLocalModelId] = React.useState(selectedModelId)
-  const [localThinking, setLocalThinking] = React.useState(thinkingEnabled)
   React.useEffect(() => {
     setLocalModelId(selectedModelId)
   }, [selectedModelId])
-  React.useEffect(() => {
-    setLocalThinking(thinkingEnabled)
-  }, [thinkingEnabled])
   const effectiveModelId = onSelectedModelChange ? selectedModelId : localModelId
-  const effectiveThinking = onThinkingChange ? thinkingEnabled : localThinking
   const setModelId = onSelectedModelChange ?? setLocalModelId
-  const setThinking = onThinkingChange ?? setLocalThinking
 
   const activeModel = React.useMemo(
     () => modelConfigs.find((m) => m.id === effectiveModelId) ?? modelConfigs[0],
@@ -139,10 +131,9 @@ export default function InlineEditLayer({
           capture={capture}
           initialPrompt={initialPrompt}
           modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
           selectedModelId={effectiveModelId}
           onSelectedModelChange={setModelId}
-          thinkingEnabled={effectiveThinking}
-          onThinkingChange={setThinking}
           bookId={bookId}
           chapterId={chapterId}
           chapterTitle={chapterTitle}

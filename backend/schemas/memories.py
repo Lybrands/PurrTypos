@@ -105,3 +105,4 @@ class BuildMemoryContextRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     memoryBudget: Optional[int] = None
     memoryRecallLimit: Optional[int] = None
+    contextWindow: Optional[str] = None

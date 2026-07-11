@@ -1,6 +1,9 @@
-/* 工具调用：逐行列表，无卡片边框，与思考区区分 */
+/* Codex 风格执行时间线：摘要始终可见，具体操作按需展开。 */
 .bubble-tool-calls {
-  margin: 6px 0;
+  position: relative;
+  margin: 5px 0 7px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
 }
 
 .bubble-tool-call-summary.ant-btn {
@@ -9,7 +12,7 @@
   padding: 0;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
-  line-height: 1.6;
+  line-height: 1.55;
 
   &:hover,
   &:focus {
@@ -27,9 +30,16 @@
   }
 }
 
+.bubble-tool-call-duration {
+  margin-left: 6px;
+  color: var(--text-muted) !important;
+  opacity: .72;
+  font-variant-numeric: tabular-nums;
+}
+
 .bubble-tool-call-details {
   margin-top: 3px;
-  padding-left: 18px;
+  padding: 3px 0 2px 16px;
 }
 
 .bubble-tool-call-line {

@@ -146,6 +146,7 @@ async def build_memory_context(body: BuildMemoryContextRequest):
                 "selectedForeshadowingIds": body.selectedForeshadowingIds or [],
                 "memoryBudget": body.memoryBudget,
                 "memoryRecallLimit": body.memoryRecallLimit,
+                "contextWindow": body.contextWindow,
             },
             body.userPrompt,
             body.mode,

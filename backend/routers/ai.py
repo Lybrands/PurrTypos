@@ -7,12 +7,14 @@ import json
 import logging
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from schemas.ai import ChatStreamRequest, GenerateTitleRequest, ListModelsRequest
 from utils.chat_stream import (
+    RuntimeTodoExtractor,
     StreamAccumulator,
     build_chat_request_params,
     build_tool_results_display,
@@ -26,6 +28,16 @@ from utils.url import normalize_base_url
 
 router = APIRouter(tags=["ai"])
 logger = logging.getLogger(__name__)
+
+RUNTIME_TODO_SYSTEM_PROMPT = """你可以在运行过程中维护一份用户可见的 To-dos。
+当你开始处理一个需要多步完成的请求，或在工具调用后发现计划需要调整时，输出一段隐藏事件：
+<agent_todos>{"title":"短标题","goal":"用户目标摘要","steps":[{"id":"kebab-case-id","title":"短步骤","type":"read|analyze|write|review|confirm","executor":"model|tool","expectedTools":["可选工具名"],"riskLevel":"read|write|destructive"}]}</agent_todos>
+要求：
+- 这段隐藏事件只用于 UI 状态，不要解释它，也不要放进 Markdown 代码块。
+- 事件之后继续正常回复用户。
+- 工具名只能从本轮可用工具中选择；没有把握时省略 expectedTools。
+- 涉及写入、保存、删除、覆盖正文或设定时，必须包含 confirm 步骤。
+"""
 
 
 # ── POST /ai/models ─────────────────────────────────────────────
@@ -209,6 +221,8 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "availableOutlines": list(body.availableOutlines or []),
                 "associatedChapterIds": list(body.associatedChapterIds or []),
                 "associatedOutlineIds": list(body.associatedOutlineIds or []),
+                "chatAgentMode": body.chatAgentMode or "",
+                "contextWindow": body.contextWindow or (opts.get("context_window") if isinstance(opts, dict) else None),
             }
             sub_rp = build_chat_request_params(model, rest, base_url, temperature)
 
@@ -232,6 +246,7 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 book_id=body.bookId,
                 user_prompt=latest_user_prompt,
                 mode=body.chatAgentMode or "",
+                context_window=body.contextWindow or (opts.get("context_window") if isinstance(opts, dict) else None),
             )
             inject_system_prompt(messages, memory_block)
             assoc_block = await build_associated_context_block(tool_ctx_book)
@@ -262,6 +277,7 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 "availableOutlines": list(body.availableOutlines or []),
                 "associatedChapterIds": list(body.associatedChapterIds or []),
                 "associatedOutlineIds": list(body.associatedOutlineIds or []),
+                "contextWindow": body.contextWindow or (opts.get("context_window") if isinstance(opts, dict) else None),
             }
 
             # ── 会话绑定说明（原前端 systemSuffix，文案权收归后端）────────────
@@ -292,12 +308,13 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 from services.agent_run_controller import AgentRunController
                 from services.task_planner import should_request_task_plan
 
-                if should_request_task_plan(
+                should_run_todos = should_request_task_plan(
                     user_text=latest_user_text,
                     book_id=body.bookId,
                     enable_agent_tools=bool(body.enableAgentTools),
                     chat_agent_mode=body.chatAgentMode,
-                ):
+                )
+                if should_run_todos:
                     agent_run = AgentRunController(
                         db=get_db(),
                         send_chunk=agent_run_events.append,
@@ -312,11 +329,13 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         chat_agent_mode=body.chatAgentMode,
                         available_tool_names=available_tool_names,
                         signal=abort,
+                        use_planner=False,
                     )
                     for evt in _drain_agent_run_events():
                         yield json.dumps(evt)
+                    inject_system_prompt(messages, RUNTIME_TODO_SYSTEM_PROMPT)
             except Exception:
-                logger.exception("[ai/chat/stream] agent run planner failed")
+                logger.exception("[ai/chat/stream] agent run init failed")
 
             used_model = model
             _MAX_ROUNDS = 6
@@ -331,7 +350,7 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                 stream = result["stream"]
                 used_model = result.get("model", model)
 
-                acc = StreamAccumulator()
+                acc = StreamAccumulator(RuntimeTodoExtractor() if agent_run else None)
                 got_tool_calls = False
 
                 async for chunk in stream:
@@ -339,6 +358,14 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         break
 
                     outcome = acc.process_chunk(chunk)
+                    if agent_run and outcome.todo_events:
+                        for todo_payload in outcome.todo_events:
+                            await agent_run.apply_runtime_todos(
+                                todo_payload,
+                                available_tool_names=available_tool_names,
+                            )
+                        for run_evt in _drain_agent_run_events():
+                            yield json.dumps(run_evt)
                     for evt in outcome.events:
                         if agent_run and evt.get("delta"):
                             await agent_run.on_model_delta()
@@ -436,6 +463,18 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
                         yield json.dumps(run_evt)
                 yield json.dumps({"done": True, "model": used_model})
 
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+            user_msg = "模型服务流式响应中断，请检查网络或稍后重试。"
+            logger.warning(
+                "[ai/chat/stream] upstream stream interrupted: %s: %s",
+                type(e).__name__,
+                e,
+            )
+            if 'agent_run' in locals() and agent_run:
+                await agent_run.fail(error=user_msg)
+                for run_evt in _drain_agent_run_events():
+                    yield json.dumps(run_evt)
+            yield json.dumps({"error": user_msg})
         except Exception as e:
             logger.exception("[ai/chat/stream] error")
             if 'agent_run' in locals() and agent_run:

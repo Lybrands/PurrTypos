@@ -330,6 +330,7 @@ export interface Conversation {
   tool_call_segments?: string | null;
   thinking_blocks?: string | null;
   thinking_durations_ms?: string | null;
+  duration_ms?: number | null;
   task_plan?: string | null;
   /** 子专家结构化结果（润色 / 审校 / 续写规划 / 风格统一）的 JSON 字符串，
    *  形如 { role, payload }，回显时还原 SubagentResultCard。 */
@@ -738,6 +739,7 @@ export interface ElectronAPI {
     }[];
     thinkingBlocks?: string[];
     thinkingDurationsMs?: number[];
+    durationMs?: number;
     taskPlan?: AiTaskPlanChunk;
     agentRunId?: string;
     /** 子专家结构化结果，形如 { role, payload }；用于回显时还原 SubagentResultCard */
@@ -839,6 +841,7 @@ export interface ElectronAPI {
     selectedForeshadowingIds?: (number | string)[];
     memoryBudget?: number;
     memoryRecallLimit?: number;
+    contextWindow?: AiContextWindow;
   }) => Promise<ApiResult<MemoryContextBlock>>;
   generateSessionTitle: (data: {
     apiKey: string;
@@ -864,6 +867,7 @@ export interface ElectronAPI {
       temperature?: number;
       max_tokens?: number;
       thinking?: { type: "disabled" | "enabled" };
+      context_window?: AiContextWindow;
     };
     tools?: unknown[];
     /** 是否在请求里携带 skills 工具列表（旧名 useToolRouter；并不做语义路由） */
@@ -880,6 +884,7 @@ export interface ElectronAPI {
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
     chatAgentMode?: ChatAgentMode;
+    contextWindow?: AiContextWindow;
   }) => void;
   abortAiStream: () => void;
   onAiChunk: (
@@ -1014,6 +1019,8 @@ export interface GeneralSettings {
   ai_agent_mode?: 'legacy' | 'subagent';
 }
 
+export type AiContextWindow = '200k' | '300k' | '1m';
+
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export interface AiModelConfig {
   id: string;
@@ -1028,6 +1035,10 @@ export interface AiModelConfig {
   nickname?: string;
   supportsThinking: boolean;
   thinkingOnly: boolean;
+  /** 当前模型是否默认以 thinking 模式请求。 */
+  thinkingEnabled?: boolean;
+  /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
+  contextWindow?: AiContextWindow;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。
    * 为 false 时不传 temperature，由大模型接口使用其默认采样行为。
