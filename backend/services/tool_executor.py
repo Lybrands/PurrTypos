@@ -8,6 +8,8 @@ Tool executor —— Agent 工具调用的 dispatch 层。
 * ``run_tools`` / ``tool_will_hit_read_cache`` 两个对外 dispatch 入口
 * 在文件末尾 import 各 ``services.tool_handlers.*``，触发它们用装饰器
   把自己注册进 ``TOOL_HANDLERS``
+* ``validate_loaded_tool_contract`` 在启动时断言模型可见 schema 与运行时
+  handler、缓存注册完全一致
 
 为保持对外 import 路径不变，本模块从 ``tool_runtime`` re-export 了
 ``ToolResult`` / ``tool`` / ``TOOL_HANDLERS`` / ``CACHE_PREDICTORS`` 等公共符号。
@@ -45,6 +47,13 @@ from services.tool_runtime import (  # noqa: F401  (re-export 保持旧 import �
     resolve_chapter_id_strict,
     tool,
 )
+from services.tool_policy import TOOL_POLICIES, policy_coverage
+from services.tool_security import (
+    parse_tool_arguments,
+    sanitize_tool_result,
+    validate_book_scope,
+    validate_tool_call_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +81,19 @@ def _make_read_cache_predictor(name: str) -> CachePredictor:
 
 for _name in READ_CACHE_KEYS:
     CACHE_PREDICTORS[_name] = _make_read_cache_predictor(_name)
+
+
+def _tool_is_authorized(ctx: dict, name: str | None) -> bool:
+    """Apply the narrowest tool allow-list supplied by an orchestrator.
+
+    ``subagentAllowedToolNames`` is kept for backward compatibility.  The
+    generic name is used by the top-level task-plan executor as well.
+    """
+    for key in ("allowedToolNames", "subagentAllowedToolNames"):
+        allowed = ctx.get(key)
+        if isinstance(allowed, set):
+            return not name or name in allowed
+    return True
 
 
 @cache_predictor("getChapterContent")
@@ -116,6 +138,36 @@ from services.tool_handlers import outline_tools as _outline_tools  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def validate_loaded_tool_contract():
+    """Fail startup when model-visible and executable tool capabilities drift.
+
+    This runs after ``tool_router`` has loaded ``SKILL.md`` files.  Keeping it
+    here also guarantees all decorator-based handler registrations have been
+    triggered before the comparison is made.
+    """
+    from services.tool_contract import inspect_tool_contract
+    from services.tool_router import get_api_skill_items
+
+    report = inspect_tool_contract(
+        get_api_skill_items(),
+        TOOL_HANDLERS,
+        CACHE_PREDICTORS,
+        READ_CACHE_KEYS,
+    )
+    if not report.is_valid:
+        raise RuntimeError(f"Agent 工具契约校验失败：{report.describe_violations()}")
+    unclassified, orphaned_policies = policy_coverage(TOOL_HANDLERS)
+    if unclassified or orphaned_policies:
+        parts: list[str] = []
+        if unclassified:
+            parts.append(f"未分类工具：{', '.join(sorted(unclassified))}")
+        if orphaned_policies:
+            parts.append(f"无 handler 的安全策略：{', '.join(sorted(orphaned_policies))}")
+        raise RuntimeError(f"Agent 工具安全策略校验失败：{'；'.join(parts)}")
+    logger.info("[agent] 工具契约校验通过：%d 个工具", report.tool_count)
+    return report
+
+
 def tool_will_hit_read_cache(ctx: dict, tc: dict, writing_chapters: list[dict]) -> bool:
     """提前预测一个工具调用是否会走读缓存。
 
@@ -124,8 +176,7 @@ def tool_will_hit_read_cache(ctx: dict, tc: dict, writing_chapters: list[dict]) 
     """
     name = (tc.get("function") or {}).get("name")
     args = _parse_args((tc.get("function") or {}).get("arguments", "{}"))
-    allow = ctx.get("subagentAllowedToolNames")
-    if isinstance(allow, set) and name and name not in allow:
+    if not _tool_is_authorized(ctx, name):
         return False
     predictor = CACHE_PREDICTORS.get(name or "")
     if predictor is None:
@@ -140,6 +191,7 @@ async def run_tools(
     tool_calls: list[dict],
     ctx: dict,
     send_chunk: Callable[[dict], None] | None = None,
+    signal=None,
 ) -> list[dict]:
     """批量执行 tool_calls，返回 ``[{tool_call_id, content}, ...]``。
 
@@ -147,6 +199,13 @@ async def run_tools(
     ``ctx['chapterId'] / ctx['writingChapters']``，本批后续工具自然能看到。
     """
     results: list[dict] = []
+    batch_error = validate_tool_call_batch(tool_calls)
+    if batch_error:
+        content = json.dumps({"success": False, "error": batch_error}, ensure_ascii=False)
+        return [
+            {"tool_call_id": call.get("id"), "content": content}
+            for call in tool_calls
+        ]
     writing_chapters_snapshot = _runtime_writing_chapters(ctx)
     tool_read_cache_mask = [
         tool_will_hit_read_cache(ctx, tc, writing_chapters_snapshot) for tc in tool_calls
@@ -156,14 +215,34 @@ async def run_tools(
 
     for i, tc in enumerate(tool_calls):
         name = (tc.get("function") or {}).get("name")
-        args = _parse_args((tc.get("function") or {}).get("arguments", "{}"))
+        raw_args = (tc.get("function") or {}).get("arguments", "{}")
+        args, argument_error = parse_tool_arguments(raw_args)
         from_cache = False
 
         try:
-            allow = ctx.get("subagentAllowedToolNames")
-            if isinstance(allow, set) and name and name not in allow:
+            if argument_error or args is None:
                 content = json.dumps(
-                    {"error": f"工具「{name}」不在当前 subagent 授权范围，已拒绝执行。"},
+                    {"success": False, "error": argument_error},
+                    ensure_ascii=False,
+                )
+            elif scope_error := validate_book_scope(ctx, args):
+                content = json.dumps(
+                    {"success": False, "error": scope_error},
+                    ensure_ascii=False,
+                )
+            elif not _tool_is_authorized(ctx, name):
+                content = json.dumps(
+                    {"error": f"工具「{name}」不在当前执行计划的授权范围，已拒绝执行。"},
+                    ensure_ascii=False,
+                )
+            elif not name or name not in TOOL_HANDLERS:
+                content = json.dumps(
+                    {"error": f"\u672a\u77e5\u5de5\u5177: {name}"},
+                    ensure_ascii=False,
+                )
+            elif name not in TOOL_POLICIES:
+                content = json.dumps(
+                    {"error": f"工具「{name or '未知'}」没有安全执行策略，已拒绝执行。"},
                     ensure_ascii=False,
                 )
             else:
@@ -171,11 +250,41 @@ async def run_tools(
                 if handler is None:
                     content = json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
                 else:
-                    res = await handler(ctx, args, send_chunk)
-                    content = res.content
-                    from_cache = res.from_cache
+                    policy = TOOL_POLICIES[name]
+                    if policy.requires_user_approval:
+                        from services.tool_approval_service import request_tool_approval
+
+                        approval = await request_tool_approval(
+                            tool_name=name,
+                            args=args,
+                            policy=policy,
+                            send_chunk=send_chunk,
+                            signal=signal,
+                        )
+                        if not approval.approved:
+                            content = json.dumps({
+                                "success": False,
+                                "approvalId": approval.approval_id,
+                                "approvalStatus": approval.status,
+                                "error": "该操作未获用户批准，未执行。",
+                            }, ensure_ascii=False)
+                        else:
+                            res = await handler(ctx, args, send_chunk)
+                            content = res.content
+                            from_cache = res.from_cache
+                    else:
+                        res = await handler(ctx, args, send_chunk)
+                        content = res.content
+                        from_cache = res.from_cache
         except Exception as err:
-            content = json.dumps({"error": str(err)}, ensure_ascii=False)
+            logger.exception("[agent] tool handler failed: %s", name)
+            content = json.dumps({
+                "success": False,
+                "error": "Tool execution failed.",
+                "errorType": type(err).__name__,
+            }, ensure_ascii=False)
+
+        content = sanitize_tool_result(content)
 
         results.append({"tool_call_id": tc.get("id"), "content": content})
         if send_chunk:

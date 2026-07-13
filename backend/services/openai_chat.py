@@ -47,6 +47,7 @@ async def chat_no_stream(
     temperature = opts.get("temperature")
     thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
+    tool_choice: Any = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     top_k: Any = opts.get("top_k")
@@ -61,6 +62,8 @@ async def chat_no_stream(
         params["max_tokens"] = max_tokens
     if tools:
         params["tools"] = tools
+        if tool_choice is not None:
+            params["tool_choice"] = tool_choice
     if top_k is not None:
         try:
             tk = int(top_k)
@@ -89,6 +92,7 @@ async def chat_stream(
     temperature = opts.get("temperature")
     thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
+    tool_choice: Any = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     top_k: Any = opts.get("top_k")
@@ -112,6 +116,8 @@ async def chat_stream(
         params["max_tokens"] = max_tokens
     if tools:
         params["tools"] = tools
+        if tool_choice is not None:
+            params["tool_choice"] = tool_choice
     if top_k is not None:
         try:
             tk = int(top_k)

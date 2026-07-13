@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+import agent_core.runtime as runtime_module
+from agent_core.cancellation import OperationCanceled
+from agent_core.contracts import (
+    AgentMessage,
+    AgentRunRequest,
+    DomainContext,
+    ExecutionState,
+    ModelFinishReason,
+    ModelRequest,
+    ModelStream,
+    ModelStreamChunk,
+    ToolBatchOutcome,
+    ToolBatchRequest,
+    ToolBatchResult,
+    ToolCall,
+    ToolCallDelta,
+    ToolCallResult,
+    ToolSchema,
+)
+from agent_core.events import AgentEvent, CoreEventType
+from agent_core.runtime import AgentRuntime, _stream_tool_batch
+
+
+def _request() -> ToolBatchRequest:
+    return ToolBatchRequest(
+        run_id="run-1",
+        calls=(ToolCall(id="call-a", name="readA", arguments_json="{}"),),
+        allowed_tool_names=frozenset({"readA"}),
+        state=ExecutionState(),
+    )
+
+
+def _result() -> ToolBatchResult:
+    return ToolBatchResult(
+        results=(ToolCallResult(
+            tool_call_id="call-a",
+            tool_name="readA",
+            content='{"success":true}',
+        ),),
+        outcome=ToolBatchOutcome.COMPLETED,
+    )
+
+
+async def _collect(gateway, signal):
+    return [
+        update
+        async for update in _stream_tool_batch(gateway, _request(), signal)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_commit_wins_same_tick_progress_and_cancel_barrier():
+    signal = asyncio.Event()
+    progress = AgentEvent(
+        type=CoreEventType.TOOL_CALL_COMPLETED,
+        run_id="run-1",
+        payload={"index": 0},
+    )
+
+    class CommitGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            await event_sink.emit(progress)
+            signal.set()
+            return _result()
+
+    updates = await asyncio.wait_for(
+        _collect(CommitGateway(), signal),
+        timeout=1,
+    )
+
+    assert updates == [progress, _result()]
+
+
+@pytest.mark.asyncio
+async def test_gateway_exception_wins_same_tick_cancel_barrier():
+    signal = asyncio.Event()
+
+    class GatewayCommittedError(RuntimeError):
+        pass
+
+    class FailingGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            signal.set()
+            raise GatewayCommittedError("committed failure")
+
+    with pytest.raises(GatewayCommittedError, match="committed failure"):
+        await asyncio.wait_for(_collect(FailingGateway(), signal), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_progress_wins_same_tick_cancel_then_gateway_is_awaited():
+    signal = asyncio.Event()
+    finalized = asyncio.Event()
+    progress = AgentEvent(
+        type=CoreEventType.TOOL_CALL_COMPLETED,
+        run_id="run-1",
+        payload={"index": 0},
+    )
+
+    class ProgressThenBlockGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            try:
+                await event_sink.emit(progress)
+                signal.set()
+                await asyncio.Event().wait()
+                raise AssertionError("gateway resumed after cancellation")
+            finally:
+                finalized.set()
+
+    stream = _stream_tool_batch(ProgressThenBlockGateway(), _request(), signal)
+    first = await asyncio.wait_for(anext(stream), timeout=1)
+    assert first is progress
+
+    with pytest.raises(OperationCanceled):
+        await asyncio.wait_for(anext(stream), timeout=1)
+    assert finalized.is_set()
+
+
+@pytest.mark.asyncio
+async def test_signal_first_cleanup_exception_does_not_replace_canceled_outcome():
+    signal = asyncio.Event()
+    started = asyncio.Event()
+    finalized = asyncio.Event()
+
+    class BadCleanupGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                finalized.set()
+                raise RuntimeError("cleanup must stay private")
+
+    consumer = asyncio.create_task(_collect(BadCleanupGateway(), signal))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    signal.set()
+
+    with pytest.raises(OperationCanceled):
+        await asyncio.wait_for(consumer, timeout=1)
+    assert finalized.is_set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gateway(
+    monkeypatch,
+):
+    progress = AgentEvent(
+        type=CoreEventType.TOOL_CALL_COMPLETED,
+        run_id="run-1",
+        payload={"index": 0},
+    )
+    gateway_finalized = asyncio.Event()
+    tracked_streams = []
+    original_stream_tool_batch = _stream_tool_batch
+
+    class ToolCallingModelGateway:
+        async def stream(self, messages, invocation, signal=None):
+            async def chunks():
+                yield ModelStreamChunk(
+                    tool_call_deltas=(ToolCallDelta(
+                        index=0,
+                        id="call-a",
+                        type="function",
+                        name="readA",
+                        arguments_fragment="{}",
+                    ),),
+                    finish_reason=ModelFinishReason.TOOL_CALLS,
+                )
+
+            return ModelStream(chunks=chunks(), model="model")
+
+    class BlockingToolGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            try:
+                await event_sink.emit(progress)
+                await asyncio.Event().wait()
+                raise AssertionError("gateway resumed after outer stream close")
+            finally:
+                gateway_finalized.set()
+
+    class TrackedToolStream:
+        def __init__(self, gateway, request, signal):
+            self._inner = original_stream_tool_batch(gateway, request, signal)
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await anext(self._inner)
+
+        async def aclose(self):
+            self.closed = True
+            await self._inner.aclose()
+
+    def tracked_stream_tool_batch(gateway, request, signal):
+        stream = TrackedToolStream(gateway, request, signal)
+        tracked_streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_stream_tool_batch",
+        tracked_stream_tool_batch,
+    )
+    runtime = AgentRuntime(
+        model_gateway=ToolCallingModelGateway(),
+        tool_execution_gateway=BlockingToolGateway(),
+    )
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="work"),),
+        model=ModelRequest(provider="test", model="model"),
+        domain_context=DomainContext(namespace="test"),
+        tools_enabled=True,
+    )
+    stream = runtime.run(
+        request,
+        tools=(ToolSchema(
+            name="readA",
+            description="Read A",
+            parameters={"type": "object", "properties": {}},
+        ),),
+        run_id="run-1",
+        scope_tools_to_observer=False,
+    )
+
+    started = await asyncio.wait_for(anext(stream), timeout=1)
+    assert isinstance(started, AgentEvent)
+    assert started.type == CoreEventType.TOOL_CALLS_STARTED
+    assert await asyncio.wait_for(anext(stream), timeout=1) is progress
+    assert tracked_streams and not tracked_streams[0].closed
+
+    await asyncio.wait_for(stream.aclose(), timeout=1)
+    closed_synchronously = tracked_streams[0].closed
+    finalized_synchronously = gateway_finalized.is_set()
+    if not closed_synchronously:
+        await tracked_streams[0].aclose()
+
+    assert closed_synchronously
+    assert finalized_synchronously

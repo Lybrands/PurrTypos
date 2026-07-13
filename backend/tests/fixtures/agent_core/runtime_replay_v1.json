@@ -1,0 +1,178 @@
+{
+  "schemaVersion": 1,
+  "description": "Deterministic pre-extraction fixtures for planner, model stream, tool continuation, and approval outcomes.",
+  "plannerCases": [
+    {
+      "id": "read-then-review",
+      "availableTools": ["getChapterContent"],
+      "decision": {
+        "needsTodos": true,
+        "title": "检查章节",
+        "goal": "读取当前章节并给出建议",
+        "todos": [
+          {
+            "id": "read",
+            "title": "读取章节",
+            "type": "read",
+            "executor": "tool",
+            "expectedTools": ["getChapterContent"],
+            "riskLevel": "read"
+          },
+          {
+            "id": "review",
+            "title": "生成建议",
+            "type": "review",
+            "executor": "model",
+            "riskLevel": "read"
+          }
+        ]
+      },
+      "expected": {
+        "title": "检查章节",
+        "stepIds": ["read", "review"],
+        "executors": ["tool", "model"],
+        "allowedTools": ["getChapterContent"]
+      }
+    }
+  ],
+  "modelCases": [
+    {
+      "id": "direct-answer",
+      "chunks": [
+        {
+          "choices": [
+            {
+              "delta": {"reasoning_content": "先确认问题范围。"},
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "delta": {"content": "这是确定性回答。"},
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "content": "这是确定性回答。",
+        "thinking": "先确认问题范围。",
+        "finishReason": "stop",
+        "events": [
+          {"thinkingDelta": "先确认问题范围。"},
+          {"delta": "这是确定性回答。"}
+        ],
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "fragmented-tool-call",
+      "chunks": [
+        {
+          "choices": [
+            {
+              "delta": {
+                "reasoning_content": "需要先读取章节。",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                      "name": "getChapterContent",
+                      "arguments": "{\"chapter"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {"arguments": "Id\":\"chapter-1\"}"}
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ]
+        }
+      ],
+      "toolResults": [
+        {
+          "tool_call_id": "call-1",
+          "content": "{\"success\":true,\"content\":\"章节正文\"}"
+        }
+      ],
+      "expected": {
+        "content": "",
+        "thinking": "需要先读取章节。",
+        "finishReason": "tool_calls",
+        "events": [{"thinkingDelta": "需要先读取章节。"}],
+        "toolCalls": [
+          {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "getChapterContent",
+              "arguments": "{\"chapterId\":\"chapter-1\"}"
+            }
+          }
+        ],
+        "continuationRoles": ["assistant", "tool"]
+      }
+    }
+  ],
+  "toolOutcomeCases": [
+    {
+      "id": "approval-rejected",
+      "toolPayloads": [
+        {"success": false, "approvalStatus": "rejected", "error": "未批准"}
+      ],
+      "expectedOutcome": "declined",
+      "expectsError": false
+    },
+    {
+      "id": "approval-timeout",
+      "toolPayloads": [
+        {"success": false, "approvalStatus": "timed_out", "error": "审批超时"}
+      ],
+      "expectedOutcome": "failed",
+      "expectsError": true,
+      "expectedErrorContains": "超时"
+    },
+    {
+      "id": "request-canceled",
+      "toolPayloads": [
+        {"success": false, "approvalStatus": "canceled", "error": "请求中止"}
+      ],
+      "expectedOutcome": "canceled",
+      "expectsError": true,
+      "expectedErrorContains": "中止"
+    },
+    {
+      "id": "handler-failed",
+      "toolPayloads": [
+        {"success": false, "error": "Tool execution failed."}
+      ],
+      "expectedOutcome": "failed",
+      "expectsError": true,
+      "expectedErrorContains": "工具执行失败"
+    },
+    {
+      "id": "tool-completed",
+      "toolPayloads": [{"success": true}],
+      "expectedOutcome": "completed",
+      "expectsError": false
+    }
+  ]
+}

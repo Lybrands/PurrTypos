@@ -50,6 +50,7 @@ async def _tool_update_spark_idea(ctx: dict, args: dict, send_chunk: Callable | 
 
     关联实体语义：显式传 None 视为清空；不传（key 不在 args 里）视为不变。
     """
+    bid = resolve_book_id_for_tools(ctx, args)
     raw_id = args.get("id")
     sid = str(raw_id).strip() if raw_id is not None else ""
     new_content_raw = args.get("content")
@@ -62,6 +63,8 @@ async def _tool_update_spark_idea(ctx: dict, args: dict, send_chunk: Callable | 
     new_chapter_id = args.get("chapterId")
     new_character_id = args.get("characterId")
 
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId"})
     if not sid:
         return _err({"success": False, "error": "缺少 id：updateSparkIdea 必须指定要更新的条目"})
     if not new_layer_valid:
@@ -76,6 +79,12 @@ async def _tool_update_spark_idea(ctx: dict, args: dict, send_chunk: Callable | 
 
     try:
         from services import memory_service
+        existing = await memory_service.get_spark_ideas_by_ids([sid])
+        if not existing or str(existing[0].get("book_id") or "") != str(bid):
+            return _err({
+                "success": False,
+                "error": "该设定条目不属于当前书籍，已拒绝更新",
+            })
         update_payload: dict[str, Any] = {}
         if new_content is not None and new_content != "":
             update_payload["content"] = new_content
@@ -105,16 +114,22 @@ async def _tool_update_spark_idea(ctx: dict, args: dict, send_chunk: Callable | 
 @tool("deleteSparkIdea")
 async def _tool_delete_spark_idea(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
     """物理删除一条设定；删除前先取出 content/layer 用于回显，便于 LLM 在回复中复述。"""
+    bid = resolve_book_id_for_tools(ctx, args)
     raw_id = args.get("id")
     sid = str(raw_id).strip() if raw_id is not None else ""
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId"})
     if not sid:
         return _err({"success": False, "error": "缺少 id：deleteSparkIdea 必须指定要删除的条目"})
 
     try:
         from services import memory_service
         existed = await memory_service.get_spark_ideas_by_ids([sid])
-        if not existed:
-            return _err({"success": False, "error": f"未找到 id={sid} 的设定条目"})
+        if not existed or str(existed[0].get("book_id") or "") != str(bid):
+            return _err({
+                "success": False,
+                "error": "该设定条目不属于当前书籍，已拒绝删除",
+            })
         target = existed[0]
         await memory_service.delete_spark_idea(sid)
         return ToolResult(json.dumps({
@@ -272,8 +287,11 @@ async def _tool_create_memory(ctx: dict, args: dict, send_chunk: Callable | None
 
 @tool("updateMemory")
 async def _tool_update_memory(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
     raw_id = args.get("id")
     mid = str(raw_id).strip() if raw_id is not None else ""
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId"})
     if not mid:
         return _err({"success": False, "error": "缺少 id：updateMemory 必须指定要更新的记忆"})
     allowed = {
@@ -293,6 +311,12 @@ async def _tool_update_memory(ctx: dict, args: dict, send_chunk: Callable | None
         return _err({"success": False, "error": "noop：缺少可更新字段", "noop": True})
     try:
         from services import long_term_memory_service
+        existing = await long_term_memory_service.get_memory_items_by_ids([mid])
+        if not existing or str(existing[0].get("book_id") or "") != str(bid):
+            return _err({
+                "success": False,
+                "error": "该记忆不属于当前书籍，已拒绝更新",
+            })
         row = await long_term_memory_service.update_memory_item(mid, payload)
         if not row:
             return _err({"success": False, "error": f"未找到 id={mid} 的长期记忆"})
@@ -303,12 +327,21 @@ async def _tool_update_memory(ctx: dict, args: dict, send_chunk: Callable | None
 
 @tool("archiveMemory")
 async def _tool_archive_memory(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
     raw_id = args.get("id")
     mid = str(raw_id).strip() if raw_id is not None else ""
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId"})
     if not mid:
         return _err({"success": False, "error": "缺少 id：archiveMemory 必须指定要归档的记忆"})
     try:
         from services import long_term_memory_service
+        existing = await long_term_memory_service.get_memory_items_by_ids([mid])
+        if not existing or str(existing[0].get("book_id") or "") != str(bid):
+            return _err({
+                "success": False,
+                "error": "该记忆不属于当前书籍，已拒绝归档",
+            })
         row = await long_term_memory_service.archive_memory_item(mid)
         if not row:
             return _err({"success": False, "error": f"未找到 id={mid} 的长期记忆"})
@@ -338,13 +371,22 @@ async def _tool_link_memories(ctx: dict, args: dict, send_chunk: Callable | None
 
 @tool("resolveForeshadowing")
 async def _tool_resolve_foreshadowing(ctx: dict, args: dict, send_chunk: Callable | None) -> ToolResult:
+    bid = resolve_book_id_for_tools(ctx, args)
     raw_id = args.get("id")
     fid = str(raw_id).strip() if raw_id is not None else ""
     resolved_chapter_id = args.get("resolvedChapterId") or _runtime_chapter_id(ctx)
+    if not bid:
+        return _err({"success": False, "error": "缺少有效 bookId"})
     if not fid:
         return _err({"success": False, "error": "缺少 id：resolveForeshadowing 必须指定伏笔"})
     try:
         from services import memory_service
+        existing = await memory_service.get_foreshadowing_by_ids([fid])
+        if not existing or str(existing[0].get("book_id") or "") != str(bid):
+            return _err({
+                "success": False,
+                "error": "该伏笔不属于当前书籍，已拒绝更新",
+            })
         row = await memory_service.update_foreshadowing(fid, {
             "status": "已回收",
             "resolved_chapter_id": str(resolved_chapter_id) if resolved_chapter_id is not None else None,

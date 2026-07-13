@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
 
+TRACE_EVENT_TYPE = "agentRunTrace"
+
+
 def new_run_id() -> str:
     return f"run_{uuid4().hex[:16]}"
 
@@ -20,12 +23,19 @@ async def create_run(
     session_id: int | None,
     prompt: str,
     mode: str | None,
+    release_version: str | None = None,
+    rollout_cohort: str | None = None,
 ) -> str:
+    from config import AGENT_RELEASE_VERSION, AGENT_ROLLOUT_COHORT
+
     run_id = new_run_id()
+    version = (release_version or AGENT_RELEASE_VERSION).strip() or "development"
+    cohort = (rollout_cohort or AGENT_ROLLOUT_COHORT).strip() or "local"
     await db.execute(
-        "INSERT INTO ai_agent_runs (id, session_id, status, mode, prompt) "
-        "VALUES (?, ?, 'running', ?, ?)",
-        [run_id, session_id, mode, prompt],
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, release_version, rollout_cohort, prompt) "
+        "VALUES (?, ?, 'running', ?, ?, ?, ?)",
+        [run_id, session_id, mode, version, cohort, prompt],
     )
     return run_id
 
@@ -91,6 +101,64 @@ async def append_event(
     )
 
 
+async def append_trace(
+    db: "DatabaseConnection",
+    run_id: str,
+    *,
+    stage: str,
+    outcome: str,
+    details: dict[str, Any] | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Persist compact, non-content runtime diagnostics for an Agent Run."""
+    payload: dict[str, Any] = {
+        "stage": str(stage),
+        "outcome": str(outcome),
+    }
+    if duration_ms is not None:
+        payload["durationMs"] = max(0, int(duration_ms))
+    if details:
+        payload["details"] = dict(details)
+    await append_event(db, run_id, TRACE_EVENT_TYPE, payload)
+
+
+async def get_run(
+    db: "DatabaseConnection",
+    run_id: str,
+) -> dict[str, Any] | None:
+    return await db.fetch_one(
+        "SELECT * FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    )
+
+
+async def get_run_events(
+    db: "DatabaseConnection",
+    run_id: str,
+) -> list[dict[str, Any]]:
+    rows = await db.fetch_all(
+        "SELECT id, event_type, payload_json, create_time "
+        "FROM ai_agent_run_events WHERE run_id = ? ORDER BY id ASC",
+        [run_id],
+    )
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        payload: dict[str, Any] = {}
+        try:
+            value = json.loads(row.get("payload_json") or "{}")
+            if isinstance(value, dict):
+                payload = value
+        except (TypeError, json.JSONDecodeError):
+            pass
+        events.append({
+            "id": row.get("id"),
+            "eventType": row.get("event_type"),
+            "payload": payload,
+            "createTime": row.get("create_time"),
+        })
+    return events
+
+
 async def update_todo_status(
     db: "DatabaseConnection",
     run_id: str,
@@ -152,6 +220,13 @@ async def block_run(
     run_id: str,
 ) -> None:
     await update_run_status(db, run_id, "blocked")
+
+
+async def cancel_run(
+    db: "DatabaseConnection",
+    run_id: str,
+) -> None:
+    await update_run_status(db, run_id, "canceled")
 
 
 def _todo_row_to_step(row: dict[str, Any]) -> dict[str, Any]:

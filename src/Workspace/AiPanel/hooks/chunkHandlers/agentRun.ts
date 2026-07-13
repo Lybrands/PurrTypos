@@ -112,7 +112,7 @@ export const handleAgentRunTodoUpdated: ChunkHandler = (chunk, ctx) => {
 
 export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
   const terminal =
-    chunk.agentRunCompleted || chunk.agentRunFailed || chunk.agentRunBlocked;
+    chunk.agentRunCompleted || chunk.agentRunFailed || chunk.agentRunBlocked || chunk.agentRunCanceled;
   if (!terminal?.runId) return;
   const status = normalizePlanStatus(terminal.status);
   ctx.acc.agentRunId = terminal.runId;

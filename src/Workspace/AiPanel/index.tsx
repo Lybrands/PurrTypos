@@ -156,6 +156,16 @@ export default function AiPanel({
     () => [...prependedHistory, ...conversations],
     [prependedHistory, conversations],
   );
+  const activeTaskPlan = React.useMemo(() => {
+    if (!loading) return undefined;
+    for (let index = conversations.length - 1; index >= 0; index -= 1) {
+      const message = conversations[index];
+      if (message.role === "assistant" && message.taskPlan) {
+        return message.taskPlan;
+      }
+    }
+    return undefined;
+  }, [conversations, loading]);
   const firstItemIndex = INITIAL_FIRST_ITEM_INDEX - prependedHistory.length;
 
   const {
@@ -374,7 +384,10 @@ export default function AiPanel({
 
   return (
     <div className="ai-panel panel-main">
-      <AiPanelHeader menuItems={ellipsisMenuItems} />
+      <AiPanelHeader
+        menuItems={ellipsisMenuItems}
+        activeTaskPlan={activeTaskPlan}
+      />
 
       <div className="ai-panel-body">
         {bookId != null && conversationSidebarOpen && (

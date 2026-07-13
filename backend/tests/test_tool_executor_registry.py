@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
 
 import pytest
 
@@ -33,47 +34,17 @@ from services.tool_runtime import (
     _read_tool_cache_set,
     build_read_cache_key,
 )
+from services.tool_router import get_api_skill_items, set_skills_path
+from services.tool_policy import TOOL_POLICIES, ToolExecutionMode, ToolPolicy
 
 
-# 当前所有"公开"工具名 —— 任何一项被意外删除/改名 这里会先红
-EXPECTED_TOOLS = {
-    "getChapterContent",
-    "listWritingChapters",
-    "createWritingChapter",
-    "batchGetChapterContents",
-    "getBookCharacters",
-    "listBookCharacters",
-    "createCharacter",
-    "updateCharacter",
-    "getStoryBackground",
-    "editStoryBackground",
-    "getBookStyle",
-    "queryOutline",
-    "getGlobalOutline",
-    "editGlobalOutline",
-    "listOutlines",
-    "updateOutline",
-    "editChapterContent",
-    "addSparkIdea",
-    "updateSparkIdea",
-    "deleteSparkIdea",
-    "addForeshadowing",
-    "archiveMemory",
-    "createMemory",
-    "linkMemories",
-    "resolveForeshadowing",
-    "searchMemories",
-    "searchSparkIdeas",
-    "updateMemory",
-    "listSettingEntities",
-    "getSettingEntities",
-    "createSettingEntity",
-    "updateSettingEntity",
-    "deleteCharacter",
-    "deleteSettingEntity",
-    "getStoryHealthDashboard",
-    "getWritingStatsDashboard",
-}
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _declared_tool_names() -> set[str]:
+    """Load the same SKILL.md declarations that production startup uses."""
+    set_skills_path(str(BACKEND_DIR / "skills"))
+    return {str(item["name"]) for item in get_api_skill_items()}
 
 
 # ---------------------------------------------------------------------------
@@ -81,26 +52,22 @@ EXPECTED_TOOLS = {
 # ---------------------------------------------------------------------------
 
 class TestRegistryShape:
-    def test_all_expected_tools_registered(self):
-        missing = EXPECTED_TOOLS - set(TOOL_HANDLERS.keys())
-        assert not missing, f"工具注册表缺失：{missing}"
+    def test_loaded_skill_declarations_match_handlers(self):
+        declared = _declared_tool_names()
+        missing = declared - set(TOOL_HANDLERS)
+        extra = set(TOOL_HANDLERS) - declared
+        assert not missing, f"SKILL.md 声明但未注册 handler：{missing}"
+        assert not extra, f"已注册 handler 但没有 SKILL.md：{extra}"
 
-    def test_no_unexpected_tools(self):
-        # 新增工具是好事，但提醒程序员同步更新这里 + 前端 schema
-        extra = set(TOOL_HANDLERS.keys()) - EXPECTED_TOOLS
-        assert not extra, (
-            f"出现未在 EXPECTED_TOOLS 登记的新工具：{extra}\n"
-            "请同步更新 tests/test_tool_executor_registry.py::EXPECTED_TOOLS "
-            "和前端 schema"
-        )
-
-    @pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
-    def test_handler_is_async_with_correct_signature(self, name: str):
-        handler = TOOL_HANDLERS[name]
-        assert inspect.iscoroutinefunction(handler), f"{name} 不是 async 函数"
-        sig = inspect.signature(handler)
-        params = list(sig.parameters.values())
-        assert len(params) == 3, f"{name} 期望 (ctx, args, send_chunk) 三参数，实际 {len(params)}"
+    def test_each_declared_handler_is_async_with_correct_signature(self):
+        for name in _declared_tool_names():
+            handler = TOOL_HANDLERS[name]
+            assert inspect.iscoroutinefunction(handler), f"{name} 不是 async 函数"
+            sig = inspect.signature(handler)
+            params = list(sig.parameters.values())
+            assert len(params) == 3, (
+                f"{name} 期望 (ctx, args, send_chunk) 三参数，实际 {len(params)}"
+            )
 
     def test_cache_predictors_point_to_real_handlers(self):
         for name in CACHE_PREDICTORS:
@@ -109,19 +76,12 @@ class TestRegistryShape:
                 "前端会因此显示'走缓存'但后端实际无该工具。"
             )
 
-    @pytest.mark.parametrize("name", sorted(["getChapterContent", "listWritingChapters",
-                                              "batchGetChapterContents", "getBookCharacters",
-                                              "listBookCharacters", "getStoryBackground",
-                                              "getBookStyle", "queryOutline",
-                                              "getGlobalOutline", "listOutlines",
-                                              "getStoryHealthDashboard",
-                                              "getWritingStatsDashboard"]))
-    def test_read_cache_predictor_exists_for_cacheable_tools(self, name: str):
-        # 这些工具的 handler 内部走了 _read_tool_cache_get/set，必须有 predictor 配套
-        assert name in CACHE_PREDICTORS, (
-            f"{name} 在 handler 中使用了读缓存，但 CACHE_PREDICTORS 缺失，"
-            "前端无法提前标灰"
-        )
+    def test_read_cache_predictors_exist_for_all_cacheable_tools(self):
+        cacheable = set(READ_CACHE_KEYS) | {
+            "getChapterContent", "batchGetChapterContents",
+        }
+        missing = cacheable - set(CACHE_PREDICTORS)
+        assert not missing, f"读缓存工具缺少 predictor，前端无法提前标灰：{missing}"
 
 
 # ---------------------------------------------------------------------------
@@ -169,37 +129,54 @@ class TestRunToolsErrorPaths:
         assert "授权" in body["error"]
 
     @pytest.mark.asyncio
+    async def test_plan_allowlist_rejects_unplanned_tool(self):
+        results = await run_tools(
+            [{"id": "c1", "function": {"name": "getChapterContent", "arguments": "{}"}}],
+            ctx={"allowedToolNames": set()},
+        )
+        body = json.loads(results[0]["content"])
+        assert "执行计划" in body["error"]
+
+    @pytest.mark.asyncio
     async def test_handler_exception_is_caught(self):
         async def _boom(ctx, args, send_chunk):
             raise RuntimeError("kaboom")
 
         TOOL_HANDLERS["__boom__"] = _boom
+        TOOL_POLICIES["__boom__"] = ToolPolicy(ToolExecutionMode.READ, "test boom")
         try:
             results = await run_tools(
                 [{"id": "c1", "function": {"name": "__boom__", "arguments": "{}"}}],
                 ctx={},
             )
             body = json.loads(results[0]["content"])
-            assert body["error"] == "kaboom"
+            assert body["error"] == "Tool execution failed."
+            assert body["errorType"] == "RuntimeError"
         finally:
             TOOL_HANDLERS.pop("__boom__", None)
+            TOOL_POLICIES.pop("__boom__", None)
 
     @pytest.mark.asyncio
     async def test_invalid_args_json_does_not_crash(self):
-        # _parse_args 失败时给 {}，handler 应该自然走"参数缺失"分支而不是抛
+        calls: list[dict] = []
+
         async def _record(ctx, args, send_chunk):
-            assert args == {}
+            calls.append(args)
             return ToolResult("ok")
 
         TOOL_HANDLERS["__rec__"] = _record
+        TOOL_POLICIES["__rec__"] = ToolPolicy(ToolExecutionMode.READ, "test record")
         try:
             results = await run_tools(
                 [{"id": "c1", "function": {"name": "__rec__", "arguments": "}{ not json"}}],
                 ctx={},
             )
-            assert results[0]["content"] == "ok"
+            body = json.loads(results[0]["content"])
+            assert calls == []
+            assert body["error"] == "Tool arguments are not valid JSON."
         finally:
             TOOL_HANDLERS.pop("__rec__", None)
+            TOOL_POLICIES.pop("__rec__", None)
 
     @pytest.mark.asyncio
     async def test_send_chunk_emits_completion_per_call(self):
@@ -207,6 +184,7 @@ class TestRunToolsErrorPaths:
             return ToolResult("ok")
 
         TOOL_HANDLERS["__ok__"] = _ok
+        TOOL_POLICIES["__ok__"] = ToolPolicy(ToolExecutionMode.READ, "test ok")
         chunks: list[dict] = []
         try:
             await run_tools(
@@ -221,6 +199,7 @@ class TestRunToolsErrorPaths:
             assert indices == [0, 1]
         finally:
             TOOL_HANDLERS.pop("__ok__", None)
+            TOOL_POLICIES.pop("__ok__", None)
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@
 .thinking-region__toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
   padding: 1px 0;
   border: none;
@@ -45,9 +45,8 @@
 
 .thinking-region__timer {
   display: inline-block;
-  min-width: 42px;
+  margin-left: 1px;
   font-variant-numeric: tabular-nums;
-  text-align: right;
 }
 
 .thinking-region__body {

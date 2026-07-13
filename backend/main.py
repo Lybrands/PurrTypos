@@ -40,6 +40,8 @@ async def lifespan(application: FastAPI):
     skills_dir = SKILLS_DIR if SKILLS_DIR and SKILLS_DIR != Path("") else Path(__file__).parent / "skills"
     _set_skills_path(str(skills_dir))
     ensure_skills_loaded()
+    from services.tool_executor import validate_loaded_tool_contract
+    validate_loaded_tool_contract()
 
     from routers import (
         books, outlines, chapters, articles, characters,

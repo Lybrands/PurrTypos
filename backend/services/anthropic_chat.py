@@ -72,6 +72,20 @@ def openai_tools_to_anthropic(tools: list[dict] | None) -> list[dict] | None:
     return result or None
 
 
+def openai_tool_choice_to_anthropic(value: Any) -> dict[str, Any] | None:
+    """Translate the host's provider-neutral tool choice for Anthropic."""
+    if value == "required":
+        return {"type": "any"}
+    if value == "auto":
+        return {"type": "auto"}
+    if isinstance(value, dict):
+        function = value.get("function") if isinstance(value.get("function"), dict) else {}
+        name = str(function.get("name") or "").strip()
+        if name:
+            return {"type": "tool", "name": name}
+    return None
+
+
 def openai_messages_to_anthropic(
     messages: list[dict] | None,
 ) -> dict[str, Any]:
@@ -183,6 +197,7 @@ async def chat_stream_as_openai_format(
     temperature = opts.get("temperature")
     thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
+    tool_choice = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     top_k: Any = opts.get("top_k")
@@ -210,6 +225,9 @@ async def chat_stream_as_openai_format(
         params["thinking"] = thinking_param
     if anthropic_tools:
         params["tools"] = anthropic_tools
+        converted_tool_choice = openai_tool_choice_to_anthropic(tool_choice)
+        if converted_tool_choice:
+            params["tool_choice"] = converted_tool_choice
     if temperature is not None:
         params["temperature"] = temperature
     if top_k is not None:
@@ -310,6 +328,7 @@ async def chat_no_stream_as_openai_format(
     temperature = opts.get("temperature")
     thinking_enabled = normalize_thinking_enabled(opts)
     tools: list | None = opts.get("tools")
+    tool_choice = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     top_k: Any = opts.get("top_k")
@@ -336,6 +355,9 @@ async def chat_no_stream_as_openai_format(
         params["thinking"] = thinking_param
     if anthropic_tools:
         params["tools"] = anthropic_tools
+        converted_tool_choice = openai_tool_choice_to_anthropic(tool_choice)
+        if converted_tool_choice:
+            params["tool_choice"] = converted_tool_choice
     if temperature is not None:
         params["temperature"] = temperature
     if top_k is not None:

@@ -259,6 +259,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── AI — HTTP ─────────────────────────────────────────────────
   generateSessionTitle: (data) => apiPost('/ai/title', data),
   listModels: (data) => apiPost('/ai/models', data),
+  resolveAiToolApproval: (data) => apiPost(`/ai/tool-approvals/${data.approvalId}`, {
+    approved: Boolean(data.approved),
+  }),
 
   // ─── AI streaming — fetch + ReadableStream SSE ─────────────────
   aiChatStream: (data) => {
