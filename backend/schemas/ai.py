@@ -43,3 +43,22 @@ class GenerateTitleRequest(BaseModel):
     prompt: str
     apiProvider: str = "openai"
     model: Optional[str] = None
+
+
+class ResolveToolApprovalRequest(BaseModel):
+    approved: bool
+
+
+class CreateAgentRunReviewRequest(BaseModel):
+    scores: Dict[str, int]
+    notes: Optional[str] = None
+    evaluator: str = "human"
+
+
+class EvaluateAgentReleaseRequest(BaseModel):
+    pilotRunIds: List[str]
+
+
+class EvaluateAgentRolloutRequest(BaseModel):
+    baselineRunIds: List[str]
+    candidateRunIds: List[str]

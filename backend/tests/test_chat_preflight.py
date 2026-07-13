@@ -130,6 +130,90 @@ async def test_assoc_block_handles_missing_chapter(temp_db):
     assert "（本章暂无正文）" in block
 
 
+async def test_assoc_block_reserves_space_for_outline_after_long_chapters(temp_db):
+    await _seed_chapter(temp_db, "ch1", "chapter-one " * 2000)
+    await _seed_chapter(temp_db, "ch2", "chapter-two " * 2000)
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id, markdown_content) "
+        "VALUES (?, ?, 'chapter', ?, ?)",
+        ["ol1", "outline", "b1", "OUTLINE_MUST_SURVIVE " * 400],
+    )
+
+    block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": ["ch1", "ch2"],
+        "associatedOutlineIds": ["ol1"],
+        "writingChapters": [
+            {"id": "ch1", "title": "one"},
+            {"id": "ch2", "title": "two"},
+        ],
+        "availableOutlines": [{"id": "ol1", "title": "outline"}],
+        "associatedContextBudget": 12_000,
+    })
+
+    assert "chapter-one" in block
+    assert "OUTLINE_MUST_SURVIVE" in block
+
+
+async def test_assoc_block_deduplicates_selected_ids(temp_db):
+    await _seed_chapter(temp_db, "ch1", "only once")
+
+    block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": ["ch1", "ch1", "ch1"],
+        "writingChapters": [{"id": "ch1", "title": "one"}],
+    })
+
+    assert block.count("chapterId=ch1") == 1
+
+
+async def test_assoc_block_shares_outline_budget_between_selected_items(temp_db):
+    await _seed_chapter(temp_db, "ch1", "chapter " * 2000)
+    for outline_id, marker in (("ol1", "FIRST_OUTLINE"), ("ol2", "SECOND_OUTLINE")):
+        await temp_db.execute(
+            "INSERT INTO outlines (id, title, type, book_id, markdown_content) "
+            "VALUES (?, ?, 'chapter', ?, ?)",
+            [outline_id, outline_id, "b1", (marker + " ") * 1000],
+        )
+
+    block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": ["ch1"],
+        "associatedOutlineIds": ["ol1", "ol2"],
+        "writingChapters": [{"id": "ch1", "title": "chapter"}],
+        "availableOutlines": [
+            {"id": "ol1", "title": "one"},
+            {"id": "ol2", "title": "two"},
+        ],
+        "associatedContextBudget": 12_000,
+    })
+
+    assert "FIRST_OUTLINE" in block
+    assert "SECOND_OUTLINE" in block
+
+
+async def test_assoc_explicit_zero_budget_injects_nothing(temp_db):
+    block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedChapterIds": [f"missing-{idx}" for idx in range(500)],
+        "associatedContextBudget": 0,
+    })
+
+    assert block == ""
+
+
+async def test_assoc_hard_budget_counts_headings_and_deferred_rows(temp_db):
+    from utils.context_budget import estimate_text_tokens
+
+    block = await build_associated_context_block({
+        "bookId": "b1",
+        "associatedOutlineIds": [f"missing-{idx}" for idx in range(500)],
+        "associatedContextBudget": 100,
+    })
+
+    assert estimate_text_tokens(block) <= 100
+
+
 # ── build_selected_memory_block ─────────────────────────────────
 
 
@@ -213,4 +297,3 @@ async def test_binding_prompt_variants():
     ask = build_session_binding_prompt(ctx, tools_enabled=False)
     assert "《第三章》" in agent and "勿猜测数据库 id" in agent
     assert "《第三章》" in ask and "无法调用工具" in ask
-

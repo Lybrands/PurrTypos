@@ -216,6 +216,16 @@ export interface ProposedSettingDiff {
   source?: string;
 }
 
+/** 服务端暂停高风险 Agent 工具调用时发送的用户确认请求。 */
+export interface ToolApprovalRequest {
+  approvalId: string;
+  toolName: string;
+  title: string;
+  riskLevel: "write" | "destructive";
+  /** 后端生成的参数预览，供用户决定是否批准。 */
+  summary: string;
+}
+
 /** 设定 diff 卡片终态（提交 / 放弃后持久化到消息） */
 export interface SettingDiffCardState {
   sessionKey: string;
@@ -426,12 +436,17 @@ export interface MemoryContextDiagnostics {
   recalled: number;
   included: number;
   deferred: number;
+  suppressed: number;
+  conflicts: number;
+  relationExpanded: number;
+  characterCount: number;
 }
 
 export interface MemoryContextBlock {
   text: string;
   includedIds: number[];
   deferredIds: number[];
+  suppressedIds: number[];
   tokenEstimate: number;
   diagnostics: MemoryContextDiagnostics;
 }
@@ -494,6 +509,11 @@ export interface ElectronAPI {
     data: Partial<Character>;
   }) => Promise<ApiResult<Character>>;
   deleteCharacter: (data: { id: number }) => Promise<ApiResult<void>>;
+  /** 对一个正在等待中的 Agent 高风险工具调用作出一次性决定。 */
+  resolveAiToolApproval: (data: {
+    approvalId: string;
+    approved: boolean;
+  }) => Promise<ApiResult<{ status: "approved" | "rejected" }>>;
   // 人物选项
   getCharacterOptions: (data: {
     category: string;
@@ -926,6 +946,22 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
+      /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
+      toolApprovalRequired?: ToolApprovalRequest;
+      /** Host-side accounting for the complete model context window. */
+      contextBudget?: {
+        windowTokens: number;
+        estimatedInputTokens: number;
+        toolSchemaTokens: number;
+        outputReserveTokens: number;
+        safetyReserveTokens: number;
+        runtimeReserveTokens: number;
+        memoryTokens: number;
+        associatedTokens: number;
+        droppedMessages: number;
+        projectedTotalTokens: number;
+        overflowTokens: number;
+      };
       /**
        * 历史协作模式：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
        * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
@@ -999,6 +1035,7 @@ export interface ElectronAPI {
       agentRunCompleted?: { runId: string; status: "done" };
       agentRunFailed?: { runId: string; status: "failed"; error?: string };
       agentRunBlocked?: { runId: string; status: "blocked" };
+      agentRunCanceled?: { runId: string; status: "canceled"; reason?: string };
     }) => void,
   ) => () => void;
   // 设置
@@ -1019,7 +1056,7 @@ export interface GeneralSettings {
   ai_agent_mode?: 'legacy' | 'subagent';
 }
 
-export type AiContextWindow = '200k' | '300k' | '1m';
+export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '300k' | '1m';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export interface AiModelConfig {

@@ -143,6 +143,9 @@ function ModelRuntimeConfig({
   const thinkingEnabled = model.thinkingEnabled ?? model.thinkingOnly ?? false
 
   const contextItems: [AiContextWindow, string][] = [
+    ['32k', '32K'],
+    ['64k', '64K'],
+    ['128k', '128K'],
     ['200k', '200K'],
     ['300k', '300K'],
     ['1m', '1M'],

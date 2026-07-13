@@ -22,6 +22,11 @@ export type TimelineTextPart = {
   md: string;
 };
 
+export type TimelineCommentaryPart = {
+  type: "commentary";
+  md: string;
+};
+
 export type TimelineDigestPart = {
   type: "digest";
   md: string;
@@ -36,8 +41,19 @@ export type AssistantTimelinePart =
   | TimelineThinkingPart
   | TimelineToolsPart
   | TimelineTextPart
+  | TimelineCommentaryPart
   | TimelineDigestPart
   | TimelineTaskPlanPart;
+
+export type TimelineStepPart = TimelineThinkingPart | TimelineToolsPart;
+
+export type WorkLogTimelineItem =
+  | AssistantTimelinePart
+  | {
+      type: "stepGroup";
+      groupKey: string;
+      parts: TimelineStepPart[];
+    };
 
 export interface BuildAssistantTimelineOptions {
   messageIndex: number;
@@ -48,6 +64,51 @@ export interface BuildAssistantTimelineOptions {
 
 function visibleToolSegment(seg: ToolCallSegment): boolean {
   return seg.labels.length > 0 || Boolean(seg.textBefore?.trim());
+}
+
+/** 将连续的思考与工具调用聚合为工作日志中的二级步骤组。 */
+export function groupConsecutiveWorkSteps(
+  parts: AssistantTimelinePart[],
+  messageIndex: number,
+): WorkLogTimelineItem[] {
+  const items: WorkLogTimelineItem[] = [];
+  let stepParts: TimelineStepPart[] = [];
+  let groupStartIndex = 0;
+
+  const flushSteps = () => {
+    if (stepParts.length === 0) return;
+    if (stepParts.length === 1) {
+      items.push(stepParts[0]);
+    } else {
+      items.push({
+        type: "stepGroup",
+        groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
+        parts: stepParts,
+      });
+    }
+    stepParts = [];
+  };
+
+  parts.forEach((part, partIndex) => {
+    if (
+      part.type === "tools" &&
+      part.segment.labels.every(
+        (_label, labelIndex) => part.segment.cachedFlags?.[labelIndex],
+      )
+    ) {
+      return;
+    }
+    if (part.type === "thinking" || part.type === "tools") {
+      if (stepParts.length === 0) groupStartIndex = partIndex;
+      stepParts.push(part);
+      return;
+    }
+    flushSteps();
+    items.push(part);
+  });
+  flushSteps();
+
+  return items;
 }
 
 /** 将助手消息拆成有序渲染片段：思考 / 工具 / 正文 */
@@ -84,7 +145,7 @@ export function buildAssistantTimeline(
     const seg = segments[i];
     const textBefore = seg.textBefore?.trim();
     if (textBefore) {
-      parts.push({ type: "text", md: textBefore });
+      parts.push({ type: "commentary", md: textBefore });
     }
 
     if (visibleToolSegment(seg) && seg.labels.length > 0) {

@@ -24,9 +24,9 @@ PLANNER_SYSTEM_PROMPT = """你是 Agent Run 的 To-dos 规划器。
 1. 判断本轮请求是否需要 To-dos。
 2. 如果需要，输出 2-8 个短 todo，标题要像 Cursor To-dos 一样简洁。
 3. To-dos 必须描述本轮 agent run 会做的真实阶段，不要承诺不存在的能力。
-4. 涉及写入、保存、删除、覆盖正文或设定时，必须包含一个 type=confirm 的确认边界。
+4. 写入确认由宿主的安全执行器处理；不要生成 type=confirm 步骤。
 5. executor 只能是 model、tool。
-6. executor=tool 时 expectedTools 只能从用户消息列出的可用工具中选择。
+6. executor=tool 时必须提供至少一个 expectedTools，且只能从用户消息列出的可用工具中选择。
 
 JSON 结构：
 {
@@ -38,9 +38,9 @@ JSON 结构：
     {
       "id": "kebab-case-id",
       "title": "短 todo 标题",
-      "type": "read|analyze|write|review|confirm",
+      "type": "read|analyze|write|review",
       "executor": "model|tool",
-      "expectedTools": ["可选，仅 tool"],
+      "expectedTools": ["executor=tool 时必填"],
       "riskLevel": "read|write|destructive"
     }
   ]
@@ -147,6 +147,12 @@ def normalize_model_task_plan(
             )
             return None
 
+        step_type = item.get("type") or "analyze"
+        executor = item.get("executor") or ("tool" if step_type == "read" else "model")
+        if executor == "tool" and not expected_tool_names:
+            logger.info("[agent-run][planner] rejected plan: tool step missing expectedTools")
+            return None
+
         step_id = _clean_id(item.get("id")) or f"todo-{idx + 1}"
         if step_id in seen_ids:
             step_id = f"{step_id}-{idx + 1}"
@@ -156,30 +162,16 @@ def normalize_model_task_plan(
             "id": step_id,
             "title": _clean_title(item.get("title")) or f"步骤 {idx + 1}",
             "description": _clean_optional(item.get("description")),
-            "type": item.get("type") or "analyze",
+            "type": step_type,
             "status": "pending",
             "riskLevel": item.get("riskLevel") or "read",
-            "executor": item.get("executor") or "model",
+            "executor": executor,
             "suggestedTools": expected_tool_names,
         }
         steps.append({
             key: value
             for key, value in step.items()
             if value not in (None, "", [])
-        })
-
-    if _has_write_risk(steps) and not any(step["type"] == "confirm" for step in steps):
-        if len(steps) >= 8:
-            logger.info("[agent-run][planner] rejected plan: write-risk plan has no confirm boundary")
-            return None
-        steps.append({
-            "id": "confirm-changes",
-            "title": "确认修改",
-            "description": "涉及写入或覆盖内容，需要你确认后继续。",
-            "type": "confirm",
-            "status": "pending",
-            "riskLevel": "write",
-            "executor": "model",
         })
 
     try:
@@ -217,20 +209,51 @@ async def generate_model_task_plan(
     )
     options = dict(planner_options)
     options.pop("tools", None)
+    options.pop("tool_choice", None)
+    # Preserve provider/model sampling constraints.  Some reasoning models only
+    # accept a specific temperature, so the control plane must not invent one.
+    # Prefer non-thinking JSON planning, but retry with the original capability
+    # profile when a provider rejects the override.
+    original_thinking = options.get("thinking")
+    options["thinking"] = {"type": "disabled"}
     options["max_tokens"] = min(int(options.get("max_tokens") or 900), 1200)
-    result = await create_chat_no_stream(key, messages, options, api_provider, signal)
+    try:
+        result = await create_chat_no_stream(key, messages, options, api_provider, signal)
+    except Exception as first_error:
+        retry_options = dict(options)
+        if original_thinking is None:
+            retry_options.pop("thinking", None)
+        else:
+            retry_options["thinking"] = original_thinking
+        logger.warning(
+            "[agent-run][planner] non-thinking request failed; retrying provider profile: %s",
+            type(first_error).__name__,
+        )
+        try:
+            result = await create_chat_no_stream(
+                key, messages, retry_options, api_provider, signal,
+            )
+        except Exception as retry_error:
+            raise retry_error from first_error
     content = ((result.get("message") or {}).get("content") or "").strip()
     logger.info("[agent-run][planner] raw model output: %s", content[:1000])
+    decision = parse_planner_json(content)
+    if decision is not None and "needsTodos" in decision and not _truthy(decision.get("needsTodos")):
+        return {
+            "title": _clean_title(decision.get("title")) or "直接回答",
+            "goal": user_text[:160] if user_text else None,
+            "status": "planned",
+            "steps": [{
+                "id": "respond",
+                "title": "直接回答",
+                "type": "review",
+                "executor": "model",
+                "riskLevel": "read",
+            }],
+        }
     return normalize_model_task_plan(
-        parse_planner_json(content),
+        decision,
         available_tool_names=available_tool_names,
-    )
-
-
-def _has_write_risk(steps: list[dict[str, Any]]) -> bool:
-    return any(
-        step.get("type") == "write" or step.get("riskLevel") in {"write", "destructive"}
-        for step in steps
     )
 
 

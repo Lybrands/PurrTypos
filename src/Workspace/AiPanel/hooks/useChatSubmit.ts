@@ -149,8 +149,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     // 系统提示（会话绑定说明、关联章节/大纲内容、勾选记忆）统一由后端组装注入；
     // 前端只传结构化字段（ids / 模式），不再拼接任何 prompt 文案。
     const toHistoryApiMessage = buildHistoryConverter("legacy");
-    const activeContextWindow = cfg.contextWindow ?? "200k";
-    const historyCharBudget = historyBudgetForContext(activeContextWindow);
 
     let historyMessages: { role: string; content: string }[];
     if (isResend) {
@@ -163,7 +161,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         .slice(0, -1)
         .map(toHistoryApiMessage)
         .filter((row): row is { role: string; content: string } => row != null);
-      historyMessages = trimMessagesByCharBudget(historyMessages, historyCharBudget);
       // 从数据库删除「该条之后」的对话记录，与界面截断一致
       const keepTurnCount = Math.floor(submitOverride.editIndex! / 2);
       if (sessionId != null && keepTurnCount >= 0) {
@@ -173,7 +170,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       historyMessages = conversations
         .map(toHistoryApiMessage)
         .filter((row): row is { role: string; content: string } => row != null);
-      historyMessages = trimMessagesByCharBudget(historyMessages, historyCharBudget);
     }
 
     const newMessages = [
@@ -313,27 +309,4 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   ]);
 
   return { handleSubmit, handleAbort, runningSessionIdRef, runningAccRef };
-}
-
-function historyBudgetForContext(contextWindow: "200k" | "300k" | "1m"): number {
-  const total = contextWindow === "1m" ? 1_000_000 : contextWindow === "300k" ? 300_000 : 200_000;
-  // 约 55% 留给历史，剩余空间给系统提示、关联章节/大纲、长期记忆、工具 schema 和工具结果。
-  return Math.floor(total * 0.55);
-}
-
-function trimMessagesByCharBudget<T extends { role: string; content: string }>(
-  messages: T[],
-  budget: number,
-): T[] {
-  if (budget <= 0) return [];
-  const picked: T[] = [];
-  let used = 0;
-  for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
-    const item = messages[idx];
-    const cost = item.content.length + item.role.length + 16;
-    if (picked.length > 0 && used + cost > budget) break;
-    picked.push(item);
-    used += cost;
-  }
-  return picked.reverse();
 }

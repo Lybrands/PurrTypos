@@ -580,42 +580,6 @@
   }
 }
 
-.assistant-turn-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  min-height: 22px;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-
-  > .anticon:first-child {
-    color: var(--success, #52c41a);
-  }
-
-  &.is-streaming {
-    margin-top: 4px;
-
-    > .anticon:first-child {
-      color: var(--accent);
-    }
-  }
-}
-
-.assistant-turn-stat {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-
-  &::before {
-    content: "·";
-    margin-right: 1px;
-    opacity: .55;
-  }
-}
-
 /* ─── AI 主区域：参考 Cursor 主页的极简风格 ──────────────────────
  * - 背景下沉到 --bg-base，与悬浮 panel/输入卡片形成层级感
  * - panel-header 移到右上角浮起、隐藏标题，让顶部纯净

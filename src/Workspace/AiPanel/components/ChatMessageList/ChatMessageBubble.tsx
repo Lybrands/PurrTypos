@@ -5,7 +5,6 @@ import { formatModelName } from "../../utils";
 import { type ChatMessage } from "../../hooks";
 import MessageEditor from "../MessageEditor";
 import AssistantMessageBody from "./AssistantMessageBody";
-import TurnMetrics from "./TurnMetrics";
 import type { ChatMessageListProps } from "./index";
 
 export interface ChatMessageBubbleProps
@@ -161,7 +160,6 @@ function ChatMessageBubbleInner({
         !showPlaceholder &&
         !(isLastAssistant && loading) && (
           <div className="bubble-footer">
-            <TurnMetrics message={message} streaming={false} />
             {message.model && (
               <span className="bubble-model-tag">
                 {formatModelName(message.model, modelConfigs)}
@@ -178,9 +176,6 @@ function ChatMessageBubbleInner({
             </Tooltip>
           </div>
         )}
-      {message.role === "assistant" && !message.isError && isLastAssistant && loading && (
-        <TurnMetrics message={message} streaming />
-      )}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import type {
   AiSession,
   EntityId,
   SettingDiffCardState,
+  ToolApprovalRequest,
 } from "../../../types";
 import type { WritingSubagentRole } from "../pipelineStages";
 
@@ -132,6 +133,8 @@ export interface ChatMessage {
   subagentResult?: { role: WritingSubagentRole; payload: unknown };
   /** AI 提议的设定 diff 卡片（人物 / 故事背景） */
   settingDiffCards?: SettingDiffCardState[];
+  /** 等待用户批准的高风险 Agent 工具调用。 */
+  toolApprovals?: ToolApprovalRequest[];
   /** AI 将用户目标拆成的任务计划（方案 A：对话内展示） */
   taskPlan?: AiTaskPlan;
 }
