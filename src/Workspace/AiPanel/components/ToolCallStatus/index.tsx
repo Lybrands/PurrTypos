@@ -6,7 +6,6 @@ import {
   CloseCircleOutlined,
   FileSearchOutlined,
   ClockCircleOutlined,
-  DownOutlined,
   RightOutlined,
 } from "@ant-design/icons";
 import "./index.scss";
@@ -163,11 +162,9 @@ export default function ToolCallStatus({
         size="small"
         className="bubble-tool-call-summary"
         icon={
-          expanded ? (
-            <DownOutlined className="bubble-tool-call-icon" />
-          ) : (
-            <RightOutlined className="bubble-tool-call-icon" />
-          )
+          <RightOutlined
+            className={`bubble-tool-call-chevron ${expanded ? "bubble-tool-call-chevron--open" : ""}`}
+          />
         }
         onClick={() => setExpanded((v) => !v)}
       >

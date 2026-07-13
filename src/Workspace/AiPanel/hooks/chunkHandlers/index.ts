@@ -25,6 +25,7 @@ import {
   handleSettingUpdated,
 } from "./sideEffects";
 import { handleProposedSettingDiff } from "./settingDiff";
+import { handleToolApprovalRequired } from "./toolApproval";
 import { handleTaskPlan } from "./taskPlan";
 import {
   handleToolCallCachedIndex,
@@ -63,6 +64,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleChapterContentUpdated(chunk, ctx);
   handleProposedChapterDiff(chunk, ctx);
   handleProposedSettingDiff(chunk, ctx);
+  handleToolApprovalRequired(chunk, ctx);
   handleChapterCreated(chunk, ctx);
   handleSettingUpdated(chunk, ctx);
   handleCollabLatestParagraph(chunk, ctx);

@@ -79,6 +79,27 @@ async def test_search_memory_items_can_include_pending_when_requested(temp_db):
     assert [r["id"] for r in rows] == [pending["id"]]
 
 
+async def test_fts_filters_book_before_limit(temp_db):
+    from services import long_term_memory_service
+
+    first = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="plot", content="玉佩共鸣触发古门", importance=5
+    )
+    for idx in range(30):
+        await long_term_memory_service.create_memory_item(
+            book_id="other", kind="plot", content=f"玉佩共鸣触发古门 {idx}", importance=5
+        )
+    second = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="plot", content="玉佩共鸣触发古门之后出现蓝光", importance=4
+    )
+
+    rows = await long_term_memory_service.search_memory_items(
+        "b1", "玉佩共鸣触发古门", options={"limit": 2},
+    )
+
+    assert {row["id"] for row in rows} == {first["id"], second["id"]}
+
+
 async def test_spark_idea_write_mirrors_to_memory_items(temp_db):
     from services import long_term_memory_service, memory_service
 

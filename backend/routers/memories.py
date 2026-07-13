@@ -155,6 +155,7 @@ async def build_memory_context(body: BuildMemoryContextRequest):
             "text": block.text,
             "includedIds": block.included_ids,
             "deferredIds": block.deferred_ids,
+            "suppressedIds": block.suppressed_ids,
             "tokenEstimate": block.token_estimate,
             "diagnostics": block.diagnostics,
         }}

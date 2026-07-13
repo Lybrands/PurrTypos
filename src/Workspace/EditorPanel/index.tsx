@@ -341,7 +341,7 @@ export default function EditorPanel({
       model: string
       temperature?: number
       thinking: { type: 'enabled' | 'disabled' }
-      context_window: '200k' | '300k' | '1m'
+      context_window: '32k' | '64k' | '128k' | '200k' | '300k' | '1m'
       max_tokens: number
     } = {
       model: selectedModelConfig.name,

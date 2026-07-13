@@ -152,11 +152,21 @@ async def init_schema(db: DatabaseConnection) -> None:
         conversation_id INTEGER DEFAULT NULL,
         status TEXT NOT NULL DEFAULT 'running',
         mode TEXT DEFAULT NULL,
+        release_version TEXT NOT NULL DEFAULT 'development',
+        rollout_cohort TEXT NOT NULL DEFAULT 'local',
         prompt TEXT NOT NULL DEFAULT '',
         final_response TEXT DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_runs ADD COLUMN release_version TEXT NOT NULL DEFAULT 'development'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_runs ADD COLUMN rollout_cohort TEXT NOT NULL DEFAULT 'local'",
+    )
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -177,6 +187,14 @@ async def init_schema(db: DatabaseConnection) -> None:
         run_id TEXT NOT NULL,
         event_type TEXT NOT NULL,
         payload_json TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        evaluator TEXT NOT NULL DEFAULT 'human',
+        scores_json TEXT NOT NULL,
+        notes TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 

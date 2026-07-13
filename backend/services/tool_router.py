@@ -91,8 +91,10 @@ def _discover_skill_tool_names() -> list[str]:
         if not os.path.isdir(full):
             continue
         md = os.path.join(full, "SKILL.md")
-        if os.path.isfile(md):
-            out.append(entry)
+        if not os.path.isfile(md):
+            logger.warning("[toolRouter] 忽略目录 %s：缺少 SKILL.md", entry)
+            continue
+        out.append(entry)
     return out
 
 

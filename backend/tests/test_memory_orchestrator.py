@@ -121,3 +121,122 @@ async def test_build_memory_context_filters_forced_items_by_book(temp_db):
     assert "其他书主角能操控雷电" not in block.text
     assert same_book["id"] in block.included_ids
     assert other_book["id"] not in block.included_ids
+
+
+async def test_recalled_items_preserve_service_relevance_order(temp_db, monkeypatch):
+    from services import long_term_memory_service, memory_orchestrator
+
+    older = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="plot", content="较低相关的玉佩背景"
+    )
+    newer = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="plot", content="高度相关的玉佩当前状态"
+    )
+
+    async def _ranked(*_args, **_kwargs):
+        return [newer, older]
+
+    monkeypatch.setattr(long_term_memory_service, "search_memory_items", _ranked)
+    block = await memory_orchestrator.build_memory_context(
+        {"bookId": "b1"}, "玉佩现在怎样？", "ask",
+    )
+
+    assert block.text.index("高度相关") < block.text.index("较低相关")
+
+
+async def test_supersedes_relation_expands_new_endpoint_and_hides_old_memory(temp_db):
+    from services import long_term_memory_service, memory_orchestrator
+
+    old = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="canon", content="玉佩只能在雨夜发光"
+    )
+    new = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="canon", content="神器现在可以在任何夜晚启动"
+    )
+    await long_term_memory_service.link_memory_items(
+        book_id="b1",
+        from_memory_id=new["id"],
+        to_memory_id=old["id"],
+        relation="supersedes",
+        note="能力限制已经解除",
+    )
+
+    block = await memory_orchestrator.build_memory_context(
+        {"bookId": "b1"}, "玉佩在雨夜会怎样？", "ask",
+    )
+
+    assert "神器现在可以在任何夜晚启动" in block.text
+    assert "玉佩只能在雨夜发光" not in block.text
+    assert old["id"] in block.suppressed_ids
+    assert block.diagnostics["relationExpanded"] == 1
+
+
+async def test_contradicting_memories_are_injected_with_explicit_warning(temp_db):
+    from services import long_term_memory_service, memory_orchestrator
+
+    first = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="character", content="林岚的眼睛是黑色"
+    )
+    second = await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="character", content="女主的瞳色已经变成银色"
+    )
+    await long_term_memory_service.link_memory_items(
+        book_id="b1",
+        from_memory_id=second["id"],
+        to_memory_id=first["id"],
+        relation="contradicts",
+        note="瞳色设定尚未确认",
+    )
+
+    block = await memory_orchestrator.build_memory_context(
+        {"bookId": "b1"}, "林岚的眼睛是什么颜色？", "ask",
+    )
+
+    assert "林岚的眼睛是黑色" in block.text
+    assert "女主的瞳色已经变成银色" in block.text
+    assert "记忆关系警告" in block.text
+    assert "存在未解决冲突" in block.text
+    assert block.diagnostics["conflicts"] == 1
+
+
+async def test_budget_diagnostics_only_mark_ids_that_really_appear(temp_db):
+    from services import long_term_memory_service, memory_orchestrator
+
+    for idx in range(3):
+        await long_term_memory_service.create_memory_item(
+            book_id="b1",
+            kind="plot",
+            content=f"玉佩事实 {idx} " + "字" * 300,
+        )
+
+    block = await memory_orchestrator.build_memory_context(
+        {"bookId": "b1", "memoryBudget": 320}, "玉佩", "ask",
+    )
+
+    assert len(block.text) <= 320
+    assert block.deferred_ids
+    for memory_id in block.included_ids:
+        assert f"[id:{memory_id}|" in block.text
+    assert block.diagnostics["characterCount"] == len(block.text)
+
+
+async def test_explicit_zero_memory_budget_does_not_fall_back_to_default(temp_db):
+    from services import long_term_memory_service, memory_orchestrator
+
+    await long_term_memory_service.create_memory_item(
+        book_id="b1", kind="plot", content="must not be injected",
+    )
+
+    block = await memory_orchestrator.build_memory_context(
+        {"bookId": "b1", "memoryBudget": 0}, "injected", "ask",
+    )
+
+    assert block.text == ""
+    assert block.included_ids == []
+
+
+async def test_token_estimate_is_not_raw_character_count_for_latin_text():
+    from services.memory_orchestrator import estimate_tokens
+
+    text = "the silver pendant glows at midnight"
+    assert 0 < estimate_tokens(text) < len(text)

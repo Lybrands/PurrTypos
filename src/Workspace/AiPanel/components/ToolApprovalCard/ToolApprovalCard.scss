@@ -1,0 +1,42 @@
+.tool-approval-card {
+  margin-top: var(--spacing-xs);
+  border-color: var(--border-light, var(--border));
+  background: var(--bg-surface);
+}
+
+.tool-approval-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  color: var(--text);
+}
+
+.tool-approval-card__hint,
+.tool-approval-card__resolved,
+.tool-approval-card__error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tool-approval-card__error {
+  color: var(--danger, #d9363e);
+}
+
+.tool-approval-card__summary {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+  color: var(--text);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-approval-card__actions {
+  margin-top: var(--spacing-sm);
+}

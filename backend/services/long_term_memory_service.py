@@ -229,17 +229,12 @@ async def search_memory_items(
     if len(q) >= 2:
         try:
             sql = f"""
-                SELECT m.*
-                FROM (
-                    SELECT rowid, rank
-                    FROM memory_items_fts
-                    WHERE memory_items_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT {limit * 4}
-                ) AS fts
-                JOIN memory_items m ON m.id = fts.rowid
-                WHERE {" AND ".join(where)}
-                ORDER BY m.pinned DESC, m.importance DESC, fts.rank, m.id ASC
+                SELECT m.*, memory_items_fts.rank AS fts_rank
+                FROM memory_items_fts
+                JOIN memory_items m ON m.id = memory_items_fts.rowid
+                WHERE memory_items_fts MATCH ? AND {" AND ".join(where)}
+                ORDER BY m.pinned DESC, m.importance DESC,
+                         memory_items_fts.rank, m.id ASC
                 LIMIT ?
             """
             rows = await db.fetch_all(sql, [q, *params, limit])
@@ -311,6 +306,29 @@ async def link_memory_items(
     )
     row = await db.fetch_one("SELECT * FROM memory_links WHERE id = ?", [row_id])
     return dict(row or {})
+
+
+async def get_memory_links_for_items(
+    book_id: str,
+    memory_ids: list[Any],
+) -> list[dict]:
+    """Return relations touching any candidate memory in the same book.
+
+    Retrieval intentionally happens after candidate recall, so relation lookup
+    stays bounded by the current context set rather than scanning a whole book.
+    """
+    clean_ids = [str(x).strip() for x in memory_ids or [] if str(x).strip()]
+    if not clean_ids:
+        return []
+    placeholders = ",".join("?" * len(clean_ids))
+    db = get_db()
+    rows = await db.fetch_all(
+        "SELECT * FROM memory_links WHERE book_id = ? AND "
+        f"(from_memory_id IN ({placeholders}) OR to_memory_id IN ({placeholders})) "
+        "ORDER BY id ASC",
+        [book_id, *clean_ids, *clean_ids],
+    )
+    return [dict(row) for row in rows]
 
 
 async def mark_memory_items_used(ids: list[Any]) -> None:

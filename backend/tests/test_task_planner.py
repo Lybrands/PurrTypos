@@ -99,7 +99,7 @@ class TestNormalizeModelTaskPlan:
             available_tool_names={"getChapterContent"},
         ) is None
 
-    def test_write_plan_without_confirm_boundary_gets_confirm_step(self):
+    def test_write_plan_relies_on_host_approval_gate_instead_of_confirm_step(self):
         plan = normalize_model_task_plan(
             {
                 "needsTodos": True,
@@ -124,8 +124,24 @@ class TestNormalizeModelTaskPlan:
         )
 
         assert plan is not None
-        assert plan["steps"][-1]["type"] == "confirm"
-        assert plan["steps"][-1]["title"] == "确认修改"
+        assert [step["type"] for step in plan["steps"]] == ["write", "analyze"]
+
+    def test_tool_step_without_expected_tools_is_rejected(self):
+        assert normalize_model_task_plan(
+            {
+                "needsTodos": True,
+                "title": "缺少工具范围",
+                "todos": [
+                    {
+                        "id": "read",
+                        "title": "读取上下文",
+                        "type": "read",
+                        "executor": "tool",
+                    },
+                ],
+            },
+            available_tool_names={"getChapterContent"},
+        ) is None
 
     def test_string_needs_todos_true_is_accepted(self):
         plan = normalize_model_task_plan(
@@ -231,7 +247,7 @@ class TestNormalizeModelTaskPlan:
         assert [s["title"] for s in plan["steps"]] == ["读取人物设定", "分析前后一致性"]
 
     @pytest.mark.asyncio
-    async def test_generate_model_task_plan_preserves_model_temperature(self, monkeypatch):
+    async def test_generate_model_task_plan_preserves_provider_temperature(self, monkeypatch):
         import services.ai_provider as ai_provider
 
         captured_options = {}
@@ -258,7 +274,70 @@ class TestNormalizeModelTaskPlan:
 
         assert plan is not None
         assert captured_options["temperature"] == 1
+        assert captured_options["thinking"] == {"type": "disabled"}
         assert captured_options["max_tokens"] == 1200
+
+    @pytest.mark.asyncio
+    async def test_generate_model_task_plan_retries_original_thinking_profile(self, monkeypatch):
+        import services.ai_provider as ai_provider
+
+        captured: list[dict] = []
+
+        async def fake_create_chat_no_stream(_key, _messages, options, _provider, _signal):
+            captured.append(dict(options))
+            if len(captured) == 1:
+                raise RuntimeError("thinking disabled is unsupported")
+            return {
+                "message": {
+                    "content": '{"needsTodos":false,"reason":"simple","todos":[]}'
+                },
+                "model": "fake",
+            }
+
+        monkeypatch.setattr(ai_provider, "create_chat_no_stream", fake_create_chat_no_stream)
+        plan = await generate_model_task_plan(
+            key="k",
+            api_provider="openai",
+            planner_options={
+                "model": "provider-model",
+                "temperature": 1,
+                "thinking": {"type": "enabled"},
+            },
+            user_text="simple question",
+            chat_agent_mode="agent",
+            available_tool_names=set(),
+        )
+
+        assert plan is not None
+        assert captured[0]["thinking"] == {"type": "disabled"}
+        assert captured[1]["thinking"] == {"type": "enabled"}
+        assert captured[0]["temperature"] == captured[1]["temperature"] == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_model_task_plan_turns_no_todos_into_direct_answer(self, monkeypatch):
+        import services.ai_provider as ai_provider
+
+        async def fake_create_chat_no_stream(*_args, **_kwargs):
+            return {
+                "message": {
+                    "content": '{"needsTodos":false,"reason":"simple","todos":[]}'
+                },
+                "model": "fake",
+            }
+
+        monkeypatch.setattr(ai_provider, "create_chat_no_stream", fake_create_chat_no_stream)
+        plan = await generate_model_task_plan(
+            key="k",
+            api_provider="openai",
+            planner_options={"model": "m"},
+            user_text="explain plan versus execution",
+            chat_agent_mode="agent",
+            available_tool_names={"deleteCharacter"},
+        )
+
+        assert plan is not None
+        assert [step["id"] for step in plan["steps"]] == ["respond"]
+        assert all(not step.get("suggestedTools") for step in plan["steps"])
 
     @pytest.mark.asyncio
     async def test_generate_model_task_plan_rejects_invalid_model_tools(self, monkeypatch):

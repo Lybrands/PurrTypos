@@ -359,8 +359,16 @@ export default function SettingsPage({
                   <Form.Item name="nickname" label="昵称">
                     <Input placeholder="选填，AI 对话中优先显示昵称" />
                   </Form.Item>
-                  <Form.Item name="contextWindow" label="Context" rules={[{ required: true, message: '请选择 Context' }]}>
+                  <Form.Item
+                    name="contextWindow"
+                    label="Context"
+                    extra="必须与模型服务商公布的真实上下文窗口一致；设置过大会导致上游拒绝请求。"
+                    rules={[{ required: true, message: '请选择 Context' }]}
+                  >
                     <Radio.Group optionType="button" buttonStyle="solid">
+                      <Radio.Button value="32k">32K</Radio.Button>
+                      <Radio.Button value="64k">64K</Radio.Button>
+                      <Radio.Button value="128k">128K</Radio.Button>
                       <Radio.Button value="200k">200K</Radio.Button>
                       <Radio.Button value="300k">300K</Radio.Button>
                       <Radio.Button value="1m">1M</Radio.Button>
