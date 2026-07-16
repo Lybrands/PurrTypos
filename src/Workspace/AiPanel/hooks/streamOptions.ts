@@ -1,4 +1,5 @@
 import type { AiContextWindow, AiModelConfig } from "../../../types";
+import { getDefaultModelContextWindow } from "../../../modelCatalog";
 
 export interface StreamRequestOptions {
   model: string;
@@ -30,7 +31,7 @@ export function buildStreamOptions(params: {
   const modelConfig = modelConfigs[selectedModel];
 
   const effectiveThinking = Boolean(cfg?.thinkingEnabled ?? cfg?.thinkingOnly ?? false);
-  const contextWindow = cfg?.contextWindow ?? "200k";
+  const contextWindow = getDefaultModelContextWindow(cfg);
 
   const apiModelName = cfg?.name ?? selectedModel;
   const useConfiguredTemperature =

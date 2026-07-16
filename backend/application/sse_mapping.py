@@ -182,4 +182,9 @@ def _runtime_error_message(error_code: str | None) -> str:
             "语义校验返回了无效结果，候选回答未展示；请稍后重试。"
         ),
         "upstream_stream_interrupted": "模型服务流式响应中断，请检查网络或稍后重试。",
+        "provider_insufficient_balance": "模型服务账户余额或额度不足，请充值或更换模型。",
+        "provider_authentication_failed": "模型服务鉴权失败，请检查 API Key 和接口地址。",
+        "provider_rate_limited": "模型服务请求过于频繁或已达到限额，请稍后重试。",
+        "provider_bad_request": "模型服务拒绝了请求，请检查模型名称及其参数兼容性。",
+        "provider_unavailable": "模型服务暂时不可用，请稍后重试。",
     }.get(str(error_code or ""), "Agent 运行过程中发生异常，已安全停止；请稍后重试。")

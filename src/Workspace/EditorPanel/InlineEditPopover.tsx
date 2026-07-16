@@ -176,7 +176,7 @@ export default function InlineEditPopover({
         model.customizeTemperature === undefined || model.customizeTemperature === true
 
       const useThinking = model.thinkingEnabled ?? model.thinkingOnly ?? false
-      const contextWindow = model.contextWindow ?? '200k'
+      const contextWindow = model.contextWindow ?? '128k'
 
       const systemPrompt = [
         '你是一位专业中文写作助手，负责对用户选中的文段进行改写。',

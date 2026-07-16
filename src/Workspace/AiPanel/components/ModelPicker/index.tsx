@@ -1,7 +1,12 @@
 import React from 'react'
 import { CheckOutlined, EditOutlined } from '@ant-design/icons'
 import { Divider, Popover, Select } from 'antd'
-import type { AiContextWindow, AiModelConfig } from '../../../../types'
+import type { AiModelConfig } from '../../../../types'
+import {
+  AI_CONTEXT_WINDOW_LABELS,
+  getDefaultModelContextWindow,
+  getModelContextWindowOptions,
+} from '../../../../modelCatalog'
 import './index.scss'
 
 export type ModelRuntimeConfigPatch = Partial<
@@ -139,17 +144,10 @@ function ModelRuntimeConfig({
   model: AiModelConfig
   onPatch: (patch: ModelRuntimeConfigPatch) => void
 }) {
-  const contextWindow = model.contextWindow ?? '200k'
+  const contextWindow = getDefaultModelContextWindow(model)
   const thinkingEnabled = model.thinkingEnabled ?? model.thinkingOnly ?? false
 
-  const contextItems: [AiContextWindow, string][] = [
-    ['32k', '32K'],
-    ['64k', '64K'],
-    ['128k', '128K'],
-    ['200k', '200K'],
-    ['300k', '300K'],
-    ['1m', '1M'],
-  ]
+  const contextItems = getModelContextWindowOptions(model)
   const thinkingItems: [boolean, string][] = [
     [false, '关闭'],
     [true, '开启'],
@@ -159,14 +157,14 @@ function ModelRuntimeConfig({
     <div className="model-picker-config">
       <div className="model-picker-config-group">
         <div className="model-picker-config-title">Context</div>
-        {contextItems.map(([value, label]) => (
+        {contextItems.map((value) => (
           <button
             key={value}
             type="button"
             className="model-picker-config-item"
             onClick={() => onPatch({ contextWindow: value })}
           >
-            <span>{label}</span>
+            <span>{AI_CONTEXT_WINDOW_LABELS[value]}</span>
             {contextWindow === value ? <CheckOutlined style={{ fontSize: 12 }} /> : null}
           </button>
         ))}

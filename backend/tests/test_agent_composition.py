@@ -21,7 +21,11 @@ from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
 )
-from application.request_mapping import to_writing_agent_request, writing_run_options
+from application.request_mapping import (
+    context_window_tokens,
+    to_writing_agent_request,
+    writing_run_options,
+)
 from application.sse_mapping import core_update_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -63,6 +67,10 @@ async def _collect(response) -> list[dict]:
         if any(event.get("done") for event in events):
             break
     return events
+
+
+def test_request_mapping_supports_kimi_256k_context_window():
+    assert context_window_tokens("256k") == 256_000
 
 
 def test_request_mapping_hides_writing_fields_inside_domain_context():

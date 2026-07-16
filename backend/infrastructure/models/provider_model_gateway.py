@@ -108,11 +108,25 @@ def _provider_options(
     if invocation.max_output_tokens is not None:
         options["max_tokens"] = invocation.max_output_tokens
     if invocation.reasoning_mode is ReasoningMode.DISABLED:
+        caller_thinking = options.get("thinking")
+        caller_had_thinking_enabled = bool(
+            options.get("thinking_enabled") is True
+            or (
+                isinstance(caller_thinking, dict)
+                and caller_thinking.get("type") == "enabled"
+            )
+        )
         # Provider adapters consume the normalized ``thinking`` shape.  The
         # former ad-hoc flag was ignored and could leave Anthropic extended
         # thinking enabled for the narrow 1,200-token planner request.
         options["thinking_enabled"] = False
         options["thinking"] = {"type": "disabled"}
+        # A caller-selected thinking temperature may be invalid after Core
+        # disables reasoning for planners/judges.  Kimi K2.6, for example,
+        # requires 1.0 with thinking but 0.6 without it.  Omitting sampling
+        # lets each provider apply the correct non-thinking default.
+        if caller_had_thinking_enabled:
+            options.pop("temperature", None)
     if invocation.tools and invocation.tool_choice is not ToolChoiceMode.NONE:
         options["tools"] = [
             {
@@ -143,8 +157,17 @@ def _provider_message(message: AgentMessage) -> dict:
         "writing_outline_sources",
     ):
         value.pop(host_only_key, None)
+    # ``developer`` is an internal Core role used to keep host context above
+    # conversation data.  Many OpenAI-compatible Chat Completions providers
+    # (including Kimi K2.6) only accept the older ``system`` role and reject
+    # ``developer`` before tokenization.  Anthropic already treats both roles
+    # as system content, so this normalization preserves the same authority
+    # while keeping the wire contract broadly compatible.
+    provider_role = (
+        "system" if message.role.value == "developer" else message.role.value
+    )
     value.update(
-        {"role": message.role.value, "content": thaw_json_value(message.content)}
+        {"role": provider_role, "content": thaw_json_value(message.content)}
     )
     if message.thinking is not None:
         value["reasoning_content"] = message.thinking
@@ -269,10 +292,19 @@ def _is_required_tool_choice_compatibility_error(error: Exception) -> bool:
 def _provider_error_code(error: Exception) -> str:
     current: BaseException | None = error
     seen: set[int] = set()
+    statuses: list[int] = []
+    messages: list[str] = []
     for _ in range(8):
         if current is None or id(current) in seen:
             break
         seen.add(id(current))
+        messages.append(str(current or "").lower())
+        status = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            statuses.append(status)
         if isinstance(current, (
             httpx.ReadError,
             httpx.RemoteProtocolError,
@@ -280,4 +312,25 @@ def _provider_error_code(error: Exception) -> str:
         )):
             return "upstream_stream_interrupted"
         current = current.__cause__ or current.__context__
+    combined = " ".join(messages)
+    if (
+        402 in statuses
+        or any(marker in combined for marker in (
+            "insufficient balance",
+            "insufficient_balance",
+            "insufficient quota",
+            "insufficient_quota",
+            "credit balance",
+            "余额不足",
+        ))
+    ):
+        return "provider_insufficient_balance"
+    if any(status in {401, 403} for status in statuses):
+        return "provider_authentication_failed"
+    if 429 in statuses:
+        return "provider_rate_limited"
+    if any(status in {400, 422} for status in statuses):
+        return "provider_bad_request"
+    if any(status >= 500 for status in statuses):
+        return "provider_unavailable"
     return "model_gateway_error"
