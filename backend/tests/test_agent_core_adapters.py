@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -7,22 +8,26 @@ import pytest
 
 from agent_core.contracts import (
     AgentMessage,
+    AgentRunRequest,
+    AgentRuntimeResult,
+    DomainContext,
     ModelInvocation,
     ModelRequest,
     ReasoningMode,
+    RuntimeOutcome,
     ToolCall,
     ToolChoiceMode,
     ToolSchema,
 )
-from agent_core.events import AgentEvent, CoreEventType
 from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
-from agent_core.ports import EventSink, ModelGateway
-from application.event_sinks import CallbackEventSink, LegacyChunkEventSink
-from infrastructure.models.legacy_model_gateway import LegacyModelGateway
+from agent_core.ports import ModelGateway
+from agent_core.runtime import AgentRuntime
+from infrastructure.models import provider_model_gateway
+from infrastructure.models.provider_model_gateway import ProviderModelGateway
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_preserves_provider_messages_tools_and_model(monkeypatch):
+async def test_provider_model_gateway_preserves_provider_messages_tools_and_model(monkeypatch):
     captured: dict = {}
 
     async def _chunks():
@@ -52,8 +57,8 @@ async def test_legacy_model_gateway_preserves_provider_messages_tools_and_model(
         })
         return {"stream": _chunks(), "model": "resolved-model"}
 
-    monkeypatch.setattr("services.ai_provider.create_chat_stream", _stream)
-    gateway = LegacyModelGateway("secret")
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    gateway = ProviderModelGateway("secret")
     request = ModelRequest(
         provider="anthropic",
         model="requested-model",
@@ -66,7 +71,22 @@ async def test_legacy_model_gateway_preserves_provider_messages_tools_and_model(
         },
     )
     stream = await gateway.stream(
-        [AgentMessage(role="user", content="hello")],
+        [AgentMessage(
+            role="user",
+            content="hello",
+            attributes={
+                "name": "caller-name",
+                "context_name": "writing_retrieval",
+                "untrusted": True,
+                "agent_core_plan": True,
+            },
+            host_metadata={
+                "writing_outline_sources": [{
+                    "outlineId": "outline-1",
+                    "text": "private receipt",
+                }],
+            },
+        )],
         ModelInvocation(
             request=request,
             tools=(ToolSchema(
@@ -94,12 +114,17 @@ async def test_legacy_model_gateway_preserves_provider_messages_tools_and_model(
     assert chunks[0].tool_call_deltas[0].arguments_fragment == "{}"
     assert captured["key"] == "secret"
     assert captured["provider"] == "anthropic"
-    assert captured["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["messages"] == [{
+        "name": "caller-name",
+        "role": "user",
+        "content": "hello",
+    }]
     assert captured["options"]["model"] == "requested-model"
     assert captured["options"]["tools"][0]["function"]["name"] == "readThing"
     assert captured["options"]["tool_choice"] == "required"
     assert captured["options"]["max_tokens"] == 2_048
     assert captured["options"]["thinking_enabled"] is False
+    assert captured["options"]["thinking"] == {"type": "disabled"}
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict
     assert type(captured["options"]["metadata"]["tags"]) is list
@@ -110,7 +135,7 @@ async def test_legacy_model_gateway_preserves_provider_messages_tools_and_model(
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_normalizes_non_stream_completion(monkeypatch):
+async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypatch):
     async def _complete(_key, _messages, options, _provider, _signal):
         assert "tools" not in options
         assert "tool_choice" not in options
@@ -119,14 +144,14 @@ async def test_legacy_model_gateway_normalizes_non_stream_completion(monkeypatch
             "model": "resolved-model",
         }
 
-    monkeypatch.setattr("services.ai_provider.create_chat_no_stream", _complete)
-    completion = await LegacyModelGateway("secret").complete(
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", _complete)
+    completion = await ProviderModelGateway("secret").complete(
         [AgentMessage(role="user", content="plan")],
         ModelInvocation(
             request=ModelRequest(
                 provider="openai",
                 model="requested-model",
-                options={"tools": [{"legacy": True}], "tool_choice": "required"},
+                options={"tools": [{"provider": True}], "tool_choice": "required"},
             ),
             tool_choice=ToolChoiceMode.NONE,
         ),
@@ -138,7 +163,7 @@ async def test_legacy_model_gateway_normalizes_non_stream_completion(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_maps_typed_tool_continuation_messages(monkeypatch):
+async def test_provider_model_gateway_maps_typed_tool_continuation_messages(monkeypatch):
     captured: list[dict] = []
 
     async def _stream(_key, messages, _options, _provider, _signal):
@@ -149,8 +174,8 @@ async def test_legacy_model_gateway_maps_typed_tool_continuation_messages(monkey
 
         return {"stream": _chunks(), "model": "model"}
 
-    monkeypatch.setattr("services.ai_provider.create_chat_stream", _stream)
-    stream = await LegacyModelGateway("secret").stream(
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    stream = await ProviderModelGateway("secret").stream(
         [
             AgentMessage(
                 role="assistant",
@@ -184,16 +209,16 @@ async def test_legacy_model_gateway_maps_typed_tool_continuation_messages(monkey
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_standardizes_required_tool_choice_rejection(monkeypatch):
+async def test_provider_model_gateway_standardizes_required_tool_choice_rejection(monkeypatch):
     class CompatibilityError(RuntimeError):
         status_code = 400
 
     async def _stream(*_args, **_kwargs):
         raise CompatibilityError("provider rejects tool_choice in thinking mode")
 
-    monkeypatch.setattr("services.ai_provider.create_chat_stream", _stream)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     observations: list[str] = []
-    gateway = LegacyModelGateway(
+    gateway = ProviderModelGateway(
         "secret",
         on_required_tool_choice_unsupported=lambda: observations.append("unsupported"),
     )
@@ -217,7 +242,7 @@ async def test_legacy_model_gateway_standardizes_required_tool_choice_rejection(
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_standardizes_upstream_stream_interruptions(monkeypatch):
+async def test_provider_model_gateway_standardizes_upstream_stream_interruptions(monkeypatch):
     async def _stream(*_args, **_kwargs):
         async def _chunks():
             raise httpx.ReadError("connection contained secret details")
@@ -225,8 +250,8 @@ async def test_legacy_model_gateway_standardizes_upstream_stream_interruptions(m
 
         return {"stream": _chunks(), "model": "model"}
 
-    monkeypatch.setattr("services.ai_provider.create_chat_stream", _stream)
-    stream = await LegacyModelGateway("secret").stream(
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    stream = await ProviderModelGateway("secret").stream(
         [AgentMessage(role="user", content="hello")],
         ModelInvocation(
             request=ModelRequest(provider="openai", model="model"),
@@ -243,7 +268,39 @@ async def test_legacy_model_gateway_standardizes_upstream_stream_interruptions(m
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_gateway_turns_cumulative_message_fallback_into_deltas(monkeypatch):
+async def test_provider_model_gateway_recognizes_wrapped_stream_interruptions(
+    monkeypatch,
+):
+    async def _stream(*_args, **_kwargs):
+        async def _chunks():
+            try:
+                raise httpx.RemoteProtocolError("private transport detail")
+            except httpx.RemoteProtocolError as cause:
+                raise RuntimeError("SDK wrapper detail") from cause
+            yield  # pragma: no cover
+
+        return {"stream": _chunks(), "model": "model"}
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    stream = await ProviderModelGateway("secret").stream(
+        [AgentMessage(role="user", content="hello")],
+        ModelInvocation(
+            request=ModelRequest(provider="openai", model="model"),
+            tool_choice=ToolChoiceMode.NONE,
+        ),
+    )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        _ = [chunk async for chunk in stream.chunks]
+
+    assert captured.value.code == "upstream_stream_interrupted"
+    assert captured.value.retryable is True
+    assert "private" not in str(captured.value)
+    assert "SDK" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_model_gateway_turns_cumulative_message_fallback_into_deltas(monkeypatch):
     async def _stream(*_args, **_kwargs):
         async def _chunks():
             yield {"choices": [{"delta": {"content": "a"}, "finish_reason": None}]}
@@ -251,8 +308,8 @@ async def test_legacy_model_gateway_turns_cumulative_message_fallback_into_delta
 
         return {"stream": _chunks(), "model": "model"}
 
-    monkeypatch.setattr("services.ai_provider.create_chat_stream", _stream)
-    stream = await LegacyModelGateway("secret").stream(
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    stream = await ProviderModelGateway("secret").stream(
         [AgentMessage(role="user", content="hello")],
         ModelInvocation(
             request=ModelRequest(provider="openai", model="model"),
@@ -265,48 +322,109 @@ async def test_legacy_model_gateway_turns_cumulative_message_fallback_into_delta
 
 
 @pytest.mark.asyncio
-async def test_callback_event_sink_supports_sync_and_async_callbacks():
-    received: list[AgentEvent] = []
-    sync_sink = CallbackEventSink(received.append)
+async def test_normalized_openai_stream_propagates_consumer_close_to_raw_stream():
+    class _TrackedRawStream:
+        def __init__(self):
+            self.close_calls = 0
+            self._sent = False
 
-    async def _async_callback(event: AgentEvent):
-        received.append(event)
+        def __aiter__(self):
+            return self
 
-    async_sink = CallbackEventSink(_async_callback)
-    event = AgentEvent(type=CoreEventType.RUN_STARTED, run_id="run-1")
-    await sync_sink.emit(event)
-    await async_sink.emit(event)
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return {
+                "choices": [{
+                    "delta": {"content": "first"},
+                    "finish_reason": None,
+                }],
+            }
 
-    assert isinstance(sync_sink, EventSink)
-    assert received == [event, event]
+        async def aclose(self):
+            self.close_calls += 1
+
+    raw_stream = _TrackedRawStream()
+    normalized = provider_model_gateway._normalize_openai_stream(raw_stream)
+
+    first = await anext(normalized)
+    assert first.content_delta == "first"
+    await normalized.aclose()
+
+    assert raw_stream.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_legacy_chunk_event_sink_preserves_existing_sse_shape():
-    received: list[dict] = []
-    sink = LegacyChunkEventSink(received.append)
-    event = AgentEvent(
-        type="agentRunStarted",
-        run_id="run-1",
-        payload={
-            "runId": "run-1",
-            "status": "running",
-            "details": {"steps": [{"id": "step-1"}]},
-        },
-    )
+async def test_normalized_openai_stream_closes_raw_stream_before_first_iteration():
+    class _TrackedRawStream:
+        def __init__(self):
+            self.next_calls = 0
+            self.close_calls = 0
 
-    await sink.emit(event)
+        def __aiter__(self):
+            return self
 
-    assert isinstance(sink, EventSink)
-    assert received == [{
-        "agentRunStarted": {
-            "runId": "run-1",
-            "status": "running",
-            "details": {"steps": [{"id": "step-1"}]},
-        },
-    }]
-    payload = received[0]["agentRunStarted"]
-    assert type(payload) is dict
-    assert type(payload["details"]) is dict
-    assert type(payload["details"]["steps"]) is list
-    assert json.loads(json.dumps(received)) == received
+        async def __anext__(self):
+            self.next_calls += 1
+            raise AssertionError("raw stream must not be read before close")
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    raw_stream = _TrackedRawStream()
+    normalized = provider_model_gateway._normalize_openai_stream(raw_stream)
+
+    await normalized.aclose()
+
+    assert raw_stream.next_calls == 0
+    assert raw_stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_stream(
+    monkeypatch,
+):
+    class _TrackedRawStream:
+        def __init__(self):
+            self.next_calls = 0
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.next_calls += 1
+            raise AssertionError("canceled runtime must not read the raw stream")
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    raw_stream = _TrackedRawStream()
+    signal = asyncio.Event()
+
+    async def _stream(_key, _messages, _options, _provider, received_signal):
+        assert received_signal is signal
+        signal.set()
+        return {"stream": raw_stream, "model": "resolved-model"}
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    runtime = AgentRuntime(model_gateway=ProviderModelGateway("secret"))
+    updates = [
+        update
+        async for update in runtime.run(
+            AgentRunRequest(
+                messages=(AgentMessage(role="user", content="hello"),),
+                model=ModelRequest(provider="openai", model="requested-model"),
+                domain_context=DomainContext(namespace="test"),
+            ),
+            signal=signal,
+        )
+    ]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRuntimeResult)
+    assert result.outcome is RuntimeOutcome.CANCELED
+    assert result.error_code == "request_canceled"
+    assert raw_stream.next_calls == 0
+    assert raw_stream.close_calls == 1

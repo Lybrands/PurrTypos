@@ -11,6 +11,8 @@ from agent_core.contracts import (
     DomainContext,
     ExecutionState,
     ModelRequest,
+    PlanningConstraints,
+    ResponseConstraints,
     StepExecutor,
     StepStatus,
     StepType,
@@ -54,6 +56,44 @@ def test_execution_state_is_run_scoped_but_has_no_core_authorization_field():
 
     assert state.domain["current"] == "two"
     assert not hasattr(state, "allowed_tool_names")
+
+
+def test_response_constraints_accept_only_a_bounded_exact_integer():
+    assert ResponseConstraints().exact_top_level_item_count is None
+    assert ResponseConstraints(
+        exact_top_level_item_count=2,
+    ).exact_top_level_item_count == 2
+
+    with pytest.raises(TypeError, match="integer"):
+        ResponseConstraints(exact_top_level_item_count=True)
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        ResponseConstraints(exact_top_level_item_count=0)
+
+
+def test_planning_constraints_normalize_dependency_edges_and_reject_bad_pairs():
+    constraints = PlanningConstraints(
+        context_satisfied_tool_names=frozenset({" cached ", ""}),
+        planning_excluded_tool_names=frozenset({" unrelated ", ""}),
+        satisfied_tool_dependency_edges=frozenset({
+            (" consumer ", " dependency "),
+        }),
+    )
+
+    assert constraints.context_satisfied_tool_names == frozenset({"cached"})
+    assert constraints.planning_excluded_tool_names == frozenset({
+        "unrelated",
+    })
+    assert constraints.satisfied_tool_dependency_edges == frozenset({
+        ("consumer", "dependency"),
+    })
+    with pytest.raises(TypeError, match="pairs"):
+        PlanningConstraints(
+            satisfied_tool_dependency_edges=frozenset({("only-one",)}),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        PlanningConstraints(
+            satisfied_tool_dependency_edges=frozenset({("consumer", " ")}),
+        )
 
 
 def test_policy_and_approval_contracts_preserve_security_semantics():

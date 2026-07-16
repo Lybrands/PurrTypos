@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
 BOOL_SETTINGS_KEYS = ["sync_outline_chapter"]
-STRING_SETTINGS_KEYS = ["ai_system_prompt", "ai_model_configs", "ai_agent_mode"]
+STRING_SETTINGS_KEYS = ["ai_system_prompt", "ai_model_configs"]
 SETTINGS_KEYS = [*BOOL_SETTINGS_KEYS, *STRING_SETTINGS_KEYS]
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -55,9 +55,6 @@ async def get_settings(db: DatabaseConnection) -> dict[str, Any]:
         if kv["ai_system_prompt"] is not None
         else DEFAULT_SYSTEM_PROMPT,
         "ai_model_configs": _parse_ai_model_configs(kv["ai_model_configs"]),
-        "ai_agent_mode": (
-            "subagent" if kv["ai_agent_mode"] == "subagent" else "legacy"
-        ),
     }
 
 

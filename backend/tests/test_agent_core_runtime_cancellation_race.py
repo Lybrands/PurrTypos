@@ -78,6 +78,73 @@ async def test_gateway_commit_wins_same_tick_progress_and_cancel_barrier():
 
 
 @pytest.mark.asyncio
+async def test_signal_during_gateway_commit_ack_preserves_durable_result():
+    signal = asyncio.Event()
+    durable = asyncio.Event()
+    release_ack = asyncio.Event()
+    progress = AgentEvent(
+        type=CoreEventType.TOOL_CALL_COMPLETED,
+        run_id="run-1",
+        payload={"index": 0},
+    )
+
+    class CommitAckGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            durable.set()
+            while not release_ack.is_set():
+                try:
+                    await release_ack.wait()
+                except asyncio.CancelledError:
+                    continue
+            await event_sink.emit(progress)
+            return _result()
+
+    consumer = asyncio.create_task(_collect(CommitAckGateway(), signal))
+    await asyncio.wait_for(durable.wait(), timeout=1)
+    signal.set()
+    await asyncio.sleep(0)
+    assert not consumer.done()
+
+    release_ack.set()
+    updates = await asyncio.wait_for(consumer, timeout=1)
+    assert updates == [progress, _result()]
+
+
+@pytest.mark.asyncio
+async def test_consumer_task_cancel_during_commit_ack_preserves_durable_result():
+    durable = asyncio.Event()
+    release_ack = asyncio.Event()
+    progress = AgentEvent(
+        type=CoreEventType.TOOL_CALL_COMPLETED,
+        run_id="run-1",
+        payload={"index": 0},
+    )
+
+    class CommitAckGateway:
+        async def execute_batch(self, request, event_sink, signal=None):
+            durable.set()
+            while not release_ack.is_set():
+                try:
+                    await release_ack.wait()
+                except asyncio.CancelledError:
+                    continue
+            await event_sink.emit(progress)
+            return _result()
+
+    consumer = asyncio.create_task(_collect(CommitAckGateway(), None))
+    await asyncio.wait_for(durable.wait(), timeout=1)
+    consumer.cancel()
+    await asyncio.sleep(0)
+    consumer.cancel()
+    await asyncio.sleep(0)
+    assert not consumer.done()
+
+    release_ack.set()
+    updates = await asyncio.wait_for(consumer, timeout=1)
+    assert updates == [progress, _result()]
+
+
+@pytest.mark.asyncio
 async def test_gateway_exception_wins_same_tick_cancel_barrier():
     signal = asyncio.Event()
 

@@ -1,12 +1,5 @@
-import { appendAssistantTailMarkdown } from "../../rendering";
-import { isWritingExpertPipeline, type ChatMessage } from "../chat.types";
+import type { ChatMessage } from "../chat.types";
 import type { ChunkHandler } from "./types";
-
-export const handleToolRouterWarning: ChunkHandler = (chunk, ctx) => {
-  if (chunk.toolRouterWarning) {
-    ctx.appMessage.warning(chunk.toolRouterWarning);
-  }
-};
 
 function ensureThinkingBlockStarted(ctx: Parameters<ChunkHandler>[1]): number {
   if (ctx.acc.thinkingBlockStartedAt == null) {
@@ -68,11 +61,9 @@ export const handleDelta: ChunkHandler = (chunk, ctx) => {
 
   if (acc.toolCallSegments?.length) {
     let after = (acc.contentAfterToolCalls ?? "") + delta;
-    if (!isWritingExpertPipeline(ctx.agentMode)) {
-      const lastS = acc.toolCallSegments[acc.toolCallSegments.length - 1];
-      if (lastS?.textBefore && after.startsWith(lastS.textBefore)) {
-        after = after.slice(lastS.textBefore.length);
-      }
+    const lastS = acc.toolCallSegments[acc.toolCallSegments.length - 1];
+    if (lastS?.textBefore && after.startsWith(lastS.textBefore)) {
+      after = after.slice(lastS.textBefore.length);
     }
     acc.contentAfterToolCalls = after;
     acc.response =
@@ -121,45 +112,6 @@ export const handleDelta: ChunkHandler = (chunk, ctx) => {
         taskPlan: acc.taskPlan,
       };
     }
-    return next;
-  });
-};
-
-export const handleCollabLatestParagraph: ChunkHandler = (chunk, ctx) => {
-  const raw = chunk.collabLatestParagraph;
-  if (typeof raw !== "string" || !raw.trim()) return;
-  const para = raw.trim();
-  const wrapped = `\n\n### 最新段落（已写入正文）\n\n\`\`\`text\n${para}\n\`\`\`\n`;
-  const { acc } = ctx;
-  const accTailPatched = appendAssistantTailMarkdown(
-    {
-      content: acc.response,
-      contentAfterToolCalls: acc.contentAfterToolCalls,
-      toolCallSegments: acc.toolCallSegments,
-    },
-    wrapped,
-  );
-  acc.response = accTailPatched.content ?? acc.response;
-  if (acc.toolCallSegments?.length) {
-    acc.contentAfterToolCalls = accTailPatched.contentAfterToolCalls ?? "";
-  }
-  ctx.scheduleCommit((prev) => {
-    const next = [...prev];
-    const last = next[next.length - 1];
-    if (!last || last.role !== "assistant") return prev;
-    const tailPatched = appendAssistantTailMarkdown(
-      {
-        content: (last as ChatMessage).content,
-        contentAfterToolCalls: (last as ChatMessage).contentAfterToolCalls,
-        toolCallSegments: (last as ChatMessage).toolCallSegments,
-      },
-      wrapped,
-    );
-    next[next.length - 1] = {
-      ...(last as ChatMessage),
-      content: tailPatched.content ?? (last.content || ""),
-      contentAfterToolCalls: tailPatched.contentAfterToolCalls,
-    };
     return next;
   });
 };

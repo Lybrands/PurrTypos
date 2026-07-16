@@ -1,11 +1,9 @@
 import React from "react";
-import type { EntityId } from "../../../../types";
 import { type ChatMessage } from "../../hooks";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
 import ThinkingRegion from "../ThinkingRegion";
-import SubagentResultCard from "../SubagentResultCard";
 import { TaskPlanSteps } from "../TaskPlanCard";
 import ToolApprovalCard from "../ToolApprovalCard";
 import WorkLog, { WorkLogStepGroup } from "../WorkLog";
@@ -22,7 +20,6 @@ export interface AssistantMessageBodyProps {
   loading: boolean;
   isLastAssistant: boolean;
   showPlaceholder: boolean;
-  chapterId: EntityId | null | undefined;
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
 }
 
@@ -96,7 +93,6 @@ function AssistantMessageBodyInner({
   loading,
   isLastAssistant,
   showPlaceholder,
-  chapterId,
   setScrolledUpByReason,
 }: AssistantMessageBodyProps) {
   const isStreaming = loading && isLastAssistant;
@@ -118,8 +114,7 @@ function AssistantMessageBodyInner({
   const workLogParts = timeline.filter(isVisibleWorkLogPart);
   const workLogItems = groupConsecutiveWorkSteps(workLogParts, index);
   const hasAnswerContent = answerParts.length > 0;
-  const hasWorkLog =
-    workLogParts.length > 0 || Boolean(message.writingSubagentActive);
+  const hasWorkLog = workLogParts.length > 0;
 
   const renderStepPart = (part: TimelineStepPart) => {
     if (part.type === "thinking") {
@@ -176,7 +171,7 @@ function AssistantMessageBodyInner({
           hasError={workLogHasError(workLogParts)}
         >
           {workLogItems.map((part, partIndex) => {
-            if (part.type === "digest" || part.type === "commentary") {
+            if (part.type === "commentary") {
               return (
                 <div
                   key={`${part.type}-${partIndex}`}
@@ -234,12 +229,6 @@ function AssistantMessageBodyInner({
             }
             return null;
           })}
-          {message.writingSubagentActive ? (
-            <div className="work-log__commentary">
-              {message.writingSubagentLabel || "子专家"}处理中
-              <span className="a-blink-dots">...</span>
-            </div>
-          ) : null}
         </WorkLog>
       ) : null}
 
@@ -257,13 +246,6 @@ function AssistantMessageBodyInner({
           <span className="a-blink-dots">...</span>
         </div>
       )}
-      {message.subagentResult ? (
-        <SubagentResultCard
-          role={message.subagentResult.role}
-          payload={message.subagentResult.payload}
-          chapterId={chapterId}
-        />
-      ) : null}
       {(message.settingDiffCards || []).map((card) => (
         <SettingDiffCard key={card.sessionKey} card={card} />
       ))}

@@ -50,10 +50,10 @@ test('starts the development backend once with the expected environment', () => 
 })
 
 test('uses a packaged executable when one exists', () => {
-  const executable = 'C:\\resources\\backend\\purrtypos-backend.exe'
+  const executable = '/resources/backend/purrtypos-backend.exe'
   const { manager, spawnCalls } = createManager({
     app: { isPackaged: true, getPath: () => 'C:\\user-data' },
-    resourcesPath: 'C:\\resources',
+    resourcesPath: '/resources',
     fsImpl: { existsSync: (candidate) => candidate === executable },
   })
 

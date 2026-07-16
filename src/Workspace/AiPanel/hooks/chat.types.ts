@@ -6,7 +6,6 @@ import type {
   SettingDiffCardState,
   ToolApprovalRequest,
 } from "../../../types";
-import type { WritingSubagentRole } from "../pipelineStages";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";
 
@@ -24,7 +23,7 @@ export type AiTaskStepStatus =
   | "blocked"
   | "failed";
 
-export type AiTaskStepExecutor = "model" | "tool" | "expert";
+export type AiTaskStepExecutor = "model" | "tool";
 
 export type AiTaskPlanStatus =
   | "planned"
@@ -42,7 +41,6 @@ export interface AiTaskStep {
   type: AiTaskStepType;
   status: AiTaskStepStatus;
   executor?: AiTaskStepExecutor;
-  expertRole?: WritingSubagentRole | string;
   riskLevel?: "read" | "write" | "destructive";
   suggestedTools?: string[];
   resultSummary?: string;
@@ -70,15 +68,6 @@ export interface ToolCallSegment {
   startedAt?: number;
   /** 整个工具批次耗时；完成时写入历史。 */
   durationMs?: number;
-  trace?: {
-    insertedByDag?: number;
-    insertedSkillNames?: string[];
-    plannedToolNames?: string[];
-    repairedRounds?: number;
-    repairReasons?: string[];
-    /** 当前工具执行阶段（如 subagent 的 analyze/plan） */
-    stage?: string;
-  };
 }
 
 export interface ChatMessage {
@@ -105,32 +94,6 @@ export interface ChatMessage {
   toolCalling?: boolean;
   toolCallSegments?: ToolCallSegment[];
   contentAfterToolCalls?: string;
-  /** Subagent：当前阶段 id（如 analyze） */
-  subagentStageId?: string;
-  /** 历史子专家阶段展示名（如「分析专家」） */
-  subagentStageName?: string;
-  /** Subagent：该阶段是否仍在执行（含工具调用） */
-  subagentStageWorking?: boolean;
-  /** Subagent：最近一次完成阶段的展示名 */
-  subagentLastCompletedStageName?: string;
-  /** Subagent：按返回顺序记录阶段状态 */
-  subagentStages?: Array<{
-    id: string;
-    name: string;
-    status: "running" | "done";
-  }>;
-  /** 主稿专家正在输出阶段间过渡文案 */
-  subagentBridging?: boolean;
-  /** 已进入最终主稿专家答复流 */
-  subagentMainPresenter?: boolean;
-  /** 历史子专家阶段摘要（Markdown），在工具条与主答复之前展示 */
-  subagentPipelineDigest?: string;
-  /** 按需子专家进行中 */
-  writingSubagentActive?: boolean;
-  writingSubagentLabel?: string;
-  writingSubagentRole?: WritingSubagentRole;
-  /** 子专家结构化结果（审校 / 规划 / 润色 / 风格） */
-  subagentResult?: { role: WritingSubagentRole; payload: unknown };
   /** AI 提议的设定 diff 卡片（人物 / 故事背景） */
   settingDiffCards?: SettingDiffCardState[];
   /** 等待用户批准的高风险 Agent 工具调用。 */
@@ -170,11 +133,4 @@ export interface UseChatSubmitParams {
    * 默认 chapter（必须先选章节）。
    */
   sessionScope?: "chapter" | "setting";
-}
-
-/** 历史子专家管线兼容判断。 */
-export function isWritingExpertPipeline(
-  mode: "legacy" | "subagent" | undefined,
-): boolean {
-  return mode === "subagent";
 }

@@ -57,22 +57,11 @@ function ChatMessageBubbleInner({
   const hasAnyThinking =
     hasThinkingBlocks ||
     (message.thinking !== undefined && message.thinking !== "");
-  const hasSubagentProgress = Boolean(
-    message.writingSubagentActive ||
-      message.subagentResult ||
-      message.subagentStages?.length ||
-      message.subagentStageName ||
-      message.subagentStageId ||
-      message.subagentBridging ||
-      message.subagentMainPresenter,
-  );
   const isEmpty =
     !message.content &&
     !message.toolCallSegments?.length &&
     !message.taskPlan &&
-    !hasAnyThinking &&
-    !hasSubagentProgress &&
-    !(message.subagentPipelineDigest || "").trim();
+    !hasAnyThinking;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;
   const showPlaceholder = isLastAssistant && isEmpty;
@@ -151,7 +140,6 @@ function ChatMessageBubbleInner({
           loading={loading}
           isLastAssistant={isLastAssistant}
           showPlaceholder={showPlaceholder}
-          chapterId={chapterId}
           setScrolledUpByReason={setScrolledUpByReason}
         />
       )}

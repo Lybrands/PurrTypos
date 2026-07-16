@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -11,10 +11,11 @@ class ChatStreamRequest(BaseModel):
     baseURL: Optional[str] = None
     apiProvider: str = "openai"
     options: Optional[Dict[str, Any]] = None
+    # Reserved only so unsupported caller-owned tool contracts can be rejected
+    # explicitly by the application mapper instead of being silently ignored.
     tools: Optional[List[Dict[str, Any]]] = None
     sessionId: Optional[int] = None
-    # 是否在请求中携带 skills/<name>/SKILL.md 解析出的工具列表。
-    # 名字曾叫 useToolRouter（误导：实际并无路由，只是"是否加载工具"开关）。
+    # 是否允许 Writing Agent 暴露当前书籍范围内的宿主工具。
     enableAgentTools: bool = False
     bookId: Optional[str] = None
     chapterId: Optional[str] = None
@@ -29,6 +30,14 @@ class ChatStreamRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     chatAgentMode: Optional[str] = None
     contextWindow: Optional[str] = None
+
+    @field_validator("bookId")
+    @classmethod
+    def normalize_book_id(cls, value: Optional[str]) -> Optional[str]:
+        """Canonicalize the Writing security scope at the HTTP boundary."""
+
+        normalized = str(value or "").strip()
+        return normalized or None
 
 
 class ListModelsRequest(BaseModel):
@@ -47,18 +56,3 @@ class GenerateTitleRequest(BaseModel):
 
 class ResolveToolApprovalRequest(BaseModel):
     approved: bool
-
-
-class CreateAgentRunReviewRequest(BaseModel):
-    scores: Dict[str, int]
-    notes: Optional[str] = None
-    evaluator: str = "human"
-
-
-class EvaluateAgentReleaseRequest(BaseModel):
-    pilotRunIds: List[str]
-
-
-class EvaluateAgentRolloutRequest(BaseModel):
-    baselineRunIds: List[str]
-    candidateRunIds: List[str]

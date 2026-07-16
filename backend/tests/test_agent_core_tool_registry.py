@@ -29,6 +29,7 @@ def _registration(
     parameters=None,
     scope_validator=None,
     cache_probe=None,
+    cancellation_linearizable=False,
 ):
     return ToolRegistration(
         schema=ToolSchema(
@@ -40,6 +41,7 @@ def _registration(
         policy=ToolPolicy(mode="read", title=f"Use {name}"),
         scope_validator=scope_validator,
         cache_probe=cache_probe,
+        cancellation_linearizable=cancellation_linearizable,
     )
 
 
@@ -91,6 +93,10 @@ def test_catalog_registration_schema_is_recursively_immutable_and_detached():
             "type must be object",
         ),
         ((_registration("sync", handler=lambda *_args: None),), "handler must be async"),
+        (
+            (_registration("bad-receipt", cancellation_linearizable="yes"),),
+            "cancellation_linearizable must be boolean",
+        ),
         (
             (
                 ToolRegistration(

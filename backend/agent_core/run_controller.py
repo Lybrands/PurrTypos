@@ -10,6 +10,7 @@ from agent_core.contracts import (
     RunStatus,
     TaskPlan,
     TaskStep,
+    ToolBatchOutcome,
     TraceRecord,
 )
 from agent_core.events import AgentEvent, CoreEventType
@@ -129,6 +130,12 @@ class AgentRunController:
             return frozenset()
         return RunStateMachine.allowed_tool_names_for_current_transition(state)
 
+    def future_allowed_tool_names(self) -> frozenset[str]:
+        state = self._snapshot
+        if state is None:
+            return frozenset()
+        return RunStateMachine.future_allowed_tool_names(state)
+
     def allowed_tool_names(self) -> frozenset[str]:
         state = self._snapshot
         if state is None:
@@ -151,10 +158,15 @@ class AgentRunController:
                 RunStateMachine.on_tool_calls_started(state, tool_names)
             )
 
-    async def on_tool_round_completed(self) -> None:
+    async def on_tool_round_completed(
+        self,
+        outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+    ) -> None:
         async with self._mutation_lock:
             state = self._require_started()
-            await self._apply(RunStateMachine.on_tool_round_completed(state))
+            await self._apply(
+                RunStateMachine.on_tool_round_completed(state, outcome)
+            )
 
     async def complete(self, final_response: str = "") -> None:
         async with self._mutation_lock:

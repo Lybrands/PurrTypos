@@ -59,6 +59,10 @@ def inspect_tool_contract(
             violations.append(f"{label}: tool description is required")
         if not isinstance(registration.policy, ToolPolicy):
             violations.append(f"{label}: explicit tool policy is required")
+        if not isinstance(registration.cancellation_linearizable, bool):
+            violations.append(
+                f"{label}: cancellation_linearizable must be boolean"
+            )
 
         parameters = thaw_json_mapping(registration.schema.parameters)
         if parameters.get("type") != "object":

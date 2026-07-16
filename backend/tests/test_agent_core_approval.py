@@ -6,6 +6,7 @@ import pytest
 
 from agent_core.contracts import (
     ApprovalRequest,
+    ApprovalResult,
     ApprovalStatus,
     ToolCall,
 )
@@ -100,6 +101,8 @@ async def test_timeout_and_signal_cancellation_always_clean_pending_state():
 
     assert timed_out.status is ApprovalStatus.TIMED_OUT
     assert timeout_sink.events[-1].payload["status"] == "timed_out"
+    timeout_id = str(timeout_sink.events[0].payload["approvalId"])
+    assert gateway.resolve("run-timeout", timeout_id, "approve") is None
     assert gateway.pending_count() == 0
 
     signal = asyncio.Event()
@@ -129,3 +132,88 @@ async def test_approval_gateway_instances_do_not_share_pending_requests():
     assert first.cancel_pending("run-a") == 1
     assert (await task).status is ApprovalStatus.CANCELED
     assert second.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_fails_closed_for_every_live_run():
+    gateway = InMemoryApprovalGateway()
+    sink_a = RecordingSink()
+    sink_b = RecordingSink()
+    task_a = asyncio.create_task(gateway.request("run-a", _approval(), sink_a))
+    task_b = asyncio.create_task(gateway.request("run-b", _approval(), sink_b))
+    id_a, id_b = await asyncio.gather(
+        _wait_for_request(sink_a),
+        _wait_for_request(sink_b),
+    )
+
+    assert gateway.cancel_all() == 2
+    assert gateway.resolve("run-a", id_a, "approve") is None
+    assert gateway.resolve("run-b", id_b, "approve") is None
+    result_a, result_b = await asyncio.gather(task_a, task_b)
+
+    assert result_a.status is ApprovalStatus.CANCELED
+    assert result_b.status is ApprovalStatus.CANCELED
+    assert gateway.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_winner_cannot_be_rewritten_by_same_tick_signal():
+    gateway = InMemoryApprovalGateway()
+    sink = RecordingSink()
+    signal = asyncio.Event()
+    task = asyncio.create_task(gateway.request(
+        "run-a",
+        _approval(),
+        sink,
+        signal,
+    ))
+    approval_id = await _wait_for_request(sink)
+
+    assert gateway.resolve(
+        "run-a",
+        approval_id,
+        "approve",
+    ) is ApprovalStatus.APPROVED
+    signal.set()
+    result = await task
+
+    assert result.status is ApprovalStatus.APPROVED
+    assert sink.events[-1].payload["status"] == "approved"
+    assert gateway.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_signal_winner_rejects_late_resolution():
+    gateway = InMemoryApprovalGateway()
+    sink = RecordingSink()
+    signal = asyncio.Event()
+    task = asyncio.create_task(gateway.request(
+        "run-a",
+        _approval(),
+        sink,
+        signal,
+    ))
+    approval_id = await _wait_for_request(sink)
+
+    signal.set()
+    while gateway.pending_count():
+        await asyncio.sleep(0)
+
+    assert gateway.resolve("run-a", approval_id, "approve") is None
+    result = await task
+    assert result.status is ApprovalStatus.CANCELED
+    assert sink.events[-1].payload["status"] == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_close_is_permanent_and_late_requests_emit_no_card():
+    gateway = InMemoryApprovalGateway()
+    assert gateway.close() == 0
+    assert gateway.close() == 0
+    sink = RecordingSink()
+
+    result = await gateway.request("run-late", _approval(), sink)
+
+    assert result == ApprovalResult(None, ApprovalStatus.CANCELED)
+    assert sink.events == []
+    assert gateway.pending_count() == 0

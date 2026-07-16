@@ -236,7 +236,6 @@ export default function InlineEditPopover({
           context_window: contextWindow,
           max_tokens: 8192,
         },
-        tools: [],
         enableAgentTools: false,
         bookId: bookId ?? undefined,
         chapterId: chapterId ?? undefined,

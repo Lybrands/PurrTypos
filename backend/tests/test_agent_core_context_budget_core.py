@@ -11,6 +11,7 @@ from agent_core.context_budget import (
 from agent_core.contracts import (
     AgentMessage,
     ContextBudgetClaim,
+    MessageOrigin,
     MessageRole,
     ToolSchema,
 )
@@ -107,3 +108,26 @@ def test_trimming_keeps_system_developer_and_latest_complete_turn():
     assert trimmed.messages == required
     assert trimmed.dropped_count == 2
     assert trimmed.overflow_tokens == 0
+
+
+def test_host_only_message_metadata_is_not_charged_to_provider_budget():
+    visible = AgentMessage(
+        role=MessageRole.DEVELOPER,
+        content="visible outline context",
+        origin=MessageOrigin.HOST_CONTEXT,
+    )
+    with_receipt = AgentMessage(
+        role=MessageRole.DEVELOPER,
+        content="visible outline context",
+        origin=MessageOrigin.HOST_CONTEXT,
+        host_metadata={
+            "writing_outline_sources": [{
+                "outlineId": "outline-1",
+                "text": "大纲" * 20_000,
+            }],
+        },
+    )
+
+    assert estimate_agent_messages_tokens((with_receipt,)) == (
+        estimate_agent_messages_tokens((visible,))
+    )

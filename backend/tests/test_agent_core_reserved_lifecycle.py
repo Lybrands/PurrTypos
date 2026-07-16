@@ -11,7 +11,7 @@ from agent_core.events import AgentEvent, CoreEventType
 from agent_core.ports import RunCommit
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
-from services.agent_run_store import get_run, get_run_events
+from infrastructure.persistence.run_store import get_run, get_run_events
 
 
 @pytest_asyncio.fixture

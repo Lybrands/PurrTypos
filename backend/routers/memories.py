@@ -137,28 +137,13 @@ async def link_memories(body: LinkMemoriesRequest):
 @router.post("/memories/context")
 async def build_memory_context(body: BuildMemoryContextRequest):
     try:
-        from services import memory_orchestrator
-        block = await memory_orchestrator.build_memory_context(
-            {
-                "bookId": body.bookId,
-                "selectedLongTermMemoryIds": body.selectedLongTermMemoryIds or [],
-                "selectedMemoryIds": body.selectedMemoryIds or [],
-                "selectedForeshadowingIds": body.selectedForeshadowingIds or [],
-                "memoryBudget": body.memoryBudget,
-                "memoryRecallLimit": body.memoryRecallLimit,
-                "contextWindow": body.contextWindow,
-            },
-            body.userPrompt,
-            body.mode,
+        from application.writing_memory_context import (
+            build_writing_memory_context,
         )
-        return {"success": True, "data": {
-            "text": block.text,
-            "includedIds": block.included_ids,
-            "deferredIds": block.deferred_ids,
-            "suppressedIds": block.suppressed_ids,
-            "tokenEstimate": block.token_estimate,
-            "diagnostics": block.diagnostics,
-        }}
+        from dependencies import get_db
+
+        result = await build_writing_memory_context(body, db=get_db())
+        return {"success": True, "data": result.to_response_data()}
     except Exception as exc:
         return {"success": False, "error": _err_message(exc)}
 

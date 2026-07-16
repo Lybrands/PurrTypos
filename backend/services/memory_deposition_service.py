@@ -405,8 +405,7 @@ def extract_explicit_memory(prompt: str) -> str:
 
 
 def _is_ai_source(source: str) -> bool:
-    s = str(source or "").lower()
-    return s.startswith("ai") or "subagent" in s or "expert" in s
+    return str(source or "").lower().startswith("ai")
 
 
 def _candidate_text(after_text: str, before_text: str = "") -> str:

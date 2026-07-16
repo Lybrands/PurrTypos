@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from routers.conversations import save_conversation
+from routers.conversations import get_conversations, save_conversation
 from schemas.conversations import SaveConversationRequest
 
 pytestmark = pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_save_conversation_persists_turn_duration(temp_db: DatabaseConnect
 
 
 async def test_save_conversation_links_agent_run(temp_db: DatabaseConnection):
-    from services.agent_run_store import create_run
+    from infrastructure.persistence.run_store import create_run
 
     run_id = await create_run(temp_db, session_id=1, prompt="p", mode="agent")
     created = await save_conversation(SaveConversationRequest(
@@ -88,3 +88,41 @@ async def test_save_conversation_links_agent_run(temp_db: DatabaseConnection):
         [run_id],
     )
     assert row["conversation_id"] == conversation_id
+
+
+async def test_conversation_schema_and_api_expose_only_current_turn_fields(
+    temp_db: DatabaseConnection,
+):
+    columns = {
+        row["name"]
+        for row in await temp_db.fetch_all("PRAGMA table_info(ai_conversations)")
+    }
+    assert columns == {
+        "id",
+        "session_id",
+        "chapter_id",
+        "prompt",
+        "response",
+        "create_time",
+        "model",
+        "thinking",
+        "tool_call_segments",
+        "thinking_blocks",
+        "thinking_durations_ms",
+        "duration_ms",
+        "task_plan",
+    }
+
+    # Extra columns in an upgraded user database are retained physically but
+    # are not part of the current response contract.
+    await temp_db.execute(
+        "ALTER TABLE ai_conversations ADD COLUMN obsolete_payload TEXT DEFAULT NULL"
+    )
+    await save_conversation(SaveConversationRequest(
+        sessionId=9,
+        prompt="p",
+        response="r",
+    ))
+    result = await get_conversations("9")
+
+    assert set(result["data"][0]) == columns
