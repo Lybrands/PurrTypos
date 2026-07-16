@@ -7,7 +7,7 @@ from collections import deque
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import AsyncIterator, Iterable, Sequence
+from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
 
 from agent_core.cancellation import OperationCanceled, await_with_cancellation
 from agent_core.context_budget import (
@@ -27,11 +27,16 @@ from agent_core.contracts import (
     ContextBudgetClaim,
     ContextBundle,
     ExecutionState,
+    MessageOrigin,
     MessageRole,
+    PlannerLimits,
     PlanningCapabilities,
+    PlanningConstraints,
     PlanningKind,
+    ResponseConstraints,
     RunCreateParams,
     RunId,
+    RunProvenance,
     RuntimeLimits,
     RuntimeOutcome,
     StepExecutor,
@@ -55,6 +60,8 @@ from agent_core.ports import (
     ContextProvider,
     ExecutionStateFactory,
     PlanningPolicy,
+    ResponseJudge,
+    ResponseValidator,
     RunRepository,
     TaskPlanner,
     ToolCatalog,
@@ -85,8 +92,10 @@ class AgentCoreRunOptions:
     minimum_message_tokens: int | None = None
     model_supports_tools: bool = True
     force_planned_tool_choice: bool = True
-    release_version: str | None = None
-    rollout_cohort: str | None = None
+    provenance: RunProvenance | None = None
+    response_constraints: ResponseConstraints = ResponseConstraints()
+    response_validators: tuple[ResponseValidator, ...] = ()
+    response_judges: tuple[ResponseJudge, ...] = ()
 
     def __post_init__(self) -> None:
         claims = tuple(self.context_claims)
@@ -117,8 +126,21 @@ class AgentCoreRunOptions:
             "force_planned_tool_choice",
             bool(self.force_planned_tool_choice),
         )
-        object.__setattr__(self, "release_version", _optional_text(self.release_version))
-        object.__setattr__(self, "rollout_cohort", _optional_text(self.rollout_cohort))
+        if self.provenance is not None and not isinstance(
+            self.provenance,
+            RunProvenance,
+        ):
+            raise TypeError("run provenance must be a RunProvenance value")
+        if not isinstance(self.response_constraints, ResponseConstraints):
+            raise TypeError("response constraints must be ResponseConstraints")
+        validators = tuple(self.response_validators)
+        if any(not isinstance(item, ResponseValidator) for item in validators):
+            raise TypeError("response validators must implement ResponseValidator")
+        object.__setattr__(self, "response_validators", validators)
+        judges = tuple(self.response_judges)
+        if any(not isinstance(item, ResponseJudge) for item in judges):
+            raise TypeError("response judges must implement ResponseJudge")
+        object.__setattr__(self, "response_judges", judges)
 
 
 class AgentCore:
@@ -145,7 +167,17 @@ class AgentCore:
     ) -> None:
         self._model_gateway = model_gateway
         self._repository = run_repository
-        self._planner = planner or AgentPlanner(model_gateway)
+        self._runtime_limits = runtime_limits
+        default_planner_limits = PlannerLimits()
+        self._planner = planner or AgentPlanner(
+            model_gateway,
+            PlannerLimits(
+                max_tool_steps=min(
+                    default_planner_limits.max_tool_steps,
+                    max(0, runtime_limits.max_model_rounds - 2),
+                ),
+            ),
+        )
         self._planning_policy = planning_policy or _DefaultPlanningPolicy()
         self._context_provider = context_provider or _EmptyContextProvider()
         self._execution_state_factory = (
@@ -161,7 +193,6 @@ class AgentCore:
             self._approval_gateway,
             tool_execution_limits,
         )
-        self._runtime_limits = runtime_limits
 
     def resolve_approval(
         self,
@@ -198,8 +229,7 @@ class AgentCore:
                     session_id=request.session_id,
                     prompt=request.latest_user_text(),
                     mode=request.mode,
-                    release_version=options.release_version,
-                    rollout_cohort=options.rollout_cohort,
+                    provenance=options.provenance,
                 )
             )
             for event in sink.drain():
@@ -212,7 +242,11 @@ class AgentCore:
                 yield _run_result(controller)
                 return
 
-            planning_started = perf_counter()
+            # Build the retrieval bundle once against every enabled schema.
+            # This conservative reservation makes the manifest describe the
+            # exact content later sent to the runtime; planning may only shrink
+            # the exposed schema set and must never cause context expansion.
+            reservation_started = perf_counter()
             try:
                 registrations, enabled_names = _effective_registrations(
                     self._tool_catalog,
@@ -220,9 +254,88 @@ class AgentCore:
                     request,
                     model_supports_tools=options.model_supports_tools,
                 )
-                capabilities = PlanningCapabilities(
+                reserved_schemas = tuple(
+                    registration.schema
+                    for registration in registrations
+                    if registration.schema.name in enabled_names
+                )
+                reserved_budget = allocate_context_budget(
+                    window_tokens=(
+                        request.context_window
+                        or options.default_context_window_tokens
+                    ),
+                    output_reserve_tokens=options.output_reserve_tokens,
+                    tools=reserved_schemas,
+                    claims=options.context_claims,
+                    safety_reserve_tokens=options.safety_reserve_tokens,
+                    runtime_reserve_tokens=options.runtime_reserve_tokens,
+                    minimum_message_tokens=options.minimum_message_tokens,
+                )
+                bundle = await await_with_cancellation(
+                    self._context_provider.build_context(
+                        request,
+                        reserved_budget,
+                        signal,
+                    ),
+                    signal,
+                )
+                if not isinstance(bundle, ContextBundle):
+                    raise ContractViolationError(
+                        "context provider must return ContextBundle"
+                    )
+                _validate_context_allocations(bundle, reserved_budget)
+            except OperationCanceled:
+                await controller.cancel("request_canceled")
+                for event in sink.drain():
+                    yield event
+                yield _run_result(controller)
+                return
+            except ContextOverflowError as error:
+                await _record_safe_exception(
+                    controller,
+                    stage="context_reservation",
+                    outcome="overflow",
+                    error=error,
+                    started=reservation_started,
+                )
+                await controller.fail("context_overflow_initial")
+                for event in sink.drain():
+                    yield event
+                yield _run_result(controller)
+                return
+            except Exception as error:
+                await _record_safe_exception(
+                    controller,
+                    stage="context_reservation",
+                    outcome="failed",
+                    error=error,
+                    started=reservation_started,
+                )
+                await controller.fail("context_setup_failed")
+                for event in sink.drain():
+                    yield event
+                yield _run_result(controller)
+                return
+
+            planning_started = perf_counter()
+            try:
+                base_capabilities = PlanningCapabilities(
                     available_tool_names=enabled_names,
                     model_supports_tools=options.model_supports_tools,
+                    host_planning_facts=_host_planning_facts(bundle),
+                    tool_guidance=_planning_tool_guidance(
+                        registrations,
+                        enabled_names,
+                    ),
+                )
+                constraints = self._planning_policy.planning_constraints(
+                    request,
+                    base_capabilities,
+                )
+                _validate_planning_constraints(base_capabilities, constraints)
+                capabilities = replace(
+                    base_capabilities,
+                    constraints=constraints,
                 )
                 should_plan = bool(
                     self._planning_policy.should_plan(request, capabilities)
@@ -236,13 +349,30 @@ class AgentCore:
                     )
                     plan = planning.plan
                     planning_kind = planning.kind
-                    _validate_plan_authority(plan, enabled_names)
+                    _validate_plan_authority(
+                        plan,
+                        enabled_names,
+                        constraints=constraints,
+                        max_tool_steps=max(
+                            0,
+                            self._runtime_limits.max_model_rounds - 2,
+                        ),
+                    )
                     await controller.install_plan(plan)
                 await controller.record_trace(TraceRecord(
                     stage="planning",
                     outcome=(planning_kind.value if planning_kind else "skipped"),
                     details={
                         "toolCount": len(enabled_names),
+                        "contextSatisfiedToolCount": len(
+                            constraints.context_satisfied_tool_names
+                        ),
+                        "planningExcludedToolCount": len(
+                            constraints.planning_excluded_tool_names
+                        ),
+                        "satisfiedToolDependencyEdgeCount": len(
+                            constraints.satisfied_tool_dependency_edges
+                        ),
                         "planned": should_plan,
                     },
                     duration_ms=_duration_ms(planning_started),
@@ -329,14 +459,6 @@ class AgentCore:
                     runtime_reserve_tokens=options.runtime_reserve_tokens,
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
-                bundle = await await_with_cancellation(
-                    self._context_provider.build_context(request, budget, signal),
-                    signal,
-                )
-                if not isinstance(bundle, ContextBundle):
-                    raise ContractViolationError(
-                        "context provider must return ContextBundle"
-                    )
                 _validate_context_allocations(bundle, budget)
                 prepared_request = replace(
                     request,
@@ -367,6 +489,9 @@ class AgentCore:
                         "windowTokens": budget.window_tokens,
                         "providerInputTokens": budget.provider_input_tokens,
                         "toolSchemaTokens": budget.tool_schema_tokens,
+                        "reservedToolSchemaTokens": (
+                            reserved_budget.tool_schema_tokens
+                        ),
                         "droppedMessages": trimmed.dropped_count,
                     },
                     duration_ms=_duration_ms(setup_started),
@@ -377,10 +502,23 @@ class AgentCore:
                     payload={
                         "windowTokens": budget.window_tokens,
                         "providerInputTokens": budget.provider_input_tokens,
+                        "estimatedInputTokens": trimmed.token_estimate,
                         "outputReserveTokens": budget.output_reserve_tokens,
                         "runtimeReserveTokens": budget.runtime_reserve_tokens,
                         "safetyReserveTokens": budget.safety_reserve_tokens,
                         "toolSchemaTokens": budget.tool_schema_tokens,
+                        "reservedToolSchemaTokens": (
+                            reserved_budget.tool_schema_tokens
+                        ),
+                        "droppedMessages": trimmed.dropped_count,
+                        "projectedTotalTokens": (
+                            trimmed.token_estimate
+                            + budget.tool_schema_tokens
+                            + budget.output_reserve_tokens
+                            + budget.runtime_reserve_tokens
+                            + budget.safety_reserve_tokens
+                        ),
+                        "overflowTokens": 0,
                         "contextAllocations": thaw_json_mapping(
                             budget.context_allocations
                         ),
@@ -433,6 +571,9 @@ class AgentCore:
                 runtime_stream = runtime.run(
                     prepared_request,
                     tools=schemas,
+                    response_constraints=options.response_constraints,
+                    response_validators=options.response_validators,
+                    response_judges=options.response_judges,
                     execution_state=state,
                     run_id=controller.run_id,
                     context_budget=budget,
@@ -442,6 +583,7 @@ class AgentCore:
                         and selected_names
                         and options.force_planned_tool_choice
                     ),
+                    require_tool_call=bool(plan is not None and selected_names),
                     tools_executable=True,
                     signal=signal,
                 )
@@ -500,7 +642,10 @@ class AgentCore:
                 )
             for event in sink.drain():
                 yield event
-            yield _run_result(controller)
+            yield _run_result(
+                controller,
+                model=(runtime_result.model if runtime_result is not None else request.model.model),
+            )
         finally:
             if runtime_stream is not None:
                 with suppress(asyncio.CancelledError, Exception):
@@ -551,6 +696,14 @@ class _BufferedEventSink:
 
 
 class _DefaultPlanningPolicy:
+    def planning_constraints(
+        self,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+    ) -> PlanningConstraints:
+        del request, capabilities
+        return PlanningConstraints()
+
     def should_plan(
         self,
         request: AgentRunRequest,
@@ -620,7 +773,11 @@ def _effective_registrations(
 def _validate_plan_authority(
     plan: TaskPlan,
     enabled_names: frozenset[str],
+    *,
+    constraints: PlanningConstraints = PlanningConstraints(),
+    max_tool_steps: int,
 ) -> None:
+    tool_step_count = 0
     for step in plan.steps:
         if step.type is StepType.CONFIRM:
             raise ContractViolationError(
@@ -629,14 +786,134 @@ def _validate_plan_authority(
         if step.executor is StepExecutor.MODEL and step.suggested_tools:
             raise ContractViolationError("model plan steps cannot grant tools")
         if step.executor is StepExecutor.TOOL:
-            if not step.suggested_tools:
-                raise ContractViolationError("tool plan step needs an allowlist")
+            if len(step.suggested_tools) != 1:
+                raise ContractViolationError(
+                    "tool plan step must grant exactly one expected tool"
+                )
+            tool_step_count += 1
             unknown = frozenset(step.suggested_tools) - enabled_names
             if unknown:
                 raise ContractViolationError(
                     "plan grants tools outside request scope: "
                     + ", ".join(sorted(unknown))
                 )
+            satisfied = (
+                frozenset(step.suggested_tools)
+                & constraints.context_satisfied_tool_names
+            )
+            if satisfied:
+                raise ContractViolationError(
+                    "plan redundantly grants tools already satisfied by context: "
+                    + ", ".join(sorted(satisfied))
+                )
+            planning_excluded = (
+                frozenset(step.suggested_tools)
+                & constraints.planning_excluded_tool_names
+            )
+            if planning_excluded:
+                raise ContractViolationError(
+                    "plan grants tools excluded by the request's planning scope: "
+                    + ", ".join(sorted(planning_excluded))
+                )
+    if tool_step_count > max_tool_steps:
+        raise ContractViolationError(
+            f"plan requires {tool_step_count} tool rounds but runtime permits "
+            f"at most {max_tool_steps} while reserving correction and final "
+            "response rounds"
+        )
+
+
+def _validate_planning_constraints(
+    capabilities: PlanningCapabilities,
+    constraints: PlanningConstraints,
+) -> None:
+    if not isinstance(constraints, PlanningConstraints):
+        raise ContractViolationError(
+            "planning policy must return PlanningConstraints"
+        )
+    unknown = (
+        constraints.context_satisfied_tool_names
+        | constraints.planning_excluded_tool_names
+    ) - capabilities.available_tool_names
+    if unknown:
+        raise ContractViolationError(
+            "planning constraints name unavailable tools: "
+            + ", ".join(sorted(unknown))
+        )
+    overlap = (
+        constraints.context_satisfied_tool_names
+        & constraints.planning_excluded_tool_names
+    )
+    if overlap:
+        raise ContractViolationError(
+            "planning constraints cannot mark tools both context-satisfied "
+            "and planning-excluded: "
+            + ", ".join(sorted(overlap))
+        )
+    for tool_name, dependency_name in sorted(
+        constraints.satisfied_tool_dependency_edges
+    ):
+        unavailable = {
+            tool_name,
+            dependency_name,
+        } - capabilities.available_tool_names
+        if unavailable:
+            raise ContractViolationError(
+                "planning dependency waiver names unavailable tools: "
+                + ", ".join(sorted(unavailable))
+            )
+        raw_guidance = capabilities.tool_guidance.get(tool_name)
+        requires = (
+            raw_guidance.get("requires")
+            if isinstance(raw_guidance, Mapping)
+            else None
+        )
+        declared_dependencies: set[str] = set()
+        if (
+            isinstance(requires, Sequence)
+            and not isinstance(requires, (str, bytes, bytearray))
+        ):
+            declared_dependencies = {
+                str(value).strip()
+                for value in requires
+                if str(value).strip()
+            }
+        if dependency_name not in declared_dependencies:
+            raise ContractViolationError(
+                "planning dependency waiver names an undeclared edge: "
+                f"{tool_name} -> {dependency_name}"
+            )
+    effective_tools = (
+        capabilities.available_tool_names
+        - constraints.context_satisfied_tool_names
+        - constraints.planning_excluded_tool_names
+    )
+    for tool_name in sorted(effective_tools):
+        raw_guidance = capabilities.tool_guidance.get(tool_name)
+        if not isinstance(raw_guidance, Mapping):
+            continue
+        requires = raw_guidance.get("requires")
+        if not (
+            isinstance(requires, Sequence)
+            and not isinstance(requires, (str, bytes, bytearray))
+        ):
+            continue
+        blocked_dependencies = {
+            str(value).strip()
+            for value in requires
+            if str(value).strip()
+            in constraints.planning_excluded_tool_names
+            and (
+                tool_name,
+                str(value).strip(),
+            ) not in constraints.satisfied_tool_dependency_edges
+        }
+        if blocked_dependencies:
+            raise ContractViolationError(
+                "planning constraints exclude dependencies still required by "
+                f"available tool {tool_name}: "
+                + ", ".join(sorted(blocked_dependencies))
+            )
 
 
 def _planned_tool_names(plan: TaskPlan) -> frozenset[str]:
@@ -646,6 +923,35 @@ def _planned_tool_names(plan: TaskPlan) -> frozenset[str]:
         if step.executor is StepExecutor.TOOL
         for name in step.suggested_tools
     )
+
+
+def _host_planning_facts(bundle: ContextBundle) -> Mapping[str, Any]:
+    value = bundle.diagnostics.get("hostPlanningFacts")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _planning_tool_guidance(
+    registrations: Sequence[ToolRegistration],
+    enabled_names: frozenset[str],
+) -> dict[str, dict[str, Any]]:
+    """Expose compact schema semantics to planning without exposing schemas."""
+
+    guidance: dict[str, dict[str, Any]] = {}
+    for registration in registrations:
+        name = registration.schema.name
+        if name not in enabled_names:
+            continue
+        purpose = " ".join(registration.schema.description.split())[:240]
+        dependencies = [
+            dependency
+            for dependency in registration.planning_dependencies
+            if dependency in enabled_names
+        ]
+        guidance[name] = {
+            "purpose": purpose,
+            "requires": dependencies,
+        }
+    return guidance
 
 
 def _validate_context_allocations(
@@ -697,10 +1003,12 @@ def _context_message(block: ContextBlock) -> AgentMessage:
     return AgentMessage(
         role=MessageRole.DEVELOPER,
         content=prefix + block.content,
+        origin=MessageOrigin.HOST_CONTEXT,
         attributes={
             "context_name": block.name,
             "untrusted": block.untrusted,
         },
+        host_metadata=block.host_metadata,
     )
 
 
@@ -730,7 +1038,11 @@ async def _record_safe_exception(
     ))
 
 
-def _run_result(controller: AgentRunController) -> AgentRunResult:
+def _run_result(
+    controller: AgentRunController,
+    *,
+    model: str | None = None,
+) -> AgentRunResult:
     snapshot = controller.snapshot
     if snapshot is None or not snapshot.terminal:
         raise RuntimeError("agent run has no terminal snapshot")
@@ -739,6 +1051,7 @@ def _run_result(controller: AgentRunController) -> AgentRunResult:
         status=snapshot.status,
         final_response=snapshot.final_response,
         error=snapshot.error,
+        model=model,
     )
 
 

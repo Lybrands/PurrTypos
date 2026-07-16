@@ -17,6 +17,7 @@ from agent_core.contracts import (
     ToolCall,
     ToolCallResult,
     ToolExecutionLimits,
+    ToolExecutionMode,
     ToolHandlerResult,
 )
 from agent_core.errors import ContractViolationError
@@ -107,6 +108,20 @@ class CoreToolExecutor:
                 outcome=ToolBatchOutcome.REJECTED,
                 code="tool_not_authorized",
                 message="The requested tool is outside the current execution scope.",
+            )
+        if len(parsed_calls) > 1 and any(
+            self._registrations[item.call.name].policy.mode
+            is not ToolExecutionMode.READ
+            for item in parsed_calls
+        ):
+            return _whole_batch_failure(
+                request.calls,
+                outcome=ToolBatchOutcome.REJECTED,
+                code="multi_call_batch_requires_read_only_tools",
+                message=(
+                    "A batch with multiple tool calls is allowed only when every "
+                    "tool has read-only policy mode."
+                ),
             )
 
         results: list[ToolCallResult] = []
@@ -224,6 +239,9 @@ class CoreToolExecutor:
                 handler_result = await await_with_cancellation(
                     registration.handler(request.state, parsed.arguments, signal),
                     signal,
+                    completion_wins_after_cancel=(
+                        registration.cancellation_linearizable
+                    ),
                 )
             except OperationCanceled:
                 return await self._canceled_result(

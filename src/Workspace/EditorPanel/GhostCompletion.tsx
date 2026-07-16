@@ -131,7 +131,6 @@ export default function GhostCompletion({
         thinking: { type: 'disabled' },
         max_tokens: 120,
       },
-      tools: [],
       enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,

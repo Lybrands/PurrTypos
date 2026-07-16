@@ -23,7 +23,7 @@ from agent_core.ports import (
     RunCommit,
     validate_run_commit_lifecycle,
 )
-from services import agent_run_store
+from infrastructure.persistence import run_store
 
 
 class SqliteRunRepository:
@@ -104,27 +104,26 @@ class SqliteRunRepository:
         return commit.events
 
     async def create(self, params: RunCreateParams) -> RunId:
-        return await agent_run_store.create_run(
+        return await run_store.create_run(
             self._db,
             session_id=_sqlite_session_id(params.session_id),
             prompt=params.prompt,
             mode=params.mode,
-            release_version=params.release_version,
-            rollout_cohort=params.rollout_cohort,
+            provenance=params.provenance,
         )
 
     async def bind_conversation(self, run_id: RunId, conversation_id: int) -> None:
-        await agent_run_store.set_run_conversation_id(self._db, run_id, conversation_id)
+        await run_store.set_run_conversation_id(self._db, run_id, conversation_id)
 
     async def replace_steps(self, run_id: RunId, steps: Sequence[TaskStep]) -> None:
-        await agent_run_store.upsert_todos(
+        await run_store.upsert_todos(
             self._db,
             run_id,
-            [_legacy_step(step) for step in steps],
+            [_storage_step(step) for step in steps],
         )
 
     async def update_step(self, run_id: RunId, update: TaskStepUpdate) -> None:
-        updated = await agent_run_store.update_todo_status(
+        updated = await run_store.update_todo_status(
             self._db,
             run_id,
             update.step_id,
@@ -146,7 +145,7 @@ class SqliteRunRepository:
         error: str | None = None,
     ) -> None:
         if status is RunStatus.DONE:
-            await agent_run_store.complete_run(
+            await run_store.complete_run(
                 self._db,
                 run_id,
                 final_response=final_response or "",
@@ -155,17 +154,17 @@ class SqliteRunRepository:
         if status is RunStatus.FAILED:
             if error is None or not str(error).strip():
                 raise ContractViolationError("failed run transition requires a non-empty error")
-            await agent_run_store.fail_run(
+            await run_store.fail_run(
                 self._db,
                 run_id,
                 error=error,
             )
             return
         if status is RunStatus.BLOCKED:
-            await agent_run_store.block_run(self._db, run_id)
+            await run_store.block_run(self._db, run_id)
             return
         if status is RunStatus.CANCELED:
-            await agent_run_store.cancel_run(self._db, run_id)
+            await run_store.cancel_run(self._db, run_id)
             return
         if status is RunStatus.RUNNING:
             raise ContractViolationError("run repository cannot reopen a run")
@@ -187,7 +186,7 @@ class SqliteRunRepository:
     ) -> None:
         if event.run_id is not None and event.run_id != run_id:
             raise ContractViolationError("event run_id does not match repository run_id")
-        await agent_run_store.append_event(
+        await run_store.append_event(
             self._db,
             run_id,
             event.type,
@@ -195,7 +194,7 @@ class SqliteRunRepository:
         )
 
     async def append_trace(self, run_id: RunId, trace: TraceRecord) -> None:
-        await agent_run_store.append_trace(
+        await run_store.append_trace(
             self._db,
             run_id,
             stage=trace.stage,
@@ -205,7 +204,7 @@ class SqliteRunRepository:
         )
 
 
-def _legacy_step(step: TaskStep) -> dict:
+def _storage_step(step: TaskStep) -> dict:
     return {
         "id": step.id,
         "title": step.title,

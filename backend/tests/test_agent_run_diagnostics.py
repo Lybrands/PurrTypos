@@ -22,61 +22,16 @@ async def temp_db(tmp_path: Path):
         await db.close()
 
 
-async def test_diagnostics_endpoint_reports_persisted_operational_checks(
-    temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    async def _plan(**_kwargs):
-        return {
-            "title": "simple",
-            "steps": [{"id": "answer", "title": "answer", "type": "review", "executor": "model"}],
-        }
-
-    monkeypatch.setattr("services.task_planner.generate_model_task_plan", _plan)
-    from application.event_sinks import LegacyChunkEventSink
-    from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
-    from routers.ai import get_agent_run_diagnostics
-    from services.agent_run_controller import AgentRunController
-
-    controller = AgentRunController(
-        repository=SqliteRunRepository(temp_db),
-        event_sink=LegacyChunkEventSink(lambda _event: None),
-    )
-    await controller.start(
-        session_id=1,
-        prompt="hello",
-        mode="agent",
-        key="k",
-        api_provider="openai",
-        planner_options={"model": "mock"},
-        chat_agent_mode="agent",
-        available_tool_names=set(),
-    )
-    await controller.record_trace(
-        "context_budget",
-        "within_budget",
-        details={"overflowTokens": 0},
-    )
-    await controller.complete(final_response="done")
-
-    response = await get_agent_run_diagnostics(controller.run_id or "")
-
-    assert response["success"] is True
-    data = response["data"]
-    assert data["verdict"] == "pass"
-    assert data["metrics"]["traceCount"] >= 3
-    assert data["performance"]["verdict"] in {"pass", "warn"}
-    assert data["performance"]["metrics"]["plannerMs"] >= 0
-    assert {trace["stage"] for trace in data["traces"]} >= {
-        "planner", "context_budget", "terminal",
-    }
-
-
 async def test_diagnostics_marks_budget_overflow_or_rejected_tools_as_failure(
     temp_db: DatabaseConnection,
 ):
-    from services.agent_run_evaluation import evaluate_agent_run
-    from services.agent_run_store import append_trace, create_run, get_run, get_run_events
+    from agent_core.evaluation import evaluate_agent_run
+    from infrastructure.persistence.run_store import (
+        append_trace,
+        create_run,
+        get_run,
+        get_run_events,
+    )
 
     run_id = await create_run(temp_db, session_id=1, prompt="p", mode="agent")
     await append_trace(temp_db, run_id, stage="planner", outcome="model_plan")
@@ -98,8 +53,13 @@ async def test_diagnostics_marks_budget_overflow_or_rejected_tools_as_failure(
 async def test_diagnostics_marks_missing_required_tool_call_as_failure(
     temp_db: DatabaseConnection,
 ):
-    from services.agent_run_evaluation import evaluate_agent_run
-    from services.agent_run_store import append_trace, create_run, get_run, get_run_events
+    from agent_core.evaluation import evaluate_agent_run
+    from infrastructure.persistence.run_store import (
+        append_trace,
+        create_run,
+        get_run,
+        get_run_events,
+    )
 
     run_id = await create_run(temp_db, session_id=1, prompt="p", mode="agent")
     await append_trace(temp_db, run_id, stage="planner", outcome="model_plan")
@@ -122,8 +82,13 @@ async def test_diagnostics_marks_missing_required_tool_call_as_failure(
 async def test_diagnostics_rejects_historical_silent_planner_fallback(
     temp_db: DatabaseConnection,
 ):
-    from services.agent_run_evaluation import evaluate_agent_run
-    from services.agent_run_store import append_trace, create_run, get_run, get_run_events
+    from agent_core.evaluation import evaluate_agent_run
+    from infrastructure.persistence.run_store import (
+        append_trace,
+        create_run,
+        get_run,
+        get_run_events,
+    )
 
     run_id = await create_run(temp_db, session_id=1, prompt="p", mode="agent")
     await append_trace(temp_db, run_id, stage="planner", outcome="fallback_after_error")

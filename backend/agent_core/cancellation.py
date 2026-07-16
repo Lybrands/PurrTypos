@@ -25,11 +25,35 @@ async def cancel_and_wait(task: asyncio.Future) -> None:
         pass
 
 
+async def _await_linearizable_completion(
+    operation: asyncio.Future[T],
+) -> T:
+    """Forward repeated cancellation until an adapter gives its outcome."""
+
+    while True:
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            if operation.cancelled():
+                raise
+            if operation.done():
+                return operation.result()
+            operation.cancel()
+
+
 async def await_with_cancellation(
     awaitable: Awaitable[T],
     signal: CancellationSignal | None,
+    *,
+    completion_wins_after_cancel: bool = False,
 ) -> T:
-    """Await an adapter operation while Core owns liveness and cleanup."""
+    """Await an adapter operation while Core owns liveness and cleanup.
+
+    ``completion_wins_after_cancel`` is an explicit persistence capability,
+    not a generic tolerance for swallowed cancellation.  It is only valid when
+    the adapter guarantees that cancellation either rolls back or returns an
+    authoritative durable receipt once COMMIT has begun.
+    """
 
     operation = asyncio.ensure_future(awaitable)
     cancel_waiter: asyncio.Task[bool] | None = None
@@ -50,10 +74,24 @@ async def await_with_cancellation(
         if operation in done:
             return await operation
         if signal.is_set():
-            await cancel_and_wait(operation)
-            raise OperationCanceled("agent run was canceled")
+            if not completion_wins_after_cancel:
+                await cancel_and_wait(operation)
+                raise OperationCanceled("agent run was canceled")
+            operation.cancel()
+            try:
+                # Receipt-returning persistence adapters may suppress task
+                # cancellation once their durable commit has begun.  In that
+                # case the completed receipt wins; reporting cancellation
+                # would invite a duplicate retry for an already-applied write.
+                return await operation
+            except asyncio.CancelledError:
+                raise OperationCanceled("agent run was canceled") from None
         return await operation
     except asyncio.CancelledError:
+        if completion_wins_after_cancel:
+            if not operation.done():
+                operation.cancel()
+            return await _await_linearizable_completion(operation)
         await cancel_and_wait(operation)
         raise
     finally:

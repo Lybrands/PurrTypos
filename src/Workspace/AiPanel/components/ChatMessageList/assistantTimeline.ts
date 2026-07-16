@@ -27,11 +27,6 @@ export type TimelineCommentaryPart = {
   md: string;
 };
 
-export type TimelineDigestPart = {
-  type: "digest";
-  md: string;
-};
-
 export type TimelineTaskPlanPart = {
   type: "taskPlan";
   plan: AiTaskPlan;
@@ -42,7 +37,6 @@ export type AssistantTimelinePart =
   | TimelineToolsPart
   | TimelineTextPart
   | TimelineCommentaryPart
-  | TimelineDigestPart
   | TimelineTaskPlanPart;
 
 export type TimelineStepPart = TimelineThinkingPart | TimelineToolsPart;
@@ -122,11 +116,6 @@ export function buildAssistantTimeline(
   const durations = message.thinkingDurationsMs ?? [];
   const { messageIndex, isStreaming, isLastAssistant, loading } = opts;
 
-  const digest = (message.subagentPipelineDigest || "").trim();
-  if (digest) {
-    parts.push({ type: "digest", md: digest });
-  }
-
   if (message.taskPlan) {
     parts.push({ type: "taskPlan", plan: message.taskPlan });
   }
@@ -175,8 +164,7 @@ export function buildAssistantTimeline(
     });
   }
 
-  const assistantMarkdownRaw = getAssistantRenderableMarkdown(message);
-  const assistantMarkdown = message.subagentResult ? "" : assistantMarkdownRaw;
+  const assistantMarkdown = getAssistantRenderableMarkdown(message);
   if (assistantMarkdown.trim()) {
     parts.push({ type: "text", md: assistantMarkdown });
   }

@@ -94,24 +94,16 @@ def _call(call_id, name, arguments="{}"):
 
 
 @pytest.mark.asyncio
-async def test_read_and_propose_tools_execute_sequentially_with_shared_state_and_effects():
+async def test_same_name_read_calls_execute_sequentially_with_shared_state():
     observations = []
 
-    async def _first(state, arguments, signal=None):
-        state.domain["value"] = "created"
-        observations.append("first")
-        return ToolHandlerResult('{"value":"created"}', from_cache=True)
-
-    async def _second(state, arguments, signal=None):
-        observations.append(state.domain["value"])
-        return ToolHandlerResult(
-            '{"proposal":true}',
-            effects=(DomainEffect("test.proposal", {"value": "created"}),),
-        )
+    async def _read(state, arguments, signal=None):
+        observations.append(arguments["value"])
+        state.domain["last"] = arguments["value"]
+        return ToolHandlerResult('{"success":true}', from_cache=True)
 
     catalog = InMemoryToolCatalog((
-        _registration("readA", _first, probe=Probe(True)),
-        _registration("proposeB", _second, mode="propose"),
+        _registration("readA", _read, probe=Probe(True)),
     ))
     executor = CoreToolExecutor(catalog)
     sink = RecordingSink()
@@ -119,8 +111,8 @@ async def test_read_and_propose_tools_execute_sequentially_with_shared_state_and
 
     result = await executor.execute_batch(
         _request(
-            _call("call-a", "readA"),
-            _call("call-b", "proposeB"),
+            _call("call-a", "readA", '{"value":"first"}'),
+            _call("call-b", "readA", '{"value":"second"}'),
             state=state,
         ),
         sink,
@@ -128,16 +120,65 @@ async def test_read_and_propose_tools_execute_sequentially_with_shared_state_and
 
     assert isinstance(executor, ToolExecutionGateway)
     assert result.outcome is ToolBatchOutcome.COMPLETED
-    assert observations == ["first", "created"]
-    assert state.domain["value"] == "created"
+    assert observations == ["first", "second"]
+    assert state.domain["last"] == "second"
     assert [item.tool_call_id for item in result.results] == ["call-a", "call-b"]
-    assert result.cache_hits == (True, False)
+    assert result.cache_hits == (True, True)
     assert [event.type for event in sink.events] == [
         CoreEventType.TOOL_CALL_COMPLETED,
-        "test.proposal",
         CoreEventType.TOOL_CALL_COMPLETED,
     ]
-    assert sink.events[1].payload["value"] == "created"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["propose", "confirm"])
+async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handler(mode):
+    order = []
+
+    async def _scope(state, arguments, signal=None):
+        order.append("scope")
+        return None
+
+    async def _handler(state, arguments, signal=None):
+        order.append("handler")
+        return ToolHandlerResult("unexpected")
+
+    class RecordingApproval:
+        async def request(self, run_id, approval, event_sink, signal=None):
+            order.append("approval")
+            return ApprovalResult("approval-1", ApprovalStatus.APPROVED)
+
+        def resolve(self, run_id, approval_id, decision):
+            return None
+
+        def cancel_pending(self, run_id):
+            return 0
+
+    catalog = InMemoryToolCatalog((
+        _registration("readA", _handler, scope=_scope),
+        _registration("mutate", _handler, mode=mode, scope=_scope),
+    ))
+    sink = RecordingSink()
+
+    result = await CoreToolExecutor(
+        catalog,
+        approval_gateway=RecordingApproval(),
+    ).execute_batch(
+        _request(
+            _call("call-a", "readA"),
+            _call("call-b", "mutate"),
+        ),
+        sink,
+    )
+
+    assert result.outcome is ToolBatchOutcome.REJECTED
+    assert result.error == "multi_call_batch_requires_read_only_tools"
+    assert [item.error for item in result.results] == [
+        "multi_call_batch_requires_read_only_tools",
+        "multi_call_batch_requires_read_only_tools",
+    ]
+    assert order == []
+    assert sink.events == []
 
 
 @pytest.mark.asyncio

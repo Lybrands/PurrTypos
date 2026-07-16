@@ -217,6 +217,14 @@ export interface ProposedSettingDiff {
 }
 
 /** 服务端暂停高风险 Agent 工具调用时发送的用户确认请求。 */
+export type ToolApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "timed_out"
+  | "canceled"
+  | "unavailable";
+
 export interface ToolApprovalRequest {
   approvalId: string;
   toolName: string;
@@ -224,6 +232,8 @@ export interface ToolApprovalRequest {
   riskLevel: "write" | "destructive";
   /** 后端生成的参数预览，供用户决定是否批准。 */
   summary: string;
+  /** 服务端审批生命周期；缺省时按 pending 处理。 */
+  status?: ToolApprovalStatus;
 }
 
 /** 设定 diff 卡片终态（提交 / 放弃后持久化到消息） */
@@ -342,9 +352,6 @@ export interface Conversation {
   thinking_durations_ms?: string | null;
   duration_ms?: number | null;
   task_plan?: string | null;
-  /** 子专家结构化结果（润色 / 审校 / 续写规划 / 风格统一）的 JSON 字符串，
-   *  形如 { role, payload }，回显时还原 SubagentResultCard。 */
-  subagent_result?: string | null;
   create_time?: string;
 }
 
@@ -358,8 +365,7 @@ export interface AiTaskPlanChunk {
     description?: string;
     type: 'read' | 'analyze' | 'write' | 'review' | 'confirm';
     status: 'pending' | 'running' | 'done' | 'blocked' | 'failed';
-    executor?: 'model' | 'tool' | 'expert';
-    expertRole?: string;
+    executor?: 'model' | 'tool';
     riskLevel?: 'read' | 'write' | 'destructive';
     suggestedTools?: string[];
     resultSummary?: string;
@@ -749,21 +755,12 @@ export interface ElectronAPI {
       textBefore: string;
       labels: string[];
       completedToolCount?: number;
-      trace?: {
-        insertedByDag?: number;
-        insertedSkillNames?: string[];
-        plannedToolNames?: string[];
-        repairedRounds?: number;
-        repairReasons?: string[];
-      };
     }[];
     thinkingBlocks?: string[];
     thinkingDurationsMs?: number[];
     durationMs?: number;
     taskPlan?: AiTaskPlanChunk;
     agentRunId?: string;
-    /** 子专家结构化结果，形如 { role, payload }；用于回显时还原 SubagentResultCard */
-    subagentResult?: { role: string; payload: unknown } | null;
   }) => Promise<ApiResult<{ id: number | null }>>;
   getConversations: (data: {
     sessionId: number;
@@ -889,8 +886,7 @@ export interface ElectronAPI {
       thinking?: { type: "disabled" | "enabled" };
       context_window?: AiContextWindow;
     };
-    tools?: unknown[];
-    /** 是否在请求里携带 skills 工具列表（旧名 useToolRouter；并不做语义路由） */
+    /** 是否允许三层 Writing Agent 暴露当前书籍范围内的工具。 */
     enableAgentTools?: boolean;
     bookId?: EntityId | null;
     chapterId?: EntityId | null;
@@ -919,8 +915,6 @@ export interface ElectronAPI {
       toolCallsInProgress?: boolean;
       partialContent?: string;
       partialThinking?: string;
-      messagesSent?: Array<{ role: string; content: string }>;
-      chapterContentUpdated?: EntityId;
       chapterCreated?: {
         chapterId: EntityId;
         title: string;
@@ -948,6 +942,13 @@ export interface ElectronAPI {
       proposedSettingDiff?: ProposedSettingDiff;
       /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
       toolApprovalRequired?: ToolApprovalRequest;
+      /** 审批的服务端最终状态（包含超时与连接取消）。 */
+      toolApprovalResolved?: {
+        runId?: string;
+        approvalId: string;
+        toolName: string;
+        status: Exclude<ToolApprovalStatus, "pending">;
+      };
       /** Host-side accounting for the complete model context window. */
       contextBudget?: {
         windowTokens: number;
@@ -962,63 +963,10 @@ export interface ElectronAPI {
         projectedTotalTokens: number;
         overflowTokens: number;
       };
-      /**
-       * 历史协作模式：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
-       * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
-       * @deprecated
-       */
-      collabLatestParagraph?: string;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
       /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
       toolFromCache?: boolean;
-      /** 本批工具执行前即已命中只读缓存的掩码（与 toolCalls 等长）；为 true 的索引整段不展示 */
-      toolReadCacheMask?: boolean[];
-      /** 命中请求内只读缓存的工具序号（与 toolIndexCompleted 配合） */
-      toolCallCachedIndex?: number;
-      /** 工具路由（嵌入/意图模型）失败时的简短提示，由主进程经流式通道下发 */
-      toolRouterWarning?: string;
-      /** DAG 编排阶段信息，用于前端可视化“自动补前置” */
-      orchestratorInfo?: {
-        insertedByDag?: number;
-        plannedNodeCount?: number;
-        insertedSkillNames?: string[];
-        plannedToolNames?: string[];
-      };
-      /** 执行阶段自动修复信息 */
-      orchestratorRepair?: {
-        repairedRounds?: number;
-        events?: Array<{
-          tool?: string;
-          reason?: string;
-          resolvedOutlineId?: EntityId;
-        }>;
-      };
-      subagentStage?: string;
-      subagentStageName?: string;
-      /** 为 true 时表示本 chunk 仅标记阶段开始（与交付物 chunk 区分） */
-      subagentStageStarting?: boolean;
-      subagentStageDone?: string;
-      /** 主稿专家在各子阶段之间输出过渡说明时置 true，结束时 false */
-      subagentBridging?: boolean;
-      /** 进入最终主稿专家流式呈现时置 true */
-      subagentMainPresenter?: boolean;
-      subagentPayload?: unknown;
-      subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
-      /** 历史子专家阶段摘要 Markdown，逐段追加 */
-      subagentPipelineDigest?: string;
-      writingSubagentStart?: {
-        role?: "review" | "polish" | "continuation_plan" | "style_unify";
-        label?: string;
-      };
-      writingSubagentDelta?: { delta?: string };
-      writingSubagentResult?: {
-        role: "review" | "polish" | "continuation_plan" | "style_unify";
-        payload: unknown;
-      };
-      writingSubagentDone?: { role?: string };
-      /** AI 将用户大目标拆分出的任务计划（对话内展示） */
-      taskPlan?: AiTaskPlanChunk;
       agentRunStarted?: {
         runId: string;
         status: string;
@@ -1052,8 +1000,6 @@ export interface GeneralSettings {
   memory_intelligence_enabled?: boolean;
   /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
   memory_intelligence_model_id?: string;
-  /** 历史设置字段：当前版本不再暴露默认专家模式切换。 */
-  ai_agent_mode?: 'legacy' | 'subagent';
 }
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '300k' | '1m';

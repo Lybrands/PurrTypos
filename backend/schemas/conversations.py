@@ -20,9 +20,3 @@ class SaveConversationRequest(BaseModel):
     durationMs: Optional[int] = None
     taskPlan: Optional[Any] = None
     agentRunId: Optional[str] = None
-    # 子专家结构化结果：{ role: 'polish'|'review'|'continuation_plan'|'style_unify', payload: any }
-    subagentResult: Optional[Any] = None
-
-
-class DeleteAfterTurnRequest(BaseModel):
-    keepTurnCount: int

@@ -110,3 +110,82 @@ async def test_await_with_cancellation_cancels_and_awaits_the_operation():
     with pytest.raises(OperationCanceled):
         await asyncio.wait_for(task, timeout=1)
     assert cleaned.is_set()
+
+
+@pytest.mark.asyncio
+async def test_await_with_cancellation_returns_a_suppressed_commit_receipt():
+    signal = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _commit_like_operation():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A cancellation-linearizable adapter suppresses cancellation once
+            # COMMIT has begun and returns the authoritative durable receipt.
+            return "durable-receipt"
+
+    task = asyncio.create_task(
+        await_with_cancellation(
+            _commit_like_operation(),
+            signal,
+            completion_wins_after_cancel=True,
+        )
+    )
+    await started.wait()
+    signal.set()
+
+    assert await asyncio.wait_for(task, timeout=1) == "durable-receipt"
+
+
+@pytest.mark.asyncio
+async def test_swallowed_cancellation_is_not_a_receipt_without_opt_in():
+    signal = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _badly_behaved_operation():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return "not-a-receipt"
+
+    task = asyncio.create_task(
+        await_with_cancellation(_badly_behaved_operation(), signal)
+    )
+    await started.wait()
+    signal.set()
+
+    with pytest.raises(OperationCanceled):
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_external_task_cancellation_honors_opted_in_durable_receipt():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _commit_like_operation():
+        started.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+        return "durable-receipt"
+
+    task = asyncio.create_task(await_with_cancellation(
+        _commit_like_operation(),
+        None,
+        completion_wins_after_cancel=True,
+    ))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release.set()
+    assert await asyncio.wait_for(task, timeout=1) == "durable-receipt"

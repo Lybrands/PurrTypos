@@ -19,16 +19,19 @@ from agent_core.contracts import (
     ModelInvocation,
     ModelStream,
     PlanningCapabilities,
+    PlanningConstraints,
     PlanningResult,
+    ResponseValidationResult,
     RunCreateParams,
     RunId,
     RunStatus,
     TaskStep,
     TaskStepUpdate,
     TerminalRunStatus,
-    ToolHandlerResult,
+    ToolBatchOutcome,
     ToolBatchRequest,
     ToolBatchResult,
+    ToolHandlerResult,
     ToolPolicy,
     ToolSchema,
     TraceRecord,
@@ -78,6 +81,12 @@ class PlanningPolicy(Protocol):
         capabilities: PlanningCapabilities,
     ) -> bool: ...
 
+    def planning_constraints(
+        self,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+    ) -> PlanningConstraints: ...
+
 
 @runtime_checkable
 class TaskPlanner(Protocol):
@@ -92,6 +101,31 @@ class TaskPlanner(Protocol):
 @runtime_checkable
 class ExecutionStateFactory(Protocol):
     def create(self, request: AgentRunRequest) -> ExecutionState: ...
+
+
+@runtime_checkable
+class ResponseValidator(Protocol):
+    """Validate a buffered final response without embedding domain semantics."""
+
+    def validate(
+        self,
+        *,
+        content: str,
+        messages: Sequence[AgentMessage],
+    ) -> ResponseValidationResult: ...
+
+
+@runtime_checkable
+class ResponseJudge(Protocol):
+    """Asynchronously judge buffered output without owning domain semantics."""
+
+    async def judge(
+        self,
+        *,
+        content: str,
+        messages: Sequence[AgentMessage],
+        signal: CancellationSignal | None = None,
+    ) -> ResponseValidationResult: ...
 
 
 @runtime_checkable
@@ -130,6 +164,19 @@ class ToolRegistration:
     policy: ToolPolicy
     scope_validator: ScopeValidator | None = None
     cache_probe: CacheProbe | None = None
+    cancellation_linearizable: bool = False
+    planning_dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "planning_dependencies",
+            tuple(dict.fromkeys(
+                str(name).strip()
+                for name in self.planning_dependencies
+                if str(name).strip()
+            )),
+        )
 
 
 @runtime_checkable
@@ -159,13 +206,18 @@ class RuntimeObserver(Protocol):
 
     def current_allowed_tool_names(self) -> frozenset[str]: ...
 
+    def future_allowed_tool_names(self) -> frozenset[str]: ...
+
     async def record_trace(self, trace: TraceRecord) -> None: ...
 
     async def on_model_delta(self) -> None: ...
 
     async def on_tool_calls_started(self, tool_names: tuple[str, ...]) -> None: ...
 
-    async def on_tool_round_completed(self) -> None: ...
+    async def on_tool_round_completed(
+        self,
+        outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,8 +374,9 @@ class RunRepository(Protocol):
         commit: RunCommit,
     ) -> tuple[AgentEvent, ...]: ...
 
-    # Legacy write methods remain during the compatibility migration.  New
-    # Core orchestration must use begin/commit for state plus outbox atomicity.
+    # Lower-level methods support repository transactions and post-run
+    # attachments. Core lifecycle orchestration uses begin/commit so state and
+    # outbox events remain atomic.
     async def create(self, params: RunCreateParams) -> RunId: ...
 
     async def bind_conversation(self, run_id: RunId, conversation_id: int) -> None: ...

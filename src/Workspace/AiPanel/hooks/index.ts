@@ -9,7 +9,6 @@ export {
   type UsePromptTemplateContextParams,
 } from "./usePromptTemplateContext";
 export {
-  isWritingExpertPipeline,
   useChatSubmit,
   type ChatMessage,
   type ToolCallSegment,

@@ -141,8 +141,6 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN duration_ms INTEGER DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
-    # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")
 
     # ── ai_agent_runs / todos / events ───────────────────────────
     # Agent Run 是一次用户请求的运行记录；To-dos 属于 run，而不是跨对话任务中心。
@@ -152,21 +150,51 @@ async def init_schema(db: DatabaseConnection) -> None:
         conversation_id INTEGER DEFAULT NULL,
         status TEXT NOT NULL DEFAULT 'running',
         mode TEXT DEFAULT NULL,
-        release_version TEXT NOT NULL DEFAULT 'development',
-        rollout_cohort TEXT NOT NULL DEFAULT 'local',
         prompt TEXT NOT NULL DEFAULT '',
+        model_provider TEXT DEFAULT NULL,
+        model_name TEXT DEFAULT NULL,
+        context_window INTEGER DEFAULT NULL,
+        endpoint_digest TEXT DEFAULT NULL,
+        request_profile_digest TEXT DEFAULT NULL,
         final_response TEXT DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    await _try_exec(
-        db,
-        "ALTER TABLE ai_agent_runs ADD COLUMN release_version TEXT NOT NULL DEFAULT 'development'",
-    )
-    await _try_exec(
-        db,
-        "ALTER TABLE ai_agent_runs ADD COLUMN rollout_cohort TEXT NOT NULL DEFAULT 'local'",
-    )
+    # Nullable migration preserves historical Runs. New Agent requests write
+    # complete provenance atomically so diagnostics never assemble identity
+    # from a partially migrated row.
+    for column in (
+        "model_provider TEXT DEFAULT NULL",
+        "model_name TEXT DEFAULT NULL",
+        "context_window INTEGER DEFAULT NULL",
+        "endpoint_digest TEXT DEFAULT NULL",
+        "request_profile_digest TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_runs ADD COLUMN {column}",
+        )
+    # Recreate the trigger so databases that once included additional routing
+    # metadata enforce only the current model-request provenance contract.
+    await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_provenance_immutable")
+    await db.execute("""CREATE TRIGGER ai_agent_runs_provenance_immutable
+        BEFORE UPDATE OF
+            model_provider,
+            model_name,
+            context_window,
+            endpoint_digest,
+            request_profile_digest
+        ON ai_agent_runs
+        WHEN
+            OLD.model_provider IS NOT NEW.model_provider
+            OR OLD.model_name IS NOT NEW.model_name
+            OR OLD.context_window IS NOT NEW.context_window
+            OR OLD.endpoint_digest IS NOT NEW.endpoint_digest
+            OR OLD.request_profile_digest IS NOT NEW.request_profile_digest
+        BEGIN
+            SELECT RAISE(ABORT, 'agent run provenance is immutable');
+        END
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -175,7 +203,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         status TEXT NOT NULL DEFAULT 'pending',
         executor TEXT NOT NULL DEFAULT 'model',
         expected_tools TEXT DEFAULT NULL,
-        expert_role TEXT DEFAULT NULL,
         result_summary TEXT DEFAULT NULL,
         error TEXT DEFAULT NULL,
         sort INTEGER DEFAULT 0,
@@ -189,15 +216,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         payload_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id TEXT NOT NULL,
-        evaluator TEXT NOT NULL DEFAULT 'human',
-        scores_json TEXT NOT NULL,
-        notes TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

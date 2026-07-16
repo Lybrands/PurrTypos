@@ -4,7 +4,9 @@ import pytest
 
 
 def test_runtime_regression_suite_covers_promoted_incidents():
-    from services.agent_runtime_regression import run_runtime_regression_suite
+    from application.operations.deterministic_checks import (
+        run_runtime_regression_suite,
+    )
 
     suite = run_runtime_regression_suite()
 
@@ -23,10 +25,10 @@ def test_runtime_regression_suite_covers_promoted_incidents():
 def test_healthy_runtime_contract_requires_exact_tool_order():
     from dataclasses import replace
 
-    from services.agent_runtime_regression import evaluate_runtime_regression_case
-    from services.agent_runtime_regression_cases import RUNTIME_REGRESSION_CASES
+    from agent_core.evaluation import evaluate_runtime_regression_case
+    from domains.writing.evaluation import WRITING_RUNTIME_REGRESSION_CASES
 
-    healthy = RUNTIME_REGRESSION_CASES[0]
+    healthy = WRITING_RUNTIME_REGRESSION_CASES[0]
     wrong_order = replace(
         healthy,
         expected_tool_sequence=("getChapterContent", "listWritingChapters"),
@@ -42,10 +44,10 @@ def test_healthy_runtime_contract_requires_exact_tool_order():
 def test_failure_incident_passes_only_when_diagnostics_detect_the_failure():
     from dataclasses import replace
 
-    from services.agent_runtime_regression import evaluate_runtime_regression_case
-    from services.agent_runtime_regression_cases import RUNTIME_REGRESSION_CASES
+    from agent_core.evaluation import evaluate_runtime_regression_case
+    from domains.writing.evaluation import WRITING_RUNTIME_REGRESSION_CASES
 
-    planner_failure = RUNTIME_REGRESSION_CASES[1]
+    planner_failure = WRITING_RUNTIME_REGRESSION_CASES[1]
     wrong_expectation = replace(planner_failure, expected_report_verdict="pass")
 
     result = evaluate_runtime_regression_case(wrong_expectation)

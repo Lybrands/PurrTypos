@@ -11,12 +11,20 @@ class ContractViolationError(AgentCoreError):
     """A registered capability violates a Core contract."""
 
 
+class ResponseJudgeContractError(ContractViolationError):
+    """A semantic judge response violates its declared verdict contract."""
+
+
 class ContextOverflowError(AgentCoreError):
     """The complete request cannot fit inside the configured budget."""
 
 
 class InvalidPlannerOutputError(AgentCoreError):
     """A planner response could not be normalized into a safe typed plan."""
+
+
+class RepairablePlannerOutputError(InvalidPlannerOutputError):
+    """A structurally valid plan may be corrected by one model re-plan."""
 
 
 class ModelGatewayError(AgentCoreError):

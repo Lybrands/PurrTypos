@@ -1,28 +1,15 @@
 import {
   CHAT_AGENT_MODES,
-  type Chapter,
   type Conversation,
   type EntityId,
   type ChatAgentMode,
 } from '../../types'
-import {
-  extractTextFromLexical as extractTextFromLexicalImpl,
-  formatChaptersAsText as formatChaptersAsTextImpl,
-} from '../utils'
 import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
 
 const isChatAgentMode = (v: unknown): v is ChatAgentMode =>
   typeof v === 'string' && (CHAT_AGENT_MODES as readonly string[]).includes(v)
-
-/** @deprecated 请从 Workspace/utils 导入 */
-export const extractTextFromLexical = extractTextFromLexicalImpl
-
-/** @deprecated 请从 Workspace/utils 导入；需要 Chapter 类型时从 types 导入 */
-export function formatChaptersAsText(chapters: Chapter[]): string {
-  return formatChaptersAsTextImpl(chapters)
-}
 
 // ─── 模型偏好（localStorage） ───
 
@@ -47,22 +34,12 @@ export function loadModelPrefs(
     if (raw) {
       const p = JSON.parse(raw) as {
         model?: string
-        agentEnabled?: boolean
         chatAgentMode?: unknown
       }
       const model = typeof p.model === 'string' && isValid(p.model) ? p.model : defaultModel
       let chatAgentMode: ChatAgentMode
       if (isChatAgentMode(p.chatAgentMode)) {
         chatAgentMode = p.chatAgentMode
-      } else if (
-        p.chatAgentMode === 'legacy' ||
-        p.chatAgentMode === 'subagent' ||
-        p.chatAgentMode === 'expert' ||
-        p.chatAgentMode === 'collab'
-      ) {
-        chatAgentMode = 'agent'
-      } else if (p.agentEnabled === false) {
-        chatAgentMode = 'ask'
       } else {
         chatAgentMode = defaultChatAgentMode
       }
@@ -141,19 +118,6 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
           }
         } catch (_) {}
       }
-      let subagentResult: ChatMessage['subagentResult']
-      if (item.subagent_result) {
-        try {
-          const parsed = JSON.parse(item.subagent_result) as unknown
-          if (
-            parsed &&
-            typeof parsed === 'object' &&
-            typeof (parsed as { role?: unknown }).role === 'string'
-          ) {
-            subagentResult = parsed as ChatMessage['subagentResult']
-          }
-        } catch (_) {}
-      }
       let assistantMsg: ChatMessage = {
         role: 'assistant',
         content: item.response,
@@ -164,7 +128,6 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         thinkingBlocks,
         thinkingDurationsMs,
         taskPlan,
-        subagentResult,
       }
       const rawSegments = item.tool_call_segments
       if (rawSegments) {

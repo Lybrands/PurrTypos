@@ -2,7 +2,9 @@ import pytest
 
 
 def test_security_redteam_suite_covers_host_boundaries():
-    from services.agent_security_redteam import run_agent_security_redteam_suite
+    from application.operations.deterministic_checks import (
+        run_agent_security_redteam_suite,
+    )
 
     suite = run_agent_security_redteam_suite()
 

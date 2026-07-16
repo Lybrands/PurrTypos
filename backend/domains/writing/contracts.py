@@ -56,9 +56,9 @@ class WritingDomainContext:
             raise ValueError(f"unsupported writing domain namespace: {context.namespace}")
         payload = thaw_json_mapping(context.payload)
         return cls(
-            book_id=_legacy_optional_identifier(payload.get("book_id")),
-            chapter_id=_legacy_optional_identifier(payload.get("chapter_id")),
-            current_chapter_title=_legacy_optional_identifier(
+            book_id=_optional_identifier(payload.get("book_id")),
+            chapter_id=_optional_identifier(payload.get("chapter_id")),
+            current_chapter_title=_optional_identifier(
                 payload.get("current_chapter_title")
             ),
             writing_chapters=_mapping_tuple(payload.get("writing_chapters")),
@@ -69,14 +69,14 @@ class WritingDomainContext:
             selected_foreshadowing_ids=_value_tuple(
                 payload.get("selected_foreshadowing_ids")
             ),
-            context_window_label=_legacy_optional_identifier(
+            context_window_label=_optional_identifier(
                 payload.get("context_window_label")
             ),
         )
 
 
-def _legacy_optional_identifier(value: object) -> str | None:
-    """Preserve stage-1 string truthiness exactly, including whitespace."""
+def _optional_identifier(value: object) -> str | None:
+    """Normalize an optional identifier while preserving supplied strings."""
 
     if value is None:
         return None

@@ -10,9 +10,15 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
-def _env_bool(key: str, default: bool = False) -> bool:
-    value = _env(key, "1" if default else "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+def _env_positive_float(key: str, default: float) -> float:
+    raw = _env(key, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{key} must be a positive number") from error
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive number")
+    return value
 
 
 # Paths
@@ -23,17 +29,11 @@ SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
 HOST: str = _env("PURRTYPOS_HOST", "127.0.0.1")
 PORT: int = int(_env("PURRTYPOS_PORT", "18321"))
 
-# Agent release metadata. Packaging or deployment should override these so
-# every persisted run can be attributed to the code version/cohort that made it.
-AGENT_RELEASE_VERSION: str = _env("PURRTYPOS_AGENT_RELEASE_VERSION", "development")
-AGENT_ROLLOUT_COHORT: str = _env("PURRTYPOS_AGENT_ROLLOUT_COHORT", "local")
-
-# Stage-3 compatibility switch. Owner: application runtime composition.
-# Keep false until both legacy/new runtime tapes and the real-tool pilot pass;
-# delete with the old routers.ai loop after the staged rollout is complete.
-AGENT_CORE_RUNTIME_ENABLED: bool = _env_bool(
-    "PURRTYPOS_AGENT_CORE_RUNTIME_ENABLED",
-    False,
+# Protected calls fail closed after this many seconds without a human decision.
+# Keep the default deliberately short so abandoned confirmations fail closed.
+AGENT_APPROVAL_TIMEOUT_SECONDS: float = _env_positive_float(
+    "PURRTYPOS_AGENT_APPROVAL_TIMEOUT_SECONDS",
+    300.0,
 )
 
 # 注：曾有 Ollama / mem0 / 工具路由意图模型相关配置（OLLAMA_HOST、MEM0_*、

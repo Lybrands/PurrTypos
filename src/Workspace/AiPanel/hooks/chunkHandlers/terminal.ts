@@ -1,13 +1,6 @@
 import { mergeAssistantErrorNotice } from "../../rendering";
-import {
-  isWritingExpertPipeline,
-  type AiTaskPlan,
-  type ChatMessage,
-} from "../chat.types";
-import {
-  summarizeSubagentResult,
-  synthesizeAssistantTextFromToolSegments,
-} from "../chatHistory";
+import { type AiTaskPlan, type ChatMessage } from "../chat.types";
+import { synthesizeAssistantTextFromToolSegments } from "../chatHistory";
 import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
@@ -58,8 +51,7 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
 };
 
 /**
- * 正常终态：合并最终内容（含 thinking 收尾、subagent 阶段定稿、digest 拼接），
- * cleanup，落库，按需生成会话标题。
+ * 正常终态：合并最终内容与 thinking 收尾，cleanup，落库，按需生成会话标题。
  */
 export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done) return;
@@ -101,16 +93,6 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
         const thinkingDurationsMs = savedThinkingDurations.length
           ? savedThinkingDurations
           : cm.thinkingDurationsMs;
-        const stages = cm.subagentStages ?? [];
-        const subagentStagesFinalized =
-          isWritingExpertPipeline(ctx.agentMode) && stages.length > 0
-            ? stages.map((s) =>
-                s.status === "running"
-                  ? { ...s, status: "done" as const }
-                  : s,
-              )
-            : cm.subagentStages;
-        const digestTrim = (cm.subagentPipelineDigest ?? "").trim();
         const currentContent = String(last.content || "");
         const accContent = (acc.response || "").trim();
         let finalContent = currentContent;
@@ -123,21 +105,14 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
             if (synthesized) {
               finalContent = synthesized;
             } else {
-              const subSummary = summarizeSubagentResult(cm);
-              finalContent = subSummary || "内容同步中。";
+              finalContent = "内容同步中。";
             }
           }
-        }
-        if (digestTrim) {
-          finalContent = finalContent.trim()
-            ? `${digestTrim}\n\n${finalContent.trim()}`
-            : digestTrim;
         }
         resolvedAssistantContent = finalContent;
         next[next.length - 1] = {
           ...last,
           content: finalContent,
-          subagentPipelineDigest: undefined,
           model: acc.model || undefined,
           durationMs,
           turnStartedAt: undefined,
@@ -151,15 +126,6 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
             acc.taskPlan ??
             (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
           toolCalling: false,
-          subagentStageWorking: false,
-          ...(isWritingExpertPipeline(ctx.agentMode)
-            ? {
-                subagentBridging: false,
-                ...(subagentStagesFinalized
-                  ? { subagentStages: subagentStagesFinalized }
-                  : {}),
-              }
-            : {}),
         };
       }
       return next;
@@ -232,7 +198,6 @@ function saveConversationIfNeeded(
         : undefined,
       taskPlan: acc.taskPlan ?? undefined,
       agentRunId: acc.agentRunId,
-      subagentResult: acc.subagentResult ?? undefined,
     })
     .then((res) => {
       if (res && res.success) {

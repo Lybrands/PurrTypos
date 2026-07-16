@@ -9,6 +9,8 @@ from agent_core.contracts import (
     StepType,
     TaskPlan,
     TaskStep,
+    TaskStepUpdate,
+    ToolBatchOutcome,
 )
 from agent_core.errors import ContractViolationError
 from agent_core.run_state import RunStateMachine
@@ -82,6 +84,156 @@ def test_state_machine_advances_model_tool_model_and_scopes_current_tools():
     assert completed.after.status is RunStatus.DONE
     assert completed.after.final_response == "answer"
     assert all(step.status is StepStatus.DONE for step in completed.after.steps)
+
+
+def test_state_machine_reports_only_unfinished_tools_after_current_transition():
+    state = RunStateMachine.initialize(
+        "run-future",
+        TaskPlan(
+            title="ordered future tools",
+            steps=(
+                _step("think", executor=StepExecutor.MODEL, step_type=StepType.ANALYZE),
+                _step(
+                    "read-a",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.READ,
+                    tools=("readA",),
+                ),
+                _step(
+                    "analyze",
+                    executor=StepExecutor.MODEL,
+                    step_type=StepType.ANALYZE,
+                ),
+                _step(
+                    "read-b",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.READ,
+                    tools=("readB",),
+                ),
+                _step("answer", executor=StepExecutor.MODEL, step_type=StepType.REVIEW),
+            ),
+        ),
+    )
+
+    assert RunStateMachine.allowed_tool_names_for_current_transition(state) == {
+        "readA"
+    }
+    assert RunStateMachine.future_allowed_tool_names(state) == {"readB"}
+
+    read_a_started = RunStateMachine.on_tool_calls_started(state, {"readA"}).after
+    assert RunStateMachine.future_allowed_tool_names(read_a_started) == {"readB"}
+
+    read_a_done = RunStateMachine.on_tool_round_completed(read_a_started).after
+    assert RunStateMachine.allowed_tool_names_for_current_transition(read_a_done) == {
+        "readB"
+    }
+    assert RunStateMachine.future_allowed_tool_names(read_a_done) == frozenset()
+
+
+def test_declined_tool_round_blocks_step_and_final_model_can_finish_run():
+    state = RunStateMachine.initialize(
+        "run-declined",
+        TaskPlan(
+            title="decline safely",
+            steps=(
+                _step(
+                    "apply",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.WRITE,
+                    tools=("applyChange",),
+                ),
+                _step(
+                    "report",
+                    executor=StepExecutor.MODEL,
+                    step_type=StepType.REVIEW,
+                ),
+            ),
+        ),
+    )
+
+    declined = RunStateMachine.on_tool_round_completed(
+        state,
+        ToolBatchOutcome.DECLINED,
+    )
+
+    assert [step.status for step in declined.after.steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.PENDING,
+    ]
+    declined_step = declined.after.steps[0]
+    assert declined_step.result_summary == (
+        "User declined approval; the planned tool was not executed."
+    )
+    assert declined_step.error == "approval_rejected"
+    assert declined.step_updates == (TaskStepUpdate(
+        step_id="apply",
+        status=StepStatus.BLOCKED,
+        result_summary=(
+            "User declined approval; the planned tool was not executed."
+        ),
+        error="approval_rejected",
+    ),)
+    assert "Planned tool step completed." not in str(declined.after.steps)
+    assert RunStateMachine.allowed_tool_names_for_current_transition(
+        declined.after
+    ) == frozenset()
+
+    reporting = RunStateMachine.on_model_delta(declined.after)
+    assert [step.status for step in reporting.after.steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.RUNNING,
+    ]
+    completed = RunStateMachine.complete(reporting.after, "not applied")
+    assert completed.after.status is RunStatus.DONE
+    assert completed.after.final_response == "not applied"
+    assert [step.status for step in completed.after.steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.DONE,
+    ]
+    assert completed.after.steps[0].error == "approval_rejected"
+
+
+def test_declined_tool_round_does_not_activate_a_later_tool_grant():
+    state = RunStateMachine.initialize(
+        "run-declined-before-tool",
+        TaskPlan(
+            title="do not skip grants",
+            steps=(
+                _step(
+                    "first-write",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.WRITE,
+                    tools=("firstWrite",),
+                ),
+                _step(
+                    "later-write",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.WRITE,
+                    tools=("laterWrite",),
+                ),
+            ),
+        ),
+    )
+
+    declined = RunStateMachine.on_tool_round_completed(
+        state,
+        ToolBatchOutcome.DECLINED,
+    ).after
+
+    assert [step.status for step in declined.steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.PENDING,
+    ]
+    assert RunStateMachine.allowed_tool_names_for_current_transition(
+        declined
+    ) == frozenset()
+    assert RunStateMachine.future_allowed_tool_names(declined) == frozenset()
+    with pytest.raises(ContractViolationError, match="outside"):
+        RunStateMachine.on_tool_calls_started(declined, {"laterWrite"})
+
+    completed = RunStateMachine.complete(declined, "first write declined")
+    assert completed.after.status is RunStatus.BLOCKED
+    assert completed.after.steps[0].error == "approval_rejected"
 
 
 def test_unauthorized_tool_start_fails_closed_without_mutating_snapshot():
@@ -208,5 +360,44 @@ def test_invalid_tool_step_contract_is_rejected_at_initialization():
         ),
     )
 
-    with pytest.raises(ContractViolationError, match="allowlist"):
+    with pytest.raises(ContractViolationError, match="exactly one"):
         RunStateMachine.initialize("run-invalid", plan)
+
+
+@pytest.mark.parametrize(
+    "step, message",
+    [
+        (
+            _step(
+                "combined",
+                executor=StepExecutor.TOOL,
+                step_type=StepType.WRITE,
+                tools=("update", "delete"),
+            ),
+            "exactly one",
+        ),
+        (
+            _step(
+                "model-grant",
+                executor=StepExecutor.MODEL,
+                step_type=StepType.REVIEW,
+                tools=("delete",),
+            ),
+            "model step",
+        ),
+        (
+            _step(
+                "confirm",
+                executor=StepExecutor.MODEL,
+                step_type=StepType.CONFIRM,
+            ),
+            "approval policy",
+        ),
+    ],
+)
+def test_state_machine_rejects_non_atomic_or_planner_owned_authority(step, message):
+    with pytest.raises(ContractViolationError, match=message):
+        RunStateMachine.initialize(
+            "run-invalid-authority",
+            TaskPlan(title="invalid", steps=(step,)),
+        )

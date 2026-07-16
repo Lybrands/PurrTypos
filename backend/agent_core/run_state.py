@@ -13,6 +13,7 @@ from agent_core.contracts import (
     TaskPlan,
     TaskStep,
     TaskStepUpdate,
+    ToolBatchOutcome,
 )
 from agent_core.errors import ContractViolationError
 
@@ -209,9 +210,20 @@ class RunStateMachine:
         return _with_step_changes(state, tuple(changes))
 
     @staticmethod
-    def on_tool_round_completed(state: RunSnapshot) -> RunTransition:
+    def on_tool_round_completed(
+        state: RunSnapshot,
+        outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+    ) -> RunTransition:
         if state.terminal:
             return _unchanged(state)
+        normalized_outcome = ToolBatchOutcome(outcome)
+        if normalized_outcome not in {
+            ToolBatchOutcome.COMPLETED,
+            ToolBatchOutcome.DECLINED,
+        }:
+            raise ContractViolationError(
+                "only completed or declined tool rounds may advance todo state"
+            )
         tool_index = next(
             (
                 index
@@ -222,6 +234,20 @@ class RunStateMachine:
         )
         if tool_index < 0:
             return _unchanged(state)
+
+        if normalized_outcome is ToolBatchOutcome.DECLINED:
+            declined = replace(
+                state.steps[tool_index],
+                status=StepStatus.BLOCKED,
+                result_summary=(
+                    "User declined approval; the planned tool was not executed."
+                ),
+                error="approval_rejected",
+            )
+            # A rejected approval ends this tool transition.  Do not activate a
+            # later tool grant; the following model round may still provide the
+            # protocol-compatible final explanation to the user.
+            return _with_step_changes(state, ((tool_index, declined),))
 
         completed = replace(
             state.steps[tool_index],
@@ -372,6 +398,49 @@ class RunStateMachine:
             )
         return frozenset()
 
+    @staticmethod
+    def future_allowed_tool_names(state: RunSnapshot) -> frozenset[str]:
+        """Return unfinished tool grants strictly after the current transition."""
+
+        if state.terminal:
+            return frozenset()
+        running_index = next(
+            (
+                index
+                for index, step in enumerate(state.steps)
+                if step.status is StepStatus.RUNNING
+            ),
+            -1,
+        )
+        if running_index < 0:
+            return frozenset()
+
+        current_tool_index = -1
+        running = state.steps[running_index]
+        if _is_tool_step(running):
+            current_tool_index = running_index
+        elif _is_model_step(running):
+            for index in range(running_index + 1, len(state.steps)):
+                step = state.steps[index]
+                if step.status in _FINISHED_STEP_STATUSES:
+                    continue
+                if _is_tool_step(step):
+                    current_tool_index = index
+                break
+
+        start_index = (
+            current_tool_index + 1
+            if current_tool_index >= 0
+            else running_index + 1
+        )
+        return frozenset(
+            tool
+            for step in state.steps[start_index:]
+            if step.status not in _FINISHED_STEP_STATUSES
+            and _is_tool_step(step)
+            for tool in step.suggested_tools
+        )
+
 
 def _initial_step(step: TaskStep) -> TaskStep:
     return replace(
@@ -387,10 +456,21 @@ def _initial_step(step: TaskStep) -> TaskStep:
 
 
 def _validate_step_execution_contract(step: TaskStep) -> None:
+    if step.type is StepType.CONFIRM:
+        raise ContractViolationError(
+            "confirm steps are owned by the host approval policy"
+        )
     if step.type is StepType.READ and step.executor is not StepExecutor.TOOL:
         raise ContractViolationError("read step must use the tool executor")
-    if step.executor is StepExecutor.TOOL and not step.suggested_tools:
-        raise ContractViolationError("tool step requires an explicit tool allowlist")
+    if (
+        step.executor is StepExecutor.TOOL
+        and len(step.suggested_tools) != 1
+    ):
+        raise ContractViolationError(
+            "tool step requires exactly one expected tool"
+        )
+    if step.executor is StepExecutor.MODEL and step.suggested_tools:
+        raise ContractViolationError("model step cannot grant tool access")
 
 
 def _is_tool_step(step: TaskStep) -> bool:

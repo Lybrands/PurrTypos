@@ -11,8 +11,26 @@ interface ToolApprovalCardProps {
 }
 
 export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
-  const [state, setState] = React.useState<ApprovalState>("pending");
+  const serverState: ApprovalState =
+    approval.status === "approved" || approval.status === "rejected"
+      ? approval.status
+      : approval.status && approval.status !== "pending"
+        ? "error"
+        : "pending";
+  const [state, setState] = React.useState<ApprovalState>(serverState);
   const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    if (serverState === "pending") return;
+    setState(serverState);
+    if (serverState === "error") {
+      setError(
+        approval.status === "timed_out"
+          ? "确认请求已超时，操作未执行。"
+          : "确认请求已取消，操作未执行。",
+      );
+    }
+  }, [approval.status, serverState]);
 
   const decide = async (approved: boolean) => {
     if (state !== "pending") return;
