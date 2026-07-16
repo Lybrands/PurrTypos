@@ -26,6 +26,57 @@ from infrastructure.models import provider_model_gateway
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 
 
+def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="model",
+            options={
+                "temperature": 0,
+                "thinking": {"type": "disabled"},
+            },
+        ),
+        reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+    options = provider_model_gateway._provider_options(invocation)
+
+    assert options["temperature"] == 0
+    assert options["thinking"] == {"type": "disabled"}
+
+
+def test_provider_message_downgrades_developer_role_to_system():
+    message = AgentMessage(
+        role="developer",
+        content="host context",
+        attributes={"context_name": "writing_retrieval", "untrusted": True},
+    )
+
+    assert provider_model_gateway._provider_message(message) == {
+        "role": "system",
+        "content": "host context",
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (402, "insufficient balance (1008)", "provider_insufficient_balance"),
+        (401, "invalid api key", "provider_authentication_failed"),
+        (429, "rate limit exceeded", "provider_rate_limited"),
+        (400, "invalid model", "provider_bad_request"),
+        (503, "service unavailable", "provider_unavailable"),
+    ],
+)
+def test_provider_error_code_classifies_safe_http_failures(status, message, expected):
+    class _ProviderHttpError(Exception):
+        status_code = status
+
+    assert provider_model_gateway._provider_error_code(
+        _ProviderHttpError(message)
+    ) == expected
+
+
 @pytest.mark.asyncio
 async def test_provider_model_gateway_preserves_provider_messages_tools_and_model(monkeypatch):
     captured: dict = {}
@@ -67,6 +118,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             "tool_choice": "required",
             "max_tokens": 999_999,
             "thinking_enabled": True,
+            "temperature": 1.0,
             "metadata": {"tags": ["writing"]},
         },
     )
@@ -125,6 +177,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert captured["options"]["max_tokens"] == 2_048
     assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
+    assert "temperature" not in captured["options"]
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict
     assert type(captured["options"]["metadata"]["tags"]) is list
