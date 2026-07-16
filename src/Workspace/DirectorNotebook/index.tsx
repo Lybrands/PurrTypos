@@ -3,12 +3,11 @@ import { DoubleRightOutlined } from '@ant-design/icons'
 import { Button, Tooltip } from 'antd'
 import type { EntityId } from '../../types'
 import ChapterSection from './ChapterSection'
-import NotebookToolbar from './NotebookToolbar'
 import './index.scss'
 
 /**
  * 兼容旧外层调用：原 OutlineSection 中用于「同步章节-大纲选中」的 payload。
- * 大纲分组已合并进章节分组（弹窗形式），此类型保留为空壳。
+ * 大纲分组已合并进章节分组（辅助面板形式），此类型保留为空壳。
  */
 export interface ChapterOutlineSelectInfo {
   title: string
@@ -30,9 +29,9 @@ export interface DirectorNotebookProps {
  *
  * 设计理念：
  * - 主体直接就是章节列表，不再嵌套「分组 / 折叠头」结构，最纯净。
- * - 「人物 / 故事背景 / 记忆 · 伏笔 / 风格基调」收成头部右侧的图标按钮，
- *   点击通过弹窗展示，不打扰章节列表的浏览。
- * - 「总纲 / 卷大纲 / 章节大纲」通过章节内联或行内的图标入口弹窗承载。
+ * - 人物 / 故事背景 / 世界设定统一由工作台顶栏的「小说设定」进入。
+ * - 记忆 · 伏笔 / 风格基调放在工作台顶栏的独立入口。
+ * - 「总纲」放在工作台顶栏；卷大纲 / 章节大纲保留行内入口。
  */
 export default function DirectorNotebook({
   bookTitle,
@@ -46,7 +45,6 @@ export default function DirectorNotebook({
       <div className="director-notebook-header">
         <span className="director-notebook-title">章节列表</span>
         <div className="director-notebook-header-right">
-          <NotebookToolbar />
           {dockCollapsed && onExpandDock ? (
             <Tooltip title="固定展开章节边栏">
               <Button

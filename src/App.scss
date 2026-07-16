@@ -155,7 +155,54 @@
 }
 
 .workspace-chapter-rail:hover .workspace-chapter-hover-panel,
-.workspace-chapter-rail:focus-within .workspace-chapter-hover-panel {
+.workspace-chapter-rail:focus-visible .workspace-chapter-hover-panel,
+.workspace-chapter-rail:has(:focus-visible) .workspace-chapter-hover-panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+  transition-delay: .08s, .08s, 0s;
+}
+
+/* 正文栏收起后在最右侧保留感应区；右侧内边距避免感应区压住相邻面板滚动条。 */
+.app-body--editor-collapsed {
+  padding-right: 10px;
+}
+
+.workspace-editor-rail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  width: 10px;
+  background: transparent;
+  outline: none;
+}
+
+.workspace-editor-hover-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: clamp(340px, var(--editor-hover-width), 640px);
+  z-index: 12;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: -12px 0 28px rgba(0, 0, 0, .22);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(8px);
+  transition:
+    opacity .16s ease .1s,
+    transform .16s ease .1s,
+    visibility 0s linear .26s;
+}
+
+.workspace-editor-rail:hover .workspace-editor-hover-panel,
+.workspace-editor-rail:focus-visible .workspace-editor-hover-panel,
+.workspace-editor-rail:has(:focus-visible) .workspace-editor-hover-panel {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;

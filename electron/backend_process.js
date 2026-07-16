@@ -28,7 +28,19 @@ function createBackendProcessManager({
   const backendUrl = `http://127.0.0.1:${port}`
   let childProcess = null
 
+  function getVirtualEnvPython() {
+    if (app.isPackaged) return null
+
+    const executable = platform === 'win32' ? 'python.exe' : 'python'
+    const binDir = platform === 'win32' ? 'Scripts' : 'bin'
+    const candidate = path.join(moduleDir, '..', '.venv', binDir, executable)
+    return fsImpl.existsSync(candidate) ? candidate : null
+  }
+
   function getPythonCommand() {
+    const virtualEnvPython = getVirtualEnvPython()
+    if (virtualEnvPython) return virtualEnvPython
+
     if (platform === 'win32') {
       try {
         execSyncImpl('py --version', { stdio: 'ignore' })
@@ -155,6 +167,7 @@ function createBackendProcessManager({
     getBackendPaths,
     getFrozenBackendExe,
     getPythonCommand,
+    getVirtualEnvPython,
     isRunning: () => childProcess !== null,
     start,
     stop,

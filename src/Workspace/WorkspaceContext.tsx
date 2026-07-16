@@ -1,6 +1,7 @@
 import React from 'react'
 import type { LexicalEditor } from 'lexical'
 import type { Chapter, EntityId } from '../types'
+import type { WorkspaceUtilityTab } from './utilityPanelTypes'
 
 export interface WorkspaceContextValue {
   bookId: EntityId | null
@@ -11,6 +12,10 @@ export interface WorkspaceContextValue {
   activeChapterTitle: string
   writingChapters: Chapter[]
   writingOutlineId: EntityId | null
+  utilityPanelOpen: boolean
+  activeUtilityTabKey: string | null
+  openUtilityTab: (tab: WorkspaceUtilityTab) => void
+  toggleUtilityTab: (tab: WorkspaceUtilityTab) => void
   setActiveChapter: (id: EntityId, title: string) => void
   setChaptersData: (outlineId: EntityId, chapters: Chapter[]) => void
   loadWritingChapters: () => Promise<void>
