@@ -8,19 +8,16 @@ Agent 的核心不是“让模型可以调用工具”，而是让不确定的�
 
 | 层 | 职责 | 主要模块 | 不应承担的职责 |
 |---|---|---|---|
-| API / Stream | 接收请求、流式事件、连接中断 | `routers/ai.py` | 决定工具安全策略 |
-| Context | 动态分配上下文预算、召回记忆、裁剪完整对话轮次 | `utils/context_budget.py`、`memory_orchestrator.py`、`chat_preflight.py` | 执行写工具 |
-| Planner | 将用户目标规范化为有序步骤及建议工具 | `task_planner.py` | 直接执行工具或静默兜底 |
-| Run Controller | 管理 Run、To-do、当前步骤和状态转换 | `agent_run_controller.py`、`agent_run_store.py` | 判断模型内容质量 |
-| Tool Contract | 保证模型可见 Schema 与后端 handler 一致 | `tool_contract.py`、`tool_router.py` | 代替运行时权限校验 |
-| Tool Policy | 定义 read/propose/confirm 风险和审批要求 | `tool_policy.py` | 相信模型自行遵守权限 |
-| Tool Runtime | 严格解析参数、限制批量、执行 allowlist、分派 handler | `tool_executor.py`、`tool_security.py` | 扩大 Planner 授权范围 |
-| Approval | 将高风险操作挂起并等待一次性用户决定 | `tool_approval_service.py` | 持久化或重放旧批准 |
-| Domain Handler | 执行具体读写，并校验对象归属 | `services/tool_handlers/*` | 自行修改全局工具政策 |
-| Trace / Diagnostics | 记录 Planner、上下文、模型、工具、终态 | `agent_run_evaluation.py`、`agent_run_performance.py` | 保存密钥或完整敏感内容 |
-| Evaluation | 确定性回归、人工质量评分、真实 Pilot | `agent_eval_*`、`agent_runtime_regression*`、`agent_run_review.py` | 用单一总分掩盖安全失败 |
-| Release Control | 上线门禁、灰度对比、回滚建议 | `agent_release_control.py` | 自动修改生产部署状态 |
-| Security Red Team | 验证宿主安全不变量 | `agent_security_redteam.py` | 宣称提示注入可以被彻底消除 |
+| API / Stream | 接收请求、映射 SSE、传播连接中断 | `routers/ai.py`、`application/sse_mapping.py` | 决定工具安全策略 |
+| Composition | 装配每次完整 Agent Run | `application/agent_composition.py` | 实现 Core 或 Writing 规则 |
+| Request Mapping | 将 HTTP DTO 转为 Core 请求与 Writing 上下文 | `application/request_mapping.py` | 静默丢弃不支持的调用方工具 |
+| Core Runtime | 规划、上下文预算、模型轮次、工具循环与终态 | `agent_core/engine.py`、`agent_core/runtime.py` | 导入具体写作业务 |
+| Core Tool Boundary | Schema、allowlist、批次校验、审批与执行限制 | `agent_core/tools/` | 相信模型自行遵守权限 |
+| Writing Policy | 定义 Planning、工具风险和响应语义 | `domains/writing/` | 依赖 HTTP 或供应商 SDK |
+| Writing Infrastructure | 执行具体读写并校验对象归属 | `infrastructure/writing/` | 修改 Core 生命周期 |
+| Model Infrastructure | 对接供应商并规范化流式协议 | `infrastructure/models/` | 决定 Writing 语义 |
+| Persistence | 持久化 Run、Trace 和 Writing 数据 | `infrastructure/persistence/` | 重新实现状态机 |
+| Deterministic Evaluation | 验证历史事故和安全不变量 | `agent_core/evaluation/`、`domains/writing/evaluation/` | 调用外部模型或改变运行状态 |
 
 ## 3. 一次 Agent Run 的数据流
 
@@ -82,18 +79,14 @@ flowchart TD
 
 上下文越多不一定越好。优化顺序是：先删除失败请求、重复轮次和无关 Schema，再考虑裁剪事实内容。
 
-## 8. 评测与发布
+## 8. 确定性评测
 
 | 信号 | 回答的问题 |
 |---|---|
 | 单元/集成测试 | 代码契约是否仍成立 |
 | Runtime Regression | 历史事故是否重新出现 |
 | Security Red Team | 宿主安全边界是否仍成立 |
-| Pilot Case | 真实模型流程是否可用 |
-| Human Review | 回答内容是否真正有用 |
 | Performance Report | 慢和贵发生在哪里 |
-| Release Gate | 是否有资格进入灰度 |
-| Rollout Comparison | 应扩大、暂停还是回滚 |
 
 ## 9. 必须长期保持的不变量
 
@@ -104,13 +97,13 @@ flowchart TD
 5. 工具参数解析失败必须 fail closed。
 6. ID 型写操作必须校验目标属于当前书籍。
 7. 不可信上下文不能改变工具权限或批准状态。
-8. 每个 Run 必须绑定 `run_id`、发布版本和灰度组。
+8. 每个 Run 必须绑定 `run_id`，并记录 provider、model、context window、endpoint digest 和 request profile digest。
 9. `blocked`、`canceled`、`failed` 必须保持不同语义。
-10. 安全回归必须阻止发布，而不是被平均质量分抵消。
+10. 安全回归必须使代码验收失败，而不是被平均质量分抵消。
 
 ## 10. 当前已知边界
 
 - Approval Broker 和供应商能力缓存是进程内状态；重启后安全失败关闭或重新探测。
 - Token 数据目前包含工程估算，不等同于供应商账单 usage。
-- 发布模块给出决策，不自动部署或回滚安装包。
+- 仓库不再包含新旧路径双轨 Pilot、人工评分或自动发布决策模块。
 - Prompt Injection 无法仅靠提示词完全消除，真正安全边界仍是宿主 allowlist、对象归属和人工审批。

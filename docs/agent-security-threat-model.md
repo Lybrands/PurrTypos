@@ -44,4 +44,4 @@
 - 敏感错误泄露。
 - 检索内容间接 Prompt Injection 的信任边界。
 
-跨书籍 ID 修改、审批重放和异常 handler 等需要数据库或异步流程，作为集成测试保存在 `backend/tests/test_agent_security.py` 与 `test_tool_approval_service.py`。
+跨书籍 ID 修改、审批重放和异常 handler 等需要数据库或异步流程，分别由 `backend/tests/test_writing_outline_tool_safety.py`、`test_agent_core_approval.py` 和 Core/Composition 集成测试覆盖。

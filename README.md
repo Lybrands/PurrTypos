@@ -1,6 +1,6 @@
 # PurrTypos
 
-**Electron 桌面写作应用** — 多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景、可配置多模型 AI 对话（写作专家 / 智能体 / 协作共创 / 纯问答四种模式 + 工具调用）。
+**Electron 桌面写作应用** — 多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景，以及可配置多模型的 Writing Agent / 纯问答。
 
 ```
 ┌────────────────────┐    HTTP/SSE     ┌────────────────────────┐
@@ -72,16 +72,12 @@ npm run build
 
 ## AI 模式
 
-工作台右侧 AI 面板的"模式选择"对应四种工作流：
+工作台右侧 AI 面板提供两种工作流：
 
 | 模式 | 适用 | 特征 |
 |---|---|---|
-| **写作专家** (`expert`) | 长篇小说创作 | 主智能体 + 按需子专家：审校 / 润色 / 续写规划 / 风格统一；子专家产出结构化 JSON，前端用专门 UI 卡片展示 |
-| **智能体** (`agent`) | 通用任务 | ReAct 工具流，自动选择并调用 `backend/skills/` 下的工具 |
-| **协作共创** (`collab`) | 与作者文字接龙 | 限制写入工具，注入协作提示词，专注交替输出短段 |
+| **Writing Agent** (`agent`) | 写作与项目任务 | 三层 Agent 执行规划、上下文预算、受限工具调用、人工审批和结果校验 |
 | **纯问答** (`ask`) | 答疑、构思 | 不携带工具，单轮文本响应 |
-
-写作专家的子专家通过对话框中的 "/" 命令或按钮触发：`/review`、`/polish`、`/continuation_plan`、`/style_unify`。
 
 ### 工具系统（Skills）
 
@@ -89,7 +85,7 @@ npm run build
 1. YAML frontmatter（`name` / `description`）
 2. 正文中的 ` ```json ` 代码块（OpenAI 函数调用的 `parameters` JSON Schema）
 
-后端启动时扫描整个 `skills/` 目录加载，注册成 OpenAI/Anthropic 兼容的工具列表。新增工具只需新建一个 `<name>/SKILL.md` 即可，无需改后端代码。
+后端启动时由 `WritingSkillCatalog` 扫描整个 `skills/` 目录，并由 Writing Domain 校验 Schema、Policy 与 Infrastructure Handler 一致。新增工具必须同时提供 `SKILL.md`、业务 Policy/规划约束和具体 Handler；任一缺失都会在装配时失败关闭。
 
 ## 项目结构
 
@@ -107,22 +103,16 @@ PurrTypos/
 │   │   ├── ai.py                # /ai/chat/stream（SSE）、/ai/title、/ai/models
 │   │   ├── books.py / outlines.py / chapters.py / characters.py / ...
 │   │   └── conversations.py / sessions.py / settings.py / ...
-│   ├── services/                # 业务/适配层
-│   │   ├── ai_provider.py       # 统一 OpenAI / Anthropic 入口
-│   │   ├── ai_capabilities.py   # 推理（thinking）等能力翻译层
-│   │   ├── openai_chat.py       # OpenAI 兼容流式适配
-│   │   ├── anthropic_chat.py    # Anthropic Messages API 适配
-│   │   ├── tool_router.py       # SKILL.md 加载器
-│   │   ├── tool_executor.py     # 工具调用执行
-│   │   ├── memory_service.py    # 本书设定/伏笔兼容服务
-│   │   ├── long_term_memory_service.py # SQLite 长期记忆池（FTS5）
-│   │   ├── memory_intelligence_service.py # 可选 LLM 记忆候选提炼
-│   │   └── memory_orchestrator.py # 长期记忆召回、预算与注入编排
+│   ├── agent_core/              # 业务无关的规划、状态机、模型轮次、工具与审批内核
+│   ├── application/             # 唯一 Composition Root、请求/SSE 映射和应用用例
+│   ├── domains/writing/         # Writing 业务规则、Planning Policy、上下文与工具契约
+│   ├── infrastructure/          # Provider、SQLite Repository、技能目录和 Writing Handler
+│   ├── services/                # 非 Agent 架构的长期记忆应用服务
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理
 │   │   ├── schema.py            # 建表 / 增量迁移
 │   │   └── crud/                # 各表 CRUD（books/outlines/chapters/...）
-│   ├── utils/                   # 纯函数工具：prompt 拼装、流式辅助等
+│   ├── utils/                   # 通用纯函数与异步流辅助
 │   ├── schemas/                 # Pydantic 请求体
 │   └── skills/                  # 工具定义（每个工具一个目录 + SKILL.md）
 ├── src/                         # 渲染进程（React + TypeScript）
@@ -131,7 +121,7 @@ PurrTypos/
 │   ├── Workspace/
 │   │   ├── OutlinePanel/        # 大纲（Tiptap）、人物、小说背景
 │   │   ├── EditorPanel/         # 章节正文（Lexical）、内联 AI、Ghost 补全
-│   │   └── AiPanel/             # AI 对话、子专家结果卡片、记忆/收藏管理
+│   │   └── AiPanel/             # AI 对话、Agent Run、工具审批、记忆/收藏管理
 │   └── types.ts                 # 前后端共享 IPC 类型契约
 ├── scripts/                     # 构建辅助脚本
 └── package.json

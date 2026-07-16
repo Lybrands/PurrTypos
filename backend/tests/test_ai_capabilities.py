@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.ai_capabilities import (
+from infrastructure.models.capabilities import (
     build_anthropic_thinking_param,
     build_openai_thinking_extra_body,
     normalize_thinking_enabled,
@@ -21,10 +21,10 @@ from services.ai_capabilities import (
 # ---------------------------------------------------------------------------
 
 class TestNormalizeThinkingEnabled:
-    def test_legacy_thinking_enabled(self):
+    def test_structured_thinking_enabled(self):
         assert normalize_thinking_enabled({"thinking": {"type": "enabled"}}) is True
 
-    def test_legacy_thinking_disabled(self):
+    def test_structured_thinking_disabled(self):
         assert normalize_thinking_enabled({"thinking": {"type": "disabled"}}) is False
 
     def test_default_off(self):

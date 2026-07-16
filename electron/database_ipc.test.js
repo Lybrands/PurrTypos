@@ -60,11 +60,11 @@ test('import rejects the active database without stopping the backend', async ()
     dialog: {
       showOpenDialog: async () => ({
         canceled: false,
-        filePaths: [path.resolve('C:\\data\\purrtypos.db')],
+        filePaths: [path.resolve('/data/purrtypos.db')],
       }),
       showSaveDialog: async () => ({ canceled: true }),
     },
-    app: { getPath: () => path.resolve('C:\\data') },
+    app: { getPath: () => path.resolve('/data') },
     fsImpl,
     backendProcess: {
       backendUrl: 'http://backend.test',

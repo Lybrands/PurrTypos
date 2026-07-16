@@ -4,13 +4,14 @@
 
 | 模块 | 职责 |
 |------|------|
-| `backend/services/tool_router.py` | **扫描**本目录下各 `<toolName>/SKILL.md`，产出 skill 条目（`get_api_skill_items`）；**不做任何路由**——历史上的 embedding Top-K 检索 / 本地模型意图分类均已废弃 |
-| `backend/services/agent_tool_definitions.py` | 把 skill 条目转成 OpenAI function-calling 工具定义（`to_openai_tools`） |
-| `backend/services/tool_executor.py` + `tool_handlers/` | 工具实际执行（handler 注册名须与目录名一致） |
+| `backend/infrastructure/writing/skill_catalog.py` | 扫描本目录下各 `<toolName>/SKILL.md`，生成实例级、不可变的工具声明快照 |
+| `backend/domains/writing/tools/catalog.py` | 校验 Schema、Policy、Handler 和缓存探针集合完全一致，并注册为 Core 工具 |
+| `backend/domains/writing/policies.py` / `planning.py` | 定义工具风险、审批要求、规划依赖和步骤授权范围 |
+| `backend/infrastructure/writing/tools/` | 装配并执行具体 Writing Handler，校验书籍与章节作用域 |
 | 本目录各 `<toolName>/SKILL.md` | **唯一真源**：frontmatter 仅 `name`、`description`；正文含 **\`\`\`json** 的 parameters schema |
 
-**工具选择由主模型完成**：`/ai/chat/stream` 在 agent 模式下把全部工具 schema 一次性发给大模型，
-由模型基于 `description` + parameters 自行决定调用哪些工具。不依赖本地模型、不需要 Ollama。
+`Agent Core` 根据 Writing Planner 的当前步骤只暴露获准工具 Schema；模型只能在该范围内选择，
+宿主随后再次执行 allowlist、Policy、参数与对象归属校验。不依赖本地路由模型或 Ollama。
 
 ## 目录约定（与常见 Skills 布局对齐）
 
@@ -28,4 +29,3 @@ skills/
 
 - **Frontmatter 仅**：`name`（与目录名一致）、`description`（使用场景，可含「依赖某某 skill」等短句）。**不要**写 `parameters` 及其他字段。
 - **正文**：人读说明；并**必须**含至少一个 **\`\`\`json** 代码块，内容为发给大模型的 **parameters JSON Schema**。
-- 兼容：`short_description` 可作为 `description` 别名。

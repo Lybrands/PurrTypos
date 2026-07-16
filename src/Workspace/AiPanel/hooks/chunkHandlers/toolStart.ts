@@ -1,5 +1,4 @@
 import {
-  isWritingExpertPipeline,
   type ChatMessage,
   type ToolCallLabelOutcome,
   type ToolCallSegment,
@@ -16,15 +15,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
 
   const partialContent = chunk.partialContent ?? "";
   const partialThinking = chunk.partialThinking ?? "";
-  const insertedByDag = chunk.orchestratorInfo?.insertedByDag ?? 0;
-  const repairReasons = (chunk.orchestratorRepair?.events || [])
-    .map((x) => String(x?.reason || "").trim())
-    .filter(Boolean);
-
-  const visibleToolCalls = (chunk.toolCalls || []).filter((tc) => {
-    const callId = String((tc as { id?: string })?.id || "");
-    return !callId.startsWith("repair_") && !callId.startsWith("sys_");
-  });
+  const visibleToolCalls = chunk.toolCalls;
 
   if (
     visibleToolCalls.length === 0 &&
@@ -68,14 +59,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
     },
   );
 
-  const taggedLabels = rows.map((row, idx) => {
-    const base = row.label;
-    const tc = visibleToolCalls[idx];
-    const callId = String(tc?.id || "");
-    if (callId.startsWith("repair_")) return `${base}（自动修复）`;
-    if (callId.startsWith("sys_")) return `${base}（自动补前置）`;
-    return base;
-  });
+  const labels = rows.map((row) => row.label);
   const labelOutcomes = rows.map((row) => row.outcome);
 
   const buildSegment = (
@@ -83,26 +67,16 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
     cachedFlags: boolean[],
   ): ToolCallSegment => ({
     textBefore,
-    labels: taggedLabels,
+    labels,
     labelOutcomes,
     cachedFlags,
     startedAt: performance.now(),
-    trace: {
-      insertedByDag,
-      insertedSkillNames: chunk.orchestratorInfo?.insertedSkillNames ?? [],
-      plannedToolNames: chunk.orchestratorInfo?.plannedToolNames ?? [],
-      repairedRounds: chunk.orchestratorRepair?.repairedRounds ?? 0,
-      repairReasons,
-      stage: chunk.subagentStage || undefined,
-    },
   });
 
-  const initialCachedFlags = visibleToolCalls.map((tc) =>
-    Boolean((tc as { cached?: boolean }).cached),
-  );
+  const initialCachedFlags = visibleToolCalls.map(() => false);
 
   let rebuiltAssistantText = "";
-  const { acc, agentMode } = ctx;
+  const { acc } = ctx;
 
   const applyThinkingFinalize = (currentThinking: string) => {
     if (!currentThinking.trim()) {
@@ -137,9 +111,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
         partialContent && partialContent.trim()
           ? partialContent
           : !hasPriorToolRound
-            ? isWritingExpertPipeline(agentMode)
-              ? ""
-              : acc.response || lastMsg.content || ""
+            ? acc.response || lastMsg.content || ""
             : "";
       const newSegment = buildSegment(textBefore, initialCachedFlags);
       const nextSegments = [...baseSegs, newSegment];
@@ -148,7 +120,6 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
           ? ""
           : (acc.contentAfterToolCalls ?? lastMsg.contentAfterToolCalls ?? "");
       if (
-        !isWritingExpertPipeline(agentMode) &&
         flushTailSegments.length === 0 &&
         textBefore &&
         afterToolCalls.startsWith(textBefore)
@@ -192,15 +163,12 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
       partialContent && partialContent.trim()
         ? partialContent
         : !hasPriorToolRound
-          ? isWritingExpertPipeline(agentMode)
-            ? ""
-            : acc.response || ""
+          ? acc.response || ""
           : "";
     const newSegment = buildSegment(textBefore, initialCachedFlags);
     const nextSegments = [...baseSegs, newSegment];
     let afterToolCallsBg = flushTailSegments.length > 0 ? "" : tailBg;
     if (
-      !isWritingExpertPipeline(agentMode) &&
       flushTailSegments.length === 0 &&
       textBefore &&
       afterToolCallsBg.startsWith(textBefore)

@@ -15,9 +15,11 @@ from agent_core.contracts import (
     TaskPlan,
     TaskStep,
     TaskStepUpdate,
+    ToolBatchOutcome,
     TraceRecord,
 )
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.errors import ContractViolationError
 from agent_core.ports import RunBeginResult, RunCommit, RuntimeObserver
 from agent_core.run_controller import AgentRunController
 
@@ -241,6 +243,7 @@ async def test_controller_is_runtime_observer_and_uses_core_events():
 
     assert isinstance(controller, RuntimeObserver)
     assert controller.current_allowed_tool_names() == {"readChapter"}
+    assert controller.future_allowed_tool_names() == frozenset()
     assert [event.type for event in repository.events] == [
         CoreEventType.RUN_STARTED,
         CoreEventType.RUN_TODOS_UPDATED,
@@ -250,6 +253,34 @@ async def test_controller_is_runtime_observer_and_uses_core_events():
         persisted is emitted
         for persisted, emitted in zip(repository.events, sink.events)
     )
+
+
+@pytest.mark.asyncio
+async def test_controller_rejects_non_atomic_tool_plan_before_persistence():
+    repository = RecordingRepository()
+    sink = RecordingSink()
+    controller = AgentRunController(repository=repository, event_sink=sink)
+    await controller.begin(
+        RunCreateParams(session_id=None, prompt="unsafe", mode="agent")
+    )
+    event_count = len(repository.events)
+
+    with pytest.raises(ContractViolationError, match="exactly one"):
+        await controller.install_plan(TaskPlan(
+            title="unsafe",
+            steps=(TaskStep(
+                id="combined",
+                title="Combined write",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("update", "delete"),
+            ),),
+        ))
+
+    assert repository.steps == []
+    assert len(repository.events) == event_count
+    assert controller.snapshot is not None
+    assert controller.snapshot.steps == ()
 
 
 @pytest.mark.asyncio
@@ -269,6 +300,49 @@ async def test_controller_progresses_steps_and_persists_terminal_before_events()
     assert repository.transitions == [(RunStatus.DONE, "final", None)]
     assert sink.events[-1].type == CoreEventType.RUN_COMPLETED
     assert repository.events[-1] is sink.events[-1]
+
+
+@pytest.mark.asyncio
+async def test_controller_persists_declined_tool_as_blocked_then_finishes_report():
+    controller, repository, sink = await _started()
+
+    await controller.on_tool_round_completed(ToolBatchOutcome.DECLINED)
+
+    steps = await controller.current_steps()
+    assert [step.status for step in steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.PENDING,
+    ]
+    assert steps[0].result_summary == (
+        "User declined approval; the planned tool was not executed."
+    )
+    assert steps[0].error == "approval_rejected"
+    assert repository.steps == list(steps)
+    assert controller.current_allowed_tool_names() == frozenset()
+    assert controller.future_allowed_tool_names() == frozenset()
+
+    declined_event = sink.events[-1]
+    assert declined_event.type == CoreEventType.RUN_TODO_UPDATED
+    assert declined_event.payload["step"]["status"] == "blocked"
+    assert declined_event.payload["step"]["error"] == "approval_rejected"
+    assert declined_event.payload["step"]["result_summary"] == (
+        "User declined approval; the planned tool was not executed."
+    )
+    assert "Planned tool step completed." not in str(declined_event.payload)
+
+    await controller.on_model_delta()
+    await controller.complete("not applied")
+
+    final_steps = await controller.current_steps()
+    assert controller.status is RunStatus.DONE
+    assert [step.status for step in final_steps] == [
+        StepStatus.BLOCKED,
+        StepStatus.DONE,
+    ]
+    assert final_steps[0].error == "approval_rejected"
+    assert repository.steps == list(final_steps)
+    assert repository.transitions == [(RunStatus.DONE, "not applied", None)]
+    assert sink.events[-1].type == CoreEventType.RUN_COMPLETED
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-from services.tool_handlers.setting_helpers import (
+from domains.writing.tools.setting_helpers import (
     filter_setting_rows,
     fields_from_args,
     merge_setting_proposal,

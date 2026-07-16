@@ -33,17 +33,12 @@ async def save_conversation(body: SaveConversationRequest):
         if body.taskPlan is not None
         else None
     )
-    subagent_result_json = (
-        json.dumps(body.subagentResult, ensure_ascii=False)
-        if body.subagentResult is not None
-        else None
-    )
     conversation_id = await db.execute_and_get_id(
         """INSERT INTO ai_conversations
            (session_id, chapter_id, prompt, response, model, thinking,
             tool_call_segments, thinking_blocks, thinking_durations_ms, duration_ms,
-            task_plan, subagent_result)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            task_plan)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             body.sessionId,
             body.chapterId,
@@ -56,11 +51,10 @@ async def save_conversation(body: SaveConversationRequest):
             thinking_durations_ms_json,
             body.durationMs,
             task_plan_json,
-            subagent_result_json,
         ],
     )
     if body.agentRunId and conversation_id is not None:
-        from services.agent_run_store import set_run_conversation_id
+        from infrastructure.persistence.run_store import set_run_conversation_id
 
         await set_run_conversation_id(db, str(body.agentRunId), int(conversation_id))
     try:
@@ -84,7 +78,10 @@ async def save_conversation(body: SaveConversationRequest):
 async def get_conversations(sessionId: str):
     db = get_db()
     rows = await db.fetch_all(
-        "SELECT * FROM ai_conversations WHERE session_id = ? ORDER BY create_time ASC",
+        "SELECT id, session_id, chapter_id, prompt, response, create_time, "
+        "model, thinking, tool_call_segments, thinking_blocks, "
+        "thinking_durations_ms, duration_ms, task_plan "
+        "FROM ai_conversations WHERE session_id = ? ORDER BY create_time ASC",
         [sessionId],
     )
     return {"success": True, "data": rows}

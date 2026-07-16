@@ -28,6 +28,17 @@ BANNED_WRITING_IDENTIFIERS = {
     "settingEntityId",
     "setting_entity_id",
 }
+BANNED_WRITING_TEXT_FRAGMENTS = {
+    "queryoutline",
+    "getchaptercontent",
+    "associatedoutlines",
+    "associated chapters",
+    "selected memories",
+    "大纲",
+    "章节",
+    "人物",
+    "伏笔",
+}
 
 
 def _source_files() -> list[Path]:
@@ -94,3 +105,16 @@ def test_agent_core_does_not_name_writing_scope_fields():
                 )
 
     assert not violations, "Agent Core writing-scope leaks:\n" + "\n".join(violations)
+
+
+def test_agent_core_prompts_do_not_embed_writing_domain_language():
+    violations: list[str] = []
+    for path in _source_files():
+        source = path.read_text(encoding="utf-8").casefold()
+        for fragment in sorted(BANNED_WRITING_TEXT_FRAGMENTS):
+            if fragment.casefold() in source:
+                violations.append(
+                    f"{path.relative_to(BACKEND_DIR)} contains {fragment!r}"
+                )
+
+    assert not violations, "Agent Core writing-text leaks:\n" + "\n".join(violations)

@@ -33,6 +33,17 @@ def estimate_json_tokens(value: Any) -> int:
     return _estimate_units(encoded, ascii_divisor=2)
 
 
+def estimate_text_tokens(value: Any) -> int:
+    """Conservatively estimate ordinary mixed-language prose.
+
+    Domain context providers may use this generic helper when fitting plain
+    text into an allocation. Structured messages and schemas must continue to
+    use the denser JSON estimator above.
+    """
+
+    return _estimate_units(str(value or ""), ascii_divisor=4)
+
+
 def _budget_message_mapping(message: AgentMessage) -> dict[str, Any]:
     """Return a conservative, provider-neutral representation for budgeting.
 

@@ -13,7 +13,6 @@ import type {
   ToolCallSegment,
 } from "../chat.types";
 import type { ConversationUpdater } from "./commitScheduler";
-import type { WritingSubagentRole } from "../../pipelineStages";
 
 /** 主进程 SSE chunk 的真实类型（直接从 ElectronAPI 接口提取，避免重复声明漂移） */
 export type AiStreamChunk = Parameters<
@@ -40,8 +39,6 @@ export interface AccState {
   contentAfterToolCalls?: string;
   /** 当前思考块开始时间（performance.now），用于计算 thinkingDurationsMs */
   thinkingBlockStartedAt?: number;
-  subagentPipelineDigest: string;
-  subagentResult?: { role: WritingSubagentRole; payload: unknown };
   agentRunId?: string;
   taskPlan?: AiTaskPlan;
 }
@@ -53,7 +50,6 @@ export interface AccState {
 export interface ChunkCtx {
   acc: AccState;
   sessionId: number;
-  agentMode: "legacy" | "subagent" | undefined;
   cfg: AiModelConfig;
   apiModelName: string;
   writingChapters: { id: EntityId; title: string }[];

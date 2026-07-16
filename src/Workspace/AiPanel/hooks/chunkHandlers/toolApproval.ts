@@ -24,3 +24,27 @@ export const handleToolApprovalRequired: ChunkHandler = (chunk, ctx) => {
     return next;
   });
 };
+
+/** Reconcile cards with the server-owned approval lifecycle. */
+export const handleToolApprovalResolved: ChunkHandler = (chunk, ctx) => {
+  const resolved = chunk.toolApprovalResolved;
+  if (!resolved?.approvalId || !ctx.isVisibleSession()) return;
+
+  ctx.setConversations((prev) => {
+    let changed = false;
+    const next = prev.map((message) => {
+      if (message.role !== "assistant" || !message.toolApprovals?.length) {
+        return message;
+      }
+      let approvalChanged = false;
+      const approvals = message.toolApprovals.map((approval) => {
+        if (approval.approvalId !== resolved.approvalId) return approval;
+        changed = true;
+        approvalChanged = true;
+        return { ...approval, status: resolved.status };
+      });
+      return approvalChanged ? { ...message, toolApprovals: approvals } : message;
+    });
+    return changed ? next : prev;
+  });
+};

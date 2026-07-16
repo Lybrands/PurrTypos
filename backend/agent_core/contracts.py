@@ -94,6 +94,15 @@ class MessageRole(StrEnum):
     TOOL = "tool"
 
 
+class MessageOrigin(StrEnum):
+    """Internal provenance that provider-shaped mappings cannot set."""
+
+    CALLER = "caller"
+    HOST_CONTEXT = "host_context"
+    MODEL = "model"
+    HOST_TOOL_RESULT = "host_tool_result"
+
+
 class ToolChoiceMode(StrEnum):
     NONE = "none"
     AUTO = "auto"
@@ -140,7 +149,9 @@ class AgentMessage:
     thinking: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
+    origin: MessageOrigin = MessageOrigin.CALLER
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    host_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         try:
@@ -152,13 +163,23 @@ class AgentMessage:
         object.__setattr__(self, "thinking", _optional_text(self.thinking))
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
         object.__setattr__(self, "tool_call_id", _optional_text(self.tool_call_id))
+        object.__setattr__(self, "origin", MessageOrigin(self.origin))
         if role is MessageRole.TOOL and not self.tool_call_id:
             raise ValueError("tool message requires tool_call_id")
         object.__setattr__(self, "attributes", _frozen_mapping(self.attributes))
+        object.__setattr__(
+            self,
+            "host_metadata",
+            _frozen_mapping(self.host_metadata),
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "AgentMessage":
         raw = dict(value)
+        # Provenance is assigned only by in-process Core composition. A
+        # provider-shaped or HTTP mapping can never claim a host origin.
+        raw.pop("origin", None)
+        raw.pop("host_metadata", None)
         role = raw.pop("role", "")
         content = raw.pop("content", None)
         thinking = raw.pop("thinking", raw.pop("reasoning_content", None))
@@ -355,9 +376,115 @@ class AgentRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningConstraints:
+    """Request-scoped limits on the tools a planner may select.
+
+    ``context_satisfied_tool_names`` is node-wide: the named tool's result is
+    already present in trusted context, so the planner must not call it.
+    ``planning_excluded_tool_names`` names tools that are valid runtime
+    capabilities but outside this request's explicitly bounded evidence or
+    action scope.  Exclusion is not a claim that their results are present.
+    ``satisfied_tool_dependency_edges`` is deliberately narrower: only the
+    named consumer's dependency is already satisfied, while the dependency
+    tool remains available for explicit use and for every other consumer.
+    """
+
+    context_satisfied_tool_names: frozenset[str] = frozenset()
+    planning_excluded_tool_names: frozenset[str] = frozenset()
+    satisfied_tool_dependency_edges: frozenset[tuple[str, str]] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "context_satisfied_tool_names",
+            frozenset(
+                str(name).strip()
+                for name in self.context_satisfied_tool_names
+                if str(name).strip()
+            ),
+        )
+        object.__setattr__(
+            self,
+            "planning_excluded_tool_names",
+            frozenset(
+                str(name).strip()
+                for name in self.planning_excluded_tool_names
+                if str(name).strip()
+            ),
+        )
+        edges: set[tuple[str, str]] = set()
+        for edge in self.satisfied_tool_dependency_edges:
+            if not isinstance(edge, (tuple, list)) or len(edge) != 2:
+                raise TypeError(
+                    "satisfied tool dependency edges must be tool/dependency pairs"
+                )
+            tool_name = str(edge[0]).strip()
+            dependency_name = str(edge[1]).strip()
+            if not tool_name or not dependency_name:
+                raise ValueError(
+                    "satisfied tool dependency edge names must be non-empty"
+                )
+            edges.add((tool_name, dependency_name))
+        object.__setattr__(
+            self,
+            "satisfied_tool_dependency_edges",
+            frozenset(edges),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseConstraints:
+    """Host-owned structural limits for a model's final response."""
+
+    exact_top_level_item_count: int | None = None
+
+    def __post_init__(self) -> None:
+        value = self.exact_top_level_item_count
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("exact response item count must be an integer")
+        if not 1 <= value <= 100:
+            raise ValueError("exact response item count must be between 1 and 100")
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseValidationResult:
+    """Business-agnostic result returned by an injected response validator.
+
+    An empty result accepts the response.  A rejected result carries a stable
+    machine-readable code plus trusted repair guidance supplied by the host
+    adapter; Core only orchestrates withholding and one bounded retry.
+    """
+
+    violation_code: str | None = None
+    repair_guidance: str | None = None
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        code = str(self.violation_code or "").strip() or None
+        guidance = str(self.repair_guidance or "").strip() or None
+        if (code is None) != (guidance is None):
+            raise ValueError(
+                "response validation rejection requires both a violation "
+                "code and repair guidance"
+            )
+        object.__setattr__(self, "violation_code", code)
+        object.__setattr__(self, "repair_guidance", guidance)
+        object.__setattr__(self, "details", _frozen_mapping(self.details))
+
+    @property
+    def accepted(self) -> bool:
+        return self.violation_code is None
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningCapabilities:
     available_tool_names: frozenset[str] = frozenset()
     model_supports_tools: bool = True
+    host_planning_facts: Mapping[str, Any] = field(default_factory=dict)
+    tool_guidance: Mapping[str, Any] = field(default_factory=dict)
+    constraints: PlanningConstraints = field(default_factory=PlanningConstraints)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -366,6 +493,18 @@ class PlanningCapabilities:
             frozenset(str(name).strip() for name in self.available_tool_names if str(name).strip()),
         )
         object.__setattr__(self, "model_supports_tools", bool(self.model_supports_tools))
+        object.__setattr__(
+            self,
+            "host_planning_facts",
+            _frozen_mapping(self.host_planning_facts),
+        )
+        object.__setattr__(
+            self,
+            "tool_guidance",
+            _frozen_mapping(self.tool_guidance),
+        )
+        if not isinstance(self.constraints, PlanningConstraints):
+            raise TypeError("planning constraints must be PlanningConstraints")
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,11 +579,11 @@ class PlannerLimits:
     max_step_id_chars: int = 48
     max_title_chars: int = 48
     max_goal_chars: int = 160
+    max_tool_steps: int = 4
 
     def __post_init__(self) -> None:
         for name in (
             "max_steps",
-            "max_output_tokens",
             "max_step_id_chars",
             "max_title_chars",
             "max_goal_chars",
@@ -453,6 +592,14 @@ class PlannerLimits:
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
             object.__setattr__(self, name, value)
+        max_tool_steps = int(self.max_tool_steps)
+        if max_tool_steps < 0 or max_tool_steps > self.max_steps:
+            raise ValueError("max_tool_steps must be between zero and max_steps")
+        object.__setattr__(self, "max_tool_steps", max_tool_steps)
+        max_output_tokens = int(self.max_output_tokens)
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        object.__setattr__(self, "max_output_tokens", max_output_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +697,7 @@ class ContextBlock:
     content: str
     token_count: int = 0
     untrusted: bool = True
+    host_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         name = str(self.name or "").strip()
@@ -562,6 +710,11 @@ class ContextBlock:
         object.__setattr__(self, "content", str(self.content or ""))
         object.__setattr__(self, "token_count", token_count)
         object.__setattr__(self, "untrusted", bool(self.untrusted))
+        object.__setattr__(
+            self,
+            "host_metadata",
+            _frozen_mapping(self.host_metadata),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -801,26 +954,50 @@ class ApprovalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RunProvenance:
+    """Immutable, non-secret identity of the model request behind a Run."""
+
+    model_provider: str
+    model_name: str
+    context_window: int
+    endpoint_digest: str
+    request_profile_digest: str
+
+    def __post_init__(self) -> None:
+        for name in ("model_provider", "model_name"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise ValueError(f"run provenance {name} is required")
+            object.__setattr__(self, name, value)
+        context_window = int(self.context_window)
+        if context_window <= 0:
+            raise ValueError("run provenance context_window must be positive")
+        object.__setattr__(self, "context_window", context_window)
+        for name in ("endpoint_digest", "request_profile_digest"):
+            value = str(getattr(self, name) or "").strip().lower()
+            if len(value) != 64 or any(
+                char not in "0123456789abcdef"
+                for char in value
+            ):
+                raise ValueError(f"run provenance {name} must be a SHA-256 digest")
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True, slots=True)
 class RunCreateParams:
     session_id: SessionId | None
     prompt: str
     mode: str | None
-    release_version: str | None = None
-    rollout_cohort: str | None = None
+    provenance: RunProvenance | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "prompt", str(self.prompt or ""))
         object.__setattr__(self, "mode", _optional_text(self.mode))
-        object.__setattr__(
-            self,
-            "release_version",
-            _optional_text(self.release_version),
-        )
-        object.__setattr__(
-            self,
-            "rollout_cohort",
-            _optional_text(self.rollout_cohort),
-        )
+        if self.provenance is not None and not isinstance(
+            self.provenance,
+            RunProvenance,
+        ):
+            raise TypeError("run provenance must be a RunProvenance value")
 
 
 @dataclass(frozen=True, slots=True)
@@ -866,6 +1043,7 @@ class AgentRunResult:
     status: RunStatus
     final_response: str = ""
     error: str | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
         run_id = str(self.run_id or "").strip()
@@ -878,6 +1056,7 @@ class AgentRunResult:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "final_response", str(self.final_response or ""))
         object.__setattr__(self, "error", _optional_text(self.error))
+        object.__setattr__(self, "model", _optional_text(self.model))
 
 
 @dataclass(frozen=True, slots=True)

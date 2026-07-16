@@ -1,7 +1,6 @@
 import React from "react";
 import { App as AntdApp } from "antd";
 import {
-  isWritingExpertPipeline,
   type ChatMessage,
   type ToolCallLabelOutcome,
   type ToolCallSegment,
@@ -17,7 +16,6 @@ import {
 import { createCommitScheduler } from "./chunkHandlers/commitScheduler";
 
 export {
-  isWritingExpertPipeline,
   type ChatMessage,
   type ToolCallLabelOutcome,
   type ToolCallSegment,
@@ -148,7 +146,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
     // 系统提示（会话绑定说明、关联章节/大纲内容、勾选记忆）统一由后端组装注入；
     // 前端只传结构化字段（ids / 模式），不再拼接任何 prompt 文案。
-    const toHistoryApiMessage = buildHistoryConverter("legacy");
+    const toHistoryApiMessage = buildHistoryConverter();
 
     let historyMessages: { role: string; content: string }[];
     if (isResend) {
@@ -198,8 +196,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       thinkingBlocks: [],
       thinkingDurationsMs: [],
       contentAfterToolCalls: "",
-      subagentPipelineDigest: "",
-      subagentResult: undefined,
       agentRunId: undefined,
       taskPlan: undefined,
     };
@@ -217,7 +213,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const ctx: ChunkCtx = {
       acc,
       sessionId,
-      agentMode: "legacy",
       cfg,
       apiModelName,
       writingChapters,
@@ -258,7 +253,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       sessionId,
       messages: newMessages,
       options: streamOptions,
-      tools: [],
       enableAgentTools,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,

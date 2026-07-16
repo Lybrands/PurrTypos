@@ -313,9 +313,6 @@ export default function EditorPanel({
 
     aiChunkUnsubRef.current?.()
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
-      if (chunk.toolRouterWarning) {
-        appMessage.warning(chunk.toolRouterWarning)
-      }
       if (chunk.error) {
         setAiFloat((prev) => ({ ...prev, loading: false, result: '请求失败：' + chunk.error }))
         unsubscribe()
@@ -369,7 +366,6 @@ export default function EditorPanel({
         { role: 'user', content: aiFloat.prompt },
       ],
       options: streamOptions,
-      tools: [],
       enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,

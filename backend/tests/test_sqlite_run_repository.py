@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest_asyncio
 
 from agent_core.contracts import (
     RunCreateParams,
+    RunProvenance,
     RunStatus,
     StepExecutor,
     StepStatus,
@@ -22,8 +24,8 @@ from agent_core.events import AgentEvent, CoreEventType
 from agent_core.ports import RunCommit, RunRepository
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
-from services import agent_run_store
-from services.agent_run_store import get_run, get_run_events, get_run_todos
+from infrastructure.persistence import run_store
+from infrastructure.persistence.run_store import get_run, get_run_events, get_run_todos
 
 
 @pytest_asyncio.fixture
@@ -40,13 +42,31 @@ async def run_db(tmp_path: Path):
 async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
     repository = SqliteRunRepository(run_db)
     assert isinstance(repository, RunRepository)
+    columns = {
+        row["name"]
+        for row in await run_db.fetch_all("PRAGMA table_info(ai_agent_runs)")
+    }
+    assert columns == {
+        "id",
+        "session_id",
+        "conversation_id",
+        "status",
+        "mode",
+        "prompt",
+        "model_provider",
+        "model_name",
+        "context_window",
+        "endpoint_digest",
+        "request_profile_digest",
+        "final_response",
+        "create_time",
+        "update_time",
+    }
 
     run_id = await repository.create(RunCreateParams(
         session_id=7,
         prompt="test prompt",
         mode="agent",
-        release_version="test-version",
-        rollout_cohort="test-cohort",
     ))
     await repository.replace_steps(run_id, [
         TaskStep(
@@ -81,8 +101,6 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
     assert run is not None
     assert run["status"] == "done"
     assert run["conversation_id"] == 99
-    assert run["release_version"] == "test-version"
-    assert run["rollout_cohort"] == "test-cohort"
     assert run["final_response"] == "final"
     assert todos == [{
         "id": "read",
@@ -96,6 +114,103 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "test.progress",
         "agentRunTrace",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db):
+    repository = SqliteRunRepository(run_db)
+    provenance = RunProvenance(
+        model_provider="openai",
+        model_name="writing-model",
+        context_window=200_000,
+        endpoint_digest="a" * 64,
+        request_profile_digest="b" * 64,
+    )
+
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="immutable provenance",
+        mode="agent",
+        provenance=provenance,
+    ))
+    row = await get_run(run_db, run_id)
+
+    assert row is not None
+    assert {
+        "model_provider": row["model_provider"],
+        "model_name": row["model_name"],
+        "context_window": row["context_window"],
+        "endpoint_digest": row["endpoint_digest"],
+        "request_profile_digest": row["request_profile_digest"],
+    } == {
+        "model_provider": "openai",
+        "model_name": "writing-model",
+        "context_window": 200_000,
+        "endpoint_digest": "a" * 64,
+        "request_profile_digest": "b" * 64,
+    }
+    with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
+        await run_db.execute(
+            "UPDATE ai_agent_runs SET model_name = ? WHERE id = ?",
+            ["replacement", run_id],
+        )
+
+    # Provenance-free callers remain valid for operational runs that do not
+    # originate from a model request.
+    plain_run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="operational run",
+        mode="agent",
+    ))
+    plain_run = await get_run(run_db, plain_run_id)
+    assert plain_run is not None
+    assert plain_run["request_profile_digest"] is None
+
+    await repository.transition(run_id, RunStatus.DONE, final_response="done")
+    assert (await get_run(run_db, run_id) or {})["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_schema_migrates_existing_agent_runs_without_fabricating_provenance(
+    tmp_path: Path,
+):
+    db_path = tmp_path / "purrtypos.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""CREATE TABLE ai_agent_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id INTEGER DEFAULT NULL,
+            conversation_id INTEGER DEFAULT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            mode TEXT DEFAULT NULL,
+            prompt TEXT NOT NULL DEFAULT '',
+            final_response TEXT DEFAULT '',
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        connection.execute(
+            "INSERT INTO ai_agent_runs (id, prompt) VALUES (?, ?)",
+            ["run-before-provenance", "historical"],
+        )
+
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        columns = {
+            row["name"]
+            for row in await db.fetch_all("PRAGMA table_info(ai_agent_runs)")
+        }
+        assert {
+            "model_provider",
+            "model_name",
+            "context_window",
+            "endpoint_digest",
+            "request_profile_digest",
+        }.issubset(columns)
+        historical = await get_run(db, "run-before-provenance")
+        assert historical is not None
+        assert historical["request_profile_digest"] is None
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -308,7 +423,7 @@ async def test_sqlite_repository_begin_rolls_back_run_when_outbox_write_fails(
     async def fail_append(*_args, **_kwargs):
         raise RuntimeError("outbox unavailable")
 
-    monkeypatch.setattr(agent_run_store, "append_event", fail_append)
+    monkeypatch.setattr(run_store, "append_event", fail_append)
     with pytest.raises(RuntimeError, match="outbox unavailable"):
         await repository.begin(
             RunCreateParams(session_id=None, prompt="rollback begin", mode="agent"),
@@ -697,7 +812,7 @@ async def test_sqlite_repository_commit_rolls_back_steps_terminal_and_outbox_tog
     async def fail_append(*_args, **_kwargs):
         raise RuntimeError("outbox unavailable")
 
-    monkeypatch.setattr(agent_run_store, "append_event", fail_append)
+    monkeypatch.setattr(run_store, "append_event", fail_append)
     with pytest.raises(RuntimeError, match="outbox unavailable"):
         await repository.commit(
             begun.run_id,

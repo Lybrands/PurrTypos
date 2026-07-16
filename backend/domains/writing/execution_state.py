@@ -1,4 +1,4 @@
-"""Compatibility factory for the current mutable writing tool context."""
+"""Factory for the mutable state consumed by Writing tool handlers."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ _WINDOW_LABELS = {
 
 
 class WritingExecutionStateFactory:
-    """Create one legacy-shaped state object per Agent Run."""
+    """Create one isolated Writing state object per Agent Run."""
 
     def create(self, request: AgentRunRequest) -> ExecutionState:
         context = WritingDomainContext.from_core_context(request.domain_context)
@@ -31,6 +31,9 @@ class WritingExecutionStateFactory:
             "availableOutlines": deepcopy(list(context.available_outlines)),
             "associatedChapterIds": list(context.associated_chapter_ids),
             "associatedOutlineIds": list(context.associated_outline_ids),
+            "selectedMemoryIds": list(context.selected_memory_ids),
+            "selectedForeshadowingIds": list(context.selected_foreshadowing_ids),
+            "chatAgentMode": request.mode or "",
             "contextWindow": (
                 context.context_window_label
                 or _WINDOW_LABELS.get(request.context_window or 0)

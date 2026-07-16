@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any
 
-from services.ai_provider import create_chat_no_stream
+from infrastructure.models.provider_router import create_chat_no_stream
 from services import long_term_memory_service
 
 MEMORY_INTELLIGENCE_ENABLED_KEY = "memory_intelligence_enabled"
