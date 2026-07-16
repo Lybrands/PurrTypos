@@ -9,21 +9,24 @@ import {
 } from '@ant-design/icons'
 import type { Chapter, EntityId } from '../types'
 import type { CommandItem } from './CommandPalette'
-import type { PanelKey, PersistedPanelState } from './hooks/usePanelLayout'
 
 export interface BuildPaletteCommandsDeps {
-  panelState: PersistedPanelState
-  toggleFloating: (key: PanelKey) => void
+  settingPanelActive: boolean
+  dashboardPanelActive: boolean
+  onToggleSettingPanel: () => void
+  onToggleDashboardPanel: () => void
   writingChapters: Chapter[]
   activeWritingChapterId: EntityId | null
   onChapterSelect: (id: EntityId, title: string) => void
   onOpenSettings?: () => void
 }
 
-/** 命令面板命令集合（浮窗控制 / 编辑动作 / 章节导航） */
+/** 命令面板命令集合（面板控制 / 编辑动作 / 章节导航） */
 export function buildPaletteCommands({
-  panelState,
-  toggleFloating,
+  settingPanelActive,
+  dashboardPanelActive,
+  onToggleSettingPanel,
+  onToggleDashboardPanel,
   writingChapters,
   activeWritingChapterId,
   onChapterSelect,
@@ -32,20 +35,20 @@ export function buildPaletteCommands({
   const base: CommandItem[] = [
     {
       id: 'panel:toggle-setting',
-      label: panelState.setting.open ? '关闭设定面板' : '打开设定面板',
+      label: settingPanelActive ? '收起小说设定' : '打开小说设定',
       icon: <ReadOutlined />,
-      category: '浮窗',
+      category: '面板',
       keywords: ['setting', 'character', 'background', '人物', '背景', '设定', '世界'],
-      run: () => toggleFloating('setting'),
+      run: onToggleSettingPanel,
     },
     {
       id: 'panel:toggle-dashboard',
-      label: panelState.dashboard.open ? '关闭仪表盘' : '打开仪表盘',
+      label: dashboardPanelActive ? '收起仪表盘' : '打开仪表盘',
       hint: '故事健康 / 写作统计',
       icon: <DashboardOutlined />,
-      category: '浮窗',
+      category: '面板',
       keywords: ['dashboard', 'stats', 'health', '仪表盘', '统计', '伏笔', '健康'],
-      run: () => toggleFloating('dashboard'),
+      run: onToggleDashboardPanel,
     },
     {
       id: 'action:diff-history',

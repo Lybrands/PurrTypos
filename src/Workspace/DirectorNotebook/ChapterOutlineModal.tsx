@@ -1,32 +1,28 @@
 import React from 'react'
-import { App as AntdApp, Alert, Button, Modal, Spin } from 'antd'
+import { App as AntdApp, Alert, Button, Spin } from 'antd'
 import { FileAddOutlined, ExportOutlined } from '@ant-design/icons'
 import type { Chapter, EntityId, Outline } from '../../types'
 import OutlineMarkdownPane, { type OutlineMarkdownPaneRef } from '../OutlinePanel/OutlineMarkdownPane'
 import './ChapterOutlineModal.scss'
 
-/** 弹窗承载的大纲类型 */
+/** 辅助面板承载的大纲类型 */
 export type OutlineModalMode = 'chapter' | 'volume' | 'global'
 
-export interface ChapterOutlineModalTarget {
+export interface ChapterOutlineTarget {
   mode: OutlineModalMode
   /** chapter / volume 模式下传入对应的写作条目；global 模式不需要 */
   chapter?: Chapter | null
-  /** 标题前缀展示用；不传时按 mode + chapter.title 拼 */
-  titleOverride?: string
 }
 
-export interface ChapterOutlineModalProps {
-  open: boolean
-  target: ChapterOutlineModalTarget | null
+export interface ChapterOutlinePanelProps {
+  target: ChapterOutlineTarget | null
   bookId: EntityId | null | undefined
-  onClose: () => void
   /** 创建/更新成功后通知外层（用于关联状态刷新等） */
   onChanged?: () => void
 }
 
 /**
- * 大纲弹窗：合并自原「大纲」分组，承载章节 / 卷 / 总纲三类大纲的查看与编辑。
+ * 大纲面板内容：承载章节 / 卷 / 总纲三类大纲的查看与编辑。
  *
  * 设计：
  * - 主流程：编辑「文本大纲」（markdown_content）
@@ -34,15 +30,13 @@ export interface ChapterOutlineModalProps {
  *   - chapter / volume → `saveOutline({type, writing_chapter_id, book_id})`
  *   - global → `ensureGlobalOutline(bookId)`
  * - 已有 XMind 大纲时显示提示条 + 「打开源文件」入口（XMind 上传/换图保留给后续）
- * - 关闭前自动 flushSave，保证草稿不丢
+ * - 从辅助面板卸载前自动 flushSave，保证草稿不丢
  */
-export default function ChapterOutlineModal({
-  open,
+export default function ChapterOutlinePanel({
   target,
   bookId,
-  onClose,
   onChanged,
-}: ChapterOutlineModalProps) {
+}: ChapterOutlinePanelProps) {
   const { message: appMessage } = AntdApp.useApp()
   const [loading, setLoading] = React.useState(false)
   const [outline, setOutline] = React.useState<Outline | null>(null)
@@ -53,13 +47,6 @@ export default function ChapterOutlineModal({
 
   const mode = target?.mode ?? 'chapter'
   const chapter = target?.chapter ?? null
-
-  const titleLabel = React.useMemo(() => {
-    if (target?.titleOverride) return target.titleOverride
-    if (mode === 'global') return '总纲'
-    if (mode === 'volume') return chapter?.title || '卷大纲'
-    return chapter?.title || '章节大纲'
-  }, [target, mode, chapter])
 
   const reload = React.useCallback(async () => {
     setError('')
@@ -110,9 +97,8 @@ export default function ChapterOutlineModal({
   }, [mode, chapter, bookId])
 
   React.useEffect(() => {
-    if (!open) return
     void reload()
-  }, [open, reload])
+  }, [reload])
 
   const handleCreateOutline = React.useCallback(async () => {
     if (creating) return
@@ -158,32 +144,12 @@ export default function ChapterOutlineModal({
     }
   }, [outline?.file_path, appMessage])
 
-  const handleClose = React.useCallback(async () => {
-    try {
-      await paneRef.current?.flushSave()
-    } finally {
-      onClose()
-    }
-  }, [onClose])
+  React.useEffect(() => () => {
+    void paneRef.current?.flushSave()
+  }, [])
 
-  const titlePrefix = mode === 'global' ? '总纲' : mode === 'volume' ? '卷大纲' : '大纲'
-
-  return (
-    <Modal
-      open={open}
-      onCancel={handleClose}
-      title={
-        <span className="chapter-outline-modal-title">
-          {titlePrefix} · <span className="chapter-outline-modal-chapter">{titleLabel}</span>
-        </span>
-      }
-      footer={null}
-      width={760}
-      destroyOnClose
-      className="chapter-outline-modal"
-      styles={{ body: { padding: 0 } }}
-    >
-      <div className="chapter-outline-modal-body">
+  const content = (
+    <div className="chapter-outline-modal-body">
         {error && (
           <Alert
             type="error"
@@ -206,7 +172,7 @@ export default function ChapterOutlineModal({
               {mode === 'global' ? '暂无总纲' : mode === 'volume' ? '该卷暂无大纲' : '该章节暂无大纲'}
             </p>
             <p className="chapter-outline-modal-empty-desc">
-              新建后即可在此弹窗内编辑文本大纲；如需 XMind 思维导图大纲，可上传 .xmind 文件。
+              新建后即可在此编辑文本大纲；如需 XMind 思维导图大纲，可上传 .xmind 文件。
             </p>
             <Button
               type="primary"
@@ -226,7 +192,7 @@ export default function ChapterOutlineModal({
                 className="chapter-outline-modal-alert"
                 message={
                   <span>
-                    该大纲有 XMind 思维导图文件，弹窗只能编辑文本部分。
+                    该大纲有 XMind 思维导图文件，当前面板只能编辑文本部分。
                     <Button
                       type="link"
                       size="small"
@@ -254,7 +220,12 @@ export default function ChapterOutlineModal({
             </div>
           </>
         )}
-      </div>
-    </Modal>
+    </div>
+  )
+
+  return (
+    <div className="chapter-outline-modal chapter-outline-panel">
+      {content}
+    </div>
   )
 }

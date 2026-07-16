@@ -39,6 +39,22 @@
   }
 }
 
+/* 工作区内全屏：覆盖 app-body，保留应用顶栏。 */
+.workspace-dock--fullscreen {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  flex: none;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  border: none;
+
+  .workspace-dock-resize {
+    display: none;
+  }
+}
+
 .workspace-dock-content {
   width: 100%;
   height: 100%;

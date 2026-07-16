@@ -2,6 +2,9 @@
 import React from 'react'
 import {
   CloseOutlined,
+  DoubleLeftOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
   UndoOutlined, RedoOutlined, AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
@@ -51,6 +54,12 @@ interface AiFloatState {
 
 interface EditorPanelProps {
   bookTitle: string
+  /** 当前是否处于右侧窄轨道触发的悬停预览。 */
+  dockCollapsed?: boolean
+  /** 将悬停预览固定展开为正文边栏。 */
+  onExpandDock?: () => void
+  fullscreen?: boolean
+  onToggleFullscreen?: () => void
   modelConfigs?: AiModelConfig[]
   onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   /** 工作台搜索：注册 Lexical 实例 */
@@ -59,6 +68,10 @@ interface EditorPanelProps {
 
 export default function EditorPanel({
   bookTitle: _bookTitle,
+  dockCollapsed = false,
+  onExpandDock,
+  fullscreen = false,
+  onToggleFullscreen,
   modelConfigs = [],
   onUpdateModelConfig,
   onLexicalEditor,
@@ -74,6 +87,11 @@ export default function EditorPanel({
   const diff = useDiff()
   const diffActive = chapterId != null && diff.hasSession(chapterId)
   const [diffHistoryOpen, setDiffHistoryOpen] = React.useState(false)
+  const [fullscreenTooltipOpen, setFullscreenTooltipOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    setFullscreenTooltipOpen(false)
+  }, [fullscreen])
 
   /** Inline Edit：选区状态 */
   const [inlineSelection, setInlineSelection] = React.useState<
@@ -378,10 +396,42 @@ export default function EditorPanel({
   }
 
   return (
-    <div className="editor-panel">
+    <div className={`editor-panel${fullscreen ? ' panel-main' : ''}`}>
       <div className="panel-header">
         <span className="panel-title">{chapterTitle || '选择章节开始写作'}</span>
         <div className="panel-header-actions">
+          {onToggleFullscreen ? (
+            <Tooltip
+              title={fullscreen ? '退出全屏' : '全屏'}
+              open={fullscreenTooltipOpen}
+              onOpenChange={setFullscreenTooltipOpen}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={fullscreen
+                  ? <FullscreenExitOutlined style={{ fontSize: 14 }} />
+                  : <FullscreenOutlined style={{ fontSize: 14 }} />}
+                onClick={(event) => {
+                  setFullscreenTooltipOpen(false)
+                  event.currentTarget.blur()
+                  onToggleFullscreen()
+                }}
+                aria-label={fullscreen ? '退出正文全屏' : '全屏显示正文'}
+              />
+            </Tooltip>
+          ) : null}
+          {dockCollapsed && onExpandDock ? (
+            <Tooltip title="固定展开正文边栏">
+              <Button
+                type="text"
+                size="small"
+                icon={<DoubleLeftOutlined style={{ fontSize: 14 }} />}
+                onClick={onExpandDock}
+                aria-label="固定展开正文边栏"
+              />
+            </Tooltip>
+          ) : null}
           {/*
            * diff 历史回滚按钮：始终可见且可点击，
            * 即使未选章节，也允许点开提示用户"请先选择章节"，

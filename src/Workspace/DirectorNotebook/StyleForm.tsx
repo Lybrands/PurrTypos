@@ -103,6 +103,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
   const [saving, setSaving] = React.useState(false)
   const [hasRemote, setHasRemote] = React.useState(false)
   const saveTimerRef = React.useRef<number | null>(null)
+  const pendingFormRef = React.useRef<StyleFormState | null>(null)
   const lastSavedJsonRef = React.useRef<string>('')
 
   React.useEffect(() => {
@@ -141,27 +142,30 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
 
   const scheduleSave = React.useCallback((next: StyleFormState) => {
     if (bookId == null) return
+    pendingFormRef.current = next
     if (saveTimerRef.current != null) {
       window.clearTimeout(saveTimerRef.current)
     }
     saveTimerRef.current = window.setTimeout(async () => {
       saveTimerRef.current = null
-      const json = JSON.stringify(next)
+      const pending = pendingFormRef.current ?? next
+      pendingFormRef.current = null
+      const json = JSON.stringify(pending)
       if (json === lastSavedJsonRef.current) return
       setSaving(true)
       try {
         const res = await window.electronAPI.saveBookStyle({
           bookId,
-          pov: next.pov,
-          tone: next.tone,
-          pace: next.pace,
-          banned_rules: next.banned_rules,
-          reference_chapter_ids: JSON.stringify(next.reference_chapter_ids),
-          free_notes: next.free_notes,
+          pov: pending.pov,
+          tone: pending.tone,
+          pace: pending.pace,
+          banned_rules: pending.banned_rules,
+          reference_chapter_ids: JSON.stringify(pending.reference_chapter_ids),
+          free_notes: pending.free_notes,
         })
         if (res?.success) {
           lastSavedJsonRef.current = json
-          setHasRemote(!isAllEmpty(next))
+          setHasRemote(!isAllEmpty(pending))
         } else {
           appMessage.error('保存风格基调失败')
         }
@@ -185,7 +189,19 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
     if (saveTimerRef.current != null) {
       window.clearTimeout(saveTimerRef.current)
     }
-  }, [])
+    const pending = pendingFormRef.current
+    if (bookId == null || pending == null) return
+    if (JSON.stringify(pending) === lastSavedJsonRef.current) return
+    void window.electronAPI.saveBookStyle({
+      bookId,
+      pov: pending.pov,
+      tone: pending.tone,
+      pace: pending.pace,
+      banned_rules: pending.banned_rules,
+      reference_chapter_ids: JSON.stringify(pending.reference_chapter_ids),
+      free_notes: pending.free_notes,
+    })
+  }, [bookId])
 
   const chapterOptions = React.useMemo(
     () => writingChapters.map((c) => ({

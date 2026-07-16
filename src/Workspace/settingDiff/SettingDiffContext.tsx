@@ -134,17 +134,18 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     const session = sessionHint ?? sessionsRef.current[sessionKey]
     if (!session) return
     window.dispatchEvent(new CustomEvent('workspace-open-panel', {
-      detail: { panel: 'setting', open: true },
-    }))
-    window.dispatchEvent(new CustomEvent('open-setting-panel', {
       detail: {
-        tab: session.kind === 'character'
-          ? 'characters'
-          : session.kind === 'entity'
-            ? 'entities'
-            : 'background',
-        characterId: session.characterId ?? null,
-        entityId: session.entityId ?? null,
+        panel: 'setting',
+        open: true,
+        setting: {
+          tab: session.kind === 'character'
+            ? 'characters'
+            : session.kind === 'entity'
+              ? 'entities'
+              : 'background',
+          characterId: session.characterId ?? null,
+          entityId: session.entityId ?? null,
+        },
       },
     }))
   }, [])
