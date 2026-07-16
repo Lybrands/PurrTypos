@@ -1,13 +1,24 @@
 import React from 'react'
 import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined } from '@ant-design/icons'
-import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tooltip } from 'antd'
-import type { AiModelConfig } from '../types'
+import { Button, Checkbox, Form, Input, Modal, Radio, Select, Slider, Switch, Tag, Tooltip } from 'antd'
+import type { AiBuiltinProviderId, AiModelConfig } from '../types'
+import {
+  AI_CONTEXT_WINDOW_LABELS,
+  AI_BUILTIN_PROVIDERS,
+  createConfigFromPreset,
+  getBuiltinProvider,
+  getDefaultPreset,
+  getModelPreset,
+  getModelContextWindowOptions,
+  getProviderPresets,
+} from '../modelCatalog'
 import { useAntdApp } from '../hooks/useAntdApp'
 import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import './index.scss'
 
 type SettingsTab = 'general' | 'ai' | 'models' | 'data'
+type AddModelMode = 'preset' | 'custom'
 
 const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
   { key: 'general', label: '通用' },
@@ -36,6 +47,9 @@ export default function SettingsPage({
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
+  const [addModelMode, setAddModelMode] = React.useState<AddModelMode>('preset')
+  const [selectedProviderId, setSelectedProviderId] = React.useState<AiBuiltinProviderId>('moonshot')
+  const [selectedPresetId, setSelectedPresetId] = React.useState('')
   const [form] = Form.useForm<Omit<AiModelConfig, 'id'>>()
   const apiProviderWatch = Form.useWatch('apiProvider', form)
   const thinkingEnabledWatch = Form.useWatch('thinkingEnabled', form)
@@ -57,27 +71,63 @@ export default function SettingsPage({
     }
   }, [modelModalOpen, customizeTemperatureWatch, thinkingEnabledWatch, form])
 
-  const openAddModel = () => {
-    setEditingConfig(null)
+  const customModelDefaults = React.useCallback((): Omit<AiModelConfig, 'id'> => ({
+    apiProvider: 'openai',
+    name: '',
+    nickname: '',
+    supportsThinking: false,
+    thinkingOnly: false,
+    thinkingEnabled: false,
+    contextWindow: '128k',
+    customizeTemperature: false,
+    temperatureThinking: 0.6,
+    temperatureNonThinking: 0.6,
+    apiKey: '',
+    baseUrl: '',
+  }), [])
+
+  const applyPresetToForm = React.useCallback((presetId: string, apiKey?: string) => {
+    const preset = getModelPreset(presetId)
+    if (!preset) return
+    const provider = getBuiltinProvider(preset.providerId)
+    if (!provider) return
     form.setFieldsValue({
-      apiProvider: 'openai',
-      name: '',
-      nickname: '',
-      supportsThinking: false,
+      apiProvider: provider.apiProvider,
+      name: preset.name,
+      nickname: form.getFieldValue('nickname') ?? '',
+      supportsThinking: preset.supportsThinking,
       thinkingOnly: false,
       thinkingEnabled: false,
-      contextWindow: '200k',
+      contextWindow: preset.contextWindow,
       customizeTemperature: false,
       temperatureThinking: 0.6,
       temperatureNonThinking: 0.6,
-      apiKey: '',
-      baseUrl: '',
+      apiKey: apiKey ?? form.getFieldValue('apiKey') ?? '',
+      baseUrl: provider.baseUrl,
     })
+  }, [form])
+
+  const selectPresetProvider = React.useCallback((providerId: AiBuiltinProviderId) => {
+    const preset = getDefaultPreset(providerId)
+    if (!preset) return
+    const existingKey = modelConfigList.find((config) => config.providerId === providerId)?.apiKey ?? ''
+    setSelectedProviderId(providerId)
+    setSelectedPresetId(preset.id)
+    applyPresetToForm(preset.id, existingKey)
+  }, [applyPresetToForm, modelConfigList])
+
+  const openAddModel = () => {
+    setEditingConfig(null)
+    setAddModelMode('preset')
+    form.resetFields()
+    form.setFieldsValue(customModelDefaults())
+    selectPresetProvider('moonshot')
     setModelModalOpen(true)
   }
 
   const openEditModel = (config: AiModelConfig) => {
     setEditingConfig(config)
+    form.resetFields()
     form.setFieldsValue({
       apiProvider: config.apiProvider ?? 'openai',
       name: config.name,
@@ -85,7 +135,7 @@ export default function SettingsPage({
       supportsThinking: config.thinkingEnabled ?? config.thinkingOnly ?? false,
       thinkingOnly: false,
       thinkingEnabled: config.thinkingEnabled ?? config.thinkingOnly ?? false,
-      contextWindow: config.contextWindow ?? '200k',
+      contextWindow: config.contextWindow ?? '128k',
       customizeTemperature: config.customizeTemperature ?? true,
       temperatureThinking: config.temperatureThinking ?? 0.6,
       temperatureNonThinking: config.temperatureNonThinking ?? 0.6,
@@ -97,12 +147,16 @@ export default function SettingsPage({
 
   const handleModelModalOk = () => {
     form.validateFields().then((values) => {
-      const name = (values.name ?? '').trim()
+      const selectedPreset = !editingConfig && addModelMode === 'preset'
+        ? getModelPreset(selectedPresetId)
+        : undefined
+      const selectedPresetProvider = getBuiltinProvider(selectedPreset?.providerId)
+      const name = (selectedPreset?.name ?? values.name ?? '').trim()
       const nickname = (values.nickname ?? '').trim()
       const apiKey = (values.apiKey ?? '').trim()
-      const baseUrl = (values.baseUrl ?? '').trim()
+      const baseUrl = (selectedPresetProvider?.baseUrl ?? values.baseUrl ?? '').trim()
       const thinkingEnabled = !!values.thinkingEnabled
-      const contextWindow = values.contextWindow ?? '200k'
+      const contextWindow = values.contextWindow ?? '128k'
       const customizeTemperature = !!values.customizeTemperature
       let temperatureNonThinking = editingConfig?.temperatureNonThinking ?? 0.6
       let temperatureThinking = editingConfig?.temperatureThinking ?? 0.6
@@ -122,6 +176,24 @@ export default function SettingsPage({
       }
       if (!apiKey) {
         message.warning('请填写 API Key')
+        return
+      }
+      if (!editingConfig && addModelMode === 'preset') {
+        if (!selectedPreset) {
+          message.warning('请选择一个内置模型')
+          return
+        }
+        const newConfig = createConfigFromPreset({
+          id: `model_${shortUuid()}`,
+          preset: selectedPreset,
+          apiKey,
+          nickname,
+        })
+        const next = [...modelConfigList, newConfig]
+        setModelConfigList(next)
+        onSaveModelConfigs(next)
+        message.success('已添加')
+        setModelModalOpen(false)
         return
       }
       const prov: 'openai' | 'anthropic' =
@@ -269,6 +341,9 @@ export default function SettingsPage({
           {activeTab === 'models' && (
             <div className="settings-section">
               <h2 className="settings-section-title">模型配置</h2>
+              <p className="settings-section-desc settings-model-section-desc">
+                可从内置目录快速添加当前项目使用的模型；代理、自建服务和其他 OpenAI / Anthropic 兼容模型仍可使用高级自定义接入。
+              </p>
               <div className="settings-models-actions" style={{ marginBottom: 12 }}>
                 <Button type="primary" icon={<PlusOutlined />} onClick={openAddModel}>
                   新增模型
@@ -278,51 +353,56 @@ export default function SettingsPage({
                 <p className="settings-field-desc">暂无模型，请点击「新增模型」添加后，在 AI 对话中选择使用。</p>
               ) : (
                 <ul className="settings-model-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                  {modelConfigList.map((c) => (
-                    <li key={c.id} className="settings-model-item">
-                      <div className="settings-model-item-main">
-                        <span style={{ fontWeight: 500 }}>{displayName(c)}</span>
-                        {c.nickname?.trim() ? (
-                          <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>{c.name}</span>
-                        ) : null}
-                        <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                          Context {(c.contextWindow ?? '200k').toUpperCase()}
-                        </span>
-                        <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                          {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
-                        </span>
-                        <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                          {c.apiProvider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'}
-                        </span>
-                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
-                          {c.baseUrl?.trim() || (c.apiProvider === 'anthropic' ? '默认 api.anthropic.com' : '未填写接口地址')}
-                          {c.apiKey ? (
-                            <span style={{ marginLeft: 8 }}>
-                              <CheckOutlined style={{ fontSize: 12 }} /> 已配置 Key
-                            </span>
+                  {modelConfigList.map((c) => {
+                    const preset = getModelPreset(c.presetId)
+                    const builtinProvider = getBuiltinProvider(c.providerId)
+                    return (
+                      <li key={c.id} className="settings-model-item">
+                        <div className="settings-model-item-main">
+                          <span style={{ fontWeight: 500 }}>{displayName(c)}</span>
+                          {preset ? <Tag color="blue" className="settings-model-builtin-tag">内置</Tag> : null}
+                          {c.nickname?.trim() ? (
+                            <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>{c.name}</span>
                           ) : null}
+                          <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                            Context {(c.contextWindow ?? '128k').toUpperCase()}
+                          </span>
+                          <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                            {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
+                          </span>
+                          <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                            {builtinProvider?.name ?? (c.apiProvider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容')}
+                          </span>
+                          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
+                            {c.baseUrl?.trim() || (c.apiProvider === 'anthropic' ? '默认 api.anthropic.com' : '未填写接口地址')}
+                            {c.apiKey ? (
+                              <span style={{ marginLeft: 8 }}>
+                                <CheckOutlined style={{ fontSize: 12 }} /> 已配置 Key
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                      <div className="settings-model-item-actions">
-                        <Tooltip title="复制一项">
-                          <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => handleDuplicateModel(c)} />
-                        </Tooltip>
-                        <Tooltip title="编辑">
-                          <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditModel(c)} />
-                        </Tooltip>
-                        <Tooltip title="删除">
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<DeleteOutlined />}
-                            onClick={() => {
-                              if (window.confirm(`确定删除模型「${displayName(c)}」？`)) handleDeleteModel(c.id)
-                            }}
-                          />
-                        </Tooltip>
-                      </div>
-                    </li>
-                  ))}
+                        <div className="settings-model-item-actions">
+                          <Tooltip title="复制一项">
+                            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => handleDuplicateModel(c)} />
+                          </Tooltip>
+                          <Tooltip title="编辑">
+                            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditModel(c)} />
+                          </Tooltip>
+                          <Tooltip title="删除">
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<DeleteOutlined />}
+                              onClick={() => {
+                                if (window.confirm(`确定删除模型「${displayName(c)}」？`)) handleDeleteModel(c.id)
+                              }}
+                            />
+                          </Tooltip>
+                        </div>
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
               <Modal
@@ -347,6 +427,79 @@ export default function SettingsPage({
                 }}
               >
                 <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+                  {!editingConfig ? (
+                    <div className="settings-model-add-mode">
+                      <Radio.Group
+                        value={addModelMode}
+                        optionType="button"
+                        buttonStyle="solid"
+                        onChange={(event) => {
+                          const nextMode = event.target.value as AddModelMode
+                          setAddModelMode(nextMode)
+                          form.resetFields()
+                          form.setFieldsValue(customModelDefaults())
+                          if (nextMode === 'preset') selectPresetProvider(selectedProviderId)
+                        }}
+                      >
+                        <Radio.Button value="preset">内置模型</Radio.Button>
+                        <Radio.Button value="custom">高级自定义</Radio.Button>
+                      </Radio.Group>
+                      <span>内置目录只代填已知参数，不改变现有模型调用方式。</span>
+                    </div>
+                  ) : null}
+
+                  {!editingConfig && addModelMode === 'preset' ? (
+                    <>
+                      <Form.Item label="服务商" required>
+                        <Select
+                          value={selectedProviderId}
+                          onChange={(value) => selectPresetProvider(value as AiBuiltinProviderId)}
+                          options={AI_BUILTIN_PROVIDERS.map((provider) => ({
+                            value: provider.id,
+                            label: provider.name,
+                          }))}
+                        />
+                      </Form.Item>
+                      <Form.Item label="模型" required>
+                        <Select
+                          value={selectedPresetId}
+                          onChange={(value) => {
+                            setSelectedPresetId(value)
+                            applyPresetToForm(value)
+                          }}
+                          options={getProviderPresets(selectedProviderId).map((preset) => ({
+                            value: preset.id,
+                            label: `${preset.label}${preset.recommended ? '（推荐）' : ''}`,
+                          }))}
+                        />
+                      </Form.Item>
+                      {getModelPreset(selectedPresetId) ? (
+                        <div className="settings-model-preset-summary">
+                          <div>
+                            <strong>{getModelPreset(selectedPresetId)?.label}</strong>
+                            <span>{getModelPreset(selectedPresetId)?.summary}</span>
+                          </div>
+                          <div className="settings-model-preset-meta">
+                            <Tag>Context {getModelPreset(selectedPresetId)?.contextWindow.toUpperCase()}</Tag>
+                            {getModelPreset(selectedPresetId)?.supportsThinking ? <Tag>支持 Thinking</Tag> : null}
+                          </div>
+                        </div>
+                      ) : null}
+                      <Form.Item name="nickname" label="昵称">
+                        <Input placeholder="选填，AI 对话中优先显示昵称" />
+                      </Form.Item>
+                      <Form.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
+                        <Input.Password
+                          placeholder={getBuiltinProvider(selectedProviderId)?.keyPlaceholder ?? 'sk-xxxxxxxxxxxxxxxx'}
+                        />
+                      </Form.Item>
+                      <div className="settings-model-preset-endpoint">
+                        <span>接口地址</span>
+                        <code>{getBuiltinProvider(selectedProviderId)?.baseUrl}</code>
+                      </div>
+                    </>
+                  ) : (
+                    <>
                   <Form.Item name="apiProvider" label="API 类型" rules={[{ required: true }]}>
                     <Radio.Group>
                       <Radio value="openai">OpenAI</Radio>
@@ -366,12 +519,11 @@ export default function SettingsPage({
                     rules={[{ required: true, message: '请选择 Context' }]}
                   >
                     <Radio.Group optionType="button" buttonStyle="solid">
-                      <Radio.Button value="32k">32K</Radio.Button>
-                      <Radio.Button value="64k">64K</Radio.Button>
-                      <Radio.Button value="128k">128K</Radio.Button>
-                      <Radio.Button value="200k">200K</Radio.Button>
-                      <Radio.Button value="300k">300K</Radio.Button>
-                      <Radio.Button value="1m">1M</Radio.Button>
+                      {getModelContextWindowOptions(editingConfig).map((value) => (
+                        <Radio.Button key={value} value={value}>
+                          {AI_CONTEXT_WINDOW_LABELS[value]}
+                        </Radio.Button>
+                      ))}
                     </Radio.Group>
                   </Form.Item>
                   <Form.Item name="thinkingEnabled" valuePropName="checked" label="Thinking">
@@ -433,6 +585,8 @@ export default function SettingsPage({
                       }
                     />
                   </Form.Item>
+                    </>
+                  )}
                 </Form>
               </Modal>
             </div>

@@ -1002,11 +1002,17 @@ export interface GeneralSettings {
   memory_intelligence_model_id?: string;
 }
 
-export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '300k' | '1m';
+export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
+
+export type AiBuiltinProviderId = 'moonshot' | 'minimax' | 'mimo';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export interface AiModelConfig {
   id: string;
+  /** 来自内置目录时记录预设 id；旧配置与高级自定义配置不需要该字段。 */
+  presetId?: string;
+  /** 内置目录中的服务商 id，仅用于设置页展示与后续目录升级。 */
+  providerId?: AiBuiltinProviderId;
   /**
    * API 协议：openai 为 OpenAI 兼容 Chat Completions；anthropic 为 Anthropic Messages API（@anthropic-ai/sdk）。
    * 未设置时按 openai 处理。

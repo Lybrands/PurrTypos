@@ -49,7 +49,11 @@ export async function buildInjectedContext({
         try {
           const res = await window.electronAPI.getArticle({ chapterId: id })
           const content = res.success ? res.data?.content?.trim() ?? '' : ''
-          const charLimit = contextWindow === '1m' ? 12000 : contextWindow === '300k' ? 6000 : 4000
+          const charLimit = contextWindow === '1m'
+            ? 12000
+            : contextWindow === '256k' || contextWindow === '300k'
+              ? 6000
+              : 4000
           const truncated =
             content.length > charLimit
               ? content.slice(0, charLimit) +

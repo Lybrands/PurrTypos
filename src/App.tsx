@@ -2,6 +2,7 @@ import React, { Suspense, lazy } from 'react'
 import { App as AntdApp, Spin } from 'antd'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
+import { migrateKnownModelConfigs } from './modelCatalog'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -26,7 +27,11 @@ export default function App() {
       if (!res.success || !res.data) return
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
-        setModelConfigs(res.data.ai_model_configs)
+        const migration = migrateKnownModelConfigs(res.data.ai_model_configs)
+        setModelConfigs(migration.configs)
+        if (migration.changed) {
+          void window.electronAPI.setSettings({ ai_model_configs: migration.configs })
+        }
       }
     })
   }, [])
