@@ -9,7 +9,7 @@ interface DockedPanelProps {
   minWidth: number
   maxWidth: number
   onWidthChange: (width: number) => void
-  /** 左侧栏越过最小宽度后触发折叠。 */
+  /** 拖拽越过最小宽度后触发折叠。 */
   onCollapse?: (width: number) => void
   ariaLabel: string
   children: React.ReactNode
@@ -54,7 +54,7 @@ export default function DockedPanel({
     const handlePointerMove = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - startX
       const requested = side === 'left' ? startWidth + delta : startWidth - delta
-      const shouldCollapse = side === 'left' && !!onCollapse && requested <= minWidth - 28
+      const shouldCollapse = !!onCollapse && requested <= minWidth - 28
       collapseArmedRef.current = shouldCollapse
       setCollapseArmed(shouldCollapse)
       const nextWidth = Math.min(maxWidth, Math.max(minWidth, requested))
@@ -87,7 +87,7 @@ export default function DockedPanel({
     event.preventDefault()
     const movement = event.key === 'ArrowRight' ? 16 : -16
     const widthDelta = side === 'left' ? movement : -movement
-    if (side === 'left' && onCollapse && widthRef.current <= minWidth && widthDelta < 0) {
+    if (onCollapse && widthRef.current <= minWidth && widthDelta < 0) {
       onCollapse(minWidth)
       return
     }

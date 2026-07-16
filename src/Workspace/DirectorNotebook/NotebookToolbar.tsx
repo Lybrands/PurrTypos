@@ -1,117 +1,52 @@
 import React from 'react'
-import { Button, Modal, Tag, Tooltip } from 'antd'
+import { Button, Tooltip } from 'antd'
 import {
-  TeamOutlined,
-  GlobalOutlined,
+  BookOutlined,
   BulbOutlined,
   HighlightOutlined,
 } from '@ant-design/icons'
 import { useWorkspace } from '../WorkspaceContext'
-import MemoryCenter from '../AiPanel/components/MemoryCenter'
-import StyleForm, { type StyleFormStatus } from './StyleForm'
+import {
+  GLOBAL_OUTLINE_TAB,
+  MEMORY_TAB,
+  STYLE_TAB,
+  type WorkspaceUtilityTab,
+} from '../utilityPanelTypes'
 import './NotebookToolbar.scss'
 
-type ToolKey = 'characters' | 'background' | 'memory' | 'style'
-
 interface ToolDef {
-  key: ToolKey
+  tab: WorkspaceUtilityTab
   icon: React.ReactNode
-  label: string
 }
 
 const TOOLS: ToolDef[] = [
-  { key: 'characters', icon: <TeamOutlined />, label: '人物' },
-  { key: 'background', icon: <GlobalOutlined />, label: '故事背景' },
-  { key: 'memory', icon: <BulbOutlined />, label: '记忆 / 伏笔' },
-  { key: 'style', icon: <HighlightOutlined />, label: '风格基调' },
+  { tab: GLOBAL_OUTLINE_TAB, icon: <BookOutlined /> },
+  { tab: MEMORY_TAB, icon: <BulbOutlined /> },
+  { tab: STYLE_TAB, icon: <HighlightOutlined /> },
 ]
 
-/**
- * 导演笔记本工具栏：把人物 / 故事背景 / 记忆-伏笔 / 风格基调
- * 收成 4 个图标按钮，点击通过弹窗承载。这样左栏只剩章节列表，更纯净。
- */
+/** 工作台顶部的全书级工具入口；内容统一在正文左侧的辅助面板中打开。 */
 export default function NotebookToolbar() {
-  const { bookId } = useWorkspace()
-  const [open, setOpen] = React.useState<ToolKey | null>(null)
-  const [styleStatus, setStyleStatus] = React.useState<StyleFormStatus>({ hasRemote: false, saving: false })
-
-  const handleOpen = React.useCallback((key: ToolKey) => () => {
-    if (key === 'characters') {
-      window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'setting', open: true } }))
-      window.dispatchEvent(new CustomEvent('open-setting-panel', { detail: { tab: 'characters' } }))
-      return
-    }
-    if (key === 'background') {
-      window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'setting', open: true } }))
-      window.dispatchEvent(new CustomEvent('open-setting-panel', { detail: { tab: 'background' } }))
-      return
-    }
-    setOpen(key)
-  }, [])
-  const handleClose = React.useCallback(() => setOpen(null), [])
-
-  const styleStatusTag = React.useMemo(() => {
-    if (styleStatus.saving) return <Tag color="processing" style={{ margin: 0 }}>保存中…</Tag>
-    if (styleStatus.hasRemote) return <Tag color="success" style={{ margin: 0 }}>已配置</Tag>
-    return <Tag style={{ margin: 0 }}>未配置</Tag>
-  }, [styleStatus])
-
-  const renderModalTitle = (def: ToolDef, suffix?: React.ReactNode) => (
-    <span className="notebook-toolbar-modal-title">
-      {def.label}
-      {suffix && <span className="notebook-toolbar-modal-suffix">{suffix}</span>}
-    </span>
-  )
+  const { utilityPanelOpen, activeUtilityTabKey, toggleUtilityTab } = useWorkspace()
 
   return (
-    <>
-      <div className="notebook-toolbar">
-        {TOOLS.map((t) => (
-          <Tooltip key={t.key} title={t.label} placement="bottom">
+    <div className="notebook-toolbar">
+      {TOOLS.map(({ tab, icon }) => {
+        const active = utilityPanelOpen && activeUtilityTabKey === tab.key
+        return (
+          <Tooltip key={tab.key} title={tab.title} placement="bottom">
             <Button
               type="text"
               size="small"
-              icon={t.icon}
-              onClick={handleOpen(t.key)}
-              className="notebook-toolbar-btn"
+              icon={icon}
+              onClick={() => toggleUtilityTab(tab)}
+              className={`app-header-action-btn notebook-toolbar-btn${active ? ' panel-toggle-active' : ''}`}
+              aria-pressed={active}
+              aria-label={tab.title}
             />
           </Tooltip>
-        ))}
-      </div>
-
-      {/* 人物 / 故事背景已迁移至设定浮窗；保留 memory / style 弹窗 */}
-
-      {/* 记忆 / 伏笔 */}
-      <Modal
-        open={open === 'memory'}
-        onCancel={handleClose}
-        title={renderModalTitle(TOOLS[2])}
-        footer={null}
-        width={860}
-        destroyOnClose
-        className="notebook-toolbar-modal"
-        styles={{ body: { padding: 0 } }}
-      >
-        <div className="notebook-toolbar-modal-body">
-          <MemoryCenter bookId={bookId} />
-        </div>
-      </Modal>
-
-      {/* 风格基调 */}
-      <Modal
-        open={open === 'style'}
-        onCancel={handleClose}
-        title={renderModalTitle(TOOLS[3], styleStatusTag)}
-        footer={null}
-        width={680}
-        destroyOnClose
-        className="notebook-toolbar-modal"
-        styles={{ body: { padding: 0 } }}
-      >
-        <div className="notebook-toolbar-modal-body">
-          <StyleForm onStatusChange={setStyleStatus} />
-        </div>
-      </Modal>
-    </>
+        )
+      })}
+    </div>
   )
 }

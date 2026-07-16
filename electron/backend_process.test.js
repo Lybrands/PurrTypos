@@ -49,6 +49,33 @@ test('starts the development backend once with the expected environment', () => 
   assert.match(spawnCalls[0][2].env.PURRTYPOS_SKILLS_DIR, /backend[\\/]skills$/)
 })
 
+test('prefers the project virtual environment for the development backend', () => {
+  const moduleDir = '/app/electron'
+  const virtualEnvPython = '/app/.venv/bin/python'
+  const { manager, spawnCalls } = createManager({
+    platform: 'darwin',
+    moduleDir,
+    fsImpl: { existsSync: (candidate) => candidate === virtualEnvPython },
+  })
+
+  manager.start()
+
+  assert.equal(manager.getVirtualEnvPython(), virtualEnvPython)
+  assert.equal(spawnCalls[0][0], virtualEnvPython)
+})
+
+test('falls back to the system Python when no project virtual environment exists', () => {
+  const { manager, spawnCalls } = createManager({
+    platform: 'darwin',
+    fsImpl: { existsSync: () => false },
+  })
+
+  manager.start()
+
+  assert.equal(manager.getVirtualEnvPython(), null)
+  assert.equal(spawnCalls[0][0], 'python')
+})
+
 test('uses a packaged executable when one exists', () => {
   const executable = '/resources/backend/purrtypos-backend.exe'
   const { manager, spawnCalls } = createManager({

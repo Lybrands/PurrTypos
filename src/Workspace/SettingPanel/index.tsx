@@ -17,23 +17,32 @@ export interface OpenSettingPanelDetail {
 
 interface SettingPanelProps {
   bookId: EntityId | null
+  /** 面板首次挂载前收到的定位请求也能通过 prop 补发。 */
+  openRequest?: OpenSettingPanelDetail | null
 }
 
-export default function SettingPanel({ bookId }: SettingPanelProps) {
+export default function SettingPanel({ bookId, openRequest }: SettingPanelProps) {
   const [activeTab, setActiveTab] = React.useState<SettingPanelTab>('characters')
   const [focusCharacterId, setFocusCharacterId] = React.useState<number | null>(null)
   const [focusEntityId, setFocusEntityId] = React.useState<number | null>(null)
 
+  const applyOpenRequest = React.useCallback((detail?: OpenSettingPanelDetail | null) => {
+    if (detail?.tab) setActiveTab(detail.tab)
+    if (detail?.characterId != null) setFocusCharacterId(detail.characterId)
+    if (detail?.entityId != null) setFocusEntityId(detail.entityId)
+  }, [])
+
+  React.useEffect(() => {
+    applyOpenRequest(openRequest)
+  }, [applyOpenRequest, openRequest])
+
   React.useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<OpenSettingPanelDetail>).detail
-      if (detail?.tab) setActiveTab(detail.tab)
-      if (detail?.characterId != null) setFocusCharacterId(detail.characterId)
-      if (detail?.entityId != null) setFocusEntityId(detail.entityId)
+      applyOpenRequest((e as CustomEvent<OpenSettingPanelDetail>).detail)
     }
     window.addEventListener('open-setting-panel', handler as EventListener)
     return () => window.removeEventListener('open-setting-panel', handler as EventListener)
-  }, [])
+  }, [applyOpenRequest])
 
   const tabItems = [
     {

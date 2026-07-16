@@ -648,24 +648,26 @@
     }
   }
 
-  /* 聊天列表：居中限宽 */
+  /*
+   * 滚动容器撑满内容区，让滚动条贴在面板最右侧；
+   * 实际消息列表仍在容器内部居中限宽，保持原有阅读宽度。
+   */
   .chat-history-wrap {
     background: transparent;
-    justify-content: center;
   }
 
   .chat-history {
-    /*
-     * 基础样式里是 `flex: 1`（等价于 flex-basis: 0%），会盖掉这里的 width
-     * 让对话列被父级 .chat-history-wrap 横向撑满。
-     * 改成 `flex: 0 1 auto` —— 不主动 grow、可以 shrink、basis 取自 width，
-     * 这样下面的 width / max-width / margin auto 才真正生效。
-     */
-    flex: 0 1 auto;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: var(--spacing) 0;
+  }
+
+  .chat-virtuoso-list {
     width: var(--main-col-width);
     max-width: 100%;
-    margin: 0 auto;
-    padding: var(--spacing) 24px;
+    margin-inline: auto;
+    padding-inline: 24px;
   }
 
   /*

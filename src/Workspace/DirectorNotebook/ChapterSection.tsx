@@ -1,6 +1,5 @@
 import React from 'react'
 import {
-  BookOutlined,
   CheckSquareOutlined,
   DeleteOutlined,
   ExportOutlined,
@@ -11,7 +10,7 @@ import type { Chapter, EntityId } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import ExportModal from '../../components/ExportModal'
 import { useWorkspace } from '../WorkspaceContext'
-import ChapterOutlineModal, { type ChapterOutlineModalTarget } from './ChapterOutlineModal'
+import { createOutlineUtilityTab } from '../utilityPanelTypes'
 import ChapterSectionNavigation from './ChapterSectionNavigation'
 import {
   buildChapterSectionModel,
@@ -53,6 +52,7 @@ export default function ChapterSection({
     enableVolume,
     setActiveChapter: onChapterSelect,
     setChaptersData: onChaptersChange,
+    openUtilityTab,
     workspaceSearchQuery,
   } = useWorkspace()
 
@@ -71,7 +71,6 @@ export default function ChapterSection({
   const [selectedIds, setSelectedIds] = React.useState<Set<EntityId>>(new Set())
   const [exportModalOpen, setExportModalOpen] = React.useState(false)
   const [exportSelectedIds, setExportSelectedIds] = React.useState<EntityId[]>([])
-  const [outlineModalTarget, setOutlineModalTarget] = React.useState<ChapterOutlineModalTarget | null>(null)
 
   const {
     volumes,
@@ -105,20 +104,12 @@ export default function ChapterSection({
   })
 
   const openChapterOutline = React.useCallback((chapter: Chapter) => {
-    setOutlineModalTarget({ mode: 'chapter', chapter })
-  }, [])
+    openUtilityTab(createOutlineUtilityTab('chapter', chapter))
+  }, [openUtilityTab])
 
   const openVolumeOutline = React.useCallback((chapter: Chapter) => {
-    setOutlineModalTarget({ mode: 'volume', chapter })
-  }, [])
-
-  const openGlobalOutline = React.useCallback(() => {
-    setOutlineModalTarget({ mode: 'global', titleOverride: bookTitle || '本书' })
-  }, [bookTitle])
-
-  const handleOutlineChanged = React.useCallback(() => {
-    window.dispatchEvent(new CustomEvent('chapter-outline-changed'))
-  }, [])
+    openUtilityTab(createOutlineUtilityTab('volume', chapter))
+  }, [openUtilityTab])
 
   const handleAddChapter = () => createItem({
     title: numberedChapterTitle('章', writableChapters.length + 1, newTitle),
@@ -286,15 +277,6 @@ export default function ChapterSection({
       <div className="chapter-list-actionbar">
         <span className="chapter-list-count">共 {writableChapters.length} 章</span>
         <div className="chapter-list-actionbar-actions">
-          <Tooltip title="总纲（全书大纲）">
-            <Button
-              type="text"
-              size="small"
-              icon={<BookOutlined style={{ fontSize: 14 }} />}
-              onClick={openGlobalOutline}
-              className="nav-action-btn"
-            />
-          </Tooltip>
           <Tooltip title="导出章节">
             <Button
               type="text"
@@ -423,14 +405,6 @@ export default function ChapterSection({
           onDeleteItem={handleDeleteItem}
         />
       </div>
-
-      <ChapterOutlineModal
-        open={outlineModalTarget !== null}
-        target={outlineModalTarget}
-        bookId={bookId}
-        onClose={() => setOutlineModalTarget(null)}
-        onChanged={handleOutlineChanged}
-      />
     </>
   )
 }
