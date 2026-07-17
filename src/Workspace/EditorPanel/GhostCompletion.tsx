@@ -127,18 +127,17 @@ export default function GhostCompletion({
       ],
       options: {
         model: model.name,
+        ...(model.presetId ? { model_profile: model.presetId } : {}),
         temperature: 0.5,
         thinking: { type: 'disabled' },
         max_tokens: 120,
       },
-      tools: [],
       enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,
       writingChapters: [],
       availableOutlines: [],
-      agentMode: 'legacy',
       chatAgentMode: 'ask',
     })
 

@@ -5,28 +5,163 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+import anyio
+from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
-from schemas.ai import ChatStreamRequest, GenerateTitleRequest, ListModelsRequest
-from utils.chat_stream import (
-    StreamAccumulator,
-    build_chat_request_params,
-    build_tool_results_display,
-    build_tool_round_messages,
-    inject_system_prompt,
-    last_user_message_text,
-    resolve_chat_modes,
-    valid_named_tool_calls,
+from agent_core.contracts import RunProvenance
+from application.request_mapping import (
+    UnsupportedCallerToolContractError,
+    build_chat_provider_options,
+)
+from schemas.ai import (
+    ChatStreamRequest,
+    GenerateTitleRequest,
+    ListModelsRequest,
+    ResolveToolApprovalRequest,
 )
 from utils.session_title import normalize_session_title
 from utils.url import normalize_base_url
 
 router = APIRouter(tags=["ai"])
 logger = logging.getLogger(__name__)
+
+
+class _AgentClientDisconnected(Exception):
+    """A guarded ASGI send observed the client disconnect."""
+
+
+class _AgentEventSourceResponse(EventSourceResponse):
+    """Close the Agent iterator when ASGI 2.4 reports disconnect via send()."""
+
+    def __init__(
+        self,
+        content,
+        *,
+        abort: asyncio.Event,
+        cleanup_complete: asyncio.Event,
+        **kwargs,
+    ) -> None:
+        self._agent_abort = abort
+        self._agent_cleanup_complete = cleanup_complete
+        super().__init__(content, **kwargs)
+
+    async def __call__(self, scope, receive, send) -> None:
+        async def _guarded_send(message) -> None:
+            try:
+                await send(message)
+            except OSError as error:
+                # Mark cancellation at the exact transport observation point,
+                # before sse-starlette's task group cancels the stream task.
+                self._agent_abort.set()
+                # If this was the body send, the iterator is suspended at a
+                # yield and can be closed here. If it was a ping send, aclose
+                # reports that the iterator is running; in that case the abort
+                # signal lets the body task drain to its durable terminal.
+                aclose = getattr(self.body_iterator, "aclose", None)
+                if aclose is not None:
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await aclose()
+                        except RuntimeError:
+                            pass
+                        except Exception:
+                            logger.exception(
+                                "Agent stream cleanup failed after send disconnect"
+                            )
+                if not self._agent_cleanup_complete.is_set():
+                    with anyio.move_on_after(5, shield=True):
+                        await self._agent_cleanup_complete.wait()
+                raise _AgentClientDisconnected from error
+
+        try:
+            await super().__call__(scope, receive, _guarded_send)
+        except _AgentClientDisconnected:
+            # ASGI spec 2.4 permits ``send`` to be the first place a closed
+            # client is observed. Close the iterator explicitly even when the
+            # disconnect listener never receives ``http.disconnect``.
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await aclose()
+                    except Exception:
+                        logger.exception(
+                            "Agent stream cleanup failed after client disconnect"
+                        )
+            self._agent_cleanup_complete.set()
+            # The peer is gone, so there is no response body left to finish.
+            # Treat this as the transport's normal disconnect completion.
+            return
+
+
+@router.post("/ai/tool-approvals/{approval_id}")
+async def resolve_pending_tool_approval(
+    approval_id: str,
+    body: ResolveToolApprovalRequest,
+):
+    """Resolve one live Human-in-the-Loop approval request exactly once."""
+    from application.agent_composition import get_agent_composition
+
+    try:
+        composition = get_agent_composition()
+    except RuntimeError:
+        return {
+            "success": False,
+            "error": "Agent 当前不可用，无法处理确认请求。",
+        }
+    status = composition.resolve_approval(approval_id, body.approved)
+    if status is None:
+        return {
+            "success": False,
+            "error": "确认请求不存在、已过期或已被处理。",
+        }
+    return {
+        "success": True,
+        "data": {"status": getattr(status, "value", status)},
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/diagnostics")
+async def get_agent_run_diagnostics(run_id: str):
+    """Return persisted host traces plus deterministic operational checks."""
+    from agent_core.evaluation import (
+        evaluate_agent_run,
+        evaluate_agent_run_performance,
+    )
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run, get_run_events
+
+    db = get_db()
+    run = await get_run(db, run_id)
+    if run is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    events = await get_run_events(db, run_id)
+    report = evaluate_agent_run(run, events)
+    report["performance"] = evaluate_agent_run_performance(events)
+    return {"success": True, "data": report}
+
+
+@router.get("/ai/agent-runtime-regressions")
+async def get_agent_runtime_regressions():
+    """Run content-free operational incidents against the current evaluator."""
+    from application.operations.deterministic_checks import (
+        run_runtime_regression_suite,
+    )
+
+    return {"success": True, "data": run_runtime_regression_suite()}
+
+
+@router.get("/ai/agent-security-redteam")
+async def get_agent_security_redteam():
+    """Run deterministic, content-free host security boundary checks."""
+    from application.operations.deterministic_checks import (
+        run_agent_security_redteam_suite,
+    )
+
+    return {"success": True, "data": run_agent_security_redteam_suite()}
 
 
 # ── POST /ai/models ─────────────────────────────────────────────
@@ -102,7 +237,9 @@ async def generate_title(body: GenerateTitleRequest):
 
     try:
         if body.apiProvider == "anthropic":
-            from services.anthropic_chat import generate_title as anth_title
+            from infrastructure.models.anthropic_chat import (
+                generate_title as anth_title,
+            )
 
             title = await anth_title(key, body.prompt, {"model": model, "baseURL": base_url})
             title = (title or "").strip()
@@ -117,7 +254,7 @@ async def generate_title(body: GenerateTitleRequest):
             logger.info("[ai-generate-title] 生成标题: %s", title)
             return {"success": True, "data": title}
 
-        from services.openai_chat import generate_title as openai_title
+        from infrastructure.models.openai_chat import generate_title as openai_title
 
         title = await openai_title(key, body.prompt, {"model": model, "baseURL": base_url})
         title = (title or "").strip()
@@ -133,103 +270,84 @@ async def generate_title(body: GenerateTitleRequest):
         return {"success": False, "error": str(e)}
 
 
-# ── POST /ai/chat/stream (SSE) ──────────────────────────────────
-
-async def _stream_writing_subagent(
+async def _stream_composed_agent(
     *,
-    abort: asyncio.Event,
-    key: str,
-    api_provider: str | None,
-    sub_rp: dict[str, Any],
-    tool_ctx: dict[str, Any],
-    messages: list[dict],
-    model: str,
-    subagent_role: str,
-):
-    """运行单次写作子专家，把其进度事件作为 SSE json 串逐条 yield 出来。
+    body: ChatStreamRequest,
+    api_key: str,
+    provider_options: dict[str, Any],
+    signal: asyncio.Event,
+    provenance: RunProvenance | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run the complete Agent Engine assembled by the application root."""
 
-    子专家在后台 task 里跑，进度经 queue 回传；结束（或异常）后补一个终止哨兵。
-    断开/取消时负责清理后台 task，正常收尾再补一个 ``done``。
-    """
-    progress_queue: asyncio.Queue = asyncio.Queue()
+    from agent_core.events import AgentEvent
+    from application.agent_composition import get_agent_composition
+    from application.run_provenance import build_chat_run_provenance
+    from application.request_mapping import (
+        to_writing_agent_request,
+        writing_run_options,
+    )
+    from application.sse_mapping import core_update_to_sse_chunk
+    from infrastructure.models.capabilities import normalize_thinking_enabled
 
-    def _send_sub(ev: dict[str, Any]) -> None:
-        try:
-            progress_queue.put_nowait(ev)
-        except Exception:
-            pass
-
-    async def _sub_runner() -> None:
-        try:
-            from services.writing_subagents import run_writing_subagent
-
-            await run_writing_subagent(
-                role=subagent_role,
-                send_chunk=_send_sub,
-                signal=abort,
-                key=key,
-                api_provider=api_provider,
-                request_params=sub_rp,
-                tool_ctx=dict(tool_ctx),
-                messages=list(messages),
-                model=model,
+    composition = get_agent_composition()
+    provider_capabilities = composition.provider_capabilities
+    request = to_writing_agent_request(body, provider_options)
+    provenance = provenance or build_chat_run_provenance(body)
+    capability_key = provider_capabilities.key(
+        api_provider=body.apiProvider,
+        base_url=str(provider_options.get("baseURL") or ""),
+        model=request.model.model,
+        thinking_enabled=normalize_thinking_enabled(provider_options),
+    )
+    response_judges = composition.create_response_judges(api_key, request)
+    options = writing_run_options(
+        request,
+        provider_options,
+        force_planned_tool_choice=(
+            not provider_capabilities.required_tool_choice_is_unsupported(
+                capability_key
             )
-        except Exception as e:
-            logger.exception("[ai/chat/stream] writing subagent")
-            await progress_queue.put({"error": str(e)})
-        finally:
-            await progress_queue.put(None)
-
-    sub_task = asyncio.create_task(_sub_runner())
+        ),
+        provenance=provenance,
+        response_judges=response_judges,
+    )
+    core = composition.create_core(
+        api_key,
+        on_required_tool_choice_unsupported=(
+            lambda: provider_capabilities.mark_required_tool_choice_unsupported(
+                capability_key
+            )
+        ),
+    )
+    core_stream = core.run(request, options=options, signal=signal)
+    run_id: str | None = None
     try:
-        while True:
-            item = await progress_queue.get()
-            if item is None:
-                break
-            yield json.dumps(item)
+        async for update in core_stream:
+            if isinstance(update, AgentEvent):
+                composition.observe_event(update)
+                run_id = update.run_id or run_id
+            else:
+                run_id = update.run_id or run_id
+            chunk = core_update_to_sse_chunk(update, model=request.model.model)
+            if chunk is not None:
+                yield chunk
     finally:
-        if not sub_task.done():
-            sub_task.cancel()
+        # sse-starlette cancels its streaming task from an AnyIO cancel scope
+        # when ASGI receives ``http.disconnect``.  Shield the inner generator
+        # close so AgentCore can durably commit consumer_disconnected before
+        # the response task exits; otherwise only the in-memory approval map
+        # is cleared and the persisted Run can remain stuck at running.
+        with anyio.CancelScope(shield=True):
             try:
-                await sub_task
-            except asyncio.CancelledError:
-                pass
-
-    if not abort.is_set():
-        yield json.dumps({"done": True, "model": model})
-
-
-async def _run_agent_tool_round(
-    valid_calls: list[dict],
-    tool_exec_ctx: dict[str, Any],
-    acc_content: str,
-    acc_thinking: str,
-) -> tuple[list[dict], list[dict]]:
-    """执行一轮工具调用。
-
-    返回 ``(events, appended_messages)``：``events`` 是要原样 yield 给前端的事件
-    （逐工具进度 + 结果汇总），``appended_messages`` 是要追加进对话历史的
-    ``[assistant, *tool]`` 序列。``run_tools`` 的进度经回调收集，待其结束后统一发出
-    （与原 endpoint 行为一致，中间无交错 yield）。
-    """
-    from services.tool_executor import run_tools
-
-    progress_events: list[dict] = []
-    tool_results = await run_tools(
-        valid_calls, tool_exec_ctx, send_chunk=progress_events.append,
-    )
-    events: list[dict] = list(progress_events)
-    events.append({
-        "toolResults": build_tool_results_display(tool_results, valid_calls),
-    })
-    appended = build_tool_round_messages(
-        valid_calls, acc_content, acc_thinking, tool_results,
-    )
-    return events, appended
+                await core_stream.aclose()
+            finally:
+                if run_id:
+                    composition.release_run(run_id)
 
 
 @router.post("/ai/chat/stream")
-async def chat_stream(body: ChatStreamRequest, request: Request):
+async def chat_stream(body: ChatStreamRequest):
     key = (body.apiKey or "").strip()
     if not key:
         async def _err_key():
@@ -245,236 +363,72 @@ async def chat_stream(body: ChatStreamRequest, request: Request):
 
     temperature = opts.get("temperature")
     rest = {k: v for k, v in opts.items() if k not in ("model", "temperature")}
-
     base_url = normalize_base_url(body.baseURL)
-    request_params = build_chat_request_params(
-        model, rest, base_url, temperature, body.tools,
+    request_params = build_chat_provider_options(
+        model,
+        rest,
+        base_url,
+        temperature,
     )
 
+    # EventSourceResponse is the sole ASGI ``receive`` owner. Its disconnect
+    # callback translates the transport event into the cancellation signal
+    # shared by planner, model, and tool operations.
+    abort = asyncio.Event()
+    stream_cleanup_complete = asyncio.Event()
+
+    async def _on_client_disconnect(_message: dict[str, Any]) -> None:
+        abort.set()
+        with anyio.move_on_after(5, shield=True):
+            await stream_cleanup_complete.wait()
+
     async def _event_generator():
-        abort = asyncio.Event()
-
-        async def _check_disconnect():
-            while not abort.is_set():
-                if await request.is_disconnected():
-                    abort.set()
-                    break
-                await asyncio.sleep(0.5)
-
-        disconnect_task = asyncio.create_task(_check_disconnect())
-
+        composed_stream = _stream_composed_agent(
+            body=body,
+            api_key=key,
+            provider_options=request_params,
+            signal=abort,
+        )
         try:
-            from services.ai_provider import create_chat_stream
-
-            modes = resolve_chat_modes(
-                body.agentMode,
-                body.chatAgentMode,
-                body.writingMode,
-                body.bookId,
-                body.subagentRole,
-            )
-
-            tool_ctx_book: dict[str, Any] = {
-                "bookId": body.bookId,
-                "chapterId": body.chapterId,
-                "currentChapterTitle": body.currentChapterTitle,
-                "writingChapters": list(body.writingChapters or []),
-                "availableOutlines": list(body.availableOutlines or []),
-                "associatedChapterIds": list(body.associatedChapterIds or []),
-                "associatedOutlineIds": list(body.associatedOutlineIds or []),
-            }
-            sub_rp = build_chat_request_params(model, rest, base_url, temperature)
-
-            # ── 前置上下文：勾选记忆 + 关联章节/大纲内容，宿主预取后直接注入 ──
-            # （取代旧的"前端拼文案 + 命令模型自己调工具去读"两套机制）
-            from utils.chat_preflight import (
-                build_associated_context_block,
-                build_selected_memory_block,
-                build_session_binding_prompt,
-            )
-
-            messages: list[dict] = list(body.messages or [])
-            memory_block = await build_selected_memory_block(
-                body.selectedMemoryIds, body.selectedForeshadowingIds,
-            )
-            inject_system_prompt(messages, memory_block)
-            assoc_block = await build_associated_context_block(tool_ctx_book)
-            inject_system_prompt(messages, assoc_block)
-
-            # ── 写作专家：按需子专家（单次调用，非管线）────────────────────────
-            if modes.is_writing_expert_book and body.subagentRole:
-                async for evt in _stream_writing_subagent(
-                    abort=abort,
-                    key=key,
-                    api_provider=body.apiProvider,
-                    sub_rp=sub_rp,
-                    tool_ctx=tool_ctx_book,
-                    messages=messages,
-                    model=model,
-                    subagent_role=str(body.subagentRole),
-                ):
-                    yield evt
-                return
-
-            # ── Agent mode: 装载全量 skills 工具列表 ───────────────────────
-            # 历史名 useToolRouter 是个误导词：这里并不做语义路由，只是
-            # "是否把 skills/<name>/SKILL.md 解析出的工具一股脑塞给 LLM"开关。
-            # 真正的工具选择由 LLM 自行基于 schema + description 决定。
-            agent_tools: list[dict] = []
-            if body.enableAgentTools and body.bookId and not request_params.get("tools"):
-                try:
-                    from services.tool_router import get_api_skill_items
-                    from services.agent_tool_definitions import to_openai_tools
-                    skill_items = get_api_skill_items()
-                    if skill_items:
-                        agent_tools = to_openai_tools(skill_items)
-                        request_params["tools"] = agent_tools
-                        logger.info("[agent] 加载工具 %d 个", len(agent_tools))
-                except Exception:
-                    logger.warning("[agent] 工具加载失败", exc_info=True)
-
-            is_collab = modes.is_collab
-            if is_collab and agent_tools:
-                from utils.collab_prompt import filter_collab_tools
-
-                last_user = last_user_message_text(body.messages)
-                agent_tools = filter_collab_tools(list(agent_tools), last_user)
-                request_params["tools"] = agent_tools
-                logger.info("[agent][collab] 工具过滤后 %d 个", len(agent_tools))
-
-            tool_exec_ctx = {
-                "bookId": body.bookId,
-                "chapterId": body.chapterId,
-                "currentChapterTitle": body.currentChapterTitle,
-                "writingChapters": list(body.writingChapters or []),
-                "availableOutlines": list(body.availableOutlines or []),
-                "associatedChapterIds": list(body.associatedChapterIds or []),
-                "associatedOutlineIds": list(body.associatedOutlineIds or []),
-                "collabWriting": is_collab,
-            }
-
-            # ── 会话绑定说明（原前端 systemSuffix，文案权收归后端）────────────
-            # 写作专家模式跳过：其 system prompt 的 tooling appendix 已含同等规则。
-            if not modes.should_inject_writing_prompt:
-                binding = build_session_binding_prompt(
-                    tool_ctx_book,
-                    tools_enabled=bool(body.enableAgentTools and body.bookId),
-                )
-                inject_system_prompt(messages, binding)
-
-            if is_collab:
-                from utils.collab_prompt import (
-                    build_collab_system_prompt,
-                    build_collab_turn_appendix,
-                )
-
-                collab_inject = "\n\n".join(
-                    p for p in (
-                        build_collab_system_prompt(),
-                        build_collab_turn_appendix(messages),
-                    ) if p
-                )
-                inject_system_prompt(messages, collab_inject)
-
-            if modes.should_inject_writing_prompt:
-                from utils.writing_prompt import build_writing_main_system_prompt
-
-                # Layer 1：强制注入风格基调
-                try:
-                    from database.crud.book_style import get_book_style
-                    from dependencies import get_db as _get_db_for_style
-                    tool_ctx_book["bookStyle"] = await get_book_style(
-                        _get_db_for_style(), str(body.bookId)
-                    )
-                except Exception:
-                    logger.exception("[ai/chat/stream] load book_style failed")
-                    tool_ctx_book["bookStyle"] = None
-
-                writing_inject = build_writing_main_system_prompt(tool_ctx_book)
-                inject_system_prompt(messages, writing_inject)
-
-            used_model = model
-            _MAX_ROUNDS = 6
-
-            for _round in range(_MAX_ROUNDS):
-                if abort.is_set():
-                    break
-
-                result = await create_chat_stream(
-                    key, messages, request_params, body.apiProvider, signal=abort,
-                )
-                stream = result["stream"]
-                used_model = result.get("model", model)
-
-                acc = StreamAccumulator()
-                got_tool_calls = False
-
-                async for chunk in stream:
-                    if abort.is_set():
-                        break
-
-                    outcome = acc.process_chunk(chunk)
-                    for evt in outcome.events:
-                        yield json.dumps(evt)
-                    if not outcome.has_choice:
-                        continue
-
-                    finish_reason = outcome.finish_reason
-                    if finish_reason in ("stop", "length"):
-                        if acc.tool_calls:
-                            if valid_named_tool_calls(acc.tool_calls):
-                                finish_reason = "tool_calls"
-                            else:
-                                yield json.dumps({"done": True, "model": used_model})
-                                return
-                        else:
-                            yield json.dumps({"done": True, "model": used_model})
-                            return
-
-                    if finish_reason in ("tool_calls", "function_call"):
-                        valid_calls = valid_named_tool_calls(acc.tool_calls)
-                        if not valid_calls:
-                            yield json.dumps({"done": True, "model": used_model})
-                            return
-
-                        # Emit tool calls for frontend display
-                        yield json.dumps({
-                            "toolCalls": valid_calls,
-                            "toolCallsInProgress": True,
-                            "partialContent": acc.content,
-                            "partialThinking": acc.thinking,
-                            "model": used_model,
-                        })
-
-                        if not agent_tools:
-                            yield json.dumps({"done": True, "model": used_model})
-                            return
-
-                        # ── Agent loop: execute tools then continue ───────
-                        round_events, appended = await _run_agent_tool_round(
-                            valid_calls, tool_exec_ctx, acc.content, acc.thinking,
-                        )
-                        for evt in round_events:
-                            yield json.dumps(evt)
-                        messages = messages + appended
-
-                        got_tool_calls = True
-                        break  # restart with updated messages
-
-                if not got_tool_calls:
-                    if not abort.is_set():
-                        yield json.dumps({"done": True, "model": used_model})
-                    return
-
-            # Max rounds reached
-            if not abort.is_set():
-                yield json.dumps({"done": True, "model": used_model})
-
-        except Exception as e:
-            logger.exception("[ai/chat/stream] error")
-            yield json.dumps({"error": str(e)})
+            async for composed_chunk in composed_stream:
+                yield json.dumps(composed_chunk)
+        except UnsupportedCallerToolContractError as error:
+            logger.info("[ai/chat/stream] rejected request contract: %s", error)
+            yield json.dumps({
+                "error": (
+                    "当前 Agent 不支持调用方自定义 tools 或 tool_choice；"
+                    "请求已停止，未调用模型或执行工具。"
+                ),
+            })
+        except Exception:
+            logger.exception("[ai/chat/stream] composed Agent failed")
+            yield json.dumps({
+                "error": "Agent 运行过程中发生异常，已安全停止；请稍后重试。",
+            })
         finally:
-            abort.set()
-            disconnect_task.cancel()
+            with anyio.CancelScope(shield=True):
+                try:
+                    await composed_stream.aclose()
+                finally:
+                    abort.set()
+                    stream_cleanup_complete.set()
 
-    return EventSourceResponse(_event_generator(), media_type="text/event-stream")
+    async def _transport_event_generator():
+        """Drain cancellation events without writing after disconnect."""
+
+        source = _event_generator()
+        try:
+            async for payload in source:
+                if not abort.is_set():
+                    yield payload
+        finally:
+            with anyio.CancelScope(shield=True):
+                await source.aclose()
+
+    return _AgentEventSourceResponse(
+        _transport_event_generator(),
+        abort=abort,
+        cleanup_complete=stream_cleanup_complete,
+        media_type="text/event-stream",
+        client_close_handler_callable=_on_client_disconnect,
+    )

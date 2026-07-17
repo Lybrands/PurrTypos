@@ -141,12 +141,176 @@ export interface ChapterDiffHistory {
   create_time?: string;
 }
 
+/** 人物设定快照（diff 前后对比） */
+export interface CharacterSettingSnapshot {
+  name: string;
+  tags: string;
+  profileMd: string;
+}
+
+export interface CharacterSettingHistory {
+  id: number;
+  character_id: number;
+  before_name: string;
+  before_tags: string;
+  before_profile_md: string;
+  after_name: string;
+  after_tags: string;
+  after_profile_md: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
+export interface StoryBackgroundSettingHistory {
+  id: number;
+  book_id: EntityId;
+  before_content: string;
+  after_content: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
+/** 世界设定实体类型（地点 / 势力 / 物品 / 其他） */
+export type SettingEntityType = "location" | "faction" | "item" | "other";
+
+export interface SettingEntity {
+  id: number;
+  book_id: EntityId;
+  entity_type: SettingEntityType;
+  name: string;
+  tags: string;
+  profile_md: string;
+  create_time?: string;
+}
+
+export interface SettingEntityHistory {
+  id: number;
+  entity_id: number;
+  before_name: string;
+  before_tags: string;
+  before_profile_md: string;
+  after_name: string;
+  after_tags: string;
+  after_profile_md: string;
+  source: string;
+  accepted_segments: number;
+  rejected_segments: number;
+  create_time?: string;
+}
+
+/** AI 工具提交的设定 diff 提议（人物 / 故事背景 / 世界设定实体） */
+export interface ProposedSettingDiff {
+  kind: "character" | "background" | "entity";
+  bookId: EntityId;
+  characterId?: number;
+  characterName?: string;
+  entityId?: number;
+  entityType?: SettingEntityType;
+  entityName?: string;
+  before: CharacterSettingSnapshot | { content: string };
+  proposed: CharacterSettingSnapshot | { content: string };
+  source?: string;
+}
+
+/** 服务端暂停高风险 Agent 工具调用时发送的用户确认请求。 */
+export type ToolApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "timed_out"
+  | "canceled"
+  | "unavailable";
+
+export interface ToolApprovalRequest {
+  approvalId: string;
+  toolName: string;
+  title: string;
+  riskLevel: "write" | "destructive";
+  /** 后端生成的参数预览，供用户决定是否批准。 */
+  summary: string;
+  /** 服务端审批生命周期；缺省时按 pending 处理。 */
+  status?: ToolApprovalStatus;
+}
+
+/** 设定 diff 卡片终态（提交 / 放弃后持久化到消息） */
+export interface SettingDiffCardState {
+  sessionKey: string;
+  kind: "character" | "background" | "entity";
+  title: string;
+  status: "pending" | "committed" | "rejected";
+  acceptedSegments?: number;
+  rejectedSegments?: number;
+}
+
 export interface StoryBackgroundAttachment {
   id: number;
   book_id: EntityId;
   name: string;
   stored_path: string;
   create_time?: string;
+}
+
+// ─── 仪表盘（故事健康度 / 写作统计）───────────────────────────────
+
+export interface ForeshadowHealthItem {
+  id: number;
+  content: string;
+  type: string;
+  chapterId: string | null;
+  chapterTitle: string | null;
+  chapterIndex: number | null;
+  expectedChapterId: string | null;
+  expectedChapterTitle: string | null;
+  expectedChapterIndex: number | null;
+  overdue: boolean;
+  dueSoon: boolean;
+  createTime?: string;
+}
+
+export interface CharacterAppearanceItem {
+  id: number;
+  name: string;
+  tags: string;
+  appearChapters: number;
+  lastChapterIndex: number | null;
+  lastChapterTitle: string | null;
+  gapChapters: number | null;
+}
+
+export interface StoryHealthData {
+  totalChapters: number;
+  writtenChapters: number;
+  totalWords: number;
+  latestWrittenIndex: number;
+  gapWarnThreshold: number;
+  foreshadowing: {
+    unresolved: ForeshadowHealthItem[];
+    unresolvedCount: number;
+    overdueCount: number;
+    dueSoonCount: number;
+    resolvedCount: number;
+  };
+  characters: CharacterAppearanceItem[];
+}
+
+export interface WritingStatsData {
+  totalWords: number;
+  todayWords: number;
+  goalWords: number;
+  streakDays: number;
+  avgChapterWords: number;
+  daily: Array<{ date: string; words: number }>;
+  chapters: Array<{
+    id: string;
+    title: string;
+    index: number;
+    volumeTitle: string | null;
+    words: number;
+  }>;
 }
 
 export interface AiSession {
@@ -185,21 +349,36 @@ export interface Conversation {
   thinking?: string;
   tool_call_segments?: string | null;
   thinking_blocks?: string | null;
-  /** 子专家结构化结果（润色 / 审校 / 续写规划 / 风格统一）的 JSON 字符串，
-   *  形如 { role, payload }，回显时还原 SubagentResultCard。 */
-  subagent_result?: string | null;
+  thinking_durations_ms?: string | null;
+  duration_ms?: number | null;
+  task_plan?: string | null;
   create_time?: string;
+}
+
+export interface AiTaskPlanChunk {
+  title: string;
+  goal?: string;
+  status: 'planned' | 'running' | 'paused' | 'done' | 'blocked' | 'failed' | 'canceled';
+  steps: {
+    id: string;
+    title: string;
+    description?: string;
+    type: 'read' | 'analyze' | 'write' | 'review' | 'confirm';
+    status: 'pending' | 'running' | 'done' | 'blocked' | 'failed';
+    executor?: 'model' | 'tool';
+    riskLevel?: 'read' | 'write' | 'destructive';
+    suggestedTools?: string[];
+    resultSummary?: string;
+    error?: string;
+  }[];
 }
 
 /** 本书设定层级 */
 export type SparkIdeaLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
 /** AI 对话模式（与 UI 模式选择一致） */
-export const CHAT_AGENT_MODES = ['ask', 'agent', 'expert', 'collab'] as const;
+export const CHAT_AGENT_MODES = ['ask', 'agent'] as const;
 export type ChatAgentMode = (typeof CHAT_AGENT_MODES)[number];
-
-/** 设置中「默认写作智能体」档位（工作区对话默认来源） */
-export type AiAgentMode = 'legacy' | 'subagent';
 
 export interface AiSparkIdea {
   id: number | string;  // mem0 使用 UUID 字符串
@@ -224,6 +403,60 @@ export interface AiForeshadowing {
   update_time?: string;
 }
 
+export type MemoryKind =
+  | 'canon'
+  | 'plot'
+  | 'character'
+  | 'world'
+  | 'foreshadowing'
+  | 'style'
+  | 'summary';
+
+export type MemoryStatus = 'pending' | 'active' | 'archived' | 'superseded';
+export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline' | 'session';
+
+export interface MemoryItem {
+  id: number;
+  book_id: EntityId;
+  kind: MemoryKind;
+  scope_type: MemoryScopeType;
+  scope_id?: string | null;
+  content: string;
+  summary: string;
+  keywords: string;
+  importance: number;
+  confidence: number;
+  status: MemoryStatus;
+  pinned: number;
+  fingerprint: string;
+  source_type: string;
+  source_id?: string | null;
+  create_time?: string;
+  update_time?: string;
+  last_used_at?: string | null;
+  deduped?: boolean;
+}
+
+export interface MemoryContextDiagnostics {
+  forced: number;
+  recalled: number;
+  included: number;
+  deferred: number;
+  suppressed: number;
+  conflicts: number;
+  relationExpanded: number;
+  characterCount: number;
+}
+
+export interface MemoryContextBlock {
+  text: string;
+  includedIds: number[];
+  deferredIds: number[];
+  suppressedIds: number[];
+  tokenEstimate: number;
+  diagnostics: MemoryContextDiagnostics;
+}
+
 export interface XmindTopic {
   title?: string;
   children?: { attached?: XmindTopic[] };
@@ -245,6 +478,10 @@ export interface ElectronAPI {
   openFilePath: (filePath: string) => Promise<ApiResult<void>>;
   readFileBuffer: (filePath: string) => Promise<ApiResult<Buffer>>;
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
+  /** 整本导出为单个 TXT：保存对话框 + 写盘 */
+  writeSingleTextFile: (data: { defaultName: string; content: string }) => Promise<ApiResult<{ path: string }>>;
+  /** EPUB 导出：后端生成，主进程保存对话框 + 写盘；chapterIds 缺省导出全书 */
+  exportEpub: (data: { bookId: EntityId; chapterIds?: EntityId[] | null; defaultName?: string }) => Promise<ApiResult<{ path: string }>>;
   exportDatabase: () => Promise<ApiResult<void>>;
   importDatabase: () => Promise<ApiResult<{
     beforeStats: { books: number; outlineChapters: number; articles: number };
@@ -278,6 +515,11 @@ export interface ElectronAPI {
     data: Partial<Character>;
   }) => Promise<ApiResult<Character>>;
   deleteCharacter: (data: { id: number }) => Promise<ApiResult<void>>;
+  /** 对一个正在等待中的 Agent 高风险工具调用作出一次性决定。 */
+  resolveAiToolApproval: (data: {
+    approvalId: string;
+    approved: boolean;
+  }) => Promise<ApiResult<{ status: "approved" | "rejected" }>>;
   // 人物选项
   getCharacterOptions: (data: {
     category: string;
@@ -291,6 +533,39 @@ export interface ElectronAPI {
     value: string;
   }) => Promise<ApiResult<CharacterOption>>;
   deleteCharacterOption: (data: { id: number }) => Promise<ApiResult<void>>;
+  // 世界设定实体（地点 / 势力 / 物品 / 其他）
+  getSettingEntities: (data: {
+    bookId: EntityId;
+    type?: SettingEntityType;
+  }) => Promise<ApiResult<SettingEntity[]>>;
+  createSettingEntity: (data: {
+    bookId: EntityId;
+    entityType: SettingEntityType;
+    name: string;
+    tags?: string;
+    profileMd?: string;
+  }) => Promise<ApiResult<SettingEntity>>;
+  updateSettingEntity: (data: {
+    id: number;
+    data: {
+      entityType?: SettingEntityType;
+      name?: string;
+      tags?: string;
+      profileMd?: string;
+    };
+  }) => Promise<ApiResult<SettingEntity>>;
+  deleteSettingEntity: (data: { id: number }) => Promise<ApiResult<void>>;
+  // 仪表盘（故事健康度 / 写作统计）
+  getStoryHealth: (data: {
+    bookId: EntityId;
+  }) => Promise<ApiResult<StoryHealthData>>;
+  getWritingStats: (data: {
+    bookId: EntityId;
+  }) => Promise<ApiResult<WritingStatsData>>;
+  setWritingGoal: (data: {
+    bookId: EntityId;
+    dailyWords: number;
+  }) => Promise<ApiResult<void>>;
   // 大纲
   saveOutline: (data: {
     title: string;
@@ -372,6 +647,7 @@ export interface ElectronAPI {
   saveArticle: (data: {
     chapterId: EntityId;
     content: string;
+    source?: string;
   }) => Promise<ApiResult<void>>;
   getArticle: (data: {
     chapterId: EntityId;
@@ -399,14 +675,77 @@ export interface ElectronAPI {
   listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
   getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
   rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
+  // Setting diff history (character / story background)
+  commitCharacterSettingDiff: (data: {
+    characterId: number;
+    name: string;
+    tags: string;
+    profileMd: string;
+    before: CharacterSettingSnapshot;
+    after: CharacterSettingSnapshot;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
+  commitBackgroundSettingDiff: (data: {
+    bookId: EntityId;
+    content: string;
+    beforeContent?: string;
+    afterContent?: string;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
+  listCharacterSettingHistory: (data: {
+    characterId: number;
+    limit?: number;
+  }) => Promise<ApiResult<CharacterSettingHistory[]>>;
+  getCharacterSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<CharacterSettingHistory | null>>;
+  rollbackCharacterSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
+  listBackgroundSettingHistory: (data: {
+    bookId: EntityId;
+    limit?: number;
+  }) => Promise<ApiResult<StoryBackgroundSettingHistory[]>>;
+  getBackgroundSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<StoryBackgroundSettingHistory | null>>;
+  rollbackBackgroundSettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
+  commitEntitySettingDiff: (data: {
+    entityId: number;
+    name: string;
+    tags: string;
+    profileMd: string;
+    before: CharacterSettingSnapshot;
+    after: CharacterSettingSnapshot;
+    source?: string;
+    acceptedSegments?: number;
+    rejectedSegments?: number;
+  }) => Promise<ApiResult<{ id: number; entityId: number } | null>>;
+  listEntitySettingHistory: (data: {
+    entityId: number;
+    limit?: number;
+  }) => Promise<ApiResult<SettingEntityHistory[]>>;
+  getEntitySettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<SettingEntityHistory | null>>;
+  rollbackEntitySettingHistory: (data: {
+    historyId: number;
+  }) => Promise<ApiResult<{ id: number; entityId: number } | null>>;
   // AI
-  createSession: (data: { bookId: EntityId; chapterId?: EntityId | null }) => Promise<ApiResult<AiSession>>;
-  getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean }) => Promise<ApiResult<AiSession[]>>;
+  createSession: (data: { bookId: EntityId; chapterId?: EntityId | null; scope?: "setting" }) => Promise<ApiResult<AiSession>>;
+  getSessions: (data: { bookId: EntityId; chapterId?: EntityId | null; includeClosed?: boolean; scope?: "setting" }) => Promise<ApiResult<AiSession[]>>;
   setSessionClosed: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   setSessionReopened: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   deleteSession: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   saveConversation: (data: {
     sessionId: number;
+    bookId?: EntityId | null;
     chapterId?: EntityId | null;
     prompt: string;
     response: string;
@@ -416,18 +755,13 @@ export interface ElectronAPI {
       textBefore: string;
       labels: string[];
       completedToolCount?: number;
-      trace?: {
-        insertedByDag?: number;
-        insertedSkillNames?: string[];
-        plannedToolNames?: string[];
-        repairedRounds?: number;
-        repairReasons?: string[];
-      };
     }[];
     thinkingBlocks?: string[];
-    /** 子专家结构化结果，形如 { role, payload }；用于回显时还原 SubagentResultCard */
-    subagentResult?: { role: string; payload: unknown } | null;
-  }) => Promise<ApiResult<void>>;
+    thinkingDurationsMs?: number[];
+    durationMs?: number;
+    taskPlan?: AiTaskPlanChunk;
+    agentRunId?: string;
+  }) => Promise<ApiResult<{ id: number | null }>>;
   getConversations: (data: {
     sessionId: number;
   }) => Promise<ApiResult<Conversation[]>>;
@@ -478,6 +812,54 @@ export interface ElectronAPI {
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
+  // 长期记忆
+  createMemory: (data: {
+    bookId: EntityId;
+    kind: MemoryKind;
+    content: string;
+    scopeType?: MemoryScopeType;
+    scopeId?: string | null;
+    summary?: string;
+    keywords?: string;
+    importance?: number;
+    confidence?: number;
+    status?: MemoryStatus;
+    pinned?: boolean;
+    sourceType?: string;
+    sourceId?: string | null;
+  }) => Promise<ApiResult<MemoryItem>>;
+  updateMemory: (data: { id: number | string; data: Partial<MemoryItem> }) => Promise<ApiResult<MemoryItem>>;
+  archiveMemory: (data: { id: number | string }) => Promise<ApiResult<MemoryItem>>;
+  searchMemories: (data: {
+    bookId: EntityId;
+    query?: string;
+    options?: {
+      statuses?: MemoryStatus[];
+      kinds?: MemoryKind[];
+      scopeType?: MemoryScopeType;
+      scopeId?: string;
+      limit?: number;
+    };
+  }) => Promise<ApiResult<MemoryItem[]>>;
+  getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<MemoryItem[]>>;
+  linkMemories: (data: {
+    bookId: EntityId;
+    fromMemoryId: number;
+    toMemoryId: number;
+    relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
+    note?: string;
+  }) => Promise<ApiResult<unknown>>;
+  buildMemoryContext: (data: {
+    bookId: EntityId;
+    userPrompt?: string;
+    mode?: string;
+    selectedLongTermMemoryIds?: (number | string)[];
+    selectedMemoryIds?: (number | string)[];
+    selectedForeshadowingIds?: (number | string)[];
+    memoryBudget?: number;
+    memoryRecallLimit?: number;
+    contextWindow?: AiContextWindow;
+  }) => Promise<ApiResult<MemoryContextBlock>>;
   generateSessionTitle: (data: {
     apiKey: string;
     baseURL?: string;
@@ -495,17 +877,18 @@ export interface ElectronAPI {
     baseURL?: string;
     /** 默认 openai：OpenAI 兼容 provider；anthropic 使用官方 Messages API */
     apiProvider?: "openai" | "anthropic";
+    sessionId?: number;
     messages: Array<{ role: string; content: string; tool_calls?: unknown[]; reasoning_content?: string } | { role: "tool"; tool_call_id: string; content: string }>;
     options?: {
       model?: string;
+      /** 内置模型 profile id；高级自定义为空并走通用协议适配。 */
+      model_profile?: string;
       temperature?: number;
       max_tokens?: number;
       thinking?: { type: "disabled" | "enabled" };
-      /** 采样 top-k；写作专家模式由前端设为 45 */
-      top_k?: number;
+      context_window?: AiContextWindow;
     };
-    tools?: unknown[];
-    /** 是否在请求里携带 skills 工具列表（旧名 useToolRouter；并不做语义路由） */
+    /** 是否允许三层 Writing Agent 暴露当前书籍范围内的工具。 */
     enableAgentTools?: boolean;
     bookId?: EntityId | null;
     chapterId?: EntityId | null;
@@ -518,14 +901,8 @@ export interface ElectronAPI {
     /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
-    agentMode?: "legacy" | "subagent";
-    chatAgentMode?: "ask" | "agent" | "expert" | "collab";
-    /** legacy 下协作共创 */
-    writingMode?: "default" | "collab";
-    /** @deprecated 已由 subagentRole 替代，后端忽略 */
-    agentActions?: string[];
-    /** 按需子专家：review | polish | continuation_plan | style_unify */
-    subagentRole?: "review" | "polish" | "continuation_plan" | "style_unify";
+    chatAgentMode?: ChatAgentMode;
+    contextWindow?: AiContextWindow;
   }) => void;
   abortAiStream: () => void;
   onAiChunk: (
@@ -540,8 +917,6 @@ export interface ElectronAPI {
       toolCallsInProgress?: boolean;
       partialContent?: string;
       partialThinking?: string;
-      messagesSent?: Array<{ role: string; content: string }>;
-      chapterContentUpdated?: EntityId;
       chapterCreated?: {
         chapterId: EntityId;
         title: string;
@@ -565,61 +940,52 @@ export interface ElectronAPI {
         proposedText: string;
         source?: string;
       };
-      /**
-       * 协作共创：最近一次写入正文的段落（前端以 Markdown 段落块展示）。
-       * 自 v3.1 后端不再发送（统一走 proposedChapterDiff），保留类型仅为兼容旧 chunk 解析。
-       * @deprecated
-       */
-      collabLatestParagraph?: string;
+      /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
+      proposedSettingDiff?: ProposedSettingDiff;
+      /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
+      toolApprovalRequired?: ToolApprovalRequest;
+      /** 审批的服务端最终状态（包含超时与连接取消）。 */
+      toolApprovalResolved?: {
+        runId?: string;
+        approvalId: string;
+        toolName: string;
+        status: Exclude<ToolApprovalStatus, "pending">;
+      };
+      /** Host-side accounting for the complete model context window. */
+      contextBudget?: {
+        windowTokens: number;
+        estimatedInputTokens: number;
+        toolSchemaTokens: number;
+        outputReserveTokens: number;
+        safetyReserveTokens: number;
+        runtimeReserveTokens: number;
+        memoryTokens: number;
+        associatedTokens: number;
+        droppedMessages: number;
+        projectedTotalTokens: number;
+        overflowTokens: number;
+      };
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
       /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
       toolFromCache?: boolean;
-      /** 本批工具执行前即已命中只读缓存的掩码（与 toolCalls 等长）；为 true 的索引整段不展示 */
-      toolReadCacheMask?: boolean[];
-      /** 命中请求内只读缓存的工具序号（与 toolIndexCompleted 配合） */
-      toolCallCachedIndex?: number;
-      /** 工具路由（嵌入/意图模型）失败时的简短提示，由主进程经流式通道下发 */
-      toolRouterWarning?: string;
-      /** DAG 编排阶段信息，用于前端可视化“自动补前置” */
-      orchestratorInfo?: {
-        insertedByDag?: number;
-        plannedNodeCount?: number;
-        insertedSkillNames?: string[];
-        plannedToolNames?: string[];
+      agentRunStarted?: {
+        runId: string;
+        status: string;
+        title?: string;
+        goal?: string | null;
       };
-      /** 执行阶段自动修复信息 */
-      orchestratorRepair?: {
-        repairedRounds?: number;
-        events?: Array<{
-          tool?: string;
-          reason?: string;
-          resolvedOutlineId?: EntityId;
-        }>;
+      agentRunTodosUpdated?: AiTaskPlanChunk & { runId: string };
+      agentRunTodoUpdated?: {
+        runId: string;
+        stepId: string;
+        step: AiTaskPlanChunk["steps"][number];
+        status?: string;
       };
-      subagentStage?: string;
-      subagentStageName?: string;
-      /** 为 true 时表示本 chunk 仅标记阶段开始（与交付物 chunk 区分） */
-      subagentStageStarting?: boolean;
-      subagentStageDone?: string;
-      /** 主稿专家在各子阶段之间输出过渡说明时置 true，结束时 false */
-      subagentBridging?: boolean;
-      /** 进入最终主稿专家流式呈现时置 true */
-      subagentMainPresenter?: boolean;
-      subagentPayload?: unknown;
-      subagentPayloadMeta?: { contentLength?: number; issueCount?: number };
-      /** 写作专家：阶段摘要 Markdown，逐段追加 */
-      subagentPipelineDigest?: string;
-      writingSubagentStart?: {
-        role?: "review" | "polish" | "continuation_plan" | "style_unify";
-        label?: string;
-      };
-      writingSubagentDelta?: { delta?: string };
-      writingSubagentResult?: {
-        role: "review" | "polish" | "continuation_plan" | "style_unify";
-        payload: unknown;
-      };
-      writingSubagentDone?: { role?: string };
+      agentRunCompleted?: { runId: string; status: "done" };
+      agentRunFailed?: { runId: string; status: "failed"; error?: string };
+      agentRunBlocked?: { runId: string; status: "blocked" };
+      agentRunCanceled?: { runId: string; status: "canceled"; reason?: string };
     }) => void,
   ) => () => void;
   // 设置
@@ -629,15 +995,25 @@ export interface ElectronAPI {
 
 export interface GeneralSettings {
   sync_outline_chapter: boolean;
-  ai_system_prompt: string;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
-  ai_agent_mode?: AiAgentMode;
+  /** 开启后，AI 接受的改动会尝试用模型提炼待确认的长期记忆候选。 */
+  memory_intelligence_enabled?: boolean;
+  /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
+  memory_intelligence_model_id?: string;
 }
+
+export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
+
+export type AiBuiltinProviderId = 'moonshot' | 'minimax' | 'mimo';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export interface AiModelConfig {
   id: string;
+  /** 来自内置目录时记录预设 id；旧配置与高级自定义配置不需要该字段。 */
+  presetId?: string;
+  /** 内置目录中的服务商 id，仅用于设置页展示与后续目录升级。 */
+  providerId?: AiBuiltinProviderId;
   /**
    * API 协议：openai 为 OpenAI 兼容 Chat Completions；anthropic 为 Anthropic Messages API（@anthropic-ai/sdk）。
    * 未设置时按 openai 处理。
@@ -647,8 +1023,13 @@ export interface AiModelConfig {
   name: string;
   /** 昵称，选模型时优先显示；为空则显示 name */
   nickname?: string;
+  /** 模型能力：是否支持思考模式；不随本次启用/关闭而变化。 */
   supportsThinking: boolean;
   thinkingOnly: boolean;
+  /** 当前模型是否以 thinking 模式请求，可在模型选择器中切换。 */
+  thinkingEnabled?: boolean;
+  /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
+  contextWindow?: AiContextWindow;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。
    * 为 false 时不传 temperature，由大模型接口使用其默认采样行为。

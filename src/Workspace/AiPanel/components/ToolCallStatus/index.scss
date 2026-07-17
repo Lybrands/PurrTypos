@@ -1,6 +1,56 @@
-/* ─── 工具调用状态（气泡内每条调用） ───────────────────────────────────── */
+/* Codex 风格执行时间线：摘要始终可见，具体操作按需展开。 */
 .bubble-tool-calls {
-  margin: 6px 0;
+  position: relative;
+  margin: 5px 0 7px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+
+.bubble-tool-call-summary.ant-btn {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+
+  &:hover,
+  &:focus {
+    color: var(--text-muted);
+    background: transparent;
+  }
+
+  .ant-btn-icon {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  span:not(.ant-btn-icon) {
+    color: currentColor;
+  }
+}
+
+.bubble-tool-call-chevron {
+  flex-shrink: 0;
+  color: inherit;
+  font-size: 10px;
+  transition: transform 0.2s ease;
+}
+
+.bubble-tool-call-chevron--open {
+  transform: rotate(90deg);
+}
+
+.bubble-tool-call-duration {
+  margin-left: 4px;
+  color: var(--text-muted) !important;
+  opacity: .72;
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble-tool-call-details {
+  margin-top: 3px;
+  padding: 3px 0 2px 16px;
 }
 
 .bubble-tool-call-line {
@@ -18,37 +68,19 @@
 
   .bubble-tool-call-icon {
     font-size: 14px;
+    flex-shrink: 0;
   }
 
   .bubble-tool-call-icon--pending {
     opacity: 0.55;
   }
 
+  &--running span {
+    opacity: 0.92;
+  }
+
   &--error .bubble-tool-call-icon,
   &--error span {
     color: var(--text-muted);
   }
-}
-
-.bubble-tool-trace {
-  margin-top: 4px;
-  color: var(--text-muted);
-
-  .ant-collapse-header {
-    color: var(--text-muted) !important;
-    padding: 0 !important;
-    font-size: var(--font-size-sm);
-  }
-
-  .ant-collapse-content-box {
-    padding: 4px 0 0 0 !important;
-  }
-}
-
-.bubble-tool-trace-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
 }

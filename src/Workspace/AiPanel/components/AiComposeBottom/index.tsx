@@ -1,10 +1,11 @@
 import React from 'react'
-import { Divider, Select, Switch, Tooltip } from 'antd'
+import { Select } from 'antd'
+import ModelPicker, { type ModelRuntimeConfigPatch } from '../ModelPicker'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
 
 /**
- * 模型选择的绑定集合 —— 对话模式、所选模型、思考开关及其 setter。
+ * 模型选择的绑定集合 —— 对话模式、所选模型及其 setter。
  *
  * 这一组 prop 既用于主输入区，也会透传到编辑气泡里的 AiComposeBottom。
  * 打成一个对象后沿途只传一个 prop，叶子处用 `{...modelSelection}` 展开。
@@ -14,17 +15,16 @@ export interface ModelSelectionBindings {
   setChatAgentMode: (v: ChatAgentMode) => void
   selectedModel: string
   setSelectedModel: (v: string) => void
-  thinkingEnabled: boolean
-  setThinkingEnabled: (v: boolean) => void
+  updateModelConfig?: (id: string, patch: ModelRuntimeConfigPatch) => void
 }
 
 export interface AiComposeBottomProps extends ModelSelectionBindings {
   /** 模型列表来自设置；为空时下拉无选项，需先在设置中添加模型 */
   modelConfigs: AiModelConfig[]
-  /** 必须开启思考、不可关闭的模型 id 列表 */
-  thinkingOnlyModelIds: string[]
   loading: boolean
   onAbort: () => void
+  /** 左侧模型选择前的附加操作区：主输入区传关联上下文/提示词模板入口。 */
+  leftContent?: React.ReactNode
   /** 右侧按钮区域：主输入区传 Stop/Send，编辑气泡传 取消+发送 */
   rightContent: React.ReactNode
 }
@@ -35,25 +35,18 @@ export default function AiComposeBottom({
   setChatAgentMode,
   selectedModel,
   setSelectedModel,
-  thinkingEnabled,
-  setThinkingEnabled,
-  thinkingOnlyModelIds,
+  updateModelConfig,
   loading,
   onAbort,
+  leftContent,
   rightContent,
 }: AiComposeBottomProps) {
-  const modelOptions = React.useMemo(
-    () => modelConfigs.map((c) => ({ label: (c.nickname?.trim() || c.name) || '未命名', value: c.id })),
-    [modelConfigs]
-  )
-
-  const thinkingOnly = thinkingOnlyModelIds.includes(selectedModel)
-
   const agentModeSelectStyles = React.useMemo(() => {
     if (chatAgentMode === 'agent') {
       return {
         root: {
           border: 'none',
+          borderRadius: 6,
           boxShadow: '0 0 2px var(--accent), 0 0 2px var(--accent)',
           background: 'var(--accent-dim)',
           color: 'var(--accent)',
@@ -61,31 +54,10 @@ export default function AiComposeBottom({
         suffix: { color: 'var(--accent)' },
       } as const
     }
-    if (chatAgentMode === 'expert') {
-      return {
-        root: {
-          border: 'none',
-          boxShadow: '0 0 2px var(--warning), 0 0 2px var(--warning)',
-          background: 'color-mix(in srgb, var(--warning) 18%, var(--bg-surface))',
-          color: 'var(--warning)',
-        },
-        suffix: { color: 'var(--warning)' },
-      } as const
-    }
-    if (chatAgentMode === 'collab') {
-      return {
-        root: {
-          border: 'none',
-          boxShadow: '0 0 2px var(--collab), 0 0 2px var(--collab)',
-          background: 'color-mix(in srgb, var(--collab) 12%, var(--bg-surface))',
-          color: 'var(--collab)',
-        },
-        suffix: { color: 'var(--collab)' },
-      } as const
-    }
     return {
       root: {
         border: 'none',
+        borderRadius: 6,
         boxShadow: '0 0 2px var(--success), 0 0 2px var(--success)',
         background: 'var(--success-dim)',
         color: 'var(--success)',
@@ -98,13 +70,11 @@ export default function AiComposeBottom({
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
         <Select
-          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''} ${chatAgentMode === 'expert' ? 'ai-agent-select--subagent' : ''} ${chatAgentMode === 'collab' ? 'ai-agent-select--collab' : ''}`}
+          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''}`}
           size="small"
           value={chatAgentMode}
           onChange={setChatAgentMode}
           options={[
-            { value: 'expert', label: '写作专家' },
-            { value: 'collab', label: '协作共创' },
             { value: 'agent', label: '智能体' },
             { value: 'ask', label: '问答' },
           ]}
@@ -112,42 +82,13 @@ export default function AiComposeBottom({
           popupMatchSelectWidth={false}
           styles={agentModeSelectStyles}
         />
-        <Select
-          className="ai-model-select"
-          size="small"
-          value={modelOptions.length ? selectedModel : undefined}
-          onChange={(v) => setSelectedModel(v)}
-          options={modelOptions}
-          placeholder={modelOptions.length ? undefined : '无模型配置'}
-          variant="borderless"
-          popupMatchSelectWidth={false}
-          popupRender={(menu) =>
-            chatAgentMode === 'expert' ? (
-              menu
-            ) : (
-              <>
-                {menu}
-                <Divider style={{ margin: '4px 0' }} />
-                <div
-                  className="ai-model-dropdown-footer"
-                  onMouseDown={(e) => e.preventDefault()}
-                >
-                  <span className="ai-model-dropdown-label">思考模式</span>
-                  <Tooltip
-                    title={thinkingOnly ? '该模型不可关闭思考模式' : ''}
-                  >
-                    <Switch
-                      size="small"
-                      checked={thinkingEnabled || thinkingOnly}
-                      disabled={thinkingOnly}
-                      onChange={setThinkingEnabled}
-                    />
-                  </Tooltip>
-                </div>
-              </>
-            )
-          }
+        <ModelPicker
+          modelConfigs={modelConfigs}
+          selectedModelId={selectedModel}
+          onModelChange={setSelectedModel}
+          onUpdateModelConfig={updateModelConfig}
         />
+        {leftContent}
       </div>
       {rightContent}
     </div>

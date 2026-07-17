@@ -1,6 +1,6 @@
 export { useAssociatedContext, type UseAssociatedContextParams } from "./useAssociatedContext";
-export { thinkingOnlyModelIds, useAiModelPrefs } from "./useAiModelPrefs";
-export { useAiSessions } from "./useAiSessions";
+export { useAiModelPrefs } from "./useAiModelPrefs";
+export { useAiSessions, type ChatSessionScope } from "./useAiSessions";
 export { useMemorySelection } from "./useMemorySelection";
 export { useChatScroll } from "./useChatScroll";
 export { useMessageEditing } from "./useMessageEditing";
@@ -9,7 +9,6 @@ export {
   type UsePromptTemplateContextParams,
 } from "./usePromptTemplateContext";
 export {
-  isWritingExpertPipeline,
   useChatSubmit,
   type ChatMessage,
   type ToolCallSegment,

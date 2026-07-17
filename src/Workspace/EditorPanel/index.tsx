@@ -1,13 +1,16 @@
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import {
-  ExpandOutlined, CompressOutlined, CloseOutlined,
+  CloseOutlined,
+  DoubleLeftOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
   UndoOutlined, RedoOutlined, AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
   HistoryOutlined,
 } from '@ant-design/icons'
-import { App as AntdApp, Button, Input, Empty, Tooltip, Select, Switch } from 'antd'
+import { App as AntdApp, Button, Input, Empty, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import type { AiModelConfig, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
@@ -20,6 +23,8 @@ import DiffOverlay from '../diff/DiffOverlay'
 import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
 import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
+import ModelPicker from '../AiPanel/components/ModelPicker'
+import { isModelThinkingEnabled } from '../../modelCatalog'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
@@ -46,25 +51,30 @@ interface AiFloatState {
   visible: boolean; x: number; y: number
   prompt: string; loading: boolean; result: string
   selectedModelId: string
-  thinkingEnabled: boolean
 }
 
 interface EditorPanelProps {
   bookTitle: string
+  /** 当前是否处于右侧窄轨道触发的悬停预览。 */
+  dockCollapsed?: boolean
+  /** 将悬停预览固定展开为正文边栏。 */
+  onExpandDock?: () => void
+  fullscreen?: boolean
+  onToggleFullscreen?: () => void
   modelConfigs?: AiModelConfig[]
-  /** 是否为当前主区域（占 56%）。 */
-  isMain: boolean
-  /** 点击 ⤢ 时回调：非主时切换为主，主时回到默认。 */
-  onSetMain: () => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   /** 工作台搜索：注册 Lexical 实例 */
   onLexicalEditor?: (editor: import('lexical').LexicalEditor | null) => void
 }
 
 export default function EditorPanel({
   bookTitle: _bookTitle,
+  dockCollapsed = false,
+  onExpandDock,
+  fullscreen = false,
+  onToggleFullscreen,
   modelConfigs = [],
-  isMain,
-  onSetMain,
+  onUpdateModelConfig,
   onLexicalEditor,
 }: EditorPanelProps) {
   const { message: appMessage } = AntdApp.useApp()
@@ -78,6 +88,11 @@ export default function EditorPanel({
   const diff = useDiff()
   const diffActive = chapterId != null && diff.hasSession(chapterId)
   const [diffHistoryOpen, setDiffHistoryOpen] = React.useState(false)
+  const [fullscreenTooltipOpen, setFullscreenTooltipOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    setFullscreenTooltipOpen(false)
+  }, [fullscreen])
 
   /** Inline Edit：选区状态 */
   const [inlineSelection, setInlineSelection] = React.useState<
@@ -127,13 +142,13 @@ export default function EditorPanel({
       loading: false,
       result: '',
       selectedModelId: initialModelId,
-      thinkingEnabled: false,
     }
   )
   const aiChunkUnsubRef = React.useRef<(() => void) | null>(null)
 
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
+  const nextSaveSourceRef = React.useRef<string | null>(null)
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
 
   const refreshArticle = React.useCallback((cid: EntityId) => {
@@ -160,12 +175,24 @@ export default function EditorPanel({
     return () => window.removeEventListener('chapter-content-updated', handler)
   }, [chapterId, refreshArticle])
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ chapterId?: EntityId | null; source?: string }>).detail ?? {}
+      if (detail.chapterId != null && detail.chapterId !== chapterId) return
+      nextSaveSourceRef.current = detail.source || 'inline_edit'
+    }
+    window.addEventListener('inline-edit-accepted', handler)
+    return () => window.removeEventListener('inline-edit-accepted', handler)
+  }, [chapterId])
+
   const scheduleAutoSave = React.useCallback((text: string) => {
     if (!chapterId) return
     setSaveStatus('保存中...')
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(async () => {
-      const res = await window.electronAPI.saveArticle({ chapterId, content: text })
+      const source = nextSaveSourceRef.current
+      nextSaveSourceRef.current = null
+      const res = await window.electronAPI.saveArticle({ chapterId, content: text, source: source ?? undefined })
       setSaveStatus(res.success ? '已保存' : '保存失败')
     }, AUTOSAVE_DELAY)
   }, [chapterId])
@@ -305,9 +332,6 @@ export default function EditorPanel({
 
     aiChunkUnsubRef.current?.()
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
-      if (chunk.toolRouterWarning) {
-        appMessage.warning(chunk.toolRouterWarning)
-      }
       if (chunk.error) {
         setAiFloat((prev) => ({ ...prev, loading: false, result: '请求失败：' + chunk.error }))
         unsubscribe()
@@ -328,24 +352,31 @@ export default function EditorPanel({
     const useConfiguredTemperature =
       selectedModelConfig.customizeTemperature === undefined ||
       selectedModelConfig.customizeTemperature === true
+    const useThinking = isModelThinkingEnabled(selectedModelConfig)
 
     const streamOptions: {
       model: string
+      model_profile?: string
       temperature?: number
       thinking: { type: 'enabled' | 'disabled' }
+      context_window: '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m'
       max_tokens: number
     } = {
       model: selectedModelConfig.name,
+      ...(selectedModelConfig.presetId
+        ? { model_profile: selectedModelConfig.presetId }
+        : {}),
       ...(useConfiguredTemperature
         ? {
-            temperature: aiFloat.thinkingEnabled
+            temperature: useThinking
               ? (selectedModelConfig.temperatureThinking ?? 0.6)
               : (selectedModelConfig.temperatureNonThinking ?? 0.6),
           }
         : {}),
       thinking: {
-        type: (aiFloat.thinkingEnabled ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
+        type: (useThinking ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
       },
+      context_window: selectedModelConfig.contextWindow ?? '128k',
       max_tokens: 8192,
     }
 
@@ -359,23 +390,54 @@ export default function EditorPanel({
         { role: 'user', content: aiFloat.prompt },
       ],
       options: streamOptions,
-      tools: [],
       enableAgentTools: false,
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,
       writingChapters: chapters.map((c) => ({ id: c.id, title: c.title })),
       availableOutlines: [],
-      agentMode: 'legacy',
       chatAgentMode: 'ask',
+      contextWindow: streamOptions.context_window,
     })
   }
 
   return (
-    <div className={`editor-panel ${isMain ? 'panel-main' : ''}`}>
+    <div className={`editor-panel${fullscreen ? ' panel-main' : ''}`}>
       <div className="panel-header">
         <span className="panel-title">{chapterTitle || '选择章节开始写作'}</span>
         <div className="panel-header-actions">
+          {onToggleFullscreen ? (
+            <Tooltip
+              title={fullscreen ? '退出全屏' : '全屏'}
+              open={fullscreenTooltipOpen}
+              onOpenChange={setFullscreenTooltipOpen}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={fullscreen
+                  ? <FullscreenExitOutlined style={{ fontSize: 14 }} />
+                  : <FullscreenOutlined style={{ fontSize: 14 }} />}
+                onClick={(event) => {
+                  setFullscreenTooltipOpen(false)
+                  event.currentTarget.blur()
+                  onToggleFullscreen()
+                }}
+                aria-label={fullscreen ? '退出正文全屏' : '全屏显示正文'}
+              />
+            </Tooltip>
+          ) : null}
+          {dockCollapsed && onExpandDock ? (
+            <Tooltip title="固定展开正文边栏">
+              <Button
+                type="text"
+                size="small"
+                icon={<DoubleLeftOutlined style={{ fontSize: 14 }} />}
+                onClick={onExpandDock}
+                aria-label="固定展开正文边栏"
+              />
+            </Tooltip>
+          ) : null}
           {/*
            * diff 历史回滚按钮：始终可见且可点击，
            * 即使未选章节，也允许点开提示用户"请先选择章节"，
@@ -395,9 +457,6 @@ export default function EditorPanel({
               }}
             />
           </Tooltip>
-          <Button type="text" size="small"
-            icon={isMain ? <CompressOutlined style={{ fontSize: 16 }} /> : <ExpandOutlined style={{ fontSize: 16 }} />}
-            title={isMain ? '已是主区域' : '扩大此区域为主'} onClick={onSetMain} />
         </div>
       </div>
 
@@ -471,13 +530,10 @@ export default function EditorPanel({
           selection={inlineSelection}
           onClearSelection={clearInlineSelection}
           modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
           selectedModelId={aiFloat.selectedModelId}
           onSelectedModelChange={(id) =>
             setAiFloat((prev) => ({ ...prev, selectedModelId: id }))
-          }
-          thinkingEnabled={aiFloat.thinkingEnabled}
-          onThinkingChange={(v) =>
-            setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))
           }
           bookId={bookId}
           chapterId={chapterId}
@@ -507,11 +563,10 @@ export default function EditorPanel({
           loading={aiFloat.loading}
           result={aiFloat.result}
           modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
           selectedModelId={aiFloat.selectedModelId}
-          thinkingEnabled={aiFloat.thinkingEnabled}
           onPromptChange={(v) => setAiFloat((prev) => ({ ...prev, prompt: v }))}
           onModelChange={(v) => setAiFloat((prev) => ({ ...prev, selectedModelId: v }))}
-          onThinkingChange={(v) => setAiFloat((prev) => ({ ...prev, thinkingEnabled: v }))}
           onSubmit={handleAiFloatSubmit}
           onAbort={handleAiFloatAbort}
           onClose={closeAiFloat}
@@ -528,11 +583,10 @@ interface AiFloatBoxProps {
   loading: boolean
   result: string
   modelConfigs: AiModelConfig[]
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   selectedModelId: string
-  thinkingEnabled: boolean
   onPromptChange: (v: string) => void
   onModelChange: (v: string) => void
-  onThinkingChange: (v: boolean) => void
   onSubmit: () => void
   onAbort: () => void
   onClose: () => void
@@ -545,22 +599,16 @@ function AiFloatBox({
   loading,
   result,
   modelConfigs,
+  onUpdateModelConfig,
   selectedModelId,
-  thinkingEnabled,
   onPromptChange,
   onModelChange,
-  onThinkingChange,
   onSubmit,
   onAbort,
   onClose,
 }: AiFloatBoxProps) {
   const textareaRef = React.useRef<TextAreaRef>(null)
   React.useEffect(() => { textareaRef.current?.focus() }, [])
-  const modelOptions = React.useMemo(
-    () => modelConfigs.map((c) => ({ label: (c.nickname?.trim() || c.name) || '未命名', value: c.id })),
-    [modelConfigs]
-  )
-
   return (
     <div className="ai-float-box" style={{ left: x, top: y }}>
       <div className="ai-float-header">
@@ -587,18 +635,13 @@ function AiFloatBox({
       </div>
       <div className="ai-float-bottom">
         <div className="ai-float-bottom-left">
-          <Select
+          <ModelPicker
+            modelConfigs={modelConfigs}
+            selectedModelId={selectedModelId}
+            onModelChange={onModelChange}
+            onUpdateModelConfig={onUpdateModelConfig}
             className="ai-float-model-select"
-            size="small"
-            value={modelOptions.length ? selectedModelId : undefined}
-            onChange={onModelChange}
-            options={modelOptions}
-            placeholder={modelOptions.length ? undefined : '无模型配置'}
-            variant="borderless"
-            popupMatchSelectWidth={false}
           />
-          <span className="ai-float-thinking-label">思考模式</span>
-          <Switch size="small" checked={thinkingEnabled} onChange={onThinkingChange} />
         </div>
         <div className="ai-float-bottom-right">
           {loading ? (

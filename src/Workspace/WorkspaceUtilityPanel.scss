@@ -1,0 +1,137 @@
+.workspace-utility-panel {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.workspace-utility-tabs.ant-tabs {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+
+  > .ant-tabs-nav {
+    flex-shrink: 0;
+    min-height: 36px;
+    margin: 0;
+    padding: 0 4px 0 8px;
+    background: var(--bg-surface);
+
+    .ant-tabs-tab {
+      height: 32px;
+      margin-top: 4px;
+      padding: 0 8px 0 10px !important;
+      border-radius: 7px 7px 0 0 !important;
+    }
+  }
+
+  > .ant-tabs-content-holder {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+
+    > .ant-tabs-content,
+    > .ant-tabs-content > .ant-tabs-tabpane {
+      height: 100%;
+      min-height: 0;
+    }
+  }
+}
+
+.workspace-utility-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+
+  > .anticon {
+    margin-inline-end: 0 !important;
+  }
+
+  > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.workspace-utility-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.workspace-utility-action-btn.ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.workspace-utility-content {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-panel);
+
+  &--setting,
+  &--dashboard {
+    overflow: hidden;
+  }
+
+  &--memory {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+
+    .memory-center {
+      height: auto;
+      min-height: 100%;
+      overflow: visible;
+    }
+
+    .memory-center > .ant-spin-nested-loading {
+      flex: none;
+      min-height: 0;
+      overflow: visible;
+    }
+
+    .memory-center > .ant-spin-nested-loading > .ant-spin-container {
+      height: auto;
+      min-height: 0;
+    }
+
+    .memory-center-list {
+      height: auto;
+      min-height: 0;
+      max-height: none;
+      overflow: visible;
+    }
+  }
+
+  &--style {
+    padding: var(--spacing-sm);
+  }
+}
+
+.workspace-utility-loading {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-dock--utility {
+  --workspace-dock-viewport-max: 38vw;
+}
+
+@media (max-width: 1100px) {
+  .workspace-dock--utility {
+    --workspace-dock-viewport-max: 34vw;
+  }
+}

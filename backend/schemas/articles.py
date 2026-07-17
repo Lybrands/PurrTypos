@@ -7,3 +7,4 @@ from pydantic import BaseModel
 
 class SaveArticleRequest(BaseModel):
     content: str
+    source: Optional[str] = None

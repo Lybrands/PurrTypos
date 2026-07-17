@@ -1,9 +1,7 @@
 import { mergeAssistantErrorNotice } from "../../rendering";
-import { isWritingExpertPipeline, type ChatMessage } from "../chat.types";
-import {
-  summarizeSubagentResult,
-  synthesizeAssistantTextFromToolSegments,
-} from "../chatHistory";
+import { type AiTaskPlan, type ChatMessage } from "../chat.types";
+import { synthesizeAssistantTextFromToolSegments } from "../chatHistory";
+import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
 /**
@@ -12,6 +10,9 @@ import type { ChunkHandler } from "./types";
 export const handleError: ChunkHandler = (chunk, ctx) => {
   if (!chunk.error) return;
   const { acc } = ctx;
+  const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
+  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
+  ctx.flushCommits();
 
   if (ctx.isVisibleSession()) {
     ctx.setConversations((prev) => {
@@ -35,6 +36,9 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
         ...(last as ChatMessage),
         content: merged.content ?? (last as ChatMessage).content,
         contentAfterToolCalls: merged.contentAfterToolCalls,
+        taskPlan: acc.taskPlan ?? (last as ChatMessage).taskPlan,
+        durationMs,
+        turnStartedAt: undefined,
         toolCalling: false,
         ...(merged.isError ? { isError: true } : {}),
       };
@@ -47,18 +51,27 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
 };
 
 /**
- * 正常终态：合并最终内容（含 thinking 收尾、subagent 阶段定稿、digest 拼接），
- * cleanup，落库，按需生成会话标题。
+ * 正常终态：合并最终内容与 thinking 收尾，cleanup，落库，按需生成会话标题。
  */
 export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done) return;
   const { acc } = ctx;
+  const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
+  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
+  ctx.flushCommits();
   if (chunk.model) acc.model = chunk.model;
+  if (chunk.aborted) {
+    acc.taskPlan = markTaskPlanAborted(acc.taskPlan);
+  }
 
   const finalThinking = (acc.thinking || "").trim();
-  const savedThinkingBlocks = finalThinking
-    ? [...(acc.thinkingBlocks ?? []), finalThinking]
-    : (acc.thinkingBlocks ?? []);
+  let savedThinkingBlocks = acc.thinkingBlocks ?? [];
+  let savedThinkingDurations = acc.thinkingDurationsMs ?? [];
+  if (finalThinking) {
+    const finalized = finalizeThinkingBlock(ctx, finalThinking);
+    savedThinkingBlocks = finalized.blocks;
+    savedThinkingDurations = finalized.durations;
+  }
 
   let resolvedAssistantContent =
     acc.response ||
@@ -73,21 +86,13 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
       const next = [...prev];
       const last = next[next.length - 1];
       if (last?.role === "assistant") {
-        const blocks = (last as ChatMessage).thinkingBlocks ?? [];
-        const thinkingBlocks = finalThinking
-          ? [...blocks, finalThinking]
-          : blocks;
         const cm = last as ChatMessage;
-        const stages = cm.subagentStages ?? [];
-        const subagentStagesFinalized =
-          isWritingExpertPipeline(ctx.agentMode) && stages.length > 0
-            ? stages.map((s) =>
-                s.status === "running"
-                  ? { ...s, status: "done" as const }
-                  : s,
-              )
-            : cm.subagentStages;
-        const digestTrim = (cm.subagentPipelineDigest ?? "").trim();
+        const thinkingBlocks = savedThinkingBlocks.length
+          ? savedThinkingBlocks
+          : cm.thinkingBlocks;
+        const thinkingDurationsMs = savedThinkingDurations.length
+          ? savedThinkingDurations
+          : cm.thinkingDurationsMs;
         const currentContent = String(last.content || "");
         const accContent = (acc.response || "").trim();
         let finalContent = currentContent;
@@ -100,34 +105,27 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
             if (synthesized) {
               finalContent = synthesized;
             } else {
-              const subSummary = summarizeSubagentResult(cm);
-              finalContent = subSummary || "内容同步中。";
+              finalContent = "内容同步中。";
             }
           }
-        }
-        if (digestTrim) {
-          finalContent = finalContent.trim()
-            ? `${digestTrim}\n\n${finalContent.trim()}`
-            : digestTrim;
         }
         resolvedAssistantContent = finalContent;
         next[next.length - 1] = {
           ...last,
           content: finalContent,
-          subagentPipelineDigest: undefined,
           model: acc.model || undefined,
-          thinking: finalThinking || last.thinking,
-          thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined,
+          durationMs,
+          turnStartedAt: undefined,
+          thinking: "",
+          thinkingStartedAt: undefined,
+          thinkingBlocks: thinkingBlocks?.length ? thinkingBlocks : undefined,
+          thinkingDurationsMs: thinkingDurationsMs?.length
+            ? thinkingDurationsMs
+            : undefined,
+          taskPlan:
+            acc.taskPlan ??
+            (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
           toolCalling: false,
-          subagentStageWorking: false,
-          ...(isWritingExpertPipeline(ctx.agentMode)
-            ? {
-                subagentBridging: false,
-                ...(subagentStagesFinalized
-                  ? { subagentStages: subagentStagesFinalized }
-                  : {}),
-              }
-            : {}),
         };
       }
       return next;
@@ -138,15 +136,32 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   ctx.cleanup();
   acc.response = resolvedAssistantContent;
 
-  saveConversationIfNeeded(ctx, savedThinkingBlocks);
+  saveConversationIfNeeded(ctx, savedThinkingBlocks, savedThinkingDurations);
   maybeGenerateSessionTitle(ctx);
 
   return true;
 };
 
+function markTaskPlanAborted(plan: AiTaskPlan | undefined): AiTaskPlan | undefined {
+  if (!plan) return plan;
+  return {
+    ...plan,
+    status: "canceled",
+    steps: plan.steps.map((step) => {
+      if (step.status !== "running") return step;
+      return {
+        ...step,
+        status: "blocked" as const,
+        resultSummary: step.resultSummary || "本轮已由你手动停止。",
+      };
+    }),
+  };
+}
+
 function saveConversationIfNeeded(
   ctx: Parameters<ChunkHandler>[1],
   savedThinkingBlocks: string[],
+  savedThinkingDurations: number[],
 ): void {
   const { acc } = ctx;
   const respTrim = (acc.response || "").trim();
@@ -156,6 +171,7 @@ function saveConversationIfNeeded(
     Boolean(
       respTrim ||
         thinkTrim ||
+        acc.taskPlan ||
         savedThinkingBlocks.length > 0 ||
         (acc.toolCallSegments?.length ?? 0) > 0,
     );
@@ -164,6 +180,7 @@ function saveConversationIfNeeded(
   void window.electronAPI
     .saveConversation({
       sessionId: acc.sessionId,
+      bookId: acc.bookId ?? undefined,
       chapterId: acc.chapterId ?? null,
       prompt: acc.userText,
       response: acc.response || "",
@@ -172,13 +189,36 @@ function saveConversationIfNeeded(
       thinkingBlocks: savedThinkingBlocks.length
         ? savedThinkingBlocks
         : undefined,
+      thinkingDurationsMs: savedThinkingDurations.length
+        ? savedThinkingDurations
+        : undefined,
+      durationMs: Math.max(0, Math.round(performance.now() - acc.turnStartedAt)),
       toolCallSegments: acc.toolCallSegments?.length
         ? acc.toolCallSegments
         : undefined,
-      subagentResult: acc.subagentResult ?? undefined,
+      taskPlan: acc.taskPlan ?? undefined,
+      agentRunId: acc.agentRunId,
     })
     .then((res) => {
-      if (res && res.success) return;
+      if (res && res.success) {
+        const conversationId = res.data?.id;
+        if (typeof conversationId === "number" && ctx.isVisibleSession()) {
+          ctx.setConversations((prev) => {
+            const idx = findConversationMessageIndex(
+              prev,
+              acc.userText,
+              acc.response || "",
+            );
+            if (idx < 0) {
+              return prev;
+            }
+            const next = [...prev];
+            next[idx] = { ...next[idx], conversationId };
+            return next;
+          });
+        }
+        return;
+      }
       const detail = (res as { detail?: unknown })?.detail;
       const msg =
         typeof (res as { error?: string })?.error === "string"
@@ -198,6 +238,42 @@ function saveConversationIfNeeded(
           : "本轮对话未能写入本地库（保存接口异常）。",
       );
     });
+}
+
+function finalizeToolDurations(
+  segments: ChatMessage["toolCallSegments"],
+): ChatMessage["toolCallSegments"] {
+  if (!segments?.length) return segments;
+  const now = performance.now();
+  return segments.map((segment) => {
+    if (segment.durationMs != null || segment.startedAt == null) return segment;
+    const { startedAt, ...rest } = segment;
+    return {
+      ...rest,
+      durationMs: Math.max(0, Math.round(now - startedAt)),
+    };
+  });
+}
+
+function findConversationMessageIndex(
+  messages: Array<{ role: string; content: string; conversationId?: number }>,
+  userText: string,
+  assistantContent: string,
+): number {
+  for (let idx = messages.length - 1; idx >= 1; idx -= 1) {
+    const assistant = messages[idx];
+    const user = messages[idx - 1];
+    if (
+      assistant.role === "assistant" &&
+      !assistant.conversationId &&
+      assistant.content === assistantContent &&
+      user?.role === "user" &&
+      user.content === userText
+    ) {
+      return idx;
+    }
+  }
+  return -1;
 }
 
 function maybeGenerateSessionTitle(

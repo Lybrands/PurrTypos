@@ -128,6 +128,8 @@ async def delete_book(bookId: str):
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM memory_links WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM memory_items WHERE book_id = ?", [bookId])
 
         await _delete_where_in(db, "articles", "chapter_id", chapter_ids)
         await _delete_where_in(db, "chapter_canvas", "chapter_id", chapter_ids)
@@ -140,6 +142,13 @@ async def delete_book(bookId: str):
         await db.execute("DELETE FROM story_background WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM story_background_attachments WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM book_style WHERE book_id = ?", [bookId])
+        await db.execute(
+            "DELETE FROM setting_entity_history WHERE entity_id IN "
+            "(SELECT id FROM setting_entities WHERE book_id = ?)",
+            [bookId],
+        )
+        await db.execute("DELETE FROM setting_entities WHERE book_id = ?", [bookId])
+        await db.execute("DELETE FROM book_word_stats WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
     for stored_path in attachment_paths:
