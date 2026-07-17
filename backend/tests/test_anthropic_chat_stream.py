@@ -20,6 +20,16 @@ class _FakeMessages:
         return _stream()
 
 
+class _CapturingMessages(_FakeMessages):
+    def __init__(self, events):
+        super().__init__(events)
+        self.kwargs = None
+
+    async def create(self, **kwargs):
+        self.kwargs = kwargs
+        return await super().create(**kwargs)
+
+
 class _TrackedTailStream:
     def __init__(self, events, *, tail_mode: str):
         self._events = list(events)
@@ -89,6 +99,41 @@ async def test_anthropic_stream_emits_finish_only_after_message_stop(monkeypatch
 
     assert chunks[0]["choices"][0]["delta"]["content"] == "answer"
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_minimax_native_thinking_is_parsed_without_anthropic_budget_param(
+    monkeypatch,
+):
+    messages = _CapturingMessages((
+        SimpleNamespace(
+            type="content_block_delta",
+            index=0,
+            delta=SimpleNamespace(type="thinking_delta", thinking="reasoning"),
+        ),
+        SimpleNamespace(type="message_stop"),
+    ))
+    client = SimpleNamespace(messages=messages)
+    monkeypatch.setattr(
+        anthropic_chat,
+        "_create_client",
+        lambda _api_key, _base_url: client,
+    )
+
+    result = await anthropic_chat.chat_stream_as_openai_format(
+        "key",
+        [{"role": "user", "content": "hello"}],
+        {
+            "model": "MiniMax-M3",
+            "baseURL": "https://api.minimaxi.com/anthropic",
+            "thinking": {"type": "enabled"},
+            "max_tokens": 8192,
+        },
+    )
+    chunks = [chunk async for chunk in result["stream"]]
+
+    assert "thinking" not in messages.kwargs
+    assert chunks[0]["choices"][0]["delta"]["reasoning_content"] == "reasoning"
 
 
 @pytest.mark.asyncio

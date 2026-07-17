@@ -19,6 +19,7 @@ from infrastructure.models.capabilities import (
     build_anthropic_thinking_param,
     normalize_thinking_enabled,
 )
+from infrastructure.models.profiles import resolve_model_profile
 from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
@@ -201,6 +202,7 @@ async def chat_stream_as_openai_format(
     tool_choice = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
@@ -210,8 +212,12 @@ async def chat_stream_as_openai_format(
     if not anth_messages:
         raise ValueError("消息为空")
 
-    thinking_param, max_out = build_anthropic_thinking_param(thinking_enabled, max_tokens)
-    thinking_on = thinking_param is not None
+    native_thinking = profile.native_anthropic_thinking
+    thinking_param, max_out = build_anthropic_thinking_param(
+        thinking_enabled and not native_thinking,
+        max_tokens,
+    )
+    thinking_on = native_thinking or thinking_param is not None
     anthropic_tools = openai_tools_to_anthropic(tools)
 
     params: dict[str, Any] = {
@@ -348,6 +354,7 @@ async def chat_no_stream_as_openai_format(
     tool_choice = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
@@ -357,7 +364,11 @@ async def chat_no_stream_as_openai_format(
     if not anth_messages:
         raise ValueError("消息为空")
 
-    thinking_param, max_out = build_anthropic_thinking_param(thinking_enabled, max_tokens)
+    native_thinking = profile.native_anthropic_thinking
+    thinking_param, max_out = build_anthropic_thinking_param(
+        thinking_enabled and not native_thinking,
+        max_tokens,
+    )
     anthropic_tools = openai_tools_to_anthropic(tools)
 
     params: dict[str, Any] = {

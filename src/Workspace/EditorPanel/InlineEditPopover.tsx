@@ -9,6 +9,7 @@ import AiContextBar from '../AiPanel/components/AiContextBar'
 import type { PromptTemplateContext } from '../AiPanel/promptTemplates'
 import ModelPicker from '../AiPanel/components/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
+import { isModelThinkingEnabled } from '../../modelCatalog'
 
 export interface InlineCapture {
   text: string
@@ -175,7 +176,7 @@ export default function InlineEditPopover({
       const useConfiguredTemperature =
         model.customizeTemperature === undefined || model.customizeTemperature === true
 
-      const useThinking = model.thinkingEnabled ?? model.thinkingOnly ?? false
+      const useThinking = isModelThinkingEnabled(model)
       const contextWindow = model.contextWindow ?? '128k'
 
       const systemPrompt = [
@@ -225,6 +226,7 @@ export default function InlineEditPopover({
         ],
         options: {
           model: model.name,
+          ...(model.presetId ? { model_profile: model.presetId } : {}),
           ...(useConfiguredTemperature
             ? {
                 temperature: useThinking

@@ -2,7 +2,7 @@ import React, { Suspense, lazy } from 'react'
 import { App as AntdApp, Spin } from 'antd'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
-import { migrateKnownModelConfigs } from './modelCatalog'
+import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -20,6 +20,10 @@ export default function App() {
 
   const [showSettings, setShowSettings] = React.useState(false)
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const configuredModelConfigs = React.useMemo(
+    () => modelConfigs.filter((config) => config.apiKey?.trim()),
+    [modelConfigs],
+  )
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
 
   React.useEffect(() => {
@@ -48,12 +52,7 @@ export default function App() {
     setModelConfigs((prev) => {
       const next = prev.map((item) =>
         item.id === id
-          ? {
-              ...item,
-              ...patch,
-              supportsThinking: patch.thinkingEnabled ?? item.supportsThinking,
-              thinkingOnly: false,
-            }
+          ? applyModelRuntimeConfigPatch(item, patch)
           : item,
       )
       void window.electronAPI.setSettings({ ai_model_configs: next })
@@ -154,7 +153,7 @@ export default function App() {
               onBack={handleBackToBookshelf}
               onGoHome={handleBackToHome}
               onOpenSettings={() => setShowSettings(true)}
-              modelConfigs={modelConfigs}
+              modelConfigs={configuredModelConfigs}
               onUpdateModelConfig={updateModelConfig}
               syncOutlineChapter={syncOutlineChapter}
             />
