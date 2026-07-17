@@ -51,6 +51,86 @@ async def test_openai_stream_forwards_required_tool_choice(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_minimax_openai_stream_requests_split_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import openai_chat
+
+    captured: dict = {}
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    class _Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return _empty_stream()
+
+    class _Client:
+        class _Chat:
+            completions = _Completions()
+
+        chat = _Chat()
+
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
+    await openai_chat.chat_stream(
+        "k",
+        [{"role": "user", "content": "reason"}],
+        {
+            "model": "MiniMax-M3",
+            "baseURL": "https://api.minimaxi.com/v1",
+            "thinking": {"type": "enabled"},
+        },
+    )
+
+    assert captured["extra_body"] == {"reasoning_split": True}
+
+
+@pytest.mark.asyncio
+async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import openai_chat
+
+    captured: dict = {}
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    class _Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return _empty_stream()
+
+    class _Client:
+        class _Chat:
+            completions = _Completions()
+
+        chat = _Chat()
+
+    messages = [
+        {"role": "assistant", "content": "", "reasoning_content": "prior thought"},
+        {"role": "user", "content": "continue"},
+    ]
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
+    await openai_chat.chat_stream(
+        "k",
+        messages,
+        {
+            "model": "kimi-k3",
+            "model_profile": "moonshot:kimi-k3",
+            "baseURL": "https://api.moonshot.cn/v1",
+            "thinking": {"type": "disabled"},
+        },
+    )
+
+    assert captured["extra_body"] == {"reasoning_effort": "max"}
+    assert captured["messages"] == messages
+
+
+@pytest.mark.asyncio
 async def test_openai_stream_propagates_consumer_close_to_raw_stream(
     monkeypatch: pytest.MonkeyPatch,
 ):

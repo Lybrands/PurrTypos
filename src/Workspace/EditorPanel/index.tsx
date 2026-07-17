@@ -24,6 +24,7 @@ import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
 import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
 import ModelPicker from '../AiPanel/components/ModelPicker'
+import { isModelThinkingEnabled } from '../../modelCatalog'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
@@ -351,24 +352,29 @@ export default function EditorPanel({
     const useConfiguredTemperature =
       selectedModelConfig.customizeTemperature === undefined ||
       selectedModelConfig.customizeTemperature === true
+    const useThinking = isModelThinkingEnabled(selectedModelConfig)
 
     const streamOptions: {
       model: string
+      model_profile?: string
       temperature?: number
       thinking: { type: 'enabled' | 'disabled' }
       context_window: '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m'
       max_tokens: number
     } = {
       model: selectedModelConfig.name,
+      ...(selectedModelConfig.presetId
+        ? { model_profile: selectedModelConfig.presetId }
+        : {}),
       ...(useConfiguredTemperature
         ? {
-            temperature: (selectedModelConfig.thinkingEnabled ?? selectedModelConfig.thinkingOnly ?? false)
+            temperature: useThinking
               ? (selectedModelConfig.temperatureThinking ?? 0.6)
               : (selectedModelConfig.temperatureNonThinking ?? 0.6),
           }
         : {}),
       thinking: {
-        type: ((selectedModelConfig.thinkingEnabled ?? selectedModelConfig.thinkingOnly ?? false) ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
+        type: (useThinking ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
       },
       context_window: selectedModelConfig.contextWindow ?? '128k',
       max_tokens: 8192,

@@ -881,6 +881,8 @@ export interface ElectronAPI {
     messages: Array<{ role: string; content: string; tool_calls?: unknown[]; reasoning_content?: string } | { role: "tool"; tool_call_id: string; content: string }>;
     options?: {
       model?: string;
+      /** 内置模型 profile id；高级自定义为空并走通用协议适配。 */
+      model_profile?: string;
       temperature?: number;
       max_tokens?: number;
       thinking?: { type: "disabled" | "enabled" };
@@ -1022,9 +1024,10 @@ export interface AiModelConfig {
   name: string;
   /** 昵称，选模型时优先显示；为空则显示 name */
   nickname?: string;
+  /** 模型能力：是否支持思考模式；不随本次启用/关闭而变化。 */
   supportsThinking: boolean;
   thinkingOnly: boolean;
-  /** 当前模型是否默认以 thinking 模式请求。 */
+  /** 当前模型是否以 thinking 模式请求，可在模型选择器中切换。 */
   thinkingEnabled?: boolean;
   /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
   contextWindow?: AiContextWindow;

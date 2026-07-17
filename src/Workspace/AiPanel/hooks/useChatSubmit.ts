@@ -8,6 +8,7 @@ import {
 } from "./chat.types";
 import { buildHistoryConverter } from "./chatHistory";
 import { buildStreamOptions } from "./streamOptions";
+import { isModelThinkingEnabled } from "../../../modelCatalog";
 import {
   dispatchChunk,
   type AccState,
@@ -80,7 +81,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       }
 
       const cfg = selectedModelConfig;
-      const expectThinking = Boolean(cfg?.thinkingEnabled ?? cfg?.thinkingOnly ?? false);
+      const expectThinking = isModelThinkingEnabled(cfg);
       const turnStartedAt = performance.now();
       const assistantPlaceholder = {
         role: "assistant" as const,

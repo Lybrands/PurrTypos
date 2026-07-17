@@ -79,7 +79,11 @@ npm run build
 | **Writing Agent** (`agent`) | 写作与项目任务 | 三层 Agent 执行规划、上下文预算、受限工具调用、人工审批和结果校验 |
 | **纯问答** (`ask`) | 答疑、构思 | 不携带工具，单轮文本响应 |
 
-模型接入提供两条路径：设置页可从内置目录选择项目当前使用的服务商与模型，自动填入协议、模型名、接口地址和上下文窗口；代理、自建服务或目录外模型继续使用“高级自定义”。两种路径最终生成相同的 `AiModelConfig`，沿用同一套后端调用链。
+模型接入提供两条路径：系统固定提供内置模型，设置页只允许配置其服务商凭据与运行参数，不能新增、复制或删除；代理、自建服务或目录外模型继续使用“高级自定义”。两种路径最终生成相同的 `AiModelConfig`，沿用同一套后端调用链。缺少 API Key 的内置模型仍显示在设置页，但不会进入对话模型列表。
+
+内置模型采用 profile 分层适配：`src/models/profiles/` 保存前端目录能力与配置迁移，`backend/infrastructure/models/profiles/` 保存请求参数和响应规范化差异；OpenAI / Anthropic SDK、流式生命周期、工具调用和错误处理仍由公共协议适配器负责。内置配置通过 `model_profile` 命中对应 profile，高级自定义不携带该字段并回退到 generic profile。
+
+Kimi K3 通过独立 profile 接入 `kimi-k3`，使用 1M 上下文和当前服务端支持的 Max 思考模式；Agent 工具续轮会回传模型的 `reasoning_content`，避免丢失 K3 的思考历史。
 
 ### 工具系统（Skills）
 

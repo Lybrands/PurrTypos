@@ -78,7 +78,7 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options={"model": "model", "model_profile": "minimax:MiniMax-M3"},
         enableAgentTools=True,
         bookId="book-1",
         chapterId="chapter-1",
@@ -94,6 +94,7 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
 
     assert request.context_window == 64_000
     assert request.model.options["baseURL"] == "https://example.test/v1"
+    assert request.model.options["model_profile"] == "minimax:MiniMax-M3"
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)

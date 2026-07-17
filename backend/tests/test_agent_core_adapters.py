@@ -119,6 +119,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             "max_tokens": 999_999,
             "thinking_enabled": True,
             "temperature": 1.0,
+            "model_profile": "minimax:MiniMax-M3",
             "metadata": {"tags": ["writing"]},
         },
     )
@@ -177,6 +178,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert captured["options"]["max_tokens"] == 2_048
     assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
+    assert captured["options"]["model_profile"] == "minimax:MiniMax-M3"
     assert "temperature" not in captured["options"]
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict

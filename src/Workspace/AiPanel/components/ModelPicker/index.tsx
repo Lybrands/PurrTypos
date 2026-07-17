@@ -6,6 +6,7 @@ import {
   AI_CONTEXT_WINDOW_LABELS,
   getDefaultModelContextWindow,
   getModelContextWindowOptions,
+  isModelThinkingEnabled,
 } from '../../../../modelCatalog'
 import './index.scss'
 
@@ -144,14 +145,26 @@ function ModelRuntimeConfig({
   model: AiModelConfig
   onPatch: (patch: ModelRuntimeConfigPatch) => void
 }) {
-  const contextWindow = getDefaultModelContextWindow(model)
-  const thinkingEnabled = model.thinkingEnabled ?? model.thinkingOnly ?? false
+  const configuredContextWindow = getDefaultModelContextWindow(model)
+  const configuredThinkingEnabled = isModelThinkingEnabled(model)
+  const [contextWindow, setContextWindow] = React.useState(configuredContextWindow)
+  const [thinkingEnabled, setThinkingEnabled] = React.useState(configuredThinkingEnabled)
+
+  React.useEffect(() => {
+    setContextWindow(configuredContextWindow)
+  }, [model.id, configuredContextWindow])
+
+  React.useEffect(() => {
+    setThinkingEnabled(configuredThinkingEnabled)
+  }, [model.id, configuredThinkingEnabled])
 
   const contextItems = getModelContextWindowOptions(model)
-  const thinkingItems: [boolean, string][] = [
-    [false, '关闭'],
-    [true, '开启'],
-  ]
+  const thinkingItems: [boolean, string][] = model.thinkingOnly
+    ? [[true, '思考模式']]
+    : [
+        [false, '普通模式'],
+        [true, '思考模式'],
+      ]
 
   return (
     <div className="model-picker-config">
@@ -162,7 +175,11 @@ function ModelRuntimeConfig({
             key={value}
             type="button"
             className="model-picker-config-item"
-            onClick={() => onPatch({ contextWindow: value })}
+            aria-pressed={contextWindow === value}
+            onClick={() => {
+              setContextWindow(value)
+              onPatch({ contextWindow: value })
+            }}
           >
             <span>{AI_CONTEXT_WINDOW_LABELS[value]}</span>
             {contextWindow === value ? <CheckOutlined style={{ fontSize: 12 }} /> : null}
@@ -171,13 +188,17 @@ function ModelRuntimeConfig({
       </div>
       <Divider style={{ margin: '6px 0' }} />
       <div className="model-picker-config-group">
-        <div className="model-picker-config-title">Thinking</div>
+        <div className="model-picker-config-title">推理模式</div>
         {thinkingItems.map(([value, label]) => (
           <button
             key={String(value)}
             type="button"
             className="model-picker-config-item"
-            onClick={() => onPatch({ thinkingEnabled: value })}
+            aria-pressed={thinkingEnabled === value}
+            onClick={() => {
+              setThinkingEnabled(value)
+              onPatch({ thinkingEnabled: value })
+            }}
           >
             <span>{label}</span>
             {thinkingEnabled === value ? <CheckOutlined style={{ fontSize: 12 }} /> : null}
