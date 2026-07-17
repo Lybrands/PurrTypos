@@ -209,6 +209,161 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+/* ─── 对话索引：按用户提问聚合每一轮，参考 Codex 的左侧刻度导航 ─── */
+.chat-turn-index {
+  --turn-index-width: clamp(16px, calc(var(--main-col-gutter) - 4px), 38px);
+  position: absolute;
+  top: 50%;
+  left: max(4px, calc(var(--main-col-gutter) - 42px));
+  z-index: 3;
+  width: var(--turn-index-width);
+  max-height: min(320px, calc(100% - 72px));
+  transform: translateY(-50%);
+  opacity: 0.58;
+  transition: opacity 0.16s ease;
+
+  &:hover,
+  &:focus-within {
+    opacity: 1;
+  }
+}
+
+.chat-turn-index-list {
+  max-height: inherit;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-block: 4px;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.chat-turn-index-item {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+
+  &:focus-visible .chat-turn-index-mark {
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+  }
+
+  &:hover .chat-turn-index-mark {
+    width: min(18px, 100%);
+    background: var(--text-secondary);
+  }
+
+  &.is-active .chat-turn-index-mark {
+    width: min(11px, 100%);
+    height: 2px;
+    background: var(--text-primary);
+  }
+
+  &.is-active:hover .chat-turn-index-mark {
+    width: min(18px, 100%);
+  }
+}
+
+.chat-turn-index-mark {
+  display: block;
+  width: min(11px, 100%);
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition:
+    width 0.14s ease,
+    height 0.14s ease,
+    background-color 0.14s ease;
+}
+
+.chat-turn-index-popover.ant-popover {
+  --antd-arrow-background-color: var(--bg-panel);
+  max-width: calc(100vw - 32px);
+
+  .ant-popover-content {
+    max-width: 100%;
+  }
+
+  .ant-popover-inner {
+    box-sizing: border-box;
+    width: 320px;
+    min-width: 0;
+    max-width: calc(100vw - 32px);
+    max-height: 220px;
+    padding: 14px 16px;
+    overflow: hidden;
+    color: var(--text-primary);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 14px;
+    box-shadow:
+      0 14px 40px rgba(0, 0, 0, 0.18),
+      0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+
+  .ant-popover-inner-content {
+    width: 100%;
+    max-width: 100%;
+    max-height: 192px;
+    min-width: 0;
+    overflow: hidden;
+  }
+}
+
+.chat-turn-index-preview {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  max-height: 192px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.chat-turn-index-preview-meta {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.chat-turn-index-preview-question,
+.chat-turn-index-preview-answer {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.chat-turn-index-preview-question {
+  color: var(--text-primary);
+  font-size: var(--font-size);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.55;
+  -webkit-line-clamp: 2;
+}
+
+.chat-turn-index-preview-answer {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  -webkit-line-clamp: 3;
+}
+
 .chat-empty {
   flex: 1;
   display: flex;
