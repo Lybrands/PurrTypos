@@ -1,6 +1,6 @@
 {
   "name": "purrtypos",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "写作",
   "author": "Lybrand",
   "main": "electron/main_python.js",
@@ -11,6 +11,8 @@
     "build:win": "npm run build:backend:win && npm run build",
     "build": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",
     "build:no-clean": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && electron-builder",
+    "test:electron": "node --test electron/*.test.js",
+    "test:unit": "node --test electron/*.test.js src/modelCatalog.test.cjs src/Workspace/AiPanel/hooks/modelRuntime.test.cjs src/Workspace/DirectorNotebook/ChapterSectionModel.test.cjs src/Workspace/DashboardPanel/dashboardFormatters.test.cjs",
     "preview": "vite preview",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -68,6 +70,7 @@
       "dist/**/*",
       "electron",
       "electron/**/*",
+      "!electron/**/*.test.js",
       "public/**/*"
     ],
     "asar": true,

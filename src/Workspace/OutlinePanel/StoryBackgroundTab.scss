@@ -3,6 +3,8 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /* 设定面板的 tabpane 无内边距，这里统一留白，避免 markdown 预览左右贴边 */
+  padding: 10px 18px 14px;
 }
 
 .story-background-empty {

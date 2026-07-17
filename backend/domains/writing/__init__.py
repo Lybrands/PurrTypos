@@ -1,0 +1,1 @@
+"""PurrTypos writing-domain adapters."""

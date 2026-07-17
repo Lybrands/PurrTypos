@@ -1,0 +1,56 @@
+.setting-diff-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light, var(--border));
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.setting-diff-view--compact {
+  max-height: 420px;
+}
+
+.setting-diff-toolbar {
+  position: static;
+  flex-shrink: 0;
+}
+
+.setting-diff-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--spacing) var(--spacing-sm);
+}
+
+.setting-diff-meta-row {
+  display: flex;
+  gap: var(--spacing-xs);
+  align-items: flex-start;
+  padding: var(--spacing-xs);
+  margin-bottom: var(--spacing-xs);
+  border: 1px solid var(--border-light, var(--border));
+  border-radius: 4px;
+  background: var(--bg-surface);
+}
+
+.setting-diff-meta-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.character-card.is-diff-focus {
+  outline: 2px solid var(--brand-color, var(--border-strong));
+  outline-offset: 1px;
+}
+
+.character-tab-diff-wrap,
+.story-background-diff-wrap {
+  margin-top: var(--spacing-sm);
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+}

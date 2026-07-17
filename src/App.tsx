@@ -1,7 +1,8 @@
 import React, { Suspense, lazy } from 'react'
 import { App as AntdApp, Spin } from 'antd'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiAgentMode, type AiModelConfig, type EntityId } from './types'
+import { Book, type AiModelConfig, type EntityId } from './types'
+import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -19,19 +20,22 @@ export default function App() {
 
   const [showSettings, setShowSettings] = React.useState(false)
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const configuredModelConfigs = React.useMemo(
+    () => modelConfigs.filter((config) => config.apiKey?.trim()),
+    [modelConfigs],
+  )
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
-  const [aiAgentMode, setAiAgentMode] = React.useState<AiAgentMode>('legacy')
 
   React.useEffect(() => {
     window.electronAPI.getSettings().then((res) => {
       if (!res.success || !res.data) return
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
-        setModelConfigs(res.data.ai_model_configs)
-      }
-      const m = res.data.ai_agent_mode
-      if (m === 'subagent' || m === 'legacy') {
-        setAiAgentMode(m)
+        const migration = migrateKnownModelConfigs(res.data.ai_model_configs)
+        setModelConfigs(migration.configs)
+        if (migration.changed) {
+          void window.electronAPI.setSettings({ ai_model_configs: migration.configs })
+        }
       }
     })
   }, [])
@@ -39,6 +43,21 @@ export default function App() {
   const saveModelConfigs = React.useCallback((configs: AiModelConfig[]) => {
     setModelConfigs(configs)
     window.electronAPI.setSettings({ ai_model_configs: configs })
+  }, [])
+
+  const updateModelConfig = React.useCallback((
+    id: string,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+  ) => {
+    setModelConfigs((prev) => {
+      const next = prev.map((item) =>
+        item.id === id
+          ? applyModelRuntimeConfigPatch(item, patch)
+          : item,
+      )
+      void window.electronAPI.setSettings({ ai_model_configs: next })
+      return next
+    })
   }, [])
 
   const handleSyncOutlineChapterChange = React.useCallback((value: boolean) => {
@@ -134,9 +153,9 @@ export default function App() {
               onBack={handleBackToBookshelf}
               onGoHome={handleBackToHome}
               onOpenSettings={() => setShowSettings(true)}
-              modelConfigs={modelConfigs}
+              modelConfigs={configuredModelConfigs}
+              onUpdateModelConfig={updateModelConfig}
               syncOutlineChapter={syncOutlineChapter}
-              aiAgentMode={aiAgentMode}
             />
           )}
         </Suspense>
@@ -154,11 +173,6 @@ export default function App() {
             onClose={() => setShowSettings(false)}
             syncOutlineChapter={syncOutlineChapter}
             onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
-            aiAgentMode={aiAgentMode}
-            onAiAgentModeChange={(mode) => {
-              setAiAgentMode(mode)
-              void window.electronAPI.setSettings({ ai_agent_mode: mode })
-            }}
           />
           </Suspense>
         </div>

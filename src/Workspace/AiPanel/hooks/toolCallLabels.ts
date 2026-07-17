@@ -135,12 +135,32 @@ export function toolCallDisplayRow(
         const n = args.name != null ? String(args.name).trim() : "";
         return { label: n ? `更新人物「${n}」设定` : "更新人物设定", outcome: "ok" };
       }
+      case "deleteCharacter":
+        return { label: "删除人物", outcome: "ok" };
       case "getStoryBackground":
         return { label: "查看小说背景", outcome: "ok" };
       case "editStoryBackground":
         return { label: "编辑小说背景", outcome: "ok" };
+      case "listSettingEntities":
+        return { label: "查看世界设定列表", outcome: "ok" };
+      case "getSettingEntities":
+        return { label: "查看世界设定详情", outcome: "ok" };
+      case "createSettingEntity": {
+        const n = args.name != null ? String(args.name).trim() : "";
+        return { label: n ? `创建设定「${n}」` : "创建世界设定", outcome: "ok" };
+      }
+      case "updateSettingEntity": {
+        const n = args.name != null ? String(args.name).trim() : "";
+        return { label: n ? `更新设定「${n}」` : "更新世界设定", outcome: "ok" };
+      }
+      case "deleteSettingEntity":
+        return { label: "删除世界设定条目", outcome: "ok" };
       case "getBookStyle":
         return { label: "查看风格基调", outcome: "ok" };
+      case "getStoryHealthDashboard":
+        return { label: "查看故事健康度仪表盘", outcome: "ok" };
+      case "getWritingStatsDashboard":
+        return { label: "查看写作统计仪表盘", outcome: "ok" };
       case "getGlobalOutline":
         return { label: "查看总纲", outcome: "ok" };
       case "editGlobalOutline":

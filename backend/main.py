@@ -24,48 +24,100 @@ logging.basicConfig(
     force=True,
 )
 
+_lifespan_owner: object | None = None
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    from database.connection import DatabaseConnection
-    from dependencies import set_db
+    global _lifespan_owner
 
-    data_dir = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else None
-    db = DatabaseConnection(data_dir)
-    await db.init()
-    set_db(db)
-
-    from config import SKILLS_DIR
-    from services.tool_router import set_skills_path as _set_skills_path, ensure_skills_loaded
-    skills_dir = SKILLS_DIR if SKILLS_DIR and SKILLS_DIR != Path("") else Path(__file__).parent / "skills"
-    _set_skills_path(str(skills_dir))
-    ensure_skills_loaded()
-
-    from routers import (
-        books, outlines, chapters, articles, characters,
-        sessions, conversations, memories, ai, settings,
-        story_background, files, prompt_templates, book_style,
-        chapter_diff,
+    from application.agent_composition import (
+        AgentComposition,
+        clear_agent_composition,
+        set_agent_composition,
     )
-    application.include_router(books.router, prefix="/api")
-    application.include_router(outlines.router, prefix="/api")
-    application.include_router(chapters.router, prefix="/api")
-    application.include_router(articles.router, prefix="/api")
-    application.include_router(characters.router, prefix="/api")
-    application.include_router(sessions.router, prefix="/api")
-    application.include_router(conversations.router, prefix="/api")
-    application.include_router(memories.router, prefix="/api")
-    application.include_router(ai.router, prefix="/api")
-    application.include_router(settings.router, prefix="/api")
-    application.include_router(story_background.router, prefix="/api")
-    application.include_router(files.router, prefix="/api")
-    application.include_router(prompt_templates.router, prefix="/api")
-    application.include_router(book_style.router, prefix="/api")
-    application.include_router(chapter_diff.router, prefix="/api")
+    from database.connection import DatabaseConnection
+    from dependencies import clear_db, set_db
 
-    yield
+    if _lifespan_owner is not None:
+        raise RuntimeError("backend lifespan is already active")
+    owner = object()
+    _lifespan_owner = owner
 
-    await db.close()
+    db: DatabaseConnection | None = None
+    composition: AgentComposition | None = None
+    try:
+        data_dir = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else None
+        db = DatabaseConnection(data_dir)
+        await db.init()
+        set_db(db)
+
+        from config import SKILLS_DIR
+
+        skills_dir = (
+            SKILLS_DIR
+            if SKILLS_DIR and SKILLS_DIR != Path("")
+            else Path(__file__).parent / "skills"
+        )
+        composition = AgentComposition(db, skills_dir=skills_dir)
+        set_agent_composition(composition)
+
+        from routers import (
+            ai,
+            articles,
+            book_style,
+            books,
+            chapter_diff,
+            chapters,
+            characters,
+            conversations,
+            dashboard,
+            export,
+            files,
+            memories,
+            outlines,
+            prompt_templates,
+            sessions,
+            setting_diff,
+            setting_entities,
+            settings,
+            story_background,
+        )
+
+        application.include_router(books.router, prefix="/api")
+        application.include_router(outlines.router, prefix="/api")
+        application.include_router(chapters.router, prefix="/api")
+        application.include_router(articles.router, prefix="/api")
+        application.include_router(characters.router, prefix="/api")
+        application.include_router(sessions.router, prefix="/api")
+        application.include_router(conversations.router, prefix="/api")
+        application.include_router(memories.router, prefix="/api")
+        application.include_router(ai.router, prefix="/api")
+        application.include_router(settings.router, prefix="/api")
+        application.include_router(story_background.router, prefix="/api")
+        application.include_router(files.router, prefix="/api")
+        application.include_router(prompt_templates.router, prefix="/api")
+        application.include_router(book_style.router, prefix="/api")
+        application.include_router(chapter_diff.router, prefix="/api")
+        application.include_router(setting_diff.router, prefix="/api")
+        application.include_router(setting_entities.router, prefix="/api")
+        application.include_router(dashboard.router, prefix="/api")
+        application.include_router(export.router, prefix="/api")
+
+        yield
+    finally:
+        try:
+            if composition is not None:
+                composition.shutdown()
+                clear_agent_composition(composition)
+        finally:
+            try:
+                if db is not None:
+                    clear_db(db)
+                    await db.close()
+            finally:
+                if _lifespan_owner is owner:
+                    _lifespan_owner = None
 
 
 app = FastAPI(title="PurrTypos Backend", version="0.4.0", lifespan=lifespan)

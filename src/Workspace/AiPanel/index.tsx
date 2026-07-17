@@ -2,6 +2,7 @@
 import React from "react";
 import {
   ArrowUpOutlined,
+  MessageOutlined,
 } from "@ant-design/icons";
 import StopCircleIcon from "../../icons/StopCircleIcon";
 import {
@@ -12,54 +13,41 @@ import {
 } from "antd";
 import type { MenuProps } from "antd";
 import type {
-  AiAgentMode,
   AiModelConfig,
   Conversation,
 } from "../../types";
 import { useWorkspace } from "../WorkspaceContext";
 import {
-  INPUT_AREA_MAX,
-  INPUT_AREA_MIN,
   INITIAL_FIRST_ITEM_INDEX,
 } from "./constants";
 import {
   parseConversationsFromApi,
 } from "./utils";
-import { thinkingOnlyModelIds, useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage } from "./hooks";
+import { useAssociatedContext, useAiModelPrefs, useAiSessions, useMemorySelection, useChatScroll, useMessageEditing, usePromptTemplateContext, useChatSubmit, type ChatMessage, type ChatSessionScope } from "./hooks";
 import FavoritesModal from "./components/FavoritesModal";
 import MemoryModal from "./components/MemoryModal";
 import AiPanelHeader from "./components/AiPanelHeader";
 import ChatEmptyState from "./components/ChatEmptyState";
 import ChatMessageList from "./components/ChatMessageList";
-import SessionTabsBar from "./components/SessionTabsBar";
+import ConversationSidebar from "./components/ConversationSidebar";
 import AiContextBar, { type AiContextBarBindings } from "./components/AiContextBar";
 import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
-import SubagentPicker from "./components/SubagentPicker";
-import type { WritingSubagentRole } from "./pipelineStages";
 import "./index.scss";
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[];
-  aiAgentMode?: AiAgentMode;
-  /** 是否为当前主区域（占 56%）。 */
-  isMain: boolean;
-  /** 点击扩展按钮时回调：非主时切换为主，主时回到默认（导演模式 = AI 主）。 */
-  onSetMain: () => void;
-  /**
-   * 写作模式浮岛：用于 mainPanel === 'editor' 时收紧 AI 面板视觉。
-   * 隐藏 system prompt 区、会话栏，最近消息超出自动截断滚动。
-   */
-  compact?: boolean;
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void;
+  conversationSidebarOpen?: boolean;
+  onConversationSidebarOpenChange?: (open: boolean) => void;
 }
 
 export default function AiPanel({
   modelConfigs = [],
-  aiAgentMode = "legacy",
-  isMain,
-  onSetMain,
-  compact = false,
+  onUpdateModelConfig,
+  conversationSidebarOpen = true,
+  onConversationSidebarOpenChange,
 }: AiPanelProps) {
   const { message: appMessage } = AntdApp.useApp();
   const {
@@ -72,16 +60,37 @@ export default function AiPanel({
   const [prompt, setPrompt] = React.useState("");
   const [conversations, setConversations] = React.useState<ChatMessage[]>([]);
   const [loading, setLoading] = React.useState(false);
+  /** 会话作用域：chapter = 章节对话（默认）；setting = 全局对话（不绑章节，整本书共享；存储值仍为 setting 以兼容历史） */
+  const [chatScope, setChatScope] = React.useState<ChatSessionScope>("chapter");
+  /** 人物卡/背景「与 AI 讨论」入口触发后，待会话列表就绪时自动建会话 */
+  const pendingSettingSessionRef = React.useRef(false);
+  const effectiveChapterId = chatScope === "setting" ? null : chapterId;
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<import("../../types").SettingDiffCardState>).detail;
+      if (!detail?.sessionKey) return;
+      setConversations((prev) =>
+        prev.map((msg) => {
+          if (!msg.settingDiffCards?.length) return msg;
+          const cards = msg.settingDiffCards.map((c) =>
+            c.sessionKey === detail.sessionKey ? { ...c, ...detail } : c,
+          );
+          return { ...msg, settingDiffCards: cards };
+        }),
+      );
+    };
+    window.addEventListener("setting-diff-resolved", handler as EventListener);
+    return () => window.removeEventListener("setting-diff-resolved", handler as EventListener);
+  }, []);
   const {
     selectedModel,
     setSelectedModel,
     chatAgentMode,
     setChatAgentMode,
-    thinkingEnabled,
-    setThinkingEnabled,
     selectedModelConfig,
     modelConfigsRecord,
-  } = useAiModelPrefs(bookId, modelConfigs, aiAgentMode);
+  } = useAiModelPrefs(bookId, modelConfigs);
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
   const {
@@ -91,12 +100,11 @@ export default function AiPanel({
     setSelectedForeshadowingIds,
   } = useMemorySelection(bookId);
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false);
-  const [pendingSubagentRole, setPendingSubagentRole] =
-    React.useState<WritingSubagentRole | null>(null);
 
   const {
     sessions,
     setSessions,
+    sessionsLoaded,
     activeSessionId,
     setActiveSessionId,
     prependedHistory,
@@ -112,12 +120,32 @@ export default function AiPanel({
     handleSaveTabTitle,
   } = useAiSessions({
     bookId,
-    chapterId,
+    chapterId: effectiveChapterId,
+    scope: chatScope,
     conversations,
     setConversations,
     loading,
     setLoading,
   });
+
+  // 「与 AI 讨论」入口事件：切到全局作用域 + 预填上下文；会话列表就绪后若无会话自动新建
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ prefill?: string }>).detail;
+      setChatScope("setting");
+      pendingSettingSessionRef.current = true;
+      if (detail?.prefill) setPrompt(detail.prefill);
+    };
+    window.addEventListener("open-setting-chat", handler as EventListener);
+    return () => window.removeEventListener("open-setting-chat", handler as EventListener);
+  }, []);
+
+  React.useEffect(() => {
+    if (!pendingSettingSessionRef.current) return;
+    if (chatScope !== "setting" || !sessionsLoaded) return;
+    pendingSettingSessionRef.current = false;
+    if (sessions.length === 0) void handleNewSession();
+  }, [chatScope, sessionsLoaded, sessions.length, handleNewSession]);
 
   const handleInsertPrompt = React.useCallback(
     (text: string) => setPrompt(text),
@@ -128,6 +156,16 @@ export default function AiPanel({
     () => [...prependedHistory, ...conversations],
     [prependedHistory, conversations],
   );
+  const activeTaskPlan = React.useMemo(() => {
+    if (!loading) return undefined;
+    for (let index = conversations.length - 1; index >= 0; index -= 1) {
+      const message = conversations[index];
+      if (message.role === "assistant" && message.taskPlan) {
+        return message.taskPlan;
+      }
+    }
+    return undefined;
+  }, [conversations, loading]);
   const firstItemIndex = INITIAL_FIRST_ITEM_INDEX - prependedHistory.length;
 
   const {
@@ -136,9 +174,7 @@ export default function AiPanel({
     setScrolledUpByReason,
     isAtBottom,
     setIsAtBottom,
-    inputAreaHeight,
     handleScrollToBottom,
-    handleInputAreaDividerMouseDown,
     pinNewTurnToTop,
   } = useChatScroll({ loading, combinedData });
 
@@ -186,23 +222,21 @@ export default function AiPanel({
     ],
   );
 
-  /** 模型选择的整组绑定：对话模式、所选模型、思考开关（见 ModelSelectionBindings）。 */
+  /** 模型选择的整组绑定：对话模式、所选模型（见 ModelSelectionBindings）。 */
   const modelSelection = React.useMemo<ModelSelectionBindings>(
     () => ({
       chatAgentMode,
       setChatAgentMode,
       selectedModel,
       setSelectedModel,
-      thinkingEnabled,
-      setThinkingEnabled,
+      updateModelConfig: onUpdateModelConfig,
     }),
     [
       chatAgentMode,
       setChatAgentMode,
       selectedModel,
       setSelectedModel,
-      thinkingEnabled,
-      setThinkingEnabled,
+      onUpdateModelConfig,
     ],
   );
 
@@ -226,7 +260,7 @@ export default function AiPanel({
     conversations,
     setConversations,
     bookId: bookId ?? undefined,
-    chapterId,
+    chapterId: effectiveChapterId,
     activeSessionId,
     setActiveSessionId,
     sessions,
@@ -235,18 +269,14 @@ export default function AiPanel({
     associatedOutlineIds,
     writingChapters,
     availableOutlines,
-    currentChapterTitle: activeChapterTitle || undefined,
+    currentChapterTitle:
+      chatScope === "setting" ? undefined : activeChapterTitle || undefined,
     selectedModel,
-    thinkingEnabled,
     agentEnabled: chatAgentMode !== "ask",
     modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    agentMode: chatAgentMode === "expert" ? "subagent" : "legacy",
-    writingMode: chatAgentMode === "collab" ? "collab" : "default",
-    pendingSubagentRole:
-      chatAgentMode === "expert" ? pendingSubagentRole : null,
-    onPendingSubagentRoleConsumed: () => setPendingSubagentRole(null),
+    sessionScope: chatScope,
   });
 
   const {
@@ -302,6 +332,8 @@ export default function AiPanel({
               role: "assistant" as const,
               content: acc.response || "",
               thinking: acc.thinking || undefined,
+              thinkingStartedAt: acc.thinkingBlockStartedAt,
+              turnStartedAt: acc.turnStartedAt,
               toolCallSegments: acc.toolCallSegments,
               contentAfterToolCalls: acc.toolCallSegments?.length
                 ? (acc.contentAfterToolCalls ?? "")
@@ -351,42 +383,57 @@ export default function AiPanel({
   ];
 
   return (
-    <div
-      className={`ai-panel ${isMain ? "panel-main" : ""} ${compact && !isMain ? "ai-panel--compact" : ""}`.trim()}
-    >
+    <div className="ai-panel panel-main">
       <AiPanelHeader
-        isMain={isMain}
-        onSetMain={onSetMain}
         menuItems={ellipsisMenuItems}
+        activeTaskPlan={activeTaskPlan}
       />
 
-      {/* Session 切换栏：仅在已选章节时显示（按章节隔离） */}
-      {bookId != null && chapterId != null && (
-        <SessionTabsBar
+      <div className="ai-panel-body">
+        {bookId != null && conversationSidebarOpen && (
+          <ConversationSidebar
           bookId={bookId}
-          chapterId={chapterId}
+          chapterId={effectiveChapterId}
+          bookTitle={bookTitle}
+          scope={chatScope}
+          chapterTitle={chatScope === "chapter" ? activeChapterTitle || undefined : undefined}
           sessions={sessions}
           activeSessionId={activeSessionId}
           loading={loading}
           isCurrentSessionEmpty={conversations.length === 0}
-          editingTabId={editingTabId}
+          editingSessionId={editingTabId}
           editingTitle={editingTitle}
+          onScopeChange={setChatScope}
           onActiveSessionChange={setActiveSessionId}
-          onEditingTabIdChange={setEditingTabId}
+          onEditingSessionIdChange={setEditingTabId}
           onEditingTitleChange={setEditingTitle}
-          onSaveTabTitle={handleSaveTabTitle}
+          onSaveTitle={handleSaveTabTitle}
           onNewSession={handleNewSession}
-          onCloseTab={handleCloseTab}
+          onCloseSession={handleCloseTab}
           onOpenFromHistory={handleOpenFromHistory}
           onDeleteFromHistory={handleDeleteFromHistory}
           onBlockedByLoading={() => {
             appMessage.warning("当前对话进行中，请先等待完成或停止");
           }}
+          onCollapse={() => onConversationSidebarOpenChange?.(false)}
         />
-      )}
+        )}
 
-      <div className="chat-history-wrap">
-        <div className="chat-history">
+        {bookId != null && !conversationSidebarOpen && (
+          <Tooltip title="展开对话列表" placement="right">
+            <Button
+              type="text"
+              className="conversation-sidebar-reopen"
+              icon={<MessageOutlined />}
+              onClick={() => onConversationSidebarOpenChange?.(true)}
+              aria-label="展开对话列表"
+            />
+          </Tooltip>
+        )}
+
+        <div className="ai-conversation-main">
+          <div className="chat-history-wrap">
+            <div className="chat-history">
           {combinedData.length === 0 && !loading && (
             <ChatEmptyState
               hasBook={bookId != null}
@@ -406,7 +453,7 @@ export default function AiPanel({
             setScrolledUpByReason={setScrolledUpByReason}
             onScrollToBottom={handleScrollToBottom}
             bookId={bookId}
-            chapterId={chapterId}
+            chapterId={effectiveChapterId}
             contextBar={contextBar}
             editingMessageIndex={editingMessageIndex}
             setEditingMessageIndex={setEditingMessageIndex}
@@ -418,35 +465,9 @@ export default function AiPanel({
             onAbort={handleAbort}
             onAddFavorite={handleAddFavorite}
           />
-        </div>
-      </div>
-      <div
-        className="chat-input-area-divider"
-        onMouseDown={handleInputAreaDividerMouseDown}
-        role="separator"
-        aria-orientation="horizontal"
-        title="拖拽调整输入区域高度"
-      />
-      <div
-        className="chat-input-area"
-        style={{
-          height: inputAreaHeight,
-          minHeight: INPUT_AREA_MIN,
-          maxHeight: INPUT_AREA_MAX,
-        }}
-      >
-        {bookId != null && (
-          <AiContextBar
-            bookId={bookId}
-            chapterId={chapterId ?? null}
-            {...contextBar}
-            currentPrompt={prompt}
-            onInsertPrompt={handleInsertPrompt}
-            promptTemplateContext={promptTemplateContext}
-            promptTemplateDisabled={loading}
-          />
-        )}
-
+            </div>
+          </div>
+          <div className="chat-input-area">
         <div className="chat-input-inner">
           <Input.TextArea
             className="chat-input"
@@ -454,17 +475,15 @@ export default function AiPanel({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧"
             disabled={loading}
-            autoSize={false}
+            autoSize={{ minRows: 1, maxRows: 5 }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 if (
                   !prompt.trim() ||
                   bookId == null ||
-                  chapterId == null ||
+                  (chatScope === "chapter" && chapterId == null) ||
                   loading ||
-                  (bookId != null &&
-                    chapterId != null &&
-                    activeSessionId == null)
+                  activeSessionId == null
                 ) {
                   return;
                 }
@@ -474,21 +493,26 @@ export default function AiPanel({
             }}
           />
         </div>
-        <AiComposeBottom
+            <AiComposeBottom
           modelConfigs={modelConfigs}
-          thinkingOnlyModelIds={thinkingOnlyModelIds(modelConfigs)}
           {...modelSelection}
           loading={loading}
           onAbort={handleAbort}
+          leftContent={
+            bookId != null ? (
+              <AiContextBar
+                bookId={bookId}
+                chapterId={effectiveChapterId ?? null}
+                {...contextBar}
+                currentPrompt={prompt}
+                onInsertPrompt={handleInsertPrompt}
+                promptTemplateContext={promptTemplateContext}
+                promptTemplateDisabled={loading}
+              />
+            ) : null
+          }
           rightContent={
             <div className="chat-compose-right">
-              {chatAgentMode === "expert" && bookId != null ? (
-                <SubagentPicker
-                  value={pendingSubagentRole}
-                  onChange={setPendingSubagentRole}
-                  disabled={loading}
-                />
-              ) : null}
               {loading ? (
                 <Button
                   className="btn-submit btn-stop btn-submit--icon"
@@ -507,18 +531,18 @@ export default function AiPanel({
                     disabled={
                       !prompt.trim() ||
                       bookId == null ||
-                      chapterId == null ||
+                      (chatScope === "chapter" && chapterId == null) ||
                       loading ||
-                      (bookId != null &&
-                        chapterId != null &&
-                        activeSessionId == null)
+                      activeSessionId == null
                     }
                   />
                 </Tooltip>
               )}
             </div>
           }
-        />
+            />
+          </div>
+        </div>
       </div>
 
       <FavoritesModal
