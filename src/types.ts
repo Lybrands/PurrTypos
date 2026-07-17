@@ -995,7 +995,6 @@ export interface ElectronAPI {
 
 export interface GeneralSettings {
   sync_outline_chapter: boolean;
-  ai_system_prompt: string;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
   /** 开启后，AI 接受的改动会尝试用模型提炼待确认的长期记忆候选。 */
