@@ -13,7 +13,7 @@ chapterId 必须对应左侧写作章节目录，不可用思维导图大纲树�
 {
   "type": "object",
   "properties": {
-    "chapterId": { "type": "string", "description": "写作目录章节 id（可省略；省略时由宿主注入当前章节）" },
+    "chapterId": { "type": "string", "description": "可选。读取当前章时省略，或传精确别名“当前章节”/“当前章”/“本章”，由宿主绑定；读取非当前章时只传 listWritingChapters 返回的真实 id，不要传章节标题" },
     "title": { "type": "string", "description": "章节标题，用于展示" },
     "maxTextLength": { "type": "number", "description": "纯文本最大长度，默认 12000" }
   }

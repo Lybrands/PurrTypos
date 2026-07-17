@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class SaveConversationRequest(BaseModel):
     """与前端一致：sessionId 为数字；亦接受数字字符串（如 \"12\"）。"""
     sessionId: int
+    bookId: Optional[str] = None
     chapterId: Optional[str] = None
     prompt: str
     response: str
@@ -15,9 +16,7 @@ class SaveConversationRequest(BaseModel):
     thinking: Optional[str] = None
     toolCallSegments: Optional[List[Any]] = None
     thinkingBlocks: Optional[List[Any]] = None
-    # 子专家结构化结果：{ role: 'polish'|'review'|'continuation_plan'|'style_unify', payload: any }
-    subagentResult: Optional[Any] = None
-
-
-class DeleteAfterTurnRequest(BaseModel):
-    keepTurnCount: int
+    thinkingDurationsMs: Optional[List[Any]] = None
+    durationMs: Optional[int] = None
+    taskPlan: Optional[Any] = None
+    agentRunId: Optional[str] = None

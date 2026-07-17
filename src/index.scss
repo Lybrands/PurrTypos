@@ -75,10 +75,12 @@
    */
   --main-col-pct: 70%;
   --main-col-min: 720px;
-  --main-col-width: max(var(--main-col-min), var(--main-col-pct));
+  /* 上限：超宽屏下 70% 会让行长过长（阅读舒适行长约 60-90 字符），封顶 920px */
+  --main-col-max: 920px;
+  --main-col-width: clamp(var(--main-col-min), var(--main-col-pct), var(--main-col-max));
   /* 单侧外侧留白：(panel_width - col_width) / 2，用于把绝对/边距元素吸到居中列两端 */
   --main-col-gutter: calc(
-    (100% - max(var(--main-col-min), var(--main-col-pct))) / 2
+    (100% - clamp(var(--main-col-min), var(--main-col-pct), var(--main-col-max))) / 2
   );
 
   /* ─── 颜色（Ant Design 中性色 + 功能色） ──────────── */
@@ -100,9 +102,6 @@
   --success: #52c41a;
   --success-dim: rgba(82, 196, 26, 0.12);
   --warning: #faad14;
-  --collab: #722ed1;
-  --collab-hover: #9254de;
-  --collab-dim: rgba(114, 46, 209, 0.12);
   --danger: #ff4d4f;
   --divider-bg: #f0f0f0;
   --divider-hover: #1677ff;
@@ -175,9 +174,6 @@
   --success: #49aa19;
   --success-dim: rgba(73, 170, 25, 0.18);
   --warning: #d89614;
-  --collab: #9254de;
-  --collab-hover: #b37feb;
-  --collab-dim: rgba(146, 84, 222, 0.2);
   --danger: #dc4446;
   --divider-bg: #303030;
   --divider-hover: #4096ff;

@@ -120,6 +120,9 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN closed INTEGER DEFAULT 0")
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN book_id TEXT")
+    # scope: chapter = 章节会话（默认）；setting = 全局会话（不绑章节，整本书共享；UI 显示为「全局对话」）。
+    # 历史遗留的无章节会话保持默认 chapter，不会被误判为全局会话。
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN scope TEXT DEFAULT 'chapter'")
 
     # ── ai_conversations ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_conversations (
@@ -135,9 +138,84 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
-    # 子专家（润色 / 续写规划 / 审校 / 风格统一）的结构化结果，回显时用来还原 SubagentResultCard
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN subagent_result TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN duration_ms INTEGER DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
 
+    # ── ai_agent_runs / todos / events ───────────────────────────
+    # Agent Run 是一次用户请求的运行记录；To-dos 属于 run，而不是跨对话任务中心。
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        session_id INTEGER DEFAULT NULL,
+        conversation_id INTEGER DEFAULT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        mode TEXT DEFAULT NULL,
+        prompt TEXT NOT NULL DEFAULT '',
+        model_provider TEXT DEFAULT NULL,
+        model_name TEXT DEFAULT NULL,
+        context_window INTEGER DEFAULT NULL,
+        endpoint_digest TEXT DEFAULT NULL,
+        request_profile_digest TEXT DEFAULT NULL,
+        final_response TEXT DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    # Nullable migration preserves historical Runs. New Agent requests write
+    # complete provenance atomically so diagnostics never assemble identity
+    # from a partially migrated row.
+    for column in (
+        "model_provider TEXT DEFAULT NULL",
+        "model_name TEXT DEFAULT NULL",
+        "context_window INTEGER DEFAULT NULL",
+        "endpoint_digest TEXT DEFAULT NULL",
+        "request_profile_digest TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_runs ADD COLUMN {column}",
+        )
+    # Recreate the trigger so databases that once included additional routing
+    # metadata enforce only the current model-request provenance contract.
+    await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_provenance_immutable")
+    await db.execute("""CREATE TRIGGER ai_agent_runs_provenance_immutable
+        BEFORE UPDATE OF
+            model_provider,
+            model_name,
+            context_window,
+            endpoint_digest,
+            request_profile_digest
+        ON ai_agent_runs
+        WHEN
+            OLD.model_provider IS NOT NEW.model_provider
+            OR OLD.model_name IS NOT NEW.model_name
+            OR OLD.context_window IS NOT NEW.context_window
+            OR OLD.endpoint_digest IS NOT NEW.endpoint_digest
+            OR OLD.request_profile_digest IS NOT NEW.request_profile_digest
+        BEGIN
+            SELECT RAISE(ABORT, 'agent run provenance is immutable');
+        END
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        executor TEXT NOT NULL DEFAULT 'model',
+        expected_tools TEXT DEFAULT NULL,
+        result_summary TEXT DEFAULT NULL,
+        error TEXT DEFAULT NULL,
+        sort INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +283,144 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+
+    # ── memory_items：长期记忆统一召回面 ───────────────────────────
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        scope_type TEXT NOT NULL DEFAULT 'book',
+        scope_id TEXT DEFAULT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        keywords TEXT NOT NULL DEFAULT '',
+        importance INTEGER NOT NULL DEFAULT 3,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        status TEXT NOT NULL DEFAULT 'active',
+        pinned INTEGER NOT NULL DEFAULT 0,
+        fingerprint TEXT NOT NULL DEFAULT '',
+        source_type TEXT NOT NULL DEFAULT 'manual',
+        source_id TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME DEFAULT NULL
+    )""")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN importance INTEGER NOT NULL DEFAULT 3")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_id TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN last_used_at DATETIME DEFAULT NULL")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_items_book_status "
+        "ON memory_items(book_id, status, kind)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_items_source "
+        "ON memory_items(source_type, source_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_items_scope "
+        "ON memory_items(book_id, scope_type, scope_id)"
+    )
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_fingerprint "
+        "ON memory_items(book_id, fingerprint) WHERE fingerprint != ''"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        from_memory_id INTEGER NOT NULL,
+        to_memory_id INTEGER NOT NULL,
+        relation TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_links_book "
+        "ON memory_links(book_id, relation)"
+    )
+
+    await _try_exec(db, """CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
+        USING fts5(content, summary, keywords, tokenize=trigram, content=memory_items, content_rowid=id)""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ai
+        AFTER INSERT ON memory_items BEGIN
+            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
+            VALUES (new.id, new.content, new.summary, new.keywords);
+        END""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_au
+        AFTER UPDATE ON memory_items BEGIN
+            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
+                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
+            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
+                VALUES (new.id, new.content, new.summary, new.keywords);
+        END""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ad
+        AFTER DELETE ON memory_items BEGIN
+            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
+                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
+        END""")
+
+    # 非破坏式迁移：把旧「本书设定 / 伏笔」镜像进统一记忆池。
+    await _try_exec(db, """
+        INSERT INTO memory_items (
+            book_id, kind, scope_type, scope_id, content, importance, status,
+            fingerprint, source_type, source_id, create_time, update_time
+        )
+        SELECT
+            book_id,
+            'canon',
+            CASE
+                WHEN character_id IS NOT NULL THEN 'character'
+                WHEN chapter_id IS NOT NULL THEN 'chapter'
+                ELSE 'book'
+            END,
+            COALESCE(CAST(character_id AS TEXT), chapter_id),
+            content,
+            4,
+            'active',
+            'legacy:spark:' || id,
+            'spark_idea',
+            CAST(id AS TEXT),
+            create_time,
+            create_time
+        FROM ai_memories AS old
+        WHERE NOT EXISTS (
+            SELECT 1 FROM memory_items AS mi
+            WHERE mi.source_type = 'spark_idea' AND mi.source_id = CAST(old.id AS TEXT)
+        )
+    """)
+    await _try_exec(db, """
+        INSERT INTO memory_items (
+            book_id, kind, scope_type, scope_id, content, keywords, importance, status,
+            fingerprint, source_type, source_id, create_time, update_time
+        )
+        SELECT
+            book_id,
+            'foreshadowing',
+            'chapter',
+            chapter_id,
+            content,
+            type || ' ' || status,
+            4,
+            CASE WHEN status = '已回收' THEN 'archived' ELSE 'active' END,
+            'legacy:foreshadowing:' || id,
+            'foreshadowing',
+            CAST(id AS TEXT),
+            create_time,
+            update_time
+        FROM ai_foreshadowing AS old
+        WHERE NOT EXISTS (
+            SELECT 1 FROM memory_items AS mi
+            WHERE mi.source_type = 'foreshadowing' AND mi.source_id = CAST(old.id AS TEXT)
+        )
+    """)
+    await _try_exec(db, "INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
 
     # ── orphaned conversations migration ─────────────────────────
     orphaned = await db.fetch_all(
@@ -295,6 +511,43 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ON chapter_diff_history(chapter_id, create_time DESC)"
     )
 
+    # ── character_history ────────────────────────────────────────
+    # 人物设定修订历史；commit diff 或手动保存前快照旧值，支持回滚。
+    await db.execute("""CREATE TABLE IF NOT EXISTS character_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id INTEGER NOT NULL,
+        before_name TEXT DEFAULT '',
+        before_tags TEXT DEFAULT '',
+        before_profile_md TEXT DEFAULT '',
+        after_name TEXT DEFAULT '',
+        after_tags TEXT DEFAULT '',
+        after_profile_md TEXT DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_character_history_character "
+        "ON character_history(character_id, create_time DESC)"
+    )
+
+    # ── story_background_history ─────────────────────────────────
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_background_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        before_content TEXT NOT NULL DEFAULT '',
+        after_content TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_background_history_book "
+        "ON story_background_history(book_id, create_time DESC)"
+    )
+
     # ── story_background_attachments ─────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS story_background_attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,6 +555,54 @@ async def init_schema(db: DatabaseConnection) -> None:
         name TEXT NOT NULL,
         stored_path TEXT NOT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # ── setting_entities ─────────────────────────────────────────
+    # 世界设定实体（地点 / 势力 / 物品 / 其他），结构与人物卡一致：
+    # name / tags 结构化，正文统一 profile_md。
+    await db.execute("""CREATE TABLE IF NOT EXISTS setting_entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL DEFAULT 'location',
+        name TEXT NOT NULL,
+        tags TEXT DEFAULT '',
+        profile_md TEXT DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_setting_entities_book "
+        "ON setting_entities(book_id, entity_type)"
+    )
+
+    # ── setting_entity_history ───────────────────────────────────
+    # 设定实体修订历史；与 character_history 同构，支持 diff 审阅与回滚。
+    await db.execute("""CREATE TABLE IF NOT EXISTS setting_entity_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id INTEGER NOT NULL,
+        before_name TEXT DEFAULT '',
+        before_tags TEXT DEFAULT '',
+        before_profile_md TEXT DEFAULT '',
+        after_name TEXT DEFAULT '',
+        after_tags TEXT DEFAULT '',
+        after_profile_md TEXT DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        accepted_segments INTEGER DEFAULT 0,
+        rejected_segments INTEGER DEFAULT 0,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_setting_entity_history_entity "
+        "ON setting_entity_history(entity_id, create_time DESC)"
+    )
+
+    # ── book_word_stats ──────────────────────────────────────────
+    # 每书每日字数快照（当日结束时的全书总字数），用于日更统计 / 连续达标。
+    # 正文保存时增量更新当日行；统计接口读取时用全量字数自校正。
+    await db.execute("""CREATE TABLE IF NOT EXISTS book_word_stats (
+        book_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        total_words INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (book_id, date)
     )""")
 
     # ── characters ───────────────────────────────────────────────

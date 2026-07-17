@@ -6,7 +6,12 @@ import SessionHistoryPopover from "../SessionHistoryPopover";
 
 interface SessionTabsBarProps {
   bookId: EntityId;
-  chapterId: EntityId;
+  /** 全局作用域会话不绑章节，传 null */
+  chapterId: EntityId | null;
+  /** 会话作用域；setting 时历史列表查询不绑章节的全局会话 */
+  scope?: "chapter" | "setting";
+  /** 章节作用域下显示在标签栏左侧的当前章节标题 */
+  chapterTitle?: string;
   sessions: AiSession[];
   activeSessionId: number | null;
   loading: boolean;
@@ -27,6 +32,8 @@ interface SessionTabsBarProps {
 export default function SessionTabsBar({
   bookId,
   chapterId,
+  scope = "chapter",
+  chapterTitle,
   sessions,
   activeSessionId,
   loading,
@@ -64,31 +71,39 @@ export default function SessionTabsBar({
         const session = sessions.find((s) => String(s.id) === targetKey);
         if (session) onCloseTab(session);
       }}
-      tabBarExtraContent={
-        <div className="session-tab-actions">
-          <Tooltip
-            title={
-              hasBlankSession ? "当前对话尚未开始" : "新建对话"
-            }
-          >
-            <Button
-              type="text"
-              size="small"
-              icon={<PlusOutlined style={{ fontSize: 13 }} />}
-              onClick={onNewSession}
-              disabled={loading || hasBlankSession}
-              className="session-new-btn"
+      tabBarExtraContent={{
+        left: chapterTitle ? (
+          <span className="session-tabs-chapter-title" title={chapterTitle}>
+            {chapterTitle}
+          </span>
+        ) : undefined,
+        right: (
+          <div className="session-tab-actions">
+            <Tooltip
+              title={
+                hasBlankSession ? "当前对话尚未开始" : "新建对话"
+              }
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<PlusOutlined style={{ fontSize: 13 }} />}
+                onClick={onNewSession}
+                disabled={loading || hasBlankSession}
+                className="session-new-btn"
+              />
+            </Tooltip>
+            <SessionHistoryPopover
+              bookId={bookId}
+              chapterId={chapterId}
+              scope={scope}
+              activeSessionId={activeSessionId}
+              onOpen={onOpenFromHistory}
+              onDelete={onDeleteFromHistory}
             />
-          </Tooltip>
-          <SessionHistoryPopover
-            bookId={bookId}
-            chapterId={chapterId}
-            activeSessionId={activeSessionId}
-            onOpen={onOpenFromHistory}
-            onDelete={onDeleteFromHistory}
-          />
-        </div>
-      }
+          </div>
+        ),
+      }}
       items={sessions.map((s) => ({
         key: String(s.id),
         label:

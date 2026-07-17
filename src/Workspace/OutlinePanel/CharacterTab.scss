@@ -237,3 +237,15 @@
   border-bottom: none;
 }
 
+/* ─── 世界设定条目（复用人物卡片版式） ─── */
+.world-entity-type-tag {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  line-height: 16px;
+}
+
+.world-entity-edit-type {
+  flex: 0 0 96px;
+}
+

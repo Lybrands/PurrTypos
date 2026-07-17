@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, field_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -11,9 +11,11 @@ class ChatStreamRequest(BaseModel):
     baseURL: Optional[str] = None
     apiProvider: str = "openai"
     options: Optional[Dict[str, Any]] = None
+    # Reserved only so unsupported caller-owned tool contracts can be rejected
+    # explicitly by the application mapper instead of being silently ignored.
     tools: Optional[List[Dict[str, Any]]] = None
-    # 是否在请求中携带 skills/<name>/SKILL.md 解析出的工具列表。
-    # 名字曾叫 useToolRouter（误导：实际并无路由，只是"是否加载工具"开关）。
+    sessionId: Optional[int] = None
+    # 是否允许 Writing Agent 暴露当前书籍范围内的宿主工具。
     enableAgentTools: bool = False
     bookId: Optional[str] = None
     chapterId: Optional[str] = None
@@ -26,17 +28,16 @@ class ChatStreamRequest(BaseModel):
     # 前端不再自行拼接记忆文案。
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
-    agentMode: Optional[str] = None
     chatAgentMode: Optional[str] = None
-    writingMode: str = "default"
-    agentActions: Optional[List[str]] = Field(
-        default=None,
-        deprecated=True,
-        description="Deprecated: ignored by server; on-demand experts use subagentRole",
-    )
-    subagentRole: Optional[
-        Literal["review", "polish", "continuation_plan", "style_unify"]
-    ] = None
+    contextWindow: Optional[str] = None
+
+    @field_validator("bookId")
+    @classmethod
+    def normalize_book_id(cls, value: Optional[str]) -> Optional[str]:
+        """Canonicalize the Writing security scope at the HTTP boundary."""
+
+        normalized = str(value or "").strip()
+        return normalized or None
 
 
 class ListModelsRequest(BaseModel):
@@ -51,3 +52,7 @@ class GenerateTitleRequest(BaseModel):
     prompt: str
     apiProvider: str = "openai"
     model: Optional[str] = None
+
+
+class ResolveToolApprovalRequest(BaseModel):
+    approved: bool

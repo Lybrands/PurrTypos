@@ -1,28 +1,25 @@
 import type { AiStreamChunk, ChunkCtx } from "./types";
 import {
-  handleOrchestratorRepair,
-  handleWritingSubagentDelta,
-  handleWritingSubagentDone,
-  handleWritingSubagentResult,
-  handleWritingSubagentStart,
-} from "./subagent";
+  handleAgentRunStarted,
+  handleAgentRunTerminal,
+  handleAgentRunTodoUpdated,
+  handleAgentRunTodosUpdated,
+} from "./agentRun";
 import {
-  handleCollabLatestParagraph,
   handleDelta,
   handleThinkingDelta,
-  handleToolRouterWarning,
 } from "./streaming";
 import {
-  handleChapterContentUpdated,
   handleChapterCreated,
   handleProposedChapterDiff,
   handleSettingUpdated,
 } from "./sideEffects";
+import { handleProposedSettingDiff } from "./settingDiff";
 import {
-  handleToolCallCachedIndex,
-  handleToolIndexCompleted,
-  handleToolReadCacheMask,
-} from "./toolProgress";
+  handleToolApprovalRequired,
+  handleToolApprovalResolved,
+} from "./toolApproval";
+import { handleToolIndexCompleted } from "./toolProgress";
 import { handleToolCallsInProgress } from "./toolStart";
 import { handleDone, handleError } from "./terminal";
 
@@ -36,36 +33,31 @@ export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
  * - error / done 由 handler 自身负责清理订阅 + refs（通过 ctx.cleanup()）。
  */
 export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
-  // 1. 独立通知 / 子专家管线 / 编排修复（原顺序，互不冲突，皆无短路）
-  handleToolRouterWarning(chunk, ctx);
-  handleWritingSubagentStart(chunk, ctx);
-  handleWritingSubagentDelta(chunk, ctx);
-  handleWritingSubagentResult(chunk, ctx);
-  handleWritingSubagentDone(chunk, ctx);
-  handleOrchestratorRepair(chunk, ctx);
-
-  // 2. 错误终态：合并提示 + cleanup，必须立即停（避免后续分支二次写 state）
+  // 1. 错误终态：合并提示 + cleanup，必须立即停（避免后续分支二次写 state）
   if (handleError(chunk, ctx)) return;
 
-  // 3. 流式正文 / 思考流（无短路）
+  // 2. 流式正文 / 思考流（无短路）
   handleThinkingDelta(chunk, ctx);
   handleDelta(chunk, ctx);
 
-  // 4. 副作用：派发 DOM 事件（无短路）
-  handleChapterContentUpdated(chunk, ctx);
+  // 3. 副作用：派发 DOM 事件（无短路）
   handleProposedChapterDiff(chunk, ctx);
+  handleProposedSettingDiff(chunk, ctx);
+  handleToolApprovalRequired(chunk, ctx);
+  handleToolApprovalResolved(chunk, ctx);
   handleChapterCreated(chunk, ctx);
   handleSettingUpdated(chunk, ctx);
-  handleCollabLatestParagraph(chunk, ctx);
+  handleAgentRunStarted(chunk, ctx);
+  handleAgentRunTodosUpdated(chunk, ctx);
+  handleAgentRunTodoUpdated(chunk, ctx);
+  handleAgentRunTerminal(chunk, ctx);
 
-  // 5. 工具进度三连：仅当 chunk 只含进度信号时短路（与原行为一致）
-  if (handleToolReadCacheMask(chunk, ctx)) return;
+  // 4. 工具进度：仅当 chunk 只含进度信号时短路
   if (handleToolIndexCompleted(chunk, ctx)) return;
-  if (handleToolCallCachedIndex(chunk, ctx)) return;
 
-  // 6. 工具批次开始：构造气泡段，吞掉 chunk 后续分支
+  // 5. 工具批次开始：构造气泡段，吞掉 chunk 后续分支
   if (handleToolCallsInProgress(chunk, ctx)) return;
 
-  // 7. 正常终态
+  // 6. 正常终态
   if (handleDone(chunk, ctx)) return;
 }

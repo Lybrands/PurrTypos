@@ -7,6 +7,22 @@
   overflow: hidden;
 }
 
+.ai-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.ai-conversation-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .system-prompt-area {
   padding: var(--spacing-sm) var(--spacing-sm);
   border-bottom: 1px solid var(--border);
@@ -17,6 +33,36 @@
 .system-prompt-input {
   width: 100%;
   font-size: var(--font-size-sm);
+}
+
+/* ─── 会话作用域切换（章节对话 / 全局对话） ──────────── */
+.chat-scope-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 6px 8px 0;
+  background: var(--bg-surface);
+}
+
+/* ─── 会话标签栏左侧：当前章节标题（与新建/历史按钮同一行） */
+.session-tabs-bar.ant-tabs .ant-tabs-extra-content {
+  /* 左右两侧的 extra 区域都与 tab 行垂直居中 */
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+}
+
+.session-tabs-chapter-title {
+  display: inline-block;
+  max-width: 180px;
+  margin-right: 10px;
+  padding-left: 4px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ─── Session 切换栏（antd Tabs editable-card） ──────── */
@@ -163,6 +209,161 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+/* ─── 对话索引：按用户提问聚合每一轮，参考 Codex 的左侧刻度导航 ─── */
+.chat-turn-index {
+  --turn-index-width: clamp(16px, calc(var(--main-col-gutter) - 4px), 38px);
+  position: absolute;
+  top: 50%;
+  left: max(4px, calc(var(--main-col-gutter) - 42px));
+  z-index: 3;
+  width: var(--turn-index-width);
+  max-height: min(320px, calc(100% - 72px));
+  transform: translateY(-50%);
+  opacity: 0.58;
+  transition: opacity 0.16s ease;
+
+  &:hover,
+  &:focus-within {
+    opacity: 1;
+  }
+}
+
+.chat-turn-index-list {
+  max-height: inherit;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-block: 4px;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.chat-turn-index-item {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+
+  &:focus-visible .chat-turn-index-mark {
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+  }
+
+  &:hover .chat-turn-index-mark {
+    width: min(18px, 100%);
+    background: var(--text-secondary);
+  }
+
+  &.is-active .chat-turn-index-mark {
+    width: min(11px, 100%);
+    height: 2px;
+    background: var(--text-primary);
+  }
+
+  &.is-active:hover .chat-turn-index-mark {
+    width: min(18px, 100%);
+  }
+}
+
+.chat-turn-index-mark {
+  display: block;
+  width: min(11px, 100%);
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition:
+    width 0.14s ease,
+    height 0.14s ease,
+    background-color 0.14s ease;
+}
+
+.chat-turn-index-popover.ant-popover {
+  --antd-arrow-background-color: var(--bg-panel);
+  max-width: calc(100vw - 32px);
+
+  .ant-popover-content {
+    max-width: 100%;
+  }
+
+  .ant-popover-inner {
+    box-sizing: border-box;
+    width: 320px;
+    min-width: 0;
+    max-width: calc(100vw - 32px);
+    max-height: 220px;
+    padding: 14px 16px;
+    overflow: hidden;
+    color: var(--text-primary);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 14px;
+    box-shadow:
+      0 14px 40px rgba(0, 0, 0, 0.18),
+      0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+
+  .ant-popover-inner-content {
+    width: 100%;
+    max-width: 100%;
+    max-height: 192px;
+    min-width: 0;
+    overflow: hidden;
+  }
+}
+
+.chat-turn-index-preview {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  max-height: 192px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.chat-turn-index-preview-meta {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.chat-turn-index-preview-question,
+.chat-turn-index-preview-answer {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.chat-turn-index-preview-question {
+  color: var(--text-primary);
+  font-size: var(--font-size);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.55;
+  -webkit-line-clamp: 2;
+}
+
+.chat-turn-index-preview-answer {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  -webkit-line-clamp: 3;
+}
+
 .chat-empty {
   flex: 1;
   display: flex;
@@ -192,26 +393,24 @@
   position: relative;
 
   &.user {
-    .bubble-label {
-      text-align: right;
-      color: var(--accent);
-      padding-right: var(--spacing-sm);
-    }
+    align-items: flex-end;
+    margin-top: 18px;
 
     .bubble-content {
+      width: fit-content;
+      max-width: min(78%, 680px);
       background: var(--accent-dim);
-      border: 1px solid rgba(79, 195, 247, 0.2);
+      border: none;
       color: var(--text-primary);
-      margin-left: 12px;
-      margin-right: var(--spacing-xs);
+      padding: 9px 13px;
+      border-radius: 15px 15px 4px 15px;
     }
 
     .bubble-user-actions {
       display: flex;
       justify-content: flex-end;
       margin-top: 4px;
-      margin-left: 12px;
-      margin-right: var(--spacing-xs);
+      margin-right: 2px;
       opacity: 0;
       transition: opacity 0.15s;
     }
@@ -263,11 +462,9 @@
     }
   }
 
-  &.assistant .bubble-content {
-    background: var(--bg-active);
-    border: 1px solid var(--border-light);
-    color: var(--text-primary);
-    margin-right: 12px;
+  &.assistant {
+    width: 100%;
+    margin: 2px 0 18px;
   }
 
   .bubble-footer {
@@ -278,7 +475,7 @@
   }
 
   &.assistant .bubble-footer {
-    margin-right: 12px;
+    min-height: 24px;
   }
 
   .bubble-model-tag {
@@ -286,7 +483,7 @@
     color: var(--text-muted);
     opacity: 0.7;
     line-height: 1.4;
-    padding-left: 2px;
+    padding-left: 0;
   }
 
   .bubble-bookmark-btn {
@@ -311,17 +508,12 @@
   }
 
   &.error .bubble-content {
-    background: rgba(244, 67, 54, 0.1);
-    border-color: rgba(244, 67, 54, 0.3);
+    padding: 8px 12px;
+    background: rgba(244, 67, 54, 0.06);
+    border: none;
+    border-left: 2px solid rgba(244, 67, 54, 0.5);
     color: #ef9a9a;
   }
-}
-
-.bubble-label {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  color: var(--text-muted);
-  padding: 0 var(--spacing-xs);
 }
 
 .bubble-content {
@@ -331,20 +523,6 @@
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-
-  .bubble-content--thinking {
-    display: flex;
-    align-items: center;
-    color: var(--text-muted);
-  }
-
-  .bubble-thinking-spin {
-    margin-right: var(--spacing-xs);
-  }
-
-  .bubble-content--thinking-with-content {
-    margin-top: var(--spacing-sm);
-  }
 
   // AI markdown 区域覆盖 pre-wrap
   > p,
@@ -467,17 +645,6 @@
   }
 }
 
-.chat-input-area-divider {
-  flex-shrink: 0;
-  height: 3px;
-  cursor: ns-resize;
-  background: var(--border);
-  transition: background 0.15s;
-  &:hover {
-    background: var(--accent);
-  }
-}
-
 .chat-input-area {
   padding: var(--spacing);
   border-top: 1px solid var(--border);
@@ -490,19 +657,14 @@
 }
 
 .chat-input-inner {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  & > * {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
+
   textarea.ant-input {
     resize: none;
-    flex: 1;
+    flex: 0 0 auto;
     min-height: 0;
   }
 }
@@ -541,12 +703,10 @@
 .chat-bubble.assistant .bubble-assistant-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-right: 12px;
-  padding: var(--spacing-sm);
-  background: var(--bg-active);
-  border: 1px solid var(--border-light);
-  border-radius: var(--border-radius);
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: none;
   color: var(--text-primary);
 
   .bubble-content {
@@ -643,24 +803,26 @@
     }
   }
 
-  /* 聊天列表：居中限宽 */
+  /*
+   * 滚动容器撑满内容区，让滚动条贴在面板最右侧；
+   * 实际消息列表仍在容器内部居中限宽，保持原有阅读宽度。
+   */
   .chat-history-wrap {
     background: transparent;
-    justify-content: center;
   }
 
   .chat-history {
-    /*
-     * 基础样式里是 `flex: 1`（等价于 flex-basis: 0%），会盖掉这里的 width
-     * 让对话列被父级 .chat-history-wrap 横向撑满。
-     * 改成 `flex: 0 1 auto` —— 不主动 grow、可以 shrink、basis 取自 width，
-     * 这样下面的 width / max-width / margin auto 才真正生效。
-     */
-    flex: 0 1 auto;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: var(--spacing) 0;
+  }
+
+  .chat-virtuoso-list {
     width: var(--main-col-width);
     max-width: 100%;
-    margin: 0 auto;
-    padding: var(--spacing) 24px;
+    margin-inline: auto;
+    padding-inline: 24px;
   }
 
   /*
@@ -670,22 +832,6 @@
    */
   .chat-scroll-to-bottom-btn {
     right: max(var(--spacing), calc(var(--main-col-gutter) + 16px));
-  }
-
-  /* divider 弱化：默认透明，hover 才出来 */
-  .chat-input-area-divider {
-    background: transparent;
-    height: 6px;
-    width: var(--main-col-width);
-    max-width: 100%;
-    margin: 0 auto;
-    border-radius: 3px;
-    transition: background 0.2s;
-    flex-shrink: 0;
-
-    &:hover {
-      background: var(--border);
-    }
   }
 
   /* 输入区 = 大圆角卡片 */
@@ -770,61 +916,5 @@
     .ant-empty-description {
       font-size: var(--font-size-lg);
     }
-  }
-}
-
-/* ─── 写作模式浮岛：ai-panel--compact ────────────────────────────
- * mainPanel === 'editor' 时 AI 栏收紧为浮岛形态：
- * - 隐藏 system prompt / 模式切换等次要控件，让出空间给写作
- * - 保留 session 标签栏（其中的「+ 新建对话」/ 历史按钮是高频入口，悬浮态也要可达）
- * - 消息气泡字号与 padding 压缩；历史列表仍可滚动
- * - 输入区保留完整能力（写作中的 AI 召唤点）
- */
-.ai-panel--compact {
-  .system-prompt-area {
-    display: none;
-  }
-
-  /* session 标签栏在窄面板里收紧：单行水平滚，按钮区永远右贴 */
-  .session-tabs-bar.ant-tabs {
-    .ant-tabs-nav {
-      min-height: 30px;
-    }
-    .ant-tabs-tab {
-      padding: 2px 6px;
-      font-size: var(--font-size-sm);
-    }
-  }
-
-  .panel-header {
-    min-height: 32px;
-    padding: 0 var(--spacing-sm);
-
-    .panel-title {
-      font-size: var(--font-size-sm);
-      color: var(--text-secondary);
-    }
-  }
-
-  .chat-bubble {
-    font-size: var(--font-size-sm);
-    line-height: var(--line-height-sm);
-
-    &.user .bubble-content,
-    &.assistant .bubble-assistant-body {
-      padding: var(--spacing-xs) var(--spacing-sm);
-    }
-
-    .bubble-label {
-      font-size: var(--font-size-xs);
-    }
-  }
-
-  .chat-input-area {
-    padding: var(--spacing-xs) var(--spacing-sm);
-  }
-
-  .chat-input-inner textarea.ant-input {
-    font-size: var(--font-size-sm);
   }
 }

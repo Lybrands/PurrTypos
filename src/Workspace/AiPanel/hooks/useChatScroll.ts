@@ -1,10 +1,5 @@
 import React from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
-import {
-  INPUT_AREA_DEFAULT,
-  INPUT_AREA_MAX,
-  INPUT_AREA_MIN,
-} from "../constants";
 import type { ChatMessage } from "./chat.types";
 
 /**
@@ -14,7 +9,6 @@ import type { ChatMessage } from "./chat.types";
  * - Virtuoso 流式贴底跟随（用户未主动上滑时）；
  * - 发送新一轮后把本轮用户消息钉到顶部（pinNewTurnToTop）；
  * - 「回到底部」；
- * - 输入区分隔条拖拽调高。
  *
  * 纯 UI 状态，不涉及业务数据。`combinedData` 由调用方合并历史+当前会话后传入。
  */
@@ -29,9 +23,6 @@ export function useChatScroll({
   /** 用户主动上滚后为 true，不再自动滚到底部；滚回底部或点击「回到底部」后恢复为 false。 */
   const [userHasScrolledUp, setUserHasScrolledUp] = React.useState(false);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
-  const [inputAreaHeight, setInputAreaHeight] =
-    React.useState(INPUT_AREA_DEFAULT);
-  const inputAreaDragRef = React.useRef(false);
   const pinNewTurnToTopRef = React.useRef(false);
 
   const setScrolledUpByReason = React.useCallback(
@@ -78,36 +69,6 @@ export function useChatScroll({
     pinNewTurnToTopRef.current = false;
   }, [combinedData.length, setScrolledUpByReason]);
 
-  const handleInputAreaDividerMouseDown = React.useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      inputAreaDragRef.current = true;
-      document.body.style.cursor = "ns-resize";
-      document.body.style.userSelect = "none";
-    },
-    [],
-  );
-
-  React.useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!inputAreaDragRef.current) return;
-      setInputAreaHeight((h) =>
-        Math.min(INPUT_AREA_MAX, Math.max(INPUT_AREA_MIN, h - e.movementY)),
-      );
-    };
-    const onMouseUp = () => {
-      inputAreaDragRef.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-  }, []);
-
   const streamFollowKey = React.useMemo(() => {
     if (!loading || userHasScrolledUp || combinedData.length === 0) return "";
     const last = combinedData[combinedData.length - 1] as
@@ -142,9 +103,7 @@ export function useChatScroll({
     setScrolledUpByReason,
     isAtBottom,
     setIsAtBottom,
-    inputAreaHeight,
     handleScrollToBottom,
-    handleInputAreaDividerMouseDown,
     pinNewTurnToTop,
   };
 }

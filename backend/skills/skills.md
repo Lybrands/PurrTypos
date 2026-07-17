@@ -94,13 +94,63 @@
 
 - **用途**：按 `characterId` 更新人物卡：`name` / `tags` / `profileMd` 只覆盖显式传入的项；**`profileMd` 是整篇覆盖**，必须先 `getBookCharacters` 读现有档案再合并改写。
 - **参数**：`bookId`、`characterId` (必填)；`name`、`tags`、`profileMd` 至少传一个。
-- **返回**：`success`、`updatedFields` 等。无删除人物工具，删除需用户手动操作。
+- **返回**：`success`、`updatedFields` 等。
+
+### deleteCharacter
+
+- **用途**：物理删除一个人物卡（**不可恢复**）。
+- **参数**：`bookId`、`characterId` (必填)；id 必须先用 `listBookCharacters` / `getBookCharacters` 取到。
+- **返回**：被删除人物的 `name`，便于在回复中复述"已删除：XXX"。
+- **使用约束**：用户**明确要求删除**才调用；可改可删时优先 `updateCharacter`；调用前先复述目标人物、得到用户同意；批量删除逐个调用。
 
 ### getStoryBackground
 
 - **用途**：本书「小说背景」整块文档。
 - **参数**：`bookId` (number, 必填)。
 - **返回**：`content` 等。
+
+### getStoryHealthDashboard
+
+- **用途**：只读查看仪表盘故事健康度聚合，包含伏笔逾期/临近、未回收伏笔、人物久未出场、章节与总字数概况。
+- **参数**：`bookId` (number, 必填)。
+- **返回**：压缩 JSON，含 `foreshadowing`、`characters`、`totalChapters`、`writtenChapters`、`totalWords` 等。
+
+### getWritingStatsDashboard
+
+- **用途**：只读查看仪表盘写作统计，包含今日新增、日更目标、近日日更、章节字数分布与空章节。
+- **参数**：`bookId` (number, 必填)。
+- **返回**：压缩 JSON，含 `totalWords`、`todayWords`、`goalWords`、`recentDaily`、`longestChapters`、`emptyChapters` 等。
+
+### listSettingEntities
+
+- **用途**：轻量列出世界设定条目（地点/势力/物品/其他）的 **id、类型与名称**，不含详情。
+- **参数**：`bookId` (number, 必填)。
+- **返回**：JSON 数组字符串形式 `[{id,type,typeLabel,name},…]`。
+
+### getSettingEntities
+
+- **用途**：世界设定条目档案 **Markdown**（每条一节：类型 + 名称 + 实体ID + 标签 + 档案全文）。修改条目前必须先用本工具读现有档案。
+- **参数**：`bookId` (number, 必填)；`entityIds`、`names`、`entityType` (可选)。
+- **返回**：Markdown 文本。
+
+### createSettingEntity
+
+- **用途**：为本书新建一个世界设定条目。档案为 Markdown（`profileMd`），建议分小节组织。人物用 `createCharacter`，不要用本工具。
+- **参数**：`bookId`、`entityType`（location/faction/item/other）、`name` (必填)；`tags`、`profileMd` 可选。
+- **返回**：`success`、`entityId`、`entityType`、`name`。
+
+### updateSettingEntity
+
+- **用途**：按 `entityId` 更新设定条目：`name` / `tags` / `profileMd` 只覆盖显式传入的项；**`profileMd` 是整篇覆盖**，必须先 `getSettingEntities` 读现有档案再合并改写。提议制：用户在设定面板接受后才落库。
+- **参数**：`bookId`、`entityId` (必填)；`name`、`tags`、`profileMd` 至少传一个。
+- **返回**：`success`、`pendingUserApproval` 等。
+
+### deleteSettingEntity
+
+- **用途**：物理删除一个世界设定条目及其修订历史（**不可恢复**）。
+- **参数**：`bookId`、`entityId` (必填)；id 必须先用 `listSettingEntities` / `getSettingEntities` 取到。
+- **返回**：被删除条目的 `name`，便于在回复中复述"已删除：XXX"。
+- **使用约束**：用户**明确要求删除**才调用；可改可删时优先 `updateSettingEntity`；调用前先复述目标条目、得到用户同意；批量删除逐条调用。
 
 ### editStoryBackground
 
@@ -146,7 +196,9 @@
 
 - **大纲**：先 **`listOutlines`** 拿 id/标题；只读详情用 **`queryOutline`**（可同时取章节树与文本大纲 Markdown）；修改用 **`updateOutline`**。需要总纲全文用 **`getGlobalOutline`** / **`editGlobalOutline`**。
 - **章节正文/目录**：先 **`listWritingChapters`** 再操作；新增目录用 **`createWritingChapter`**；正文读写用 **`getChapterContent`** / **`batchGetChapterContents`** / **`editChapterContent`**，其章节 id 必须来自写作目录。
-- **人物与背景**：读取用 **`getBookCharacters`** / **`listBookCharacters`** / **`getStoryBackground`**；新建/整理人物用 **`createCharacter`** / **`updateCharacter`**（部分更新，先读后写）；改写背景用 **`editStoryBackground`**（整篇覆盖，必须先读）。
+- **人物与背景**：读取用 **`getBookCharacters`** / **`listBookCharacters`** / **`getStoryBackground`**；新建/整理人物用 **`createCharacter`** / **`updateCharacter`**（部分更新，先读后写）；明确要删除人物时用 **`deleteCharacter`**（不可恢复，需用户同意）；改写背景用 **`editStoryBackground`**（整篇覆盖，必须先读）。
+- **世界设定（地点/势力/物品）**：读取用 **`listSettingEntities`** / **`getSettingEntities`**；新建用 **`createSettingEntity`**；整理已有条目用 **`updateSettingEntity`**（提议制，先读后写）；明确要删除时用 **`deleteSettingEntity`**（不可恢复，需用户同意）。
 - **本书设定与伏笔**：新增用 **`addSparkIdea`** / **`addForeshadowing`**；查询用 **`searchSparkIdeas`**（结果含 `[id:N]`）；改写已有设定用 **`updateSparkIdea`**（必须先用 `searchSparkIdeas` 取 id）；明确要删除时用 **`deleteSparkIdea`**（不可恢复，可改可删先 update）。
+- **仪表盘信息**：需要判断故事健康度、伏笔回收风险、人物出场空档时用 **`getStoryHealthDashboard`**；需要评估写作进度、日更状态、章节字数分布时用 **`getWritingStatsDashboard`**。
 - 用户要求改写某章正文时，必须实际调用 **`editChapterContent`** 并收到成功后再宣称完成。
 - 回复用户时优先使用**章节名**等与界面一致的可见名称，避免直接暴露内部数字 id。

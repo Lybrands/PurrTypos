@@ -1,5 +1,8 @@
 import React from "react";
-import { Modal, Radio, Checkbox, Button } from "antd";
+import { Modal, Radio, Checkbox, Button, Space } from "antd";
+
+/** md/txt：每章一个文件；txt-single：整本一个 TXT；epub：电子书 */
+export type ExportFormat = "md" | "txt" | "txt-single" | "epub";
 
 export interface ExportItem {
   id: string;
@@ -24,7 +27,7 @@ export interface ExportModalProps {
   onSelectedIdsChange: (ids: string[]) => void;
   onConfirm: (
     selectedIds: string[],
-    format: "md" | "txt",
+    format: ExportFormat,
     exportAsZip: boolean,
   ) => void | Promise<void>;
   confirmLoading?: boolean;
@@ -49,8 +52,10 @@ export default function ExportModal({
   emptyText = "暂无数据",
   showFolderHint = false,
 }: ExportModalProps) {
-  const [exportFormat, setExportFormat] = React.useState<"md" | "txt">("md");
+  const [exportFormat, setExportFormat] = React.useState<ExportFormat>("md");
   const [exportAsZip, setExportAsZip] = React.useState(false);
+  // 单文件格式（整本 TXT / EPUB）走各自的保存对话框，无目录/压缩包概念
+  const isSingleFileFormat = exportFormat === "txt-single" || exportFormat === "epub";
 
   const toggleItem = React.useCallback(
     (id: string) => {
@@ -101,28 +106,34 @@ export default function ExportModal({
       confirmLoading={confirmLoading}
       width={480}
     >
-      <div style={{ marginBottom: 16 }}>
-        <span style={{ marginRight: 8 }}>导出方式：</span>
-        <Radio.Group
-          value={exportAsZip}
-          onChange={(e) => setExportAsZip(e.target.value)}
-        >
-          <Radio value={false}>导出到文件夹</Radio>
-          <Radio value={true}>
-            导出为压缩包{showFolderHint ? "" : " (.zip)"}
-          </Radio>
-        </Radio.Group>
-      </div>
-      <div style={{ marginBottom: 16 }}>
-        <span style={{ marginRight: 8 }}>导出格式：</span>
+      <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
+        <span style={{ flexShrink: 0 }}>导出格式：</span>
         <Radio.Group
           value={exportFormat}
           onChange={(e) => setExportFormat(e.target.value)}
         >
-          <Radio value="md">Markdown (.md)</Radio>
-          <Radio value="txt">纯文本 (.txt)</Radio>
+          <Space direction="vertical" size={4}>
+            <Radio value="md">Markdown（每章一个 .md）</Radio>
+            <Radio value="txt">纯文本（每章一个 .txt）</Radio>
+            <Radio value="txt-single">整本 TXT（单文件，适合投稿 / 发布平台）</Radio>
+            <Radio value="epub">EPUB 电子书</Radio>
+          </Space>
         </Radio.Group>
       </div>
+      {!isSingleFileFormat && (
+        <div style={{ marginBottom: 16 }}>
+          <span style={{ marginRight: 8 }}>导出方式：</span>
+          <Radio.Group
+            value={exportAsZip}
+            onChange={(e) => setExportAsZip(e.target.value)}
+          >
+            <Radio value={false}>导出到文件夹</Radio>
+            <Radio value={true}>
+              导出为压缩包{showFolderHint ? "" : " (.zip)"}
+            </Radio>
+          </Radio.Group>
+        </div>
+      )}
       <div>
         <div style={{ marginBottom: 8 }}>
           <span>{selectLabel}</span>

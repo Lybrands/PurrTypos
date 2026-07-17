@@ -1,28 +1,35 @@
 import React, { Suspense, lazy } from 'react'
 import {
   ArrowLeftOutlined,
+  DashboardOutlined,
   HomeOutlined,
+  TeamOutlined,
 } from '@ant-design/icons'
 import { Button, Tooltip, Spin } from 'antd'
 import type { LexicalEditor } from 'lexical'
 import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
-import ChapterListIcon from '../icons/ChapterListIcon'
-import WritingPenIcon from '../icons/WritingPenIcon'
-import AiChatIcon from '../icons/AiChatIcon'
-import type { Chapter, AiAgentMode, AiModelConfig, EntityId } from '../types'
+import type { Chapter, AiModelConfig, EntityId } from '../types'
 import { getWritingOutlineWithChapters } from './utils'
 import WorkspaceContext from './WorkspaceContext'
 import type { WorkspaceContextValue } from './WorkspaceContext'
 import WorkspaceSearchPanel from './WorkspaceSearchPanel'
 import { DiffProvider } from './diff/DiffContext'
+import { SettingDiffProvider } from './settingDiff/SettingDiffContext'
 import CommandPalette, { type CommandItem } from './CommandPalette'
-import FloatingPanel from './FloatingPanel'
+import DockedPanel from './DockedPanel'
+import WorkspaceUtilityPanel from './WorkspaceUtilityPanel'
 import { usePanelLayout } from './hooks/usePanelLayout'
 import { useActiveChapter } from './hooks/useActiveChapter'
 import { useWorkspaceSearch } from './hooks/useWorkspaceSearch'
 import { useWorkspaceShortcuts } from './hooks/useWorkspaceShortcuts'
 import { buildPaletteCommands } from './workspaceCommands'
-import './FloatingPanel.scss'
+import NotebookToolbar from './DirectorNotebook/NotebookToolbar'
+import type { OpenSettingPanelDetail } from './SettingPanel'
+import {
+  DASHBOARD_TAB,
+  SETTING_TAB,
+  type WorkspaceUtilityTab,
+} from './utilityPanelTypes'
 import './workspaceSearch.scss'
 
 const DirectorNotebook = lazy(() => import('./DirectorNotebook'))
@@ -34,13 +41,13 @@ const PanelFallback = () => (
 )
 
 /**
- * AI-Centric 工作区：默认 AI 占满中央，「设定」「写作」以悬浮 panel 形式弹出。
+ * AI-Centric 工作区：AI 固定居中，章节悬停/停靠在左侧，辅助面板与正文依次在右侧。
  *
  * 主区域规则见 hooks/usePanelLayout；本组件只负责组合：
  * - 布局状态（usePanelLayout）+ 快捷键（useWorkspaceShortcuts）
  * - 活跃章节持久化（useActiveChapter）+ 写作目录加载
  * - 全局搜索（useWorkspaceSearch）
- * - WorkspaceContext 组装与各 panel / 浮窗 / 命令面板渲染
+ * - WorkspaceContext 组装与各停靠面板 / 命令面板渲染
  */
 interface WorkspaceProps {
   bookId?: EntityId | null
@@ -50,26 +57,112 @@ interface WorkspaceProps {
   onGoHome?: () => void
   onOpenSettings?: () => void
   modelConfigs?: AiModelConfig[]
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   syncOutlineChapter?: boolean
-  aiAgentMode?: AiAgentMode
 }
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], syncOutlineChapter = false, aiAgentMode = 'legacy' }: WorkspaceProps = {}) {
+type WorkspaceFullscreenPanel = 'utility' | 'editor' | null
+
+export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false }: WorkspaceProps = {}) {
   const {
     panelState,
-    mainPanel,
     updateFloating,
-    toggleFloating,
-    closeFloating,
-    setMain,
   } = usePanelLayout()
+
+  const [fullscreenPanel, setFullscreenPanel] = React.useState<WorkspaceFullscreenPanel>(null)
+  const [utilityTabs, setUtilityTabs] = React.useState<WorkspaceUtilityTab[]>([])
+  const [activeUtilityTabKey, setActiveUtilityTabKey] = React.useState<string | null>(null)
+  const [settingOpenRequest, setSettingOpenRequest] = React.useState<OpenSettingPanelDetail | null>(null)
+
+  const openUtilityTab = React.useCallback((tab: WorkspaceUtilityTab) => {
+    setUtilityTabs((currentTabs) => {
+      const existingIndex = currentTabs.findIndex((item) => item.key === tab.key)
+      if (existingIndex < 0) return [...currentTabs, tab]
+      const nextTabs = [...currentTabs]
+      nextTabs[existingIndex] = tab
+      return nextTabs
+    })
+    setActiveUtilityTabKey(tab.key)
+    setFullscreenPanel((currentPanel) => currentPanel === 'editor' ? null : currentPanel)
+    updateFloating('utility', { open: true })
+  }, [updateFloating])
+
+  const toggleUtilityTab = React.useCallback((tab: WorkspaceUtilityTab) => {
+    if (panelState.utility.open && activeUtilityTabKey === tab.key) {
+      setFullscreenPanel((currentPanel) => currentPanel === 'utility' ? null : currentPanel)
+      updateFloating('utility', { open: false })
+      return
+    }
+    openUtilityTab(tab)
+  }, [activeUtilityTabKey, openUtilityTab, panelState.utility.open, updateFloating])
+
+  const closeUtilityTab = React.useCallback((key: string) => {
+    setUtilityTabs((currentTabs) => {
+      const closingIndex = currentTabs.findIndex((tab) => tab.key === key)
+      if (closingIndex < 0) return currentTabs
+      const nextTabs = currentTabs.filter((tab) => tab.key !== key)
+      setActiveUtilityTabKey((currentKey) => {
+        if (currentKey !== key) return currentKey
+        return nextTabs[Math.min(closingIndex, nextTabs.length - 1)]?.key ?? null
+      })
+      if (nextTabs.length === 0) {
+        setFullscreenPanel((currentPanel) => currentPanel === 'utility' ? null : currentPanel)
+        updateFloating('utility', { open: false })
+      }
+      return nextTabs
+    })
+  }, [updateFloating])
+
+  const collapseUtilityPanel = React.useCallback(() => {
+    setFullscreenPanel((currentPanel) => currentPanel === 'utility' ? null : currentPanel)
+    updateFloating('utility', { open: false })
+  }, [updateFloating])
+
+  const togglePanelFullscreen = React.useCallback((panel: Exclude<WorkspaceFullscreenPanel, null>) => {
+    setFullscreenPanel((currentPanel) => currentPanel === panel ? null : panel)
+  }, [])
 
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const toggleCommandPalette = React.useCallback(
     () => setCommandPaletteOpen((open) => !open),
     [],
   )
-  useWorkspaceShortcuts({ toggleFloating, setMain, toggleCommandPalette })
+  useWorkspaceShortcuts({ toggleCommandPalette })
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        panel?: string
+        open?: boolean
+        setting?: OpenSettingPanelDetail
+      }>).detail
+      if (detail?.open === false) return
+      if (detail?.panel === 'setting') {
+        if (detail.setting) setSettingOpenRequest(detail.setting)
+        openUtilityTab(SETTING_TAB)
+      } else if (detail?.panel === 'dashboard') {
+        openUtilityTab(DASHBOARD_TAB)
+      }
+    }
+    window.addEventListener('workspace-open-panel', handler as EventListener)
+    return () => window.removeEventListener('workspace-open-panel', handler as EventListener)
+  }, [openUtilityTab])
+
+  React.useEffect(() => {
+    setUtilityTabs([])
+    setActiveUtilityTabKey(null)
+    setFullscreenPanel(null)
+    updateFloating('utility', { open: false })
+  }, [bookId, updateFloating])
+
+  React.useEffect(() => {
+    if (fullscreenPanel == null) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setFullscreenPanel(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [fullscreenPanel])
 
   const [writingOutlineId, setWritingOutlineId] = React.useState<EntityId | null>(null)
   const [writingChapters, setWritingChapters] = React.useState<Chapter[]>([])
@@ -167,7 +260,9 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
         break
       }
     }
-  }, [bookId])
+    closeUtilityTab(`outline:chapter:${wcKey}`)
+    closeUtilityTab(`outline:volume:${wcKey}`)
+  }, [bookId, closeUtilityTab])
 
   const handleWritingChaptersChange = React.useCallback((outlineId: EntityId, chapterList: Chapter[]) => {
     setWritingOutlineId(outlineId)
@@ -184,6 +279,10 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     activeChapterTitle: activeWritingChapterTitle,
     writingChapters,
     writingOutlineId,
+    utilityPanelOpen: panelState.utility.open,
+    activeUtilityTabKey,
+    openUtilityTab,
+    toggleUtilityTab,
     setActiveChapter: handleWritingSelect,
     setChaptersData: handleWritingChaptersChange,
     loadWritingChapters,
@@ -201,6 +300,8 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     bookId, bookTitle, enableVolume, syncOutlineChapter,
     activeWritingChapterId, activeWritingChapterTitle,
     writingChapters, writingOutlineId,
+    panelState.utility.open, activeUtilityTabKey,
+    openUtilityTab, toggleUtilityTab,
     handleWritingSelect, handleWritingChaptersChange, loadWritingChapters,
     workspaceSearchQuery,
     setWorkspaceSearchQuery,
@@ -214,62 +315,56 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   ])
 
   /**
-   * 顶栏面板 toggle：与左右贴线（floating-rail）等价的显式入口，解决贴线
-   * 「几乎不可见」导致新用户找不到章节列表 / 编辑器的可发现性问题。
-   * 已是主区域的面板按钮高亮且不可点（toggleFloating 对主区域本就是 noop）。
+   * 顶栏工具统一打开正文左侧的多标签辅助面板。
    */
   const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
     {
-      key: 'left',
-      icon: <ChapterListIcon size={16} />,
-      tooltip: panelState.left.open ? '关闭章节列表（Ctrl+Shift+1）' : '章节列表（Ctrl+Shift+1）',
-      active: panelState.left.open,
-      onClick: () => toggleFloating('left'),
+      key: 'setting',
+      icon: <TeamOutlined style={{ fontSize: 16 }} />,
+      tooltip: panelState.utility.open && activeUtilityTabKey === SETTING_TAB.key
+        ? '收起小说设定'
+        : '小说设定：人物 / 故事背景 / 世界设定',
+      active: panelState.utility.open && activeUtilityTabKey === SETTING_TAB.key,
+      onClick: () => toggleUtilityTab(SETTING_TAB),
     },
     {
-      key: 'editor',
-      icon: <WritingPenIcon size={16} />,
-      tooltip: mainPanel === 'editor'
-        ? '写作已是主区域'
-        : panelState.editor.open
-          ? '关闭写作浮窗（Ctrl+Shift+3）'
-          : '写作 / 正文编辑器（Ctrl+Shift+3）',
-      active: mainPanel === 'editor' || panelState.editor.open,
-      disabled: mainPanel === 'editor',
-      onClick: () => toggleFloating('editor'),
+      key: 'dashboard',
+      icon: <DashboardOutlined style={{ fontSize: 16 }} />,
+      tooltip: panelState.utility.open && activeUtilityTabKey === DASHBOARD_TAB.key
+        ? '收起仪表盘'
+        : '仪表盘：故事健康 / 写作统计',
+      active: panelState.utility.open && activeUtilityTabKey === DASHBOARD_TAB.key,
+      onClick: () => toggleUtilityTab(DASHBOARD_TAB),
     },
-    {
-      key: 'ai',
-      icon: <AiChatIcon size={16} />,
-      tooltip: mainPanel === 'ai'
-        ? 'AI 已是主区域'
-        : panelState.ai.open
-          ? '收起 AI 浮窗（Ctrl+Shift+2 切回主区域）'
-          : 'AI 对话浮窗（Ctrl+Shift+2 切回主区域）',
-      active: mainPanel === 'ai' || panelState.ai.open,
-      disabled: mainPanel === 'ai',
-      onClick: () => toggleFloating('ai'),
-    },
-  ], [panelState, mainPanel, toggleFloating])
+  ], [activeUtilityTabKey, panelState.utility.open, toggleUtilityTab])
 
   const paletteCommands = React.useMemo<CommandItem[]>(
     () =>
       buildPaletteCommands({
-        panelState,
-        mainPanel,
-        toggleFloating,
-        setMain,
+        settingPanelActive: panelState.utility.open && activeUtilityTabKey === SETTING_TAB.key,
+        dashboardPanelActive: panelState.utility.open && activeUtilityTabKey === DASHBOARD_TAB.key,
+        onToggleSettingPanel: () => toggleUtilityTab(SETTING_TAB),
+        onToggleDashboardPanel: () => toggleUtilityTab(DASHBOARD_TAB),
         writingChapters,
         activeWritingChapterId,
         onChapterSelect: handleWritingSelect,
         onOpenSettings,
       }),
-    [panelState, mainPanel, toggleFloating, setMain, writingChapters, activeWritingChapterId, handleWritingSelect, onOpenSettings],
+    [
+      panelState.utility.open,
+      activeUtilityTabKey,
+      toggleUtilityTab,
+      writingChapters,
+      activeWritingChapterId,
+      handleWritingSelect,
+      onOpenSettings,
+    ],
   )
 
   return (
     <WorkspaceContext.Provider value={workspaceContextValue}>
     <DiffProvider>
+    <SettingDiffProvider>
       <AppHeader
         title={
           bookId ? (
@@ -308,6 +403,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
           </>
         }
         showActions
+        right={<NotebookToolbar />}
         panelToggles={headerPanelToggles}
         onOpenSettings={onOpenSettings}
       />
@@ -315,112 +411,19 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       <WorkspaceSearchPanel />
 
       <div
-        className="app-body app-body--ai-centric"
+        className={`app-body app-body--ai-centric${panelState.editor.open || fullscreenPanel === 'editor' ? '' : ' app-body--editor-collapsed'}`}
         id="workspace-search-scope"
         ref={containerRef}
       >
-        {/* 主区域：mainPanel 只能是 'ai' 或 'editor'（章节列表只能浮窗） */}
-        <div className={`panel panel-${mainPanel} panel-main panel-ai--fill workspace-search-include`}>
-          <Suspense fallback={<PanelFallback />}>
-            {mainPanel === 'ai' && (
-              <AiPanel
-                modelConfigs={modelConfigs}
-                aiAgentMode={aiAgentMode}
-                isMain={true}
-                onSetMain={() => { /* AI 已是主区域，noop */ }}
-                compact={false}
-              />
-            )}
-            {mainPanel === 'editor' && (
-              <EditorPanel
-                bookTitle={bookTitle ?? ''}
-                modelConfigs={modelConfigs}
-                isMain={true}
-                onSetMain={() => { /* 已是主区域，noop */ }}
-                onLexicalEditor={setLexicalEditorRef}
-              />
-            )}
-          </Suspense>
-        </div>
-
-        {/* 左侧边线：唤起章节列表浮窗（章节列表永远不能成为主，所以从不 disabled） */}
-        <Tooltip
-          title={panelState.left.open ? '关闭章节列表（Ctrl+Shift+1）' : '章节列表（Ctrl+Shift+1）'}
-          placement="right"
-          mouseEnterDelay={0.4}
-        >
-          <button
-            type="button"
-            className={`floating-rail floating-rail--left ${panelState.left.open ? 'is-active' : ''}`}
-            onClick={() => toggleFloating('left')}
-            aria-label="章节列表"
-          />
-        </Tooltip>
-
-        {/* 右侧边线：当 AI 是主区域时唤起「写作」浮窗；当 Editor 是主区域时唤起「AI」浮窗 */}
-        {mainPanel === 'ai' ? (
-          <Tooltip
-            title={panelState.editor.open ? '关闭写作浮窗（Ctrl+Shift+3）' : '写作 / 正文编辑器（Ctrl+Shift+3）'}
-            placement="left"
-            mouseEnterDelay={0.4}
-          >
-            <button
-              type="button"
-              className={`floating-rail floating-rail--right ${panelState.editor.open ? 'is-active' : ''}`}
-              onClick={() => toggleFloating('editor')}
-              aria-label="写作 / 正文编辑器"
-            />
-          </Tooltip>
-        ) : (
-          <Tooltip
-            title={panelState.ai.open ? '收起 AI 浮窗（Ctrl+Shift+2 切回主区域）' : '展开 AI 浮窗（Ctrl+Shift+2 切回主区域）'}
-            placement="left"
-            mouseEnterDelay={0.4}
-          >
-            <button
-              type="button"
-              className={`floating-rail floating-rail--right ${panelState.ai.open ? 'is-active' : ''}`}
-              onClick={() => toggleFloating('ai')}
-              aria-label="AI 对话"
-            />
-          </Tooltip>
-        )}
-
-        {/* AI 浮窗：仅当 AI 不是主区域时显示；close 按钮真正关闭浮窗（用户可通过右侧边线 / Ctrl+Shift+2 重新唤起 / 切回主） */}
-        {mainPanel !== 'ai' && panelState.ai.open && (
-          <FloatingPanel
-            side="right"
-            title="AI 对话"
-            x={panelState.ai.x}
-            y={panelState.ai.y}
-            width={panelState.ai.width}
-            onPositionChange={(p) => updateFloating('ai', p)}
-            onClose={() => closeFloating('ai')}
-          >
-            <div className="panel panel-ai">
-              <Suspense fallback={<PanelFallback />}>
-                <AiPanel
-                  modelConfigs={modelConfigs}
-                  aiAgentMode={aiAgentMode}
-                  isMain={false}
-                  onSetMain={() => setMain('ai')}
-                  compact={true}
-                />
-              </Suspense>
-            </div>
-          </FloatingPanel>
-        )}
-
-        {/* 左浮窗：章节列表（永远是浮窗，不传 onSetMain → 隐藏「扩大为主」按钮） */}
         {panelState.left.open && (
-          <FloatingPanel
+          <DockedPanel
             side="left"
-            title="章节列表"
-            x={panelState.left.x}
-            y={panelState.left.y}
             width={panelState.left.width}
-            onPositionChange={(p) => updateFloating('left', p)}
-            onClose={() => closeFloating('left')}
+            minWidth={220}
+            maxWidth={420}
+            onWidthChange={(width) => updateFloating('left', { width })}
+            onCollapse={(width) => updateFloating('left', { width, open: false })}
+            ariaLabel="章节列表边栏"
           >
             <div className="panel panel-left workspace-search-include">
               <Suspense fallback={<PanelFallback />}>
@@ -430,39 +433,123 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
                 />
               </Suspense>
             </div>
-          </FloatingPanel>
+          </DockedPanel>
         )}
 
-        {/* 右浮窗：写作 / 编辑器（mainPanel='editor' 时不渲染浮窗） */}
-        {mainPanel !== 'editor' && panelState.editor.open && (
-          <FloatingPanel
+        {!panelState.left.open && (
+          <div
+            className="workspace-chapter-rail"
+            style={{ '--chapter-hover-width': `${panelState.left.width}px` } as React.CSSProperties}
+            tabIndex={0}
+            aria-label="悬停展开章节边栏"
+          >
+            <div className="workspace-chapter-hover-panel">
+              <div className="panel panel-left workspace-search-include">
+                <Suspense fallback={<PanelFallback />}>
+                  <DirectorNotebook
+                    bookTitle={bookTitle ?? ''}
+                    onWritingChapterDeleted={handleWritingChapterDeleted}
+                    dockCollapsed
+                    onExpandDock={() => updateFloating('left', { open: true })}
+                  />
+                </Suspense>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 中央区域永远是 AI；不再存在“切换主区域”的布局状态。 */}
+        <div className="panel panel-ai panel-main panel-ai--fill workspace-primary-panel workspace-search-include">
+          <Suspense fallback={<PanelFallback />}>
+            <AiPanel
+              modelConfigs={modelConfigs}
+              onUpdateModelConfig={onUpdateModelConfig}
+              conversationSidebarOpen={panelState.conversation.open}
+              onConversationSidebarOpenChange={(open) => updateFloating('conversation', { open })}
+            />
+          </Suspense>
+        </div>
+
+        {panelState.utility.open && utilityTabs.length > 0 && (
+          <DockedPanel
             side="right"
-            title="写作 / 正文"
-            x={panelState.editor.x}
-            y={panelState.editor.y}
+            width={panelState.utility.width}
+            minWidth={320}
+            maxWidth={620}
+            onWidthChange={(width) => updateFloating('utility', { width })}
+            ariaLabel="工作台辅助面板"
+            className={`workspace-dock--utility${fullscreenPanel === 'utility' ? ' workspace-dock--fullscreen' : ''}`}
+          >
+            <WorkspaceUtilityPanel
+              bookId={bookId ?? null}
+              tabs={utilityTabs}
+              activeKey={activeUtilityTabKey}
+              onActiveKeyChange={setActiveUtilityTabKey}
+              onCloseTab={closeUtilityTab}
+              onCollapse={collapseUtilityPanel}
+              fullscreen={fullscreenPanel === 'utility'}
+              onToggleFullscreen={() => togglePanelFullscreen('utility')}
+              settingOpenRequest={settingOpenRequest}
+            />
+          </DockedPanel>
+        )}
+
+        {panelState.editor.open || fullscreenPanel === 'editor' ? (
+          <DockedPanel
+            side="right"
             width={panelState.editor.width}
-            onPositionChange={(p) => updateFloating('editor', p)}
-            onClose={() => closeFloating('editor')}
+            minWidth={340}
+            maxWidth={640}
+            onWidthChange={(width) => updateFloating('editor', { width })}
+            onCollapse={(width) => updateFloating('editor', { width, open: false })}
+            ariaLabel="正文编辑边栏"
+            className={fullscreenPanel === 'editor' ? 'workspace-dock--fullscreen' : ''}
           >
             <div className="panel panel-editor workspace-search-include">
               <Suspense fallback={<PanelFallback />}>
                 <EditorPanel
                   bookTitle={bookTitle ?? ''}
                   modelConfigs={modelConfigs}
-                  isMain={false}
-                  onSetMain={() => setMain('editor')}
+                  onUpdateModelConfig={onUpdateModelConfig}
                   onLexicalEditor={setLexicalEditorRef}
+                  fullscreen={fullscreenPanel === 'editor'}
+                  onToggleFullscreen={() => togglePanelFullscreen('editor')}
                 />
               </Suspense>
             </div>
-          </FloatingPanel>
+          </DockedPanel>
+        ) : (
+          <div
+            className="workspace-editor-rail"
+            style={{ '--editor-hover-width': `${panelState.editor.width}px` } as React.CSSProperties}
+            tabIndex={0}
+            aria-label="悬停展开正文边栏"
+          >
+            <div className="workspace-editor-hover-panel">
+              <div className="panel panel-editor workspace-search-include">
+                <Suspense fallback={<PanelFallback />}>
+                  <EditorPanel
+                    bookTitle={bookTitle ?? ''}
+                    modelConfigs={modelConfigs}
+                    onUpdateModelConfig={onUpdateModelConfig}
+                    onLexicalEditor={setLexicalEditorRef}
+                    dockCollapsed
+                    onExpandDock={() => updateFloating('editor', { open: true })}
+                    onToggleFullscreen={() => togglePanelFullscreen('editor')}
+                  />
+                </Suspense>
+              </div>
+            </div>
+          </div>
         )}
+
       </div>
       <CommandPalette
         open={commandPaletteOpen}
         commands={paletteCommands}
         onClose={() => setCommandPaletteOpen(false)}
       />
+    </SettingDiffProvider>
     </DiffProvider>
     </WorkspaceContext.Provider>
   )

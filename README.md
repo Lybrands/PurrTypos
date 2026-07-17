@@ -1,6 +1,6 @@
 # PurrTypos
 
-**Electron 桌面写作应用** — 多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景、可配置多模型 AI 对话（写作专家 / 智能体 / 协作共创 / 纯问答四种模式 + 工具调用）。
+**Electron 桌面写作应用** — 多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景，以及可配置多模型的 Writing Agent / 纯问答。
 
 ```
 ┌────────────────────┐    HTTP/SSE     ┌────────────────────────┐
@@ -72,16 +72,18 @@ npm run build
 
 ## AI 模式
 
-工作台右侧 AI 面板的"模式选择"对应四种工作流：
+工作台右侧 AI 面板提供两种工作流：
 
 | 模式 | 适用 | 特征 |
 |---|---|---|
-| **写作专家** (`expert`) | 长篇小说创作 | 主智能体 + 按需子专家：审校 / 润色 / 续写规划 / 风格统一；子专家产出结构化 JSON，前端用专门 UI 卡片展示 |
-| **智能体** (`agent`) | 通用任务 | ReAct 工具流，自动选择并调用 `backend/skills/` 下的工具 |
-| **协作共创** (`collab`) | 与作者文字接龙 | 限制写入工具，注入协作提示词，专注交替输出短段 |
+| **Writing Agent** (`agent`) | 写作与项目任务 | 三层 Agent 执行规划、上下文预算、受限工具调用、人工审批和结果校验 |
 | **纯问答** (`ask`) | 答疑、构思 | 不携带工具，单轮文本响应 |
 
-写作专家的子专家通过对话框中的 "/" 命令或按钮触发：`/review`、`/polish`、`/continuation_plan`、`/style_unify`。
+模型接入提供两条路径：系统固定提供内置模型，设置页只允许配置其服务商凭据与运行参数，不能新增、复制或删除；代理、自建服务或目录外模型继续使用“高级自定义”。两种路径最终生成相同的 `AiModelConfig`，沿用同一套后端调用链。缺少 API Key 的内置模型仍显示在设置页，但不会进入对话模型列表。
+
+内置模型采用 profile 分层适配：`src/models/profiles/` 保存前端目录能力与配置迁移，`backend/infrastructure/models/profiles/` 保存请求参数和响应规范化差异；OpenAI / Anthropic SDK、流式生命周期、工具调用和错误处理仍由公共协议适配器负责。内置配置通过 `model_profile` 命中对应 profile，高级自定义不携带该字段并回退到 generic profile。
+
+Kimi K3 通过独立 profile 接入 `kimi-k3`，使用 1M 上下文和当前服务端支持的 Max 思考模式；Agent 工具续轮会回传模型的 `reasoning_content`，避免丢失 K3 的思考历史。
 
 ### 工具系统（Skills）
 
@@ -89,7 +91,7 @@ npm run build
 1. YAML frontmatter（`name` / `description`）
 2. 正文中的 ` ```json ` 代码块（OpenAI 函数调用的 `parameters` JSON Schema）
 
-后端启动时扫描整个 `skills/` 目录加载，注册成 OpenAI/Anthropic 兼容的工具列表。新增工具只需新建一个 `<name>/SKILL.md` 即可，无需改后端代码。
+后端启动时由 `WritingSkillCatalog` 扫描整个 `skills/` 目录，并由 Writing Domain 校验 Schema、Policy 与 Infrastructure Handler 一致。新增工具必须同时提供 `SKILL.md`、业务 Policy/规划约束和具体 Handler；任一缺失都会在装配时失败关闭。
 
 ## 项目结构
 
@@ -107,20 +109,16 @@ PurrTypos/
 │   │   ├── ai.py                # /ai/chat/stream（SSE）、/ai/title、/ai/models
 │   │   ├── books.py / outlines.py / chapters.py / characters.py / ...
 │   │   └── conversations.py / sessions.py / settings.py / ...
-│   ├── services/                # 业务/适配层
-│   │   ├── ai_provider.py       # 统一 OpenAI / Anthropic 入口
-│   │   ├── ai_capabilities.py   # 推理（thinking）等能力翻译层
-│   │   ├── openai_chat.py       # OpenAI 兼容流式适配
-│   │   ├── anthropic_chat.py    # Anthropic Messages API 适配
-│   │   ├── tool_router.py       # SKILL.md 加载器
-│   │   ├── tool_executor.py     # 工具调用执行
-│   │   ├── writing_subagents.py # 写作专家的按需子专家调用
-│   │   └── memory_service.py    # mem0 集成（长期记忆）
+│   ├── agent_core/              # 业务无关的规划、状态机、模型轮次、工具与审批内核
+│   ├── application/             # 唯一 Composition Root、请求/SSE 映射和应用用例
+│   ├── domains/writing/         # Writing 业务规则、Planning Policy、上下文与工具契约
+│   ├── infrastructure/          # Provider、SQLite Repository、技能目录和 Writing Handler
+│   ├── services/                # 非 Agent 架构的长期记忆应用服务
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理
 │   │   ├── schema.py            # 建表 / 增量迁移
 │   │   └── crud/                # 各表 CRUD（books/outlines/chapters/...）
-│   ├── utils/                   # 纯函数工具：prompt 拼装、流式辅助等
+│   ├── utils/                   # 通用纯函数与异步流辅助
 │   ├── schemas/                 # Pydantic 请求体
 │   └── skills/                  # 工具定义（每个工具一个目录 + SKILL.md）
 ├── src/                         # 渲染进程（React + TypeScript）
@@ -129,7 +127,7 @@ PurrTypos/
 │   ├── Workspace/
 │   │   ├── OutlinePanel/        # 大纲（Tiptap）、人物、小说背景
 │   │   ├── EditorPanel/         # 章节正文（Lexical）、内联 AI、Ghost 补全
-│   │   └── AiPanel/             # AI 对话、子专家结果卡片、记忆/收藏管理
+│   │   └── AiPanel/             # AI 对话、Agent Run、工具审批、记忆/收藏管理
 │   └── types.ts                 # 前后端共享 IPC 类型契约
 ├── scripts/                     # 构建辅助脚本
 └── package.json
@@ -139,8 +137,14 @@ PurrTypos/
 
 - **位置**：用户数据目录下的 `purrtypos.db`（Windows：`%APPDATA%\purrtypos\purrtypos.db`，macOS：`~/Library/Application Support/purrtypos/purrtypos.db`，由 Electron `app.getPath('userData')` 决定，并通过 `PURRTYPOS_DATA_DIR` 环境变量传给 Python 后端）。
 - **驱动**：`aiosqlite`（异步 SQLite）+ WAL 日志模式，单连接复用，写锁 `busy_timeout=5000ms`。多步写操作通过 `db.transaction()` 上下文管理器原子化（如 `delete_book`）。
-- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
+- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories` / `ai_foreshadowing`、`memory_items` / `memory_links`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
 - **导入 / 导出**：设置面板 → 数据 → 数据库导出/导入，覆盖式导入会替换当前所有数据，请先备份。
+
+## 长期记忆
+
+- `memory_items` 是统一长期记忆池，覆盖设定、剧情事实、人物状态、世界观、伏笔、风格和阶段总结；`memory_links` 保存冲突、替代、支持、相关等关系。
+- 默认使用 SQLite FTS5 本地召回与规则沉淀，不依赖外部服务；AI 接受的 diff / inline edit 会生成 `pending` 候选，用户明确“记住”的内容和手动保存的设定会写入 `active`。
+- 记忆中心里的“高级智能记忆”开关默认关闭。开启后，AI 来源改动会使用已配置的第一个可用模型提炼更精细的 `pending` 候选，并尝试生成冲突/替代/伏笔等关系；模型不可用或输出无效时自动回退到本地规则候选。
 
 ## 健康检查
 

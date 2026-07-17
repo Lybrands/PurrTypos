@@ -24,6 +24,20 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
         accepted_segments=body.accepted_segments,
         rejected_segments=body.rejected_segments,
     )
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_chapter_diff_candidate(
+            db,
+            chapter_id=chapterId,
+            diff_id=diff_id,
+            before_text=body.before_text,
+            after_text=body.after_text,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+        )
+    except Exception:
+        # 记忆候选沉淀失败不应阻断正文落库。
+        pass
     return {"success": True, "data": {"id": diff_id}}
 
 

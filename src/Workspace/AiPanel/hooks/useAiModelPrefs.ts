@@ -1,31 +1,24 @@
 import React from "react";
-import type { AiAgentMode, AiModelConfig, EntityId } from "../../../types";
+import type { AiModelConfig, EntityId } from "../../../types";
 import { loadModelPrefs, saveModelPrefs } from "../utils";
 
 const validModelIds = (configs: AiModelConfig[]) => configs.map((c) => c.id);
 
-export const thinkingOnlyModelIds = (configs: AiModelConfig[]) =>
-  configs.filter((c) => c.thinkingOnly).map((c) => c.id);
-
 export function useAiModelPrefs(
   bookId: EntityId | null | undefined,
   modelConfigs: AiModelConfig[],
-  aiAgentMode: AiAgentMode,
 ) {
   const prefBookId = bookId ?? null;
   const ids = React.useMemo(() => validModelIds(modelConfigs), [modelConfigs]);
   const initialPrefs = React.useMemo(
-    () => loadModelPrefs(prefBookId, ids, aiAgentMode),
-    [prefBookId, ids.join(","), aiAgentMode],
+    () => loadModelPrefs(prefBookId, ids),
+    [prefBookId, ids.join(",")],
   );
   const [selectedModel, setSelectedModel] = React.useState<string>(
     initialPrefs.model,
   );
   const [chatAgentMode, setChatAgentMode] = React.useState(
     initialPrefs.chatAgentMode,
-  );
-  const [thinkingEnabled, setThinkingEnabled] = React.useState(
-    initialPrefs.thinkingEnabled,
   );
   const selectedModelConfig = React.useMemo(
     () => modelConfigs.find((c) => c.id === selectedModel) ?? null,
@@ -34,17 +27,16 @@ export function useAiModelPrefs(
   const modelConfigsRecord = React.useMemo(() => {
     const r: Record<string, { label?: string; max_tokens?: number }> = {};
     modelConfigs.forEach((c) => {
-      r[c.id] = { label: c.name, max_tokens: 8192 };
+      r[c.id] = { label: c.name };
     });
     return r;
   }, [modelConfigs]);
 
   React.useEffect(() => {
-    const prefs = loadModelPrefs(prefBookId, ids, aiAgentMode);
+    const prefs = loadModelPrefs(prefBookId, ids);
     setSelectedModel(prefs.model);
     setChatAgentMode(prefs.chatAgentMode);
-    setThinkingEnabled(prefs.thinkingEnabled);
-  }, [prefBookId, ids.join(","), aiAgentMode]);
+  }, [prefBookId, ids.join(",")]);
 
   React.useEffect(() => {
     if (ids.length && !ids.includes(selectedModel)) {
@@ -56,16 +48,14 @@ export function useAiModelPrefs(
   }, [ids, selectedModel]);
 
   React.useEffect(() => {
-    saveModelPrefs(prefBookId, selectedModel, chatAgentMode, thinkingEnabled);
-  }, [prefBookId, selectedModel, chatAgentMode, thinkingEnabled]);
+    saveModelPrefs(prefBookId, selectedModel, chatAgentMode);
+  }, [prefBookId, selectedModel, chatAgentMode]);
 
   return {
     selectedModel,
     setSelectedModel,
     chatAgentMode,
     setChatAgentMode,
-    thinkingEnabled,
-    setThinkingEnabled,
     selectedModelConfig,
     modelConfigsRecord,
   };

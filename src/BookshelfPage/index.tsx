@@ -4,8 +4,8 @@ import { Button, Modal, Input, Tooltip, Checkbox } from 'antd'
 import { Book, type EntityId } from '../types'
 import { useAntdApp } from '../hooks/useAntdApp'
 import AppHeader from '../components/AppHeader'
-import ExportModal from '../components/ExportModal'
-import { fetchExportData, buildExportEntries } from '../utils/exportBooks'
+import ExportModal, { type ExportFormat } from '../components/ExportModal'
+import { fetchExportData, buildExportEntries, buildSingleTxtContent } from '../utils/exportBooks'
 import './index.scss'
 
 interface BookshelfPageProps {
@@ -79,14 +79,58 @@ export default function BookshelfPage({
   }, [])
 
   const handleExportConfirm = React.useCallback(
-    async (selectedIds: EntityId[], format: 'md' | 'txt', exportAsZip: boolean) => {
+    async (selectedIds: EntityId[], format: ExportFormat, exportAsZip: boolean) => {
       if (selectedIds.length === 0) {
         message.warning('请至少选择一本书籍')
         return
       }
       setExporting(true)
       try {
+        // EPUB：逐本书走「后端生成 + 保存对话框」
+        if (format === 'epub') {
+          let okCount = 0
+          for (const bookId of selectedIds) {
+            const book = books.find((b) => b.id === bookId)
+            const res = await window.electronAPI.exportEpub({
+              bookId,
+              defaultName: book?.title || '书籍',
+            })
+            if (res.success) okCount += 1
+            else if (res.error === 'canceled') break
+            else message.error(`「${book?.title || bookId}」导出失败：${res.error || '未知错误'}`)
+          }
+          if (okCount > 0) {
+            message.success(`已导出 ${okCount} 本 EPUB`)
+            setExportModalOpen(false)
+          }
+          return
+        }
+
         const booksData = await fetchExportData(selectedIds)
+
+        // 整本 TXT：逐本书保存为单文件
+        if (format === 'txt-single') {
+          let okCount = 0
+          for (const bookData of booksData) {
+            if (bookData.chapters.length === 0) {
+              message.warning(`「${bookData.title}」暂无内容，已跳过`)
+              continue
+            }
+            const res = await window.electronAPI.writeSingleTextFile({
+              defaultName: `${bookData.title || '导出'}.txt`,
+              content: buildSingleTxtContent(bookData),
+            })
+            if (res.success) okCount += 1
+            else if (res.error === 'canceled') break
+            else message.error(`「${bookData.title}」导出失败：${res.error || '未知错误'}`)
+          }
+          if (okCount > 0) {
+            message.success(`已导出 ${okCount} 本 TXT`)
+            setExportModalOpen(false)
+          }
+          return
+        }
+
         const entries = buildExportEntries(booksData, format)
         if (entries.length === 0) {
           message.warning('所选书籍暂无内容可导出')
@@ -103,7 +147,7 @@ export default function BookshelfPage({
         setExporting(false)
       }
     },
-    [message]
+    [message, books]
   )
 
   return (

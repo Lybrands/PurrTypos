@@ -1,5 +1,5 @@
 import React from 'react'
-import { Button, Tooltip, Select, Switch, Divider } from 'antd'
+import { Button } from 'antd'
 import { CloseOutlined, CheckOutlined, RedoOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -7,7 +7,9 @@ import StopCircleIcon from '../../icons/StopCircleIcon'
 import type { AiModelConfig, EntityId, Outline } from '../../types'
 import AiContextBar from '../AiPanel/components/AiContextBar'
 import type { PromptTemplateContext } from '../AiPanel/promptTemplates'
+import ModelPicker from '../AiPanel/components/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
+import { isModelThinkingEnabled } from '../../modelCatalog'
 
 export interface InlineCapture {
   text: string
@@ -19,10 +21,9 @@ interface InlineEditPopoverProps {
   capture: InlineCapture
   initialPrompt: string
   modelConfigs: AiModelConfig[]
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   selectedModelId: string
   onSelectedModelChange: (id: string) => void
-  thinkingEnabled: boolean
-  onThinkingChange: (v: boolean) => void
   bookId: EntityId | null
   chapterId: EntityId | null
   chapterTitle: string
@@ -48,10 +49,9 @@ export default function InlineEditPopover({
   capture,
   initialPrompt,
   modelConfigs,
+  onUpdateModelConfig,
   selectedModelId,
   onSelectedModelChange,
-  thinkingEnabled,
-  onThinkingChange,
   bookId,
   chapterId,
   chapterTitle,
@@ -83,17 +83,6 @@ export default function InlineEditPopover({
     () => modelConfigs.find((m) => m.id === selectedModelId) ?? modelConfigs[0],
     [modelConfigs, selectedModelId]
   )
-
-  const modelOptions = React.useMemo(
-    () =>
-      modelConfigs.map((c) => ({
-        label: (c.nickname?.trim() || c.name) || '未命名',
-        value: c.id,
-      })),
-    [modelConfigs]
-  )
-
-  const thinkingOnly = !!model?.thinkingOnly
 
   // 提示词模板上下文（含「选中」变量，使模板可引用当前选区文本）
   const promptTemplateContext = React.useMemo<PromptTemplateContext>(() => {
@@ -187,7 +176,8 @@ export default function InlineEditPopover({
       const useConfiguredTemperature =
         model.customizeTemperature === undefined || model.customizeTemperature === true
 
-      const useThinking = thinkingEnabled || thinkingOnly
+      const useThinking = isModelThinkingEnabled(model)
+      const contextWindow = model.contextWindow ?? '128k'
 
       const systemPrompt = [
         '你是一位专业中文写作助手，负责对用户选中的文段进行改写。',
@@ -199,8 +189,11 @@ export default function InlineEditPopover({
         .filter(Boolean)
         .join('\n')
 
-      // 关联与注入：客户端拼装到 user prompt（chatAgentMode='ask' 不会在后端注入）
+      // 关联章节/大纲仍在客户端拼装；记忆/伏笔改走后端统一长期记忆编排。
       const injectedContext = await buildInjectedContext({
+        bookId,
+        userPrompt: instr,
+        contextWindow,
         associatedChapterIds,
         associatedOutlineIds,
         availableOutlines,
@@ -233,6 +226,7 @@ export default function InlineEditPopover({
         ],
         options: {
           model: model.name,
+          ...(model.presetId ? { model_profile: model.presetId } : {}),
           ...(useConfiguredTemperature
             ? {
                 temperature: useThinking
@@ -241,17 +235,17 @@ export default function InlineEditPopover({
               }
             : {}),
           thinking: { type: useThinking ? 'enabled' : 'disabled' },
-          max_tokens: 4096,
+          context_window: contextWindow,
+          max_tokens: 8192,
         },
-        tools: [],
         enableAgentTools: false,
         bookId: bookId ?? undefined,
         chapterId: chapterId ?? undefined,
         currentChapterTitle: chapterTitle || undefined,
         writingChapters: [],
         availableOutlines: [],
-        agentMode: 'legacy',
         chatAgentMode: 'ask',
+        contextWindow,
       })
     },
     [
@@ -268,8 +262,6 @@ export default function InlineEditPopover({
       model,
       selectedForeshadowingIds,
       selectedMemoryIds,
-      thinkingEnabled,
-      thinkingOnly,
     ]
   )
 
@@ -282,6 +274,9 @@ export default function InlineEditPopover({
   const handleAccept = () => {
     const clean = result.trim()
     if (!clean) return
+    window.dispatchEvent(new CustomEvent('inline-edit-accepted', {
+      detail: { chapterId, source: 'inline_edit' },
+    }))
     capture.replace(clean)
     onClose()
   }
@@ -382,36 +377,13 @@ export default function InlineEditPopover({
 
       <div className="inline-edit-popover-footer">
         <div className="inline-edit-popover-footer-left">
-          <Select
-            className="inline-edit-popover-model-select"
-            size="small"
-            value={modelOptions.length ? selectedModelId : undefined}
-            onChange={onSelectedModelChange}
-            options={modelOptions}
-            placeholder={modelOptions.length ? undefined : '无模型配置'}
-            variant="borderless"
-            popupMatchSelectWidth={false}
+          <ModelPicker
+            modelConfigs={modelConfigs}
+            selectedModelId={selectedModelId}
+            onModelChange={onSelectedModelChange}
+            onUpdateModelConfig={onUpdateModelConfig}
             disabled={loading}
-            popupRender={(menu) => (
-              <>
-                {menu}
-                <Divider style={{ margin: '4px 0' }} />
-                <div
-                  className="inline-edit-popover-thinking-row"
-                  onMouseDown={(e) => e.preventDefault()}
-                >
-                  <span>思考模式</span>
-                  <Tooltip title={thinkingOnly ? '该模型不可关闭思考模式' : ''}>
-                    <Switch
-                      size="small"
-                      checked={thinkingEnabled || thinkingOnly}
-                      disabled={thinkingOnly || loading}
-                      onChange={onThinkingChange}
-                    />
-                  </Tooltip>
-                </div>
-              </>
-            )}
+            className="inline-edit-popover-model-select"
           />
         </div>
         <div className="inline-edit-popover-footer-right">

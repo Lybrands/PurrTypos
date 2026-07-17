@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from database.crud.articles import save_article as crud_save_article
 from dependencies import get_db
 from schemas.articles import SaveArticleRequest
 
@@ -19,18 +20,17 @@ async def get_article(chapterId: str):
 
 @router.put("/articles/{chapterId}")
 async def save_article(chapterId: str, body: SaveArticleRequest):
+    """统一走 crud.save_article：写正文 + 维护当日字数快照。"""
     db = get_db()
-    existing = await db.fetch_one(
-        "SELECT id FROM articles WHERE chapter_id = ?", [chapterId]
-    )
-    if existing:
-        await db.execute(
-            "UPDATE articles SET content = ?, update_time = datetime('now') WHERE chapter_id = ?",
-            [body.content, chapterId],
+    await crud_save_article(db, chapterId, body.content)
+    try:
+        from services import memory_deposition_service
+        await memory_deposition_service.deposit_inline_article_candidate(
+            db,
+            chapter_id=chapterId,
+            content=body.content,
+            source=body.source or "",
         )
-    else:
-        await db.execute(
-            "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
-            [chapterId, body.content],
-        )
+    except Exception:
+        pass
     return {"success": True}
