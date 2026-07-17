@@ -13,10 +13,9 @@ import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import './index.scss'
 
-type SettingsTab = 'general' | 'ai' | 'models' | 'data'
+type SettingsTab = 'general' | 'models' | 'data'
 const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
   { key: 'general', label: '通用' },
-  { key: 'ai', label: 'AI 配置' },
   { key: 'models', label: '模型配置' },
   { key: 'data', label: '数据' },
 ]
@@ -268,18 +267,6 @@ export default function SettingsPage({
               >
                 点击章节大纲或章节列表时，同步切换另一侧选中项
               </Checkbox>
-            </div>
-          )}
-          {activeTab === 'ai' && (
-            <div className="settings-section">
-              <h2 className="settings-section-title">AI 配置</h2>
-              <p className="settings-section-desc">系统提示词已内置，不对终端用户开放自定义。</p>
-              <div className="settings-field">
-                <div className="settings-field-label">系统提示词</div>
-                <p className="settings-field-desc">
-                  当前版本统一使用内置 ReAct 提示词，以保证工具调用与智能体行为稳定一致。
-                </p>
-              </div>
             </div>
           )}
           {activeTab === 'models' && (
