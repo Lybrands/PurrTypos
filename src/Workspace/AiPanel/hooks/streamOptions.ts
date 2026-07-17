@@ -1,8 +1,9 @@
 import type { AiContextWindow, AiModelConfig } from "../../../types";
-import { getDefaultModelContextWindow } from "../../../modelCatalog";
+import { getDefaultModelContextWindow, isModelThinkingEnabled } from "../../../modelCatalog";
 
 export interface StreamRequestOptions {
   model: string;
+  model_profile?: string;
   temperature?: number;
   thinking: { type: "enabled" | "disabled" };
   context_window: AiContextWindow;
@@ -30,7 +31,7 @@ export function buildStreamOptions(params: {
   const { cfg, modelConfigs, selectedModel } = params;
   const modelConfig = modelConfigs[selectedModel];
 
-  const effectiveThinking = Boolean(cfg?.thinkingEnabled ?? cfg?.thinkingOnly ?? false);
+  const effectiveThinking = isModelThinkingEnabled(cfg);
   const contextWindow = getDefaultModelContextWindow(cfg);
 
   const apiModelName = cfg?.name ?? selectedModel;
@@ -39,6 +40,7 @@ export function buildStreamOptions(params: {
 
   const options: StreamRequestOptions = {
     model: apiModelName,
+    ...(cfg?.presetId ? { model_profile: cfg.presetId } : {}),
     ...(useConfiguredTemperature
       ? {
           temperature: effectiveThinking

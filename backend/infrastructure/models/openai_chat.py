@@ -14,9 +14,9 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 
 from infrastructure.models.capabilities import (
-    build_openai_thinking_extra_body,
     normalize_thinking_enabled,
 )
+from infrastructure.models.profiles import resolve_model_profile
 from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
@@ -51,6 +51,7 @@ async def chat_no_stream(
     tool_choice: Any = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
@@ -58,7 +59,9 @@ async def chat_no_stream(
     params: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
     if temperature is not None:
         params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(thinking_enabled))
+    params.setdefault("extra_body", {}).update(
+        profile.build_openai_extra_body(thinking_enabled)
+    )
     if max_tokens:
         params["max_tokens"] = max_tokens
     if tools:
@@ -75,7 +78,9 @@ async def chat_no_stream(
 
     res = await client.chat.completions.create(**params)
     choice = res.choices[0] if res.choices else None
-    message = choice.message.model_dump() if choice and choice.message else {}
+    message = profile.normalize_openai_message(
+        choice.message.model_dump() if choice and choice.message else {}
+    )
     return {"message": message, "model": res.model or model}
 
 
@@ -96,6 +101,7 @@ async def chat_stream(
     tool_choice: Any = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
 
     tool_names = (
@@ -112,7 +118,9 @@ async def chat_stream(
     params: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if temperature is not None:
         params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(build_openai_thinking_extra_body(thinking_enabled))
+    params.setdefault("extra_body", {}).update(
+        profile.build_openai_extra_body(thinking_enabled)
+    )
     if max_tokens:
         params["max_tokens"] = max_tokens
     if tools:
@@ -133,7 +141,7 @@ async def chat_stream(
         async for chunk in raw_stream:
             if signal and signal.is_set():
                 break
-            yield chunk.model_dump()
+            yield profile.normalize_openai_chunk(chunk.model_dump())
 
     return {
         "stream": OwnedAsyncIterator(
@@ -156,6 +164,7 @@ async def generate_title(
     opts = options or {}
     model: str = opts.get("model", "")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
 
     client = _create_client(api_key, base_url)
 
@@ -166,7 +175,7 @@ async def generate_title(
             {"role": "user", "content": str(text or "").strip()},
         ],
         max_tokens=32,
-        extra_body=build_openai_thinking_extra_body(False),
+        extra_body=profile.build_openai_extra_body(False),
         stream=False,
     )
     raw = (res.choices[0].message.content if res.choices and res.choices[0].message else "") or ""

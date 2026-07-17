@@ -1,0 +1,92 @@
+"""Shared contract for model-specific behavior above protocol adapters."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+
+class ModelProfile:
+    profile_id = "generic"
+    model_names: frozenset[str] = frozenset()
+    base_urls: frozenset[str] = frozenset()
+    native_anthropic_thinking = False
+
+    def matches(self, model: str, base_url: str | None) -> bool:
+        return (
+            str(model or "").strip().lower() in self.model_names
+            and _normalize_base_url(base_url) in self.base_urls
+        )
+
+    def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
+        return {
+            "thinking": {
+                "type": "enabled" if thinking_enabled else "disabled",
+            },
+        }
+
+    def normalize_openai_chunk(self, chunk: Mapping[str, Any]) -> dict[str, Any]:
+        value = dict(chunk)
+        choices = value.get("choices")
+        if not isinstance(choices, list):
+            return value
+        normalized_choices: list[Any] = []
+        for raw_choice in choices:
+            if not isinstance(raw_choice, Mapping):
+                normalized_choices.append(raw_choice)
+                continue
+            choice = dict(raw_choice)
+            delta = choice.get("delta")
+            if isinstance(delta, Mapping):
+                choice["delta"] = _normalize_reasoning_mapping(delta, include_details=False)
+            message = choice.get("message")
+            if isinstance(message, Mapping):
+                choice["message"] = self.normalize_openai_message(message)
+            normalized_choices.append(choice)
+        value["choices"] = normalized_choices
+        return value
+
+    def normalize_openai_message(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        return _normalize_reasoning_mapping(message, include_details=True)
+
+
+class GenericModelProfile(ModelProfile):
+    pass
+
+
+def _normalize_base_url(value: str | None) -> str:
+    return str(value or "").strip().lower().rstrip("/")
+
+
+def _normalize_reasoning_mapping(
+    value: Mapping[str, Any],
+    *,
+    include_details: bool,
+) -> dict[str, Any]:
+    normalized = dict(value)
+    reasoning = normalized.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning:
+        fallback = normalized.get("reasoning")
+        if isinstance(fallback, str) and fallback:
+            reasoning = fallback
+    if (not isinstance(reasoning, str) or not reasoning) and include_details:
+        reasoning = _reasoning_details_text(normalized.get("reasoning_details"))
+    if isinstance(reasoning, str) and reasoning:
+        normalized["reasoning_content"] = reasoning
+    return normalized
+
+
+def _reasoning_details_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        text = item.get("text") or item.get("content")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
+
+
+__all__ = ["GenericModelProfile", "ModelProfile"]
