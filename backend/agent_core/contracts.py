@@ -32,6 +32,15 @@ class RunStatus(StrEnum):
     CANCELED = "canceled"
 
 
+class DelegationStatus(StrEnum):
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
 TerminalRunStatus: TypeAlias = Literal[
     RunStatus.DONE,
     RunStatus.BLOCKED,
@@ -177,7 +186,7 @@ class AgentMessage:
     def from_mapping(cls, value: Mapping[str, Any]) -> "AgentMessage":
         raw = dict(value)
         # Provenance is assigned only by in-process Core composition. A
-        # provider-shaped or HTTP mapping can never claim a host origin.
+        # untrusted external mapping can never claim a host origin.
         raw.pop("origin", None)
         raw.pop("host_metadata", None)
         role = raw.pop("role", "")
@@ -236,6 +245,7 @@ class DomainContext:
 class ModelRequest:
     provider: str
     model: str
+    profile_id: str | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -247,6 +257,7 @@ class ModelRequest:
             raise ValueError("model name is required")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
+        object.__setattr__(self, "profile_id", _optional_text(self.profile_id))
         object.__setattr__(self, "options", _frozen_mapping(self.options))
 
 
@@ -616,6 +627,45 @@ class PlanningResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningTurn:
+    """Runtime evidence supplied when the planner revises future work.
+
+    Completed steps are immutable history. ``messages`` includes the trusted
+    tool-result continuation accumulated by the runtime, allowing the planner
+    to choose the next transition from observed results instead of committing
+    the whole run before execution starts.
+    """
+
+    revision: int
+    round_number: int
+    remaining_model_rounds: int
+    messages: tuple[AgentMessage, ...]
+    completed_steps: tuple[TaskStep, ...] = ()
+    last_tool_outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED
+
+    def __post_init__(self) -> None:
+        revision = int(self.revision)
+        round_number = int(self.round_number)
+        remaining = int(self.remaining_model_rounds)
+        if revision <= 0:
+            raise ValueError("planning turn revision must be positive")
+        if round_number <= 0:
+            raise ValueError("planning turn round number must be positive")
+        if remaining < 0:
+            raise ValueError("remaining model rounds must be non-negative")
+        object.__setattr__(self, "revision", revision)
+        object.__setattr__(self, "round_number", round_number)
+        object.__setattr__(self, "remaining_model_rounds", remaining)
+        object.__setattr__(self, "messages", tuple(self.messages))
+        object.__setattr__(self, "completed_steps", tuple(self.completed_steps))
+        object.__setattr__(
+            self,
+            "last_tool_outcome",
+            ToolBatchOutcome(self.last_tool_outcome),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ContextBudget:
     window_tokens: int
     output_reserve_tokens: int
@@ -785,7 +835,7 @@ class ToolPolicy:
 
 @dataclass(frozen=True, slots=True)
 class DomainEffect:
-    """A domain-owned UI effect emitted without depending on SSE."""
+    """A domain-owned effect emitted without depending on a host transport."""
 
     type: str
     payload: Mapping[str, Any] = field(default_factory=dict)
@@ -846,6 +896,9 @@ class ExecutionState:
     """
 
     domain: MutableMapping[str, Any] = field(default_factory=dict)
+    # Bound by AgentCore after Run creation. It is contextual identity for
+    # run-aware host tools, never a source of authorization.
+    run_id: RunId | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -984,11 +1037,150 @@ class RunProvenance:
 
 
 @dataclass(frozen=True, slots=True)
+class RunLineage:
+    """Immutable parent/delegation identity for one child Agent Run."""
+
+    parent_run_id: RunId
+    root_run_id: RunId
+    delegation_id: str
+    agent_role: str
+    depth: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "parent_run_id",
+            "root_run_id",
+            "delegation_id",
+            "agent_role",
+        ):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise ValueError(f"run lineage {name} is required")
+            object.__setattr__(self, name, value)
+        depth = int(self.depth)
+        if depth < 1:
+            raise ValueError("child run depth must be positive")
+        object.__setattr__(self, "depth", depth)
+
+
+@dataclass(frozen=True, slots=True)
+class RunExecutionLease:
+    run_id: RunId
+    status: RunStatus
+    owner_id: str | None = None
+    expires_at_ms: int | None = None
+    heartbeat_at_ms: int | None = None
+    attempt: int = 0
+    cancellation_requested_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        run_id = str(self.run_id or "").strip()
+        if not run_id:
+            raise ValueError("execution lease requires a run id")
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "status", RunStatus(self.status))
+        object.__setattr__(self, "owner_id", _optional_text(self.owner_id))
+        object.__setattr__(self, "attempt", max(0, int(self.attempt)))
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDelegation:
+    id: str
+    parent_run_id: RunId
+    root_run_id: RunId
+    agent_role: str
+    objective: str
+    input_payload: Mapping[str, Any] = field(default_factory=dict)
+    status: DelegationStatus = DelegationStatus.QUEUED
+    child_run_id: RunId | None = None
+    required: bool = True
+    priority: int = 0
+    result_summary: str | None = None
+    error: str | None = None
+    claim_attempt: int = 0
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("id", "parent_run_id", "root_run_id", "agent_role", "objective"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise ValueError(f"delegation {name} is required")
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "status", DelegationStatus(self.status))
+        object.__setattr__(self, "input_payload", _frozen_mapping(self.input_payload))
+        object.__setattr__(self, "child_run_id", _optional_text(self.child_run_id))
+        object.__setattr__(self, "required", bool(self.required))
+        object.__setattr__(self, "priority", int(self.priority))
+        object.__setattr__(self, "claim_attempt", max(0, int(self.claim_attempt)))
+        object.__setattr__(self, "result_summary", _optional_text(self.result_summary))
+        object.__setattr__(self, "error", _optional_text(self.error))
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationClaim:
+    delegation: AgentDelegation
+    lineage: RunLineage
+
+    def __post_init__(self) -> None:
+        if self.delegation.id != self.lineage.delegation_id:
+            raise ValueError("delegation claim lineage does not match")
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationAggregation:
+    state: Literal["pending", "ready", "blocked"]
+    counts: Mapping[str, int]
+    required_failures: tuple[str, ...] = ()
+    results: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state not in {"pending", "ready", "blocked"}:
+            raise ValueError("invalid delegation aggregate state")
+        object.__setattr__(self, "counts", _frozen_mapping(self.counts))
+        object.__setattr__(self, "required_failures", tuple(self.required_failures))
+        object.__setattr__(
+            self,
+            "results",
+            tuple(_frozen_mapping(item) for item in self.results),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RunCheckpoint:
+    """Storage-neutral durable read checkpoint for one Run."""
+
+    run: Mapping[str, Any]
+    steps: tuple[Mapping[str, Any], ...]
+    events: tuple[Mapping[str, Any], ...]
+    delegations: tuple[AgentDelegation, ...] = ()
+    next_cursor: int = 0
+    has_more: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run", _frozen_mapping(self.run))
+        object.__setattr__(
+            self,
+            "steps",
+            tuple(_frozen_mapping(item) for item in self.steps),
+        )
+        object.__setattr__(
+            self,
+            "events",
+            tuple(_frozen_mapping(item) for item in self.events),
+        )
+        object.__setattr__(self, "delegations", tuple(self.delegations))
+        object.__setattr__(self, "next_cursor", max(0, int(self.next_cursor)))
+        object.__setattr__(self, "has_more", bool(self.has_more))
+
+
+@dataclass(frozen=True, slots=True)
 class RunCreateParams:
     session_id: SessionId | None
     prompt: str
     mode: str | None
     provenance: RunProvenance | None = None
+    lineage: RunLineage | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "prompt", str(self.prompt or ""))
@@ -998,6 +1190,8 @@ class RunCreateParams:
             RunProvenance,
         ):
             raise TypeError("run provenance must be a RunProvenance value")
+        if self.lineage is not None and not isinstance(self.lineage, RunLineage):
+            raise TypeError("run lineage must be a RunLineage value")
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,7 @@ import ThinkingRegion from "../ThinkingRegion";
 import { TaskPlanSteps } from "../TaskPlanCard";
 import ToolApprovalCard from "../ToolApprovalCard";
 import WorkLog, { WorkLogStepGroup } from "../WorkLog";
+import SubAgentStatusList from "../SubAgentStatusList";
 import {
   buildAssistantTimeline,
   groupConsecutiveWorkSteps,
@@ -33,6 +34,9 @@ function isVisibleWorkLogPart(part: AssistantTimelinePart): boolean {
 function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   return parts.some((part) => {
     if (part.type === "taskPlan") return part.plan.status === "failed";
+    if (part.type === "delegations") {
+      return part.items.some((item) => item.status === "failed");
+    }
     if (part.type !== "tools") return false;
     return part.segment.labelOutcomes?.some(
       (outcome, labelIndex) =>
@@ -195,6 +199,14 @@ function AssistantMessageBodyInner({
                   </div>
                   <TaskPlanSteps plan={part.plan} />
                 </div>
+              );
+            }
+            if (part.type === "delegations") {
+              return (
+                <SubAgentStatusList
+                  key={`delegations-${partIndex}`}
+                  items={part.items}
+                />
               );
             }
             if (part.type === "stepGroup") {

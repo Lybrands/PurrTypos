@@ -4,6 +4,7 @@ import {
   handleAgentRunTerminal,
   handleAgentRunTodoUpdated,
   handleAgentRunTodosUpdated,
+  handleAgentDelegation,
 } from "./agentRun";
 import {
   handleDelta,
@@ -51,6 +52,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleAgentRunTodosUpdated(chunk, ctx);
   handleAgentRunTodoUpdated(chunk, ctx);
   handleAgentRunTerminal(chunk, ctx);
+  handleAgentDelegation(chunk, ctx);
 
   // 4. 工具进度：仅当 chunk 只含进度信号时短路
   if (handleToolIndexCompleted(chunk, ctx)) return;

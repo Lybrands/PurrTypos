@@ -2,6 +2,7 @@ import type React from "react";
 import type { App as AntdApp } from "antd";
 import type {
   AiModelConfig,
+  AiAgentDelegation,
   AiSession,
   ElectronAPI,
   EntityId,
@@ -41,6 +42,7 @@ export interface AccState {
   thinkingBlockStartedAt?: number;
   agentRunId?: string;
   taskPlan?: AiTaskPlan;
+  delegations?: AiAgentDelegation[];
 }
 
 /**

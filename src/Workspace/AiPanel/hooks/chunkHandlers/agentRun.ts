@@ -1,3 +1,4 @@
+import type { AiAgentDelegation } from "../../../../types";
 import type { AiTaskPlan, AiTaskStep, ChatMessage } from "../chat.types";
 import type { ChunkHandler } from "./types";
 
@@ -123,5 +124,56 @@ export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
     ...message,
     agentRunId: terminal.runId,
     taskPlan: message.taskPlan ? { ...message.taskPlan, status } : message.taskPlan,
+  }));
+};
+
+function normalizeDelegation(payload: unknown): AiAgentDelegation | null {
+  if (!payload || typeof payload !== "object") return null;
+  const raw = payload as Partial<AiAgentDelegation>;
+  const delegationId = String(raw.delegationId || "").trim();
+  const agentRole = String(raw.agentRole || "").trim();
+  if (!delegationId || !agentRole) return null;
+  return {
+    delegationId,
+    parentRunId: String(raw.parentRunId || ""),
+    rootRunId: String(raw.rootRunId || raw.parentRunId || ""),
+    childRunId: raw.childRunId || null,
+    agentRole,
+    agentTitle: raw.agentTitle || null,
+    objective: String(raw.objective || ""),
+    status: raw.status || "queued",
+    required: raw.required !== false,
+    priority: Number(raw.priority || 0),
+    resultSummary: raw.resultSummary || null,
+    error: raw.error || null,
+  };
+}
+
+function upsertDelegation(
+  items: AiAgentDelegation[] | undefined,
+  next: AiAgentDelegation,
+): AiAgentDelegation[] {
+  const current = items ?? [];
+  const index = current.findIndex(
+    (item) => item.delegationId === next.delegationId,
+  );
+  if (index < 0) return [...current, next];
+  return current.map((item, itemIndex) =>
+    itemIndex === index ? { ...item, ...next } : item,
+  );
+}
+
+export const handleAgentDelegation: ChunkHandler = (chunk, ctx) => {
+  const payload =
+    chunk.agentDelegationCreated || chunk.agentDelegationUpdated;
+  const delegation = normalizeDelegation(payload);
+  if (!delegation) return;
+  const runId = payload?.runId;
+  ctx.acc.agentRunId = runId || ctx.acc.agentRunId;
+  ctx.acc.delegations = upsertDelegation(ctx.acc.delegations, delegation);
+  updateLastAssistant(ctx, (message) => ({
+    ...message,
+    agentRunId: runId || message.agentRunId,
+    delegations: upsertDelegation(message.delegations, delegation),
   }));
 };

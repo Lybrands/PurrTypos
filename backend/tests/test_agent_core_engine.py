@@ -266,6 +266,38 @@ class CapturePlanner(StaticPlanner):
         return await super().create_plan(request, capabilities, signal)
 
 
+class StopAfterObservationPlanner(StaticPlanner):
+    """Fixture proving an initial roadmap does not lock future execution."""
+
+    def __init__(self, plan: TaskPlan):
+        super().__init__(plan)
+        self.turns = []
+
+    async def revise_plan(
+        self,
+        request,
+        capabilities,
+        turn,
+        signal=None,
+    ):
+        del request, capabilities, signal
+        self.turns.append(turn)
+        return PlanningResult(
+            kind=PlanningKind.DIRECT_RESPONSE,
+            plan=TaskPlan(
+                title="Evidence is sufficient",
+                steps=(TaskStep(
+                    id="respond-now",
+                    title="Respond from observed evidence",
+                    type=StepType.REVIEW,
+                    executor=StepExecutor.MODEL,
+                    risk_level=ToolRiskLevel.READ,
+                ),),
+            ),
+            reason="The first tool result satisfied the goal.",
+        )
+
+
 class FixtureContextProvider:
     async def build_context(self, request, budget, signal=None):
         assert budget.allocation_for("fixture") == 1_000
@@ -553,7 +585,7 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
             approval_id = str(update.payload["approvalId"])
             assert state.domain["handler_order"] == ["read", "propose"]
             assert state.domain["value"] == "before"
-            assert core.resolve_approval(
+            assert await core.resolve_approval(
                 "wrong-run",
                 approval_id,
                 ApprovalDecision.APPROVE,
@@ -568,12 +600,12 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
                 if approve
                 else ApprovalStatus.REJECTED
             )
-            assert core.resolve_approval(
+            assert await core.resolve_approval(
                 update.run_id,
                 approval_id,
                 decision,
             ) is expected
-            assert core.resolve_approval(
+            assert await core.resolve_approval(
                 update.run_id,
                 approval_id,
                 decision,
@@ -637,7 +669,67 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
     assert CoreEventType.RUN_TODOS_UPDATED in [item.type for item in updates[:-1]]
     assert CoreEventType.CONTEXT_BUDGETED in [item.type for item in updates[:-1]]
     assert updates[-2].type == CoreEventType.RUN_COMPLETED
-    assert core.cancel_pending_approvals(result.run_id) == 0
+    assert await core.cancel_pending_approvals(result.run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result():
+    initial = TaskPlan(
+        title="Tentative roadmap",
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="propose",
+                title="Tentatively propose a change",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("propose_change",),
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+        ),
+    )
+    planner = StopAfterObservationPlanner(initial)
+    core, request, options, repository, model, state = _core_fixture(
+        planner=planner,
+    )
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert state.domain["handler_order"] == ["read"]
+    assert [tuple(schema.name for schema in call.tools) for call in model.invocations] == [
+        ("read_resource",),
+        (),
+    ]
+    assert len(planner.turns) == 1
+    turn = planner.turns[0]
+    assert [step.id for step in turn.completed_steps] == ["read"]
+    assert any(message.role is MessageRole.TOOL for message in turn.messages)
+    persisted_steps = repository.runs[result.run_id]["steps"]
+    assert [(step.id, step.status) for step in persisted_steps] == [
+        ("read", StepStatus.DONE),
+        ("respond-now", StepStatus.DONE),
+    ]
+    todo_replacements = [
+        item
+        for item in updates
+        if isinstance(item, AgentEvent)
+        and item.type == CoreEventType.RUN_TODOS_UPDATED
+    ]
+    assert len(todo_replacements) == 2
+    assert any(
+        trace.stage == "planning" and trace.outcome == "replanned"
+        for trace in repository.traces
+    )
 
 
 @pytest.mark.asyncio
@@ -677,7 +769,7 @@ async def test_core_builds_host_planning_facts_before_planning_and_keeps_tool_gu
             isinstance(update, AgentEvent)
             and update.type == CoreEventType.APPROVAL_REQUESTED
         ):
-            core.resolve_approval(
+            await core.resolve_approval(
                 update.run_id,
                 str(update.payload["approvalId"]),
                 ApprovalDecision.REJECT,
@@ -696,7 +788,9 @@ async def test_core_builds_host_planning_facts_before_planning_and_keeps_tool_gu
         if isinstance(update, AgentEvent)
         and update.type == CoreEventType.CONTEXT_BUDGETED
     )
-    assert budget_event.payload["reservedToolSchemaTokens"] > (
+    # Dynamic planning keeps every request-scoped candidate schema available;
+    # each runtime round still exposes only the latest authorized transition.
+    assert budget_event.payload["reservedToolSchemaTokens"] == (
         budget_event.payload["toolSchemaTokens"]
     )
 
@@ -949,7 +1043,7 @@ async def test_standalone_core_cancels_during_approval_without_running_confirm_h
     assert state.domain["handler_order"] == ["read", "propose"]
     assert state.domain["value"] == "before"
     assert repository.runs[result.run_id]["status"] is RunStatus.CANCELED
-    assert core.cancel_pending_approvals(result.run_id) == 0
+    assert await core.cancel_pending_approvals(result.run_id) == 0
 
 
 @pytest.mark.asyncio
@@ -969,7 +1063,7 @@ async def test_closing_public_stream_persists_canceled_run_and_cleans_approval()
     assert run_id is not None
     assert repository.runs[run_id]["status"] is RunStatus.CANCELED
     assert state.domain["handler_order"] == ["read", "propose"]
-    assert core.cancel_pending_approvals(run_id) == 0
+    assert await core.cancel_pending_approvals(run_id) == 0
 
 
 @pytest.mark.asyncio

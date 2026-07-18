@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from agent_core.contracts import (
+    AgentDelegation,
     AgentMessage,
+    AgentRunResult,
     AgentRunRequest,
     ApprovalDecision,
     ApprovalRequest,
@@ -14,6 +16,8 @@ from agent_core.contracts import (
     ApprovalStatus,
     ContextBudget,
     ContextBundle,
+    DelegationAggregation,
+    DelegationClaim,
     ExecutionState,
     ModelCompletion,
     ModelInvocation,
@@ -21,8 +25,11 @@ from agent_core.contracts import (
     PlanningCapabilities,
     PlanningConstraints,
     PlanningResult,
+    PlanningTurn,
     ResponseValidationResult,
     RunCreateParams,
+    RunCheckpoint,
+    RunExecutionLease,
     RunId,
     RunStatus,
     TaskStep,
@@ -31,6 +38,7 @@ from agent_core.contracts import (
     ToolBatchOutcome,
     ToolBatchRequest,
     ToolBatchResult,
+    ToolCall,
     ToolHandlerResult,
     ToolPolicy,
     ToolSchema,
@@ -94,6 +102,19 @@ class TaskPlanner(Protocol):
         self,
         request: AgentRunRequest,
         capabilities: PlanningCapabilities,
+        signal: CancellationSignal | None = None,
+    ) -> PlanningResult: ...
+
+
+@runtime_checkable
+class DynamicTaskPlanner(Protocol):
+    """Optional planner capability for result-driven runtime revisions."""
+
+    async def revise_plan(
+        self,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+        turn: PlanningTurn,
         signal: CancellationSignal | None = None,
     ) -> PlanningResult: ...
 
@@ -165,6 +186,10 @@ class ToolRegistration:
     scope_validator: ScopeValidator | None = None
     cache_probe: CacheProbe | None = None
     cancellation_linearizable: bool = False
+    # Long-running host workflows may own durable state transitions outside
+    # Core's single tool-receipt transaction. This avoids holding a host
+    # database transaction while the workflow waits on independent workers.
+    host_managed_durability: bool = False
     planning_dependencies: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -176,6 +201,11 @@ class ToolRegistration:
                 for name in self.planning_dependencies
                 if str(name).strip()
             )),
+        )
+        object.__setattr__(
+            self,
+            "host_managed_durability",
+            bool(self.host_managed_durability),
         )
 
 
@@ -218,6 +248,21 @@ class RuntimeObserver(Protocol):
         self,
         outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
     ) -> None: ...
+
+
+@runtime_checkable
+class RuntimePlanningHook(Protocol):
+    """Revise runtime authority after a completed tool transition."""
+
+    async def replan_after_tool(
+        self,
+        messages: Sequence[AgentMessage],
+        *,
+        round_number: int,
+        remaining_model_rounds: int,
+        outcome: ToolBatchOutcome,
+        signal: CancellationSignal | None = None,
+    ) -> AgentMessage | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,11 +468,116 @@ class ApprovalGateway(Protocol):
         signal: CancellationSignal | None = None,
     ) -> ApprovalResult: ...
 
-    def resolve(
+    async def resolve(
         self,
         run_id: RunId,
         approval_id: str,
         decision: ApprovalDecision,
     ) -> ApprovalStatus | None: ...
 
-    def cancel_pending(self, run_id: RunId) -> int: ...
+    async def cancel_pending(self, run_id: RunId) -> int: ...
+
+
+@runtime_checkable
+class ToolIdempotencyGateway(Protocol):
+    """Execute one side-effecting tool call at most once for a Run."""
+
+    async def execute_once(
+        self,
+        run_id: RunId,
+        tool_call: ToolCall,
+        operation: Callable[[], Awaitable[ToolHandlerResult]],
+    ) -> ToolHandlerResult: ...
+
+
+@runtime_checkable
+class ExecutionLeaseStore(Protocol):
+    async def claim(
+        self,
+        run_id: RunId,
+        owner_id: str,
+        *,
+        lease_duration_ms: int,
+    ) -> bool: ...
+
+    async def renew(
+        self,
+        run_id: RunId,
+        owner_id: str,
+        *,
+        lease_duration_ms: int,
+    ) -> bool: ...
+
+    async def release(self, run_id: RunId, owner_id: str) -> bool: ...
+
+    async def request_cancellation(self, run_id: RunId) -> bool: ...
+
+    async def get(self, run_id: RunId) -> RunExecutionLease | None: ...
+
+
+@runtime_checkable
+class DelegationRepository(Protocol):
+    async def create(
+        self,
+        *,
+        parent_run_id: RunId,
+        agent_role: str,
+        objective: str,
+        input_payload: Mapping[str, Any] | None = None,
+        required: bool = True,
+        priority: int = 0,
+        max_depth: int = 3,
+    ) -> AgentDelegation: ...
+
+    async def claim_next(
+        self,
+        *,
+        parent_run_id: RunId,
+        worker_id: str,
+        max_parallel_children: int,
+        agent_role: str | None = None,
+    ) -> DelegationClaim | None: ...
+
+    async def record_result(
+        self,
+        *,
+        delegation_id: str,
+        child_run_id: RunId,
+        result: AgentRunResult,
+    ) -> bool: ...
+
+    async def attach_child_run(
+        self,
+        *,
+        delegation_id: str,
+        child_run_id: RunId,
+        worker_id: str,
+    ) -> bool: ...
+
+    async def fail(
+        self,
+        *,
+        delegation_id: str,
+        worker_id: str,
+        error: str,
+    ) -> bool: ...
+
+    async def list_for_parent(
+        self,
+        parent_run_id: RunId,
+    ) -> tuple[AgentDelegation, ...]: ...
+
+    async def aggregate(self, parent_run_id: RunId) -> DelegationAggregation: ...
+
+    async def cancel_children(self, parent_run_id: RunId) -> int: ...
+
+
+@runtime_checkable
+class CheckpointStore(Protocol):
+    async def load(
+        self,
+        run_id: RunId,
+        *,
+        after_event_id: int = 0,
+        limit: int = 100,
+    ) -> RunCheckpoint | None: ...

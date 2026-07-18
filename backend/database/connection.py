@@ -108,6 +108,7 @@ class DatabaseConnection:
         self,
         *,
         cancellation_linearizable: bool = False,
+        write: bool = True,
     ) -> AsyncIterator["DatabaseConnection"]:
         """
         将块内所有写入合并为一笔原子事务；异常自动回滚。
@@ -121,12 +122,20 @@ class DatabaseConnection:
                 await db.execute("INSERT ...")
                 await db.execute("DELETE ...")
 
+        ``write=False`` starts a deferred transaction for a consistent read
+        snapshot without eagerly taking SQLite's write reservation.
+
         ``cancellation_linearizable=True`` is reserved for receipt-returning
         persistence ports. Cancellation before COMMIT rolls back; cancellation
         during COMMIT finishes the durable acknowledgement so the port can
         return its receipt instead of reporting a false non-commit.
         """
         task = self._current_task()
+
+        if cancellation_linearizable and not write:
+            raise ValueError(
+                "cancellation-linearizable transactions must be writable"
+            )
 
         if self._tx_owner is task:
             conn = self._ensure_conn()
@@ -160,7 +169,7 @@ class DatabaseConnection:
         try:
             conn = self._ensure_conn()
             try:
-                await conn.execute("BEGIN IMMEDIATE")
+                await conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             except asyncio.CancelledError:
                 # aiosqlite may already have queued BEGIN on its worker thread.
                 # Queueing rollback behind it makes CancelledError authoritative:

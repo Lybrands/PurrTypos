@@ -25,6 +25,7 @@ _PLANNER_PASS_OUTCOMES = {
     "skipped",
     "planned",
     "direct_response",
+    "replanned",
 }
 _PLANNER_FAIL_OUTCOMES = {
     "exception",

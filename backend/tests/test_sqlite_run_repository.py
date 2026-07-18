@@ -58,10 +58,25 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "context_window",
         "endpoint_digest",
         "request_profile_digest",
+        "parent_run_id",
+        "root_run_id",
+        "delegation_id",
+        "agent_role",
+        "run_depth",
+        "execution_owner_id",
+        "lease_expires_at_ms",
+        "heartbeat_at_ms",
+        "execution_attempt",
+        "cancel_requested_at_ms",
         "final_response",
         "create_time",
         "update_time",
     }
+    todo_columns = {
+        row["name"]
+        for row in await run_db.fetch_all("PRAGMA table_info(ai_agent_run_todos)")
+    }
+    assert {"step_type", "risk_level", "description"}.issubset(todo_columns)
 
     run_id = await repository.create(RunCreateParams(
         session_id=7,
@@ -107,6 +122,8 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "title": "Read context",
         "status": "done",
         "executor": "tool",
+        "type": "read",
+        "riskLevel": "read",
         "suggestedTools": ["readThing"],
         "resultSummary": "Read complete",
     }]

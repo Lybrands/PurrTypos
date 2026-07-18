@@ -101,6 +101,30 @@ class AgentRunController:
         async with self._mutation_lock:
             return await self._install_plan_unlocked(plan)
 
+    async def revise_plan(self, plan: TaskPlan) -> RunSnapshot:
+        """Atomically replace tentative steps after observing runtime evidence."""
+
+        async with self._mutation_lock:
+            state = self._require_started()
+            revised = RunStateMachine.revise_plan(state, plan)
+            event = AgentEvent(
+                type=CoreEventType.RUN_TODOS_UPDATED,
+                run_id=state.run_id,
+                payload=_todos_payload(revised),
+            )
+            persisted, canceled = await _await_repository_receipt(
+                self._repository.commit(
+                    state.run_id,
+                    RunCommit(replace_steps=revised.steps, events=(event,)),
+                )
+            )
+            if self._snapshot is not state:
+                raise RuntimeError("stale run plan revision")
+            self._snapshot = revised
+            _raise_if_canceled(canceled)
+            await self._publish(persisted)
+            return revised
+
     async def _install_plan_unlocked(self, plan: TaskPlan) -> RunSnapshot:
         state = self._require_started()
         if state.terminal:
@@ -167,6 +191,14 @@ class AgentRunController:
             await self._apply(
                 RunStateMachine.on_tool_round_completed(state, outcome)
             )
+
+    async def on_tool_round_failed(
+        self,
+        error: str = "tool_execution_failed",
+    ) -> None:
+        async with self._mutation_lock:
+            state = self._require_started()
+            await self._apply(RunStateMachine.on_tool_round_failed(state, error))
 
     async def complete(self, final_response: str = "") -> None:
         async with self._mutation_lock:

@@ -32,12 +32,18 @@ export type TimelineTaskPlanPart = {
   plan: AiTaskPlan;
 };
 
+export type TimelineDelegationsPart = {
+  type: "delegations";
+  items: NonNullable<ChatMessage["delegations"]>;
+};
+
 export type AssistantTimelinePart =
   | TimelineThinkingPart
   | TimelineToolsPart
   | TimelineTextPart
   | TimelineCommentaryPart
-  | TimelineTaskPlanPart;
+  | TimelineTaskPlanPart
+  | TimelineDelegationsPart;
 
 export type TimelineStepPart = TimelineThinkingPart | TimelineToolsPart;
 
@@ -118,6 +124,9 @@ export function buildAssistantTimeline(
 
   if (message.taskPlan) {
     parts.push({ type: "taskPlan", plan: message.taskPlan });
+  }
+  if (message.delegations?.length) {
+    parts.push({ type: "delegations", items: message.delegations });
   }
 
   for (let i = 0; i < segments.length; i++) {

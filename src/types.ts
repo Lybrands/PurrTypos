@@ -373,6 +373,86 @@ export interface AiTaskPlanChunk {
   }[];
 }
 
+export interface AiAgentRunEventEnvelope {
+  version: 1;
+  cursor: number;
+  type: string;
+  runId: string;
+  payload: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface AiAgentRunSnapshot {
+  version: 1;
+  run: {
+    runId: string;
+    sessionId?: number | null;
+    conversationId?: number | null;
+    status: 'running' | 'done' | 'blocked' | 'failed' | 'canceled';
+    mode?: string | null;
+    lineage: {
+      parentRunId?: string | null;
+      rootRunId: string;
+      delegationId?: string | null;
+      agentRole?: string | null;
+      agentTitle?: string | null;
+      depth: number;
+    };
+    finalResponse: string;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+    execution: {
+      attempt: number;
+      leaseExpiresAtMs?: number | null;
+      heartbeatAtMs?: number | null;
+      cancellationRequested: boolean;
+    };
+    provenance: {
+      modelProvider?: string | null;
+      modelName?: string | null;
+      contextWindow?: number | null;
+      endpointDigest?: string | null;
+      requestProfileDigest?: string | null;
+    };
+  };
+  todos: AiTaskPlanChunk['steps'];
+  events: AiAgentRunEventEnvelope[];
+  delegations: {
+    items: AiAgentDelegation[];
+    aggregate: AiAgentDelegationAggregate;
+  };
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export interface AiAgentDelegation {
+  delegationId: string;
+  parentRunId: string;
+  rootRunId: string;
+  childRunId?: string | null;
+  agentRole: string;
+  agentTitle?: string | null;
+  objective: string;
+  status: 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'canceled';
+  required: boolean;
+  priority: number;
+  resultSummary?: string | null;
+  error?: string | null;
+}
+
+export interface AiAgentDelegationAggregate {
+  state: 'pending' | 'ready' | 'blocked';
+  counts: Record<string, number>;
+  requiredFailures: string[];
+  results: Array<{
+    delegationId: string;
+    agentRole: string;
+    agentTitle?: string | null;
+    childRunId?: string | null;
+    summary: string;
+  }>;
+}
+
 /** 本书设定层级 */
 export type SparkIdeaLayer = '全局' | '大纲' | '人物' | '章节' | '伏笔';
 
@@ -872,6 +952,26 @@ export interface ElectronAPI {
     baseURL?: string;
     apiProvider?: "openai" | "anthropic";
   }) => Promise<ApiResult<string[]>>;
+  getAgentRunSnapshot: (data: {
+    runId: string;
+    after?: number;
+    limit?: number;
+  }) => Promise<ApiResult<AiAgentRunSnapshot>>;
+  cancelAgentRun: (data: {
+    runId: string;
+  }) => Promise<ApiResult<{
+    status: 'cancel_requested';
+    newlyRequested: boolean;
+    childrenCanceled: number;
+  }>>;
+  createAgentDelegation: (data: {
+    runId: string;
+    agentRole: string;
+    objective: string;
+    input?: Record<string, unknown>;
+    required?: boolean;
+    priority?: number;
+  }) => Promise<ApiResult<AiAgentDelegation>>;
   aiChatStream: (data: {
     apiKey: string;
     baseURL?: string;
@@ -986,6 +1086,8 @@ export interface ElectronAPI {
       agentRunFailed?: { runId: string; status: "failed"; error?: string };
       agentRunBlocked?: { runId: string; status: "blocked" };
       agentRunCanceled?: { runId: string; status: "canceled"; reason?: string };
+      agentDelegationCreated?: AiAgentDelegation & { runId: string };
+      agentDelegationUpdated?: AiAgentDelegation & { runId: string };
     }) => void,
   ) => () => void;
   // 设置

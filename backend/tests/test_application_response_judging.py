@@ -57,6 +57,7 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
         model_request=ModelRequest(
             provider="fixture",
             model="writer-model",
+            profile_id="fixture:writer-model",
             options={
                 "temperature": 0.8,
                 "tools": [{"name": "unsafe"}],
@@ -90,6 +91,7 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     assert invocation.max_output_tokens == 1_200
     assert invocation.request.options["temperature"] == 0
     assert invocation.request.options["baseURL"] == "https://provider.test/v1"
+    assert invocation.request.profile_id == "fixture:writer-model"
     assert "tools" not in invocation.request.options
     assert "tool_choice" not in invocation.request.options
     assert "top_p" not in invocation.request.options

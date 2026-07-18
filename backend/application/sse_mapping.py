@@ -100,6 +100,15 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         return {"toolApprovalRequired": {"runId": run_id, **payload}}
     if event.type == CoreEventType.APPROVAL_RESOLVED:
         return {"toolApprovalResolved": {"runId": run_id, **payload}}
+    if event.type == CoreEventType.DELEGATION_CREATED:
+        return {"agentDelegationCreated": {"runId": run_id, **payload}}
+    if event.type in {
+        CoreEventType.DELEGATION_CLAIMED,
+        CoreEventType.DELEGATION_COMPLETED,
+        CoreEventType.DELEGATION_FAILED,
+        CoreEventType.DELEGATION_CANCELED,
+    }:
+        return {"agentDelegationUpdated": {"runId": run_id, **payload}}
     if event.type == CoreEventType.CONTEXT_BUDGETED:
         diagnostics = payload.get("diagnostics")
         context_budget = {

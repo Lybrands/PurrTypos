@@ -199,6 +199,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       contentAfterToolCalls: "",
       agentRunId: undefined,
       taskPlan: undefined,
+      delegations: undefined,
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;

@@ -29,6 +29,7 @@ from agent_core.ports import (
     EventSink,
     ToolCatalog,
     ToolRegistration,
+    ToolIdempotencyGateway,
 )
 from agent_core.tools.contract import validate_tool_contract
 from agent_core.tools.policy import (
@@ -55,6 +56,7 @@ class CoreToolExecutor:
         catalog: ToolCatalog,
         approval_gateway: ApprovalGateway | None = None,
         limits: ToolExecutionLimits = ToolExecutionLimits(),
+        idempotency_gateway: ToolIdempotencyGateway | None = None,
     ) -> None:
         registrations = validate_tool_contract(catalog.registrations())
         self._registrations = MappingProxyType({
@@ -63,6 +65,7 @@ class CoreToolExecutor:
         })
         self._approval_gateway = approval_gateway
         self._limits = limits
+        self._idempotency_gateway = idempotency_gateway
 
     async def execute_batch(
         self,
@@ -236,8 +239,27 @@ class CoreToolExecutor:
                     continue
 
             try:
+                async def execute_handler() -> ToolHandlerResult:
+                    return await registration.handler(
+                        request.state,
+                        parsed.arguments,
+                        signal,
+                    )
+
+                operation = execute_handler
+                if (
+                    policy.mode is not ToolExecutionMode.READ
+                    and self._idempotency_gateway is not None
+                    and request.run_id is not None
+                    and not registration.host_managed_durability
+                ):
+                    operation = lambda: self._idempotency_gateway.execute_once(
+                        request.run_id,
+                        parsed.call,
+                        execute_handler,
+                    )
                 handler_result = await await_with_cancellation(
-                    registration.handler(request.state, parsed.arguments, signal),
+                    operation(),
                     signal,
                     completion_wins_after_cancel=(
                         registration.cancellation_linearizable

@@ -9,6 +9,9 @@ const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, 'stream
 const { handleDelta, handleThinkingDelta } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/streaming.ts'),
 )
+const { handleAgentDelegation } = loadTypeScriptModule(
+  path.join(__dirname, 'chunkHandlers/agentRun.ts'),
+)
 
 test('built-in selection sends its model profile while custom models stay generic', () => {
   const builtIn = buildStreamOptions({
@@ -72,4 +75,56 @@ test('thinking SSE deltas become visible thinking blocks before answer text', ()
   handleDelta({ delta: '最终答案' }, ctx)
   assert.equal(conversations[0].content, '最终答案')
   assert.deepEqual(conversations[0].thinkingBlocks, ['模型思考内容'])
+})
+
+test('delegation lifecycle chunks update the visible assistant work log', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {}
+  const ctx = {
+    acc,
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  handleAgentDelegation({
+    agentDelegationCreated: {
+      runId: 'parent-1',
+      delegationId: 'delegation-1',
+      parentRunId: 'parent-1',
+      rootRunId: 'parent-1',
+      childRunId: null,
+      agentRole: 'researcher',
+      agentTitle: '资料核验 Agent',
+      objective: 'collect evidence',
+      status: 'queued',
+      required: true,
+      priority: 1,
+    },
+  }, ctx)
+  handleAgentDelegation({
+    agentDelegationUpdated: {
+      runId: 'parent-1',
+      delegationId: 'delegation-1',
+      parentRunId: 'parent-1',
+      rootRunId: 'parent-1',
+      childRunId: 'child-1',
+      agentRole: 'researcher',
+      agentTitle: '资料核验 Agent',
+      objective: 'collect evidence',
+      status: 'done',
+      required: true,
+      priority: 1,
+      resultSummary: 'three verified facts',
+    },
+  }, ctx)
+
+  assert.equal(acc.agentRunId, 'parent-1')
+  assert.equal(acc.delegations.length, 1)
+  assert.equal(acc.delegations[0].status, 'done')
+  assert.equal(acc.delegations[0].childRunId, 'child-1')
+  assert.equal(acc.delegations[0].agentTitle, '资料核验 Agent')
+  assert.equal(conversations[0].delegations.length, 1)
+  assert.equal(conversations[0].delegations[0].resultSummary, 'three verified facts')
 })
