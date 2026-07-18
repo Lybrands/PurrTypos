@@ -48,7 +48,7 @@ async def composed_app(
     try:
         yield app, composition, db
     finally:
-        composition.shutdown()
+        await composition.shutdown()
         set_agent_composition(None)
         await db.close()
 
@@ -95,12 +95,12 @@ def _assert_exact_two_item_writing_policy(
     evidence_blocks = [
         message
         for message in messages
-        if message.get("role") == "developer"
+        if message.get("role") == "system"
         and "exactReviewItemCount=2" in str(message.get("content") or "")
     ]
     assert len(evidence_blocks) == 1
     policy = evidence_blocks[0]
-    assert policy["role"] == "developer"
+    assert policy["role"] == "system"
     assert all(
         "context_name" not in message and "untrusted" not in message
         for message in messages
@@ -163,6 +163,8 @@ def _event_name(event: dict[str, Any]) -> str:
         "toolCalls",
         "toolApprovalRequired",
         "toolApprovalResolved",
+        "agentDelegationCreated",
+        "agentDelegationUpdated",
         "toolIndexCompleted",
         "toolResults",
         "agentRunCompleted",
@@ -175,6 +177,186 @@ def _event_name(event: dict[str, Any]) -> str:
         if key in event:
             return key
     raise AssertionError(f"unclassified SSE event: {event!r}")
+
+
+@pytest.mark.asyncio
+async def test_composed_parent_streams_live_child_agent_lifecycle(
+    composed_app,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app, composition, _db = composed_app
+    planner_calls: list[str] = []
+    runtime_calls: list[str] = []
+
+    def _has_child_role_instruction(messages: list[dict[str, Any]]) -> bool:
+        return any(
+            message.get("role") == "system"
+            and "read-only research sub-agent" in str(message.get("content") or "")
+            for message in messages
+        )
+
+    def _is_child_planning_call(messages: list[dict[str, Any]]) -> bool:
+        return any(
+            message.get("role") == "user"
+            and "核验三条关键证据" in str(message.get("content") or "")
+            for message in messages
+        )
+
+    async def _planner(_key, messages, _options, _provider, signal=None):
+        assert signal is not None
+        if _is_child_planning_call(messages):
+            planner_calls.append("child")
+            content = {
+                "needsTodos": False,
+                "reason": "the child can answer from supplied context",
+            }
+        elif "parent" in planner_calls:
+            planner_calls.append("parent-replan")
+            content = {
+                "needsTodos": False,
+                "reason": "the delegated evidence is now available",
+            }
+        else:
+            planner_calls.append("parent")
+            content = {
+                "needsTodos": True,
+                "title": "并行研究后综合",
+                "goal": "让研究 Agent 提供独立证据",
+                "todos": [{
+                    "id": "delegate-research",
+                    "title": "委派独立研究",
+                    "type": "analyze",
+                    "executor": "tool",
+                    "expectedTools": ["delegateToAgents"],
+                    "riskLevel": "write",
+                }],
+            }
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(content, ensure_ascii=False),
+            },
+            "model": "planner-model",
+        }
+
+    async def _runtime(_key, messages, options, _provider, signal=None):
+        assert signal is not None
+        child = _has_child_role_instruction(messages)
+        tool_names = [
+            item["function"]["name"]
+            for item in options.get("tools", [])
+        ]
+
+        async def _stream():
+            if child:
+                runtime_calls.append("child")
+                assert tool_names == []
+                yield {
+                    "choices": [{
+                        "delta": {"content": "子 Agent 已核验三条证据。"},
+                        "finish_reason": "stop",
+                    }],
+                }
+                return
+            if tool_names:
+                runtime_calls.append("parent-delegate")
+                assert tool_names == ["delegateToAgents"]
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-delegate",
+                                "type": "function",
+                                "function": {
+                                    "name": "delegateToAgents",
+                                    "arguments": json.dumps({
+                                        "delegations": [{
+                                            "agentRole": "researcher",
+                                            "objective": "核验三条关键证据",
+                                            "input": {"scope": "current request"},
+                                        }],
+                                    }, ensure_ascii=False),
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
+            runtime_calls.append("parent-final")
+            tool_message = next(
+                message for message in reversed(messages)
+                if message.get("role") == "tool"
+            )
+            result = json.loads(tool_message["content"])
+            assert result["state"] == "ready"
+            assert result["counts"]["done"] == 1
+            assert result["results"][0]["summary"] == "子 Agent 已核验三条证据。"
+            yield {
+                "choices": [{
+                    "delta": {"content": "父 Agent 已根据子 Agent 结果完成综合。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "wire-model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+
+    live = start_asgi_request(
+        app,
+        method="POST",
+        path="/api/ai/chat/stream",
+        json_body=_chat_request("请先让独立研究者核验，再综合回答。"),
+    )
+    await live.wait_started()
+    response = await live.finish()
+    events = _assert_sse_wire(response)
+
+    created = [
+        event["agentDelegationCreated"]
+        for event in events
+        if "agentDelegationCreated" in event
+    ]
+    updated = [
+        event["agentDelegationUpdated"]
+        for event in events
+        if "agentDelegationUpdated" in event
+    ]
+    assert len(created) == 1, events
+    assert [item["status"] for item in updated] == [
+        "claimed",
+        "running",
+        "done",
+    ], updated
+    delegation_id = created[0]["delegationId"]
+    assert created[0]["agentTitle"] == "研究 Agent"
+    assert all(item["delegationId"] == delegation_id for item in updated)
+    assert all(item["agentTitle"] == "研究 Agent" for item in updated)
+    assert updated[1]["childRunId"]
+    assert updated[2]["childRunId"] == updated[1]["childRunId"]
+    assert updated[2]["resultSummary"] == "子 Agent 已核验三条证据。"
+    assert planner_calls == ["parent", "child", "parent-replan"]
+    assert runtime_calls == ["parent-delegate", "child", "parent-final"]
+    assert sum(event.get("done") is True for event in events) == 1
+
+    parent_run_id = created[0]["runId"]
+    snapshot = await composition.checkpoint_store.load(
+        parent_run_id,
+        after_event_id=0,
+        limit=100,
+    )
+    assert snapshot is not None
+    assert len(snapshot.delegations) == 1
+    assert snapshot.delegations[0].status.value == "done"
 
 
 def _assert_terminal_exclusive(
@@ -235,7 +417,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
         )
         if book_id is None or not str(book_id).strip():
             assert any(
-                message.get("role") == "developer"
+                    message.get("role") == "system"
                 and "未绑定任何作品或章节" in str(message.get("content") or "")
                 and "不得猜测" in str(message.get("content") or "")
                 for message in messages
@@ -321,7 +503,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
         assert signal is not None
         assert "tools" not in options
         assert any(
-            message.get("role") == "developer"
+                message.get("role") == "system"
             and binding_marker in str(message.get("content") or "")
             for message in messages
         )
@@ -740,7 +922,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
             assert model_round == 3
             assert messages[-2]["role"] == "assistant"
             assert messages[-2]["content"] == invalid_response
-            assert messages[-1]["role"] == "developer"
+            assert messages[-1]["role"] == "system"
             assert "摘要正文按非空白可见字符计数不得超过 150 字" in (
                 messages[-1]["content"]
             )
@@ -1011,8 +1193,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     },
                 ],
             }
-        else:
-            assert planner_round == 2
+        elif planner_round == 2:
             assert messages[-1]["role"] == "user"
             assert "read steps are reserved" in messages[-1]["content"]
             content = {
@@ -1037,6 +1218,27 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                         "riskLevel": "read",
                     },
                 ],
+            }
+        else:
+            assert planner_round == 3
+            execution_state = planner_payload["executionState"]
+            assert execution_state["revision"] == 1
+            assert execution_state["completedSteps"][0]["id"] == (
+                "read-current-chapter"
+            )
+            assert execution_state["recentToolObservations"]
+            content = {
+                "needsTodos": True,
+                "title": "对照章节与关联大纲",
+                "goal": "使用已获取章节和已注入大纲完成一致性检查",
+                "todos": [{
+                    "id": "compare-evidence",
+                    "title": "比较章节与已注入大纲",
+                    "type": "review",
+                    "executor": "model",
+                    "expectedTools": [],
+                    "riskLevel": "read",
+                }],
             }
         return {
             "message": {
@@ -1191,11 +1393,11 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         for event in raw_events
         if "agentRunStarted" in event
     )
-    assert planner_round == 2
+    assert planner_round == 3
     assert judge_round == 2
     assert final_messages[-2]["role"] == "assistant"
     assert final_messages[-2]["content"] == invalid_response
-    assert final_messages[-1]["role"] == "developer"
+    assert final_messages[-1]["role"] == "system"
     repair_guidance = final_messages[-1]["content"]
     assert "独立语义评审未通过" in repair_guidance
     assert "第1项实际改变了零个或多个独立维度" in repair_guidance
@@ -1385,7 +1587,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
             continuation_tool_result = json.loads(tool_message["content"])
             if model_round == 2:
                 guidance = messages[-1]
-                assert guidance["role"] == "developer"
+                assert guidance["role"] == "system"
                 assert "user rejected" in guidance["content"]
                 yield {
                     "choices": [{
@@ -1408,7 +1610,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 return
 
             guidance = messages[-1]
-            assert guidance["role"] == "developer"
+            assert guidance["role"] == "system"
             assert "not shown to the user" in guidance["content"]
             yield {
                 "choices": [{

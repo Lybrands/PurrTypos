@@ -14,6 +14,7 @@ from agent_core.contracts import (
     ResponseConstraints,
     RunStatus,
     ToolCall,
+    ToolExecutionMode,
 )
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.tools import InMemoryApprovalGateway
@@ -94,7 +95,8 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
 
     assert request.context_window == 64_000
     assert request.model.options["baseURL"] == "https://example.test/v1"
-    assert request.model.options["model_profile"] == "minimax:MiniMax-M3"
+    assert request.model.profile_id == "minimax:MiniMax-M3"
+    assert "model_profile" not in request.model.options
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)
@@ -247,6 +249,44 @@ async def test_composed_core_consumes_configured_approval_timeout(
     assert core._tool_executor._limits.approval_timeout_seconds == 3_600
 
 
+@pytest.mark.asyncio
+async def test_composition_filters_child_tools_from_business_role_policy(
+    temp_db: DatabaseConnection,
+):
+    composition = AgentComposition(temp_db)
+    role = composition.agent_role_registry.require("researcher")
+    request = to_writing_agent_request(
+        ChatStreamRequest(
+            messages=[{"role": "user", "content": "读取当前章节"}],
+            apiKey="key",
+            apiProvider="openai",
+            options={"model": "model"},
+            enableAgentTools=True,
+            bookId="book-1",
+            chapterId="chapter-1",
+            chatAgentMode="agent",
+        ),
+        {"model": "model"},
+    )
+    core = composition.create_core(
+        "key",
+        allowed_tool_modes=role.allowed_tool_modes,
+    )
+    enabled = core._tool_catalog.enabled_names(request)
+    registration_by_name = {
+        item.schema.name: item
+        for item in core._tool_catalog.registrations()
+    }
+
+    assert enabled
+    assert "getChapterContent" in enabled
+    assert "editChapterContent" not in enabled
+    assert all(
+        registration_by_name[name].policy.mode is ToolExecutionMode.READ
+        for name in enabled
+    )
+
+
 def test_request_mapping_rejects_caller_owned_tool_contract():
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "hello"}],
@@ -367,6 +407,31 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
+    delegation_created = core_update_to_sse_chunk(
+        AgentEvent(
+            type=CoreEventType.DELEGATION_CREATED,
+            run_id="run-1",
+            payload={
+                "delegationId": "delegation-1",
+                "agentRole": "researcher",
+                "status": "queued",
+            },
+        ),
+        model="model",
+    )
+    delegation_updated = core_update_to_sse_chunk(
+        AgentEvent(
+            type=CoreEventType.DELEGATION_COMPLETED,
+            run_id="run-1",
+            payload={
+                "delegationId": "delegation-1",
+                "agentRole": "researcher",
+                "status": "done",
+                "resultSummary": "verified",
+            },
+        ),
+        model="model",
+    )
 
     assert started == {
         "agentRunStarted": {"runId": "run-1", "status": "running"},
@@ -374,6 +439,23 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
     assert effect == {"proposedSettingDiff": {"kind": "character"}}
     assert done == {"done": True, "model": "provider-resolved-model"}
     assert cached == {"toolIndexCompleted": 2, "toolFromCache": True}
+    assert delegation_created == {
+        "agentDelegationCreated": {
+            "runId": "run-1",
+            "delegationId": "delegation-1",
+            "agentRole": "researcher",
+            "status": "queued",
+        },
+    }
+    assert delegation_updated == {
+        "agentDelegationUpdated": {
+            "runId": "run-1",
+            "delegationId": "delegation-1",
+            "agentRole": "researcher",
+            "status": "done",
+            "resultSummary": "verified",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -473,7 +555,7 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         def observe_event(self, _event):
             return None
 
-        def release_run(self, run_id):
+        async def release_run(self, run_id):
             self.released.append(run_id)
 
     composition = _FakeComposition()
@@ -674,7 +756,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 @pytest.mark.asyncio
 async def test_approval_endpoint_resolves_composition_owned_request():
     class _FakeComposition:
-        def resolve_approval(self, approval_id: str, approved: bool):
+        async def resolve_approval(self, approval_id: str, approved: bool):
             assert approval_id == "composition-approval"
             assert approved is False
             return ApprovalStatus.REJECTED
@@ -732,12 +814,12 @@ async def test_composition_shutdown_cancels_all_live_approvals(
     approval_id = str(sink.events[0].payload["approvalId"])
     composition.observe_event(sink.events[0])
 
-    composition.shutdown()
+    await composition.shutdown()
     result = await task
 
     assert result.status is ApprovalStatus.CANCELED
     assert gateway.pending_count() == 0
-    assert composition.resolve_approval(approval_id, True) is None
+    assert await composition.resolve_approval(approval_id, True) is None
 
     late_sink = _RecordingSink()
     late = await gateway.request(

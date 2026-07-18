@@ -134,7 +134,7 @@ class InMemoryApprovalGateway:
         pending.future.set_result(status)
         return status
 
-    def resolve(
+    async def resolve(
         self,
         run_id: RunId,
         approval_id: str,
@@ -149,7 +149,7 @@ class InMemoryApprovalGateway:
         )
         return self._settle(key, status)
 
-    def cancel_pending(self, run_id: RunId) -> int:
+    async def cancel_pending(self, run_id: RunId) -> int:
         normalized_run_id = str(run_id or "").strip()
         count = 0
         for key in tuple(self._pending):
@@ -159,7 +159,7 @@ class InMemoryApprovalGateway:
                 count += 1
         return count
 
-    def cancel_all(self) -> int:
+    async def cancel_all(self) -> int:
         """Cancel every unresolved request owned by this gateway instance."""
 
         count = 0
@@ -168,11 +168,11 @@ class InMemoryApprovalGateway:
                 count += 1
         return count
 
-    def close(self) -> int:
+    async def close(self) -> int:
         """Permanently reject late requests and cancel every live approval."""
 
         self._closed = True
-        return self.cancel_all()
+        return await self.cancel_all()
 
     def pending_count(self, run_id: RunId | None = None) -> int:
         if run_id is None:

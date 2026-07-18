@@ -13,6 +13,9 @@
     "build:no-clean": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && electron-builder",
     "test:electron": "node --test electron/*.test.js",
     "test:unit": "node --test electron/*.test.js src/modelCatalog.test.cjs src/Workspace/AiPanel/hooks/modelRuntime.test.cjs src/Workspace/DirectorNotebook/ChapterSectionModel.test.cjs src/Workspace/DashboardPanel/dashboardFormatters.test.cjs",
+    "test:backend": "node scripts/run-backend-tests.cjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test:unit && npm run test:backend",
     "preview": "vite preview",
     "postinstall": "electron-builder install-app-deps"
   },

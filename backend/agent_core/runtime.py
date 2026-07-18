@@ -1,9 +1,9 @@
 """Provider-neutral Agent model/tool loop.
 
-This stage-3 runtime starts after the application has built and initially
+This stage-3 runtime starts after the host has built and initially
 budgeted context.  It owns model rounds, typed tool continuation, authorization,
-round trimming, cancellation and the model-round limit.  HTTP, SSE, writing
-concepts and concrete tool handlers stay behind ports.
+round trimming, cancellation and the model-round limit. Host transports,
+domain concepts and concrete tool handlers stay behind ports.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ from agent_core.ports import (
     ResponseJudge,
     ResponseValidator,
     RuntimeObserver,
+    RuntimePlanningHook,
     ToolExecutionGateway,
 )
 
@@ -152,6 +153,7 @@ class AgentRuntime:
         force_tool_choice: bool = False,
         require_tool_call: bool | None = None,
         tools_executable: bool = True,
+        planning_hook: RuntimePlanningHook | None = None,
         signal: CancellationSignal | None = None,
     ) -> AsyncIterator[RuntimeUpdate]:
         messages = list(request.messages)
@@ -176,6 +178,8 @@ class AgentRuntime:
         provider_interruption_retry_used = False
         pending_provider_attempt: _PendingProviderAttempt | None = None
         logical_round_number = 0
+        dynamic_replan_pending = False
+        last_tool_outcome = ToolBatchOutcome.COMPLETED
         budget_contract_error = _context_budget_contract_error(
             request,
             context_budget,
@@ -218,6 +222,58 @@ class AgentRuntime:
                 provider_attempt = pending_provider_attempt
                 pending_provider_attempt = None
             else:
+                if dynamic_replan_pending and planning_hook is not None:
+                    replanning_started = perf_counter()
+                    try:
+                        revised_guidance = await planning_hook.replan_after_tool(
+                            tuple(messages),
+                            round_number=round_number,
+                            remaining_model_rounds=(
+                                self._limits.max_model_rounds - round_index
+                            ),
+                            outcome=last_tool_outcome,
+                            signal=signal,
+                        )
+                        if revised_guidance is not None:
+                            messages.append(revised_guidance)
+                    except OperationCanceled:
+                        await self._trace(
+                            "planning",
+                            "canceled",
+                            details={
+                                "dynamic": True,
+                                "round": round_number,
+                            },
+                            duration_ms=_duration_ms(replanning_started),
+                        )
+                        yield _runtime_result(
+                            run_id,
+                            RuntimeOutcome.CANCELED,
+                            used_model,
+                            round_index,
+                            error_code="request_canceled",
+                        )
+                        return
+                    except Exception as error:
+                        await self._trace(
+                            "planning",
+                            "failed",
+                            details={
+                                "dynamic": True,
+                                "round": round_number,
+                                "errorType": _root_error_type(error),
+                            },
+                            duration_ms=_duration_ms(replanning_started),
+                        )
+                        yield _runtime_result(
+                            run_id,
+                            RuntimeOutcome.FAILED,
+                            used_model,
+                            round_index,
+                            error_code="dynamic_planning_failed",
+                        )
+                        return
+                    dynamic_replan_pending = False
                 initial_logical_round = logical_round_number == 0
                 active_token_budget = (
                     (
@@ -1340,7 +1396,7 @@ class AgentRuntime:
                     error_code=batch_result.error or "tool_execution_canceled",
                 )
                 return
-            if outcome in {ToolBatchOutcome.FAILED, ToolBatchOutcome.REJECTED}:
+            if outcome is ToolBatchOutcome.REJECTED:
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
@@ -1359,8 +1415,18 @@ class AgentRuntime:
                     error_code="invalid_tool_results",
                 )
                 return
+            if outcome is ToolBatchOutcome.FAILED and planning_hook is None:
+                yield _runtime_result(
+                    run_id,
+                    RuntimeOutcome.FAILED,
+                    used_model,
+                    round_number,
+                    error_code=batch_result.error or "tool_execution_failed",
+                )
+                return
             if scope_tools_to_observer and self._observer is not None:
-                await self._observer.on_tool_round_completed(outcome)
+                if outcome is not ToolBatchOutcome.FAILED:
+                    await self._observer.on_tool_round_completed(outcome)
             elif not scope_tools_to_observer:
                 # Caller-owned REQUIRED applies to the initial selection. A
                 # successful unscoped tool round must still leave room for the
@@ -1378,6 +1444,12 @@ class AgentRuntime:
                 content="" if require_tool else accumulator.content,
                 thinking=accumulator.thinking,
             ))
+            if outcome in {
+                ToolBatchOutcome.COMPLETED,
+                ToolBatchOutcome.FAILED,
+            } and planning_hook is not None:
+                last_tool_outcome = outcome
+                dynamic_replan_pending = True
             if outcome is ToolBatchOutcome.DECLINED:
                 declined_response_pending = True
                 messages.append(AgentMessage(

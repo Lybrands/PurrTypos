@@ -8,7 +8,7 @@ import logging
 from typing import Any, AsyncIterator
 
 import anyio
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 
 from agent_core.contracts import RunProvenance
@@ -18,6 +18,7 @@ from application.request_mapping import (
 )
 from schemas.ai import (
     ChatStreamRequest,
+    CreateAgentDelegationRequest,
     GenerateTitleRequest,
     ListModelsRequest,
     ResolveToolApprovalRequest,
@@ -112,7 +113,7 @@ async def resolve_pending_tool_approval(
             "success": False,
             "error": "Agent 当前不可用，无法处理确认请求。",
         }
-    status = composition.resolve_approval(approval_id, body.approved)
+    status = await composition.resolve_approval(approval_id, body.approved)
     if status is None:
         return {
             "success": False,
@@ -142,6 +143,84 @@ async def get_agent_run_diagnostics(run_id: str):
     report = evaluate_agent_run(run, events)
     report["performance"] = evaluate_agent_run_performance(events)
     return {"success": True, "data": report}
+
+
+@router.post("/ai/agent-runs/{run_id}/cancel")
+async def cancel_agent_run(run_id: str):
+    """Persist a cancellation request for the executor that owns this Run."""
+
+    from application.agent_delegation_service import AgentDelegationService
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    children_canceled = await AgentDelegationService(
+        composition.delegation_repository,
+    ).cancel_children(run_id)
+    requested = await composition.execution_lease_store.request_cancellation(run_id)
+    state = await composition.execution_lease_store.get(run_id)
+    if state is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    if state.status.value != "running":
+        return {"success": False, "error": "Agent Run 已结束"}
+    return {
+        "success": True,
+        "data": {
+            "status": "cancel_requested",
+            "newlyRequested": requested,
+            "childrenCanceled": children_canceled,
+        },
+    }
+
+
+@router.post("/ai/agent-runs/{run_id}/delegations")
+async def create_agent_delegation(
+    run_id: str,
+    body: CreateAgentDelegationRequest,
+):
+    from application.agent_delegation_service import AgentDelegationService
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    try:
+        delegation = await AgentDelegationService(
+            composition.delegation_repository,
+            role_registry=composition.agent_role_registry,
+        ).delegate(
+            parent_run_id=run_id,
+            agent_role=body.agentRole,
+            objective=body.objective,
+            input_payload=body.input,
+            required=body.required,
+            priority=body.priority,
+        )
+    except ValueError as error:
+        return {"success": False, "error": str(error)}
+    return {"success": True, "data": delegation}
+
+
+@router.get("/ai/agent-runs/{run_id}")
+async def get_agent_run_snapshot(
+    run_id: str,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Return a resumable Run snapshot and durable events after a cursor."""
+
+    from application.agent_run_queries import AgentRunQueryService
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    snapshot = await AgentRunQueryService(
+        composition.checkpoint_store,
+        role_registry=getattr(composition, "agent_role_registry", None),
+    ).get_snapshot(
+        run_id,
+        after_event_id=after,
+        limit=limit,
+    )
+    if snapshot is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {"success": True, "data": snapshot}
 
 
 @router.get("/ai/agent-runtime-regressions")
@@ -278,58 +357,24 @@ async def _stream_composed_agent(
     signal: asyncio.Event,
     provenance: RunProvenance | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Run the complete Agent Engine assembled by the application root."""
+    """Map application-owned Agent updates onto the desktop SSE contract."""
 
-    from agent_core.events import AgentEvent
     from application.agent_composition import get_agent_composition
-    from application.run_provenance import build_chat_run_provenance
-    from application.request_mapping import (
-        to_writing_agent_request,
-        writing_run_options,
-    )
+    from application.agent_run_service import AgentRunService
     from application.sse_mapping import core_update_to_sse_chunk
-    from infrastructure.models.capabilities import normalize_thinking_enabled
 
     composition = get_agent_composition()
-    provider_capabilities = composition.provider_capabilities
-    request = to_writing_agent_request(body, provider_options)
-    provenance = provenance or build_chat_run_provenance(body)
-    capability_key = provider_capabilities.key(
-        api_provider=body.apiProvider,
-        base_url=str(provider_options.get("baseURL") or ""),
-        model=request.model.model,
-        thinking_enabled=normalize_thinking_enabled(provider_options),
-    )
-    response_judges = composition.create_response_judges(api_key, request)
-    options = writing_run_options(
-        request,
-        provider_options,
-        force_planned_tool_choice=(
-            not provider_capabilities.required_tool_choice_is_unsupported(
-                capability_key
-            )
-        ),
+    service_stream = AgentRunService(composition).run(
+        body=body,
+        api_key=api_key,
+        provider_options=provider_options,
+        signal=signal,
         provenance=provenance,
-        response_judges=response_judges,
     )
-    core = composition.create_core(
-        api_key,
-        on_required_tool_choice_unsupported=(
-            lambda: provider_capabilities.mark_required_tool_choice_unsupported(
-                capability_key
-            )
-        ),
-    )
-    core_stream = core.run(request, options=options, signal=signal)
-    run_id: str | None = None
+    model = str(provider_options.get("model") or "")
     try:
-        async for update in core_stream:
-            if isinstance(update, AgentEvent):
-                composition.observe_event(update)
-                run_id = update.run_id or run_id
-            else:
-                run_id = update.run_id or run_id
-            chunk = core_update_to_sse_chunk(update, model=request.model.model)
+        async for update in service_stream:
+            chunk = core_update_to_sse_chunk(update, model=model)
             if chunk is not None:
                 yield chunk
     finally:
@@ -339,11 +384,7 @@ async def _stream_composed_agent(
         # the response task exits; otherwise only the in-memory approval map
         # is cleared and the persisted Run can remain stuck at running.
         with anyio.CancelScope(shield=True):
-            try:
-                await core_stream.aclose()
-            finally:
-                if run_id:
-                    composition.release_run(run_id)
+            await service_stream.aclose()
 
 
 @router.post("/ai/chat/stream")

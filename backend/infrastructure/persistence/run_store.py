@@ -25,8 +25,17 @@ async def create_run(
     prompt: str,
     mode: str | None,
     provenance: "RunProvenance | None" = None,
+    execution_owner_id: str | None = None,
+    lease_expires_at_ms: int | None = None,
+    heartbeat_at_ms: int | None = None,
+    parent_run_id: str | None = None,
+    root_run_id: str | None = None,
+    delegation_id: str | None = None,
+    agent_role: str | None = None,
+    run_depth: int = 0,
 ) -> str:
     run_id = new_run_id()
+    normalized_root_run_id = str(root_run_id or "").strip() or run_id
     provenance_values = (
         [
             provenance.model_provider,
@@ -42,14 +51,25 @@ async def create_run(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)",
+        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "heartbeat_at_ms, execution_attempt) "
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             run_id,
             session_id,
             mode,
             prompt,
             *provenance_values,
+            parent_run_id,
+            normalized_root_run_id,
+            delegation_id,
+            agent_role,
+            int(run_depth),
+            execution_owner_id,
+            lease_expires_at_ms,
+            heartbeat_at_ms,
+            1 if execution_owner_id else 0,
         ],
     )
     return run_id
@@ -77,14 +97,18 @@ async def upsert_todos(
         for idx, step in enumerate(steps):
             await db.execute(
                 "INSERT INTO ai_agent_run_todos "
-                "(run_id, step_id, title, status, executor, expected_tools, "
-                "result_summary, error, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(run_id, step_id, title, status, executor, step_type, "
+                "risk_level, description, expected_tools, result_summary, "
+                "error, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     run_id,
                     str(step.get("id") or f"step-{idx + 1}"),
                     str(step.get("title") or f"步骤 {idx + 1}"),
                     str(step.get("status") or "pending"),
                     str(step.get("executor") or "model"),
+                    str(step.get("type") or "analyze"),
+                    step.get("riskLevel"),
+                    step.get("description"),
                     json.dumps(step.get("suggestedTools") or [], ensure_ascii=False),
                     step.get("resultSummary"),
                     step.get("error"),
@@ -144,7 +168,10 @@ async def get_run(
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, final_response, create_time, update_time "
+        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
+        "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE id = ?",
         [run_id],
     )
@@ -159,6 +186,37 @@ async def get_run_events(
         "FROM ai_agent_run_events WHERE run_id = ? ORDER BY id ASC",
         [run_id],
     )
+    return _event_rows_to_records(rows)
+
+
+async def get_run_events_page(
+    db: "DatabaseConnection",
+    run_id: str,
+    *,
+    after_id: int = 0,
+    limit: int = 100,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read one stable, forward-only page from a Run's durable event log."""
+
+    normalized_after = int(after_id)
+    normalized_limit = int(limit)
+    if normalized_after < 0:
+        raise ValueError("event cursor must be non-negative")
+    if normalized_limit < 1 or normalized_limit > 500:
+        raise ValueError("event page limit must be between 1 and 500")
+    rows = await db.fetch_all(
+        "SELECT id, event_type, payload_json, create_time "
+        "FROM ai_agent_run_events WHERE run_id = ? AND id > ? "
+        "ORDER BY id ASC LIMIT ?",
+        [run_id, normalized_after, normalized_limit + 1],
+    )
+    has_more = len(rows) > normalized_limit
+    return _event_rows_to_records(rows[:normalized_limit]), has_more
+
+
+def _event_rows_to_records(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for row in rows:
         payload: dict[str, Any] = {}
@@ -210,6 +268,7 @@ async def update_run_status(
     await db.execute(
         "UPDATE ai_agent_runs SET status = ?, "
         "final_response = COALESCE(?, final_response), "
+        "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
         "update_time = CURRENT_TIMESTAMP WHERE id = ?",
         [status, final_response, run_id],
     )
@@ -261,6 +320,9 @@ def _todo_row_to_step(row: dict[str, Any]) -> dict[str, Any]:
         "title": str(row.get("title") or ""),
         "status": str(row.get("status") or "pending"),
         "executor": str(row.get("executor") or "model"),
+        "type": str(row.get("step_type") or "analyze"),
+        "riskLevel": row.get("risk_level"),
+        "description": row.get("description"),
         "suggestedTools": expected_tools,
         "resultSummary": row.get("result_summary"),
         "error": row.get("error"),

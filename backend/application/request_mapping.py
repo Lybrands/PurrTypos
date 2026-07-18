@@ -10,6 +10,7 @@ from agent_core.contracts import (
     AgentRunRequest,
     ModelRequest,
     RunProvenance,
+    RunLineage,
 )
 from agent_core.engine import AgentCoreRunOptions
 from agent_core.ports import ResponseJudge
@@ -66,8 +67,11 @@ def to_writing_agent_request(
 ) -> AgentRunRequest:
     """Map the stable HTTP request shape to Core plus opaque domain context."""
 
-    options = dict(provider_options)
     body_options = dict(body.options or {})
+    # Keep model runtime metadata (for example ``model_profile``) when this
+    # mapper is used outside the HTTP router.  Router-owned normalized values
+    # still win for connection routing, model name, and temperature.
+    options = {**body_options, **dict(provider_options)}
     if (
         _has_caller_tool_definitions(body.tools)
         or _has_caller_tool_definitions(body_options.get("tools"))
@@ -80,6 +84,7 @@ def to_writing_agent_request(
             "composed writing agent"
         )
     model = str(options.pop("model", "") or "").strip()
+    profile_id = str(options.pop("model_profile", "") or "").strip() or None
     options.pop("tools", None)
     options.pop("tool_choice", None)
     window_label = body.contextWindow or options.pop("context_window", None)
@@ -104,6 +109,7 @@ def to_writing_agent_request(
         model=ModelRequest(
             provider=body.apiProvider,
             model=model,
+            profile_id=profile_id,
             options=options,
         ),
         domain_context=context.to_core_context(),
@@ -120,6 +126,7 @@ def writing_run_options(
     *,
     force_planned_tool_choice: bool = True,
     provenance: RunProvenance | None = None,
+    lineage: RunLineage | None = None,
     response_judges: Sequence[ResponseJudge] = (),
 ) -> AgentCoreRunOptions:
     output_reserve = _positive_int(provider_options.get("max_tokens"), 8_192)
@@ -139,6 +146,7 @@ def writing_run_options(
         default_context_window_tokens=request.context_window or 200_000,
         force_planned_tool_choice=force_planned_tool_choice,
         provenance=provenance,
+        lineage=lineage,
         response_constraints=writing_response_constraints(request),
         response_validators=writing_response_validators(request),
         response_judges=tuple(response_judges),
