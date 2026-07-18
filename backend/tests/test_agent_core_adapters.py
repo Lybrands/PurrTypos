@@ -113,13 +113,13 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     request = ModelRequest(
         provider="anthropic",
         model="requested-model",
+        profile_id="minimax:MiniMax-M3",
         options={
             "baseURL": "https://example.invalid",
             "tool_choice": "required",
             "max_tokens": 999_999,
             "thinking_enabled": True,
             "temperature": 1.0,
-            "model_profile": "minimax:MiniMax-M3",
             "metadata": {"tags": ["writing"]},
         },
     )

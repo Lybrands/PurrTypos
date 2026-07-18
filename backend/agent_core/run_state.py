@@ -136,6 +136,36 @@ class RunStateMachine:
         )
 
     @staticmethod
+    def revise_plan(state: RunSnapshot, plan: TaskPlan) -> RunSnapshot:
+        """Replace tentative work while preserving immutable execution history."""
+
+        if state.terminal:
+            raise ContractViolationError("cannot revise a terminal run plan")
+        history = tuple(
+            step for step in state.steps if step.status in _FINISHED_STEP_STATUSES
+        )
+        history_ids = frozenset(step.id for step in history)
+        future = tuple(step for step in plan.steps if step.id not in history_ids)
+        if not future:
+            fallback_id = _unique_step_id("respond", history_ids)
+            future = (TaskStep(
+                id=fallback_id,
+                title="Respond",
+                type=StepType.REVIEW,
+                executor=StepExecutor.MODEL,
+            ),)
+        revised_future = RunStateMachine.initialize(
+            state.run_id,
+            TaskPlan(title=plan.title, goal=plan.goal, steps=future),
+        )
+        return replace(
+            state,
+            title=plan.title,
+            goal=plan.goal,
+            steps=history + revised_future.steps,
+        )
+
+    @staticmethod
     def on_model_delta(state: RunSnapshot) -> RunTransition:
         if state.terminal or any(
             step.status is StepStatus.RUNNING and _is_tool_step(step)
@@ -264,6 +294,36 @@ class RunStateMachine:
             running = replace(steps[next_index], status=StepStatus.RUNNING)
             changes.append((next_index, running))
         return _with_step_changes(state, tuple(changes))
+
+    @staticmethod
+    def on_tool_round_failed(
+        state: RunSnapshot,
+        error: str = "tool_execution_failed",
+    ) -> RunTransition:
+        """Close the current tool step as failed before a recovery replan."""
+
+        if state.terminal:
+            return _unchanged(state)
+        normalized_error = _optional_text(error) or "tool_execution_failed"
+        tool_index = next(
+            (
+                index
+                for index, step in enumerate(state.steps)
+                if step.status is StepStatus.RUNNING and _is_tool_step(step)
+            ),
+            -1,
+        )
+        if tool_index < 0:
+            raise ContractViolationError(
+                "failed tool round requires a running tool step"
+            )
+        failed = replace(
+            state.steps[tool_index],
+            status=StepStatus.FAILED,
+            result_summary="Tool execution failed; runtime replanning requested.",
+            error=normalized_error,
+        )
+        return _with_step_changes(state, ((tool_index, failed),))
 
     @staticmethod
     def complete(state: RunSnapshot, final_response: str = "") -> RunTransition:
@@ -542,3 +602,12 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _unique_step_id(base: str, used: frozenset[str]) -> str:
+    if base not in used:
+        return base
+    suffix = 2
+    while f"{base}-{suffix}" in used:
+        suffix += 1
+    return f"{base}-{suffix}"

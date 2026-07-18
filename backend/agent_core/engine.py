@@ -33,15 +33,19 @@ from agent_core.contracts import (
     PlanningCapabilities,
     PlanningConstraints,
     PlanningKind,
+    PlanningTurn,
     ResponseConstraints,
     RunCreateParams,
     RunId,
     RunProvenance,
+    RunLineage,
     RuntimeLimits,
     RuntimeOutcome,
     StepExecutor,
+    StepStatus,
     StepType,
     TaskPlan,
+    ToolBatchOutcome,
     ToolExecutionLimits,
     TraceRecord,
 )
@@ -52,12 +56,17 @@ from agent_core.errors import (
 )
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.json_values import thaw_json_mapping
-from agent_core.planner import AgentPlanner, build_execution_message
+from agent_core.planner import (
+    AgentPlanner,
+    build_execution_message,
+    effective_planning_tool_names,
+)
 from agent_core.ports import (
     ApprovalGateway,
     CancellationSignal,
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     ContextProvider,
+    DynamicTaskPlanner,
     ExecutionStateFactory,
     PlanningPolicy,
     ResponseJudge,
@@ -65,10 +74,12 @@ from agent_core.ports import (
     RunRepository,
     TaskPlanner,
     ToolCatalog,
+    ToolIdempotencyGateway,
     ToolRegistration,
     ModelGateway,
 )
 from agent_core.run_controller import AgentRunController
+from agent_core.run_state import RunStateMachine
 from agent_core.runtime import AgentRuntime
 from agent_core.tools import (
     CoreToolExecutor,
@@ -93,6 +104,7 @@ class AgentCoreRunOptions:
     model_supports_tools: bool = True
     force_planned_tool_choice: bool = True
     provenance: RunProvenance | None = None
+    lineage: RunLineage | None = None
     response_constraints: ResponseConstraints = ResponseConstraints()
     response_validators: tuple[ResponseValidator, ...] = ()
     response_judges: tuple[ResponseJudge, ...] = ()
@@ -131,6 +143,8 @@ class AgentCoreRunOptions:
             RunProvenance,
         ):
             raise TypeError("run provenance must be a RunProvenance value")
+        if self.lineage is not None and not isinstance(self.lineage, RunLineage):
+            raise TypeError("run lineage must be a RunLineage value")
         if not isinstance(self.response_constraints, ResponseConstraints):
             raise TypeError("response constraints must be ResponseConstraints")
         validators = tuple(self.response_validators)
@@ -147,7 +161,7 @@ class AgentCore:
     """Compose planning, context, model/tool runtime and run lifecycle.
 
     The async iterator is the only public output channel. Applications can map
-    its typed events to SSE, WebSocket messages, a CLI, or another transport.
+    its typed events to any host transport.
     Concrete domain tools enter only as registrations in ``tool_catalog``.
     """
 
@@ -162,6 +176,7 @@ class AgentCore:
         execution_state_factory: ExecutionStateFactory | None = None,
         tool_catalog: ToolCatalog | None = None,
         approval_gateway: ApprovalGateway | None = None,
+        tool_idempotency_gateway: ToolIdempotencyGateway | None = None,
         runtime_limits: RuntimeLimits = RuntimeLimits(),
         tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(),
     ) -> None:
@@ -192,22 +207,23 @@ class AgentCore:
             _CapturedToolCatalog(self._registrations),
             self._approval_gateway,
             tool_execution_limits,
+            tool_idempotency_gateway,
         )
 
-    def resolve_approval(
+    async def resolve_approval(
         self,
         run_id: RunId,
         approval_id: str,
         decision: ApprovalDecision,
     ) -> ApprovalStatus | None:
-        return self._approval_gateway.resolve(
+        return await self._approval_gateway.resolve(
             run_id,
             approval_id,
             ApprovalDecision(decision),
         )
 
-    def cancel_pending_approvals(self, run_id: RunId) -> int:
-        return self._approval_gateway.cancel_pending(run_id)
+    async def cancel_pending_approvals(self, run_id: RunId) -> int:
+        return await self._approval_gateway.cancel_pending(run_id)
 
     async def run(
         self,
@@ -230,6 +246,7 @@ class AgentCore:
                     prompt=request.latest_user_text(),
                     mode=request.mode,
                     provenance=options.provenance,
+                    lineage=options.lineage,
                 )
             )
             for event in sink.drain():
@@ -431,8 +448,23 @@ class AgentCore:
             for event in sink.drain():
                 yield event
 
+            planning_hook: _DynamicPlanningOrchestrator | None = None
+            if (
+                should_plan
+                and plan is not None
+                and isinstance(self._planner, DynamicTaskPlanner)
+            ):
+                planning_hook = _DynamicPlanningOrchestrator(
+                    planner=self._planner,
+                    request=request,
+                    capabilities=capabilities,
+                    controller=controller,
+                    enabled_names=enabled_names,
+                )
             selected_names = (
-                _planned_tool_names(plan)
+                effective_planning_tool_names(capabilities)
+                if planning_hook is not None
+                else _planned_tool_names(plan)
                 if plan is not None
                 else enabled_names
             )
@@ -482,6 +514,7 @@ class AgentCore:
                     raise ContractViolationError(
                         "execution state factory must return ExecutionState"
                     )
+                state.run_id = controller.run_id
                 await controller.record_trace(TraceRecord(
                     stage="context_budget",
                     outcome="within_budget",
@@ -585,6 +618,7 @@ class AgentCore:
                     ),
                     require_tool_call=bool(plan is not None and selected_names),
                     tools_executable=True,
+                    planning_hook=planning_hook,
                     signal=signal,
                 )
                 async with aclosing(runtime_stream) as updates:
@@ -653,7 +687,7 @@ class AgentCore:
             run_id = controller.run_id
             if run_id is not None:
                 with suppress(Exception):
-                    self._approval_gateway.cancel_pending(run_id)
+                    await self._approval_gateway.cancel_pending(run_id)
             snapshot = controller.snapshot
             if snapshot is not None and not snapshot.terminal:
                 # Closing the public iterator is itself a disconnect signal.
@@ -710,6 +744,105 @@ class _DefaultPlanningPolicy:
         capabilities: PlanningCapabilities,
     ) -> bool:
         return bool(request.tools_enabled and capabilities.available_tool_names)
+
+
+class _DynamicPlanningOrchestrator:
+    """Bridge runtime evidence to a dynamic planner and durable Run authority."""
+
+    def __init__(
+        self,
+        *,
+        planner: DynamicTaskPlanner,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+        controller: AgentRunController,
+        enabled_names: frozenset[str],
+    ) -> None:
+        self._planner = planner
+        self._request = request
+        self._capabilities = capabilities
+        self._controller = controller
+        self._enabled_names = enabled_names
+        self._revision = 0
+
+    async def replan_after_tool(
+        self,
+        messages: Sequence[AgentMessage],
+        *,
+        round_number: int,
+        remaining_model_rounds: int,
+        outcome: ToolBatchOutcome,
+        signal: CancellationSignal | None = None,
+    ) -> AgentMessage:
+        started = perf_counter()
+        self._revision += 1
+        snapshot = self._controller.snapshot
+        if snapshot is None:
+            raise ContractViolationError("dynamic planning requires a live run")
+        if outcome is ToolBatchOutcome.FAILED:
+            await self._controller.on_tool_round_failed()
+            snapshot = self._controller.snapshot
+            if snapshot is None:  # pragma: no cover - controller invariant
+                raise ContractViolationError("dynamic planning lost its live run")
+        completed_steps = tuple(
+            step
+            for step in snapshot.steps
+            if step.status in {
+                StepStatus.DONE,
+                StepStatus.BLOCKED,
+                StepStatus.FAILED,
+            }
+        )
+        planning = await await_with_cancellation(
+            self._planner.revise_plan(
+                self._request,
+                self._capabilities,
+                PlanningTurn(
+                    revision=self._revision,
+                    round_number=round_number,
+                    remaining_model_rounds=remaining_model_rounds,
+                    messages=tuple(messages),
+                    completed_steps=completed_steps,
+                    last_tool_outcome=outcome,
+                ),
+                signal,
+            ),
+            signal,
+        )
+        prospective = RunStateMachine.revise_plan(snapshot, planning.plan)
+        remaining_plan = TaskPlan(
+            title=prospective.title,
+            goal=prospective.goal,
+            steps=tuple(
+                step
+                for step in prospective.steps
+                if step.status in {StepStatus.PENDING, StepStatus.RUNNING}
+            ),
+        )
+        _validate_plan_authority(
+            remaining_plan,
+            self._enabled_names,
+            constraints=self._capabilities.constraints,
+            max_tool_steps=max(0, remaining_model_rounds - 1),
+        )
+        revised = await self._controller.revise_plan(planning.plan)
+        await self._controller.record_trace(TraceRecord(
+            stage="planning",
+            outcome="replanned",
+            details={
+                "dynamic": True,
+                "revision": self._revision,
+                "round": round_number,
+                "planningKind": planning.kind.value,
+                "completedStepCount": len(completed_steps),
+                "remainingStepCount": sum(
+                    step.status in {StepStatus.PENDING, StepStatus.RUNNING}
+                    for step in revised.steps
+                ),
+            },
+            duration_ms=_duration_ms(started),
+        ))
+        return build_execution_message(remaining_plan)
 
 
 class _EmptyContextProvider:

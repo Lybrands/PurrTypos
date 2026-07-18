@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -56,3 +56,19 @@ class GenerateTitleRequest(BaseModel):
 
 class ResolveToolApprovalRequest(BaseModel):
     approved: bool
+
+
+class CreateAgentDelegationRequest(BaseModel):
+    agentRole: str
+    objective: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+    required: bool = True
+    priority: int = 0
+
+    @field_validator("agentRole", "objective")
+    @classmethod
+    def require_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be empty")
+        return normalized

@@ -148,10 +148,10 @@ async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handle
             order.append("approval")
             return ApprovalResult("approval-1", ApprovalStatus.APPROVED)
 
-        def resolve(self, run_id, approval_id, decision):
+        async def resolve(self, run_id, approval_id, decision):
             return None
 
-        def cancel_pending(self, run_id):
+        async def cancel_pending(self, run_id):
             return 0
 
     catalog = InMemoryToolCatalog((
@@ -259,10 +259,10 @@ async def test_scope_cache_approval_and_handler_run_in_fixed_order():
             order.append("approval")
             return ApprovalResult("approval-1", ApprovalStatus.APPROVED)
 
-        def resolve(self, run_id, approval_id, decision):
+        async def resolve(self, run_id, approval_id, decision):
             return None
 
-        def cancel_pending(self, run_id):
+        async def cancel_pending(self, run_id):
             return 0
 
     catalog = InMemoryToolCatalog((
@@ -321,7 +321,7 @@ async def test_confirm_tool_uses_real_run_bound_approval_before_handler(
             break
         await asyncio.sleep(0)
     approval_id = str(sink.events[0].payload["approvalId"])
-    broker.resolve("run-1", approval_id, "approve" if approved else "reject")
+    await broker.resolve("run-1", approval_id, "approve" if approved else "reject")
     result = await task
 
     assert result.outcome is expected_outcome

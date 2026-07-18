@@ -129,6 +129,34 @@ class RecordingObserver:
         self.scope_index += 1
 
 
+class RecoveryPlanningHook:
+    def __init__(self, observer: RecordingObserver):
+        self.observer = observer
+        self.calls = []
+
+    async def replan_after_tool(
+        self,
+        messages,
+        *,
+        round_number,
+        remaining_model_rounds,
+        outcome,
+        signal=None,
+    ):
+        del signal
+        self.calls.append({
+            "messages": tuple(messages),
+            "round": round_number,
+            "remaining": remaining_model_rounds,
+            "outcome": outcome,
+        })
+        self.observer.scope_index += 1
+        return AgentMessage(
+            role=MessageRole.DEVELOPER,
+            content="The failed tool step was replanned; answer from available evidence.",
+        )
+
+
 def _request(
     *,
     user_text: str = "work",
@@ -572,6 +600,54 @@ async def test_runtime_preserves_typed_continuation_scope_and_state_across_tool_
     assert observer.started_tools == [("readA",), ("readB",)]
     assert observer.completed_tool_rounds == 2
     assert _result(updates).final_response == "final"
+
+
+@pytest.mark.asyncio
+async def test_runtime_allows_dynamic_planner_to_recover_from_tool_failure():
+    model = ScriptedModelGateway([
+        _tool_call("call-a", "readA"),
+        _answer("Recovered without retrying the failed tool."),
+    ])
+    tools = ScriptedToolGateway([_batch(
+        "call-a",
+        "readA",
+        outcome=ToolBatchOutcome.FAILED,
+        content='{"error":"temporarily unavailable"}',
+        error="temporarily_unavailable",
+    )])
+    observer = RecordingObserver([{"readA"}, set()])
+    hook = RecoveryPlanningHook(observer)
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == (
+        "Recovered without retrying the failed tool."
+    )
+    assert observer.completed_tool_rounds == 0
+    assert len(hook.calls) == 1
+    assert hook.calls[0]["outcome"] is ToolBatchOutcome.FAILED
+    assert any(
+        message.role is MessageRole.TOOL
+        and message.tool_call_id == "call-a"
+        for message in hook.calls[0]["messages"]
+    )
+    assert [
+        update.payload["outcome"]
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.TOOL_ROUND_COMPLETED
+    ] == ["failed"]
 
 
 @pytest.mark.asyncio

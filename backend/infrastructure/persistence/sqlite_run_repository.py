@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 from typing import Sequence
 
 from agent_core.contracts import (
@@ -21,15 +22,45 @@ from agent_core.ports import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     RunBeginResult,
     RunCommit,
+    DelegationRepository,
     validate_run_commit_lifecycle,
 )
 from infrastructure.persistence import run_store
+from infrastructure.persistence.sqlite_delegation_repository import (
+    SqliteDelegationRepository,
+)
+from infrastructure.persistence.run_execution_store import now_ms
+
+
+DEFAULT_RUN_LEASE_DURATION_MS = 30_000
 
 
 class SqliteRunRepository:
-    def __init__(self, db):
+    def __init__(
+        self,
+        db,
+        *,
+        owner_id: str | None = None,
+        lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
+        delegation_repository: DelegationRepository | None = None,
+    ):
         self._db = db
         self._write_lock = asyncio.Lock()
+        self._owner_id = str(owner_id or f"executor-{uuid4().hex}").strip()
+        self._lease_duration_ms = int(lease_duration_ms)
+        self._delegations = (
+            delegation_repository or SqliteDelegationRepository(db)
+        )
+        if self._lease_duration_ms <= 0:
+            raise ValueError("lease duration must be positive")
+
+    @property
+    def owner_id(self) -> str:
+        return self._owner_id
+
+    @property
+    def lease_duration_ms(self) -> int:
+        return self._lease_duration_ms
 
     async def begin(
         self,
@@ -73,7 +104,8 @@ class SqliteRunRepository:
         async with self._write_lock:
             async with self._db.transaction(cancellation_linearizable=True):
                 current = await self._db.fetch_one(
-                    "SELECT status FROM ai_agent_runs WHERE id = ?",
+                    "SELECT status, execution_owner_id, lease_expires_at_ms "
+                    "FROM ai_agent_runs WHERE id = ?",
                     [normalized_run_id],
                 )
                 if current is None:
@@ -84,6 +116,12 @@ class SqliteRunRepository:
                     raise ContractViolationError(
                         "terminal run cannot be mutated"
                     )
+                if current.get("execution_owner_id") != self._owner_id:
+                    raise ContractViolationError(
+                        "run execution lease is owned by another executor"
+                    )
+                if int(current.get("lease_expires_at_ms") or 0) <= now_ms():
+                    raise ContractViolationError("run execution lease has expired")
 
                 if commit.replace_steps is not None:
                     await self.replace_steps(
@@ -104,13 +142,38 @@ class SqliteRunRepository:
         return commit.events
 
     async def create(self, params: RunCreateParams) -> RunId:
-        return await run_store.create_run(
-            self._db,
-            session_id=_sqlite_session_id(params.session_id),
-            prompt=params.prompt,
-            mode=params.mode,
-            provenance=params.provenance,
-        )
+        created_at = now_ms()
+        lineage = params.lineage
+        async def create_row() -> RunId:
+            return await run_store.create_run(
+                self._db,
+                session_id=_sqlite_session_id(params.session_id),
+                prompt=params.prompt,
+                mode=params.mode,
+                provenance=params.provenance,
+                execution_owner_id=self._owner_id,
+                heartbeat_at_ms=created_at,
+                lease_expires_at_ms=created_at + self._lease_duration_ms,
+                parent_run_id=(lineage.parent_run_id if lineage else None),
+                root_run_id=(lineage.root_run_id if lineage else None),
+                delegation_id=(lineage.delegation_id if lineage else None),
+                agent_role=(lineage.agent_role if lineage else None),
+                run_depth=(lineage.depth if lineage else 0),
+            )
+        if lineage is None:
+            return await create_row()
+        async with self._db.transaction():
+            run_id = await create_row()
+            attached = await self._delegations.attach_child_run(
+                delegation_id=lineage.delegation_id,
+                child_run_id=run_id,
+                worker_id=self._owner_id,
+            )
+            if not attached:
+                raise ContractViolationError(
+                    "child run could not attach to the claimed delegation"
+                )
+        return run_id
 
     async def bind_conversation(self, run_id: RunId, conversation_id: int) -> None:
         await run_store.set_run_conversation_id(self._db, run_id, conversation_id)

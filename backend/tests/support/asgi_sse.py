@@ -50,6 +50,7 @@ class LiveASGIResponse:
         body: bytes,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        request_path, separator, query = path.partition("?")
         request_headers = {
             "host": "testserver",
             "content-length": str(len(body)),
@@ -61,9 +62,9 @@ class LiveASGIResponse:
             "http_version": "1.1",
             "method": method.upper(),
             "scheme": "http",
-            "path": path,
-            "raw_path": path.encode("ascii"),
-            "query_string": b"",
+            "path": request_path,
+            "raw_path": request_path.encode("ascii"),
+            "query_string": query.encode("ascii") if separator else b"",
             "root_path": "",
             "headers": [
                 (name.lower().encode("latin-1"), value.encode("latin-1"))

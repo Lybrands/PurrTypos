@@ -532,6 +532,61 @@ async def test_controller_can_start_before_planning_and_install_plan_once():
 
 
 @pytest.mark.asyncio
+async def test_controller_revision_preserves_history_and_replaces_tentative_steps():
+    controller, repository, sink = await _started()
+    await controller.on_tool_calls_started(("readChapter",))
+    await controller.on_tool_round_completed()
+
+    revised = await controller.revise_plan(TaskPlan(
+        title="Revised from evidence",
+        steps=(TaskStep(
+            id="publish",
+            title="Publish result",
+            type=StepType.WRITE,
+            executor=StepExecutor.TOOL,
+            suggested_tools=("publishChapter",),
+        ),),
+    ))
+
+    assert [(step.id, step.status) for step in revised.steps] == [
+        ("read", StepStatus.DONE),
+        ("publish", StepStatus.RUNNING),
+    ]
+    assert [step.id for step in repository.steps] == ["read", "publish"]
+    assert sink.events[-1].type == CoreEventType.RUN_TODOS_UPDATED
+    assert [step["id"] for step in sink.events[-1].payload["steps"]] == [
+        "read",
+        "publish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_controller_preserves_failed_tool_as_history_during_recovery_replan():
+    controller, repository, _sink = await _started()
+    await controller.on_tool_calls_started(("readChapter",))
+    await controller.on_tool_round_failed("source_unavailable")
+
+    revised = await controller.revise_plan(TaskPlan(
+        title="Recover from another source",
+        steps=(TaskStep(
+            id="answer",
+            title="Explain the unavailable source",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+        ),),
+    ))
+
+    assert [(step.id, step.status, step.error) for step in revised.steps] == [
+        ("read", StepStatus.FAILED, "source_unavailable"),
+        ("answer", StepStatus.RUNNING, None),
+    ]
+    assert [(step.id, step.status) for step in repository.steps] == [
+        ("read", StepStatus.FAILED),
+        ("answer", StepStatus.RUNNING),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_failed_plan_persistence_keeps_unplanned_memory_state():
     repository = RecordingRepository()
     sink = RecordingSink()

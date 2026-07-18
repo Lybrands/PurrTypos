@@ -156,6 +156,16 @@ async def init_schema(db: DatabaseConnection) -> None:
         context_window INTEGER DEFAULT NULL,
         endpoint_digest TEXT DEFAULT NULL,
         request_profile_digest TEXT DEFAULT NULL,
+        parent_run_id TEXT DEFAULT NULL,
+        root_run_id TEXT DEFAULT NULL,
+        delegation_id TEXT DEFAULT NULL,
+        agent_role TEXT DEFAULT NULL,
+        run_depth INTEGER NOT NULL DEFAULT 0,
+        execution_owner_id TEXT DEFAULT NULL,
+        lease_expires_at_ms INTEGER DEFAULT NULL,
+        heartbeat_at_ms INTEGER DEFAULT NULL,
+        execution_attempt INTEGER NOT NULL DEFAULT 0,
+        cancel_requested_at_ms INTEGER DEFAULT NULL,
         final_response TEXT DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -169,6 +179,16 @@ async def init_schema(db: DatabaseConnection) -> None:
         "context_window INTEGER DEFAULT NULL",
         "endpoint_digest TEXT DEFAULT NULL",
         "request_profile_digest TEXT DEFAULT NULL",
+        "parent_run_id TEXT DEFAULT NULL",
+        "root_run_id TEXT DEFAULT NULL",
+        "delegation_id TEXT DEFAULT NULL",
+        "agent_role TEXT DEFAULT NULL",
+        "run_depth INTEGER NOT NULL DEFAULT 0",
+        "execution_owner_id TEXT DEFAULT NULL",
+        "lease_expires_at_ms INTEGER DEFAULT NULL",
+        "heartbeat_at_ms INTEGER DEFAULT NULL",
+        "execution_attempt INTEGER NOT NULL DEFAULT 0",
+        "cancel_requested_at_ms INTEGER DEFAULT NULL",
     ):
         await _try_exec(
             db,
@@ -195,6 +215,14 @@ async def init_schema(db: DatabaseConnection) -> None:
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END
     """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_execution_lease
+        ON ai_agent_runs(status, lease_expires_at_ms)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_parent
+        ON ai_agent_runs(parent_run_id, create_time)
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -202,6 +230,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         title TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         executor TEXT NOT NULL DEFAULT 'model',
+        step_type TEXT NOT NULL DEFAULT 'analyze',
+        risk_level TEXT DEFAULT NULL,
+        description TEXT DEFAULT NULL,
         expected_tools TEXT DEFAULT NULL,
         result_summary TEXT DEFAULT NULL,
         error TEXT DEFAULT NULL,
@@ -209,6 +240,15 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    for column in (
+        "step_type TEXT NOT NULL DEFAULT 'analyze'",
+        "risk_level TEXT DEFAULT NULL",
+        "description TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_run_todos ADD COLUMN {column}",
+        )
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -216,6 +256,66 @@ async def init_schema(db: DatabaseConnection) -> None:
         payload_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_approvals (
+        id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        risk_level TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        expires_at_ms INTEGER NOT NULL,
+        resolved_at_ms INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_approvals_run_status
+        ON ai_agent_approvals(run_id, status)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_tool_receipts (
+        run_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_digest TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        effects_json TEXT NOT NULL DEFAULT '[]',
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, tool_call_id)
+    )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
+        id TEXT PRIMARY KEY NOT NULL,
+        parent_run_id TEXT NOT NULL,
+        root_run_id TEXT NOT NULL,
+        child_run_id TEXT DEFAULT NULL,
+        agent_role TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        input_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'queued',
+        required INTEGER NOT NULL DEFAULT 1,
+        priority INTEGER NOT NULL DEFAULT 0,
+        worker_id TEXT DEFAULT NULL,
+        claim_expires_at_ms INTEGER DEFAULT NULL,
+        claim_attempt INTEGER NOT NULL DEFAULT 0,
+        result_summary TEXT DEFAULT NULL,
+        error TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    for column in (
+        "claim_expires_at_ms INTEGER DEFAULT NULL",
+        "claim_attempt INTEGER NOT NULL DEFAULT 0",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_delegations ADD COLUMN {column}",
+        )
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_delegations_parent_status
+        ON ai_agent_delegations(parent_run_id, status, priority DESC, create_time)
+    """)
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -103,6 +103,9 @@ def _provider_options(
     request = invocation.request
     options = thaw_json_mapping(request.options)
     options["model"] = request.model
+    options.pop("model_profile", None)
+    if request.profile_id is not None:
+        options["model_profile"] = request.profile_id
     options.pop("tools", None)
     options.pop("tool_choice", None)
     if invocation.max_output_tokens is not None:

@@ -52,6 +52,28 @@ async def lifespan(application: FastAPI):
         await db.init()
         set_db(db)
 
+        from infrastructure.persistence.approval_store import (
+            recover_pending_approvals,
+        )
+
+        recovered_approvals = await recover_pending_approvals(db)
+        if recovered_approvals:
+            logging.getLogger(__name__).warning(
+                "Recovered %s pending Agent approval(s) after restart",
+                recovered_approvals,
+            )
+
+        from infrastructure.persistence.delegation_store import (
+            recover_delegations,
+        )
+
+        recovered_delegations = await recover_delegations(db)
+        if any(recovered_delegations.values()):
+            logging.getLogger(__name__).warning(
+                "Recovered Agent delegations after restart: %s",
+                recovered_delegations,
+            )
+
         from config import SKILLS_DIR
 
         skills_dir = (
@@ -108,7 +130,7 @@ async def lifespan(application: FastAPI):
     finally:
         try:
             if composition is not None:
-                composition.shutdown()
+                await composition.shutdown()
                 clear_agent_composition(composition)
         finally:
             try:

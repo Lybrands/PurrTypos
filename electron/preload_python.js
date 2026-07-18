@@ -259,6 +259,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── AI — HTTP ─────────────────────────────────────────────────
   generateSessionTitle: (data) => apiPost('/ai/title', data),
   listModels: (data) => apiPost('/ai/models', data),
+  getAgentRunSnapshot: (data) => {
+    const params = new URLSearchParams()
+    if (data.after != null) params.set('after', String(data.after))
+    if (data.limit != null) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(
+      `/ai/agent-runs/${encodeURIComponent(data.runId)}${query ? `?${query}` : ''}`,
+    )
+  },
+  cancelAgentRun: (data) => apiPost(
+    `/ai/agent-runs/${encodeURIComponent(data.runId)}/cancel`,
+    {},
+  ),
+  createAgentDelegation: (data) => apiPost(
+    `/ai/agent-runs/${encodeURIComponent(data.runId)}/delegations`,
+    {
+      agentRole: data.agentRole,
+      objective: data.objective,
+      input: data.input || {},
+      required: data.required !== false,
+      priority: data.priority || 0,
+    },
+  ),
   resolveAiToolApproval: (data) => apiPost(`/ai/tool-approvals/${data.approvalId}`, {
     approved: Boolean(data.approved),
   }),

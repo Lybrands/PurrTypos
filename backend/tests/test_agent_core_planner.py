@@ -8,6 +8,7 @@ from agent_core.contracts import (
     AgentMessage,
     AgentRunRequest,
     DomainContext,
+    MessageOrigin,
     MessageRole,
     ModelCompletion,
     ModelRequest,
@@ -15,8 +16,13 @@ from agent_core.contracts import (
     PlanningCapabilities,
     PlanningConstraints,
     PlanningKind,
+    PlanningTurn,
     ReasoningMode,
     StepExecutor,
+    StepStatus,
+    StepType,
+    TaskStep,
+    ToolBatchOutcome,
 )
 from agent_core.errors import (
     InvalidPlannerOutputError,
@@ -103,6 +109,64 @@ async def test_planner_uses_non_streaming_gateway_and_normalizes_safe_plan():
                 "riskLevel": "read",
             },
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_revision_receives_completed_steps_and_tool_observations():
+    gateway = FakeModelGateway(
+        '{"needsTodos":false,"reason":"observed evidence is sufficient"}'
+    )
+    turn = PlanningTurn(
+        revision=1,
+        round_number=2,
+        remaining_model_rounds=4,
+        messages=(AgentMessage(
+            role=MessageRole.TOOL,
+            content={"status": "ready"},
+            tool_call_id="call-read",
+            origin=MessageOrigin.HOST_TOOL_RESULT,
+        ),),
+        completed_steps=(TaskStep(
+            id="read",
+            title="Read resource",
+            type=StepType.READ,
+            executor=StepExecutor.TOOL,
+            status=StepStatus.DONE,
+            suggested_tools=("lookup",),
+            result_summary="Read completed.",
+        ),),
+        last_tool_outcome=ToolBatchOutcome.COMPLETED,
+    )
+
+    result = await AgentPlanner(gateway).revise_plan(
+        _request(),
+        PlanningCapabilities(available_tool_names=frozenset({"lookup"})),
+        turn,
+    )
+
+    assert result.kind is PlanningKind.DIRECT_RESPONSE
+    messages = gateway.invocations[0][0]
+    assert "runtime revision" in messages[0].content
+    assert "untrusted data" in messages[0].content
+    payload = json.loads(messages[1].content)
+    assert payload["maxToolSteps"] == 3
+    assert payload["executionState"] == {
+        "revision": 1,
+        "roundNumber": 2,
+        "remainingModelRounds": 4,
+        "lastToolOutcome": "completed",
+        "completedSteps": [{
+            "id": "read",
+            "title": "Read resource",
+            "executor": "tool",
+            "tools": ["lookup"],
+            "resultSummary": "Read completed.",
+        }],
+        "recentToolObservations": [{
+            "toolCallId": "call-read",
+            "content": {"status": "ready"},
+        }],
     }
 
 

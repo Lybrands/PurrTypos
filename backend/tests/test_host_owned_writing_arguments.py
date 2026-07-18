@@ -49,10 +49,10 @@ class _ImmediateApproval:
         self.requests.append(approval)
         return ApprovalResult("approval-1", ApprovalStatus.APPROVED)
 
-    def resolve(self, run_id, approval_id, decision):
+    async def resolve(self, run_id, approval_id, decision):
         return None
 
-    def cancel_pending(self, run_id):
+    async def cancel_pending(self, run_id):
         return 0
 
 

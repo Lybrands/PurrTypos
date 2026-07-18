@@ -202,3 +202,51 @@ async def test_same_task_nested_transactions_use_savepoints_without_deadlock(
         {"value": "inner-committed"},
         {"value": "outer"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_read_transaction_keeps_a_snapshot_without_reserving_the_writer(
+    tmp_path: Path,
+):
+    reader = DatabaseConnection(tmp_path)
+    writer = DatabaseConnection(tmp_path)
+    await reader.init()
+    await writer.init()
+    try:
+        await writer.execute(
+            "CREATE TABLE IF NOT EXISTS read_snapshot_probe "
+            "(value TEXT PRIMARY KEY)"
+        )
+        await writer.execute(
+            "INSERT INTO read_snapshot_probe(value) VALUES ('first')"
+        )
+
+        async with reader.transaction(write=False):
+            before = await reader.fetch_all(
+                "SELECT value FROM read_snapshot_probe ORDER BY value"
+            )
+            await writer.execute(
+                "INSERT INTO read_snapshot_probe(value) VALUES ('second')"
+            )
+            during = await reader.fetch_all(
+                "SELECT value FROM read_snapshot_probe ORDER BY value"
+            )
+
+        after = await reader.fetch_all(
+            "SELECT value FROM read_snapshot_probe ORDER BY value"
+        )
+        assert before == during == [{"value": "first"}]
+        assert after == [{"value": "first"}, {"value": "second"}]
+    finally:
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_read_transaction_rejects_write_receipt_mode(db):
+    with pytest.raises(ValueError, match="must be writable"):
+        async with db.transaction(
+            write=False,
+            cancellation_linearizable=True,
+        ):
+            pass

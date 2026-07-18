@@ -5,6 +5,7 @@ import type {
   EntityId,
   SettingDiffCardState,
   ToolApprovalRequest,
+  AiAgentDelegation,
 } from "../../../types";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";
@@ -100,6 +101,8 @@ export interface ChatMessage {
   toolApprovals?: ToolApprovalRequest[];
   /** AI 将用户目标拆成的任务计划（方案 A：对话内展示） */
   taskPlan?: AiTaskPlan;
+  /** 当前主 Run 调用的子 Agent 生命周期状态。 */
+  delegations?: AiAgentDelegation[];
 }
 
 export interface UseChatSubmitParams {
