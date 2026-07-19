@@ -142,7 +142,7 @@ async def lifespan(application: FastAPI):
                     _lifespan_owner = None
 
 
-app = FastAPI(title="PurrTypos Backend", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="PurrTypos Backend", version="0.5.2", lifespan=lifespan)
 
 # CORS：本服务**仅供本机 Electron 渲染进程**调用。
 # - "null" 来自打包后 file:// 加载的页面发起 fetch 时 Origin 为 "null"。
