@@ -8,6 +8,18 @@ import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
 
+function parseJsonObject<T>(value: string | null | undefined): T | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as T
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 const isChatAgentMode = (v: unknown): v is ChatAgentMode =>
   typeof v === 'string' && (CHAT_AGENT_MODES as readonly string[]).includes(v)
 
@@ -128,6 +140,12 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         thinkingBlocks,
         thinkingDurationsMs,
         taskPlan,
+        contextCompaction: parseJsonObject<
+          NonNullable<ChatMessage['contextCompaction']>
+        >(item.context_compaction),
+        contextBudget: parseJsonObject<
+          NonNullable<ChatMessage['contextBudget']>
+        >(item.context_budget),
       }
       const rawSegments = item.tool_call_segments
       if (rawSegments) {

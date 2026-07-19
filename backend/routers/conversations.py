@@ -33,12 +33,22 @@ async def save_conversation(body: SaveConversationRequest):
         if body.taskPlan is not None
         else None
     )
+    context_compaction_json = (
+        json.dumps(body.contextCompaction, ensure_ascii=False)
+        if body.contextCompaction is not None
+        else None
+    )
+    context_budget_json = (
+        json.dumps(body.contextBudget, ensure_ascii=False)
+        if body.contextBudget is not None
+        else None
+    )
     conversation_id = await db.execute_and_get_id(
         """INSERT INTO ai_conversations
            (session_id, chapter_id, prompt, response, model, thinking,
             tool_call_segments, thinking_blocks, thinking_durations_ms, duration_ms,
-            task_plan)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            task_plan, context_compaction, context_budget)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             body.sessionId,
             body.chapterId,
@@ -51,6 +61,8 @@ async def save_conversation(body: SaveConversationRequest):
             thinking_durations_ms_json,
             body.durationMs,
             task_plan_json,
+            context_compaction_json,
+            context_budget_json,
         ],
     )
     if body.agentRunId and conversation_id is not None:
@@ -80,8 +92,9 @@ async def get_conversations(sessionId: str):
     rows = await db.fetch_all(
         "SELECT id, session_id, chapter_id, prompt, response, create_time, "
         "model, thinking, tool_call_segments, thinking_blocks, "
-        "thinking_durations_ms, duration_ms, task_plan "
-        "FROM ai_conversations WHERE session_id = ? ORDER BY create_time ASC",
+        "thinking_durations_ms, duration_ms, task_plan, "
+        "context_compaction, context_budget "
+        "FROM ai_conversations WHERE session_id = ? ORDER BY id ASC",
         [sessionId],
     )
     return {"success": True, "data": rows}
@@ -90,16 +103,21 @@ async def get_conversations(sessionId: str):
 @router.delete("/conversations/{sessionId}/after-turn")
 async def delete_after_turn(sessionId: str, keepTurnCount: int = Query(...)):
     db = get_db()
-    all_rows = await db.fetch_all(
-        "SELECT id FROM ai_conversations WHERE session_id = ? ORDER BY create_time ASC",
-        [sessionId],
-    )
-    if keepTurnCount < len(all_rows):
-        ids_to_delete = [r["id"] for r in all_rows[keepTurnCount:]]
-        if ids_to_delete:
-            placeholders = ",".join("?" for _ in ids_to_delete)
-            await db.execute(
-                f"DELETE FROM ai_conversations WHERE id IN ({placeholders})",
-                ids_to_delete,
-            )
+    async with db.transaction():
+        all_rows = await db.fetch_all(
+            "SELECT id FROM ai_conversations WHERE session_id = ? ORDER BY id ASC",
+            [sessionId],
+        )
+        if keepTurnCount < len(all_rows):
+            ids_to_delete = [r["id"] for r in all_rows[keepTurnCount:]]
+            if ids_to_delete:
+                placeholders = ",".join("?" for _ in ids_to_delete)
+                await db.execute(
+                    f"DELETE FROM ai_conversations WHERE id IN ({placeholders})",
+                    ids_to_delete,
+                )
+                await db.execute(
+                    "DELETE FROM ai_conversation_summaries WHERE session_id = ?",
+                    [sessionId],
+                )
     return {"success": True}

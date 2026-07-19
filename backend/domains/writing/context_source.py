@@ -53,6 +53,28 @@ class RepositoryWritingContextSource:
             # Retrieval is optional context and must not prevent a chat run.
             return unavailable_memory_context(memory_request)
 
+    async def build_memory_for_query(
+        self,
+        context: WritingDomainContext,
+        request: AgentRunRequest,
+        token_budget: int,
+        query: str,
+    ) -> MemoryContextBlock:
+        """Run formal semantic recall with a host-compiled TaskSpec query."""
+
+        memory_request = MemoryContextRequest(
+            book_id=context.book_id,
+            user_prompt=str(query or "").strip(),
+            token_budget=token_budget,
+            recall_limit=_memory_recall_limit(request.context_window),
+            selected_spark_idea_ids=context.selected_memory_ids,
+            selected_foreshadowing_ids=context.selected_foreshadowing_ids,
+        )
+        try:
+            return await self._memory.build(memory_request)
+        except Exception:
+            return unavailable_memory_context(memory_request)
+
     async def build_associated(
         self,
         context: WritingDomainContext,

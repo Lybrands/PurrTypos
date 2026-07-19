@@ -70,7 +70,12 @@ async def reopen_session(sessionId: int):
 @router.delete("/sessions/{sessionId}")
 async def delete_session(sessionId: int):
     db = get_db()
-    await db.execute("DELETE FROM ai_sessions WHERE id = ?", [sessionId])
+    async with db.transaction():
+        await db.execute(
+            "DELETE FROM ai_conversation_summaries WHERE session_id = ?",
+            [sessionId],
+        )
+        await db.execute("DELETE FROM ai_sessions WHERE id = ?", [sessionId])
     return {"success": True}
 
 

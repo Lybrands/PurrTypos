@@ -90,6 +90,28 @@ def inspect_tool_contract(
             if probe is None or not callable(probe) or inspect.iscoroutinefunction(probe):
                 violations.append(f"{label}: cache probe will_hit must be synchronous")
 
+        unknown_prerequisites = set(registration.prerequisite_tools) - set(names)
+        if unknown_prerequisites:
+            violations.append(
+                f"{label}: context contract names unavailable prerequisites: "
+                + ", ".join(sorted(unknown_prerequisites))
+            )
+        if name in registration.prerequisite_tools:
+            violations.append(
+                f"{label}: context contract cannot require itself"
+            )
+
+    dependency_map = {
+        names[index]: tuple(registration.prerequisite_tools)
+        for index, registration in enumerate(items)
+        if names[index]
+    }
+    cycle = _dependency_cycle(dependency_map)
+    if cycle:
+        violations.append(
+            "tool context prerequisite cycle: " + " -> ".join(cycle)
+        )
+
     return ToolContractReport(
         registered_names=frozenset(name for name in names if name),
         duplicate_names=duplicate_names,
@@ -113,3 +135,31 @@ def _is_async_callable(value: object) -> bool:
     return inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(
         getattr(value, "__call__", None)
     )
+
+
+def _dependency_cycle(
+    dependency_map: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    visited: set[str] = set()
+    active: list[str] = []
+
+    def visit(name: str) -> tuple[str, ...]:
+        if name in active:
+            index = active.index(name)
+            return tuple((*active[index:], name))
+        if name in visited:
+            return ()
+        active.append(name)
+        for dependency in dependency_map.get(name, ()):
+            cycle = visit(dependency)
+            if cycle:
+                return cycle
+        active.pop()
+        visited.add(name)
+        return ()
+
+    for name in dependency_map:
+        cycle = visit(name)
+        if cycle:
+            return cycle
+    return ()

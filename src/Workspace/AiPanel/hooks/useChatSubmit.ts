@@ -200,6 +200,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       agentRunId: undefined,
       taskPlan: undefined,
       delegations: undefined,
+      contextCompaction: undefined,
+      contextBudget: undefined,
     };
     runningSessionIdRef.current = sessionId;
     runningAccRef.current = acc;

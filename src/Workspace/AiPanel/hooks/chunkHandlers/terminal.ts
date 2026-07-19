@@ -197,6 +197,8 @@ function saveConversationIfNeeded(
         ? acc.toolCallSegments
         : undefined,
       taskPlan: acc.taskPlan ?? undefined,
+      contextCompaction: acc.contextCompaction,
+      contextBudget: acc.contextBudget,
       agentRunId: acc.agentRunId,
     })
     .then((res) => {

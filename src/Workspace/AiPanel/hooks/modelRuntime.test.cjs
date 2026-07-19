@@ -12,6 +12,12 @@ const { handleDelta, handleThinkingDelta } = loadTypeScriptModule(
 const { handleAgentDelegation } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/agentRun.ts'),
 )
+const { handleContextBudget, handleContextCompaction } = loadTypeScriptModule(
+  path.join(__dirname, 'chunkHandlers/context.ts'),
+)
+const { calculateContextUsage } = loadTypeScriptModule(
+  path.join(__dirname, '../contextUsage.ts'),
+)
 
 test('built-in selection sends its model profile while custom models stay generic', () => {
   const builtIn = buildStreamOptions({
@@ -127,4 +133,62 @@ test('delegation lifecycle chunks update the visible assistant work log', () => 
   assert.equal(acc.delegations[0].agentTitle, '资料核验 Agent')
   assert.equal(conversations[0].delegations.length, 1)
   assert.equal(conversations[0].delegations[0].resultSummary, 'three verified facts')
+})
+
+test('context lifecycle chunks update the visible assistant work log', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {}
+  const ctx = {
+    acc,
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  handleContextCompaction({
+    contextCompaction: {
+      status: 'running',
+      selectedTurnCount: 4,
+    },
+  }, ctx)
+  handleContextBudget({
+    contextBudget: {
+      windowTokens: 200000,
+      estimatedInputTokens: 12000,
+      toolSchemaTokens: 1000,
+      outputReserveTokens: 8000,
+      safetyReserveTokens: 1000,
+      runtimeReserveTokens: 1000,
+      droppedMessages: 0,
+      projectedTotalTokens: 23000,
+      overflowTokens: 0,
+    },
+  }, ctx)
+
+  assert.equal(acc.contextCompaction.status, 'running')
+  assert.equal(conversations[0].contextCompaction.selectedTurnCount, 4)
+  assert.equal(acc.contextBudget.estimatedInputTokens, 12000)
+  assert.equal(conversations[0].contextBudget.toolSchemaTokens, 1000)
+})
+
+test('context indicator prefers backend budget and estimates new text', () => {
+  const usage = calculateContextUsage({
+    messages: [{
+      role: 'assistant',
+      content: 'last answer',
+      contextBudget: {
+        windowTokens: 200000,
+        estimatedInputTokens: 12000,
+        toolSchemaTokens: 1000,
+      },
+    }],
+    prompt: 'new question',
+    windowTokens: 200000,
+    loading: false,
+  })
+
+  assert.equal(usage.source, 'backend')
+  assert.ok(usage.usedTokens > 13000)
+  assert.equal(usage.windowTokens, 200000)
 })

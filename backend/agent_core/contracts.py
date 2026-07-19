@@ -351,6 +351,108 @@ class ModelCompletion:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationTurn:
+    id: int
+    prompt: str
+    response: str
+
+    def __post_init__(self) -> None:
+        turn_id = int(self.id)
+        if turn_id <= 0:
+            raise ValueError("conversation turn id must be positive")
+        object.__setattr__(self, "id", turn_id)
+        object.__setattr__(self, "prompt", str(self.prompt or ""))
+        object.__setattr__(self, "response", str(self.response or ""))
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSummary:
+    """Persisted semantic compaction for one conversation session."""
+
+    session_id: SessionId
+    version: int
+    covered_through_conversation_id: int
+    covered_turn_count: int
+    source_digest: str
+    active_goal: str | None = None
+    targets: tuple[Mapping[str, Any], ...] = ()
+    decisions: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    unresolved_items: tuple[str, ...] = ()
+    completed_actions: tuple[str, ...] = ()
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.session_id, bool) or not str(self.session_id).strip():
+            raise ValueError("conversation summary session_id is required")
+        version = int(self.version)
+        covered_id = int(self.covered_through_conversation_id)
+        covered_count = int(self.covered_turn_count)
+        if version <= 0:
+            raise ValueError("conversation summary version must be positive")
+        if covered_id <= 0 or covered_count <= 0:
+            raise ValueError("conversation summary coverage must be positive")
+        digest = str(self.source_digest or "").strip().lower()
+        if len(digest) != 64 or any(
+            char not in "0123456789abcdef" for char in digest
+        ):
+            raise ValueError("conversation summary source_digest must be sha256")
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "covered_through_conversation_id", covered_id)
+        object.__setattr__(self, "covered_turn_count", covered_count)
+        object.__setattr__(self, "source_digest", digest)
+        object.__setattr__(self, "active_goal", _optional_text(self.active_goal))
+        object.__setattr__(
+            self,
+            "targets",
+            tuple(_frozen_mapping(value) for value in self.targets),
+        )
+        for name in (
+            "decisions",
+            "constraints",
+            "unresolved_items",
+            "completed_actions",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                tuple(dict.fromkeys(
+                    str(value).strip()
+                    for value in getattr(self, name)
+                    if str(value).strip()
+                )),
+            )
+        object.__setattr__(self, "summary", str(self.summary or "").strip())
+
+    def to_mapping(self, *, include_persistence: bool = True) -> dict[str, Any]:
+        value = {
+            "activeGoal": self.active_goal,
+            "targets": [thaw_json_mapping(item) for item in self.targets],
+            "decisions": list(self.decisions),
+            "constraints": list(self.constraints),
+            "unresolvedItems": list(self.unresolved_items),
+            "completedActions": list(self.completed_actions),
+            "summary": self.summary,
+        }
+        if include_persistence:
+            value = {
+                "sessionId": self.session_id,
+                "version": self.version,
+                "coveredThroughConversationId": (
+                    self.covered_through_conversation_id
+                ),
+                "coveredTurnCount": self.covered_turn_count,
+                "sourceDigest": self.source_digest,
+                **value,
+            }
+        return {
+            key: item
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunRequest:
     messages: tuple[AgentMessage, ...]
     model: ModelRequest
@@ -359,6 +461,7 @@ class AgentRunRequest:
     mode: str | None = None
     context_window: int | None = None
     tools_enabled: bool = False
+    conversation_summary: ConversationSummary | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -369,6 +472,13 @@ class AgentRunRequest:
             raise TypeError("agent run model must be ModelRequest")
         if not isinstance(self.domain_context, DomainContext):
             raise TypeError("agent run domain context must be DomainContext")
+        if self.conversation_summary is not None and not isinstance(
+            self.conversation_summary,
+            ConversationSummary,
+        ):
+            raise TypeError(
+                "agent run conversation_summary must be ConversationSummary"
+            )
         object.__setattr__(self, "messages", messages)
         object.__setattr__(self, "mode", _optional_text(self.mode))
         object.__setattr__(self, "tools_enabled", bool(self.tools_enabled))
@@ -519,6 +629,67 @@ class PlanningCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskSpec:
+    """Normalized user intent carried across every phase of one Agent Run.
+
+    The planner may propose this semantic summary, but it never grants tools,
+    authorizes data access, or declares low-level evidence dependencies.  Those
+    remain host-owned contracts.
+    """
+
+    goal: str
+    target: Mapping[str, Any] = field(default_factory=dict)
+    operation: str | None = None
+    instruction: str | None = None
+    constraints: tuple[str, ...] = ()
+    preserve: tuple[str, ...] = ()
+    deliverable: str | None = None
+
+    def __post_init__(self) -> None:
+        goal = str(self.goal or "").strip()
+        if not goal:
+            raise ValueError("task spec goal is required")
+        object.__setattr__(self, "goal", goal)
+        object.__setattr__(self, "target", _frozen_mapping(self.target))
+        object.__setattr__(self, "operation", _optional_text(self.operation))
+        object.__setattr__(self, "instruction", _optional_text(self.instruction))
+        object.__setattr__(
+            self,
+            "constraints",
+            tuple(dict.fromkeys(
+                str(value).strip()
+                for value in self.constraints
+                if str(value).strip()
+            )),
+        )
+        object.__setattr__(
+            self,
+            "preserve",
+            tuple(dict.fromkeys(
+                str(value).strip()
+                for value in self.preserve
+                if str(value).strip()
+            )),
+        )
+        object.__setattr__(self, "deliverable", _optional_text(self.deliverable))
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "goal": self.goal,
+                "target": thaw_json_mapping(self.target),
+                "operation": self.operation,
+                "instruction": self.instruction,
+                "constraints": list(self.constraints),
+                "preserve": list(self.preserve),
+                "deliverable": self.deliverable,
+            }.items()
+            if value not in (None, "", [], {})
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TaskStep:
     id: str
     title: str
@@ -567,6 +738,7 @@ class TaskPlan:
     title: str
     steps: tuple[TaskStep, ...]
     goal: str | None = None
+    task_spec: TaskSpec | None = None
 
     def __post_init__(self) -> None:
         title = str(self.title or "").strip()
@@ -581,6 +753,8 @@ class TaskPlan:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "steps", steps)
         object.__setattr__(self, "goal", _optional_text(self.goal))
+        if self.task_spec is not None and not isinstance(self.task_spec, TaskSpec):
+            raise TypeError("task plan task_spec must be TaskSpec")
 
 
 @dataclass(frozen=True, slots=True)
@@ -782,6 +956,43 @@ class ContextBundle:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskContextRequest:
+    """Host-compiled requirements for post-planning context retrieval.
+
+    ``task_spec`` carries semantic intent proposed by the planner. Every
+    dependency and evidence field is compiled from host-owned tool contracts;
+    the planner cannot grant itself context by emitting these values.
+    """
+
+    task_spec: TaskSpec
+    planned_tool_names: tuple[str, ...] = ()
+    available_tool_names: tuple[str, ...] = ()
+    required_context_blocks: tuple[str, ...] = ()
+    evidence_kinds: tuple[str, ...] = ()
+    include_response_context: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_spec, TaskSpec):
+            raise TypeError("task context request requires a TaskSpec")
+        for name in (
+            "planned_tool_names",
+            "available_tool_names",
+            "required_context_blocks",
+            "evidence_kinds",
+        ):
+            object.__setattr__(self, name, tuple(dict.fromkeys(
+                str(value).strip()
+                for value in getattr(self, name)
+                if str(value).strip()
+            )))
+        object.__setattr__(
+            self,
+            "include_response_context",
+            bool(self.include_response_context),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     id: str
     name: str
@@ -831,6 +1042,59 @@ class ToolPolicy:
     @property
     def requires_user_approval(self) -> bool:
         return self.mode is ToolExecutionMode.CONFIRM
+
+
+class ToolResultProjection(StrEnum):
+    """How a completed result may be represented in later model rounds."""
+
+    FULL = "full"
+    RECEIPT = "receipt"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolContextContract:
+    """Host-owned dependency and evidence lifecycle for one tool.
+
+    ``FULL`` is deliberately the default projection.  A tool result may only
+    be compacted to a receipt after its domain contract opts in, preventing a
+    context optimization from silently removing evidence.
+    """
+
+    prerequisite_tools: tuple[str, ...] = ()
+    mandatory_context_keys: tuple[str, ...] = ()
+    required_context_blocks: tuple[str, ...] = ()
+    evidence_kinds: tuple[str, ...] = ()
+    produces: tuple[str, ...] = ()
+    result_projection: ToolResultProjection = ToolResultProjection.FULL
+    final_projection: ToolResultProjection = ToolResultProjection.FULL
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "prerequisite_tools",
+            "mandatory_context_keys",
+            "required_context_blocks",
+            "evidence_kinds",
+            "produces",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(dict.fromkeys(
+                    str(value).strip()
+                    for value in getattr(self, field_name)
+                    if str(value).strip()
+                )),
+            )
+        object.__setattr__(
+            self,
+            "result_projection",
+            ToolResultProjection(self.result_projection),
+        )
+        object.__setattr__(
+            self,
+            "final_projection",
+            ToolResultProjection(self.final_projection),
+        )
 
 
 @dataclass(frozen=True, slots=True)

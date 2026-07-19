@@ -1,0 +1,42 @@
+.context-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  border-radius: 7px;
+  cursor: default;
+  transition: color 0.15s ease, background-color 0.15s ease;
+
+  &:hover {
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+  }
+}
+
+.context-usage__gauge {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--accent) var(--context-usage),
+    var(--border) 0
+  );
+  mask: radial-gradient(circle, transparent 45%, #000 48%);
+}
+
+.context-usage-tooltip {
+  max-width: 260px;
+  line-height: 1.5;
+}
+
+.context-usage-tooltip__hint {
+  margin-top: 3px;
+  opacity: 0.72;
+  font-size: 12px;
+}

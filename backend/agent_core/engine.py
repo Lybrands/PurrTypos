@@ -44,6 +44,7 @@ from agent_core.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
+    TaskContextRequest,
     TaskPlan,
     ToolBatchOutcome,
     ToolExecutionLimits,
@@ -61,6 +62,7 @@ from agent_core.planner import (
     build_execution_message,
     effective_planning_tool_names,
 )
+from agent_core.plan_compiler import compile_task_plan
 from agent_core.ports import (
     ApprovalGateway,
     CancellationSignal,
@@ -72,6 +74,7 @@ from agent_core.ports import (
     ResponseJudge,
     ResponseValidator,
     RunRepository,
+    StagedContextProvider,
     TaskPlanner,
     ToolCatalog,
     ToolIdempotencyGateway,
@@ -252,6 +255,20 @@ class AgentCore:
             for event in sink.drain():
                 yield event
 
+            compaction_trace = request.metadata.get("conversationCompaction")
+            if isinstance(compaction_trace, Mapping):
+                await controller.record_trace(TraceRecord(
+                    stage="conversation_compaction",
+                    outcome=str(
+                        compaction_trace.get("outcome") or "unknown"
+                    ),
+                    details={
+                        str(key): value
+                        for key, value in compaction_trace.items()
+                        if key != "outcome"
+                    },
+                ))
+
             if _is_canceled(signal):
                 await controller.cancel("request_canceled")
                 for event in sink.drain():
@@ -259,10 +276,9 @@ class AgentCore:
                 yield _run_result(controller)
                 return
 
-            # Build the retrieval bundle once against every enabled schema.
-            # This conservative reservation makes the manifest describe the
-            # exact content later sent to the runtime; planning may only shrink
-            # the exposed schema set and must never cause context expansion.
+            # Reserve against every enabled schema. Staged providers use this
+            # pass only for a lightweight, host-authenticated planning manifest;
+            # legacy providers retain their original single-pass behavior.
             reservation_started = perf_counter()
             try:
                 registrations, enabled_names = _effective_registrations(
@@ -288,19 +304,33 @@ class AgentCore:
                     runtime_reserve_tokens=options.runtime_reserve_tokens,
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
-                bundle = await await_with_cancellation(
-                    self._context_provider.build_context(
-                        request,
-                        reserved_budget,
-                        signal,
+                staged_context_provider = (
+                    self._context_provider
+                    if isinstance(self._context_provider, StagedContextProvider)
+                    else None
+                )
+                planning_bundle = await await_with_cancellation(
+                    (
+                        staged_context_provider.build_planning_context(
+                            request,
+                            reserved_budget,
+                            signal,
+                        )
+                        if staged_context_provider is not None
+                        else self._context_provider.build_context(
+                            request,
+                            reserved_budget,
+                            signal,
+                        )
                     ),
                     signal,
                 )
-                if not isinstance(bundle, ContextBundle):
+                if not isinstance(planning_bundle, ContextBundle):
                     raise ContractViolationError(
                         "context provider must return ContextBundle"
                     )
-                _validate_context_allocations(bundle, reserved_budget)
+                _validate_context_allocations(planning_bundle, reserved_budget)
+                bundle = planning_bundle
             except OperationCanceled:
                 await controller.cancel("request_canceled")
                 for event in sink.drain():
@@ -339,7 +369,7 @@ class AgentCore:
                 base_capabilities = PlanningCapabilities(
                     available_tool_names=enabled_names,
                     model_supports_tools=options.model_supports_tools,
-                    host_planning_facts=_host_planning_facts(bundle),
+                    host_planning_facts=_host_planning_facts(planning_bundle),
                     tool_guidance=_planning_tool_guidance(
                         registrations,
                         enabled_names,
@@ -364,7 +394,12 @@ class AgentCore:
                         self._planner.create_plan(request, capabilities, signal),
                         signal,
                     )
-                    plan = planning.plan
+                    compiled = compile_task_plan(
+                        planning.plan,
+                        registrations,
+                        constraints=constraints,
+                    )
+                    plan = compiled.plan
                     planning_kind = planning.kind
                     _validate_plan_authority(
                         plan,
@@ -391,6 +426,11 @@ class AgentCore:
                             constraints.satisfied_tool_dependency_edges
                         ),
                         "planned": should_plan,
+                        "hostInsertedPrerequisiteCount": (
+                            len(compiled.inserted_tool_names)
+                            if should_plan
+                            else 0
+                        ),
                     },
                     duration_ms=_duration_ms(planning_started),
                 ))
@@ -460,6 +500,7 @@ class AgentCore:
                     capabilities=capabilities,
                     controller=controller,
                     enabled_names=enabled_names,
+                    registrations=registrations,
                 )
             selected_names = (
                 effective_planning_tool_names(capabilities)
@@ -491,6 +532,64 @@ class AgentCore:
                     runtime_reserve_tokens=options.runtime_reserve_tokens,
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
+                context_mode = "legacy_reserved"
+                if staged_context_provider is not None:
+                    retrieval_started = perf_counter()
+                    if plan is not None and plan.task_spec is not None:
+                        task_context = _compile_task_context_request(
+                            plan,
+                            selected_registrations,
+                        )
+                        bundle = await await_with_cancellation(
+                            staged_context_provider.build_task_context(
+                                request,
+                                budget,
+                                task_context,
+                                signal,
+                            ),
+                            signal,
+                        )
+                        context_mode = "task_spec"
+                    else:
+                        # Missing TaskSpec is a compatibility condition, not
+                        # permission to silently omit previously available
+                        # context. Rebuild through the legacy full path.
+                        bundle = await await_with_cancellation(
+                            self._context_provider.build_context(
+                                request,
+                                budget,
+                                signal,
+                            ),
+                            signal,
+                        )
+                        context_mode = "legacy_fallback"
+                    if not isinstance(bundle, ContextBundle):
+                        raise ContractViolationError(
+                            "context provider must return ContextBundle"
+                        )
+                    await controller.record_trace(TraceRecord(
+                        stage="context_retrieval",
+                        outcome=context_mode,
+                        details={
+                            "postPlanning": context_mode == "task_spec",
+                            "plannedToolCount": len(
+                                _planned_tool_names(plan)
+                                if plan is not None
+                                else ()
+                            ),
+                            "requiredContextBlockCount": (
+                                len(task_context.required_context_blocks)
+                                if context_mode == "task_spec"
+                                else 0
+                            ),
+                            "evidenceKindCount": (
+                                len(task_context.evidence_kinds)
+                                if context_mode == "task_spec"
+                                else 0
+                            ),
+                        },
+                        duration_ms=_duration_ms(retrieval_started),
+                    ))
                 _validate_context_allocations(bundle, budget)
                 prepared_request = replace(
                     request,
@@ -525,6 +624,7 @@ class AgentCore:
                         "reservedToolSchemaTokens": (
                             reserved_budget.tool_schema_tokens
                         ),
+                        "contextMode": context_mode,
                         "droppedMessages": trimmed.dropped_count,
                     },
                     duration_ms=_duration_ms(setup_started),
@@ -543,6 +643,7 @@ class AgentCore:
                         "reservedToolSchemaTokens": (
                             reserved_budget.tool_schema_tokens
                         ),
+                        "contextMode": context_mode,
                         "droppedMessages": trimmed.dropped_count,
                         "projectedTotalTokens": (
                             trimmed.token_estimate
@@ -619,6 +720,13 @@ class AgentCore:
                     require_tool_call=bool(plan is not None and selected_names),
                     tools_executable=True,
                     planning_hook=planning_hook,
+                    tool_context_contracts={
+                        registration.schema.name: registration.context_contract
+                        for registration in registrations
+                    },
+                    stage_context_projection_enabled=bool(
+                        plan is not None and plan.task_spec is not None
+                    ),
                     signal=signal,
                 )
                 async with aclosing(runtime_stream) as updates:
@@ -757,12 +865,14 @@ class _DynamicPlanningOrchestrator:
         capabilities: PlanningCapabilities,
         controller: AgentRunController,
         enabled_names: frozenset[str],
+        registrations: Sequence[ToolRegistration],
     ) -> None:
         self._planner = planner
         self._request = request
         self._capabilities = capabilities
         self._controller = controller
         self._enabled_names = enabled_names
+        self._registrations = tuple(registrations)
         self._revision = 0
 
     async def replan_after_tool(
@@ -809,10 +919,23 @@ class _DynamicPlanningOrchestrator:
             ),
             signal,
         )
-        prospective = RunStateMachine.revise_plan(snapshot, planning.plan)
+        satisfied_tool_names = frozenset(
+            name
+            for step in completed_steps
+            if step.status is StepStatus.DONE
+            for name in step.suggested_tools
+        )
+        compiled = compile_task_plan(
+            planning.plan,
+            self._registrations,
+            constraints=self._capabilities.constraints,
+            satisfied_tool_names=satisfied_tool_names,
+        )
+        prospective = RunStateMachine.revise_plan(snapshot, compiled.plan)
         remaining_plan = TaskPlan(
             title=prospective.title,
             goal=prospective.goal,
+            task_spec=compiled.plan.task_spec,
             steps=tuple(
                 step
                 for step in prospective.steps
@@ -825,7 +948,7 @@ class _DynamicPlanningOrchestrator:
             constraints=self._capabilities.constraints,
             max_tool_steps=max(0, remaining_model_rounds - 1),
         )
-        revised = await self._controller.revise_plan(planning.plan)
+        revised = await self._controller.revise_plan(compiled.plan)
         await self._controller.record_trace(TraceRecord(
             stage="planning",
             outcome="replanned",
@@ -838,6 +961,9 @@ class _DynamicPlanningOrchestrator:
                 "remainingStepCount": sum(
                     step.status in {StepStatus.PENDING, StepStatus.RUNNING}
                     for step in revised.steps
+                ),
+                "hostInsertedPrerequisiteCount": len(
+                    compiled.inserted_tool_names
                 ),
             },
             duration_ms=_duration_ms(started),
@@ -1058,6 +1184,44 @@ def _planned_tool_names(plan: TaskPlan) -> frozenset[str]:
     )
 
 
+def _compile_task_context_request(
+    plan: TaskPlan,
+    available_registrations: Sequence[ToolRegistration],
+) -> TaskContextRequest:
+    """Compile semantic intent plus host-owned tool evidence requirements."""
+
+    if plan.task_spec is None:
+        raise ContractViolationError(
+            "task context compilation requires a TaskSpec"
+        )
+    planned_names = _planned_tool_names(plan)
+    available_names: list[str] = []
+    required_blocks: list[str] = []
+    evidence_kinds: list[str] = []
+    for registration in available_registrations:
+        name = registration.schema.name
+        available_names.append(name)
+        contract = registration.context_contract
+        # Runtime replanning may choose any exposed registration. Reserve the
+        # required blocks for that complete authority set, while retaining the
+        # narrower initial plan for evidence/query compilation.
+        required_blocks.extend(contract.required_context_blocks)
+        if name in planned_names:
+            evidence_kinds.extend(contract.evidence_kinds)
+    return TaskContextRequest(
+        task_spec=plan.task_spec,
+        planned_tool_names=tuple(
+            name for name in available_names if name in planned_names
+        ),
+        available_tool_names=tuple(available_names),
+        required_context_blocks=tuple(required_blocks),
+        evidence_kinds=tuple(evidence_kinds),
+        include_response_context=any(
+            step.executor is StepExecutor.MODEL for step in plan.steps
+        ),
+    )
+
+
 def _host_planning_facts(bundle: ContextBundle) -> Mapping[str, Any]:
     value = bundle.diagnostics.get("hostPlanningFacts")
     return value if isinstance(value, Mapping) else {}
@@ -1077,7 +1241,7 @@ def _planning_tool_guidance(
         purpose = " ".join(registration.schema.description.split())[:240]
         dependencies = [
             dependency
-            for dependency in registration.planning_dependencies
+            for dependency in registration.prerequisite_tools
             if dependency in enabled_names
         ]
         guidance[name] = {
