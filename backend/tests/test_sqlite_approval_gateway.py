@@ -49,6 +49,7 @@ class _PersistentSink:
         self.db = db
         self.events = []
         self.requested_row = None
+        self.requested = asyncio.Event()
 
     async def emit(self, event) -> None:
         if event.type == CoreEventType.APPROVAL_REQUESTED:
@@ -57,14 +58,18 @@ class _PersistentSink:
                 str(event.payload["approvalId"]),
             )
         self.events.append(event)
+        if event.type == CoreEventType.APPROVAL_REQUESTED:
+            self.requested.set()
 
 
 async def _wait_for_request(sink: _PersistentSink) -> str:
-    for _ in range(100):
-        if sink.events:
-            return str(sink.events[0].payload["approvalId"])
-        await asyncio.sleep(0)
-    raise AssertionError("approval request was not emitted")
+    await asyncio.wait_for(sink.requested.wait(), timeout=5.0)
+    event = next(
+        event
+        for event in sink.events
+        if event.type == CoreEventType.APPROVAL_REQUESTED
+    )
+    return str(event.payload["approvalId"])
 
 
 @pytest.mark.asyncio
