@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from agent_core.context_budget import estimate_json_tokens
@@ -12,7 +13,10 @@ from agent_core.contracts import (
     ContextBudget,
     ContextBudgetClaim,
     ContextBundle,
+    MessageRole,
+    TaskContextRequest,
 )
+from agent_core.json_values import thaw_json_mapping
 from agent_core.ports import CancellationSignal
 from domains.writing.associated_context import AssociatedContextResult
 from domains.writing.contracts import WritingDomainContext
@@ -95,9 +99,95 @@ class WritingContextProvider:
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
         del signal
+        return await self._build_context(request, budget)
+
+    async def build_planning_context(
+        self,
+        request: AgentRunRequest,
+        budget: ContextBudget,
+        signal: CancellationSignal | None = None,
+    ) -> ContextBundle:
+        """Build only the host facts needed before the LLM Planner runs.
+
+        Explicitly selected evidence keeps the legacy exact-manifest path so
+        existing no-reread guarantees remain truthful. Ordinary semantic
+        memory search is deferred until a normalized TaskSpec exists.
+        """
+
+        del signal
+        context = WritingDomainContext.from_core_context(request.domain_context)
+        if _has_explicit_evidence(context):
+            bundle = await self._build_context(request, budget)
+            return ContextBundle(
+                blocks=(),
+                diagnostics={
+                    **dict(bundle.diagnostics),
+                    "planningContextMode": "explicit_evidence_manifest",
+                },
+            )
+        empty_memory = unavailable_memory_context(MemoryContextRequest(
+            book_id=context.book_id,
+            user_prompt="",
+            token_budget=0,
+        ))
+        return ContextBundle(diagnostics={
+            "memoryTokens": 0,
+            "associatedTokens": 0,
+            "retrievalTokens": 0,
+            "retrievalAllocation": budget.allocation_for(
+                WRITING_RETRIEVAL_CONTEXT
+            ),
+            "planningContextMode": "lightweight_manifest",
+            "hostPlanningFacts": build_host_planning_facts(
+                current_chapter_bound=bool(
+                    str(context.chapter_id or "").strip()
+                ),
+                memory=empty_memory,
+                associated=AssociatedContextResult(),
+            ),
+        })
+
+    async def build_task_context(
+        self,
+        request: AgentRunRequest,
+        budget: ContextBudget,
+        task: TaskContextRequest,
+        signal: CancellationSignal | None = None,
+    ) -> ContextBundle:
+        """Perform formal recall after planning using semantic task intent."""
+
+        del signal
+        context = WritingDomainContext.from_core_context(request.domain_context)
+        retrieval_required = bool(
+            WRITING_RETRIEVAL_CONTEXT in task.required_context_blocks
+            or task.include_response_context
+            or _has_explicit_evidence(context)
+        )
+        query = build_task_recall_query(task)
+        return await self._build_context(
+            request,
+            budget,
+            recall_query=query,
+            retrieval_required=retrieval_required,
+            task=task,
+        )
+
+    async def _build_context(
+        self,
+        request: AgentRunRequest,
+        budget: ContextBudget,
+        *,
+        recall_query: str | None = None,
+        retrieval_required: bool = True,
+        task: TaskContextRequest | None = None,
+    ) -> ContextBundle:
         context = WritingDomainContext.from_core_context(request.domain_context)
         allocated = budget.allocation_for(WRITING_RETRIEVAL_CONTEXT)
-        desired = _desired_budgets(request, context)
+        desired = (
+            _desired_budgets(request, context)
+            if retrieval_required
+            else _DesiredBudgets(memory=0, associated=0)
+        )
         memory_budget, associated_budget = _split_allocation(allocated, desired)
 
         memory_request = MemoryContextRequest(
@@ -109,11 +199,25 @@ class WritingContextProvider:
         )
         memory_value: str | MemoryContextBlock = ""
         if context.book_id and memory_budget > 0:
-            memory_value = await self._source.build_memory(
-                context,
-                request,
-                memory_budget,
-            )
+            query_builder = getattr(self._source, "build_memory_for_query", None)
+            if recall_query is not None and callable(query_builder):
+                memory_value = await query_builder(
+                    context,
+                    request,
+                    memory_budget,
+                    recall_query,
+                )
+            else:
+                memory_request_value = (
+                    _request_with_latest_user_text(request, recall_query)
+                    if recall_query is not None
+                    else request
+                )
+                memory_value = await self._source.build_memory(
+                    context,
+                    memory_request_value,
+                    memory_budget,
+                )
         if isinstance(memory_value, MemoryContextBlock):
             memory_result = memory_value
         else:
@@ -203,6 +307,13 @@ class WritingContextProvider:
                 ),
                 "retrievalTokens": estimate_json_tokens(retrieval) if retrieval else 0,
                 "retrievalAllocation": allocated,
+                "recallQuerySource": (
+                    "taskSpec" if recall_query is not None else "latestUserText"
+                ),
+                "recallQueryCharacters": len(recall_query or ""),
+                "requiredEvidenceKinds": (
+                    list(task.evidence_kinds) if task is not None else []
+                ),
                 "hostPlanningFacts": build_host_planning_facts(
                     current_chapter_bound=bool(
                         str(context.chapter_id or "").strip()
@@ -212,6 +323,59 @@ class WritingContextProvider:
                 ),
             },
         )
+
+
+def build_task_recall_query(task: TaskContextRequest) -> str:
+    """Compile a bounded semantic query from TaskSpec and contract evidence."""
+
+    brief = task.task_spec
+    rows = [f"任务目标: {brief.goal}"]
+    if brief.operation:
+        rows.append(f"操作: {brief.operation}")
+    if brief.target:
+        rows.append(
+            "目标: "
+            + json.dumps(
+                thaw_json_mapping(brief.target),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    if brief.instruction:
+        rows.append(f"具体要求: {brief.instruction}")
+    if brief.constraints:
+        rows.append("约束: " + "；".join(brief.constraints))
+    if brief.preserve:
+        rows.append("必须保留: " + "；".join(brief.preserve))
+    if brief.deliverable:
+        rows.append(f"交付物: {brief.deliverable}")
+    if task.evidence_kinds:
+        rows.append("所需证据类型: " + ", ".join(task.evidence_kinds))
+    return "\n".join(rows)[:6_000]
+
+
+def _has_explicit_evidence(context: WritingDomainContext) -> bool:
+    return bool(
+        context.selected_memory_ids
+        or context.selected_foreshadowing_ids
+        or context.associated_chapter_ids
+        or context.associated_outline_ids
+    )
+
+
+def _request_with_latest_user_text(
+    request: AgentRunRequest,
+    text: str,
+) -> AgentRunRequest:
+    """Compatibility adapter for sources without query-aware retrieval."""
+
+    messages = list(request.messages)
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role is MessageRole.USER:
+            messages[index] = replace(messages[index], content=str(text or ""))
+            return replace(request, messages=tuple(messages))
+    return request
 
 
 def writing_context_claims(request: AgentRunRequest) -> tuple[ContextBudgetClaim, ...]:

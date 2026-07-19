@@ -119,6 +119,13 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         [10, "chapter1", "p", "r"],
     )
     await temp_db.execute(
+        "INSERT INTO ai_conversation_summaries "
+        "(session_id, version, covered_through_conversation_id, "
+        "covered_turn_count, source_digest, summary_json) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [10, 1, 1, 1, "a" * 64, "{}"],
+    )
+    await temp_db.execute(
         "INSERT INTO ai_favorites (session_id, session_title, prompt, content) VALUES (?, ?, ?, ?)",
         [10, "Session", "p", "c"],
     )
@@ -184,6 +191,7 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "articles",
         "ai_sessions",
         "ai_conversations",
+        "ai_conversation_summaries",
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",

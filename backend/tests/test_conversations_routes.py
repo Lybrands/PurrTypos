@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from routers.conversations import get_conversations, save_conversation
+from routers.conversations import delete_after_turn, get_conversations, save_conversation
 from schemas.conversations import SaveConversationRequest
 
 pytestmark = pytest.mark.asyncio
@@ -52,6 +52,33 @@ async def test_save_conversation_persists_task_plan_json(temp_db: DatabaseConnec
         [conversation_id],
     )
     assert json.loads(row["task_plan"])["status"] == "done"
+
+
+async def test_save_conversation_persists_context_ui_state(
+    temp_db: DatabaseConnection,
+):
+    created = await save_conversation(SaveConversationRequest(
+        sessionId=1,
+        prompt="p",
+        response="r",
+        contextCompaction={
+            "status": "completed",
+            "compactedTurnCount": 4,
+        },
+        contextBudget={
+            "windowTokens": 200_000,
+            "estimatedInputTokens": 12_000,
+            "toolSchemaTokens": 1_000,
+        },
+    ))
+
+    row = await temp_db.fetch_one(
+        "SELECT context_compaction, context_budget "
+        "FROM ai_conversations WHERE id = ?",
+        [created["data"]["id"]],
+    )
+    assert json.loads(row["context_compaction"])["compactedTurnCount"] == 4
+    assert json.loads(row["context_budget"])["windowTokens"] == 200_000
 
 
 async def test_save_conversation_persists_turn_duration(temp_db: DatabaseConnection):
@@ -111,6 +138,8 @@ async def test_conversation_schema_and_api_expose_only_current_turn_fields(
         "thinking_durations_ms",
         "duration_ms",
         "task_plan",
+        "context_compaction",
+        "context_budget",
     }
 
     # Extra columns in an upgraded user database are retained physically but
@@ -126,3 +155,34 @@ async def test_conversation_schema_and_api_expose_only_current_turn_fields(
     result = await get_conversations("9")
 
     assert set(result["data"][0]) == columns
+
+
+async def test_truncating_conversation_invalidates_persisted_summary(
+    temp_db: DatabaseConnection,
+):
+    for index in range(3):
+        await temp_db.execute(
+            "INSERT INTO ai_conversations (session_id, prompt, response) "
+            "VALUES (?, ?, ?)",
+            [9, f"p{index}", f"r{index}"],
+        )
+    await temp_db.execute(
+        "INSERT INTO ai_conversation_summaries "
+        "(session_id, version, covered_through_conversation_id, "
+        "covered_turn_count, source_digest, summary_json) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [9, 1, 1, 1, "a" * 64, "{}"],
+    )
+
+    result = await delete_after_turn("9", keepTurnCount=2)
+
+    assert result["success"] is True
+    row = await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_conversations WHERE session_id = ?",
+        [9],
+    )
+    assert row["count"] == 2
+    assert await temp_db.fetch_one(
+        "SELECT session_id FROM ai_conversation_summaries WHERE session_id = ?",
+        [9],
+    ) is None

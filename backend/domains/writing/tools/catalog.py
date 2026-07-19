@@ -24,6 +24,9 @@ from domains.writing.tools.host_arguments import (
     model_visible_writing_parameters,
     validate_host_chapter_reference,
 )
+from domains.writing.tools.context_contracts import (
+    WRITING_TOOL_CONTEXT_CONTRACTS,
+)
 
 
 WritingToolHandler = Callable[[dict, dict, Callable[[dict], None] | None], Any]
@@ -103,6 +106,7 @@ def build_writing_tool_catalog(
                 name in cancellation_linearizable_handlers
             ),
             planning_dependencies=WRITING_TOOL_PLANNING_DEPENDENCIES.get(name, ()),
+            context_contract=WRITING_TOOL_CONTEXT_CONTRACTS[name],
         )
         for name in ordered_names
     )

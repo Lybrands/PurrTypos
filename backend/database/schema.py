@@ -141,6 +141,23 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN duration_ms INTEGER DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_compaction TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_budget TEXT DEFAULT NULL")
+
+    # ── ai_conversation_summaries ────────────────────────────────
+    # Raw turns remain authoritative in ai_conversations. This table stores
+    # only a replaceable model-input projection for long sessions.
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_conversation_summaries (
+        session_id INTEGER PRIMARY KEY NOT NULL,
+        version INTEGER NOT NULL,
+        covered_through_conversation_id INTEGER NOT NULL,
+        covered_turn_count INTEGER NOT NULL,
+        source_digest TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        model TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # ── ai_agent_runs / todos / events ───────────────────────────
     # Agent Run 是一次用户请求的运行记录；To-dos 属于 run，而不是跨对话任务中心。

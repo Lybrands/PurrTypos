@@ -670,7 +670,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         assert options.get("tool_choice") is None
         assert [
             item["function"]["name"] for item in options.get("tools", [])
-        ] == ["getBookCharacters"]
+        ] == ["listBookCharacters"]
 
         async def _stream():
                 yield {
@@ -726,16 +726,19 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
     assert events[3]["agentRunTodoUpdated"] == {
         "runId": "<run-1>",
-        "stepId": "read-characters",
+        "stepId": "host-prerequisite-listBookCharacters-1",
         "step": {
-            "id": "read-characters",
-            "title": "读取人物设定",
+            "id": "host-prerequisite-listBookCharacters-1",
+            "title": "Prepare listBookCharacters",
             "type": "read",
             "executor": "tool",
             "status": "failed",
             "riskLevel": "read",
-            "suggestedTools": ["getBookCharacters"],
-            "description": None,
+            "suggestedTools": ["listBookCharacters"],
+            "description": (
+                "Host-inserted prerequisite for getBookCharacters; derived "
+                "from the registered tool context contract."
+            ),
             "resultSummary": None,
             "error": "missing_required_tool_call",
         },
@@ -1557,11 +1560,38 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         nonlocal model_round, continuation_tool_result
         model_round += 1
         assert signal is not None
-        assert bool(options.get("tools")) is (model_round == 1)
+        assert bool(options.get("tools")) is (model_round in {1, 2})
+        if model_round == 1:
+            assert [
+                item["function"]["name"] for item in options.get("tools", [])
+            ] == ["listBookCharacters"]
+        elif model_round == 2:
+            assert [
+                item["function"]["name"] for item in options.get("tools", [])
+            ] == ["deleteCharacter"]
 
         async def _stream():
             nonlocal continuation_tool_result
             if model_round == 1:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-list-characters",
+                                "type": "function",
+                                "function": {
+                                    "name": "listBookCharacters",
+                                    "arguments": '{}',
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
+
+            if model_round == 2:
                 yield {
                     "choices": [{
                         "delta": {
@@ -1585,7 +1615,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 if message.get("role") == "tool"
             )
             continuation_tool_result = json.loads(tool_message["content"])
-            if model_round == 2:
+            if model_round == 3:
                 guidance = messages[-1]
                 assert guidance["role"] == "system"
                 assert "user rejected" in guidance["content"]
@@ -1691,6 +1721,12 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         "agentRunTodosUpdated",
         "contextBudget",
         "toolCalls",
+        "toolIndexCompleted",
+        "toolResults",
+        "agentRunTodoUpdated",
+        "agentRunTodoUpdated",
+        "agentRunTodosUpdated",
+        "toolCalls",
         "toolApprovalRequired",
         "toolApprovalResolved",
         "toolIndexCompleted",
@@ -1702,17 +1738,17 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         "agentRunCompleted",
         "done",
     ]
-    requested = events[4]["toolApprovalRequired"]
-    resolved_event = events[5]["toolApprovalResolved"]
+    requested = events[10]["toolApprovalRequired"]
+    resolved_event = events[11]["toolApprovalResolved"]
     assert requested["runId"] == resolved_event["runId"] == "<run-1>"
     assert requested["approvalId"] == resolved_event["approvalId"] == "<approval-1>"
     assert requested["toolName"] == resolved_event["toolName"] == "deleteCharacter"
     assert resolved_event["status"] == "rejected"
-    tool_result = json.loads(events[7]["toolResults"][0]["content"])
+    tool_result = json.loads(events[13]["toolResults"][0]["content"])
     assert tool_result["success"] is False
     assert tool_result["errorCode"] == "approval_rejected"
     assert continuation_tool_result == tool_result
-    declined_todo = events[8]["agentRunTodoUpdated"]
+    declined_todo = events[14]["agentRunTodoUpdated"]
     assert declined_todo["stepId"] == "delete-character"
     assert declined_todo["step"]["status"] == "blocked"
     assert declined_todo["step"]["resultSummary"] == (
@@ -1720,20 +1756,20 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    assert events[9]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[9]["agentRunTodoUpdated"]["step"]["status"] == "running"
-    assert events[10] == {
+    assert events[15]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[15]["agentRunTodoUpdated"]["step"]["status"] == "running"
+    assert events[16] == {
         "delta": "您已拒绝审批；操作未执行，相关数据仍保留。",
     }
-    assert events[11]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[11]["agentRunTodoUpdated"]["step"]["status"] == "done"
+    assert events[17]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[17]["agentRunTodoUpdated"]["step"]["status"] == "done"
     delete_statuses = [
         event["agentRunTodoUpdated"]["step"]["status"]
         for event in events
         if event.get("agentRunTodoUpdated", {}).get("stepId")
         == "delete-character"
     ]
-    assert delete_statuses == ["blocked"]
+    assert delete_statuses == ["running", "blocked"]
     visible_text = "".join(
         str(event.get("delta") or "") for event in events
     )
@@ -1747,7 +1783,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "联系管理员" not in visible_text
     assert not any("thinkingDelta" in event for event in events)
     assert events[-1] == {"done": True, "model": "wire-model"}
-    assert model_round == 3
+    assert model_round == 4
     character = await db.fetch_one(
         "SELECT id FROM characters WHERE id = ? AND book_id = ?",
         [7, "book-wire"],
@@ -1767,6 +1803,12 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         [run_id],
     )
     assert stored_todos == [
+        {
+            "step_id": "host-prerequisite-listBookCharacters-1",
+            "status": "done",
+            "result_summary": "Planned tool step completed.",
+            "error": None,
+        },
         {
             "step_id": "delete-character",
             "status": "blocked",

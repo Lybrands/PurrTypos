@@ -3,6 +3,8 @@ import type { App as AntdApp } from "antd";
 import type {
   AiModelConfig,
   AiAgentDelegation,
+  AiContextBudgetState,
+  AiContextCompactionState,
   AiSession,
   ElectronAPI,
   EntityId,
@@ -43,6 +45,8 @@ export interface AccState {
   agentRunId?: string;
   taskPlan?: AiTaskPlan;
   delegations?: AiAgentDelegation[];
+  contextCompaction?: AiContextCompactionState;
+  contextBudget?: AiContextBudgetState;
 }
 
 /**

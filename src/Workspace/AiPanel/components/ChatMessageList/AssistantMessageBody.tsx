@@ -1,4 +1,9 @@
 import React from "react";
+import {
+  CheckCircleOutlined,
+  ExclamationCircleOutlined,
+  LoadingOutlined,
+} from "@ant-design/icons";
 import { type ChatMessage } from "../../hooks";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
@@ -33,6 +38,9 @@ function isVisibleWorkLogPart(part: AssistantTimelinePart): boolean {
 
 function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   return parts.some((part) => {
+    if (part.type === "contextCompaction") {
+      return part.state.status === "failed";
+    }
     if (part.type === "taskPlan") return part.plan.status === "failed";
     if (part.type === "delegations") {
       return part.items.some((item) => item.status === "failed");
@@ -175,6 +183,36 @@ function AssistantMessageBodyInner({
           hasError={workLogHasError(workLogParts)}
         >
           {workLogItems.map((part, partIndex) => {
+            if (part.type === "contextCompaction") {
+              const running = part.state.status === "running";
+              const failed = part.state.status === "failed";
+              const turnCount =
+                part.state.compactedTurnCount ??
+                part.state.selectedTurnCount;
+              return (
+                <div
+                  key={`context-compaction-${partIndex}`}
+                  className={`work-log__context-compaction ${failed ? "work-log__context-compaction--failed" : ""}`}
+                >
+                  {running ? (
+                    <LoadingOutlined spin />
+                  ) : failed ? (
+                    <ExclamationCircleOutlined />
+                  ) : (
+                    <CheckCircleOutlined />
+                  )}
+                  <span>
+                    {running
+                      ? "正在压缩上下文"
+                      : failed
+                        ? "上下文压缩未完成，已使用安全回退"
+                        : "已压缩上下文"}
+                    {turnCount && !failed ? ` · ${turnCount} 个较早回合` : ""}
+                  </span>
+                  {running ? <span className="a-blink-dots">...</span> : null}
+                </div>
+              );
+            }
             if (part.type === "commentary") {
               return (
                 <div

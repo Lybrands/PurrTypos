@@ -6,6 +6,8 @@ import type {
   SettingDiffCardState,
   ToolApprovalRequest,
   AiAgentDelegation,
+  AiContextBudgetState,
+  AiContextCompactionState,
 } from "../../../types";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";
@@ -103,6 +105,10 @@ export interface ChatMessage {
   taskPlan?: AiTaskPlan;
   /** 当前主 Run 调用的子 Agent 生命周期状态。 */
   delegations?: AiAgentDelegation[];
+  /** 本轮会话压缩的实时/最终状态。 */
+  contextCompaction?: AiContextCompactionState;
+  /** 后端对本轮完整模型输入的实际预算。 */
+  contextBudget?: AiContextBudgetState;
 }
 
 export interface UseChatSubmitParams {

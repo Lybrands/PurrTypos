@@ -24,12 +24,14 @@ from application.agent_delegation_service import AgentDelegationService
 from application.agent_delegation_tool import (
     build_delegation_tool_registration,
 )
+from application.conversation_compaction import ConversationCompactionService
 from application.request_mapping import (
     to_writing_agent_request,
     writing_run_options,
 )
 from application.run_provenance import build_chat_run_provenance
 from infrastructure.models.capabilities import normalize_thinking_enabled
+from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from schemas.ai import ChatStreamRequest
 
 
@@ -64,6 +66,96 @@ class AgentRunService:
         composition = self._composition
         provider_capabilities = composition.provider_capabilities
         request = to_writing_agent_request(body, provider_options)
+        if request.session_id is not None:
+            # Conversation compaction is an optimization boundary: persistence
+            # or summarization failures must never prevent the Agent Run.
+            compaction_started = asyncio.Event()
+            compaction_started_payload: dict = {}
+
+            async def notify_compaction_started(payload) -> None:
+                compaction_started_payload.update(dict(payload))
+                compaction_started.set()
+
+            compaction_task = asyncio.create_task(
+                ConversationCompactionService(
+                    composition.conversation_compaction_repository,
+                    ProviderModelGateway(api_key),
+                ).prepare(
+                    request,
+                    signal,
+                    on_compaction_started=notify_compaction_started,
+                )
+            )
+            started_wait = asyncio.create_task(compaction_started.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    (compaction_task, started_wait),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if started_wait in done and compaction_started.is_set():
+                    yield AgentEvent(
+                        type="conversation.compaction.started",
+                        payload={
+                            "status": "running",
+                            **compaction_started_payload,
+                        },
+                    )
+                compaction = await compaction_task
+                request = compaction.request
+                if "conversationCompaction" not in request.metadata:
+                    metadata = dict(request.metadata)
+                    metadata["conversationCompaction"] = {
+                        "outcome": compaction.outcome,
+                        "compactedTurnCount": compaction.compacted_turn_count,
+                        "retainedRawTurnCount": compaction.retained_raw_turn_count,
+                    }
+                    request = replace(request, metadata=metadata)
+                if compaction_started.is_set():
+                    yield AgentEvent(
+                        type="conversation.compaction.completed",
+                        payload={
+                            "status": (
+                                "completed"
+                                if compaction.outcome == "compacted"
+                                else "failed"
+                            ),
+                            "outcome": compaction.outcome,
+                            "compactedTurnCount": (
+                                compaction.compacted_turn_count
+                            ),
+                            "retainedRawTurnCount": (
+                                compaction.retained_raw_turn_count
+                            ),
+                            "summaryVersion": (
+                                compaction.summary.version
+                                if compaction.summary is not None
+                                else None
+                            ),
+                        },
+                    )
+            except Exception:
+                metadata = dict(request.metadata)
+                metadata["conversationCompaction"] = {
+                    "outcome": "failed_open",
+                }
+                request = replace(request, metadata=metadata)
+                if compaction_started.is_set():
+                    yield AgentEvent(
+                        type="conversation.compaction.completed",
+                        payload={
+                            "status": "failed",
+                            "outcome": "failed_open",
+                        },
+                    )
+            finally:
+                if not started_wait.done():
+                    started_wait.cancel()
+                if not compaction_task.done():
+                    compaction_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await started_wait
+                with suppress(asyncio.CancelledError, Exception):
+                    await compaction_task
         trusted_instruction = str(host_system_instruction or "").strip()
         if trusted_instruction:
             request = replace(
