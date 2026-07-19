@@ -432,12 +432,25 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
+    compaction = core_update_to_sse_chunk(
+        AgentEvent(
+            type="conversation.compaction.started",
+            payload={"status": "running", "selectedTurnCount": 4},
+        ),
+        model="model",
+    )
 
     assert started == {
         "agentRunStarted": {"runId": "run-1", "status": "running"},
     }
     assert effect == {"proposedSettingDiff": {"kind": "character"}}
     assert done == {"done": True, "model": "provider-resolved-model"}
+    assert compaction == {
+        "contextCompaction": {
+            "status": "running",
+            "selectedTurnCount": 4,
+        },
+    }
     assert cached == {"toolIndexCompleted": 2, "toolFromCache": True}
     assert delegation_created == {
         "agentDelegationCreated": {

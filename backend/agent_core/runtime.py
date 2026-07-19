@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 from agent_core.cancellation import (
     OperationCanceled,
@@ -44,6 +44,7 @@ from agent_core.contracts import (
     ToolCall,
     ToolCallResult,
     ToolChoiceMode,
+    ToolContextContract,
     ToolSchema,
     TraceRecord,
 )
@@ -53,6 +54,8 @@ from agent_core.errors import (
     UnsupportedModelFeatureError,
 )
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.evidence import RunEvidenceStore
+from agent_core.runtime_context import project_intermediate_tool_context
 from agent_core.ports import (
     CancellationSignal,
     EventSink,
@@ -154,12 +157,16 @@ class AgentRuntime:
         require_tool_call: bool | None = None,
         tools_executable: bool = True,
         planning_hook: RuntimePlanningHook | None = None,
+        tool_context_contracts: Mapping[str, ToolContextContract] | None = None,
+        stage_context_projection_enabled: bool = False,
         signal: CancellationSignal | None = None,
     ) -> AsyncIterator[RuntimeUpdate]:
         messages = list(request.messages)
         validators = tuple(response_validators)
         judges = tuple(response_judges)
         state = execution_state or ExecutionState()
+        evidence_store = RunEvidenceStore()
+        context_contracts = dict(tool_context_contracts or {})
         configured_tools = tuple(tools) if request.tools_enabled else ()
         used_model = request.model.model
         # A provider-level REQUIRED hint can never weaken the host guard.
@@ -226,7 +233,7 @@ class AgentRuntime:
                     replanning_started = perf_counter()
                     try:
                         revised_guidance = await planning_hook.replan_after_tool(
-                            tuple(messages),
+                            evidence_store.project_messages_for_planning(messages),
                             round_number=round_number,
                             remaining_model_rounds=(
                                 self._limits.max_model_rounds - round_index
@@ -345,9 +352,40 @@ class AgentRuntime:
                     or validators
                     or judges
                 )
+                projection = project_intermediate_tool_context(
+                    messages,
+                    visible_tool_names=frozenset(
+                        schema.name for schema in visible_tools
+                    ),
+                    contracts=context_contracts,
+                    evidence_store=evidence_store,
+                    enabled=stage_context_projection_enabled,
+                    initial_round=initial_logical_round,
+                )
+                if (
+                    projection.dropped_context_blocks
+                    or projection.compacted_tool_results
+                ):
+                    await self._trace(
+                        "context_projection",
+                        "optional_blocks_removed",
+                        details={
+                            "round": round_number,
+                            "toolNames": sorted(
+                                schema.name for schema in visible_tools
+                            ),
+                            "droppedContextBlocks": list(
+                                projection.dropped_context_blocks
+                            ),
+                            "compactedToolResults": list(
+                                projection.compacted_tool_results
+                            ),
+                            "savedTokens": projection.saved_tokens,
+                        },
+                    )
                 logical_round_number += 1
                 provider_attempt = _PendingProviderAttempt(
-                    messages=tuple(messages),
+                    messages=projection.messages,
                     invocation=ModelInvocation(
                         request=request.model,
                         tools=visible_tools,
@@ -1359,6 +1397,11 @@ class AgentRuntime:
                 )
                 return
 
+            receipts = (
+                evidence_store.record_batch(calls, batch_result)
+                if _results_match_calls(calls, batch_result.results)
+                else ()
+            )
             yield AgentEvent(
                 type=CoreEventType.TOOL_RESULTS,
                 run_id=run_id,
@@ -1366,6 +1409,10 @@ class AgentRuntime:
                     "results": [
                         _tool_result_payload(result)
                         for result in batch_result.results
+                    ],
+                    "toolResultReceipts": [
+                        receipt.to_mapping()
+                        for receipt in receipts
                     ],
                 },
             )
@@ -1384,6 +1431,10 @@ class AgentRuntime:
                     "allowedTools": sorted(allowed_names),
                     "callCount": len(calls),
                     "approvalStatuses": approval_statuses,
+                    "evidenceRecordCount": len(
+                        evidence_store.tool_result_receipts()
+                    ),
+                    "evidenceTokens": evidence_store.token_estimate,
                 },
                 duration_ms=_duration_ms(tool_started),
             )

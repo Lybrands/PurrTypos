@@ -34,6 +34,7 @@ import AiContextBar, { type AiContextBarBindings } from "./components/AiContextB
 import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
+import ContextUsageIndicator from "./components/ContextUsageIndicator";
 import "./index.scss";
 
 interface AiPanelProps {
@@ -341,6 +342,8 @@ export default function AiPanel({
               thinkingBlocks: acc.thinkingBlocks?.length
                 ? acc.thinkingBlocks
                 : undefined,
+              contextCompaction: acc.contextCompaction,
+              contextBudget: acc.contextBudget,
             },
           ]);
           setLoading(true);
@@ -513,6 +516,12 @@ export default function AiPanel({
           }
           rightContent={
             <div className="chat-compose-right">
+              <ContextUsageIndicator
+                conversations={conversations}
+                prompt={prompt}
+                selectedModelConfig={selectedModelConfig}
+                loading={loading}
+              />
               {loading ? (
                 <Button
                   className="btn-submit btn-stop btn-submit--icon"

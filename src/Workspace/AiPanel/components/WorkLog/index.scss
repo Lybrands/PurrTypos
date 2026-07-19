@@ -96,6 +96,28 @@
   }
 }
 
+.work-log__context-compaction {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 5px 0 8px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+
+  .anticon {
+    flex: 0 0 auto;
+    color: var(--accent);
+  }
+
+  .a-blink-dots {
+    margin-left: -4px;
+  }
+}
+
+.work-log__context-compaction--failed .anticon {
+  color: var(--danger);
+}
+
 .work-log__plan {
   margin: 5px 0 9px;
 }

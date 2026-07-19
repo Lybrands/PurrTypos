@@ -16,6 +16,8 @@ from agent_core.contracts import (
     ApprovalStatus,
     ContextBudget,
     ContextBundle,
+    ConversationSummary,
+    ConversationTurn,
     DelegationAggregation,
     DelegationClaim,
     ExecutionState,
@@ -33,12 +35,14 @@ from agent_core.contracts import (
     RunId,
     RunStatus,
     TaskStep,
+    TaskContextRequest,
     TaskStepUpdate,
     TerminalRunStatus,
     ToolBatchOutcome,
     ToolBatchRequest,
     ToolBatchResult,
     ToolCall,
+    ToolContextContract,
     ToolHandlerResult,
     ToolPolicy,
     ToolSchema,
@@ -79,6 +83,48 @@ class ContextProvider(Protocol):
         budget: ContextBudget,
         signal: CancellationSignal | None = None,
     ) -> ContextBundle: ...
+
+
+@runtime_checkable
+class StagedContextProvider(Protocol):
+    """Optional provider separating lightweight planning from formal recall."""
+
+    async def build_planning_context(
+        self,
+        request: AgentRunRequest,
+        budget: ContextBudget,
+        signal: CancellationSignal | None = None,
+    ) -> ContextBundle: ...
+
+    async def build_task_context(
+        self,
+        request: AgentRunRequest,
+        budget: ContextBudget,
+        task: TaskContextRequest,
+        signal: CancellationSignal | None = None,
+    ) -> ContextBundle: ...
+
+
+@runtime_checkable
+class ConversationCompactionRepository(Protocol):
+    async def load_summary(
+        self,
+        session_id: str | int,
+    ) -> ConversationSummary | None: ...
+
+    async def list_turns(
+        self,
+        session_id: str | int,
+        *,
+        after_conversation_id: int = 0,
+    ) -> tuple[ConversationTurn, ...]: ...
+
+    async def save_summary(
+        self,
+        summary: ConversationSummary,
+    ) -> None: ...
+
+    async def delete_summary(self, session_id: str | int) -> None: ...
 
 
 @runtime_checkable
@@ -191,6 +237,7 @@ class ToolRegistration:
     # database transaction while the workflow waits on independent workers.
     host_managed_durability: bool = False
     planning_dependencies: tuple[str, ...] = ()
+    context_contract: ToolContextContract = ToolContextContract()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -207,6 +254,16 @@ class ToolRegistration:
             "host_managed_durability",
             bool(self.host_managed_durability),
         )
+        if not isinstance(self.context_contract, ToolContextContract):
+            raise TypeError("tool context_contract must be ToolContextContract")
+
+    @property
+    def prerequisite_tools(self) -> tuple[str, ...]:
+        """Return the host-owned prerequisites with legacy compatibility."""
+
+        if self.context_contract.prerequisite_tools:
+            return self.context_contract.prerequisite_tools
+        return self.planning_dependencies
 
 
 @runtime_checkable

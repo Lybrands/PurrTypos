@@ -19,4 +19,6 @@ class SaveConversationRequest(BaseModel):
     thinkingDurationsMs: Optional[List[Any]] = None
     durationMs: Optional[int] = None
     taskPlan: Optional[Any] = None
+    contextCompaction: Optional[Any] = None
+    contextBudget: Optional[Any] = None
     agentRunId: Optional[str] = None

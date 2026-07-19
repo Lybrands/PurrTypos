@@ -122,6 +122,12 @@ async def delete_book(bookId: str):
         ]
 
         await _delete_where_in(db, "ai_favorites", "session_id", session_ids)
+        await _delete_where_in(
+            db,
+            "ai_conversation_summaries",
+            "session_id",
+            session_ids,
+        )
         await _delete_where_in(db, "ai_conversations", "session_id", session_ids)
         await _delete_where_in(db, "ai_conversations", "chapter_id", chapter_ids)
         await _delete_where_in(db, "ai_sessions", "id", session_ids)

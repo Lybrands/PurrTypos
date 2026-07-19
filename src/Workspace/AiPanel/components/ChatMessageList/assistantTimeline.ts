@@ -37,13 +37,19 @@ export type TimelineDelegationsPart = {
   items: NonNullable<ChatMessage["delegations"]>;
 };
 
+export type TimelineContextCompactionPart = {
+  type: "contextCompaction";
+  state: NonNullable<ChatMessage["contextCompaction"]>;
+};
+
 export type AssistantTimelinePart =
   | TimelineThinkingPart
   | TimelineToolsPart
   | TimelineTextPart
   | TimelineCommentaryPart
   | TimelineTaskPlanPart
-  | TimelineDelegationsPart;
+  | TimelineDelegationsPart
+  | TimelineContextCompactionPart;
 
 export type TimelineStepPart = TimelineThinkingPart | TimelineToolsPart;
 
@@ -122,6 +128,12 @@ export function buildAssistantTimeline(
   const durations = message.thinkingDurationsMs ?? [];
   const { messageIndex, isStreaming, isLastAssistant, loading } = opts;
 
+  if (message.contextCompaction) {
+    parts.push({
+      type: "contextCompaction",
+      state: message.contextCompaction,
+    });
+  }
   if (message.taskPlan) {
     parts.push({ type: "taskPlan", plan: message.taskPlan });
   }

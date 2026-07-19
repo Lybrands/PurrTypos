@@ -62,6 +62,7 @@ function ChatMessageBubbleInner({
     !message.toolCallSegments?.length &&
     !message.taskPlan &&
     !message.delegations?.length &&
+    !message.contextCompaction &&
     !hasAnyThinking;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;

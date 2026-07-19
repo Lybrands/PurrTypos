@@ -41,6 +41,9 @@ from infrastructure.persistence.sqlite_checkpoint_store import (
 from infrastructure.persistence.sqlite_delegation_repository import (
     SqliteDelegationRepository,
 )
+from infrastructure.persistence.sqlite_conversation_compaction_repository import (
+    SqliteConversationCompactionRepository,
+)
 from infrastructure.persistence.sqlite_tool_idempotency_gateway import (
     SqliteToolIdempotencyGateway,
 )
@@ -77,6 +80,9 @@ class AgentComposition:
         self._execution_lease_store = SqliteExecutionLeaseStore(db)
         self._delegation_repository = SqliteDelegationRepository(db)
         self._checkpoint_store = SqliteCheckpointStore(db)
+        self._conversation_compaction_repository = (
+            SqliteConversationCompactionRepository(db)
+        )
         self._repository = SqliteRunRepository(
             db,
             delegation_repository=self._delegation_repository,
@@ -149,6 +155,12 @@ class AgentComposition:
     @property
     def checkpoint_store(self) -> CheckpointStore:
         return self._checkpoint_store
+
+    @property
+    def conversation_compaction_repository(
+        self,
+    ) -> SqliteConversationCompactionRepository:
+        return self._conversation_compaction_repository
 
     def create_core(
         self,

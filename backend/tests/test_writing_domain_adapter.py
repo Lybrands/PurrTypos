@@ -13,6 +13,8 @@ from agent_core.contracts import (
     ContextBudgetClaim,
     ExecutionState,
     ModelRequest,
+    TaskSpec,
+    TaskContextRequest,
 )
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.associated_context import (
@@ -417,6 +419,91 @@ async def test_writing_context_provider_honors_one_shared_retrieval_budget(monke
     }
     assert "associatedOutlines" not in facts
     assert "do not add listWritingChapters" in facts["planningRules"][0]
+
+
+@pytest.mark.asyncio
+async def test_writing_staged_recall_uses_resolved_task_spec_query():
+    class _Source:
+        def __init__(self):
+            self.queries = []
+
+        async def build_memory(self, context, request, token_budget):
+            raise AssertionError("latest-user recall must not run for this task")
+
+        async def build_memory_for_query(
+            self,
+            context,
+            request,
+            token_budget,
+            query,
+        ):
+            del context, request, token_budget
+            self.queries.append(query)
+            return "第二章雪夜见面场景的既有设定"
+
+        async def build_associated(self, context, request, token_budget):
+            del context, request, token_budget
+            return ""
+
+    context = WritingDomainContext(
+        book_id="book-1",
+        chapter_id="chapter-2",
+        current_chapter_title="第二章",
+        context_window_label="200k",
+    )
+    request = AgentRunRequest(
+        messages=(
+            AgentMessage(role="user", content="把第二章的见面改成雪夜。"),
+            AgentMessage(role="assistant", content="已经完成修改。"),
+            AgentMessage(role="user", content="把刚才那个再改得压抑一点。"),
+        ),
+        model=ModelRequest(provider="openai", model="test-model"),
+        domain_context=context.to_core_context(),
+        mode="agent",
+        context_window=200_000,
+        tools_enabled=True,
+    )
+    budget = allocate_context_budget(
+        window_tokens=request.context_window,
+        output_reserve_tokens=8_192,
+        claims=writing_context_claims(request),
+    )
+    source = _Source()
+    provider = WritingContextProvider(source)
+
+    planning = await provider.build_planning_context(request, budget)
+    assert planning.blocks == ()
+    assert planning.diagnostics["planningContextMode"] == "lightweight_manifest"
+    assert source.queries == []
+
+    task = TaskContextRequest(
+        task_spec=TaskSpec(
+            goal="调整第二章雪夜见面场景的氛围",
+            target={"chapter": "第二章", "scene": "雪夜见面"},
+            operation="edit",
+            instruction="使场景更加压抑",
+            preserve=("雪夜背景", "人物见面的主要情节"),
+        ),
+        planned_tool_names=("editChapterContent",),
+        available_tool_names=("editChapterContent",),
+        required_context_blocks=(WRITING_RETRIEVAL_CONTEXT,),
+        evidence_kinds=("plot", "character", "foreshadowing"),
+    )
+    bundle = await provider.build_task_context(request, budget, task)
+
+    assert len(source.queries) == 1
+    query = source.queries[0]
+    assert "第二章" in query
+    assert "雪夜见面" in query
+    assert "更加压抑" in query
+    assert "plot, character, foreshadowing" in query
+    assert "把刚才那个" not in query
+    assert bundle.diagnostics["recallQuerySource"] == "taskSpec"
+    assert bundle.diagnostics["requiredEvidenceKinds"] == [
+        "plot",
+        "character",
+        "foreshadowing",
+    ]
 
 
 @pytest.mark.asyncio

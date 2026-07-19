@@ -32,6 +32,11 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
 
     if event.type == CoreEventType.RUN_STARTED:
         return {"agentRunStarted": {"runId": run_id, **payload}}
+    if event.type in {
+        "conversation.compaction.started",
+        "conversation.compaction.completed",
+    }:
+        return {"contextCompaction": payload}
     if event.type == CoreEventType.RUN_TODOS_UPDATED:
         return {"agentRunTodosUpdated": {
             "runId": run_id,

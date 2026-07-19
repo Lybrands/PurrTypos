@@ -38,6 +38,7 @@ from agent_core.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
+    TaskSpec,
     TaskPlan,
     TaskStep,
     TaskStepUpdate,
@@ -728,6 +729,151 @@ async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result()
     assert len(todo_replacements) == 2
     assert any(
         trace.stage == "planning" and trace.outcome == "replanned"
+        for trace in repository.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_staged_context_runs_formal_retrieval_after_task_spec_planning():
+    class _StagedProvider:
+        def __init__(self):
+            self.calls = []
+            self.task = None
+
+        async def build_planning_context(self, request, budget, signal=None):
+            del request, budget, signal
+            self.calls.append("planning")
+            return ContextBundle(diagnostics={
+                "hostPlanningFacts": {"planningManifest": True},
+            })
+
+        async def build_task_context(
+            self,
+            request,
+            budget,
+            task,
+            signal=None,
+        ):
+            del request, budget, signal
+            assert self.calls == ["planning"]
+            self.calls.append("task")
+            self.task = task
+            return ContextBundle(blocks=(ContextBlock(
+                name="fixture",
+                content="TaskSpec-targeted evidence.",
+            ),))
+
+        async def build_context(self, request, budget, signal=None):
+            del request, budget, signal
+            self.calls.append("legacy")
+            return ContextBundle()
+
+    plan = TaskPlan(
+        title="Read after recall",
+        task_spec=TaskSpec(
+            goal="read the previously referenced resource",
+            target={"resource": "alpha"},
+        ),
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="respond",
+                title="Respond",
+                type=StepType.REVIEW,
+                executor=StepExecutor.MODEL,
+                risk_level=ToolRiskLevel.READ,
+            ),
+        ),
+    )
+    core, request, options, repository, _model, _state = _core_fixture(
+        planner=StaticPlanner(plan),
+    )
+    provider = _StagedProvider()
+    core._context_provider = provider
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    assert updates[-1].status is RunStatus.DONE, repository.traces
+    assert provider.calls == ["planning", "task"]
+    assert provider.task.task_spec is plan.task_spec
+    assert provider.task.planned_tool_names == ("read_resource",)
+    assert provider.task.include_response_context is True
+    assert any(
+        trace.stage == "context_retrieval"
+        and trace.outcome == "task_spec"
+        for trace in repository.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_staged_context_missing_task_spec_falls_back_to_legacy_context():
+    class _StagedProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def build_planning_context(self, request, budget, signal=None):
+            del request, budget, signal
+            self.calls.append("planning")
+            return ContextBundle()
+
+        async def build_task_context(
+            self,
+            request,
+            budget,
+            task,
+            signal=None,
+        ):
+            del request, budget, task, signal
+            raise AssertionError("missing TaskSpec must not use task recall")
+
+        async def build_context(self, request, budget, signal=None):
+            del request, budget, signal
+            self.calls.append("legacy")
+            return ContextBundle(blocks=(ContextBlock(
+                name="fixture",
+                content="Legacy evidence remains available.",
+            ),))
+
+    plan = TaskPlan(
+        title="Legacy-compatible read",
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="respond",
+                title="Respond",
+                type=StepType.REVIEW,
+                executor=StepExecutor.MODEL,
+                risk_level=ToolRiskLevel.READ,
+            ),
+        ),
+    )
+    core, request, options, repository, _model, _state = _core_fixture(
+        planner=StaticPlanner(plan),
+    )
+    provider = _StagedProvider()
+    core._context_provider = provider
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    assert updates[-1].status is RunStatus.DONE
+    assert provider.calls == ["planning", "legacy"]
+    assert any(
+        trace.stage == "context_retrieval"
+        and trace.outcome == "legacy_fallback"
         for trace in repository.traces
     )
 

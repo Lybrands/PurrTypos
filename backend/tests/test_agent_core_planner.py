@@ -271,7 +271,7 @@ async def test_planner_receives_host_facts_and_distinct_tool_semantics_in_system
     )
     assert "exactly one expectedTools entry" in messages[0].content
     assert "smallest non-redundant tool chain" in messages[0].content
-    assert "dependency before" in messages[0].content
+    assert "host expands mandatory" in messages[0].content
     assert "do not" in messages[0].content.lower()
     assert "explicit evidence scope" in messages[0].content
     assert "host facts mark the selected evidence incomplete" in messages[0].content

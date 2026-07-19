@@ -79,6 +79,10 @@ async def set_session_reopened(db: DatabaseConnection, session_id: int) -> None:
 
 async def delete_session(db: DatabaseConnection, session_id: int) -> None:
     await db.execute(
+        "DELETE FROM ai_conversation_summaries WHERE session_id = ?",
+        [session_id],
+    )
+    await db.execute(
         "DELETE FROM ai_conversations WHERE session_id = ?", [session_id]
     )
     await db.execute("DELETE FROM ai_sessions WHERE id = ?", [session_id])

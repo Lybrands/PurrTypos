@@ -352,7 +352,33 @@ export interface Conversation {
   thinking_durations_ms?: string | null;
   duration_ms?: number | null;
   task_plan?: string | null;
+  context_compaction?: string | null;
+  context_budget?: string | null;
   create_time?: string;
+}
+
+export interface AiContextCompactionState {
+  status: "running" | "completed" | "failed";
+  outcome?: string;
+  selectedTurnCount?: number;
+  compactedTurnCount?: number;
+  retainedRawTurnCount?: number;
+  previousSummaryVersion?: number | null;
+  summaryVersion?: number | null;
+}
+
+export interface AiContextBudgetState {
+  windowTokens: number;
+  estimatedInputTokens: number;
+  toolSchemaTokens: number;
+  outputReserveTokens: number;
+  safetyReserveTokens: number;
+  runtimeReserveTokens: number;
+  droppedMessages: number;
+  projectedTotalTokens: number;
+  overflowTokens: number;
+  memoryTokens?: number;
+  associatedTokens?: number;
 }
 
 export interface AiTaskPlanChunk {
@@ -840,6 +866,8 @@ export interface ElectronAPI {
     thinkingDurationsMs?: number[];
     durationMs?: number;
     taskPlan?: AiTaskPlanChunk;
+    contextCompaction?: AiContextCompactionState;
+    contextBudget?: AiContextBudgetState;
     agentRunId?: string;
   }) => Promise<ApiResult<{ id: number | null }>>;
   getConversations: (data: {
@@ -1052,19 +1080,8 @@ export interface ElectronAPI {
         status: Exclude<ToolApprovalStatus, "pending">;
       };
       /** Host-side accounting for the complete model context window. */
-      contextBudget?: {
-        windowTokens: number;
-        estimatedInputTokens: number;
-        toolSchemaTokens: number;
-        outputReserveTokens: number;
-        safetyReserveTokens: number;
-        runtimeReserveTokens: number;
-        memoryTokens: number;
-        associatedTokens: number;
-        droppedMessages: number;
-        projectedTotalTokens: number;
-        overflowTokens: number;
-      };
+      contextBudget?: AiContextBudgetState;
+      contextCompaction?: AiContextCompactionState;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
       /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */

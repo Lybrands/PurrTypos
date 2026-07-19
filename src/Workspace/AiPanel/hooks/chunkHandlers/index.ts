@@ -23,6 +23,10 @@ import {
 import { handleToolIndexCompleted } from "./toolProgress";
 import { handleToolCallsInProgress } from "./toolStart";
 import { handleDone, handleError } from "./terminal";
+import {
+  handleContextBudget,
+  handleContextCompaction,
+} from "./context";
 
 export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
 
@@ -40,6 +44,8 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   // 2. 流式正文 / 思考流（无短路）
   handleThinkingDelta(chunk, ctx);
   handleDelta(chunk, ctx);
+  handleContextCompaction(chunk, ctx);
+  handleContextBudget(chunk, ctx);
 
   // 3. 副作用：派发 DOM 事件（无短路）
   handleProposedChapterDiff(chunk, ctx);
