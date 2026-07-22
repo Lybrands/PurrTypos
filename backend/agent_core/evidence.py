@@ -61,6 +61,32 @@ class ToolResultReceipt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ContextEvidenceReceipt:
+    """Receipt for one host-selected context fact used by this run."""
+
+    evidence_id: str
+    context_block: str
+    source: str
+    item_id: str
+    version: int | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "evidenceId": self.evidence_id,
+                "contextBlock": self.context_block,
+                "source": self.source,
+                "itemId": self.item_id,
+                "version": self.version,
+                "metadata": dict(self.metadata),
+            }.items()
+            if value not in (None, "", {})
+        }
+
+
 @dataclass(slots=True)
 class RunEvidenceStore:
     """Keep full tool evidence outside the ever-growing protocol transcript."""
@@ -69,6 +95,55 @@ class RunEvidenceStore:
     _tool_result_receipts: dict[str, ToolResultReceipt] = field(
         default_factory=dict
     )
+    _context_receipts: dict[str, ContextEvidenceReceipt] = field(
+        default_factory=dict
+    )
+    _context_blocks: dict[str, str] = field(default_factory=dict)
+
+    def record_context_messages(
+        self,
+        messages: Sequence[AgentMessage],
+    ) -> tuple[ContextEvidenceReceipt, ...]:
+        """Persist host context facts separately from protocol projection."""
+
+        recorded: list[ContextEvidenceReceipt] = []
+        for message in messages:
+            block_name = str(message.attributes.get("context_name") or "").strip()
+            raw_receipts = message.host_metadata.get("memory_context_receipts")
+            if not block_name or not (
+                isinstance(raw_receipts, Sequence)
+                and not isinstance(raw_receipts, (str, bytes, bytearray))
+            ):
+                continue
+            self._context_blocks[block_name] = str(message.content or "")
+            for raw in raw_receipts:
+                if not isinstance(raw, Mapping):
+                    continue
+                evidence_id = str(raw.get("evidenceId") or "").strip()
+                source = str(raw.get("source") or "").strip()
+                item_id = str(raw.get("itemId") or "").strip()
+                if not evidence_id or not source or not item_id:
+                    continue
+                receipt = ContextEvidenceReceipt(
+                    evidence_id=evidence_id,
+                    context_block=block_name,
+                    source=source,
+                    item_id=item_id,
+                    version=_optional_int(raw.get("version")),
+                    metadata={
+                        str(key): value
+                        for key, value in raw.items()
+                        if str(key) not in {
+                            "evidenceId",
+                            "source",
+                            "itemId",
+                            "version",
+                        }
+                    },
+                )
+                self._context_receipts[evidence_id] = receipt
+                recorded.append(receipt)
+        return tuple(recorded)
 
     def record_batch(
         self,
@@ -92,6 +167,9 @@ class RunEvidenceStore:
 
     def tool_result_receipts(self) -> tuple[ToolResultReceipt, ...]:
         return tuple(self._tool_result_receipts.values())
+
+    def context_receipts(self) -> tuple[ContextEvidenceReceipt, ...]:
+        return tuple(self._context_receipts.values())
 
     @property
     def token_estimate(self) -> int:
@@ -202,7 +280,17 @@ def _record_and_receipt(
     return record, receipt
 
 
+def _optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
+    "ContextEvidenceReceipt",
     "EvidenceRecord",
     "RunEvidenceStore",
     "ToolResultReceipt",

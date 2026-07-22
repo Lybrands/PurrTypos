@@ -34,6 +34,41 @@ class MemoryContextRequest:
     selected_foreshadowing_memory_item_ids: tuple[Any, ...] = ()
     selected_spark_idea_ids: tuple[Any, ...] = ()
     selected_foreshadowing_ids: tuple[Any, ...] = ()
+    story_kinds: tuple[str, ...] = ()
+    planner_story_kinds: tuple[str, ...] = ()
+    entity_refs: tuple[str, ...] = ()
+    chapter_ids: tuple[str, ...] = ()
+    include_story_memory: bool = True
+    authoritative_fingerprints: tuple[str, ...] = ()
+    authoritative_signatures: tuple[tuple[str, ...], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryUsageReceipt:
+    """Compact record of one memory fact injected into this run."""
+
+    evidence_id: str
+    source: str
+    item_id: str
+    version: int | None = None
+    source_id: str | None = None
+    chapter_id: str | None = None
+    memory_key: str | None = None
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "evidenceId": self.evidence_id,
+                "source": self.source,
+                "itemId": self.item_id,
+                "version": self.version,
+                "sourceId": self.source_id,
+                "chapterId": self.chapter_id,
+                "memoryKey": self.memory_key,
+            }.items()
+            if value not in (None, "")
+        }
 
 
 @dataclass(slots=True)
@@ -43,7 +78,8 @@ class MemoryContextBlock:
     deferred_ids: list[int] = field(default_factory=list)
     suppressed_ids: list[int] = field(default_factory=list)
     token_estimate: int = 0
-    diagnostics: dict[str, int] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    receipts: tuple[MemoryUsageReceipt, ...] = ()
     selected_fact: "SelectedMemoryContextFact | None" = None
 
     def with_outer_truncation(self) -> "MemoryContextBlock":
@@ -56,6 +92,7 @@ class MemoryContextBlock:
             suppressed_ids=list(self.suppressed_ids),
             token_estimate=self.token_estimate,
             diagnostics=dict(self.diagnostics),
+            receipts=(),
             selected_fact=(
                 self.selected_fact.with_outer_truncation()
                 if self.selected_fact is not None
@@ -225,6 +262,29 @@ class WritingMemoryContextBuilder:
         ]
         ordered = [*forced_ordered, *recalled_ordered]
 
+        authoritative = {
+            _fact_fingerprint(value)
+            for value in request.authoritative_fingerprints
+            if _fact_fingerprint(value)
+        }
+        authority_suppressed_ids = {
+            item.id
+            for item in ordered
+            if item.id not in forced_ids
+            and (
+                _fact_fingerprint(item.content or item.summary) in authoritative
+                or _matches_authoritative_signature(
+                    item.content or item.summary,
+                    request.authoritative_signatures,
+                )
+            )
+        }
+        if authority_suppressed_ids:
+            ordered = [
+                item for item in ordered
+                if item.id not in authority_suppressed_ids
+            ]
+
         links = await self._repository.get_links(book_id, tuple(by_id))
         related_ids = {
             endpoint
@@ -252,6 +312,7 @@ class WritingMemoryContextBuilder:
             links,
             forced_ids,
         )
+        suppressed_ids.update(authority_suppressed_ids)
 
         text, included_ids, deferred_ids, truncated_ids = _format_budgeted(
             ordered,
@@ -295,6 +356,14 @@ class WritingMemoryContextBuilder:
             suppressed_ids=sorted(suppressed_ids),
             token_estimate=estimate_tokens(text),
             diagnostics=diagnostics,
+            receipts=tuple(
+                MemoryUsageReceipt(
+                    evidence_id=f"semantic:{item_id}",
+                    source="semantic",
+                    item_id=str(item_id),
+                )
+                for item_id in included_ids
+            ),
             selected_fact=(
                 SelectedMemoryContextFact(
                     requested_count=selection.requested_count,
@@ -524,6 +593,29 @@ def _apply_relation_policy(
 
 def estimate_tokens(text: str) -> int:
     return estimate_text_tokens(text)
+
+
+def _fact_fingerprint(value: object) -> str:
+    return "".join(str(value or "").casefold().split())
+
+
+def _matches_authoritative_signature(
+    content: str,
+    signatures: Sequence[Sequence[str]],
+) -> bool:
+    normalized = _fact_fingerprint(content)
+    if not normalized:
+        return False
+    for signature in signatures:
+        values = tuple(dict.fromkeys(
+            _fact_fingerprint(value)
+            for value in signature
+            if len(_fact_fingerprint(value)) >= 2
+        ))
+        matched = [value for value in values if value in normalized]
+        if len(matched) >= 2 or any(len(value) >= 8 for value in matched):
+            return True
+    return False
 
 
 def _diagnostics(

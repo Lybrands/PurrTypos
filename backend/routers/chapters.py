@@ -61,6 +61,23 @@ async def add_chapter(outlineId: str, body: AddChapterRequest):
 @router.delete("/chapters/{chapterId}")
 async def delete_chapter(chapterId: str):
     db = get_db()
+    owner = await db.fetch_one(
+        "SELECT o.book_id FROM outline_chapters AS c "
+        "JOIN outlines AS o ON o.id = c.outline_id WHERE c.id = ?",
+        [chapterId],
+    )
+    if owner and owner.get("book_id"):
+        try:
+            from domains.writing.story_memory_ledger import StoryMemoryLedger
+            from infrastructure.persistence.writing.sqlite_story_memory_repository import (
+                SqliteStoryMemoryRepository,
+            )
+
+            await StoryMemoryLedger(
+                SqliteStoryMemoryRepository(db)
+            ).chapter_changed(str(owner["book_id"]), chapterId)
+        except Exception:
+            pass
     await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapterId])
     return {"success": True}
 

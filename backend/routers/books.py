@@ -136,6 +136,35 @@ async def delete_book(bookId: str):
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM memory_links WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM memory_items WHERE book_id = ?", [bookId])
+        await db.execute(
+            "DELETE FROM story_memory_versions WHERE book_id = ?",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_analysis_runs WHERE book_id = ?",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_evolution_reviews WHERE book_id = ?",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_delta_operations WHERE delta_id IN "
+            "(SELECT id FROM story_memory_deltas WHERE book_id = ?)",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_sources WHERE book_id = ?",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_deltas WHERE book_id = ?",
+            [bookId],
+        )
+        await db.execute(
+            "DELETE FROM story_memory_records WHERE book_id = ?",
+            [bookId],
+        )
 
         await _delete_where_in(db, "articles", "chapter_id", chapter_ids)
         await _delete_where_in(db, "chapter_canvas", "chapter_id", chapter_ids)
