@@ -15,6 +15,21 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
     """落盘：把 ``content`` 写入 articles，并将本次 diff 写入历史表。"""
     db = get_db()
     await save_article(db, chapterId, body.content)
+    book_id = None
+    try:
+        from services.memory_deposition_service import resolve_book_id_for_chapter
+        from services.story_memory_analysis_service import invalidate_saved_chapter
+
+        book_id = await resolve_book_id_for_chapter(db, chapterId)
+        if book_id:
+            await invalidate_saved_chapter(
+                db,
+                book_id=book_id,
+                chapter_id=chapterId,
+                content=body.content,
+            )
+    except Exception:
+        pass
     diff_id = await diff_crud.insert_diff_history(
         db,
         chapter_id=chapterId,
@@ -38,7 +53,33 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
     except Exception:
         # 记忆候选沉淀失败不应阻断正文落库。
         pass
-    return {"success": True, "data": {"id": diff_id}}
+    story_memory_analysis = None
+    if int(body.accepted_segments or 0) > 0:
+        try:
+            from services.story_memory_analysis_service import (
+                analyze_chapter,
+                receipt_dict,
+            )
+
+            if book_id:
+                story_memory_analysis = receipt_dict(
+                    await analyze_chapter(
+                        db,
+                        book_id=book_id,
+                        chapter_id=chapterId,
+                        content=body.content,
+                        automatic=True,
+                    )
+                )
+        except Exception:
+            pass
+    return {
+        "success": True,
+        "data": {
+            "id": diff_id,
+            "storyMemoryAnalysis": story_memory_analysis,
+        },
+    }
 
 
 @router.get("/chapter-diff/{chapterId}")
@@ -73,6 +114,20 @@ async def rollback_chapter_diff(diffId: int):
     rollback_from = target.get("after_text") or ""
 
     await save_article(db, chapter_id, rollback_to)
+    try:
+        from services.memory_deposition_service import resolve_book_id_for_chapter
+        from services.story_memory_analysis_service import invalidate_saved_chapter
+
+        book_id = await resolve_book_id_for_chapter(db, chapter_id)
+        if book_id:
+            await invalidate_saved_chapter(
+                db,
+                book_id=book_id,
+                chapter_id=chapter_id,
+                content=rollback_to,
+            )
+    except Exception:
+        pass
     new_id = await diff_crud.insert_diff_history(
         db,
         chapter_id=chapter_id,

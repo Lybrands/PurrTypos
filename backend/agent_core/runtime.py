@@ -166,6 +166,23 @@ class AgentRuntime:
         judges = tuple(response_judges)
         state = execution_state or ExecutionState()
         evidence_store = RunEvidenceStore()
+        context_receipts = evidence_store.record_context_messages(messages)
+        if context_receipts:
+            await self._trace(
+                "context_evidence",
+                "recorded",
+                details={
+                    "receiptCount": len(context_receipts),
+                    "storyReceiptCount": sum(
+                        receipt.source == "story_state"
+                        for receipt in context_receipts
+                    ),
+                    "semanticReceiptCount": sum(
+                        receipt.source == "semantic"
+                        for receipt in context_receipts
+                    ),
+                },
+            )
         context_contracts = dict(tool_context_contracts or {})
         configured_tools = tuple(tools) if request.tools_enabled else ()
         used_model = request.model.model

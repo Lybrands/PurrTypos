@@ -58,6 +58,12 @@ For a multi-step task, return:
 The taskSpec captures semantic intent only. Never put tool names, permissions,
 database access claims, dependency keys, requires, produces, or dependsOn in it.
 The host owns all tool prerequisites and evidence dependencies.
+When story continuity is relevant, declare semantic recall hints inside target:
+storyContext may contain characters, relationships, plot_threads, timeline, or
+world_facts; entities may name relevant characters/objects; chapterIds may name
+relevant chapters. Include only hints supported by the request and conversation.
+These hints describe relevance only; they never authorize access or override the
+host's evidence filters and tool contracts.
 
 Use 1-8 ordered action steps and no more than maxToolSteps from the host payload.
 Every tool step must contain exactly one expectedTools entry selected from the

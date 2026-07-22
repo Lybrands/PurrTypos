@@ -7,6 +7,16 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
+from application.unified_memory import (
+    UnifiedMemoryQueryService,
+    page_to_response,
+)
+from dependencies import get_db
+from domains.writing.unified_memory import (
+    UnifiedMemorySource,
+    UnifiedMemoryStatus,
+)
+
 from schemas.memories import (
     AddForeshadowingRequest,
     AddSparkIdeaRequest,
@@ -63,6 +73,28 @@ def _err_message(err: Exception) -> str:
 # ---------------------------------------------------------------------------
 # Unified long-term memories
 # ---------------------------------------------------------------------------
+
+@router.get("/books/{bookId}/memories/unified")
+async def list_unified_memories(
+    bookId: str,
+    q: str = Query(default="", max_length=500),
+    status: list[UnifiedMemoryStatus] | None = Query(default=None),
+    kind: list[str] | None = Query(default=None),
+    source: list[UnifiedMemorySource] | None = Query(default=None),
+    limit: int = Query(default=120, ge=1, le=500),
+):
+    try:
+        page = await UnifiedMemoryQueryService(get_db()).list_items(
+            bookId,
+            query=q,
+            statuses=tuple(item.value for item in (status or ())),
+            kinds=tuple(kind or ()),
+            sources=tuple(item.value for item in (source or ())),
+            limit=limit,
+        )
+        return {"success": True, "data": page_to_response(page)}
+    except Exception as exc:
+        return {"success": False, "error": _err_message(exc)}
 
 @router.post("/memories")
 async def create_memory(body: CreateMemoryRequest):

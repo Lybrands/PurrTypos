@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_core.contracts import AgentRunRequest
+from agent_core.contracts import AgentRunRequest, TaskContextRequest
 from domains.writing.associated_context import (
     AssociatedContextBuilder,
     AssociatedContextResult,
@@ -11,14 +11,22 @@ from domains.writing.associated_context import (
 )
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.memory_context import (
-    MemoryContextBlock,
     MemoryContextRequest,
     WritingMemoryContextBuilder,
     unavailable_memory_context,
 )
+from domains.writing.unified_memory_context import (
+    MemoryContextAssembler,
+    MemoryContextPack,
+    StoryMemoryContextBlock,
+    StoryMemoryContextProvider,
+    UnifiedMemoryRetriever,
+    memory_context_request_from_task,
+)
 from domains.writing.repositories import (
     AssociatedContextRepository,
     MemoryRecallRepository,
+    StoryMemoryRecallRepository,
 )
 
 
@@ -29,16 +37,24 @@ class RepositoryWritingContextSource:
         self,
         associated_repository: AssociatedContextRepository,
         memory_repository: MemoryRecallRepository,
+        story_memory_repository: StoryMemoryRecallRepository | None = None,
     ):
         self._associated = AssociatedContextBuilder(associated_repository)
-        self._memory = WritingMemoryContextBuilder(memory_repository)
+        self._memory = UnifiedMemoryRetriever(
+            WritingMemoryContextBuilder(memory_repository),
+            (
+                StoryMemoryContextProvider(story_memory_repository)
+                if story_memory_repository is not None
+                else None
+            ),
+        )
 
     async def build_memory(
         self,
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> MemoryContextBlock:
+    ) -> MemoryContextPack:
         memory_request = MemoryContextRequest(
             book_id=context.book_id,
             user_prompt=request.latest_user_text(),
@@ -47,11 +63,16 @@ class RepositoryWritingContextSource:
             selected_spark_idea_ids=context.selected_memory_ids,
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         )
+        memory_request = memory_context_request_from_task(
+            memory_request,
+            None,
+            current_chapter_id=context.chapter_id,
+        )
         try:
             return await self._memory.build(memory_request)
         except Exception:
             # Retrieval is optional context and must not prevent a chat run.
-            return unavailable_memory_context(memory_request)
+            return _unavailable_pack(memory_request)
 
     async def build_memory_for_query(
         self,
@@ -59,7 +80,7 @@ class RepositoryWritingContextSource:
         request: AgentRunRequest,
         token_budget: int,
         query: str,
-    ) -> MemoryContextBlock:
+    ) -> MemoryContextPack:
         """Run formal semantic recall with a host-compiled TaskSpec query."""
 
         memory_request = MemoryContextRequest(
@@ -70,10 +91,42 @@ class RepositoryWritingContextSource:
             selected_spark_idea_ids=context.selected_memory_ids,
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         )
+        memory_request = memory_context_request_from_task(
+            memory_request,
+            None,
+            current_chapter_id=context.chapter_id,
+        )
         try:
             return await self._memory.build(memory_request)
         except Exception:
-            return unavailable_memory_context(memory_request)
+            return _unavailable_pack(memory_request)
+
+    async def build_memory_for_task(
+        self,
+        context: WritingDomainContext,
+        request: AgentRunRequest,
+        token_budget: int,
+        query: str,
+        task: TaskContextRequest,
+    ) -> MemoryContextPack:
+        """Compile planner semantic declarations into bounded memory recall."""
+
+        memory_request = memory_context_request_from_task(
+            MemoryContextRequest(
+                book_id=context.book_id,
+                user_prompt=str(query or "").strip(),
+                token_budget=token_budget,
+                recall_limit=_memory_recall_limit(request.context_window),
+                selected_spark_idea_ids=context.selected_memory_ids,
+                selected_foreshadowing_ids=context.selected_foreshadowing_ids,
+            ),
+            task,
+            current_chapter_id=context.chapter_id,
+        )
+        try:
+            return await self._memory.build(memory_request)
+        except Exception:
+            return _unavailable_pack(memory_request)
 
     async def build_associated(
         self,
@@ -113,3 +166,18 @@ def _memory_recall_limit(context_window: int | None) -> int:
     if window >= 300_000:
         return 32
     return 16
+
+
+def _unavailable_pack(request: MemoryContextRequest) -> MemoryContextPack:
+    semantic = unavailable_memory_context(request)
+    story = StoryMemoryContextBlock(diagnostics={
+        "recalled": 0,
+        "included": 0,
+        "deferred": 0,
+        "unavailable": True,
+    })
+    return MemoryContextAssembler().assemble(
+        story,
+        semantic,
+        token_budget=request.token_budget,
+    )

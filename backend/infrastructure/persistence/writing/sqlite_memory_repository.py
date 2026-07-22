@@ -195,7 +195,10 @@ def _query_like_terms(query: str) -> list[str]:
         return []
     terms = [text]
     for chunk in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", text):
-        if len(chunk) <= 6:
+        if re.search(r"[\u4e00-\u9fff]", chunk) and len(chunk) > 3:
+            terms.append(chunk)
+            terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))
+        elif len(chunk) <= 6:
             terms.append(chunk)
         else:
             terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))

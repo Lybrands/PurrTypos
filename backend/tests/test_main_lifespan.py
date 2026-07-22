@@ -51,7 +51,7 @@ async def test_lifespan_shutdown_clears_composition_and_global_db(
     application = _RecordingApplication()
 
     async with main.lifespan(application):
-        assert application.router_count == 19
+        assert application.router_count == 20
         assert dependencies.get_db() is created[0]
         assert get_agent_composition().writing is not None
 

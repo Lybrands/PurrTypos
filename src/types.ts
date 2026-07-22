@@ -141,6 +141,78 @@ export interface ChapterDiffHistory {
   create_time?: string;
 }
 
+export interface StoryMemoryAnalysisReceipt {
+  book_id: string;
+  chapter_id: string;
+  source_revision: string;
+  status: 'skipped' | 'running' | 'completed' | 'reused' | 'failed';
+  candidate_count: number;
+  delta_id?: string | null;
+  reason: string;
+  model: string;
+}
+
+export interface StoryMemoryEvolutionFieldChange {
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface StoryMemoryEvolutionDecision {
+  delta_id: string;
+  target_key: string;
+  kind: 'character_state' | 'relationship_state' | 'world_fact' | 'timeline_event' | 'plot_thread';
+  classification: 'addition' | 'update' | 'duplicate' | 'conflict' | 'supersession';
+  recommendation: 'apply' | 'reject' | 'review';
+  risk: 'low' | 'medium' | 'high';
+  rationale: string;
+  field_changes: StoryMemoryEvolutionFieldChange[];
+  candidate_payload: Record<string, unknown>;
+  source_excerpt: string;
+  related_memory_key?: string | null;
+  existing_record_id?: string | null;
+  existing_version?: number | null;
+  candidate_confidence: number;
+  review_status: 'open' | 'resolved' | 'stale';
+  resolution: 'pending' | 'accepted' | 'rejected' | 'reverted';
+  resolved_delta_id?: string | null;
+  resolution_actor?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface StoryMemoryEvolutionReview {
+  delta_id: string;
+  book_id: string;
+  chapter_id: string;
+  status: 'open' | 'resolved' | 'stale';
+  decisions: StoryMemoryEvolutionDecision[];
+  summary: Record<StoryMemoryEvolutionDecision['classification'], number>;
+}
+
+export interface StoryMemoryEvolutionResolutionReceipt {
+  original_delta_id: string;
+  applied_delta_id?: string | null;
+  accepted_keys: string[];
+  rejected_keys: string[];
+  status: 'applied' | 'rejected';
+  actor: string;
+}
+
+export interface StoryMemoryVersionView {
+  record_id: string;
+  book_id: string;
+  memory_key: string;
+  version: number;
+  delta_id: string;
+  action: string;
+  payload: Record<string, unknown>;
+  status: 'confirmed' | 'inferred' | 'disputed' | 'deprecated';
+  lifecycle: 'active' | 'reverted';
+  provenance_status: 'valid' | 'stale';
+  source_id?: string | null;
+  create_time?: string | null;
+}
+
 /** 人物设定快照（diff 前后对比） */
 export interface CharacterSettingSnapshot {
   name: string;
@@ -543,6 +615,46 @@ export interface MemoryItem {
   deduped?: boolean;
 }
 
+export type UnifiedMemorySource = 'semantic' | 'story_state' | 'story_candidate';
+export type UnifiedMemoryStatus = 'active' | 'pending' | 'conflict' | 'stale' | 'archived' | 'rejected';
+
+export interface UnifiedMemoryItem {
+  id: string;
+  book_id: EntityId;
+  source: UnifiedMemorySource;
+  kind: MemoryKind | StoryMemoryEvolutionDecision['kind'];
+  status: UnifiedMemoryStatus;
+  content: string;
+  summary: string;
+  structured_data: Record<string, unknown>;
+  scope_type: string;
+  scope_id?: string | null;
+  chapter_id?: string | null;
+  chapter_title?: string | null;
+  evidence_excerpt: string;
+  confidence: number;
+  version?: number | null;
+  pinned: boolean;
+  source_type: string;
+  source_id?: string | null;
+  memory_key?: string | null;
+  delta_id?: string | null;
+  target_key?: string | null;
+  classification?: StoryMemoryEvolutionDecision['classification'] | null;
+  recommendation?: StoryMemoryEvolutionDecision['recommendation'] | null;
+  risk?: StoryMemoryEvolutionDecision['risk'] | null;
+  resolution?: StoryMemoryEvolutionDecision['resolution'] | null;
+  actions: Array<'activate' | 'edit' | 'pin' | 'archive' | 'accept' | 'reject' | 'view_history'>;
+  create_time?: string | null;
+  update_time?: string | null;
+}
+
+export interface UnifiedMemoryPage {
+  items: UnifiedMemoryItem[];
+  total: number;
+  suppressedDuplicates: number;
+}
+
 export interface MemoryContextDiagnostics {
   forced: number;
   recalled: number;
@@ -758,6 +870,29 @@ export interface ElectronAPI {
   getArticle: (data: {
     chapterId: EntityId;
   }) => Promise<ApiResult<Article | null>>;
+  analyzeChapterStoryMemory: (data: {
+    bookId: EntityId;
+    chapterId: EntityId;
+    modelId?: string;
+  }) => Promise<ApiResult<StoryMemoryAnalysisReceipt>>;
+  reviewStoryMemoryDelta: (data: {
+    deltaId: string;
+  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
+  getStoryMemoryEvolutionReview: (data: {
+    deltaId: string;
+  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
+  getStoryMemoryVersions: (data: {
+    bookId: EntityId;
+    memoryKey: string;
+  }) => Promise<ApiResult<StoryMemoryVersionView[]>>;
+  listStoryMemoryEvolutionReviews: (data: {
+    bookId: EntityId;
+    statuses?: Array<'open' | 'resolved' | 'stale'>;
+  }) => Promise<ApiResult<StoryMemoryEvolutionReview[]>>;
+  resolveStoryMemoryEvolutionReview: (data: {
+    deltaId: string;
+    resolutions: Record<string, 'accepted' | 'rejected'>;
+  }) => Promise<ApiResult<StoryMemoryEvolutionResolutionReceipt>>;
   getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
   saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
@@ -949,6 +1084,14 @@ export interface ElectronAPI {
       limit?: number;
     };
   }) => Promise<ApiResult<MemoryItem[]>>;
+  listUnifiedMemories: (data: {
+    bookId: EntityId;
+    query?: string;
+    statuses?: UnifiedMemoryStatus[];
+    kinds?: UnifiedMemoryItem['kind'][];
+    sources?: UnifiedMemorySource[];
+    limit?: number;
+  }) => Promise<ApiResult<UnifiedMemoryPage>>;
   getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<MemoryItem[]>>;
   linkMemories: (data: {
     bookId: EntityId;
@@ -1120,6 +1263,16 @@ export interface GeneralSettings {
   memory_intelligence_enabled?: boolean;
   /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
   memory_intelligence_model_id?: string;
+  /** 用户确认 AI 正文改动后，自动生成结构化 Story Memory 候选。 */
+  story_memory_analysis_enabled?: boolean;
+  /** 可选：指定用于 Story Memory 章节分析的模型配置 id。 */
+  story_memory_analysis_model_id?: string;
+  /** 仅对满足低风险白名单的 Story Memory 候选启用自动应用。 */
+  story_memory_auto_apply_enabled?: boolean;
+  /** 自动应用候选的最低模型置信度，默认 0.95。 */
+  story_memory_auto_apply_min_confidence?: number;
+  /** 自动应用允许的 Story Memory 类型白名单。 */
+  story_memory_auto_apply_kinds?: Array<StoryMemoryEvolutionDecision['kind']>;
 }
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';

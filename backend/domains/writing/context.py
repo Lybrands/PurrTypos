@@ -25,6 +25,7 @@ from domains.writing.memory_context import (
     MemoryContextRequest,
     unavailable_memory_context,
 )
+from domains.writing.unified_memory_context import MemoryContextPack
 from domains.writing.prompts import (
     build_writing_evidence_policy,
     build_writing_session_binding,
@@ -56,7 +57,7 @@ class WritingContextSource(Protocol):
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> str | MemoryContextBlock: ...
+    ) -> str | MemoryContextBlock | MemoryContextPack: ...
 
     async def build_associated(
         self,
@@ -197,10 +198,23 @@ class WritingContextProvider:
             selected_spark_idea_ids=context.selected_memory_ids,
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         )
-        memory_value: str | MemoryContextBlock = ""
+        memory_value: str | MemoryContextBlock | MemoryContextPack = ""
         if context.book_id and memory_budget > 0:
+            task_builder = getattr(self._source, "build_memory_for_task", None)
             query_builder = getattr(self._source, "build_memory_for_query", None)
-            if recall_query is not None and callable(query_builder):
+            if (
+                recall_query is not None
+                and task is not None
+                and callable(task_builder)
+            ):
+                memory_value = await task_builder(
+                    context,
+                    request,
+                    memory_budget,
+                    recall_query,
+                    task,
+                )
+            elif recall_query is not None and callable(query_builder):
                 memory_value = await query_builder(
                     context,
                     request,
@@ -218,7 +232,7 @@ class WritingContextProvider:
                     memory_request_value,
                     memory_budget,
                 )
-        if isinstance(memory_value, MemoryContextBlock):
+        if isinstance(memory_value, (MemoryContextBlock, MemoryContextPack)):
             memory_result = memory_value
         else:
             memory_result = unavailable_memory_context(memory_request)
@@ -247,7 +261,7 @@ class WritingContextProvider:
         )
         associated_block = associated_result.text
         retrieval = frame_untrusted_writing_context({
-            "long_term_memory": memory_block,
+            "memory_context_pack": memory_block,
             "associated_chapters_and_outlines": associated_block,
         })
         fitted_retrieval = _fit_json_budget(retrieval, allocated)
@@ -269,6 +283,10 @@ class WritingContextProvider:
                         for outline_id, text in (
                             associated_result.outline_source_records
                         )
+                    ],
+                    "memory_context_receipts": [
+                        receipt.to_mapping()
+                        for receipt in memory_result.receipts
                     ],
                 },
             ))
@@ -314,6 +332,13 @@ class WritingContextProvider:
                 "requiredEvidenceKinds": (
                     list(task.evidence_kinds) if task is not None else []
                 ),
+                "memoryContextReceipt": {
+                    "receipts": [
+                        receipt.to_mapping()
+                        for receipt in memory_result.receipts
+                    ],
+                    "diagnostics": dict(memory_result.diagnostics),
+                },
                 "hostPlanningFacts": build_host_planning_facts(
                     current_chapter_bound=bool(
                         str(context.chapter_id or "").strip()
@@ -441,7 +466,7 @@ def _fit_json_budget(text: str, token_budget: int) -> str:
 def build_host_planning_facts(
     *,
     current_chapter_bound: bool,
-    memory: MemoryContextBlock | None,
+    memory: MemoryContextBlock | MemoryContextPack | None,
     associated: AssociatedContextResult,
 ) -> dict[str, object]:
     """Return the ID-free planning manifest consumed by Agent Core."""
