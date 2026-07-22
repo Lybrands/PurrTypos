@@ -150,6 +150,87 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", 1, 2, "relates_to"],
     )
     await temp_db.execute(
+        "INSERT INTO story_memory_deltas "
+        "(id, book_id, chapter_id, source_revision, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ["delta1", "book1", "chapter1", "rev1", "applied"],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_sources "
+        "(id, delta_id, operation_index, book_id, chapter_id, excerpt) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ["source1", "delta1", 0, "book1", "chapter1", "Hero entered the city"],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_analysis_runs "
+        "(id, book_id, chapter_id, source_revision, status, delta_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ["analysis1", "book1", "chapter1", "rev1", "completed", "delta1"],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_evolution_reviews "
+        "(book_id, chapter_id, delta_id, target_key, kind, classification, "
+        "recommendation, risk) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            "book1",
+            "chapter1",
+            "delta1",
+            "character:hero:location",
+            "character_state",
+            "addition",
+            "apply",
+            "low",
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_delta_operations "
+        "(delta_id, operation_index, operation, target_key, kind, "
+        "after_payload_json, source_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            "delta1",
+            0,
+            "upsert",
+            "character:hero:location",
+            "character_state",
+            '{"value":"city"}',
+            "source1",
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_records "
+        "(id, book_id, memory_key, kind, payload_json, last_delta_id, last_source_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            "record1",
+            "book1",
+            "character:hero:location",
+            "character_state",
+            '{"value":"city"}',
+            "delta1",
+            "source1",
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO story_memory_versions "
+        "(record_id, book_id, memory_key, version, delta_id, action, kind, "
+        "payload_json, status, lifecycle, provenance_status, source_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            "record1",
+            "book1",
+            "character:hero:location",
+            1,
+            "delta1",
+            "apply",
+            "character_state",
+            '{"value":"city"}',
+            "confirmed",
+            "active",
+            "valid",
+            "source1",
+        ],
+    )
+    await temp_db.execute(
         "INSERT INTO story_background (book_id, content) VALUES (?, ?)",
         ["book1", "background"],
     )
@@ -197,6 +278,13 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_foreshadowing",
         "memory_items",
         "memory_links",
+        "story_memory_records",
+        "story_memory_deltas",
+        "story_memory_analysis_runs",
+        "story_memory_evolution_reviews",
+        "story_memory_sources",
+        "story_memory_delta_operations",
+        "story_memory_versions",
         "story_background",
         "story_background_attachments",
         "characters",

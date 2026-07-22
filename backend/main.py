@@ -103,6 +103,7 @@ async def lifespan(application: FastAPI):
             setting_diff,
             setting_entities,
             settings,
+            story_memory,
             story_background,
         )
 
@@ -123,6 +124,7 @@ async def lifespan(application: FastAPI):
         application.include_router(chapter_diff.router, prefix="/api")
         application.include_router(setting_diff.router, prefix="/api")
         application.include_router(setting_entities.router, prefix="/api")
+        application.include_router(story_memory.router, prefix="/api")
         application.include_router(dashboard.router, prefix="/api")
         application.include_router(export.router, prefix="/api")
 

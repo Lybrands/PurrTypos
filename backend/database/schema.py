@@ -539,6 +539,197 @@ async def init_schema(db: DatabaseConnection) -> None:
     """)
     await _try_exec(db, "INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
 
+    # ── story_memory_*：章节溯源、可版本化的正式故事状态 ──────────
+    # memory_items 继续承担通用召回；这里保存可审计的项目级当前状态，
+    # 以及每章带来的原子变化。两者在后续召回阶段通过适配器连接。
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_records (
+        id TEXT PRIMARY KEY NOT NULL,
+        book_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        subject_id TEXT DEFAULT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        lifecycle TEXT NOT NULL DEFAULT 'active',
+        provenance_status TEXT NOT NULL DEFAULT 'valid',
+        version INTEGER NOT NULL DEFAULT 1,
+        last_delta_id TEXT DEFAULT NULL,
+        last_source_id TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(book_id, memory_key)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_records_book_kind "
+        "ON story_memory_records(book_id, lifecycle, kind)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_records_subject "
+        "ON story_memory_records(book_id, subject_id)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_deltas (
+        id TEXT PRIMARY KEY NOT NULL,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL DEFAULT '',
+        source_type TEXT NOT NULL DEFAULT 'manual',
+        note TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        applied_at DATETIME DEFAULT NULL,
+        reverted_at DATETIME DEFAULT NULL,
+        invalidated_at DATETIME DEFAULT NULL
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_deltas_chapter "
+        "ON story_memory_deltas(book_id, chapter_id, status, create_time)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_analysis_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        delta_id TEXT DEFAULT NULL,
+        model_provider TEXT NOT NULL DEFAULT '',
+        model_name TEXT NOT NULL DEFAULT '',
+        candidate_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(book_id, chapter_id, source_revision)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_analysis_chapter "
+        "ON story_memory_analysis_runs(book_id, chapter_id, create_time)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_evolution_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        delta_id TEXT NOT NULL,
+        target_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        recommendation TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        rationale TEXT NOT NULL DEFAULT '',
+        field_changes_json TEXT NOT NULL DEFAULT '[]',
+        candidate_payload_json TEXT NOT NULL DEFAULT '{}',
+        source_excerpt TEXT NOT NULL DEFAULT '',
+        related_memory_key TEXT DEFAULT NULL,
+        existing_record_id TEXT DEFAULT NULL,
+        existing_version INTEGER DEFAULT NULL,
+        candidate_confidence REAL NOT NULL DEFAULT 1.0,
+        review_status TEXT NOT NULL DEFAULT 'open',
+        resolution TEXT NOT NULL DEFAULT 'pending',
+        resolved_delta_id TEXT DEFAULT NULL,
+        resolution_actor TEXT DEFAULT NULL,
+        resolved_at DATETIME DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(delta_id, target_key)
+    )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE story_memory_evolution_reviews "
+        "ADD COLUMN candidate_payload_json TEXT NOT NULL DEFAULT '{}'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE story_memory_evolution_reviews "
+        "ADD COLUMN source_excerpt TEXT NOT NULL DEFAULT ''",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE story_memory_evolution_reviews "
+        "ADD COLUMN resolved_delta_id TEXT DEFAULT NULL",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE story_memory_evolution_reviews "
+        "ADD COLUMN resolution_actor TEXT DEFAULT NULL",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE story_memory_evolution_reviews "
+        "ADD COLUMN resolved_at DATETIME DEFAULT NULL",
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_evolution_book_status "
+        "ON story_memory_evolution_reviews(book_id, review_status, create_time)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_sources (
+        id TEXT PRIMARY KEY NOT NULL,
+        delta_id TEXT NOT NULL,
+        operation_index INTEGER NOT NULL,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL DEFAULT '',
+        excerpt TEXT NOT NULL,
+        locator_json TEXT NOT NULL DEFAULT '{}',
+        narrative_order INTEGER DEFAULT NULL,
+        story_time TEXT DEFAULT NULL,
+        story_time_precision TEXT DEFAULT NULL,
+        status TEXT NOT NULL DEFAULT 'valid',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(delta_id, operation_index)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_sources_chapter "
+        "ON story_memory_sources(book_id, chapter_id, status)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_delta_operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        delta_id TEXT NOT NULL,
+        operation_index INTEGER NOT NULL,
+        operation TEXT NOT NULL,
+        target_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        subject_id TEXT DEFAULT NULL,
+        after_payload_json TEXT NOT NULL DEFAULT '{}',
+        after_status TEXT NOT NULL DEFAULT 'confirmed',
+        confidence REAL NOT NULL DEFAULT 1.0,
+        source_id TEXT NOT NULL,
+        before_record_json TEXT DEFAULT NULL,
+        after_record_json TEXT DEFAULT NULL,
+        applied_version INTEGER DEFAULT NULL,
+        UNIQUE(delta_id, operation_index),
+        UNIQUE(delta_id, target_key)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_operations_delta "
+        "ON story_memory_delta_operations(delta_id, operation_index)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_id TEXT NOT NULL,
+        book_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        delta_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        subject_id TEXT DEFAULT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL,
+        lifecycle TEXT NOT NULL,
+        provenance_status TEXT NOT NULL,
+        source_id TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(record_id, version)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_versions_key "
+        "ON story_memory_versions(book_id, memory_key, version)"
+    )
+
     # ── orphaned conversations migration ─────────────────────────
     orphaned = await db.fetch_all(
         "SELECT DISTINCT chapter_id FROM ai_conversations "

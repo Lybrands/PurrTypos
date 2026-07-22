@@ -52,6 +52,7 @@ from infrastructure.persistence.sqlite_approval_gateway import SqliteApprovalGat
 from infrastructure.persistence.writing import (
     SqliteAssociatedContextRepository,
     SqliteMemoryRecallRepository,
+    SqliteStoryMemoryRecallRepository,
     SqliteWritingToolMemoryRepository,
 )
 from infrastructure.writing import (
@@ -114,6 +115,7 @@ class AgentComposition:
                     RepositoryWritingContextSource(
                         SqliteAssociatedContextRepository(db),
                         SqliteMemoryRecallRepository(db),
+                        SqliteStoryMemoryRecallRepository(db),
                     )
                 ),
             )

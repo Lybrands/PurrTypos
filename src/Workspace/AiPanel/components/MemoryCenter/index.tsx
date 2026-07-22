@@ -1,14 +1,48 @@
 import React from 'react'
-import { Button, Empty, Input, List, Modal, Radio, Select, Space, Spin, Switch, Tag, Tooltip, message } from 'antd'
-import { CheckCircleOutlined, ClockCircleOutlined, CloseOutlined, InboxOutlined, PlusOutlined, PushpinOutlined } from '@ant-design/icons'
-import type { EntityId, MemoryItem, MemoryKind, MemoryStatus } from '../../../../types'
+import {
+  Button,
+  Empty,
+  Input,
+  Modal,
+  Radio,
+  Select,
+  Space,
+  Spin,
+  Switch,
+  Tag,
+  Tooltip,
+  message,
+} from 'antd'
+import {
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseOutlined,
+  HistoryOutlined,
+  InboxOutlined,
+  PlusOutlined,
+  PushpinOutlined,
+} from '@ant-design/icons'
+import type {
+  EntityId,
+  MemoryItem,
+  MemoryKind,
+  StoryMemoryVersionView,
+  UnifiedMemoryItem,
+  UnifiedMemorySource,
+  UnifiedMemoryStatus,
+} from '../../../../types'
 import './index.scss'
 
 interface MemoryCenterProps {
   bookId: EntityId | null
 }
 
-const KIND_OPTIONS: { value: MemoryKind; label: string }[] = [
+type Resolution = 'accepted' | 'rejected'
+type DisplayEntry =
+  | { type: 'memory'; key: string; item: UnifiedMemoryItem }
+  | { type: 'candidate'; key: string; deltaId: string; items: UnifiedMemoryItem[] }
+
+const MEMORY_KIND_OPTIONS: { value: MemoryKind; label: string }[] = [
   { value: 'canon', label: '设定' },
   { value: 'plot', label: '剧情事实' },
   { value: 'character', label: '人物状态' },
@@ -18,15 +52,41 @@ const KIND_OPTIONS: { value: MemoryKind; label: string }[] = [
   { value: 'summary', label: '总结' },
 ]
 
-const STATUS_OPTIONS: { value: MemoryStatus; label: string }[] = [
-  { value: 'pending', label: '待确认' },
-  { value: 'active', label: '已启用' },
+const STORY_KIND_OPTIONS = [
+  { value: 'character_state', label: '人物状态 · 精确' },
+  { value: 'relationship_state', label: '人物关系' },
+  { value: 'world_fact', label: '世界事实' },
+  { value: 'timeline_event', label: '时间线事件' },
+  { value: 'plot_thread', label: '剧情线' },
+] as const
+
+const ALL_KIND_OPTIONS = [...MEMORY_KIND_OPTIONS, ...STORY_KIND_OPTIONS]
+const KIND_LABEL = Object.fromEntries(
+  ALL_KIND_OPTIONS.map((item) => [item.value, item.label]),
+) as Record<string, string>
+
+const STATUS_OPTIONS: Array<{ value: UnifiedMemoryStatus; label: string }> = [
+  { value: 'active', label: '已生效' },
+  { value: 'pending', label: '待审核' },
+  { value: 'conflict', label: '冲突' },
+  { value: 'stale', label: '已失效' },
+  { value: 'rejected', label: '已拒绝' },
   { value: 'archived', label: '已归档' },
-  { value: 'superseded', label: '被覆盖' },
 ]
 
-const KIND_LABEL = Object.fromEntries(KIND_OPTIONS.map((item) => [item.value, item.label])) as Record<MemoryKind, string>
-const STATUS_LABEL = Object.fromEntries(STATUS_OPTIONS.map((item) => [item.value, item.label])) as Record<MemoryStatus, string>
+const STATUS_LABEL = Object.fromEntries(
+  STATUS_OPTIONS.map((item) => [item.value, item.label]),
+) as Record<UnifiedMemoryStatus, string>
+
+const SOURCE_OPTIONS: Array<{ value: UnifiedMemorySource; label: string }> = [
+  { value: 'semantic', label: '语义记忆' },
+  { value: 'story_state', label: '精确故事状态' },
+  { value: 'story_candidate', label: 'AI 候选' },
+]
+
+const SOURCE_LABEL = Object.fromEntries(
+  SOURCE_OPTIONS.map((item) => [item.value, item.label]),
+) as Record<UnifiedMemorySource, string>
 
 const KIND_HINTS: Record<MemoryKind, string> = {
   canon: '记录不会轻易改变的规则、身份或核心设定。',
@@ -40,11 +100,28 @@ const KIND_HINTS: Record<MemoryKind, string> = {
 
 const MEMORY_CONTENT_PLACEHOLDER = '请输入希望 AI 在后续创作中持续记住的内容…'
 
+function defaultResolution(item: UnifiedMemoryItem): Resolution | undefined {
+  if (item.recommendation === 'apply') return 'accepted'
+  if (item.recommendation === 'reject') return 'rejected'
+  return undefined
+}
+
+function semanticId(item: UnifiedMemoryItem): string {
+  return item.id.startsWith('semantic:') ? item.id.slice('semantic:'.length) : ''
+}
+
+function displayValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'string') return value
+  return JSON.stringify(value, null, 2)
+}
+
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const [query, setQuery] = React.useState('')
-  const [status, setStatus] = React.useState<MemoryStatus>('pending')
-  const [kind, setKind] = React.useState<MemoryKind | undefined>()
-  const [items, setItems] = React.useState<MemoryItem[]>([])
+  const [status, setStatus] = React.useState<UnifiedMemoryStatus | undefined>()
+  const [kind, setKind] = React.useState<UnifiedMemoryItem['kind'] | undefined>()
+  const [source, setSource] = React.useState<UnifiedMemorySource | undefined>()
+  const [items, setItems] = React.useState<UnifiedMemoryItem[]>([])
   const [loading, setLoading] = React.useState(false)
   const [creating, setCreating] = React.useState(false)
   const [createOpen, setCreateOpen] = React.useState(false)
@@ -52,8 +129,19 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const [newContent, setNewContent] = React.useState('')
   const [newStatus, setNewStatus] = React.useState<'active' | 'pending'>('active')
   const [newPinned, setNewPinned] = React.useState(false)
+  const [settingsSaving, setSettingsSaving] = React.useState(false)
   const [intelligenceEnabled, setIntelligenceEnabled] = React.useState(false)
-  const [intelligenceSaving, setIntelligenceSaving] = React.useState(false)
+  const [analysisEnabled, setAnalysisEnabled] = React.useState(false)
+  const [autoApplyEnabled, setAutoApplyEnabled] = React.useState(false)
+  const [minConfidence, setMinConfidence] = React.useState(0.95)
+  const [resolutions, setResolutions] = React.useState<Record<string, Record<string, Resolution>>>({})
+  const [submittingId, setSubmittingId] = React.useState<string | null>(null)
+  const [editingItem, setEditingItem] = React.useState<UnifiedMemoryItem | null>(null)
+  const [editingContent, setEditingContent] = React.useState('')
+  const [editingSaving, setEditingSaving] = React.useState(false)
+  const [historyItem, setHistoryItem] = React.useState<UnifiedMemoryItem | null>(null)
+  const [history, setHistory] = React.useState<StoryMemoryVersionView[]>([])
+  const [historyLoading, setHistoryLoading] = React.useState(false)
 
   const load = React.useCallback(async () => {
     if (bookId == null) {
@@ -61,51 +149,57 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       return
     }
     setLoading(true)
-    const res = await window.electronAPI.searchMemories({
+    const res = await window.electronAPI.listUnifiedMemories({
       bookId,
       query,
-      options: {
-        statuses: [status],
-        kinds: kind ? [kind] : undefined,
-        limit: 80,
-      },
+      statuses: status ? [status] : undefined,
+      kinds: kind ? [kind] : undefined,
+      sources: source ? [source] : undefined,
+      limit: 200,
     })
     setLoading(false)
-    if (res.success && Array.isArray(res.data)) {
-      setItems(res.data)
-    } else {
+    if (!res.success || !res.data || !Array.isArray(res.data.items)) {
       setItems([])
-      message.error(res.error || '读取长期记忆失败')
+      message.error(res.error || '读取记忆失败')
+      return
     }
-  }, [bookId, query, status, kind])
+    setItems(res.data.items)
+    setResolutions((previous) => {
+      const next = { ...previous }
+      res.data.items.forEach((item) => {
+        if (item.source !== 'story_candidate' || !item.delta_id || !item.target_key) return
+        const suggested = defaultResolution(item)
+        if (suggested && !next[item.delta_id]?.[item.target_key]) {
+          next[item.delta_id] = { ...(next[item.delta_id] || {}), [item.target_key]: suggested }
+        }
+      })
+      return next
+    })
+  }, [bookId, kind, query, source, status])
 
   React.useEffect(() => {
-    load()
+    void load()
   }, [load])
 
   React.useEffect(() => {
     let cancelled = false
     window.electronAPI.getSettings().then((res) => {
-      if (cancelled) return
-      if (res.success) {
-        setIntelligenceEnabled(!!res.data?.memory_intelligence_enabled)
-      }
+      if (cancelled || !res.success) return
+      setIntelligenceEnabled(!!res.data?.memory_intelligence_enabled)
+      setAnalysisEnabled(!!res.data?.story_memory_analysis_enabled)
+      setAutoApplyEnabled(!!res.data?.story_memory_auto_apply_enabled)
+      const value = Number(res.data?.story_memory_auto_apply_min_confidence)
+      setMinConfidence(Number.isFinite(value) ? value : 0.95)
     })
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [])
 
-  const handleToggleIntelligence = React.useCallback(async (checked: boolean) => {
-    setIntelligenceSaving(true)
-    const res = await window.electronAPI.setSettings({ memory_intelligence_enabled: checked })
-    setIntelligenceSaving(false)
-    if (res.success) {
-      setIntelligenceEnabled(checked)
-      message.success(checked ? '已开启高级智能记忆' : '已关闭高级智能记忆')
-    } else {
-      message.error(res.error || '保存高级智能记忆开关失败')
-    }
+  const saveSettings = React.useCallback(async (patch: Record<string, unknown>) => {
+    setSettingsSaving(true)
+    const res = await window.electronAPI.setSettings(patch)
+    setSettingsSaving(false)
+    if (!res.success) message.error(res.error || '保存记忆设置失败')
+    return res.success
   }, [])
 
   const handleCreate = React.useCallback(async () => {
@@ -120,126 +214,317 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       sourceType: 'manual',
     })
     setCreating(false)
-    if (res.success) {
-      setNewContent('')
-      setNewPinned(false)
-      setCreateOpen(false)
-      message.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存长期记忆')
-      load()
-    } else {
-      message.error(res.error || '保存长期记忆失败')
+    if (!res.success) {
+      message.error(res.error || '保存记忆失败')
+      return
     }
-  }, [bookId, newKind, newContent, newPinned, newStatus, load])
+    setNewContent('')
+    setNewPinned(false)
+    setCreateOpen(false)
+    message.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
+    await load()
+  }, [bookId, load, newContent, newKind, newPinned, newStatus])
 
-  const handleNewKindChange = React.useCallback((nextKind: MemoryKind) => {
-    setNewKind(nextKind)
-    setNewStatus(nextKind === 'summary' ? 'pending' : 'active')
-  }, [])
-
-  const updateItem = React.useCallback(async (item: MemoryItem, data: Partial<MemoryItem>) => {
-    const res = await window.electronAPI.updateMemory({ id: item.id, data })
-    if (res.success) {
-      setItems((prev) => prev.map((row) => (row.id === item.id ? res.data : row)))
-    } else {
-      message.error(res.error || '更新长期记忆失败')
+  const updateSemantic = React.useCallback(async (
+    item: UnifiedMemoryItem,
+    data: Partial<MemoryItem>,
+  ) => {
+    const id = semanticId(item)
+    if (!id) return false
+    const res = await window.electronAPI.updateMemory({ id, data })
+    if (!res.success) {
+      message.error(res.error || '更新记忆失败')
+      return false
     }
-  }, [])
+    await load()
+    return true
+  }, [load])
 
-  const handleArchive = React.useCallback((item: MemoryItem) => {
+  const archiveSemantic = React.useCallback((item: UnifiedMemoryItem) => {
+    const id = semanticId(item)
+    if (!id) return
     Modal.confirm({
       title: '归档这条记忆？',
-      content: '归档后默认不会自动召回，但仍可在已归档筛选中查看。',
+      content: '归档后不会自动召回，但仍可在已归档筛选中查看。',
       okText: '归档',
       cancelText: '取消',
       okButtonProps: { danger: true },
       onOk: async () => {
-        const res = await window.electronAPI.archiveMemory({ id: item.id })
-        if (res.success) {
-          setItems((prev) => prev.filter((row) => row.id !== item.id))
-        } else {
-          message.error(res.error || '归档失败')
-        }
+        const res = await window.electronAPI.archiveMemory({ id })
+        if (!res.success) message.error(res.error || '归档失败')
+        await load()
       },
     })
-  }, [])
+  }, [load])
 
-  const renderActions = (item: MemoryItem) => (
-    <Space size={6}>
-      {item.status === 'pending' ? (
-        <Button size="small" type="primary" onClick={() => updateItem(item, { status: 'active' })}>
-          确认
-        </Button>
-      ) : null}
-      <Tooltip title={item.pinned ? '取消固定' : '固定优先召回'}>
-        <Button
-          size="small"
-          type={item.pinned ? 'primary' : 'default'}
-          icon={<PushpinOutlined />}
-          onClick={() => updateItem(item, { pinned: item.pinned ? 0 : 1 })}
-        />
-      </Tooltip>
-      {item.status !== 'archived' ? (
-        <Button size="small" icon={<InboxOutlined />} onClick={() => handleArchive(item)}>
-          归档
-        </Button>
-      ) : null}
-    </Space>
+  const submitCandidateGroup = React.useCallback(async (
+    deltaId: string,
+    candidates: UnifiedMemoryItem[],
+  ) => {
+    const selected = resolutions[deltaId] || {}
+    if (!candidates.every((item) => item.target_key && selected[item.target_key])) {
+      message.warning('请先处理这一组中的所有候选')
+      return
+    }
+    setSubmittingId(deltaId)
+    const res = await window.electronAPI.resolveStoryMemoryEvolutionReview({
+      deltaId,
+      resolutions: selected,
+    })
+    setSubmittingId(null)
+    if (!res.success) {
+      message.error(res.error || '提交记忆审核失败')
+      await load()
+      return
+    }
+    message.success(res.data?.applied_delta_id ? '已应用接受的故事状态' : '候选已全部拒绝')
+    await load()
+  }, [load, resolutions])
+
+  const openHistory = React.useCallback(async (item: UnifiedMemoryItem) => {
+    if (bookId == null || !item.memory_key) return
+    setHistoryItem(item)
+    setHistory([])
+    setHistoryLoading(true)
+    const res = await window.electronAPI.getStoryMemoryVersions({
+      bookId,
+      memoryKey: item.memory_key,
+    })
+    setHistoryLoading(false)
+    if (res.success && Array.isArray(res.data)) setHistory(res.data)
+    else message.error(res.error || '读取版本历史失败')
+  }, [bookId])
+
+  const displayEntries = React.useMemo<DisplayEntry[]>(() => {
+    const candidates = new Map<string, UnifiedMemoryItem[]>()
+    items.forEach((item) => {
+      if (item.source === 'story_candidate' && item.delta_id) {
+        candidates.set(item.delta_id, [...(candidates.get(item.delta_id) || []), item])
+      }
+    })
+    const emitted = new Set<string>()
+    return items.reduce<DisplayEntry[]>((entries, item) => {
+      if (item.source !== 'story_candidate' || !item.delta_id) {
+        entries.push({ type: 'memory', key: item.id, item })
+        return entries
+      }
+      if (emitted.has(item.delta_id)) return entries
+      emitted.add(item.delta_id)
+      entries.push({
+        type: 'candidate' as const,
+        key: `candidate-group:${item.delta_id}`,
+        deltaId: item.delta_id,
+        items: candidates.get(item.delta_id) || [],
+      })
+      return entries
+    }, [])
+  }, [items])
+
+  const renderCandidateGroup = (deltaId: string, candidates: UnifiedMemoryItem[]) => {
+    const open = candidates.some((item) => item.actions.includes('accept'))
+    return (
+      <article className="story-memory-review-card" key={deltaId}>
+        <div className="story-memory-review-header">
+          <div>
+            <div className="story-memory-review-title">
+              {candidates[0]?.chapter_title || `章节 ${candidates[0]?.chapter_id || '未知'}`}
+            </div>
+            <div className="story-memory-review-summary">AI 提取的故事状态候选 · {candidates.length} 条</div>
+          </div>
+          <Tag>{STATUS_LABEL[candidates[0]?.status || 'pending']}</Tag>
+        </div>
+        <div className="story-memory-decision-list">
+          {candidates.map((item) => (
+            <div className="story-memory-decision" key={item.id}>
+              <div className="story-memory-decision-header">
+                <Space size={6} wrap>
+                  <Tag>{KIND_LABEL[item.kind] || item.kind}</Tag>
+                  {item.classification ? <Tag>{item.classification}</Tag> : null}
+                  {item.risk ? <Tag>{item.risk} risk</Tag> : null}
+                  <span className="story-memory-confidence">可信度 {Math.round(item.confidence * 100)}%</span>
+                </Space>
+                {open && item.target_key ? (
+                  <Radio.Group
+                    size="small"
+                    value={resolutions[deltaId]?.[item.target_key]}
+                    onChange={(event) => setResolutions((previous) => ({
+                      ...previous,
+                      [deltaId]: {
+                        ...(previous[deltaId] || {}),
+                        [item.target_key as string]: event.target.value as Resolution,
+                      },
+                    }))}
+                  >
+                    <Radio.Button value="accepted">接受</Radio.Button>
+                    <Radio.Button value="rejected">拒绝</Radio.Button>
+                  </Radio.Group>
+                ) : <Tag>{STATUS_LABEL[item.status]}</Tag>}
+              </div>
+              <div className="story-memory-rationale">{item.summary}</div>
+              <div className="story-memory-target-key">{item.target_key}</div>
+              <details className="unified-memory-details">
+                <summary>查看结构化字段与证据</summary>
+                <div className="story-memory-payload">
+                  {Object.entries(item.structured_data).map(([key, value]) => (
+                    <div className="story-memory-payload-row" key={key}>
+                      <span>{key}</span><code>{displayValue(value)}</code>
+                    </div>
+                  ))}
+                </div>
+                {item.evidence_excerpt ? <blockquote className="story-memory-evidence">{item.evidence_excerpt}</blockquote> : null}
+              </details>
+            </div>
+          ))}
+        </div>
+        {open ? (
+          <div className="story-memory-review-footer">
+            <span>接受项会成为正式故事状态；拒绝项仅保留审计记录。</span>
+            <Button
+              type="primary"
+              loading={submittingId === deltaId}
+              onClick={() => void submitCandidateGroup(deltaId, candidates)}
+            >
+              提交本组决议
+            </Button>
+          </div>
+        ) : null}
+      </article>
+    )
+  }
+
+  const renderMemory = (item: UnifiedMemoryItem) => (
+    <article className="unified-memory-card" key={item.id}>
+      <div className="unified-memory-card-main">
+        <Space size={6} wrap>
+          <Tag>{SOURCE_LABEL[item.source]}</Tag>
+          <Tag>{KIND_LABEL[item.kind] || item.kind}</Tag>
+          <Tag>{STATUS_LABEL[item.status]}</Tag>
+          {item.pinned ? <Tag>固定</Tag> : null}
+          {item.version ? <span className="memory-center-item-source">v{item.version}</span> : null}
+          {item.chapter_title ? <span className="memory-center-item-source">{item.chapter_title}</span> : null}
+        </Space>
+        <div className="unified-memory-content">{item.content}</div>
+        {item.summary ? <div className="memory-center-item-summary">{item.summary}</div> : null}
+        {(item.evidence_excerpt || Object.keys(item.structured_data).length) ? (
+          <details className="unified-memory-details">
+            <summary>查看来源与详情</summary>
+            {Object.keys(item.structured_data).length ? (
+              <div className="story-memory-payload">
+                {Object.entries(item.structured_data).map(([key, value]) => (
+                  <div className="story-memory-payload-row" key={key}>
+                    <span>{key}</span><code>{displayValue(value)}</code>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {item.evidence_excerpt ? <blockquote className="story-memory-evidence">{item.evidence_excerpt}</blockquote> : null}
+          </details>
+        ) : null}
+      </div>
+      <Space size={6} wrap className="unified-memory-actions">
+        {item.actions.includes('activate') ? (
+          <Button size="small" type="primary" onClick={() => void updateSemantic(item, { status: 'active' })}>启用</Button>
+        ) : null}
+        {item.actions.includes('edit') ? (
+          <Button size="small" onClick={() => { setEditingItem(item); setEditingContent(item.content) }}>编辑</Button>
+        ) : null}
+        {item.actions.includes('pin') ? (
+          <Tooltip title={item.pinned ? '取消固定' : '固定优先召回'}>
+            <Button
+              size="small"
+              type={item.pinned ? 'primary' : 'default'}
+              icon={<PushpinOutlined />}
+              onClick={() => void updateSemantic(item, { pinned: item.pinned ? 0 : 1 })}
+            />
+          </Tooltip>
+        ) : null}
+        {item.actions.includes('archive') ? (
+          <Button size="small" icon={<InboxOutlined />} onClick={() => archiveSemantic(item)}>归档</Button>
+        ) : null}
+        {item.actions.includes('view_history') ? (
+          <Button size="small" icon={<HistoryOutlined />} onClick={() => void openHistory(item)}>版本</Button>
+        ) : null}
+      </Space>
+    </article>
   )
 
   return (
     <div className="memory-center">
-      <div className="memory-center-intelligence">
+      <div className="memory-center-heading">
         <div>
-          <div className="memory-center-intelligence-title">高级智能记忆</div>
-          <div className="memory-center-intelligence-desc">
-            开启后，AI 接受的改动会调用模型提炼待确认候选，并尝试识别冲突、替代和伏笔线索。
-          </div>
+          <div className="memory-center-heading-title">统一记忆中心</div>
+          <div className="memory-center-heading-desc">集中管理语义记忆、精确故事状态与 AI 待审核候选。</div>
         </div>
-        <Switch
-          checked={intelligenceEnabled}
-          loading={intelligenceSaving}
-          onChange={handleToggleIntelligence}
-        />
       </div>
 
-      <div className="memory-center-toolbar">
-        <div className="memory-center-filters">
+      <div className="story-memory-policy-grid unified-memory-policy-grid">
+        <div className="memory-center-intelligence">
+          <div>
+            <div className="memory-center-intelligence-title">智能长期记忆</div>
+            <div className="memory-center-intelligence-desc">从已接受的改动中提炼语义记忆。</div>
+          </div>
+          <Switch checked={intelligenceEnabled} loading={settingsSaving} onChange={async (checked) => {
+            if (await saveSettings({ memory_intelligence_enabled: checked })) setIntelligenceEnabled(checked)
+          }} />
+        </div>
+        <div className="memory-center-intelligence">
+          <div>
+            <div className="memory-center-intelligence-title">章节故事状态分析</div>
+            <div className="memory-center-intelligence-desc">生成带原文证据的精确故事状态候选。</div>
+          </div>
+          <Switch checked={analysisEnabled} loading={settingsSaving} onChange={async (checked) => {
+            if (await saveSettings({ story_memory_analysis_enabled: checked })) setAnalysisEnabled(checked)
+          }} />
+        </div>
+        <div className="memory-center-intelligence">
+          <div>
+            <div className="memory-center-intelligence-title">低风险自动应用</div>
+            <div className="memory-center-intelligence-desc">只处理白名单内的高置信度低风险新增。</div>
+          </div>
+          <Space size={8}>
+            <Select
+              size="small"
+              value={minConfidence}
+              disabled={!autoApplyEnabled || settingsSaving}
+              options={[
+                { value: 0.9, label: '≥ 90%' },
+                { value: 0.95, label: '≥ 95%' },
+                { value: 0.98, label: '≥ 98%' },
+              ]}
+              onChange={async (value) => {
+                if (await saveSettings({ story_memory_auto_apply_min_confidence: value })) setMinConfidence(value)
+              }}
+            />
+            <Switch checked={autoApplyEnabled} loading={settingsSaving} onChange={async (checked) => {
+              if (await saveSettings({ story_memory_auto_apply_enabled: checked })) setAutoApplyEnabled(checked)
+            }} />
+          </Space>
+        </div>
+      </div>
+
+      <div className="memory-center-toolbar unified-memory-toolbar">
+        <div className="memory-center-filters unified-memory-filters">
           <Input.Search
             allowClear
-            placeholder="搜索长期记忆、伏笔、人物状态..."
+            placeholder="搜索全部记忆、故事状态与证据…"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onSearch={load}
+            onChange={(event) => setQuery(event.target.value)}
+            onSearch={() => void load()}
           />
-          <Select value={status} options={STATUS_OPTIONS} onChange={setStatus} className="memory-center-status-filter" />
-          <Select
-            allowClear
-            placeholder="全部类型"
-            value={kind}
-            options={KIND_OPTIONS}
-            onChange={setKind}
-            className="memory-center-kind-filter"
-          />
+          <Select allowClear placeholder="全部状态" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+          <Select allowClear placeholder="全部类型" value={kind} options={ALL_KIND_OPTIONS} onChange={setKind} />
+          <Select allowClear placeholder="全部来源" value={source} options={SOURCE_OPTIONS} onChange={setSource} />
         </div>
+        <Button onClick={() => void load()} loading={loading}>刷新</Button>
       </div>
 
-      <section
-        className={`memory-center-create ${createOpen ? 'is-open' : 'is-collapsed'}`}
-        aria-label="手动添加长期记忆"
-      >
+      <section className={`memory-center-create ${createOpen ? 'is-open' : 'is-collapsed'}`} aria-label="手动添加记忆">
         {!createOpen ? (
-          <button
-            type="button"
-            className="memory-center-create-launcher"
-            onClick={() => setCreateOpen(true)}
-            disabled={bookId == null}
-          >
+          <button type="button" className="memory-center-create-launcher" onClick={() => setCreateOpen(true)} disabled={bookId == null}>
             <span className="memory-center-create-launcher-icon"><PlusOutlined /></span>
             <span className="memory-center-create-launcher-copy">
               <span className="memory-center-create-launcher-title">手动添加记忆</span>
-              <span className="memory-center-create-launcher-desc">
-                {bookId == null ? '请先选择一本书' : '补充设定、剧情事实、人物状态或伏笔'}
-              </span>
+              <span className="memory-center-create-launcher-desc">补充设定、剧情事实、人物状态、伏笔或风格偏好</span>
             </span>
             <span className="memory-center-create-launcher-action">添加</span>
           </button>
@@ -250,28 +535,24 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 <div className="memory-center-create-title">手动添加记忆</div>
                 <div className="memory-center-create-desc">写下希望 AI 在后续创作中持续记住的信息。</div>
               </div>
-              <Button
-                type="text"
-                size="small"
-                icon={<CloseOutlined />}
-                onClick={() => setCreateOpen(false)}
-                aria-label="关闭添加记忆"
-              />
+              <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setCreateOpen(false)} aria-label="关闭添加记忆" />
             </div>
-
             <div className="memory-center-create-field">
               <div className="memory-center-create-label">记忆类型</div>
               <Radio.Group
                 value={newKind}
-                onChange={(event) => handleNewKindChange(event.target.value as MemoryKind)}
+                onChange={(event) => {
+                  const value = event.target.value as MemoryKind
+                  setNewKind(value)
+                  setNewStatus(value === 'summary' ? 'pending' : 'active')
+                }}
                 optionType="button"
                 buttonStyle="solid"
-                options={KIND_OPTIONS}
+                options={MEMORY_KIND_OPTIONS}
                 className="memory-center-kind-options"
               />
               <div className="memory-center-create-hint">{KIND_HINTS[newKind]}</div>
             </div>
-
             <div className="memory-center-create-field">
               <div className="memory-center-create-field-header">
                 <div className="memory-center-create-label">记忆内容</div>
@@ -282,7 +563,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 autoSize={{ minRows: 3, maxRows: 7 }}
                 maxLength={2000}
                 value={newContent}
-                onChange={(e) => setNewContent(e.target.value)}
+                onChange={(event) => setNewContent(event.target.value)}
                 onKeyDown={(event) => {
                   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                     event.preventDefault()
@@ -292,52 +573,30 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 placeholder={MEMORY_CONTENT_PLACEHOLDER}
               />
             </div>
-
             <div className="memory-center-create-options">
               <div className="memory-center-create-status">
                 <div className="memory-center-create-label">保存后状态</div>
-                <Radio.Group
-                  value={newStatus}
-                  onChange={(event) => setNewStatus(event.target.value as 'active' | 'pending')}
-                  className="memory-center-create-status-choices"
-                >
+                <Radio.Group value={newStatus} onChange={(event) => setNewStatus(event.target.value)} className="memory-center-create-status-choices">
                   <Radio.Button value="active">
                     <CheckCircleOutlined />
-                    <span className="memory-center-create-status-copy">
-                      <span className="memory-center-create-status-title">立即生效</span>
-                      <span className="memory-center-create-status-desc">马上参与召回</span>
-                    </span>
+                    <span className="memory-center-create-status-copy"><span className="memory-center-create-status-title">立即生效</span><span className="memory-center-create-status-desc">马上参与召回</span></span>
                   </Radio.Button>
                   <Radio.Button value="pending">
                     <ClockCircleOutlined />
-                    <span className="memory-center-create-status-copy">
-                      <span className="memory-center-create-status-title">待确认</span>
-                      <span className="memory-center-create-status-desc">审核后生效</span>
-                    </span>
+                    <span className="memory-center-create-status-copy"><span className="memory-center-create-status-title">待确认</span><span className="memory-center-create-status-desc">审核后生效</span></span>
                   </Radio.Button>
                 </Radio.Group>
               </div>
               <div className="memory-center-create-pinned">
-                <div>
-                  <div className="memory-center-create-label">固定优先召回</div>
-                  <div className="memory-center-create-hint">固定后，AI 会优先召回。</div>
-                </div>
+                <div><div className="memory-center-create-label">固定优先召回</div><div className="memory-center-create-hint">固定后，AI 会优先召回。</div></div>
                 <Switch size="small" checked={newPinned} onChange={setNewPinned} />
               </div>
             </div>
-
             <div className="memory-center-create-footer">
               <span className="memory-center-create-shortcut">Ctrl/⌘ + Enter 快速添加</span>
               <Space size={8}>
                 <Button onClick={() => setCreateOpen(false)}>取消</Button>
-                <Button
-                  type="primary"
-                  loading={creating}
-                  disabled={!newContent.trim()}
-                  onClick={() => void handleCreate()}
-                >
-                  添加到记忆库
-                </Button>
+                <Button type="primary" loading={creating} disabled={!newContent.trim()} onClick={() => void handleCreate()}>添加到记忆库</Button>
               </Space>
             </div>
           </div>
@@ -345,33 +604,49 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       </section>
 
       <Spin spinning={loading}>
-        <List
-          className="memory-center-list"
-          dataSource={items}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无长期记忆" /> }}
-          renderItem={(item) => (
-            <List.Item actions={[renderActions(item)]}>
-              <List.Item.Meta
-                title={
-                  <Space size={6} wrap>
-                    <Tag>{KIND_LABEL[item.kind] || item.kind}</Tag>
-                    <Tag>{STATUS_LABEL[item.status] || item.status}</Tag>
-                    {item.pinned ? <Tag>固定</Tag> : null}
-                    <span className="memory-center-item-source">{item.source_type}</span>
-                  </Space>
-                }
-                description={
-                  <div className="memory-center-item-body">
-                    <div>{item.content}</div>
-                    {item.summary ? <div className="memory-center-item-summary">{item.summary}</div> : null}
-                    {item.keywords ? <div className="memory-center-item-keywords">关键词：{item.keywords}</div> : null}
-                  </div>
-                }
-              />
-            </List.Item>
-          )}
-        />
+        {displayEntries.length ? (
+          <div className="unified-memory-list">
+            {displayEntries.map((entry) => (
+              entry.type === 'candidate'
+                ? renderCandidateGroup(entry.deltaId, entry.items)
+                : renderMemory(entry.item)
+            ))}
+          </div>
+        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无符合条件的记忆" />}
       </Spin>
+
+      <Modal
+        title="编辑记忆"
+        open={!!editingItem}
+        confirmLoading={editingSaving}
+        okText="保存"
+        cancelText="取消"
+        onCancel={() => setEditingItem(null)}
+        onOk={async () => {
+          if (!editingItem || !editingContent.trim()) return
+          setEditingSaving(true)
+          const saved = await updateSemantic(editingItem, { content: editingContent.trim() })
+          setEditingSaving(false)
+          if (saved) setEditingItem(null)
+        }}
+      >
+        <Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} />
+      </Modal>
+
+      <Modal title={historyItem ? `${historyItem.content} · 版本历史` : '版本历史'} open={!!historyItem} footer={null} onCancel={() => setHistoryItem(null)}>
+        <Spin spinning={historyLoading}>
+          {history.length ? (
+            <div className="unified-memory-history">
+              {history.map((version) => (
+                <div key={`${version.record_id}:${version.version}`}>
+                  <Space size={6}><Tag>v{version.version}</Tag><Tag>{version.action}</Tag><Tag>{version.provenance_status}</Tag></Space>
+                  <pre>{JSON.stringify(version.payload, null, 2)}</pre>
+                </div>
+              ))}
+            </div>
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无版本记录" />}
+        </Spin>
+      </Modal>
     </div>
   )
 }

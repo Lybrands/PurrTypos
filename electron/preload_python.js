@@ -120,6 +120,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── Articles — HTTP ───────────────────────────────────────────
   saveArticle: (data) => apiPut(`/articles/${data.chapterId}`, { content: data.content, source: data.source }),
   getArticle: (data) => apiGet(`/articles/${data.chapterId}`),
+  analyzeChapterStoryMemory: (data) =>
+    apiPost(`/books/${data.bookId}/chapters/${data.chapterId}/story-memory/analyze`, {
+      modelId: data.modelId || null,
+    }),
+  reviewStoryMemoryDelta: (data) =>
+    apiPost(`/story-memory/deltas/${data.deltaId}/evolution-review`, {}),
+  getStoryMemoryEvolutionReview: (data) =>
+    apiGet(`/story-memory/deltas/${data.deltaId}/evolution-review`),
+  getStoryMemoryVersions: (data) =>
+    apiGet(`/books/${data.bookId}/story-memory/versions?memoryKey=${encodeURIComponent(data.memoryKey)}`),
+  listStoryMemoryEvolutionReviews: (data) => {
+    const statuses = Array.isArray(data.statuses) ? data.statuses : []
+    const query = statuses.map((value) => `status=${encodeURIComponent(value)}`).join('&')
+    return apiGet(`/books/${data.bookId}/story-memory/evolution-reviews${query ? `?${query}` : ''}`)
+  },
+  resolveStoryMemoryEvolutionReview: (data) =>
+    apiPost(`/story-memory/deltas/${data.deltaId}/evolution-review/resolve`, {
+      resolutions: data.resolutions,
+    }),
 
   // ─── Story background — HTTP ───────────────────────────────────
   getStoryBackground: (data) => apiGet(`/story-background/${data.bookId}`),
@@ -252,6 +271,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateMemory: (data) => apiPut(`/memories/${data.id}`, { data: data.data }),
   archiveMemory: (data) => apiPost(`/memories/${data.id}/archive`, {}),
   searchMemories: (data) => apiPost('/memories/search', data),
+  listUnifiedMemories: (data) => {
+    const params = new URLSearchParams()
+    if (data.query) params.set('q', data.query)
+    for (const value of data.statuses || []) params.append('status', value)
+    for (const value of data.kinds || []) params.append('kind', value)
+    for (const value of data.sources || []) params.append('source', value)
+    if (data.limit) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(`/books/${data.bookId}/memories/unified${query ? `?${query}` : ''}`)
+  },
   getMemoriesByIds: (data) => apiPost('/memories/by-ids', data),
   linkMemories: (data) => apiPost('/memories/link', data),
   buildMemoryContext: (data) => apiPost('/memories/context', data),

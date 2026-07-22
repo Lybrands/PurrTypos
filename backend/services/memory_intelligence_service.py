@@ -13,6 +13,10 @@ from typing import Any
 
 from infrastructure.models.provider_router import create_chat_no_stream
 from services import long_term_memory_service
+from services.model_settings_service import (
+    is_setting_enabled,
+    resolve_model_config,
+)
 
 MEMORY_INTELLIGENCE_ENABLED_KEY = "memory_intelligence_enabled"
 MEMORY_INTELLIGENCE_MODEL_ID_KEY = "memory_intelligence_model_id"
@@ -51,7 +55,7 @@ JSON 格式：
 
 
 async def is_enabled(db: Any) -> bool:
-    return _coerce_bool(await _get_setting(db, MEMORY_INTELLIGENCE_ENABLED_KEY), False)
+    return await is_setting_enabled(db, MEMORY_INTELLIGENCE_ENABLED_KEY)
 
 
 async def extract_and_store_candidates(
@@ -80,7 +84,10 @@ async def extract_and_store_candidates(
     if not await is_enabled(db):
         return []
 
-    config = await _get_model_config(db)
+    config = await resolve_model_config(
+        db,
+        selection_key=MEMORY_INTELLIGENCE_MODEL_ID_KEY,
+    )
     if not config:
         return []
 
@@ -148,33 +155,6 @@ async def extract_and_store_candidates(
             await _link_candidate(clean_book_id, item["id"], relation)
         created.append(item)
     return created
-
-
-async def _get_model_config(db: Any) -> dict | None:
-    raw_configs = await _get_setting(db, "ai_model_configs")
-    configs = raw_configs if isinstance(raw_configs, list) else []
-    model_id = str(await _get_setting(db, MEMORY_INTELLIGENCE_MODEL_ID_KEY) or "").strip()
-    selected = None
-    if model_id:
-        selected = next((c for c in configs if str(c.get("id") or "") == model_id), None)
-    if not selected:
-        selected = next((c for c in configs if c.get("apiKey") and c.get("name")), None)
-    if not selected:
-        return None
-    if not str(selected.get("apiKey") or "").strip() or not str(selected.get("name") or "").strip():
-        return None
-    return selected
-
-
-async def _get_setting(db: Any, key: str) -> Any:
-    row = await db.fetch_one("SELECT value FROM settings WHERE key = ?", [key])
-    if not row:
-        return None
-    raw = row["value"]
-    try:
-        return json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return raw
 
 
 async def _nearby_existing_memories(book_id: str, source_text: str) -> list[dict]:
@@ -295,20 +275,6 @@ def _keywords(text: str) -> list[str]:
         if word not in result:
             result.append(word[:16])
     return result[:6]
-
-
-def _coerce_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        s = value.strip().lower()
-        if s in {"true", "1", "yes", "on"}:
-            return True
-        if s in {"false", "0", "no", "off", ""}:
-            return False
-    return default
 
 
 def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
