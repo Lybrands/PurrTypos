@@ -1,5 +1,5 @@
 import React from 'react'
-import { useAntdApp } from '../hooks/useAntdApp'
+import { useAppFeedback } from '../hooks/useAppFeedback'
 
 export type DatabaseInfo = {
   dbPath: string
@@ -9,7 +9,7 @@ export type DatabaseInfo = {
 }
 
 export function useDatabaseActions(active: boolean) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [exportingDb, setExportingDb] = React.useState(false)
   const [importingDb, setImportingDb] = React.useState(false)
   const [dbInfoLoading, setDbInfoLoading] = React.useState(false)

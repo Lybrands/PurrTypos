@@ -1,5 +1,5 @@
 import React from "react";
-import { Tooltip } from "antd";
+import { Tooltip } from "../../../../ui";
 import type { AiModelConfig } from "../../../../types";
 import { contextWindowTokens } from "../../../../models/shared";
 import { getDefaultModelContextWindow } from "../../../../models/runtime";

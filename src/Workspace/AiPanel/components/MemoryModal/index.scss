@@ -73,7 +73,7 @@
     margin-bottom: 12px;
     transition: border-color 0.2s, box-shadow 0.2s;
     &:focus-within {
-      border-color: var(--accent, #1677ff);
+      border-color: var(--accent, #c94361);
       box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
     }
   }
@@ -82,37 +82,37 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    .ant-select {
+    .purr-select {
       flex-shrink: 0;
     }
   }
 
   /* 表单内 Select / Input 统一风格 */
   .memory-add-card {
-    .ant-select-selector,
-    .ant-input {
+    .purr-select__selector,
+    .purr-input {
       border-radius: 6px;
       font-size: 13px;
       transition: border-color 0.2s, box-shadow 0.2s;
     }
-    .ant-select.ant-select-sm .ant-select-selector {
+    .purr-select.purr-select--small .purr-select__selector {
       padding-inline: 10px 28px;
       min-height: 32px;
       align-items: center;
     }
-    .ant-input {
+    .purr-input {
       padding: 6px 10px;
       resize: vertical;
       &::placeholder {
         color: var(--text-muted);
       }
       &:focus,
-      &.ant-input-focused {
-        border-color: var(--accent, #1677ff);
+      &.is-focused {
+        border-color: var(--accent, #c94361);
         box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
       }
     }
-    .ant-btn-primary {
+    .purr-button--primary {
       border-radius: 6px;
       font-weight: 500;
       min-height: 32px;
@@ -136,13 +136,13 @@
       gap: 8px;
       width: 100%;
       min-width: 0;
-      .memory-add-content-input.ant-input {
+      .memory-add-content-input.purr-input {
         flex: 1;
         min-width: 0;
         min-height: 40px;
         line-height: 1.5;
       }
-      .ant-btn {
+      .purr-button {
         flex-shrink: 0;
       }
     }
@@ -223,7 +223,7 @@
 
   /* 编辑态：撑满整行，不再有右侧按钮列；输入框 + 第二行操作条 */
   .memory-manage-item--editing {
-    border-color: var(--accent, #1677ff);
+    border-color: var(--accent, #c94361);
     background: var(--bg-panel, var(--bg-active));
     box-shadow: 0 0 0 2px var(--accent-dim, rgba(22, 119, 255, 0.08));
     .memory-manage-edit-form {
@@ -233,7 +233,7 @@
       flex-direction: column;
       gap: 8px;
     }
-    .memory-manage-edit-input.ant-input {
+    .memory-manage-edit-input.purr-input {
       font-size: 13px;
       line-height: 1.5;
       border-radius: 6px;
@@ -252,7 +252,7 @@
         max-width: 220px;
       }
       /* save + cancel 始终贴右；不管前面有没有关联 Select */
-      .ant-btn-primary {
+      .purr-button--primary {
         margin-left: auto;
       }
     }

@@ -1,10 +1,10 @@
 import React from 'react'
-import { Button, Tooltip } from 'antd'
+import { Button, Tooltip } from '../../ui'
 import {
   BookOutlined,
   BulbOutlined,
   HighlightOutlined,
-} from '@ant-design/icons'
+} from '../../ui'
 import { useWorkspace } from '../WorkspaceContext'
 import {
   GLOBAL_OUTLINE_TAB,

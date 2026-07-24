@@ -1,6 +1,6 @@
 import React from 'react'
-import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined } from '@ant-design/icons'
-import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tag, Tooltip } from 'antd'
+import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined } from '../ui'
+import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tag, Tooltip } from '../ui'
 import type { AiModelConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
@@ -8,7 +8,7 @@ import {
   getModelPreset,
   getModelContextWindowOptions,
 } from '../modelCatalog'
-import { useAntdApp } from '../hooks/useAntdApp'
+import { useAppFeedback } from '../hooks/useAppFeedback'
 import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import './index.scss'
@@ -35,7 +35,7 @@ export default function SettingsPage({
   syncOutlineChapter,
   onSyncOutlineChapterChange,
 }: SettingsPageProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)

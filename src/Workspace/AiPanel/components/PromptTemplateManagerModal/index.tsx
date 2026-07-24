@@ -1,23 +1,10 @@
 import React from "react";
-import {
-  App as AntdApp,
-  Button,
-  Empty,
-  Form,
-  Input,
-  List,
-  Modal,
-  Popconfirm,
-  Space,
-  Tag,
-  Tooltip,
-} from "antd";
-import type { TextAreaRef } from "antd/es/input/TextArea";
+import { Button, Empty, Form, Input, List, Modal, Popconfirm, Space, Tag, Tooltip, useToast, type TextAreaRef } from "../../../../ui";
 import {
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
-} from "@ant-design/icons";
+} from "../../../../ui";
 import type { AiPromptTemplate } from "../../../../types";
 import { PROMPT_PLACEHOLDERS } from "../../promptTemplates";
 import "./index.scss";
@@ -39,7 +26,7 @@ export default function PromptTemplateManagerModal({
   open,
   onClose,
 }: PromptTemplateManagerModalProps) {
-  const { message: appMessage } = AntdApp.useApp();
+  const appMessage = useToast();
   const [templates, setTemplates] = React.useState<AiPromptTemplate[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [form, setForm] = React.useState<FormState>(EMPTY_FORM);

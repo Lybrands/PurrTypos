@@ -1,5 +1,5 @@
 import React from 'react'
-import { App as AntdApp } from 'antd'
+import { useToast } from '../../ui'
 import type { Chapter, EntityId, Outline } from '../../types'
 import type { ExportFormat } from '../../components/ExportModal'
 import { buildExportEntries, buildSingleTxtContent } from '../../utils/exportBooks'
@@ -48,7 +48,7 @@ export function useChapterSectionActions({
   onWritingChapterDeleted,
   onExportSuccess,
 }: UseChapterSectionActionsOptions) {
-  const { message } = AntdApp.useApp()
+  const message = useToast()
   const addingRef = React.useRef(false)
   const [exportLoading, setExportLoading] = React.useState(false)
 

@@ -1,13 +1,12 @@
 import React from 'react'
-import { Button, Dropdown, Input, Modal, Space, Tag, Tooltip } from 'antd'
-import type { MenuProps } from 'antd'
+import { Button, Dropdown, Input, Modal, Space, Tag, Tooltip, useConfirm, type DropdownItem } from '../../ui'
 import {
   CheckOutlined,
   CloseOutlined,
   DownOutlined,
   RollbackOutlined,
   SaveOutlined,
-} from '@ant-design/icons'
+} from '../../ui'
 import type { EntityId } from '../../types'
 import { useDiff } from './DiffContext'
 import { countByStatus, type DiffOp } from './paragraphDiff'
@@ -21,7 +20,7 @@ interface DiffOverlayProps {
 export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProps) {
   const diff = useDiff()
   const session = diff.getSession(chapterId)
-  const [modal, modalCtx] = Modal.useModal()
+  const confirm = useConfirm()
   const [committing, setCommitting] = React.useState(false)
 
   if (!session) return null
@@ -38,13 +37,14 @@ export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProp
   }
   const handleExit = () => {
     if (stats.accepted > 0 || stats.rejected > 0) {
-      modal.confirm({
+      void confirm({
         title: '退出 diff 会话',
         content: '已处理的接受/拒绝将丢失，正文回到 diff 开始前的状态。继续？',
-        okText: '退出',
+        confirmText: '退出',
         cancelText: '继续编辑',
-        okButtonProps: { danger: true },
-        onOk: () => diff.exitDiff(chapterId),
+        confirmVariant: 'danger',
+      }).then((result) => {
+        if (result === 'confirm') diff.exitDiff(chapterId)
       })
     } else {
       diff.exitDiff(chapterId)
@@ -64,8 +64,6 @@ export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProp
 
   return (
     <div className="diff-overlay">
-      {modalCtx}
-
       {/* ── 顶部 toolbar ──────────────────────────────────────── */}
       <div className="diff-overlay-toolbar">
         <div className="diff-overlay-title">
@@ -181,7 +179,7 @@ function DiffParagraphRow({ op, onAccept, onReject, onPending }: DiffParagraphRo
     `diff-status-${op.status}`,
   ].join(' ')
 
-  const rejectMenuItems: MenuProps['items'] = [
+  const rejectMenuItems: DropdownItem[] = [
     {
       key: 'discard',
       label: '直接放弃（保留原文）',

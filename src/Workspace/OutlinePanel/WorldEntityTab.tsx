@@ -6,14 +6,14 @@ import {
   HistoryOutlined,
   CommentOutlined,
   CompassOutlined,
-} from '@ant-design/icons'
-import { Button, Modal, Input, Select, Tag, Tooltip, Empty, Segmented } from 'antd'
+} from '../../ui'
+import { Button, Empty, Input, Modal, Segmented, Select, Tag, Tooltip } from '../../ui'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import type { EntityId, SettingEntity, SettingEntityType } from '../../types'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
@@ -82,7 +82,7 @@ export default function WorldEntityTab({
   focusEntityId = null,
   onFocusEntityHandled,
 }: WorldEntityTabProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [entities, setEntities] = React.useState<SettingEntity[]>([])
   const [typeFilter, setTypeFilter] = React.useState<SettingEntityType | 'all'>('all')
   const [editModalOpen, setEditModalOpen] = React.useState(false)

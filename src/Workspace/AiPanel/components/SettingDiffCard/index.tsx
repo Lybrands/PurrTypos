@@ -1,10 +1,10 @@
 import React from 'react'
-import { Button, Card, Space, Tag } from 'antd'
+import { Button, Card, Space, Tag } from '../../../../ui'
 import {
   CheckOutlined,
   CloseOutlined,
   EyeOutlined,
-} from '@ant-design/icons'
+} from '../../../../ui'
 import type { SettingDiffCardState } from '../../../../types'
 import { useSettingDiff } from '../../../settingDiff/SettingDiffContext'
 import { countByStatus } from '../../../diff/paragraphDiff'

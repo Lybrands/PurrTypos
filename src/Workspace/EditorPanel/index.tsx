@@ -9,9 +9,8 @@ import {
   CopyOutlined,
   BorderlessTableOutlined,
   HistoryOutlined,
-} from '@ant-design/icons'
-import { App as AntdApp, Button, Input, Empty, Tooltip } from 'antd'
-import type { TextAreaRef } from 'antd/es/input/TextArea'
+} from '../../ui'
+import { Button, Empty, Input, Tooltip, useToast, type TextAreaRef } from '../../ui'
 import type { AiModelConfig, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -77,7 +76,7 @@ export default function EditorPanel({
   onUpdateModelConfig,
   onLexicalEditor,
 }: EditorPanelProps) {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const {
     writingChapters: chapters,
     activeChapterId: chapterId,

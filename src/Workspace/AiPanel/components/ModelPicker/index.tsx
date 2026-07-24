@@ -1,6 +1,6 @@
 import React from 'react'
-import { CheckOutlined, EditOutlined } from '@ant-design/icons'
-import { Divider, Popover, Select } from 'antd'
+import { CheckOutlined, EditOutlined } from '../../../../ui'
+import { Divider, Popover, Select } from '../../../../ui'
 import type { AiModelConfig } from '../../../../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
@@ -31,7 +31,7 @@ const displayModelName = (model: AiModelConfig | null | undefined): string =>
  * 模型选择器：一个普通的模型名称下拉框。
  *
  * 关键点 —— 配置与选择完全解耦：
- * - 下拉框本身只负责「选模型」，结构是标准 antd Select，不被配置 UI 改造。
+ * - 下拉框本身只负责「选模型」，配置入口保持为独立浮层。
  * - 每行 hover 出现「编辑」入口，点击后弹出**独立** Popover 配置 Context / Thinking。
  * - 编辑浮层浮在上层（portal 到 body），不在下拉里占位、不改变下拉布局。
  * - 编辑浮层打开时用 ref 守卫，避免它的外部点击把模型下拉一起关掉。
@@ -98,6 +98,7 @@ export default function ModelPicker({
             <span className="model-picker-option-name">{option.label}</span>
             <Popover
               trigger="click"
+              nativeButton={false}
               placement="right"
               arrow={false}
               // 编辑入口在下拉行最右侧，向右再推一段，确保浮层不与下拉框重叠

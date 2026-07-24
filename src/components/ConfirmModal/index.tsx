@@ -1,5 +1,5 @@
 import React from 'react'
-import { Modal, Checkbox } from 'antd'
+import { Button, Checkbox, Dialog } from '../../ui'
 import './index.scss'
 
 interface ConfirmModalProps {
@@ -20,24 +20,25 @@ export default function ConfirmModal({
   const [checked, setChecked] = React.useState(false)
 
   return (
-    <Modal
+    <Dialog
       title={title}
       open
-      onOk={() => onConfirm(checked)}
-      onCancel={onCancel}
-      okText="确认删除"
-      okButtonProps={{ danger: true }}
-      cancelText="取消"
-      destroyOnHidden
+      onOpenChange={(open) => { if (!open) onCancel() }}
+      footer={(
+        <>
+          <Button onClick={onCancel}>取消</Button>
+          <Button variant="danger" onClick={() => onConfirm(checked)}>确认删除</Button>
+        </>
+      )}
     >
       <p className="confirm-modal-message">{message}</p>
       {checkboxLabel && (
         <div className="confirm-modal-checkbox">
-          <Checkbox checked={checked} onChange={(e) => setChecked(e.target.checked)}>
+          <Checkbox checked={checked} onChange={(event) => setChecked(event.target.checked)}>
             {checkboxLabel}
           </Checkbox>
         </div>
       )}
-    </Modal>
+    </Dialog>
   )
 }

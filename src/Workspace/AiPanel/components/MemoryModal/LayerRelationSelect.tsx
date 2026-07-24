@@ -1,5 +1,5 @@
 import React from 'react'
-import { Select } from 'antd'
+import { Select } from '../../../../ui'
 import type { Character, EntityId } from '../../../../types'
 import { SparkIdeaLayerFour } from '../../types'
 import type { WritingChapter } from './types'

@@ -1,6 +1,6 @@
 import React from 'react'
-import { App as AntdApp, Button, Drawer, Empty, Modal, Spin, Tag, Tooltip } from 'antd'
-import { HistoryOutlined, RollbackOutlined } from '@ant-design/icons'
+import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
+import { HistoryOutlined, RollbackOutlined } from '../../ui'
 import type { EntityId, OutlineHistoryDetail, OutlineHistoryListItem } from '../../types'
 import './OutlineHistoryDrawer.scss'
 
@@ -30,8 +30,8 @@ function renderSourceTag(source: string) {
 export default function OutlineHistoryDrawer({
   outlineId, outlineTitle, open, onClose, onRestored,
 }: OutlineHistoryDrawerProps) {
-  const { message: appMessage } = AntdApp.useApp()
-  const [modal, modalCtx] = Modal.useModal()
+  const appMessage = useToast()
+  const confirm = useConfirm()
   const [loading, setLoading] = React.useState(false)
   const [items, setItems] = React.useState<OutlineHistoryListItem[]>([])
   const [expandedId, setExpandedId] = React.useState<number | null>(null)
@@ -90,7 +90,7 @@ export default function OutlineHistoryDrawer({
   }
 
   const handleRestore = (item: OutlineHistoryListItem) => {
-    modal.confirm({
+    void confirm({
       title: '回退到此版本',
       content: (
         <div>
@@ -104,10 +104,11 @@ export default function OutlineHistoryDrawer({
           </p>
         </div>
       ),
-      okText: '回退',
-      okButtonProps: { danger: true },
+      confirmText: '回退',
+      confirmVariant: 'danger',
       cancelText: '取消',
-      onOk: async () => {
+    }).then(async (result) => {
+      if (result === 'confirm') {
         setRestoringId(item.id)
         try {
           const res = await window.electronAPI.restoreOutlineHistory({ historyId: item.id })
@@ -124,7 +125,7 @@ export default function OutlineHistoryDrawer({
         } finally {
           setRestoringId(null)
         }
-      },
+      }
     })
   }
 
@@ -147,8 +148,6 @@ export default function OutlineHistoryDrawer({
       onClose={onClose}
       destroyOnHidden
     >
-      {modalCtx}
-
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
       ) : items.length === 0 ? (

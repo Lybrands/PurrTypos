@@ -1,18 +1,20 @@
 // 模型选择器：保持标准下拉框外观，不被配置 UI 改造
-.model-picker.ant-select {
-  width: fit-content;
-  max-width: 220px;
+.model-picker.purr-select {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
   font-size: var(--font-size-sm);
 
-  .ant-select-selection-item {
+  .purr-select__value {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 }
 
-// 下拉弹层：选项字号与触发器、配置 popover 保持一致（默认 antd 14px 会偏大）
-.model-picker-popup.ant-select-dropdown .ant-select-item {
+// 下拉弹层：选项字号与触发器、配置 popover 保持一致
+.model-picker-popup.purr-select__popup .purr-select__item {
   font-size: var(--font-size-sm);
 }
 
@@ -52,15 +54,15 @@
 }
 
 // 鼠标悬停该行、键盘选中该行，或该行配置浮层处于打开状态时显示编辑入口
-.ant-select-item-option:hover .model-picker-option-edit,
-.ant-select-item-option-active .model-picker-option-edit,
+.purr-select__item:hover .model-picker-option-edit,
+.purr-select__item[data-highlighted] .model-picker-option-edit,
 .model-picker-option-edit--active {
   visibility: visible;
 }
 
 // 编辑入口弹出的独立配置浮层
 .model-picker-config-popover {
-  .ant-popover-inner {
+  .purr-popover__inner {
     padding: 6px;
   }
 }

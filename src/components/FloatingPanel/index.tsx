@@ -1,10 +1,10 @@
 import React from "react";
-import { Button, Tooltip } from "antd";
+import { Button, Tooltip } from '../../ui';
 import {
   CloseOutlined,
   PushpinFilled,
   PushpinOutlined,
-} from "@ant-design/icons";
+} from "../../ui";
 import "./index.scss";
 
 interface FloatingPanelProps {

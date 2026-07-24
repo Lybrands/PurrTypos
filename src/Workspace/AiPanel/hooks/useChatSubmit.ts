@@ -1,5 +1,5 @@
 import React from "react";
-import { App as AntdApp } from "antd";
+import { useToast } from "../../../ui";
 import {
   type ChatMessage,
   type ToolCallLabelOutcome,
@@ -51,7 +51,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     sessionScope = "chapter",
   } = params;
 
-  const { message: appMessage } = AntdApp.useApp();
+  const appMessage = useToast();
   const unsubscribeRef = React.useRef<(() => void) | null>(null);
   const visibleSessionIdRef = React.useRef<number | null>(activeSessionId);
   const runningSessionIdRef = React.useRef<number | null>(null);

@@ -34,7 +34,7 @@
 .ai-context-pipeline-slot {
   min-width: 0;
 
-  .ant-checkbox-wrapper {
+  .purr-checkbox-label {
     font-size: var(--font-size-sm);
     margin-inline-start: 0;
     line-height: 1.35;
@@ -49,11 +49,11 @@
   border-bottom: 1px solid color-mix(in srgb, var(--text-muted) 20%, transparent);
 }
 
-.ai-pipeline-btn--active.ant-btn {
+.ai-pipeline-btn--active.purr-button {
   color: var(--warning);
 }
 
-.ai-context-icon-btn.ant-btn {
+.ai-context-icon-btn.purr-button {
   flex-shrink: 0;
   padding: 0 4px;
   color: var(--text-muted);
@@ -61,7 +61,7 @@
     color: var(--text-primary);
   }
 }
-.ai-memory-btn--has-selection.ant-btn {
+.ai-memory-btn--has-selection.purr-button {
   color: var(--accent);
 }
 
@@ -74,32 +74,24 @@
   gap: 2px;
 }
 
-.ai-context-select.ant-select {
+.ai-context-select.purr-select {
   flex: 1;
   min-width: 0;
   font-size: var(--font-size-sm);
 
-  .ant-select-selector {
-    font-size: var(--font-size-sm);
-    padding: 0 6px !important;
-  }
-
-  .ant-select-selection-placeholder,
-  .ant-select-selection-item {
-    font-size: var(--font-size-sm);
-    line-height: 22px;
-  }
+  padding: 0 6px;
+  line-height: 22px;
 }
 
-.ai-context-quick-btn.ant-btn {
+.ai-context-quick-btn.purr-button {
   flex-shrink: 0;
   padding: 0 3px;
   color: var(--text-muted);
 }
 
 /* 关联 Popover 无箭头 */
-.ai-context-popover.ant-popover {
-  .ant-popover-arrow {
+.ai-context-popover.purr-popover {
+  .purr-popover__arrow {
     display: none;
   }
 }

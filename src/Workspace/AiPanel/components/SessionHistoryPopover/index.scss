@@ -1,112 +1,183 @@
 /* ─── 历史对话 Popover ──────────────────────────────────────── */
-.session-history-popover.ant-popover {
-  .ant-popover-inner {
+.session-history-popover.purr-popover {
+  width: min(320px, calc(100vw - 24px));
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+
+  .purr-popover__inner {
     padding: 0;
   }
 
-  .ant-popover-title {
-    padding: 10px 14px 8px;
-    font-size: var(--font-size-sm);
+  .purr-popover__title {
+    min-height: 46px;
+    margin: 0;
+    padding: 12px 15px 10px;
+    color: var(--text-primary);
+    font-size: var(--font-size);
     font-weight: var(--font-weight-semibold);
     border-bottom: 1px solid var(--border-light);
-    margin: 0;
+    background: color-mix(in srgb, var(--bg-elevated) 88%, var(--bg-surface));
   }
 }
 
 .history-popover-body {
-  width: 300px;
-  padding: 8px 8px 4px;
+  width: 100%;
+  padding: 10px;
 }
 
-.history-search.ant-input-search {
-  margin-bottom: 8px;
+.history-search.purr-input-search {
+  min-height: 36px;
+  margin-bottom: 10px;
+  border-color: var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
   font-size: var(--font-size-sm);
+  box-shadow: none;
+
+  &:hover {
+    border-color: var(--border);
+  }
+
+  &:focus-within {
+    border-color: var(--accent);
+    background: var(--bg-panel);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+  }
+
+  .purr-input__suffix {
+    color: var(--text-muted);
+  }
 }
 
 .history-loading {
   display: flex;
+  min-height: 96px;
+  align-items: center;
   justify-content: center;
-  padding: 24px 0;
 }
 
 .history-empty {
-  padding: 20px 0;
+  min-height: 110px;
+  padding: 22px 8px;
+  align-content: center;
 }
 
 .history-list {
-  max-height: 400px;
+  max-height: min(400px, calc(100vh - 180px));
+  margin: 0 -2px;
+  padding: 0 2px 2px;
+  overflow-x: hidden;
   overflow-y: auto;
-  margin: 0 -4px;
 }
 
 .history-group {
-  margin-bottom: 4px;
+  margin-bottom: 9px;
+
+  &:last-child { margin-bottom: 0; }
 }
 
 .history-group-label {
-  font-size: 11px;
+  padding: 4px 7px 5px;
   color: var(--text-muted);
-  padding: 4px 8px 2px;
+  font-size: 10px;
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.03em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.history-item.ant-list-item {
-  padding: 5px 8px;
-  border-radius: var(--border-radius);
-  cursor: pointer;
-  border: none !important;
-  transition: background 0.12s;
+.history-item.purr-list__item {
+  position: relative;
+  min-height: 38px;
+  margin-bottom: 2px;
+  padding: 3px 4px 3px 9px;
+  gap: 4px;
+  border: 1px solid transparent !important;
+  border-radius: var(--radius-md);
+  background: transparent;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
 
-  &:hover {
-    background: var(--bg-hover);
+  &:hover,
+  &:focus-within {
+    border-color: var(--border-light) !important;
+    background: var(--bg-hover-list);
   }
 
   &.active {
-    background: var(--bg-active);
+    border-color: color-mix(in srgb, var(--accent) 16%, transparent) !important;
+    background: var(--accent-light);
+
+    &::before {
+      position: absolute;
+      top: 9px;
+      bottom: 9px;
+      left: 3px;
+      width: 2px;
+      border-radius: 999px;
+      background: var(--accent);
+      content: '';
+    }
   }
 
-  .ant-list-item-action {
-    margin-left: 6px;
+  .purr-list__item-content {
+    min-width: 0;
+  }
+
+  .purr-list__actions {
+    margin-left: 0;
     opacity: 0;
-    transition: opacity 0.12s;
-
-    li { padding: 0; }
+    transition: opacity var(--transition-fast);
   }
 
-  &:hover .ant-list-item-action {
+  &:hover .purr-list__actions,
+  &:focus-within .purr-list__actions {
     opacity: 1;
   }
 }
 
-.history-item-content {
-  min-width: 0;
-  flex: 1;
-}
-
-.history-item-title {
-  font-size: var(--font-size-sm);
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.history-item-open {
   display: block;
-}
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 4px;
+  color: var(--text-primary);
+  text-align: left;
+  border-radius: var(--radius-sm);
 
-.history-delete-btn.ant-btn {
-  padding: 0 4px;
-  height: 22px;
-  color: var(--text-muted) !important;
-
-  &:hover {
-    color: var(--text-primary) !important;
-    background: transparent !important;
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-dim);
   }
 }
 
-/* 与标签栏「新建对话」按钮同款间距（本组件与 AiPanel tabBarExtraContent 共用类名） */
-.session-new-btn.ant-btn {
-  flex-shrink: 0;
+.history-item-title {
+  display: block;
+  overflow: hidden;
+  color: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-delete-btn.purr-button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+
+  &:hover {
+    color: var(--danger);
+    background: var(--danger-dim);
+  }
+}
+
+/* 与标签栏“新建对话”按钮保持一致。 */
+.session-new-btn.purr-button {
   margin: 0 2px;
+  flex-shrink: 0;
 }

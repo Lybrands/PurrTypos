@@ -1,8 +1,8 @@
 import React from 'react'
-import { DeleteOutlined, PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
-import { Modal, Button, Input, Tooltip } from 'antd'
+import { DeleteOutlined, PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '../../ui'
+import { Button, Input, Modal, Tooltip } from '../../ui'
 import type { CharacterOption } from '../../types'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 
 interface Props {
   open: boolean
@@ -20,7 +20,7 @@ function OptionList({
   category: Category
   onOptionsChange?: () => void
 }) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [options, setOptions] = React.useState<CharacterOption[]>([])
   const [addingValue, setAddingValue] = React.useState('')
   const [isAdding, setIsAdding] = React.useState(false)

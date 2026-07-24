@@ -1,5 +1,5 @@
 .prompt-template-manager-modal {
-  .ant-modal-body {
+  .purr-dialog__body {
     padding-top: 8px;
   }
 }
@@ -44,7 +44,7 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
-  .ant-list-item-meta {
+  .purr-list__meta {
     min-width: 0;
   }
 }
@@ -115,7 +115,7 @@
   gap: 4px;
 }
 
-.prompt-template-placeholder-chip.ant-tag {
+.prompt-template-placeholder-chip.purr-tag {
   margin: 0;
   cursor: pointer;
   font-size: 12px;

@@ -1,5 +1,5 @@
 import React from "react";
-import { Popover } from "antd";
+import { Popover } from "../../../../ui";
 
 export interface ConversationTurnIndexItem {
   dataIndex: number;
@@ -15,7 +15,7 @@ interface ConversationTurnIndexProps {
 
 /**
  * Popover 会被渲染到 document.body，不能只依赖对话面板的样式选择器。
- * 这里直接向 Ant Design 的弹层根节点、内层和内容区写入尺寸边界，
+ * 这里直接向 Purr UI 的弹层根节点、内层和内容区写入尺寸边界，
  * 以保证长提问不会把悬浮卡按原文宽度撑开。
  */
 const TURN_INDEX_POPOVER_STYLES = {

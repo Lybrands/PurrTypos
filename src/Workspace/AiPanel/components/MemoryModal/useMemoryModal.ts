@@ -1,5 +1,5 @@
 import React from 'react'
-import { message } from 'antd'
+import { toast } from '../../../../ui'
 import type {
   AiForeshadowing,
   AiSparkIdea,
@@ -117,13 +117,13 @@ export function useMemoryModal({
     const needsChapter = needsChapterRelation(addLayer)
     const needsCharacter = needsCharacterRelation(addLayer)
     if (needsChapter && addChapterId == null) {
-      message.warning(
+      toast.warning(
         `请先选择关联${addLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`
       )
       return
     }
     if (needsCharacter && addCharacterId == null) {
-      message.warning('请先选择关联人物')
+      toast.warning('请先选择关联人物')
       return
     }
 
@@ -140,7 +140,7 @@ export function useMemoryModal({
       setSparkIdeas((previous) => [response.data as AiSparkIdea, ...previous])
       setAddContent('')
     } else if (!response.success) {
-      message.error(response.error || '添加失败')
+      toast.error(response.error || '添加失败')
     }
   }, [bookId, addLayer, addContent, addChapterId, addCharacterId])
 
@@ -181,20 +181,20 @@ export function useMemoryModal({
     if (editingId == null) return
     const trimmedContent = editingContent.trim()
     if (!trimmedContent) {
-      message.warning('设定内容不能为空')
+      toast.warning('设定内容不能为空')
       return
     }
 
     const needsChapter = needsChapterRelation(editingLayer)
     const needsCharacter = needsCharacterRelation(editingLayer)
     if (needsChapter && editingChapterId == null) {
-      message.warning(
+      toast.warning(
         `请先选择关联${editingLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`
       )
       return
     }
     if (needsCharacter && editingCharacterId == null) {
-      message.warning('请先选择关联人物')
+      toast.warning('请先选择关联人物')
       return
     }
 
@@ -216,7 +216,7 @@ export function useMemoryModal({
       )
       handleEditCancel()
     } else {
-      message.error(response.error || '保存失败')
+      toast.error(response.error || '保存失败')
     }
   }, [
     editingId,

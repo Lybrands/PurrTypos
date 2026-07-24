@@ -8,8 +8,8 @@ import {
   FullscreenOutlined,
   HighlightOutlined,
   TeamOutlined,
-} from '@ant-design/icons'
-import { Button, Spin, Tabs, Tooltip } from 'antd'
+} from '../ui'
+import { Button, Spin, Tabs, Tooltip } from '../ui'
 import type { EntityId } from '../types'
 import type { OpenSettingPanelDetail } from './SettingPanel'
 import type { WorkspaceUtilityTab, WorkspaceUtilityTabKind } from './utilityPanelTypes'
@@ -111,13 +111,9 @@ export default function WorkspaceUtilityPanel({
   return (
     <div className="workspace-utility-panel">
       <Tabs
-        type="editable-card"
-        hideAdd
         activeKey={activeKey ?? undefined}
         onChange={onActiveKeyChange}
-        onEdit={(targetKey, action) => {
-          if (action === 'remove' && typeof targetKey === 'string') onCloseTab(targetKey)
-        }}
+        onEdit={(targetKey) => onCloseTab(targetKey)}
         destroyOnHidden={false}
         items={items}
         className="workspace-utility-tabs"

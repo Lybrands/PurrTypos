@@ -1,5 +1,5 @@
 import React from "react";
-import type { TextAreaRef } from "antd/es/input/TextArea";
+import type { TextAreaRef } from "../../../ui";
 
 /**
  * 用户消息「就地编辑」的 textarea 机制：

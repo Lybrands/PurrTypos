@@ -1,6 +1,6 @@
 import React from 'react'
-import { DoubleRightOutlined } from '@ant-design/icons'
-import { Button, Tooltip } from 'antd'
+import { DoubleRightOutlined } from '../../ui'
+import { Button, Tooltip } from '../../ui'
 import type { EntityId } from '../../types'
 import ChapterSection from './ChapterSection'
 import './index.scss'

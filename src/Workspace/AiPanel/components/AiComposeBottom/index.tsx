@@ -1,5 +1,5 @@
 import React from 'react'
-import { Select } from 'antd'
+import { Select } from '../../../../ui'
 import ModelPicker, { type ModelRuntimeConfigPatch } from '../ModelPicker'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
@@ -41,31 +41,6 @@ export default function AiComposeBottom({
   leftContent,
   rightContent,
 }: AiComposeBottomProps) {
-  const agentModeSelectStyles = React.useMemo(() => {
-    if (chatAgentMode === 'agent') {
-      return {
-        root: {
-          border: 'none',
-          borderRadius: 6,
-          boxShadow: '0 0 2px var(--accent), 0 0 2px var(--accent)',
-          background: 'var(--accent-dim)',
-          color: 'var(--accent)',
-        },
-        suffix: { color: 'var(--accent)' },
-      } as const
-    }
-    return {
-      root: {
-        border: 'none',
-        borderRadius: 6,
-        boxShadow: '0 0 2px var(--success), 0 0 2px var(--success)',
-        background: 'var(--success-dim)',
-        color: 'var(--success)',
-      },
-      suffix: { color: 'var(--success)' },
-    } as const
-  }, [chatAgentMode])
-
   return (
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
@@ -78,9 +53,6 @@ export default function AiComposeBottom({
             { value: 'agent', label: '智能体' },
             { value: 'ask', label: '问答' },
           ]}
-          variant="filled"
-          popupMatchSelectWidth={false}
-          styles={agentModeSelectStyles}
         />
         <ModelPicker
           modelConfigs={modelConfigs}

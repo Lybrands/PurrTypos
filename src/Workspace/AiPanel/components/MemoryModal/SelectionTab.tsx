@@ -1,5 +1,6 @@
 import React from 'react'
-import { Checkbox, Empty, Spin } from 'antd'
+import { Checkbox } from '../../../../ui'
+import { Empty, Spin } from '../../../../ui'
 import type { MemoryModalController } from './useMemoryModal'
 import SparkIdeaMeta from './SparkIdeaMeta'
 

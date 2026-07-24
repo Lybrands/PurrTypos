@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Select, Tooltip } from 'antd'
-import { ThunderboltOutlined } from '@ant-design/icons'
+import { Button, MultiSelect, Tooltip } from '../../../../../ui'
+import { ThunderboltOutlined } from '../../../../../ui'
 import type { EntityId } from '../../../../../types'
 
 export interface AssociatedChapterSelectProps {
@@ -20,17 +20,14 @@ export default function AssociatedChapterSelect({
 }: AssociatedChapterSelectProps) {
   return (
     <div className="ai-context-group">
-      <Select
+      <MultiSelect
         className="ai-context-select"
         size="small"
-        mode="multiple"
         placeholder="章节内容"
         allowClear
-        maxTagCount="responsive"
         value={value}
         onChange={onChange}
         options={options}
-        styles={{ popup: { root: { minWidth: 160 } } }}
       />
       {chapterId != null && (
         <Tooltip title="快捷关联当前章节内容">

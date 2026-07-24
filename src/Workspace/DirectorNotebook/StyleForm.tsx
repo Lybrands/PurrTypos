@@ -1,6 +1,6 @@
 import React from 'react'
-import { Input, Select, Tooltip, App as AntdApp, Spin } from 'antd'
-import { ThunderboltOutlined } from '@ant-design/icons'
+import { Input, Select, Spin, Tooltip, useToast } from '../../ui'
+import { ThunderboltOutlined } from '../../ui'
 import { useWorkspace } from '../WorkspaceContext'
 import type { BookStyle } from '../../types'
 
@@ -96,7 +96,7 @@ export interface StyleFormProps {
  * 由外层（如 Modal）决定布局与是否展示。
  */
 export default function StyleForm({ onStatusChange }: StyleFormProps) {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const { bookId, writingChapters } = useWorkspace()
   const [form, setForm] = React.useState<StyleFormState>(EMPTY_FORM)
   const [loading, setLoading] = React.useState(false)

@@ -1,6 +1,7 @@
 .confirm-modal-message {
   margin-bottom: 0;
-  color: rgba(0, 0, 0, 0.88);
+  color: var(--text-secondary);
+  line-height: 1.65;
 }
 
 .confirm-modal-checkbox {

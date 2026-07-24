@@ -1,6 +1,6 @@
 import React from "react";
-import { App as AntdApp, Button, Empty, Popover, Tooltip } from "antd";
-import { FileTextOutlined, SettingOutlined } from "@ant-design/icons";
+import { FileTextOutlined, SettingOutlined } from "../../../../ui";
+import { Button, Empty, Popover, Tooltip, useConfirm, useToast } from "../../../../ui";
 import {
   BUILTIN_PROMPT_TEMPLATES,
   PROMPT_PLACEHOLDERS,
@@ -29,7 +29,8 @@ export default function PromptTemplatePicker({
   context,
   disabled,
 }: PromptTemplatePickerProps) {
-  const { message: appMessage, modal } = AntdApp.useApp();
+  const appMessage = useToast();
+  const confirm = useConfirm();
   const [open, setOpen] = React.useState(false);
   const [managerOpen, setManagerOpen] = React.useState(false);
   const [userTemplates, setUserTemplates] = React.useState<AiPromptTemplate[]>(
@@ -66,7 +67,7 @@ export default function PromptTemplatePicker({
   );
 
   const handlePick = React.useCallback(
-    (tpl: PromptTemplateItem) => {
+    async (tpl: PromptTemplateItem) => {
       const filled = applyPromptPlaceholders(tpl.content, context);
       const missing = hasUnfilledPlaceholders(tpl.content, context);
       const doInsert = (text: string) => {
@@ -84,33 +85,20 @@ export default function PromptTemplatePicker({
         doInsert(filled);
         return;
       }
-      const pending: { destroy?: () => void } = {};
-      const inst = modal.confirm({
+      const result = await confirm({
         title: "输入框已有内容",
         content: `要如何插入「${tpl.title}」？`,
-        okText: "替换",
-        cancelText: "取消",
-        okButtonProps: { danger: true },
-        footer: (_, { OkBtn, CancelBtn }) => (
-          <>
-            <CancelBtn />
-            <Button
-              onClick={() => {
-                const sep = currentPrompt.endsWith("\n") ? "" : "\n\n";
-                doInsert(currentPrompt + sep + filled);
-                pending.destroy?.();
-              }}
-            >
-              追加
-            </Button>
-            <OkBtn />
-          </>
-        ),
-        onOk: () => doInsert(filled),
+        confirmText: "替换",
+        confirmVariant: "danger",
+        actions: [{ id: 'append', label: '追加' }],
       });
-      pending.destroy = inst.destroy;
+      if (result === 'confirm') doInsert(filled);
+      if (result === 'append') {
+        const sep = currentPrompt.endsWith("\n") ? "" : "\n\n";
+        doInsert(currentPrompt + sep + filled);
+      }
     },
-    [appMessage, context, currentPrompt, modal, onInsert],
+    [appMessage, confirm, context, currentPrompt, onInsert],
   );
 
   const content = (
@@ -226,26 +214,27 @@ export default function PromptTemplatePicker({
 
   return (
     <>
-      <Popover
-        trigger="click"
-        open={open}
-        onOpenChange={setOpen}
-        arrow={false}
-        placement="topLeft"
-        overlayClassName="prompt-template-popover"
-        content={content}
-        destroyTooltipOnHide
-      >
-        <Tooltip title="插入提示词模版">
+      <Tooltip title="插入提示词模版">
+        <span className="purr-popup-trigger">
+          <Popover
+            open={open}
+            onOpenChange={setOpen}
+            arrow={false}
+            placement="topLeft"
+            overlayClassName="prompt-template-popover"
+            content={content}
+          >
           <Button
             type="text"
             size="small"
             icon={<FileTextOutlined style={{ fontSize: 14 }} />}
             className="ai-context-icon-btn"
             disabled={disabled}
+            aria-label="插入提示词模版"
           />
-        </Tooltip>
-      </Popover>
+          </Popover>
+        </span>
+      </Tooltip>
       <PromptTemplateManagerModal
         open={managerOpen}
         onClose={() => {
