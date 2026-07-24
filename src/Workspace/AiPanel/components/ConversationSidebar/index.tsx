@@ -5,8 +5,8 @@ import {
   MenuFoldOutlined,
   PlusOutlined,
   ReadOutlined,
-} from '@ant-design/icons'
-import { Button, Empty, Input, Segmented, Tooltip } from 'antd'
+} from '../../../../ui'
+import { Button, Empty, Input, Segmented, Tooltip } from '../../../../ui'
 import type { AiSession, EntityId } from '../../../../types'
 import type { ChatSessionScope } from '../../hooks'
 import SessionHistoryPopover from '../SessionHistoryPopover'

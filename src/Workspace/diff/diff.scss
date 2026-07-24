@@ -76,7 +76,7 @@
   height: 14px;
   margin-right: 8px;
   border: 2px solid var(--border-color, #d9d9d9);
-  border-top-color: var(--color-primary, #1677ff);
+  border-top-color: var(--accent, #c94361);
   border-radius: 50%;
   vertical-align: -2px;
   animation: diff-overlay-spin 0.9s linear infinite;
@@ -300,15 +300,15 @@
   opacity: 0.95;
 }
 
-/* Dropdown.Button antd 默认宽度太大，调一下行高对齐 */
+/* 组合下拉按钮与相邻操作按钮对齐。 */
 .diff-action-reject-dropdown {
-  .ant-btn {
+  .purr-button {
     color: #c62828;
     height: 24px;
     line-height: 1;
     padding: 0 6px;
   }
-  .ant-btn:hover {
+  .purr-button:hover {
     background: rgba(244, 67, 54, 0.12);
     color: #c62828;
   }

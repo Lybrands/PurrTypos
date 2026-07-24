@@ -3,7 +3,7 @@ import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
-} from "@ant-design/icons";
+} from "../../../../ui";
 import { type ChatMessage } from "../../hooks";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";

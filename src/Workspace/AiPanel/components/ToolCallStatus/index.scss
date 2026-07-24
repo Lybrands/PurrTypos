@@ -6,7 +6,7 @@
   border-left: 1px solid var(--border);
 }
 
-.bubble-tool-call-summary.ant-btn {
+.bubble-tool-call-summary.purr-button {
   height: auto;
   min-height: 0;
   padding: 0;
@@ -20,12 +20,12 @@
     background: transparent;
   }
 
-  .ant-btn-icon {
+  .purr-button__icon {
     display: inline-flex;
     align-items: center;
   }
 
-  span:not(.ant-btn-icon) {
+  span:not(.purr-button__icon) {
     color: currentColor;
   }
 }

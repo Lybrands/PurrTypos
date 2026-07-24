@@ -1,5 +1,5 @@
 import React from "react";
-import { App as AntdApp } from "antd";
+import { useToast } from "../../../ui";
 import type { AiSession, EntityId } from "../../../types";
 import type { ChatMessage } from "./chat.types";
 
@@ -26,7 +26,7 @@ export function useAiSessions({
   loading,
   setLoading,
 }: UseAiSessionsParams) {
-  const { message: appMessage } = AntdApp.useApp();
+  const appMessage = useToast();
   const [sessions, setSessions] = React.useState<AiSession[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<number | null>(
     null,

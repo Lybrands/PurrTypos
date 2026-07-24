@@ -5,7 +5,7 @@ import {
   LoadingOutlined,
   PauseCircleOutlined,
   RightOutlined,
-} from "@ant-design/icons";
+} from "../../../../ui";
 import React from "react";
 import type { AiTaskPlan, AiTaskStep } from "../../hooks/chat.types";
 import "./index.scss";

@@ -3,8 +3,8 @@
   position: fixed;
   inset: 0;
   z-index: 1300;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(2px);
+  background: rgba(25, 19, 16, 0.38);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -17,24 +17,24 @@
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--border-radius);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
 .cmdk-input-wrap {
   display: flex;
   align-items: center;
-  padding: 0 var(--spacing);
+  padding: 0 18px;
   border-bottom: 1px solid var(--border-light);
   background: var(--bg-panel);
 }
 
 .cmdk-input {
   flex: 1;
-  padding: var(--spacing) 0;
+  padding: 17px 0;
   font-size: var(--font-size-lg);
   color: var(--text-primary);
   background: transparent;
@@ -51,14 +51,14 @@
   font-family: var(--font-family-mono);
   color: var(--text-muted);
   border: 1px solid var(--border-light);
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-sm);
   background: var(--bg-surface);
 }
 
 .cmdk-list {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: var(--spacing-xs) 0;
+  padding: 7px;
   min-height: 0;
 }
 
@@ -67,7 +67,7 @@
 }
 
 .cmdk-group-title {
-  padding: var(--spacing-xs) var(--spacing-lg);
+  padding: 8px 10px 5px;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
   color: var(--text-muted);
@@ -79,7 +79,9 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-lg);
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--text-primary);
   font-size: var(--font-size);
@@ -113,7 +115,8 @@
 }
 
 .cmdk-item-active {
-  background: var(--bg-active);
+  color: var(--accent);
+  background: var(--accent-light);
 
   .cmdk-item-icon {
     color: var(--accent);
@@ -141,7 +144,7 @@
     margin-right: 2px;
     font-family: var(--font-family-mono);
     border: 1px solid var(--border-light);
-    border-radius: var(--border-radius);
+    border-radius: var(--radius-sm);
     background: var(--bg-panel);
     color: var(--text-secondary);
   }

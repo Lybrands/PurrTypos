@@ -26,7 +26,7 @@ export default defineConfig({
           if (n.includes('sql.js')) return 'sql'
           if (n.includes('turndown')) return 'turndown'
           if (n.includes('adm-zip')) return 'misc'
-          return 'react-antd'
+          return 'react-vendor'
         },
       },
     },

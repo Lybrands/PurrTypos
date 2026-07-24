@@ -1,6 +1,6 @@
 import React from 'react'
-import { App as AntdApp, Button, Drawer, Empty, Modal, Spin, Tag, Tooltip } from 'antd'
-import { HistoryOutlined, RollbackOutlined } from '@ant-design/icons'
+import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
+import { HistoryOutlined, RollbackOutlined } from '../../ui'
 import type { ChapterDiffHistory, EntityId } from '../../types'
 import { diffParagraphs } from './paragraphDiff'
 import './diff.scss'
@@ -21,8 +21,8 @@ interface DiffHistoryDrawerProps {
 export default function DiffHistoryDrawer({
   chapterId, chapterTitle, open, onClose,
 }: DiffHistoryDrawerProps) {
-  const { message: appMessage } = AntdApp.useApp()
-  const [modal, modalCtx] = Modal.useModal()
+  const appMessage = useToast()
+  const confirm = useConfirm()
   const [loading, setLoading] = React.useState(false)
   const [items, setItems] = React.useState<ChapterDiffHistory[]>([])
   const [expandedId, setExpandedId] = React.useState<number | null>(null)
@@ -51,7 +51,7 @@ export default function DiffHistoryDrawer({
   }, [open, reload])
 
   const handleRollback = (item: ChapterDiffHistory) => {
-    modal.confirm({
+    void confirm({
       title: '回滚到此版本',
       content: (
         <div>
@@ -65,10 +65,11 @@ export default function DiffHistoryDrawer({
           </p>
         </div>
       ),
-      okText: '回滚',
-      okButtonProps: { danger: true },
+      confirmText: '回滚',
+      confirmVariant: 'danger',
       cancelText: '取消',
-      onOk: async () => {
+    }).then(async (result) => {
+      if (result === 'confirm') {
         setRollbackingId(item.id)
         try {
           const res = await window.electronAPI.rollbackChapterDiff({ diffId: item.id })
@@ -87,7 +88,7 @@ export default function DiffHistoryDrawer({
         } finally {
           setRollbackingId(null)
         }
-      },
+      }
     })
   }
 
@@ -106,8 +107,6 @@ export default function DiffHistoryDrawer({
       onClose={onClose}
       destroyOnHidden
     >
-      {modalCtx}
-
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
       ) : items.length === 0 ? (

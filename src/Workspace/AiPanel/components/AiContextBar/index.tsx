@@ -1,7 +1,7 @@
 import React from "react";
-import { Button, Popover, Tooltip } from "antd";
+import { Button, Popover, Tooltip } from "../../../../ui";
 import "./index.scss";
-import { BulbOutlined, LinkOutlined } from "@ant-design/icons";
+import { BulbOutlined, LinkOutlined } from "../../../../ui";
 import AssociatedChapterSelect from "./AssociatedChapterSelect";
 import AssociatedOutlineSelect from "./AssociatedOutlineSelect";
 import PromptTemplatePicker from "../PromptTemplatePicker";
@@ -64,47 +64,50 @@ export default function AiContextBar({
   if (bookId == null) return null;
   return (
     <div className="ai-context-bar">
-      <Popover
-        trigger="click"
-        open={contextPopoverOpen}
-        onOpenChange={onContextPopoverOpenChange}
-        arrow={false}
-        placement="topLeft"
-        overlayClassName="ai-context-popover"
-        content={
-          <div className="ai-context-popover-content">
-            <div className="ai-context-popover-row">
-              <span className="ai-context-popover-label">章节内容</span>
-              <AssociatedChapterSelect
-                value={associatedChapterIds}
-                onChange={setAssociatedChapterIds}
-                options={chapterSelectOptions}
-                chapterId={chapterId}
-                onQuickAssociate={onQuickAssociateChapter}
-              />
-            </div>
-            <div className="ai-context-popover-row">
-              <span className="ai-context-popover-label">章节大纲</span>
-              <AssociatedOutlineSelect
-                value={associatedOutlineIds}
-                onChange={setAssociatedOutlineIds}
-                options={outlineSelectOptions}
-                chapterId={chapterId}
-                onQuickAssociate={onQuickAssociateOutline}
-              />
-            </div>
-          </div>
-        }
-      >
-        <Tooltip title="关联章节与大纲">
+      <Tooltip title="关联章节与大纲">
+        <span className="purr-popup-trigger">
+          <Popover
+            trigger="click"
+            open={contextPopoverOpen}
+            onOpenChange={onContextPopoverOpenChange}
+            arrow={false}
+            placement="topLeft"
+            overlayClassName="ai-context-popover"
+            content={
+              <div className="ai-context-popover-content">
+                <div className="ai-context-popover-row">
+                  <span className="ai-context-popover-label">章节内容</span>
+                  <AssociatedChapterSelect
+                    value={associatedChapterIds}
+                    onChange={setAssociatedChapterIds}
+                    options={chapterSelectOptions}
+                    chapterId={chapterId}
+                    onQuickAssociate={onQuickAssociateChapter}
+                  />
+                </div>
+                <div className="ai-context-popover-row">
+                  <span className="ai-context-popover-label">章节大纲</span>
+                  <AssociatedOutlineSelect
+                    value={associatedOutlineIds}
+                    onChange={setAssociatedOutlineIds}
+                    options={outlineSelectOptions}
+                    chapterId={chapterId}
+                    onQuickAssociate={onQuickAssociateOutline}
+                  />
+                </div>
+              </div>
+            }
+          >
           <Button
             type="text"
             size="small"
             icon={<LinkOutlined style={{ fontSize: 14 }} />}
             className="ai-context-icon-btn"
+            aria-label="关联章节与大纲"
           />
-        </Tooltip>
-      </Popover>
+          </Popover>
+        </span>
+      </Tooltip>
       <Tooltip
         title={
           selectedMemoryIds.length || selectedForeshadowingIds.length

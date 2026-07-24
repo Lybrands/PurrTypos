@@ -1,7 +1,6 @@
 import React from 'react'
-import { CloseOutlined, DownOutlined, SearchOutlined, UpOutlined } from '@ant-design/icons'
-import type { InputRef } from 'antd/es/input/Input'
-import { Button, Input, Tooltip } from 'antd'
+import { CloseOutlined, DownOutlined, SearchOutlined, UpOutlined } from '../ui'
+import { Button, Input, Tooltip, type InputRef } from '../ui'
 import { useWorkspace } from './WorkspaceContext'
 import './workspaceSearch.scss'
 

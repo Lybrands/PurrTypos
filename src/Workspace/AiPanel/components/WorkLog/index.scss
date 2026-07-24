@@ -104,7 +104,7 @@
   color: var(--text-secondary);
   line-height: 1.55;
 
-  .anticon {
+  .purr-icon {
     flex: 0 0 auto;
     color: var(--accent);
   }
@@ -114,7 +114,7 @@
   }
 }
 
-.work-log__context-compaction--failed .anticon {
+.work-log__context-compaction--failed .purr-icon {
   color: var(--danger);
 }
 

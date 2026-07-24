@@ -7,8 +7,7 @@
  */
 
 import React from 'react'
-import { Input } from 'antd'
-import type { InputRef } from 'antd'
+import { Input, type InputRef } from '../../ui'
 import './CommandPalette.scss'
 
 export interface CommandItem {

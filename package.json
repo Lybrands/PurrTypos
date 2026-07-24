@@ -15,11 +15,14 @@
     "test:unit": "node --test electron/*.test.js src/modelCatalog.test.cjs src/Workspace/AiPanel/hooks/modelRuntime.test.cjs src/Workspace/DirectorNotebook/ChapterSectionModel.test.cjs src/Workspace/DashboardPanel/dashboardFormatters.test.cjs",
     "test:backend": "node scripts/run-backend-tests.cjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run test:unit && npm run test:backend",
+    "check:purr-ui": "node scripts/check-purr-ui.cjs",
+    "check": "npm run check:purr-ui && npm run typecheck && npm run test:unit && npm run test:backend",
     "preview": "vite preview",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.2",
+    "@base-ui/react": "^1.6.0",
     "@lexical/react": "^0.41.0",
     "@tiptap/extension-heading": "^3.20.0",
     "@tiptap/extension-table": "^3.20.1",
@@ -27,7 +30,6 @@
     "@tiptap/react": "^3.20.0",
     "@tiptap/starter-kit": "^3.20.0",
     "adm-zip": "^0.5.16",
-    "antd": "^6.3.1",
     "gray-matter": "^4.0.3",
     "lexical": "^0.41.0",
     "marked": "^17.0.4",

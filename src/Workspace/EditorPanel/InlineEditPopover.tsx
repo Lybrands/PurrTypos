@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button } from 'antd'
-import { CloseOutlined, CheckOutlined, RedoOutlined } from '@ant-design/icons'
+import { Button } from '../../ui'
+import { CloseOutlined, CheckOutlined, RedoOutlined } from '../../ui'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import StopCircleIcon from '../../icons/StopCircleIcon'

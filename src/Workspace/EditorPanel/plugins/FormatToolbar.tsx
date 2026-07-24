@@ -3,9 +3,8 @@
 import React from 'react'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { $getSelection, $isRangeSelection, FORMAT_TEXT_COMMAND } from 'lexical'
-import { Dropdown } from 'antd'
-import type { MenuProps } from 'antd'
-import { DownOutlined, UnorderedListOutlined, OrderedListOutlined } from '@ant-design/icons'
+import { Dropdown } from '../../../ui'
+import { DownOutlined, UnorderedListOutlined, OrderedListOutlined } from '../../../ui'
 import { $setBlocksType } from '@lexical/selection'
 import { $createHeadingNode } from '@lexical/rich-text'
 import { INSERT_ORDERED_LIST_COMMAND, INSERT_UNORDERED_LIST_COMMAND } from '@lexical/list'
@@ -61,9 +60,8 @@ export function FormatToolbar() {
               { key: 'h2', label: '标题 2', onClick: () => applyHeading('h2') },
               { key: 'h3', label: '标题 3', onClick: () => applyHeading('h3') },
               { key: 'h4', label: '标题 4', onClick: () => applyHeading('h4') },
-            ] as MenuProps['items'],
+            ],
           }}
-          trigger={['click']}
         >
           <button type="button" title="标题" className="format-bar-heading-trigger">
             标题 <DownOutlined />

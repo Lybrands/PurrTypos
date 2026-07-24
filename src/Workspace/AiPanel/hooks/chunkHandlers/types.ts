@@ -1,5 +1,5 @@
 import type React from "react";
-import type { App as AntdApp } from "antd";
+import type { ToastApi } from "../../../../ui";
 import type {
   AiModelConfig,
   AiAgentDelegation,
@@ -22,8 +22,8 @@ export type AiStreamChunk = Parameters<
   Parameters<ElectronAPI["onAiChunk"]>[0]
 >[0];
 
-/** Antd 的 message API（来自 AntdApp.useApp().message） */
-export type AppMessage = ReturnType<typeof AntdApp.useApp>["message"];
+/** 项目内统一的反馈 API。 */
+export type AppMessage = ToastApi;
 
 /** 单次 handleSubmit 调用期间在 onAiChunk 各分支共享的累加状态 */
 export interface AccState {

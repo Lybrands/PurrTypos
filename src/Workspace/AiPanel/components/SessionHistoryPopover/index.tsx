@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Empty, Input, List, Popover, Spin, Tooltip } from 'antd'
-import { DeleteOutlined, HistoryOutlined } from '@ant-design/icons'
+import { Button, Empty, Input, List, Popover, Spin, Tooltip } from '../../../../ui'
+import { DeleteOutlined, HistoryOutlined } from '../../../../ui'
 import type { AiSession, EntityId } from '../../../../types'
 import './index.scss'
 
@@ -54,11 +54,17 @@ export default function SessionHistoryPopover({
   const [popoverOpen, setPopoverOpen] = React.useState(false)
   const [allSessions, setAllSessions] = React.useState<AiSession[]>([])
   const [loading, setLoading] = React.useState(false)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
   const [search, setSearch] = React.useState('')
 
   const loadSessions = React.useCallback(() => {
-    if (bookId == null) return
+    if (bookId == null) {
+      setAllSessions([])
+      setLoadError('请先选择书籍')
+      return
+    }
     setSearch('')
+    setLoadError(null)
     setLoading(true)
     window.electronAPI
       .getSessions(
@@ -67,9 +73,18 @@ export default function SessionHistoryPopover({
           : { bookId, chapterId: chapterId ?? null, includeClosed: true },
       )
       .then((res) => {
-        if (res.success) setAllSessions(res.data)
-        setLoading(false)
+        if (res.success) {
+          setAllSessions(res.data)
+          return
+        }
+        setAllSessions([])
+        setLoadError(res.error || '历史对话加载失败')
       })
+      .catch(() => {
+        setAllSessions([])
+        setLoadError('历史对话加载失败，请稍后重试')
+      })
+      .finally(() => setLoading(false))
   }, [bookId, chapterId, scope])
 
   const handleOpenChange = React.useCallback((visible: boolean) => {
@@ -117,6 +132,8 @@ export default function SessionHistoryPopover({
       />
       {loading ? (
         <div className="history-loading"><Spin size="small" /></div>
+      ) : loadError ? (
+        <Empty image={false} description={loadError} className="history-empty" />
       ) : filtered.length === 0 ? (
         <Empty image={false} description="暂无历史对话" className="history-empty" />
       ) : (
@@ -129,7 +146,6 @@ export default function SessionHistoryPopover({
                 renderItem={(session) => (
                   <List.Item
                     className={`history-item${activeSessionId === session.id ? ' active' : ''}`}
-                    onClick={() => handleOpen(session)}
                     actions={[
                       <Tooltip title="删除" key="del">
                         <Button
@@ -138,13 +154,19 @@ export default function SessionHistoryPopover({
                           icon={<DeleteOutlined />}
                           className="history-delete-btn"
                           onClick={(e) => handleDelete(session, e)}
+                          aria-label={`删除对话：${session.title}`}
                         />
                       </Tooltip>,
                     ]}
                   >
-                    <div className="history-item-content">
+                    <button
+                      type="button"
+                      className="history-item-open"
+                      aria-current={activeSessionId === session.id ? 'page' : undefined}
+                      onClick={() => handleOpen(session)}
+                    >
                       <span className="history-item-title">{session.title}</span>
-                    </div>
+                    </button>
                   </List.Item>
                 )}
               />
@@ -156,24 +178,28 @@ export default function SessionHistoryPopover({
   )
 
   return (
-    <Popover
-      content={content}
-      title="历史对话"
-      trigger="click"
-      open={popoverOpen}
-      onOpenChange={handleOpenChange}
-      placement="bottomRight"
-      overlayClassName="session-history-popover"
-      arrow={false}
-    >
-      <Tooltip title="历史对话" mouseEnterDelay={0.5} placement="left" getPopupContainer={() => document.body}>
+    <Tooltip title="历史对话" mouseEnterDelay={0.5} placement="left" getPopupContainer={() => document.body}>
+      <span className="purr-popup-trigger session-history-trigger">
+        <Popover
+          content={content}
+          title="历史对话"
+          trigger="click"
+          open={popoverOpen}
+          onOpenChange={handleOpenChange}
+          placement="bottomRight"
+          overlayClassName="session-history-popover"
+          arrow={false}
+        >
         <Button
           type="text"
           size="small"
           icon={<HistoryOutlined style={{ fontSize: 13 }} />}
           className="session-new-btn"
+          aria-label="打开历史对话"
+          disabled={bookId == null}
         />
-      </Tooltip>
-    </Popover>
+        </Popover>
+      </span>
+    </Tooltip>
   )
 }

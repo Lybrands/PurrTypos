@@ -1,8 +1,8 @@
 import React from 'react'
-import { PlusOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons'
-import { Button, Modal, Input, Tooltip, Checkbox } from 'antd'
+import { PlusOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '../ui'
+import { Button, Checkbox, Input, Modal, Tooltip } from '../ui'
 import { Book, type EntityId } from '../types'
-import { useAntdApp } from '../hooks/useAntdApp'
+import { useAppFeedback } from '../hooks/useAppFeedback'
 import AppHeader from '../components/AppHeader'
 import ExportModal, { type ExportFormat } from '../components/ExportModal'
 import { fetchExportData, buildExportEntries, buildSingleTxtContent } from '../utils/exportBooks'
@@ -10,6 +10,7 @@ import './index.scss'
 
 interface BookshelfPageProps {
   books: Book[]
+  lastOpenedBookId: EntityId | null
   onOpenBook: (book: Book) => void
   onCreateBook: (title: string, enableVolume?: boolean) => void
   onDeleteBook: (bookId: EntityId) => void
@@ -19,13 +20,14 @@ interface BookshelfPageProps {
 
 export default function BookshelfPage({
   books,
+  lastOpenedBookId,
   onOpenBook,
   onCreateBook,
   onDeleteBook,
   onRenameBook,
   onBack,
 }: BookshelfPageProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [createModalOpen, setCreateModalOpen] = React.useState(false)
   const [createTitle, setCreateTitle] = React.useState('')
   const [createEnableVolume, setCreateEnableVolume] = React.useState(false)
@@ -178,40 +180,66 @@ export default function BookshelfPage({
         showActions
       />
 
-      <div className="bookshelf-list">
-        {books.map((book) => (
-          <div
-            key={book.id}
-            className="book-card"
-            onClick={() => onOpenBook(book)}
-          >
-            <div className="book-spine" style={{ background: book.cover_color || '#4A90D9' }} />
-            <div className="book-cover" style={{ borderTopColor: book.cover_color || '#4A90D9' }}>
-              <span className="book-cover-title">{book.title}</span>
-            </div>
-            <div className="book-actions">
-              <Tooltip title="重命名">
-                <button className="book-action-btn" onClick={(e) => openRename(e, book)}>
-                  <EditOutlined />
-                </button>
-              </Tooltip>
-              <Tooltip title="删除书籍">
-                <button className="book-action-btn danger" onClick={(e) => openDelete(e, book)}>
-                  <DeleteOutlined />
-                </button>
-              </Tooltip>
-            </div>
-            <div className="book-title">{book.title}</div>
+      <section className="bookshelf-main">
+        <div className="bookshelf-toolbar">
+          <div>
+            <span className="bookshelf-eyebrow">YOUR STORIES</span>
+            <h1>作品书架</h1>
+            <p>{books.length > 0 ? `共 ${books.length} 部作品，挑一本继续创作吧。` : '从一个书名开始，写下你的第一部作品。'}</p>
           </div>
-        ))}
-
-        <div className="book-card book-card-add" onClick={() => setCreateModalOpen(true)}>
-          <div className="book-card-add-inner">
-            <PlusOutlined />
-            <span>新建书籍</span>
-          </div>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
+            新建书籍
+          </Button>
         </div>
-      </div>
+
+        <div className="bookshelf-list">
+          {books.map((book) => {
+            const isLastOpened = book.id === lastOpenedBookId
+            return (
+              <div
+                key={book.id}
+                className={`book-card${isLastOpened ? ' is-last-opened' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="book-card-open"
+                  aria-label={`打开《${book.title}》${isLastOpened ? '，上次打开' : ''}`}
+                  onClick={() => onOpenBook(book)}
+                >
+                  <span className="book-cover" style={{ '--book-color': book.cover_color || '#c94361' } as React.CSSProperties}>
+                    <span className="book-spine" style={{ background: book.cover_color || '#c94361' }} />
+                    <span className="book-cover-brand">PURR TYPOS</span>
+                    <span className="book-cover-title">{book.title}</span>
+                    {isLastOpened && <span className="book-last-opened-badge">上次打开</span>}
+                    <span className="book-cover-mark">✦</span>
+                  </span>
+                  <span className="book-title">{book.title}</span>
+                </button>
+                <div className="book-actions">
+                  <Tooltip title="重命名">
+                    <button type="button" aria-label={`重命名《${book.title}》`} className="book-action-btn" onClick={(e) => openRename(e, book)}>
+                      <EditOutlined />
+                    </button>
+                  </Tooltip>
+                  <Tooltip title="删除书籍">
+                    <button type="button" aria-label={`删除《${book.title}》`} className="book-action-btn danger" onClick={(e) => openDelete(e, book)}>
+                      <DeleteOutlined />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            )
+          })}
+
+          <button type="button" className="book-card book-card-add" onClick={() => setCreateModalOpen(true)}>
+            <span className="book-card-add-inner">
+              <span className="book-add-icon"><PlusOutlined /></span>
+              <strong>新建书籍</strong>
+              <small>让一个新故事从这里开始</small>
+            </span>
+          </button>
+        </div>
+      </section>
 
       {/* 新建书籍 */}
       <Modal

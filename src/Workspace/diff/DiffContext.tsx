@@ -1,5 +1,5 @@
 import React from 'react'
-import { App as AntdApp } from 'antd'
+import { useToast } from '../../ui'
 import type { EntityId } from '../../types'
 import {
   composeResult,
@@ -71,7 +71,7 @@ export function useDiff(): DiffContextValue {
 }
 
 export function DiffProvider({ children }: { children: React.ReactNode }) {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const [sessions, setSessions] = React.useState<Record<string, DiffSession>>({})
   // 用 ref 存当前 sessions 给事件监听器读，避免依赖闭包
   const sessionsRef = React.useRef(sessions)

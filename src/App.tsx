@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react'
-import { App as AntdApp, Spin } from 'antd'
+import { Spin, useToast } from './ui'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
 import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
@@ -11,12 +11,37 @@ const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 
 type Page = 'home' | 'bookshelf' | 'workspace'
+const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
+
+function getStoredLastOpenedBookId(): EntityId | null {
+  try {
+    return localStorage.getItem(LAST_OPENED_BOOK_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+function storeLastOpenedBookId(bookId: EntityId | null) {
+  try {
+    if (bookId == null) {
+      localStorage.removeItem(LAST_OPENED_BOOK_STORAGE_KEY)
+    } else {
+      localStorage.setItem(LAST_OPENED_BOOK_STORAGE_KEY, bookId)
+    }
+  } catch {
+    // 本地存储不可用时不影响书籍打开与删除。
+  }
+}
 
 export default function App() {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const [page, setPage] = React.useState<Page>('home')
   const [books, setBooks] = React.useState<Book[]>([])
   const [activeBook, setActiveBook] = React.useState<Book | null>(null)
+  const [workspaceReady, setWorkspaceReady] = React.useState(false)
+  const [lastOpenedBookId, setLastOpenedBookId] = React.useState<EntityId | null>(
+    getStoredLastOpenedBookId,
+  )
 
   const [showSettings, setShowSettings] = React.useState(false)
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
@@ -67,7 +92,16 @@ export default function App() {
 
   const loadBooks = React.useCallback(async () => {
     const res = await window.electronAPI.getBooks()
-    if (res.success && res.data) setBooks(res.data)
+    if (res.success && res.data) {
+      setBooks(res.data)
+      setLastOpenedBookId((storedBookId) => {
+        if (storedBookId == null || res.data.some((book) => book.id === storedBookId)) {
+          return storedBookId
+        }
+        storeLastOpenedBookId(null)
+        return null
+      })
+    }
   }, [])
 
   React.useEffect(() => {
@@ -79,6 +113,9 @@ export default function App() {
   }, [])
 
   const handleOpenBook = React.useCallback((book: Book) => {
+    storeLastOpenedBookId(book.id)
+    setLastOpenedBookId(book.id)
+    setWorkspaceReady(false)
     setActiveBook(book)
     setPage('workspace')
   }, [])
@@ -112,16 +149,26 @@ export default function App() {
   }, [loadBooks, appMessage])
 
   const handleBackToBookshelf = React.useCallback(() => {
+    setWorkspaceReady(false)
     setActiveBook(null)
     setPage('bookshelf')
   }, [])
 
   const handleBackToHome = React.useCallback(() => {
+    setWorkspaceReady(false)
     setPage('home')
   }, [])
 
+  const handleWorkspaceReady = React.useCallback(() => {
+    setWorkspaceReady(true)
+  }, [])
+
+  const ambientPage: Page =
+    page === 'workspace' && !workspaceReady ? 'bookshelf' : page
+
   return (
-    <div className="app-root">
+    <div className={`app-root app-root--${page} app-root--ambient-${ambientPage}`}>
+      <div className="app-ambient-glow" aria-hidden="true" />
       {page === 'home' && (
         <div className="app-global-actions">
           <GlobalActions />
@@ -138,6 +185,7 @@ export default function App() {
           {page === 'bookshelf' && (
             <BookshelfPage
               books={books}
+              lastOpenedBookId={lastOpenedBookId}
               onOpenBook={handleOpenBook}
               onCreateBook={handleCreateBook}
               onDeleteBook={handleDeleteBook}
@@ -156,6 +204,7 @@ export default function App() {
               modelConfigs={configuredModelConfigs}
               onUpdateModelConfig={updateModelConfig}
               syncOutlineChapter={syncOutlineChapter}
+              onReady={handleWorkspaceReady}
             />
           )}
         </Suspense>

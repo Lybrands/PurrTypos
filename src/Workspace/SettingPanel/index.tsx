@@ -1,6 +1,6 @@
 import React from 'react'
-import { Tabs } from 'antd'
-import { TeamOutlined, GlobalOutlined, CompassOutlined } from '@ant-design/icons'
+import { Tabs } from '../../ui'
+import { TeamOutlined, GlobalOutlined, CompassOutlined } from '../../ui'
 import type { EntityId } from '../../types'
 import CharacterTab from '../OutlinePanel/CharacterTab'
 import StoryBackgroundTab from '../OutlinePanel/StoryBackgroundTab'

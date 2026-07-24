@@ -158,7 +158,7 @@
   pointer-events: none;
   transition: opacity 0.15s;
 
-  .ant-btn {
+  .purr-button {
     color: var(--text-muted);
     &:hover {
       color: var(--text-muted);
@@ -223,7 +223,7 @@
   flex-shrink: 0;
   display: flex;
 
-  .ant-btn {
+  .purr-button {
     color: var(--text-muted);
     &:hover {
       color: var(--text-muted);

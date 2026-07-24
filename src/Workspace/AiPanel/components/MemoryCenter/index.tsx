@@ -1,18 +1,5 @@
 import React from 'react'
-import {
-  Button,
-  Empty,
-  Input,
-  Modal,
-  Radio,
-  Select,
-  Space,
-  Spin,
-  Switch,
-  Tag,
-  Tooltip,
-  message,
-} from 'antd'
+import { Button, Empty, Input, Modal, Radio, Select, Space, Spin, Switch, Tag, Tooltip, toast, useConfirm } from '../../../../ui'
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -21,7 +8,7 @@ import {
   InboxOutlined,
   PlusOutlined,
   PushpinOutlined,
-} from '@ant-design/icons'
+} from '../../../../ui'
 import type {
   EntityId,
   MemoryItem,
@@ -157,6 +144,7 @@ function structuredFieldLabel(key: string): string {
 }
 
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
+  const confirm = useConfirm()
   const [query, setQuery] = React.useState('')
   const [status, setStatus] = React.useState<UnifiedMemoryStatus | undefined>()
   const [kind, setKind] = React.useState<UnifiedMemoryItem['kind'] | undefined>()
@@ -200,7 +188,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setLoading(false)
     if (!res.success || !res.data || !Array.isArray(res.data.items)) {
       setItems([])
-      message.error(res.error || '读取记忆失败')
+      toast.error(res.error || '读取记忆失败')
       return
     }
     setItems(res.data.items)
@@ -238,7 +226,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setSettingsSaving(true)
     const res = await window.electronAPI.setSettings(patch)
     setSettingsSaving(false)
-    if (!res.success) message.error(res.error || '保存记忆设置失败')
+    if (!res.success) toast.error(res.error || '保存记忆设置失败')
     return res.success
   }, [])
 
@@ -255,13 +243,13 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setCreating(false)
     if (!res.success) {
-      message.error(res.error || '保存记忆失败')
+      toast.error(res.error || '保存记忆失败')
       return
     }
     setNewContent('')
     setNewPinned(false)
     setCreateOpen(false)
-    message.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
+    toast.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
     await load()
   }, [bookId, load, newContent, newKind, newPinned, newStatus])
 
@@ -273,7 +261,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     if (!id) return false
     const res = await window.electronAPI.updateMemory({ id, data })
     if (!res.success) {
-      message.error(res.error || '更新记忆失败')
+      toast.error(res.error || '更新记忆失败')
       return false
     }
     await load()
@@ -283,19 +271,20 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const archiveSemantic = React.useCallback((item: UnifiedMemoryItem) => {
     const id = semanticId(item)
     if (!id) return
-    Modal.confirm({
+    void confirm({
       title: '归档这条记忆？',
       content: '归档后不会自动召回，但仍可在已归档筛选中查看。',
-      okText: '归档',
+      confirmText: '归档',
       cancelText: '取消',
-      okButtonProps: { danger: true },
-      onOk: async () => {
+      confirmVariant: 'danger',
+    }).then(async (result) => {
+      if (result === 'confirm') {
         const res = await window.electronAPI.archiveMemory({ id })
-        if (!res.success) message.error(res.error || '归档失败')
+        if (!res.success) toast.error(res.error || '归档失败')
         await load()
-      },
+      }
     })
-  }, [load])
+  }, [confirm, load])
 
   const submitCandidateGroup = React.useCallback(async (
     deltaId: string,
@@ -303,7 +292,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   ) => {
     const selected = resolutions[deltaId] || {}
     if (!candidates.every((item) => item.target_key && selected[item.target_key])) {
-      message.warning('请先处理这一组中的所有候选')
+      toast.warning('请先处理这一组中的所有候选')
       return
     }
     setSubmittingId(deltaId)
@@ -313,11 +302,11 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setSubmittingId(null)
     if (!res.success) {
-      message.error(res.error || '提交记忆审核失败')
+      toast.error(res.error || '提交记忆审核失败')
       await load()
       return
     }
-    message.success(res.data?.applied_delta_id ? '已应用接受的故事状态' : '候选已全部拒绝')
+    toast.success(res.data?.applied_delta_id ? '已应用接受的故事状态' : '候选已全部拒绝')
     await load()
   }, [load, resolutions])
 
@@ -332,7 +321,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setHistoryLoading(false)
     if (res.success && Array.isArray(res.data)) setHistory(res.data)
-    else message.error(res.error || '读取版本历史失败')
+    else toast.error(res.error || '读取版本历史失败')
   }, [bookId])
 
   const displayEntries = React.useMemo<DisplayEntry[]>(() => {

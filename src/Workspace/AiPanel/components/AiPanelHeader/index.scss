@@ -1,4 +1,4 @@
-.ai-task-progress-trigger.ant-btn {
+.ai-task-progress-trigger.purr-button {
   height: 26px;
   padding: 0 8px;
   border: 1px solid var(--border-light);
@@ -16,19 +16,19 @@
     color: var(--text-primary);
   }
 
-  .ant-btn-icon {
+  .purr-button__icon {
     display: inline-flex;
     color: var(--accent);
   }
 }
 
-.ai-task-progress-trigger--blocked.ant-btn .ant-btn-icon,
-.ai-task-progress-trigger--failed.ant-btn .ant-btn-icon,
-.ai-task-progress-trigger--canceled.ant-btn .ant-btn-icon {
+.ai-task-progress-trigger--blocked.purr-button .purr-button__icon,
+.ai-task-progress-trigger--failed.purr-button .purr-button__icon,
+.ai-task-progress-trigger--canceled.purr-button .purr-button__icon {
   color: var(--danger);
 }
 
-.ai-task-progress-trigger--done.ant-btn .ant-btn-icon {
+.ai-task-progress-trigger--done.purr-button .purr-button__icon {
   color: var(--success);
 }
 
