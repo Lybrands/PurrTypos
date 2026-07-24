@@ -684,6 +684,73 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ON story_memory_sources(book_id, chapter_id, status)"
     )
 
+    # Story Memory records can refer to several entities at once (relationship
+    # endpoints, event participants/location, plot-thread entities). A single
+    # subject_id cannot support broad entity recall, so materialize every role.
+    await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_entity_links (
+        record_id TEXT NOT NULL,
+        book_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        PRIMARY KEY (record_id, entity_type, entity_id, role)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_story_memory_entity_links_lookup "
+        "ON story_memory_entity_links(book_id, entity_type, entity_id)"
+    )
+    await db.execute("""CREATE TRIGGER IF NOT EXISTS story_memory_entity_links_ad
+        AFTER DELETE ON story_memory_records BEGIN
+            DELETE FROM story_memory_entity_links WHERE record_id = old.id;
+        END""")
+
+    # Keep the first-stage lexical channel independent from the final LLM
+    # relevance judgment. FTS may be unavailable in custom SQLite builds; every
+    # caller retains a LIKE compatibility fallback.
+    await _try_exec(db, """CREATE VIRTUAL TABLE IF NOT EXISTS story_memory_fts
+        USING fts5(
+            memory_key,
+            subject_id,
+            payload_json,
+            source_excerpt,
+            book_id UNINDEXED,
+            record_id UNINDEXED,
+            tokenize=trigram
+        )""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS story_memory_fts_ai
+        AFTER INSERT ON story_memory_records BEGIN
+            INSERT INTO story_memory_fts(
+                memory_key, subject_id, payload_json, source_excerpt,
+                book_id, record_id
+            ) VALUES (
+                new.memory_key, COALESCE(new.subject_id, ''), new.payload_json,
+                COALESCE((
+                    SELECT excerpt FROM story_memory_sources
+                    WHERE id = new.last_source_id
+                ), ''),
+                new.book_id, new.id
+            );
+        END""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS story_memory_fts_au
+        AFTER UPDATE ON story_memory_records BEGIN
+            DELETE FROM story_memory_fts WHERE record_id = old.id;
+            INSERT INTO story_memory_fts(
+                memory_key, subject_id, payload_json, source_excerpt,
+                book_id, record_id
+            ) VALUES (
+                new.memory_key, COALESCE(new.subject_id, ''), new.payload_json,
+                COALESCE((
+                    SELECT excerpt FROM story_memory_sources
+                    WHERE id = new.last_source_id
+                ), ''),
+                new.book_id, new.id
+            );
+        END""")
+    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS story_memory_fts_ad
+        AFTER DELETE ON story_memory_records BEGIN
+            DELETE FROM story_memory_fts WHERE record_id = old.id;
+        END""")
+
     await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_delta_operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         delta_id TEXT NOT NULL,
@@ -729,6 +796,92 @@ async def init_schema(db: DatabaseConnection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_story_memory_versions_key "
         "ON story_memory_versions(book_id, memory_key, version)"
     )
+
+    # Non-destructive rebuilds cover records written by older application
+    # versions before the indexes and link projection existed.
+    await db.execute("DELETE FROM story_memory_entity_links")
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT id, book_id, 'generic', subject_id, 'subject'
+        FROM story_memory_records
+        WHERE subject_id IS NOT NULL AND TRIM(subject_id) != ''
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT id, book_id, 'character',
+               CAST(json_extract(payload_json, '$.characterId') AS TEXT),
+               'subject'
+        FROM story_memory_records
+        WHERE kind = 'character_state' AND json_valid(payload_json)
+          AND json_extract(payload_json, '$.characterId') IS NOT NULL
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT id, book_id, 'character',
+               CAST(json_extract(payload_json, '$.sourceCharacterId') AS TEXT),
+               'source'
+        FROM story_memory_records
+        WHERE kind = 'relationship_state' AND json_valid(payload_json)
+          AND json_extract(payload_json, '$.sourceCharacterId') IS NOT NULL
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT id, book_id, 'character',
+               CAST(json_extract(payload_json, '$.targetCharacterId') AS TEXT),
+               'target'
+        FROM story_memory_records
+        WHERE kind = 'relationship_state' AND json_valid(payload_json)
+          AND json_extract(payload_json, '$.targetCharacterId') IS NOT NULL
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT r.id, r.book_id, 'character', CAST(value AS TEXT), 'participant'
+        FROM story_memory_records AS r,
+             json_each(r.payload_json, '$.participantIds')
+        WHERE r.kind = 'timeline_event' AND json_valid(r.payload_json)
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT id, book_id, 'setting',
+               CAST(json_extract(payload_json, '$.locationId') AS TEXT),
+               'location'
+        FROM story_memory_records
+        WHERE kind = 'timeline_event' AND json_valid(payload_json)
+          AND json_extract(payload_json, '$.locationId') IS NOT NULL
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT r.id, r.book_id, 'generic', CAST(value AS TEXT), 'related'
+        FROM story_memory_records AS r,
+             json_each(r.payload_json, '$.relatedEntityIds')
+        WHERE r.kind = 'plot_thread' AND json_valid(r.payload_json)
+    """)
+    await _try_exec(db, """
+        INSERT OR IGNORE INTO story_memory_entity_links
+            (record_id, book_id, entity_type, entity_id, role)
+        SELECT r.id, r.book_id, 'character', CAST(value AS TEXT), 'known_by'
+        FROM story_memory_records AS r,
+             json_each(r.payload_json, '$.knownByCharacterIds')
+        WHERE r.kind = 'world_fact' AND json_valid(r.payload_json)
+    """)
+    await _try_exec(db, "DELETE FROM story_memory_fts")
+    await _try_exec(db, """
+        INSERT INTO story_memory_fts(
+            memory_key, subject_id, payload_json, source_excerpt,
+            book_id, record_id
+        )
+        SELECT r.memory_key, COALESCE(r.subject_id, ''), r.payload_json,
+               COALESCE(s.excerpt, ''), r.book_id, r.id
+        FROM story_memory_records AS r
+        LEFT JOIN story_memory_sources AS s ON s.id = r.last_source_id
+    """)
 
     # ── orphaned conversations migration ─────────────────────────
     orphaned = await db.fetch_all(

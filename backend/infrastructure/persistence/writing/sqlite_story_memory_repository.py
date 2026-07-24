@@ -479,6 +479,7 @@ class SqliteStoryMemoryRepository:
                     record_id,
                 ],
             )
+        await self._replace_entity_links(values)
         after = dict(values)
         await self._db.execute(
             "UPDATE story_memory_delta_operations SET before_record_json = ?, "
@@ -556,12 +557,39 @@ class SqliteStoryMemoryRepository:
                 restored["id"],
             ],
         )
+        await self._replace_entity_links(restored)
         await self._insert_version(
             restored,
             action="rollback",
             delta_id=str(delta["id"]),
             source_id=str(operation["source_id"]),
         )
+
+    async def _replace_entity_links(self, values: Mapping[str, Any]) -> None:
+        record_id = str(values.get("id") or "").strip()
+        await self._db.execute(
+            "DELETE FROM story_memory_entity_links WHERE record_id = ?",
+            [record_id],
+        )
+        if (
+            not record_id
+            or str(values.get("lifecycle") or "")
+            != StoryMemoryLifecycle.ACTIVE.value
+        ):
+            return
+        for entity_type, entity_id, role in _record_entity_links(values):
+            await self._db.execute(
+                "INSERT OR IGNORE INTO story_memory_entity_links "
+                "(record_id, book_id, entity_type, entity_id, role) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    record_id,
+                    str(values.get("book_id") or ""),
+                    entity_type,
+                    entity_id,
+                    role,
+                ],
+            )
 
     async def _insert_version(
         self,
@@ -662,6 +690,38 @@ def _version_from_row(row: Mapping[str, Any]) -> StoryMemoryVersion:
         source_id=_optional_text(row.get("source_id")),
         create_time=_optional_text(row.get("create_time")),
     )
+
+
+def _record_entity_links(
+    values: Mapping[str, Any],
+) -> tuple[tuple[str, str, str], ...]:
+    kind = str(values.get("kind") or "")
+    payload = _json_load_object(values.get("payload_json"))
+    links: list[tuple[str, str, str]] = []
+
+    def add(entity_type: str, entity_id: Any, role: str) -> None:
+        normalized = _optional_text(entity_id)
+        if normalized is not None:
+            links.append((entity_type, normalized, role))
+
+    add("generic", values.get("subject_id"), "subject")
+    if kind == StoryMemoryKind.CHARACTER_STATE.value:
+        add("character", payload.get("characterId"), "subject")
+    elif kind == StoryMemoryKind.RELATIONSHIP_STATE.value:
+        add("character", payload.get("sourceCharacterId"), "source")
+        add("character", payload.get("targetCharacterId"), "target")
+    elif kind == StoryMemoryKind.WORLD_FACT.value:
+        add("generic", payload.get("subjectId"), "subject")
+        for value in payload.get("knownByCharacterIds") or ():
+            add("character", value, "known_by")
+    elif kind == StoryMemoryKind.TIMELINE_EVENT.value:
+        for value in payload.get("participantIds") or ():
+            add("character", value, "participant")
+        add("setting", payload.get("locationId"), "location")
+    elif kind == StoryMemoryKind.PLOT_THREAD.value:
+        for value in payload.get("relatedEntityIds") or ():
+            add("generic", value, "related")
+    return tuple(dict.fromkeys(links))
 
 
 def _record_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:

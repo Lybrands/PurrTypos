@@ -98,6 +98,42 @@ const KIND_HINTS: Record<MemoryKind, string> = {
   summary: '记录阶段性结论；建议先保存为待确认，审核后再启用。',
 }
 
+const STRUCTURED_FIELD_LABELS: Record<string, string> = {
+  keywords: '关键词',
+  importance: '重要程度',
+  characterId: '人物',
+  attribute: '属性',
+  value: '值',
+  note: '备注',
+  sourceCharacterId: '关系发起人物',
+  targetCharacterId: '关系目标人物',
+  relationType: '关系类型',
+  state: '状态',
+  description: '描述',
+  directional: '是否有方向',
+  factId: '事实标识',
+  statement: '事实描述',
+  truthMode: '事实模式',
+  subjectId: '关联主体',
+  knownByCharacterIds: '知情人物',
+  tags: '标签',
+  eventId: '事件标识',
+  title: '标题',
+  summary: '摘要',
+  participantIds: '参与者',
+  locationId: '地点',
+  storyTime: '故事时间',
+  storyTimePrecision: '时间精度',
+  narrativeOrder: '叙事顺序',
+  causedByEventIds: '前置事件',
+  threadId: '剧情线标识',
+  relatedEntityIds: '关联实体',
+  openedChapterId: '开启章节',
+  expectedResolutionChapterId: '预计解决章节',
+  resolvedChapterId: '解决章节',
+  fieldChanges: '字段变更',
+}
+
 const MEMORY_CONTENT_PLACEHOLDER = '请输入希望 AI 在后续创作中持续记住的内容…'
 
 function defaultResolution(item: UnifiedMemoryItem): Resolution | undefined {
@@ -114,6 +150,10 @@ function displayValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
   if (typeof value === 'string') return value
   return JSON.stringify(value, null, 2)
+}
+
+function structuredFieldLabel(key: string): string {
+  return STRUCTURED_FIELD_LABELS[key] || key
 }
 
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
@@ -367,7 +407,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 <div className="story-memory-payload">
                   {Object.entries(item.structured_data).map(([key, value]) => (
                     <div className="story-memory-payload-row" key={key}>
-                      <span>{key}</span><code>{displayValue(value)}</code>
+                      <span>{structuredFieldLabel(key)}</span><code>{displayValue(value)}</code>
                     </div>
                   ))}
                 </div>
@@ -412,7 +452,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
               <div className="story-memory-payload">
                 {Object.entries(item.structured_data).map(([key, value]) => (
                   <div className="story-memory-payload-row" key={key}>
-                    <span>{key}</span><code>{displayValue(value)}</code>
+                    <span>{structuredFieldLabel(key)}</span><code>{displayValue(value)}</code>
                   </div>
                 ))}
               </div>

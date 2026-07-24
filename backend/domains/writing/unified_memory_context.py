@@ -7,8 +7,9 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from agent_core.context_budget import estimate_json_tokens
-from agent_core.contracts import TaskContextRequest
+from agent_core.contracts import ModelRequest, TaskContextRequest
 from agent_core.json_values import thaw_json_mapping
+from agent_core.ports import CancellationSignal
 from domains.writing.memory_context import (
     MemoryContextBlock,
     MemoryContextRequest,
@@ -19,6 +20,11 @@ from domains.writing.memory_context import (
 from domains.writing.repositories import (
     StoryMemoryRecallItem,
     StoryMemoryRecallRepository,
+)
+from domains.writing.memory_reranking import (
+    MemoryCandidateCard,
+    MemoryCandidateReranker,
+    MemoryRerankDecision,
 )
 
 
@@ -118,23 +124,120 @@ class MemoryContextPack:
 class StoryMemoryContextProvider:
     """Select and format authoritative current story state."""
 
-    def __init__(self, repository: StoryMemoryRecallRepository):
+    def __init__(
+        self,
+        repository: StoryMemoryRecallRepository,
+        reranker: MemoryCandidateReranker | None = None,
+    ):
         self._repository = repository
+        self._reranker = reranker
 
-    async def build(self, request: MemoryContextRequest) -> StoryMemoryContextBlock:
+    async def build(
+        self,
+        request: MemoryContextRequest,
+        *,
+        model_request: ModelRequest | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> StoryMemoryContextBlock:
         book_id = str(request.book_id or "").strip()
         budget = max(0, int(request.token_budget))
         if not book_id or budget <= 0 or not request.include_story_memory:
             return StoryMemoryContextBlock(diagnostics=_story_diagnostics())
-        items = await self._repository.search_current(
+        maximum = max(1, min(64, int(request.recall_limit)))
+        candidates = await self._repository.search_current(
             book_id,
             request.user_prompt,
             kinds=request.story_kinds,
             planner_kinds=request.planner_story_kinds,
             entity_refs=request.entity_refs,
             chapter_ids=request.chapter_ids,
-            limit=max(1, min(48, int(request.recall_limit))),
+            limit=max(
+                maximum,
+                min(160, max(1, int(request.candidate_limit))),
+            ),
         )
+        items = candidates[:maximum]
+        rerank_diagnostics: dict[str, Any] = {
+            "candidateCount": len(candidates),
+            "rerankerUsed": False,
+            "rerankerStatus": "not_configured",
+        }
+        decisions: tuple[MemoryRerankDecision, ...] = ()
+        if self._reranker is not None and model_request is not None and candidates:
+            try:
+                reranked = await self._reranker.rerank(
+                    query=request.user_prompt,
+                    candidates=tuple(
+                        _story_candidate_card(item) for item in candidates
+                    ),
+                    story_kinds=request.story_kinds,
+                    planner_story_kinds=request.planner_story_kinds,
+                    entity_refs=request.entity_refs,
+                    chapter_ids=request.chapter_ids,
+                    max_selected=maximum,
+                    model_request=model_request,
+                    signal=signal,
+                )
+                decisions = reranked.decisions
+                candidate_by_id = {
+                    item.record_id: item for item in candidates
+                }
+                selected_ids = tuple(
+                    decision.record_id
+                    for decision in decisions
+                    if decision.record_id in candidate_by_id
+                )
+                refreshed = await self._repository.get_current_by_ids(
+                    book_id,
+                    selected_ids,
+                )
+                refreshed_by_id = {
+                    item.record_id: item for item in refreshed
+                }
+                invalidated_ids: list[str] = []
+                validated_items: list[StoryMemoryRecallItem] = []
+                for record_id in selected_ids:
+                    candidate = candidate_by_id[record_id]
+                    current = refreshed_by_id.get(record_id)
+                    if current is None or current.version != candidate.version:
+                        invalidated_ids.append(record_id)
+                        continue
+                    validated_items.append(replace(
+                        current,
+                        candidate_channels=candidate.candidate_channels,
+                        retrieval_score=candidate.retrieval_score,
+                    ))
+                items = tuple(validated_items[:maximum])
+                rerank_diagnostics = {
+                    "candidateCount": len(candidates),
+                    "rerankerUsed": True,
+                    "rerankerStatus": "completed",
+                    "rerankerModel": reranked.model,
+                    "rerankerBatchCount": reranked.batch_count,
+                    "rerankerSelectedCount": len(items),
+                    "rerankerInvalidatedCount": len(invalidated_ids),
+                    "rerankerInvalidatedIds": invalidated_ids,
+                    "rerankerUnresolvedNeeds": list(reranked.unresolved_needs),
+                    "rerankerDecisions": [
+                        {
+                            "recordId": decision.record_id,
+                            "priority": decision.priority,
+                            "supports": list(decision.supports),
+                            "reason": decision.reason,
+                        }
+                        for decision in decisions
+                    ],
+                }
+            except Exception as error:
+                # Recall is optional context. A malformed or unavailable judge
+                # must not erase deterministic candidates or fail the Agent Run.
+                items = candidates[:maximum]
+                rerank_diagnostics = {
+                    "candidateCount": len(candidates),
+                    "rerankerUsed": True,
+                    "rerankerStatus": "fallback",
+                    "rerankerError": type(error).__name__,
+                }
         included: list[StoryMemoryRecallItem] = []
         deferred: list[str] = []
         rows: list[str] = []
@@ -175,9 +278,11 @@ class StoryMemoryContextProvider:
             authority_signatures=signatures,
             receipts=receipts,
             diagnostics=_story_diagnostics(
-                recalled=len(items),
+                recalled=len(candidates),
                 included=len(included),
                 deferred=len(deferred),
+                selected=len(items),
+                **rerank_diagnostics,
             ),
         )
 
@@ -242,7 +347,13 @@ class UnifiedMemoryRetriever:
         self._story = story_provider
         self._assembler = assembler or MemoryContextAssembler()
 
-    async def build(self, request: MemoryContextRequest) -> MemoryContextPack:
+    async def build(
+        self,
+        request: MemoryContextRequest,
+        *,
+        model_request: ModelRequest | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> MemoryContextPack:
         total_budget = max(0, int(request.token_budget))
         overhead_reserve = min(120, total_budget)
         content_budget = max(0, total_budget - overhead_reserve)
@@ -252,17 +363,25 @@ class UnifiedMemoryRetriever:
             else 0
         )
         story = (
-            await self._story.build(replace(request, token_budget=story_budget))
+            await self._story.build(
+                replace(request, token_budget=story_budget),
+                model_request=model_request,
+                signal=signal,
+            )
             if self._story is not None
             else StoryMemoryContextBlock(diagnostics=_story_diagnostics())
         )
         semantic_budget = max(0, content_budget - story.token_estimate)
-        semantic = await self._semantic.build(replace(
-            request,
-            token_budget=semantic_budget,
-            authoritative_fingerprints=story.authority_fingerprints,
-            authoritative_signatures=story.authority_signatures,
-        ))
+        semantic = await self._semantic.build(
+            replace(
+                request,
+                token_budget=semantic_budget,
+                authoritative_fingerprints=story.authority_fingerprints,
+                authoritative_signatures=story.authority_signatures,
+            ),
+            model_request=model_request,
+            signal=signal,
+        )
         return self._assembler.assemble(
             story,
             semantic,
@@ -367,6 +486,20 @@ def _render_story_item(item: StoryMemoryRecallItem) -> str:
     )
 
 
+def _story_candidate_card(item: StoryMemoryRecallItem) -> MemoryCandidateCard:
+    return MemoryCandidateCard(
+        id=item.record_id,
+        source="story_state",
+        kind=item.kind,
+        fact=dict(item.payload),
+        subject_id=item.subject_id,
+        chapter_id=item.chapter_id,
+        source_excerpt=item.source_excerpt,
+        version=item.version,
+        candidate_channels=item.candidate_channels,
+    )
+
+
 def _compose_story_text(rows: Sequence[str], deferred_count: int) -> str:
     lines = ["【Story Memory — 已确认、当前有效且证据有效】", *rows]
     if deferred_count:
@@ -433,11 +566,15 @@ def _story_diagnostics(
     recalled: int = 0,
     included: int = 0,
     deferred: int = 0,
-) -> dict[str, int]:
+    selected: int = 0,
+    **extra: Any,
+) -> dict[str, Any]:
     return {
         "recalled": recalled,
+        "selected": selected,
         "included": included,
         "deferred": deferred,
+        **extra,
     }
 
 

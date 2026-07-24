@@ -157,7 +157,6 @@ class WritingContextProvider:
     ) -> ContextBundle:
         """Perform formal recall after planning using semantic task intent."""
 
-        del signal
         context = WritingDomainContext.from_core_context(request.domain_context)
         retrieval_required = bool(
             WRITING_RETRIEVAL_CONTEXT in task.required_context_blocks
@@ -171,6 +170,7 @@ class WritingContextProvider:
             recall_query=query,
             retrieval_required=retrieval_required,
             task=task,
+            signal=signal,
         )
 
     async def _build_context(
@@ -181,6 +181,7 @@ class WritingContextProvider:
         recall_query: str | None = None,
         retrieval_required: bool = True,
         task: TaskContextRequest | None = None,
+        signal: CancellationSignal | None = None,
     ) -> ContextBundle:
         context = WritingDomainContext.from_core_context(request.domain_context)
         allocated = budget.allocation_for(WRITING_RETRIEVAL_CONTEXT)
@@ -213,6 +214,7 @@ class WritingContextProvider:
                     memory_budget,
                     recall_query,
                     task,
+                    signal=signal,
                 )
             elif recall_query is not None and callable(query_builder):
                 memory_value = await query_builder(
