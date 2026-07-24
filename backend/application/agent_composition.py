@@ -25,6 +25,7 @@ from agent_core.ports import (
 from agent_core.tools import InMemoryToolCatalog
 from application.response_judging import ModelBackedResponseJudge
 from application.run_execution_control import RunExecutionSession
+from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider
 from domains.writing.context_source import RepositoryWritingContextSource
@@ -95,6 +96,7 @@ class AgentComposition:
         self._provider_capabilities = (
             provider_capabilities or ProviderCapabilityCache()
         )
+        self._writing_context_source: RepositoryWritingContextSource | None = None
         self._skill_catalog: WritingSkillCatalog | None = None
         if writing is not None:
             self._writing = writing
@@ -103,6 +105,11 @@ class AgentComposition:
                 Path(__file__).resolve().parent.parent / "skills"
             )
             self._skill_catalog = WritingSkillCatalog(resolved_skills_dir)
+            self._writing_context_source = RepositoryWritingContextSource(
+                SqliteAssociatedContextRepository(db),
+                SqliteMemoryRecallRepository(db),
+                SqliteStoryMemoryRecallRepository(db),
+            )
             self._writing = WritingDomainAdapter.build(
                 tool_catalog=build_writing_tool_catalog(
                     dependencies=WritingToolDependencies(
@@ -112,11 +119,7 @@ class AgentComposition:
                     skill_items=tuple(self._skill_catalog.skill_items()),
                 ),
                 context_provider=WritingContextProvider(
-                    RepositoryWritingContextSource(
-                        SqliteAssociatedContextRepository(db),
-                        SqliteMemoryRecallRepository(db),
-                        SqliteStoryMemoryRecallRepository(db),
-                    )
+                    self._writing_context_source
                 ),
             )
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
@@ -174,15 +177,21 @@ class AgentComposition:
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
-        context_provider = self._writing.context_provider
-        if context_provider is None:
-            raise RuntimeError("Writing ContextProvider is not configured")
         model_gateway = ProviderModelGateway(
             api_key,
             on_required_tool_choice_unsupported=(
                 on_required_tool_choice_unsupported
             ),
         )
+        context_provider = self._writing.context_provider
+        if self._writing_context_source is not None:
+            context_provider = WritingContextProvider(
+                self._writing_context_source.with_memory_reranker(
+                    ModelBackedMemoryReranker(model_gateway)
+                )
+            )
+        if context_provider is None:
+            raise RuntimeError("Writing ContextProvider is not configured")
         base_catalog = self._writing.tool_catalog
         extras = tuple(extra_tool_registrations)
         tool_catalog = base_catalog

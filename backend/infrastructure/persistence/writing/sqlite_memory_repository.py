@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
 
+_FIELD_PREFIX = re.compile(
+    r"^(?:任务目标|操作|目标|具体要求|约束|必须保留|交付物|所需证据类型)\s*[:：]\s*"
+)
+_CLAUSE_SPLIT = re.compile(r"[\n\r。！？!?；;，,、]+")
+_TOKEN_CHUNK = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_.:-]{2,}")
+
+
 class SqliteMemoryRecallRepository:
     def __init__(self, db: DatabaseConnection):
         self._db = db
@@ -74,27 +81,31 @@ class SqliteMemoryRecallRepository:
             scope_id=scope_id,
         )
         text = str(query or "").strip()
-        if len(text) >= 2:
+        terms = _query_like_terms(text)
+        searchable = tuple(value for value in terms if len(value) >= 3)
+        fts_rows: list[dict[str, Any]] = []
+        if searchable:
+            expression = " OR ".join(
+                '"' + value.replace('"', '""') + '"' for value in searchable
+            )
             try:
-                rows = await self._db.fetch_all(
+                fts_rows = await self._db.fetch_all(
                     "SELECT m.*, memory_items_fts.rank AS fts_rank "
                     "FROM memory_items_fts "
                     "JOIN memory_items m ON m.id = memory_items_fts.rowid "
                     f"WHERE memory_items_fts MATCH ? AND {' AND '.join(where)} "
                     "ORDER BY m.pinned DESC, m.importance DESC, "
                     "memory_items_fts.rank, m.id ASC LIMIT ?",
-                    [text, *params, maximum],
+                    [expression, *params, maximum],
                 )
-                if rows:
-                    return tuple(_memory_item(row) for row in rows)
             except Exception:
-                pass
+                fts_rows = []
 
         fallback_where = list(where)
         fallback_params = list(params)
-        if text:
+        if terms:
             clauses: list[str] = []
-            for term in _query_like_terms(text):
+            for term in _evenly_sample(terms, min(32, len(terms))):
                 clauses.append(
                     "(m.content LIKE ? OR m.summary LIKE ? OR m.keywords LIKE ?)"
                 )
@@ -102,14 +113,24 @@ class SqliteMemoryRecallRepository:
                 fallback_params.extend([like, like, like])
             if clauses:
                 fallback_where.append("(" + " OR ".join(clauses) + ")")
-        rows = await self._db.fetch_all(
+        fallback_rows = await self._db.fetch_all(
             f"SELECT m.* FROM memory_items m WHERE {' AND '.join(fallback_where)} "
             "ORDER BY m.pinned DESC, m.importance DESC, "
             "COALESCE(m.last_used_at, m.update_time, m.create_time) DESC, "
             "m.id ASC LIMIT ?",
             [*fallback_params, maximum],
         )
-        return tuple(_memory_item(row) for row in rows)
+        merged: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for row in (*fts_rows, *fallback_rows):
+            item_id = int(row["id"])
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            merged.append(row)
+            if len(merged) >= maximum:
+                break
+        return tuple(_memory_item(row) for row in merged)
 
     async def get_links(
         self,
@@ -193,16 +214,65 @@ def _query_like_terms(query: str) -> list[str]:
     text = str(query or "").strip()
     if not text:
         return []
-    terms = [text]
-    for chunk in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", text):
-        if re.search(r"[\u4e00-\u9fff]", chunk) and len(chunk) > 3:
-            terms.append(chunk)
-            terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))
-        elif len(chunk) <= 6:
-            terms.append(chunk)
-        else:
-            terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))
-    return list(dict.fromkeys(terms))[:12]
+    groups: list[tuple[str, ...]] = []
+    for line in text.splitlines() or (text,):
+        body = _FIELD_PREFIX.sub("", line.strip())
+        for clause in _CLAUSE_SPLIT.split(body):
+            values: list[str] = []
+            for chunk in _TOKEN_CHUNK.findall(clause):
+                if re.search(r"[\u4e00-\u9fff]", chunk):
+                    if len(chunk) <= 3:
+                        values.append(chunk)
+                    else:
+                        if len(chunk) <= 12:
+                            values.append(chunk)
+                        values.extend(
+                            chunk[index:index + 2]
+                            for index in range(len(chunk) - 1)
+                        )
+                        values.extend(
+                            chunk[index:index + 3]
+                            for index in range(len(chunk) - 2)
+                        )
+                else:
+                    values.append(chunk[:64])
+            cleaned = tuple(dict.fromkeys(value for value in values if value))
+            if cleaned:
+                groups.append(cleaned)
+    maximum = 96
+    if not groups:
+        return []
+    quota = max(1, maximum // len(groups))
+    selected: list[str] = []
+    leftovers: list[tuple[str, ...]] = []
+    for group in groups:
+        sampled = _evenly_sample(group, min(len(group), quota))
+        selected.extend(sampled)
+        sampled_set = set(sampled)
+        leftovers.append(tuple(value for value in group if value not in sampled_set))
+    cursor = 0
+    while len(selected) < maximum and any(leftovers):
+        index = cursor % len(leftovers)
+        if leftovers[index]:
+            selected.append(leftovers[index][0])
+            leftovers[index] = leftovers[index][1:]
+        cursor += 1
+    return list(dict.fromkeys(selected))[:maximum]
+
+
+def _evenly_sample(values: Sequence[str], maximum: int) -> tuple[str, ...]:
+    rows = tuple(values)
+    if maximum <= 0 or not rows:
+        return ()
+    if len(rows) <= maximum:
+        return rows
+    if maximum == 1:
+        return (rows[len(rows) // 2],)
+    indexes = {
+        round(index * (len(rows) - 1) / (maximum - 1))
+        for index in range(maximum)
+    }
+    return tuple(rows[index] for index in sorted(indexes))
 
 
 def _memory_item(row: dict[str, Any]) -> MemoryItem:

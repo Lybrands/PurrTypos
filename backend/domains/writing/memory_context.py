@@ -5,11 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from agent_core.contracts import ModelRequest
 from agent_core.context_budget import estimate_text_tokens
+from agent_core.ports import CancellationSignal
 from domains.writing.repositories import (
     MemoryItem,
     MemoryLink,
     MemoryRecallRepository,
+)
+from domains.writing.memory_reranking import (
+    MemoryCandidateCard,
+    MemoryCandidateReranker,
 )
 
 
@@ -30,6 +36,7 @@ class MemoryContextRequest:
     user_prompt: str = ""
     token_budget: int = 6_000
     recall_limit: int = 16
+    candidate_limit: int = 40
     selected_memory_item_ids: tuple[Any, ...] = ()
     selected_foreshadowing_memory_item_ids: tuple[Any, ...] = ()
     selected_spark_idea_ids: tuple[Any, ...] = ()
@@ -226,10 +233,21 @@ def unavailable_memory_context(
 
 
 class WritingMemoryContextBuilder:
-    def __init__(self, repository: MemoryRecallRepository):
+    def __init__(
+        self,
+        repository: MemoryRecallRepository,
+        reranker: MemoryCandidateReranker | None = None,
+    ):
         self._repository = repository
+        self._reranker = reranker
 
-    async def build(self, request: MemoryContextRequest) -> MemoryContextBlock:
+    async def build(
+        self,
+        request: MemoryContextRequest,
+        *,
+        model_request: ModelRequest | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> MemoryContextBlock:
         selection = _selected_memory_request(request)
         book_id = str(request.book_id or "").strip()
         if not book_id:
@@ -239,11 +257,96 @@ class WritingMemoryContextBuilder:
             return unavailable_memory_context(request)
 
         forced = await self._resolve_forced_items(request, book_id)
-        recalled = await self._repository.search(
+        recalled_candidates = await self._repository.search(
             book_id,
             request.user_prompt,
-            limit=max(1, int(request.recall_limit)),
+            limit=max(
+                int(request.recall_limit),
+                min(160, max(1, int(request.candidate_limit))),
+            ),
         )
+        recalled = recalled_candidates[:max(1, int(request.recall_limit))]
+        rerank_diagnostics: dict[str, Any] = {
+            "candidateCount": len(recalled_candidates),
+            "rerankerUsed": False,
+            "rerankerStatus": "not_configured",
+        }
+        if (
+            self._reranker is not None
+            and model_request is not None
+            and recalled_candidates
+        ):
+            try:
+                reranked = await self._reranker.rerank(
+                    query=request.user_prompt,
+                    candidates=tuple(
+                        _semantic_candidate_card(item)
+                        for item in recalled_candidates
+                    ),
+                    story_kinds=request.story_kinds,
+                    planner_story_kinds=request.planner_story_kinds,
+                    entity_refs=request.entity_refs,
+                    chapter_ids=request.chapter_ids,
+                    max_selected=max(1, int(request.recall_limit)),
+                    model_request=model_request,
+                    signal=signal,
+                )
+                item_by_id = {
+                    f"semantic:{item.id}": item
+                    for item in recalled_candidates
+                }
+                selected_keys = tuple(
+                    decision.record_id
+                    for decision in reranked.decisions
+                    if decision.record_id in item_by_id
+                )
+                selected_ids = tuple(
+                    item_by_id[key].id for key in selected_keys
+                )
+                refreshed = await self._repository.get_by_ids(
+                    book_id,
+                    selected_ids,
+                    statuses=("active",),
+                )
+                refreshed_by_id = {item.id: item for item in refreshed}
+                invalidated_ids: list[int] = []
+                validated: list[MemoryItem] = []
+                for key in selected_keys:
+                    candidate = item_by_id[key]
+                    current = refreshed_by_id.get(candidate.id)
+                    if current is None or current != candidate:
+                        invalidated_ids.append(candidate.id)
+                        continue
+                    validated.append(current)
+                recalled = tuple(validated)
+                rerank_diagnostics = {
+                    "candidateCount": len(recalled_candidates),
+                    "rerankerUsed": True,
+                    "rerankerStatus": "completed",
+                    "rerankerModel": reranked.model,
+                    "rerankerBatchCount": reranked.batch_count,
+                    "rerankerSelectedCount": len(recalled),
+                    "rerankerInvalidatedCount": len(invalidated_ids),
+                    "rerankerInvalidatedIds": invalidated_ids,
+                    "rerankerUnresolvedNeeds": list(reranked.unresolved_needs),
+                    "rerankerDecisions": [
+                        {
+                            "recordId": decision.record_id,
+                            "priority": decision.priority,
+                            "supports": list(decision.supports),
+                            "reason": decision.reason,
+                        }
+                        for decision in reranked.decisions
+                    ],
+                }
+            except Exception as error:
+                recalled = recalled_candidates[:max(1, int(request.recall_limit))]
+                rerank_diagnostics = {
+                    "candidateCount": len(recalled_candidates),
+                    "rerankerUsed": True,
+                    "rerankerStatus": "fallback",
+                    "rerankerError": type(error).__name__,
+                }
 
         by_id: dict[int, MemoryItem] = {}
         forced_ids = {item.id for item in forced}
@@ -333,6 +436,7 @@ class WritingMemoryContextBuilder:
             relation_expanded=len(relation_expanded),
             character_count=len(text),
         )
+        diagnostics.update(rerank_diagnostics)
         selected_included_ids = forced_ids.intersection(included_ids)
         selected_truncated_ids = selected_included_ids.intersection(truncated_ids)
         selected_truncated_count = min(
@@ -415,6 +519,26 @@ class WritingMemoryContextBuilder:
             seen.add(item.id)
             result.append(item)
         return tuple(result)
+
+
+def _semantic_candidate_card(item: MemoryItem) -> MemoryCandidateCard:
+    return MemoryCandidateCard(
+        id=f"semantic:{item.id}",
+        source="semantic",
+        kind=item.kind,
+        fact={
+            "content": item.content,
+            "summary": item.summary,
+            "importance": item.importance,
+            "scopeType": item.scope_type,
+            "scopeId": item.scope_id,
+        },
+        subject_id=item.scope_id,
+        chapter_id=(
+            item.scope_id if item.scope_type == "chapter" else None
+        ),
+        candidate_channels=("semantic_search",),
+    )
 
 
 def _format_budgeted(

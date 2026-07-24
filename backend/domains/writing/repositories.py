@@ -58,6 +58,8 @@ class StoryMemoryRecallItem:
     chapter_id: str
     source_excerpt: str
     update_time: str | None = None
+    candidate_channels: tuple[str, ...] = ()
+    retrieval_score: float = 0.0
 
 
 class AssociatedContextRepository(Protocol):
@@ -134,4 +136,10 @@ class StoryMemoryRecallRepository(Protocol):
         entity_refs: Sequence[str] = (),
         chapter_ids: Sequence[str] = (),
         limit: int = 24,
+    ) -> tuple[StoryMemoryRecallItem, ...]: ...
+
+    async def get_current_by_ids(
+        self,
+        book_id: str,
+        record_ids: Sequence[str],
     ) -> tuple[StoryMemoryRecallItem, ...]: ...
