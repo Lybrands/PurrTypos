@@ -1,5 +1,5 @@
-import { EditOutlined, StarOutlined } from "@ant-design/icons";
-import { Button, Tooltip } from "antd";
+import { EditOutlined, StarOutlined } from "../../../../ui";
+import { Button, Tooltip } from "../../../../ui";
 import React from "react";
 import { formatModelName } from "../../utils";
 import { type ChatMessage } from "../../hooks";

@@ -4,9 +4,8 @@ import {
   EllipsisOutlined,
   LoadingOutlined,
   PauseCircleOutlined,
-} from "@ant-design/icons";
-import { Button, Dropdown, Popover, Tooltip } from "antd";
-import type { MenuProps } from "antd";
+} from "../../../../ui";
+import { Button, Dropdown, Popover, Tooltip, type DropdownItem } from "../../../../ui";
 import type { AiTaskPlan } from "../../hooks/chat.types";
 import {
   getTaskPlanLabel,
@@ -16,7 +15,7 @@ import {
 import "./index.scss";
 
 interface AiPanelHeaderProps {
-  menuItems: MenuProps["items"];
+  menuItems: DropdownItem[];
   activeTaskPlan?: AiTaskPlan;
 }
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { ExclamationCircleOutlined, RightOutlined } from "@ant-design/icons";
+import { ExclamationCircleOutlined, RightOutlined } from "../../../../ui";
 import "./index.scss";
 
 export interface WorkLogProps {

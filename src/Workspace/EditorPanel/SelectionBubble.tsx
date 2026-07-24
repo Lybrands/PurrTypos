@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Tooltip } from 'antd'
-import { BulbOutlined } from '@ant-design/icons'
+import { Button, Tooltip } from '../../ui'
+import { BulbOutlined } from '../../ui'
 
 // ── 预设改写指令 ──────────────────────────────────────────────────
 export const PRESETS: { id: string; label: string; prompt: string }[] = [

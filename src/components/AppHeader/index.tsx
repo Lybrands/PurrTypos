@@ -1,6 +1,6 @@
 import React from 'react'
-import { SunOutlined, MoonOutlined, FontSizeOutlined, SettingOutlined } from '@ant-design/icons'
-import { Button, Tooltip } from 'antd'
+import { SunOutlined, MoonOutlined, FontSizeOutlined, SettingOutlined } from '../../ui'
+import { Button, Tooltip } from '../../ui'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useFontSize } from '../../contexts/FontSizeContext'
 import homeLogoLight from '../../imgs/home_logo_light.png'

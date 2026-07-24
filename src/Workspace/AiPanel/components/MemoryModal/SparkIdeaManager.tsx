@@ -1,6 +1,7 @@
 import React from 'react'
-import { Button, Empty, Input, Popconfirm, Select, Spin } from 'antd'
-import { CheckOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
+import { Button, Input, Popconfirm, Select } from '../../../../ui'
+import { Empty, Spin } from '../../../../ui'
+import { CheckOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from '../../../../ui'
 import {
   SPARK_IDEA_LAYER_FOUR_VALUES,
   SPARK_IDEA_LAYER_LABELS,

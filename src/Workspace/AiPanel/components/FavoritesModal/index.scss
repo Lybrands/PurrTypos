@@ -1,6 +1,6 @@
 /* ─── 收藏列表弹窗 ──────────────────────────────────────────── */
-.ai-favorites-modal.ant-modal {
-  .ant-modal-body {
+.ai-favorites-modal.purr-dialog {
+  .purr-dialog__body {
     height: 50vh;
     overflow: hidden;
     display: flex;
@@ -15,7 +15,7 @@
     min-height: 320px;
   }
 
-  .ant-modal-body .ant-empty {
+  .purr-dialog__body .purr-empty {
     flex: 1;
     display: flex;
     align-items: center;
@@ -23,14 +23,14 @@
     min-height: 320px;
   }
 
-  .favorites-list.ant-list {
+  .favorites-list.purr-list {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
   }
 
-  .favorites-list-item.ant-list-item {
-    .ant-list-item-action {
+  .favorites-list-item.purr-list__item {
+    .purr-list__actions {
       display: none;
     }
   }
@@ -93,7 +93,7 @@
     line-height: 1.4;
   }
 
-  .favorites-item-delete.ant-btn {
+  .favorites-item-delete.purr-button {
     min-width: 24px;
     color: var(--text-muted);
     &:hover {
@@ -103,8 +103,8 @@
 }
 
 /* ─── 收藏详情弹窗 ──────────────────────────────────────────── */
-.ai-favorite-detail-modal.ant-modal {
-  .ant-modal-body {
+.ai-favorite-detail-modal.purr-dialog {
+  .purr-dialog__body {
     height: 60vh;
     overflow: hidden;
     display: flex;

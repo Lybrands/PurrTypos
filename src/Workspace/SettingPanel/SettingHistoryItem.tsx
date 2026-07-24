@@ -1,5 +1,5 @@
-import { RollbackOutlined } from '@ant-design/icons'
-import { Button, Spin, Tag, Tooltip } from 'antd'
+import { RollbackOutlined } from '../../ui'
+import { Button, Spin, Tag, Tooltip } from '../../ui'
 import type { HistoryViewModel } from './SettingHistoryAdapter'
 
 interface SettingHistoryItemProps {

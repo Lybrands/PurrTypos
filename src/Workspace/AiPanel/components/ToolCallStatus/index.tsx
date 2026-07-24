@@ -1,5 +1,5 @@
 import React from "react";
-import { Button } from "antd";
+import { Button } from "../../../../ui";
 import {
   EditOutlined,
   CheckCircleOutlined,
@@ -7,7 +7,7 @@ import {
   FileSearchOutlined,
   ClockCircleOutlined,
   RightOutlined,
-} from "@ant-design/icons";
+} from "../../../../ui";
 import "./index.scss";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";

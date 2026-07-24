@@ -1,6 +1,6 @@
 import React from "react";
-import { Button, Card, Space, Tag } from "antd";
-import { CheckOutlined, CloseOutlined } from "@ant-design/icons";
+import { Button, Card, Space, Tag } from "../../../../ui";
+import { CheckOutlined, CloseOutlined } from "../../../../ui";
 import type { ToolApprovalRequest } from "../../../../types";
 import "./ToolApprovalCard.scss";
 

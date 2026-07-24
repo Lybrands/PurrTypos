@@ -37,7 +37,7 @@
   max-width: 420px;
 }
 
-.workspace-search-input.ant-input-affix-wrapper {
+.workspace-search-input.purr-input-affix {
   flex: 1;
   min-width: 0;
 }
@@ -54,11 +54,11 @@
   white-space: nowrap;
 }
 
-.workspace-search-nav-btn.ant-btn {
+.workspace-search-nav-btn.purr-button {
   flex-shrink: 0;
   color: inherit;
 
-  .anticon {
+  .purr-icon {
     color: inherit;
   }
 

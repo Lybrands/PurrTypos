@@ -1,6 +1,5 @@
 import React from "react";
-import { Button, Input } from "antd";
-import type { TextAreaRef } from "antd/es/input/TextArea";
+import { Button, Input, type TextAreaRef } from "../../../../ui";
 import type { AiModelConfig, EntityId } from "../../../../types";
 import AiContextBar, { type AiContextBarBindings } from "../AiContextBar";
 import AiComposeBottom, {

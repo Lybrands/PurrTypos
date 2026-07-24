@@ -2,8 +2,106 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--bg-base);
+  overflow: hidden;
+  color: var(--text-primary);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--bg-panel) 42%, transparent), transparent 46%),
+    var(--bg-base);
   position: relative;
+  isolation: isolate;
+}
+
+/*
+ * 跨页面环境光：同一层在书架与工作台之间持续存在，因此页面切换时可以真正
+ * 移动、缩放和重组，而不是让两张静态渐变简单交叉淡入。
+ */
+.app-ambient-glow {
+  --ambient-motion-duration: 1280ms;
+  --ambient-motion-curve: cubic-bezier(0.42, 0, 0.16, 1);
+  --ambient-fade-curve: cubic-bezier(0.32, 0, 0.18, 1);
+
+  position: absolute;
+  z-index: 0;
+  top: -10%;
+  left: 74%;
+  width: 38%;
+  height: 54%;
+  border-radius: 46% 54% 58% 42%;
+  pointer-events: none;
+  opacity: 0;
+  background:
+    radial-gradient(
+      ellipse at 58% 30%,
+      color-mix(in srgb, var(--accent) 26%, transparent) 0%,
+      color-mix(in srgb, var(--accent) 15%, transparent) 34%,
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse at 30% 58%,
+      color-mix(in srgb, var(--accent) 12%, transparent) 0%,
+      transparent 66%
+    );
+  filter: blur(34px) saturate(1.05);
+  transform: translate3d(0, 0, 0) rotate(-6deg) scale(0.92);
+  transform-origin: center;
+  will-change: top, left, width, height, opacity, transform, filter;
+  transition:
+    top var(--ambient-motion-duration) var(--ambient-motion-curve),
+    left var(--ambient-motion-duration) var(--ambient-motion-curve),
+    width var(--ambient-motion-duration) var(--ambient-motion-curve),
+    height var(--ambient-motion-duration) var(--ambient-motion-curve),
+    opacity 820ms var(--ambient-fade-curve),
+    transform var(--ambient-motion-duration) var(--ambient-motion-curve),
+    filter 1380ms var(--ambient-fade-curve);
+}
+
+.app-ambient-glow::after {
+  position: absolute;
+  inset: 12% 10% 8% 14%;
+  border-radius: inherit;
+  background: radial-gradient(
+    ellipse at 54% 44%,
+    color-mix(in srgb, var(--accent) 17%, transparent),
+    transparent 68%
+  );
+  opacity: 0.72;
+  transform: translate3d(18%, -8%, 0) scale(0.86);
+  transition:
+    opacity 980ms var(--ambient-fade-curve),
+    transform var(--ambient-motion-duration) var(--ambient-motion-curve);
+  content: '';
+}
+
+.app-root--ambient-bookshelf .app-ambient-glow {
+  top: -11%;
+  left: 61%;
+  width: 48%;
+  height: 66%;
+  opacity: 0.88;
+  filter: blur(38px) saturate(1.05);
+  transform: translate3d(0, 0, 0) rotate(-6deg) scale(1);
+}
+
+.app-root--ambient-workspace .app-ambient-glow {
+  top: calc(var(--header-height) - 76px);
+  left: 25%;
+  width: 56%;
+  height: min(440px, 44vh);
+  opacity: 0.72;
+  filter: blur(46px) saturate(1.08);
+  transform: translate3d(0, 0, 0) rotate(3deg) scale(1.06);
+}
+
+.app-root--ambient-workspace .app-ambient-glow::after {
+  animation: app-ambient-glow-settle 1480ms linear both;
+}
+
+[data-theme='dark'] .app-root--ambient-bookshelf .app-ambient-glow {
+  opacity: 0.98;
+}
+
+[data-theme='dark'] .app-root--ambient-workspace .app-ambient-glow {
+  opacity: 0.82;
 }
 
 .app-settings-overlay {
@@ -11,9 +109,12 @@
   inset: 0;
   z-index: 200;
   background: var(--bg-base);
+  animation: app-overlay-in var(--transition-base);
 }
 
 .app-main {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -30,13 +131,16 @@
 }
 
 .app-footer {
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
-  padding: var(--spacing-xs) var(--spacing-lg);
+  min-height: 24px;
+  padding: 3px var(--spacing-lg);
   font-size: var(--font-size-xs);
   color: var(--text-muted);
   text-align: center;
   border-top: 1px solid var(--border-light);
-  background: var(--bg-surface);
+  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
 }
 
 .app-global-actions {
@@ -70,9 +174,9 @@
   padding: var(--spacing) var(--spacing-lg);
   min-width: 240px;
   background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--border-radius);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   z-index: 100;
 }
 
@@ -111,6 +215,7 @@
     flex: 1;
     width: 100%;
     min-width: 0;
+    background: transparent;
   }
 }
 
@@ -141,9 +246,9 @@
   left: 0;
   width: clamp(240px, var(--chapter-hover-width), 420px);
   z-index: 12;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-light);
   background: var(--bg-panel);
-  box-shadow: 12px 0 28px rgba(0, 0, 0, .22);
+  box-shadow: var(--shadow-md);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -187,9 +292,9 @@
   bottom: 0;
   width: clamp(340px, var(--editor-hover-width), 640px);
   z-index: 12;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--border-light);
   background: var(--bg-panel);
-  box-shadow: -12px 0 28px rgba(0, 0, 0, .22);
+  box-shadow: var(--shadow-md);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -236,15 +341,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 38px;
-  padding: 0 var(--spacing);
-  border-bottom: 1px solid var(--border);
+  height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
-  background: var(--bg-panel);
+  background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-surface));
 }
 
 .panel-title {
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size);
   font-weight: var(--font-weight-semibold);
   color: var(--text-primary);
   white-space: nowrap;
@@ -263,12 +368,12 @@
 .divider {
   flex-shrink: 0;
   background: var(--divider-bg);
-  transition: background 0.15s;
+  transition: background var(--transition-fast);
   z-index: 10;
 }
 
 .divider-vertical {
-  width: 4px;
+  width: 3px;
   height: 100%;
   cursor: col-resize;
 
@@ -289,7 +394,7 @@
 
 .btn-sm {
   padding: var(--spacing-xs) var(--spacing);
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   font-size: var(--font-size-sm);
   background: var(--bg-hover);
   border: 1px solid var(--border);
@@ -330,9 +435,9 @@
 .error-msg {
   margin: var(--spacing-sm) var(--spacing);
   padding: var(--spacing-xs) var(--spacing-sm);
-  background: rgba(255, 77, 79, 0.08);
-  border: 1px solid rgba(255, 77, 79, 0.2);
-  border-radius: var(--border-radius);
+  background: var(--danger-dim);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
+  border-radius: var(--radius-md);
   font-size: var(--font-size-sm);
   color: var(--danger);
 }
@@ -349,5 +454,57 @@
 
   &.save-error {
     color: var(--danger);
+  }
+}
+
+@keyframes app-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes app-ambient-glow-settle {
+  0% {
+    opacity: 0.36;
+    transform: translate3d(18%, -10%, 0) scale(0.82);
+    animation-timing-function: cubic-bezier(0.42, 0, 0.2, 1);
+  }
+  68% {
+    opacity: 0.7;
+    transform: translate3d(-3%, 5%, 0) scale(1.02);
+    animation-timing-function: cubic-bezier(0.24, 0, 0.12, 1);
+  }
+  88% {
+    opacity: 0.75;
+    transform: translate3d(-9%, 10%, 0) scale(1.08);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  100% {
+    opacity: 0.72;
+    transform: translate3d(-8%, 9%, 0) scale(1.06);
+  }
+}
+
+@media (max-width: 900px) {
+  .app-root--ambient-bookshelf .app-ambient-glow {
+    left: 48%;
+    width: 64%;
+  }
+
+  .app-root--ambient-workspace .app-ambient-glow {
+    left: 15%;
+    width: 76%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-ambient-glow,
+  .app-ambient-glow::after {
+    transition: none;
+  }
+
+  .app-root--ambient-workspace .app-ambient-glow::after {
+    animation: none;
+    opacity: 0.72;
+    transform: translate3d(-8%, 9%, 0) scale(1.06);
   }
 }

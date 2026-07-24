@@ -14,12 +14,6 @@ export interface MindMapViewProps {
 
 let smmPluginRegistered = false
 
-const ACCENT = '#1677ff'
-const LIGHT_TEXT = 'rgba(0, 0, 0, 0.88)'
-const LIGHT_TEXT_SEC = 'rgba(0, 0, 0, 0.65)'
-const DARK_TEXT = 'rgba(255, 255, 255, 0.85)'
-const DARK_TEXT_SEC = 'rgba(255, 255, 255, 0.65)'
-
 export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapViewProps) {
   const { theme } = useTheme()
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -114,6 +108,13 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
       if (!ready || destroyed || !containerRef.current) return
 
       try {
+        const tokens = getComputedStyle(document.documentElement)
+        const token = (name: string, fallback: string) => tokens.getPropertyValue(name).trim() || fallback
+        const accent = token('--accent', '#c94361')
+        const accentDim = token('--accent-dim', 'rgba(201, 67, 97, 0.17)')
+        const textPrimary = token('--text-primary', isDark ? '#f6f0eb' : '#292421')
+        const textSecondary = token('--text-secondary', isDark ? '#c5bab3' : '#625a55')
+        const warning = token('--warning', '#b87416')
         const instance = new MindMap({
           el: containerRef.current,
           data: mindMapData,
@@ -122,36 +123,36 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
           theme: 'classic4',
           themeConfig: {
             backgroundColor: 'transparent',
-            lineColor: ACCENT,
+            lineColor: accent,
             lineWidth: 2,
             generalizationLineWidth: 2,
-            associativeLineColor: '#ff9800',
+            associativeLineColor: warning,
             associativeLineWidth: 2,
             associativeLineDasharray: '6,4',
             associativeLineActiveWidth: 8,
-            associativeLineActiveColor: 'rgba(255, 152, 0, 0.6)',
-            associativeLineTextColor: '#ffb74d',
+            associativeLineActiveColor: warning,
+            associativeLineTextColor: warning,
             associativeLineTextFontSize: 14,
             associativeLineTextFontFamily: 'inherit',
             root: {
-              fillColor: isDark ? 'rgba(64, 150, 255, 0.15)' : 'rgba(22, 119, 255, 0.12)',
-              color: isDark ? DARK_TEXT : LIGHT_TEXT,
-              borderColor: ACCENT,
+              fillColor: accentDim,
+              color: textPrimary,
+              borderColor: accent,
               borderWidth: 2,
               fontSize: 16,
               fontWeight: 'bold',
             },
             second: {
-              fillColor: isDark ? 'rgba(64, 150, 255, 0.08)' : 'rgba(22, 119, 255, 0.06)',
-              color: isDark ? DARK_TEXT_SEC : LIGHT_TEXT_SEC,
-              borderColor: ACCENT,
+              fillColor: `color-mix(in srgb, ${accent} 9%, transparent)`,
+              color: textSecondary,
+              borderColor: accent,
               borderWidth: 1,
               fontSize: 14,
             },
             node: {
-              fillColor: isDark ? 'rgba(64, 150, 255, 0.06)' : 'rgba(22, 119, 255, 0.04)',
-              color: isDark ? DARK_TEXT_SEC : LIGHT_TEXT_SEC,
-              borderColor: isDark ? 'rgba(64, 150, 255, 0.5)' : 'rgba(22, 119, 255, 0.4)',
+              fillColor: `color-mix(in srgb, ${accent} 6%, transparent)`,
+              color: textSecondary,
+              borderColor: `color-mix(in srgb, ${accent} 48%, transparent)`,
               borderWidth: 1,
               fontSize: 12,
             },

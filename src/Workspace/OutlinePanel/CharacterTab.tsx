@@ -1,12 +1,12 @@
 import React from 'react'
-import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, HistoryOutlined, CommentOutlined } from '@ant-design/icons'
-import { Button, Modal, Input, Select, Tag, Tooltip, Empty } from 'antd'
+import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, HistoryOutlined, CommentOutlined } from '../../ui'
+import { Button, Empty, Input, Modal, Select, Tag, Tooltip } from '../../ui'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import type { Character, CharacterOption, EntityId } from '../../types'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { getBookCharacters } from '../utils'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import CharacterOptionsModal from './CharacterOptionsModal'
@@ -77,7 +77,7 @@ export default function CharacterTab({
   focusCharacterId = null,
   onFocusCharacterHandled,
 }: CharacterTabProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [editModalOpen, setEditModalOpen] = React.useState(false)
   const [editTarget, setEditTarget] = React.useState<Character | null>(null)

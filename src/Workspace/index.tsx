@@ -4,8 +4,8 @@ import {
   DashboardOutlined,
   HomeOutlined,
   TeamOutlined,
-} from '@ant-design/icons'
-import { Button, Tooltip, Spin } from 'antd'
+} from '../ui'
+import { Button, Spin, Tooltip } from '../ui'
 import type { LexicalEditor } from 'lexical'
 import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
 import type { Chapter, AiModelConfig, EntityId } from '../types'
@@ -59,11 +59,12 @@ interface WorkspaceProps {
   modelConfigs?: AiModelConfig[]
   onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   syncOutlineChapter?: boolean
+  onReady?: () => void
 }
 
 type WorkspaceFullscreenPanel = 'utility' | 'editor' | null
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false }: WorkspaceProps = {}) {
+export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps = {}) {
   const {
     panelState,
     updateFloating,
@@ -466,6 +467,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
               onUpdateModelConfig={onUpdateModelConfig}
               conversationSidebarOpen={panelState.conversation.open}
               onConversationSidebarOpenChange={(open) => updateFloating('conversation', { open })}
+              onReady={onReady}
             />
           </Suspense>
         </div>

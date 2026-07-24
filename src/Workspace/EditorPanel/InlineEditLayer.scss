@@ -201,19 +201,19 @@
     color: var(--text-muted);
   }
 
-  &-model-select.ant-select {
+  &-model-select.purr-select {
     font-size: var(--font-size-sm);
     min-width: 96px;
 
-    .ant-select-selector {
+    .purr-select__selector {
       padding-inline: 4px 22px !important;
       height: 26px !important;
     }
-    .ant-select-selection-item {
+    .purr-select__value {
       color: var(--text-muted);
       line-height: 24px !important;
     }
-    &:hover .ant-select-selection-item {
+    &:hover .purr-select__value {
       color: var(--text-primary);
     }
   }

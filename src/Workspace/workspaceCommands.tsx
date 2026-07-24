@@ -6,7 +6,7 @@ import {
   DashboardOutlined,
   HistoryOutlined,
   SettingOutlined,
-} from '@ant-design/icons'
+} from '../ui'
 import type { Chapter, EntityId } from '../types'
 import type { CommandItem } from './CommandPalette'
 

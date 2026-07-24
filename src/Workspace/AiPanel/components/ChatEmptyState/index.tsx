@@ -1,4 +1,4 @@
-import { Empty } from "antd";
+import { Empty } from "../../../../ui";
 
 interface ChatEmptyStateProps {
   hasBook: boolean;

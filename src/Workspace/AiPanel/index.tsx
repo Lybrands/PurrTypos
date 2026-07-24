@@ -3,15 +3,9 @@ import React from "react";
 import {
   ArrowUpOutlined,
   MessageOutlined,
-} from "@ant-design/icons";
+} from "../../ui";
 import StopCircleIcon from "../../icons/StopCircleIcon";
-import {
-  App as AntdApp,
-  Button,
-  Input,
-  Tooltip,
-} from "antd";
-import type { MenuProps } from "antd";
+import { Button, Input, Tooltip, useToast, type DropdownItem } from "../../ui";
 import type {
   AiModelConfig,
   Conversation,
@@ -42,6 +36,7 @@ interface AiPanelProps {
   onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void;
   conversationSidebarOpen?: boolean;
   onConversationSidebarOpenChange?: (open: boolean) => void;
+  onReady?: () => void;
 }
 
 export default function AiPanel({
@@ -49,8 +44,27 @@ export default function AiPanel({
   onUpdateModelConfig,
   conversationSidebarOpen = true,
   onConversationSidebarOpenChange,
+  onReady,
 }: AiPanelProps) {
-  const { message: appMessage } = AntdApp.useApp();
+  React.useEffect(() => {
+    if (!onReady) return
+
+    let secondFrame = 0
+    let readyTimer = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        readyTimer = window.setTimeout(onReady, 200)
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) window.cancelAnimationFrame(secondFrame)
+      if (readyTimer) window.clearTimeout(readyTimer)
+    }
+  }, [onReady])
+
+  const appMessage = useToast();
   const {
     activeChapterId: chapterId,
     activeChapterTitle,
@@ -377,7 +391,7 @@ export default function AiPanel({
    * 因此 handleWriteToCanvas / handleInsertAtCursor / handleApplyAsDiff 全部移除。
    */
 
-  const ellipsisMenuItems: MenuProps["items"] = [
+  const ellipsisMenuItems: DropdownItem[] = [
     {
       key: "favorites",
       label: "查看收藏列表",

@@ -1,20 +1,23 @@
 .app-header {
+  position: relative;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
   height: var(--header-height);
-  padding: 0 var(--spacing-lg);
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border-light);
+  background: transparent;
+  box-shadow: none;
   flex-shrink: 0;
   -webkit-app-region: drag;
-  gap: var(--spacing-sm);
+  gap: 10px;
 }
 
 .app-header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex: 1;
   min-width: 0;
   -webkit-app-region: no-drag;
@@ -29,10 +32,14 @@
 }
 
 .app-header-logo {
-  height: 28px;
+  height: 24px;
   width: auto;
   display: block;
   object-fit: contain;
+  opacity: 0.88;
+  transition: opacity var(--transition-fast);
+
+  &:hover { opacity: 1; }
 }
 
 .app-title-with-meta {
@@ -51,17 +58,17 @@
 .app-title-word-count {
   flex-shrink: 0;
   font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-normal);
+  font-weight: var(--font-weight-regular);
   color: var(--text-muted);
   letter-spacing: 0;
   white-space: nowrap;
 }
 
 .app-title {
-  font-size: var(--font-size-h3);
+  font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
-  color: var(--accent);
-  letter-spacing: 0.5px;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -71,29 +78,32 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--spacing-sm);
+  gap: 6px;
   flex: 1;
   min-width: 0;
+  background: transparent;
   -webkit-app-region: no-drag;
 }
 
-.app-header-action-btn.ant-btn {
+.app-header-action-btn.purr-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 
-  &:hover {
-    background: var(--bg-hover);
+  &:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: transparent;
+    background: var(--bg-hover-zone);
+    box-shadow: none;
   }
 
-  .anticon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 0;
-  }
-  .anticon > * {
+  .purr-icon {
     display: block;
+    line-height: 0;
   }
 }
 
@@ -101,22 +111,24 @@
 .app-header-panel-toggles {
   display: flex;
   align-items: center;
-  gap: var(--spacing-xs);
-  padding-right: var(--spacing-sm);
+  gap: 3px;
+  padding-right: 8px;
   border-right: 1px solid var(--border-light, var(--border));
+  background: transparent;
 }
 
 /* 对应面板可见（浮窗已开 / 已是主区域）→ 主色高亮 */
-.app-header-action-btn.panel-toggle-active.ant-btn {
+.app-header-action-btn.panel-toggle-active.purr-button {
   color: var(--accent);
-  background: var(--bg-active);
+  background: transparent;
+  box-shadow: none;
 }
 
 /* 该面板已是主区域：按钮仅作状态展示 */
-.app-header-action-btn.panel-toggle-static.ant-btn {
+.app-header-action-btn.panel-toggle-static.purr-button {
   cursor: default;
 
   &:hover {
-    background: var(--bg-active);
+    background: transparent;
   }
 }

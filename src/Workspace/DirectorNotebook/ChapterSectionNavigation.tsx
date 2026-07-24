@@ -1,7 +1,6 @@
 import React from 'react'
-import { DeleteOutlined, EditOutlined, PlusOutlined, ProfileOutlined } from '@ant-design/icons'
-import { Button, Checkbox, Empty, Input, Tooltip } from 'antd'
-import type { InputRef } from 'antd/es/input/Input'
+import { DeleteOutlined, EditOutlined, PlusOutlined, ProfileOutlined } from '../../ui'
+import { Button, Checkbox, Empty, Input, Tooltip, type InputRef } from '../../ui'
 import type { Chapter, EntityId } from '../../types'
 import { HighlightText } from '../search/highlightText'
 

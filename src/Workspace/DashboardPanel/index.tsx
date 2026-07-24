@@ -1,5 +1,5 @@
 import React from 'react'
-import { Empty, Tabs } from 'antd'
+import { Empty, Tabs } from '../../ui'
 import type { EntityId } from '../../types'
 import StoryHealthTab from './StoryHealthTab'
 import WritingStatsTab from './WritingStatsTab'

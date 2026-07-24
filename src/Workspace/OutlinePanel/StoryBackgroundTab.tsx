@@ -1,6 +1,6 @@
 import React from 'react'
-import { CommentOutlined, EditOutlined, HistoryOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '@ant-design/icons'
-import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from 'antd'
+import { CommentOutlined, EditOutlined, HistoryOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '../../ui'
+import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from '../../ui'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
 import type { Editor } from '@tiptap/core'
@@ -11,7 +11,7 @@ import Heading from '@tiptap/extension-heading'
 import { TableKit } from '@tiptap/extension-table'
 import type { EntityId, StoryBackgroundAttachment } from '../../types'
 import { getStoryBackground } from '../utils'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
@@ -43,7 +43,7 @@ interface StoryBackgroundTabProps {
 }
 
 export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const { workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
   const [content, setContent] = React.useState('')
   const [attachments, setAttachments] = React.useState<StoryBackgroundAttachment[]>([])

@@ -1,7 +1,7 @@
 import React from "react";
-import { VerticalAlignBottomOutlined } from "@ant-design/icons";
-import { Button, Tooltip } from "antd";
-import type { TextAreaRef } from "antd/es/input/TextArea";
+import { VerticalAlignBottomOutlined } from "../../../../ui";
+import { Button, Tooltip } from "../../../../ui";
+import type { TextAreaRef } from "../../../../ui";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import type { AiModelConfig, EntityId } from "../../../../types";
 import { type ChatMessage } from "../../hooks";

@@ -1,5 +1,5 @@
 import React from 'react'
-import { Button, Empty, Radio, Select, Space, Spin, Switch, Tag, message } from 'antd'
+import { Button, Empty, Radio, Select, Space, Spin, Switch, Tag, toast } from '../../../../ui'
 import type {
   EntityId,
   StoryMemoryEvolutionDecision,
@@ -84,7 +84,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     setLoading(false)
     if (!res.success || !Array.isArray(res.data)) {
       setReviews([])
-      message.error(res.error || '读取故事演化审查失败')
+      toast.error(res.error || '读取故事演化审查失败')
       return
     }
     setReviews(res.data)
@@ -123,7 +123,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     setSettingsSaving(true)
     const res = await window.electronAPI.setSettings(patch)
     setSettingsSaving(false)
-    if (!res.success) message.error(res.error || '保存故事演化设置失败')
+    if (!res.success) toast.error(res.error || '保存故事演化设置失败')
     return res.success
   }, [])
 
@@ -131,7 +131,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     const selected = resolutions[review.delta_id] || {}
     const complete = review.decisions.every((decision) => !!selected[decision.target_key])
     if (!complete) {
-      message.warning('请先处理所有需要人工判断的候选')
+      toast.warning('请先处理所有需要人工判断的候选')
       return
     }
     setSubmittingId(review.delta_id)
@@ -141,11 +141,11 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     })
     setSubmittingId(null)
     if (!res.success) {
-      message.error(res.error || '提交故事演化决议失败')
+      toast.error(res.error || '提交故事演化决议失败')
       await load()
       return
     }
-    message.success(res.data?.applied_delta_id ? '已应用接受的故事设定' : '候选已全部拒绝')
+    toast.success(res.data?.applied_delta_id ? '已应用接受的故事设定' : '候选已全部拒绝')
     await load()
   }, [load, resolutions])
 

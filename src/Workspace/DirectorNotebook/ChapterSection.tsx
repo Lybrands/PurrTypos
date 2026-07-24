@@ -4,8 +4,8 @@ import {
   DeleteOutlined,
   ExportOutlined,
   PlusOutlined,
-} from '@ant-design/icons'
-import { Button, Tooltip } from 'antd'
+} from '../../ui'
+import { Button, Tooltip } from '../../ui'
 import type { Chapter, EntityId } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import ExportModal from '../../components/ExportModal'

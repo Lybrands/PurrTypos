@@ -1,5 +1,5 @@
 import React from "react";
-import { RightOutlined } from "@ant-design/icons";
+import { RightOutlined } from "../../../../ui";
 import Markdown from "../Markdown";
 import "./index.scss";
 

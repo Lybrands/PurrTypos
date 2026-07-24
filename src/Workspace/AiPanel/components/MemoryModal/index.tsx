@@ -1,5 +1,6 @@
 import React from 'react'
-import { Button, Modal, Tabs } from 'antd'
+import { Button, Modal } from '../../../../ui'
+import { Tabs } from '../../../../ui'
 import ManageTab from './ManageTab'
 import SelectionTab from './SelectionTab'
 import type { MemoryModalProps } from './types'

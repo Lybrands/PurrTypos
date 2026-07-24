@@ -1,6 +1,6 @@
 import React from 'react'
-import { SunOutlined, MoonOutlined, FontSizeOutlined } from '@ant-design/icons'
-import { Button, Tooltip } from 'antd'
+import { SunOutlined, MoonOutlined, FontSizeOutlined } from '../../ui'
+import { Button, Tooltip } from '../../ui'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useFontSize } from '../../contexts/FontSizeContext'
 import './index.scss'

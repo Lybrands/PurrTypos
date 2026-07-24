@@ -1,6 +1,7 @@
 import React from 'react'
-import { App as AntdApp, Alert, Button, Spin } from 'antd'
-import { FileAddOutlined, ExportOutlined } from '@ant-design/icons'
+import { Alert, Button } from '../../ui'
+import { Spin, useToast } from '../../ui'
+import { FileAddOutlined, ExportOutlined } from '../../ui'
 import type { Chapter, EntityId, Outline } from '../../types'
 import OutlineMarkdownPane, { type OutlineMarkdownPaneRef } from '../OutlinePanel/OutlineMarkdownPane'
 import './ChapterOutlineModal.scss'
@@ -37,7 +38,7 @@ export default function ChapterOutlinePanel({
   bookId,
   onChanged,
 }: ChapterOutlinePanelProps) {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const [loading, setLoading] = React.useState(false)
   const [outline, setOutline] = React.useState<Outline | null>(null)
   const [error, setError] = React.useState<string>('')

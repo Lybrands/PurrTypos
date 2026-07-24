@@ -28,7 +28,7 @@
   .memory-center-tabs {
     margin-bottom: -4px;
 
-    .ant-tabs-nav {
+    .purr-tabs__bar {
       margin: 0;
     }
   }
@@ -233,12 +233,12 @@
     line-height: 1.5;
   }
 
-  .memory-center-kind-options.ant-radio-group {
+  .memory-center-kind-options.purr-radio-group {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
 
-    .ant-radio-button-wrapper {
+    .purr-radio-button {
       height: 30px;
       padding: 0 10px;
       line-height: 28px;
@@ -249,7 +249,7 @@
         display: none;
       }
 
-      &.ant-radio-button-wrapper-checked {
+      &.is-checked {
         border-color: var(--accent);
       }
     }
@@ -276,14 +276,14 @@
     gap: 7px;
   }
 
-  .memory-center-create-status-choices.ant-radio-group {
+  .memory-center-create-status-choices.purr-radio-group {
     display: grid;
     width: 100%;
     max-width: 100%;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
 
-    .ant-radio-button-wrapper {
+    .purr-radio-button {
       display: flex;
       box-sizing: border-box;
       width: 100%;
@@ -306,13 +306,13 @@
         display: none;
       }
 
-      &.ant-radio-button-wrapper-checked {
+      &.is-checked {
         border-color: var(--accent);
         background: var(--accent-dim);
         color: var(--accent);
       }
 
-      .anticon {
+      .purr-icon {
         flex-shrink: 0;
         font-size: 14px;
       }
@@ -360,7 +360,7 @@
     border-top: 1px solid var(--border);
     background: transparent;
 
-    .ant-space {
+    .purr-space {
       margin-left: auto;
     }
   }
@@ -368,7 +368,7 @@
   .memory-center-list {
     border-top: 1px solid var(--border);
 
-    .ant-list-item {
+    .purr-list__item {
       padding: 12px 2px;
       align-items: flex-start;
     }
@@ -483,7 +483,7 @@
     gap: 8px;
     align-items: center;
 
-    .ant-select {
+    .purr-select {
       width: 120px;
     }
   }
@@ -651,7 +651,7 @@
     .memory-center-filters {
       grid-template-columns: 1fr 1fr;
 
-      .ant-input-search {
+      .purr-input-search {
         grid-column: 1 / -1;
       }
     }
@@ -693,7 +693,7 @@
 
 @container (max-width: 340px) {
   .memory-center {
-    .memory-center-create-status-choices.ant-radio-group {
+    .memory-center-create-status-choices.purr-radio-group {
       grid-template-columns: minmax(0, 1fr);
     }
   }

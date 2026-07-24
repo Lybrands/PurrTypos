@@ -1,6 +1,6 @@
 import React, { forwardRef, useImperativeHandle } from 'react'
-import { EditOutlined, HistoryOutlined, ImportOutlined, UserOutlined } from '@ant-design/icons'
-import { App as AntdApp, Button, Empty, Tooltip } from 'antd'
+import { EditOutlined, HistoryOutlined, ImportOutlined, UserOutlined } from '../../ui'
+import { Button, Empty, Tooltip, useToast } from '../../ui'
 import FloatingPanel from '../../components/FloatingPanel'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import OutlineHistoryDrawer from './OutlineHistoryDrawer'
@@ -32,7 +32,7 @@ interface OutlineMarkdownPaneProps {
 
 const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPaneProps>(
   function OutlineMarkdownPane({ outlineId, markdownContent, onSaved }, ref) {
-    const { message: appMessage } = AntdApp.useApp()
+    const appMessage = useToast()
     const { bookId, workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
 
     React.useEffect(() => {

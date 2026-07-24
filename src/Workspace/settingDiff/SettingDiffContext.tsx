@@ -1,5 +1,5 @@
 import React from 'react'
-import { App as AntdApp } from 'antd'
+import { useToast } from '../../ui'
 import type {
   CharacterSettingSnapshot,
   EntityId,
@@ -116,7 +116,7 @@ export function useSettingDiff(): SettingDiffContextValue {
 }
 
 export function SettingDiffProvider({ children }: { children: React.ReactNode }) {
-  const { message: appMessage } = AntdApp.useApp()
+  const appMessage = useToast()
   const [sessions, setSessions] = React.useState<Record<string, SettingDiffSession>>({})
   const [resolvedCards, setResolvedCards] = React.useState<Record<string, SettingDiffCardState>>({})
   const sessionsRef = React.useRef(sessions)

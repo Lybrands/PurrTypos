@@ -5,10 +5,10 @@ import {
   EditOutlined,
   FireOutlined,
   ReloadOutlined,
-} from '@ant-design/icons'
-import { Button, Empty, InputNumber, Progress, Spin, Tooltip } from 'antd'
+} from '../../ui'
+import { Button, Empty, InputNumber, Progress, Spin, Tooltip } from '../../ui'
 import type { EntityId, WritingStatsData } from '../../types'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { formatWords } from './dashboardFormatters'
 
 interface WritingStatsTabProps {
@@ -16,7 +16,7 @@ interface WritingStatsTabProps {
 }
 
 export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [loading, setLoading] = React.useState(true)
   const [data, setData] = React.useState<WritingStatsData | null>(null)
   const [editingGoal, setEditingGoal] = React.useState(false)

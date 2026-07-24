@@ -1,8 +1,8 @@
 import React from 'react'
-import { ReloadOutlined } from '@ant-design/icons'
-import { Button, Empty, Spin, Tag, Tooltip } from 'antd'
+import { ReloadOutlined } from '../../ui'
+import { Button, Empty, Spin, Tag, Tooltip } from '../../ui'
 import type { EntityId, StoryHealthData } from '../../types'
-import { useAntdApp } from '../../hooks/useAntdApp'
+import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { formatWords } from './dashboardFormatters'
 
 interface StoryHealthTabProps {
@@ -10,7 +10,7 @@ interface StoryHealthTabProps {
 }
 
 export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
-  const { message } = useAntdApp()
+  const { message } = useAppFeedback()
   const [loading, setLoading] = React.useState(true)
   const [data, setData] = React.useState<StoryHealthData | null>(null)
 

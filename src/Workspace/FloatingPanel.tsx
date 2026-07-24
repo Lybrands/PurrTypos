@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Tooltip } from 'antd'
-import { CloseOutlined } from '@ant-design/icons'
+import { Button, Tooltip } from '../ui'
+import { CloseOutlined } from '../ui'
 import './FloatingPanel.scss'
 
 /**

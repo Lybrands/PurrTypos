@@ -1,6 +1,6 @@
 import React from "react";
-import { PlusOutlined } from "@ant-design/icons";
-import { Button, Input, Tabs, Tooltip } from "antd";
+import { PlusOutlined } from "../../../../ui";
+import { Button, Input, Tabs, Tooltip } from "../../../../ui";
 import type { AiSession, EntityId } from "../../../../types";
 import SessionHistoryPopover from "../SessionHistoryPopover";
 
@@ -54,10 +54,7 @@ export default function SessionTabsBar({
 
   return (
     <Tabs
-      type="editable-card"
-      hideAdd
       className="session-tabs-bar"
-      size="small"
       activeKey={activeSessionId ? String(activeSessionId) : undefined}
       onChange={(key) => {
         if (loading) {

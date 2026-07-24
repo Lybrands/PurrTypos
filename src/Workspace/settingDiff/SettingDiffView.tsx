@@ -1,13 +1,12 @@
 import React from 'react'
-import { Button, Dropdown, Input, Modal, Space, Tag, Tooltip } from 'antd'
-import type { MenuProps } from 'antd'
+import { Button, Dropdown, Input, Modal, Space, Tag, Tooltip, useConfirm, type DropdownItem } from '../../ui'
 import {
   CheckOutlined,
   CloseOutlined,
   DownOutlined,
   RollbackOutlined,
   SaveOutlined,
-} from '@ant-design/icons'
+} from '../../ui'
 import { useSettingDiff, type MetaDiffOp, type SettingDiffSession } from './SettingDiffContext'
 import { countByStatus, type DiffOp } from '../diff/paragraphDiff'
 import '../diff/diff.scss'
@@ -22,7 +21,7 @@ interface SettingDiffViewProps {
 export default function SettingDiffView({ sessionKey, title, compact = false }: SettingDiffViewProps) {
   const diff = useSettingDiff()
   const session = diff.getSession(sessionKey)
-  const [modal, modalCtx] = Modal.useModal()
+  const confirm = useConfirm()
   const [committing, setCommitting] = React.useState(false)
 
   if (!session) return null
@@ -47,13 +46,14 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
   const handleRejectAll = () => diff.rejectAllPending(sessionKey)
   const handleExit = () => {
     if (acceptedTotal > 0 || rejectedTotal > 0) {
-      modal.confirm({
+      void confirm({
         title: '退出 diff 会话',
         content: '已处理的接受/拒绝将丢失，设定回到 diff 开始前的状态。继续？',
-        okText: '退出',
+        confirmText: '退出',
         cancelText: '继续编辑',
-        okButtonProps: { danger: true },
-        onOk: () => diff.exitDiff(sessionKey),
+        confirmVariant: 'danger',
+      }).then((result) => {
+        if (result === 'confirm') diff.exitDiff(sessionKey)
       })
     } else {
       diff.exitDiff(sessionKey)
@@ -72,7 +72,6 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
 
   return (
     <div className={`setting-diff-view ${compact ? 'setting-diff-view--compact' : ''}`}>
-      {modalCtx}
       <div className="diff-overlay-toolbar setting-diff-toolbar">
         <div className="diff-overlay-title">
           <span className="diff-badge">AI diff</span>
@@ -214,7 +213,7 @@ function DiffParagraphRow({
   }
 
   const cls = ['diff-row', `diff-row-${op.kind}`, `diff-status-${op.status}`].join(' ')
-  const rejectMenuItems: MenuProps['items'] = [
+  const rejectMenuItems: DropdownItem[] = [
     { key: 'discard', label: '直接放弃（保留原文）', onClick: () => onReject(undefined) },
     {
       key: 'reason',
