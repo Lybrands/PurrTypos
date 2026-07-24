@@ -41,11 +41,18 @@ from domains.writing.unified_memory_context import (
     UnifiedMemoryRetriever,
     memory_context_request_from_task,
 )
+from domains.writing.memory_reranking import (
+    MemoryRerankDecision,
+    MemoryRerankResult,
+)
 from infrastructure.persistence.writing import (
     SqliteMemoryRecallRepository,
     SqliteAssociatedContextRepository,
     SqliteStoryMemoryRecallRepository,
     SqliteStoryMemoryRepository,
+)
+from infrastructure.persistence.writing.sqlite_story_memory_recall_repository import (
+    _query_terms,
 )
 
 
@@ -89,6 +96,44 @@ async def _apply_story(
     await repository.apply_delta(delta.id)
 
 
+async def _apply_relationship(
+    db: DatabaseConnection,
+    *,
+    source_character_id: str,
+    target_character_id: str,
+) -> None:
+    repository = SqliteStoryMemoryRepository(db)
+    delta = await repository.create_delta(StoryMemoryDeltaDraft(
+        book_id="book-1",
+        chapter_id="chapter-relationship",
+        source_revision="rev-relationship",
+        changes=(StoryMemoryChange(
+            target_key=(
+                "relationship:directed:"
+                f"{source_character_id}:{target_character_id}:trust"
+            ),
+            kind=StoryMemoryKind.RELATIONSHIP_STATE,
+            operation=StoryMemoryOperation.UPSERT,
+            subject_id=source_character_id,
+            payload={
+                "sourceCharacterId": source_character_id,
+                "targetCharacterId": target_character_id,
+                "relationType": "trust",
+                "state": "动摇",
+                "description": "两人表面合作",
+                "directional": True,
+            },
+            status=StoryMemoryStatus.CONFIRMED,
+            source=SourceReference(
+                chapter_id="chapter-relationship",
+                source_revision="rev-relationship",
+                excerpt="她把备用钥匙放回桌上。",
+            ),
+        ),),
+    ))
+    await repository.apply_delta(delta.id)
+
+
 def test_task_spec_semantic_hints_compile_without_becoming_authority():
     base = MemoryContextRequest(book_id="book-1", user_prompt="继续写", token_budget=8000)
     task = TaskContextRequest(
@@ -123,6 +168,48 @@ def test_task_spec_semantic_hints_compile_without_becoming_authority():
     }
     assert compiled.entity_refs == ("character:linmo", "character:suyao")
     assert compiled.chapter_ids == ("chapter-8", "chapter-9")
+
+
+def test_long_chinese_query_terms_cover_the_end_instead_of_prefix_truncation():
+    text = "".join(chr(0x4E00 + index) for index in range(150))
+
+    terms = _query_terms(text, maximum=16)
+
+    assert len(terms) == 16
+    assert text[:2] in terms
+    assert text[-3:] in terms
+
+
+def test_query_term_budget_is_distributed_across_task_fields():
+    long_goal = "".join(chr(0x4E00 + index) for index in range(120))
+    query = f"任务目标: {long_goal}\n必须保留: 终局暗号"
+
+    terms = _query_terms(query, maximum=16)
+
+    assert any("终局" in value or "局暗" in value or "暗号" in value for value in terms)
+
+
+@pytest.mark.asyncio
+async def test_long_query_can_recall_fact_mentioned_at_the_end(db):
+    await _apply_story(
+        db,
+        key="character:linmo:secret",
+        value="终局暗号",
+        chapter_id="chapter-secret",
+    )
+    prefix = "".join(chr(0x4E00 + index) for index in range(140))
+
+    rows = await SqliteStoryMemoryRecallRepository(db).search_current(
+        "book-1",
+        prefix + "终局暗号",
+        limit=20,
+    )
+
+    assert [item.memory_key for item in rows] == ["character:linmo:secret"]
+    assert any(
+        channel in rows[0].candidate_channels
+        for channel in ("fts", "lexical")
+    )
 
 
 @pytest.mark.asyncio
@@ -160,6 +247,155 @@ async def test_story_recall_only_returns_confirmed_active_valid_evidence(db):
 
     assert [item.memory_key for item in rows] == ["character:linmo:location"]
     assert rows[0].source_excerpt == "角色抵达旧城区"
+
+
+@pytest.mark.asyncio
+async def test_story_recall_resolves_character_name_to_relationship_target(db):
+    source_id = await db.execute_and_get_id(
+        "INSERT INTO characters (book_id, name) VALUES ('book-1', '林墨')"
+    )
+    target_id = await db.execute_and_get_id(
+        "INSERT INTO characters (book_id, name) VALUES ('book-1', '苏遥')"
+    )
+    assert source_id is not None and target_id is not None
+    await _apply_relationship(
+        db,
+        source_character_id=str(source_id),
+        target_character_id=str(target_id),
+    )
+
+    rows = await SqliteStoryMemoryRecallRepository(db).search_current(
+        "book-1",
+        "继续写苏遥接下来的反应",
+        limit=20,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].kind == "relationship_state"
+    assert "entity" in rows[0].candidate_channels
+
+
+@pytest.mark.asyncio
+async def test_contract_kind_is_an_independent_candidate_channel(db):
+    await _apply_story(
+        db,
+        key="character:linmo:location",
+        value="旧城区",
+        chapter_id="chapter-1",
+    )
+
+    rows = await SqliteStoryMemoryRecallRepository(db).search_current(
+        "book-1",
+        "",
+        kinds=("character_state",),
+        limit=20,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].candidate_channels == ("contract_kind",)
+
+
+class _SelectNoneReranker:
+    async def rerank(self, **kwargs):
+        del kwargs
+        return MemoryRerankResult(model="judge", batch_count=1)
+
+
+@pytest.mark.asyncio
+async def test_explicit_semantic_memory_bypasses_model_filtering(db):
+    forced_id = await db.execute_and_get_id(
+        "INSERT INTO memory_items "
+        "(book_id, kind, content, status, fingerprint) "
+        "VALUES ('book-1', 'canon', '用户明确选择的设定', 'active', 'forced')"
+    )
+    await db.execute(
+        "INSERT INTO memory_items "
+        "(book_id, kind, content, status, fingerprint) "
+        "VALUES ('book-1', 'plot', '普通召回内容', 'active', 'ordinary')"
+    )
+    assert forced_id is not None
+    builder = WritingMemoryContextBuilder(
+        SqliteMemoryRecallRepository(db),
+        _SelectNoneReranker(),
+    )
+
+    block = await builder.build(
+        MemoryContextRequest(
+            book_id="book-1",
+            user_prompt="普通召回内容",
+            selected_memory_item_ids=(forced_id,),
+        ),
+        model_request=ModelRequest(provider="test", model="test-model"),
+    )
+
+    assert block.included_ids == [forced_id]
+    assert "用户明确选择的设定" in block.text
+    assert "普通召回内容" not in block.text
+    assert block.diagnostics["rerankerStatus"] == "completed"
+
+
+class _SelectStoryReranker:
+    def __init__(self, record_id: str):
+        self.record_id = record_id
+
+    async def rerank(self, **kwargs):
+        assert any(item.id == self.record_id for item in kwargs["candidates"])
+        return MemoryRerankResult(
+            decisions=(MemoryRerankDecision(
+                record_id=self.record_id,
+                priority="must_use",
+                supports=("当前任务",),
+                reason="直接相关",
+            ),),
+            model="judge",
+            batch_count=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_story_provider_hydrates_only_model_selected_candidate(db):
+    await _apply_story(
+        db,
+        key="character:linmo:location",
+        value="旧城区",
+        chapter_id="chapter-1",
+    )
+    await _apply_story(
+        db,
+        key="character:suyao:location",
+        value="北城",
+        chapter_id="chapter-2",
+    )
+    candidates = await SqliteStoryMemoryRecallRepository(db).search_current(
+        "book-1",
+        "人物现在在哪里",
+        kinds=("character_state",),
+        limit=20,
+    )
+    selected = next(
+        item for item in candidates
+        if item.memory_key == "character:suyao:location"
+    )
+    provider = StoryMemoryContextProvider(
+        SqliteStoryMemoryRecallRepository(db),
+        _SelectStoryReranker(selected.record_id),
+    )
+
+    block = await provider.build(
+        MemoryContextRequest(
+            book_id="book-1",
+            user_prompt="人物现在在哪里",
+            story_kinds=("character_state",),
+            recall_limit=10,
+        ),
+        model_request=ModelRequest(provider="test", model="test-model"),
+    )
+
+    assert [item.record_id for item in block.included_items] == [
+        selected.record_id
+    ]
+    assert block.diagnostics["rerankerStatus"] == "completed"
+    assert block.diagnostics["rerankerDecisions"][0]["reason"] == "直接相关"
 
 
 @pytest.mark.asyncio

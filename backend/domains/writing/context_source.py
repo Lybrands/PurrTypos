@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agent_core.contracts import AgentRunRequest, TaskContextRequest
+from agent_core.ports import CancellationSignal
 from domains.writing.associated_context import (
     AssociatedContextBuilder,
     AssociatedContextResult,
@@ -28,6 +29,7 @@ from domains.writing.repositories import (
     MemoryRecallRepository,
     StoryMemoryRecallRepository,
 )
+from domains.writing.memory_reranking import MemoryCandidateReranker
 
 
 class RepositoryWritingContextSource:
@@ -38,15 +40,38 @@ class RepositoryWritingContextSource:
         associated_repository: AssociatedContextRepository,
         memory_repository: MemoryRecallRepository,
         story_memory_repository: StoryMemoryRecallRepository | None = None,
+        memory_reranker: MemoryCandidateReranker | None = None,
     ):
+        self._associated_repository = associated_repository
+        self._memory_repository = memory_repository
+        self._story_memory_repository = story_memory_repository
         self._associated = AssociatedContextBuilder(associated_repository)
         self._memory = UnifiedMemoryRetriever(
-            WritingMemoryContextBuilder(memory_repository),
+            WritingMemoryContextBuilder(
+                memory_repository,
+                memory_reranker,
+            ),
             (
-                StoryMemoryContextProvider(story_memory_repository)
+                StoryMemoryContextProvider(
+                    story_memory_repository,
+                    memory_reranker,
+                )
                 if story_memory_repository is not None
                 else None
             ),
+        )
+
+    def with_memory_reranker(
+        self,
+        reranker: MemoryCandidateReranker,
+    ) -> "RepositoryWritingContextSource":
+        """Create a request-scoped source without mutating shared adapters."""
+
+        return RepositoryWritingContextSource(
+            self._associated_repository,
+            self._memory_repository,
+            self._story_memory_repository,
+            memory_reranker=reranker,
         )
 
     async def build_memory(
@@ -60,6 +85,7 @@ class RepositoryWritingContextSource:
             user_prompt=request.latest_user_text(),
             token_budget=token_budget,
             recall_limit=_memory_recall_limit(request.context_window),
+            candidate_limit=_memory_candidate_limit(request.context_window),
             selected_spark_idea_ids=context.selected_memory_ids,
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         )
@@ -88,6 +114,7 @@ class RepositoryWritingContextSource:
             user_prompt=str(query or "").strip(),
             token_budget=token_budget,
             recall_limit=_memory_recall_limit(request.context_window),
+            candidate_limit=_memory_candidate_limit(request.context_window),
             selected_spark_idea_ids=context.selected_memory_ids,
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         )
@@ -108,6 +135,7 @@ class RepositoryWritingContextSource:
         token_budget: int,
         query: str,
         task: TaskContextRequest,
+        signal: CancellationSignal | None = None,
     ) -> MemoryContextPack:
         """Compile planner semantic declarations into bounded memory recall."""
 
@@ -117,6 +145,9 @@ class RepositoryWritingContextSource:
                 user_prompt=str(query or "").strip(),
                 token_budget=token_budget,
                 recall_limit=_memory_recall_limit(request.context_window),
+                candidate_limit=_memory_candidate_limit(
+                    request.context_window
+                ),
                 selected_spark_idea_ids=context.selected_memory_ids,
                 selected_foreshadowing_ids=context.selected_foreshadowing_ids,
             ),
@@ -124,7 +155,11 @@ class RepositoryWritingContextSource:
             current_chapter_id=context.chapter_id,
         )
         try:
-            return await self._memory.build(memory_request)
+            return await self._memory.build(
+                memory_request,
+                model_request=request.model,
+                signal=signal,
+            )
         except Exception:
             return _unavailable_pack(memory_request)
 
@@ -166,6 +201,15 @@ def _memory_recall_limit(context_window: int | None) -> int:
     if window >= 300_000:
         return 32
     return 16
+
+
+def _memory_candidate_limit(context_window: int | None) -> int:
+    window = int(context_window or 200_000)
+    if window >= 1_000_000:
+        return 96
+    if window >= 300_000:
+        return 64
+    return 40
 
 
 def _unavailable_pack(request: MemoryContextRequest) -> MemoryContextPack:
