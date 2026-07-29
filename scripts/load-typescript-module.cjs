@@ -30,6 +30,7 @@ function loadTypeScriptModule(filePath) {
   }
 
   const originalTsLoader = Module._extensions['.ts']
+  const originalResolveFilename = Module._resolveFilename
   Module._extensions['.ts'] = (loadedModule, dependencyPath) => {
     const dependencySource = fs.readFileSync(dependencyPath, 'utf8')
     const dependencyOutput = ts.transpileModule(dependencySource, {
@@ -40,7 +41,16 @@ function loadTypeScriptModule(filePath) {
         esModuleInterop: true,
       },
     }).outputText
-    loadedModule._compile(dependencyOutput, dependencyPath)
+    // Node 24 can classify a .ts filename as native ESM even after this helper
+    // transpiles it to CommonJS. Compile under a synthetic .cjs filename while
+    // preserving the module's real resolution path.
+    loadedModule._compile(dependencyOutput, `${dependencyPath}.cjs`)
+  }
+  Module._resolveFilename = function resolveFilename(request, parent, isMain, options) {
+    if (typeof request === 'string' && request.startsWith('@/')) {
+      request = path.join(__dirname, '..', 'src', request.slice(2))
+    }
+    return originalResolveFilename.call(this, request, parent, isMain, options)
   }
   try {
     const loaded = new Module(filename, module)
@@ -49,6 +59,7 @@ function loadTypeScriptModule(filePath) {
     loaded._compile(outputText, filename)
     return loaded.exports
   } finally {
+    Module._resolveFilename = originalResolveFilename
     if (originalTsLoader) Module._extensions['.ts'] = originalTsLoader
     else delete Module._extensions['.ts']
   }

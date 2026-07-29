@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, HistoryOutlined, CommentOutlined } from '../../ui'
 import { Button, Empty, Input, Modal, Select, Tag, Tooltip } from '../../ui'
@@ -136,7 +137,7 @@ export default function CharacterTab({
   }, [bookId])
 
   const loadOptions = React.useCallback(async () => {
-    const res = await window.electronAPI.getCharacterOptions({ category: 'tag' })
+    const res = await services.characters.getCharacterOptions({ category: 'tag' })
     if (res.success && res.data) setTagOptions(res.data)
   }, [])
 
@@ -211,8 +212,8 @@ export default function CharacterTab({
     setSaving(true)
     try {
       const res = editTarget
-        ? await window.electronAPI.updateCharacter({ id: editTarget.id, data })
-        : await window.electronAPI.createCharacter({ bookId, data })
+        ? await services.characters.updateCharacter({ id: editTarget.id, data })
+        : await services.characters.createCharacter({ bookId, data })
       if (res.success) {
         message.success(editTarget ? '已保存' : '人物已创建')
         closeModal()
@@ -235,7 +236,7 @@ export default function CharacterTab({
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await window.electronAPI.deleteCharacter({ id: deleteTarget.id })
+    const res = await services.characters.deleteCharacter({ id: deleteTarget.id })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)

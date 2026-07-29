@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import { Button, Card, Space, Tag } from "../../../../ui";
 import { CheckOutlined, CloseOutlined } from "../../../../ui";
@@ -35,7 +36,7 @@ export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
   const decide = async (approved: boolean) => {
     if (state !== "pending") return;
     setState("submitting");
-    const result = await window.electronAPI.resolveAiToolApproval({
+    const result = await services.ai.resolveAiToolApproval({
       approvalId: approval.approvalId,
       approved,
     });

@@ -5,6 +5,7 @@ node_modules
 dist
 dist-electron
 build-resources
+dist-web
 backend/dist
 backend/build
 out

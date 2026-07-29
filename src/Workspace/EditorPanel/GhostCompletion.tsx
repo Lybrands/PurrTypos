@@ -1,3 +1,4 @@
+import { services } from '@/services'
 /**
  * 编辑器 Ghost Text 续写（类 Copilot 体验）。
  *
@@ -58,7 +59,7 @@ export default function GhostCompletion({
     chunkUnsubRef.current?.()
     chunkUnsubRef.current = null
     if (hadActiveStream) {
-      window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
+      services.ai.abortAiStream?.(streamIdRef.current ?? undefined)
     }
     streamIdRef.current = null
   }, [])
@@ -88,7 +89,7 @@ export default function GhostCompletion({
     // 注册 chunk 订阅
     const streamId = createAiStreamId('ghost-completion')
     streamIdRef.current = streamId
-    const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
+    const unsubscribe = services.ai.onAiChunk((chunk) => {
       if (chunk.error) {
         clearGhost()
         return
@@ -122,7 +123,7 @@ export default function GhostCompletion({
 
     const userPrompt = `【上文】\n${trigger.prefix}\n\n【续写紧接上文】：`
 
-    window.electronAPI.aiChatStream({
+    services.ai.aiChatStream({
       streamId,
       apiKey: model.apiKey,
       baseURL: model.baseUrl || undefined,

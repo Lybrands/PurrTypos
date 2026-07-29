@@ -866,7 +866,7 @@ export interface ElectronAPI {
   openXmindFile: () => Promise<string | null>;
   parseXmind: (filePath: string) => Promise<ApiResult<XmindSheet[]>>;
   openFilePath: (filePath: string) => Promise<ApiResult<void>>;
-  readFileBuffer: (filePath: string) => Promise<ApiResult<Buffer>>;
+  readFileBuffer: (filePath: string) => Promise<ApiResult<Uint8Array>>;
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
   /** 整本导出为单个 TXT：保存对话框 + 写盘 */
   writeSingleTextFile: (data: { defaultName: string; content: string }) => Promise<ApiResult<{ path: string }>>;
@@ -1510,6 +1510,7 @@ export interface ElectronAPI {
     }) => void,
     streamId?: string,
   ) => () => void;
+  debugLog: (payload: unknown) => void;
   // 设置
   getSettings: () => Promise<ApiResult<GeneralSettings>>;
   setSettings: (data: Partial<GeneralSettings>) => Promise<ApiResult<void>>;

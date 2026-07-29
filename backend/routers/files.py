@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from dependencies import get_db
 
@@ -71,9 +71,43 @@ async def export_database():
     )
 
 
-@router.post("/database/import")
-async def import_database():
+async def _database_stats() -> dict[str, int]:
+    db = get_db()
+    books = await db.fetch_one("SELECT COUNT(*) AS count FROM books")
+    outline_chapters = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM outline_chapters"
+    )
+    articles = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM articles WHERE content IS NOT NULL AND content != ''"
+    )
     return {
-        "success": False,
-        "error": "Database import requires file upload — use Electron dialog or a dedicated upload endpoint",
+        "books": int((books or {}).get("count") or 0),
+        "outlineChapters": int((outline_chapters or {}).get("count") or 0),
+        "articles": int((articles or {}).get("count") or 0),
+    }
+
+
+@router.post("/database/import")
+async def import_database(
+    request: Request,
+    fileName: str = Query(default="backup.db"),
+):
+    if not fileName.lower().endswith(".db"):
+        return {"success": False, "error": "请选择 .db 数据库备份文件"}
+    payload = await request.body()
+    if len(payload) > 512 * 1024 * 1024:
+        return {"success": False, "error": "数据库备份不能超过 512 MB"}
+    db = get_db()
+    before_stats = await _database_stats()
+    try:
+        await db.import_from_buffer(payload)
+    except (ValueError, RuntimeError) as error:
+        return {"success": False, "error": str(error)}
+    after_stats = await _database_stats()
+    return {
+        "success": True,
+        "data": {
+            "beforeStats": before_stats,
+            "afterStats": after_stats,
+        },
     }

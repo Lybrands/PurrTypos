@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Input, Select, Spin, Tooltip, useToast } from '../../ui'
 import { ThunderboltOutlined } from '../../ui'
@@ -118,7 +119,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
       return
     }
     setLoading(true)
-    window.electronAPI
+    services.bookStyle
       .getBookStyle({ bookId })
       .then((res) => {
         if (cancelled) return
@@ -154,7 +155,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
       if (json === lastSavedJsonRef.current) return
       setSaving(true)
       try {
-        const res = await window.electronAPI.saveBookStyle({
+        const res = await services.bookStyle.saveBookStyle({
           bookId,
           pov: pending.pov,
           tone: pending.tone,
@@ -192,7 +193,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
     const pending = pendingFormRef.current
     if (bookId == null || pending == null) return
     if (JSON.stringify(pending) === lastSavedJsonRef.current) return
-    void window.electronAPI.saveBookStyle({
+    void services.bookStyle.saveBookStyle({
       bookId,
       pov: pending.pov,
       tone: pending.tone,

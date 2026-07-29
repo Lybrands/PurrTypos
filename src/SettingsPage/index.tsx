@@ -233,6 +233,7 @@ export default function SettingsPage({
     handleExportDatabase,
     handleImportDatabase,
     handleOpenDbDir,
+    canOpenDbDir,
   } = useDatabaseActions(activeTab === 'data')
 
   return (
@@ -563,7 +564,9 @@ export default function SettingsPage({
                     : '—'}
                 </div>
                 <div className="settings-field-actions">
-                  <Button onClick={handleOpenDbDir}>打开数据库目录</Button>
+                  {canOpenDbDir && (
+                    <Button onClick={handleOpenDbDir}>打开数据库目录</Button>
+                  )}
                   <Button onClick={refreshDbInfo} loading={dbInfoLoading}>刷新统计</Button>
                 </div>
               </div>

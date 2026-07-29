@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,7 +22,7 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
     if (!open) return
     setLoading(true)
     setDetail(null)
-    window.electronAPI.getAiFavorites().then((res) => {
+    services.favorites.getAiFavorites().then((res) => {
       setLoading(false)
       if (res.success && res.data) setList(res.data)
       else setList([])
@@ -29,7 +30,7 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
   }, [open])
 
   const handleDelete = React.useCallback(async (id: number) => {
-    const res = await window.electronAPI.deleteAiFavorite({ id })
+    const res = await services.favorites.deleteAiFavorite({ id })
     if (res.success) setList((prev) => prev.filter((f) => f.id !== id))
   }, [])
 

@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import { Button, Empty, Form, Input, List, Modal, Popconfirm, Space, Tag, Tooltip, useToast, type TextAreaRef } from "../../../../ui";
 import {
@@ -56,7 +57,7 @@ export default function PromptTemplateManagerModal({
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const res = await window.electronAPI.listPromptTemplates();
+      const res = await services.promptTemplates.listPromptTemplates();
       if (res.success) setTemplates(res.data ?? []);
       else appMessage.error(res.error ?? "加载失败");
     } finally {
@@ -83,7 +84,7 @@ export default function PromptTemplateManagerModal({
     setSaving(true);
     try {
       if (form.id != null) {
-        const res = await window.electronAPI.updatePromptTemplate({
+        const res = await services.promptTemplates.updatePromptTemplate({
           id: form.id,
           data: { title, content },
         });
@@ -93,7 +94,7 @@ export default function PromptTemplateManagerModal({
         }
         appMessage.success("已更新");
       } else {
-        const res = await window.electronAPI.createPromptTemplate({
+        const res = await services.promptTemplates.createPromptTemplate({
           title,
           content,
         });
@@ -112,7 +113,7 @@ export default function PromptTemplateManagerModal({
 
   const handleDelete = React.useCallback(
     async (id: number) => {
-      const res = await window.electronAPI.deletePromptTemplate({ id });
+      const res = await services.promptTemplates.deletePromptTemplate({ id });
       if (!res.success) {
         appMessage.error(res.error ?? "删除失败");
         return;

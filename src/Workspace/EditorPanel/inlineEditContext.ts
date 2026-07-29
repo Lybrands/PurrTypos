@@ -1,9 +1,10 @@
+import { services } from '@/services'
 /**
  * Inline 改写的「参考资料」拼装。
  *
  * 从用户勾选的关联章节 / 关联大纲 / 记忆 / 伏笔出发，读取各自内容并组装成一段
  * 注入到 user prompt 的纯文本（[参考资料]）。从 InlineEditPopover 抽出，便于复用与
- * 单独维护。仅依赖 window.electronAPI 读取数据，不持有任何组件状态。
+ * 单独维护。仅依赖领域服务读取数据，不持有任何组件状态。
  */
 
 import type {
@@ -47,7 +48,7 @@ export async function buildInjectedContext({
         )
         const title = titleOpt?.label || `章节 ${id}`
         try {
-          const res = await window.electronAPI.getArticle({ chapterId: id })
+          const res = await services.articles.getArticle({ chapterId: id })
           const content = res.success ? res.data?.content?.trim() ?? '' : ''
           const charLimit = contextWindow === '1m'
             ? 12000
@@ -85,7 +86,7 @@ export async function buildInjectedContext({
   // 记忆 / 伏笔：统一交给后端长期记忆编排器生成；未手动选择时也允许按 prompt 自动召回。
   if (bookId != null) {
     try {
-      const res = await window.electronAPI.buildMemoryContext({
+      const res = await services.memories.buildMemoryContext({
         bookId,
         userPrompt,
         mode: 'inline',

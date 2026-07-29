@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+import re
+import secrets
+from pathlib import Path
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from config import DATA_DIR
@@ -78,6 +83,52 @@ async def add_attachment(bookId: str, body: AddAttachmentsRequest):
                 added.append(row)
     rows = await story_background_crud.get_story_background_attachments(db, bookId)
     return {"success": True, "data": rows, "addedCount": len(added)}
+
+
+@router.post("/story-background/{bookId}/attachments/upload")
+async def upload_attachments(
+    bookId: str,
+    request: Request,
+    fileName: str = Query(default="attachment"),
+):
+    base = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else Path(".")
+    attachment_dir = base / "story-background-attachments" / bookId
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    original_name = Path(fileName or "attachment").name
+    safe_name = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff]+", "_", original_name)
+    stored_name = f"{secrets.token_hex(8)}-{safe_name or 'attachment'}"
+    target = attachment_dir / stored_name
+    total = 0
+    with target.open("wb") as output:
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > 100 * 1024 * 1024:
+                output.close()
+                target.unlink(missing_ok=True)
+                return {"success": False, "error": "单个附件不能超过 100 MB"}
+            output.write(chunk)
+    relative = target.relative_to(base).as_posix()
+
+    db = get_db()
+    await story_background_crud.add_story_background_attachment(
+        db, bookId, original_name, relative
+    )
+    rows = await story_background_crud.get_story_background_attachments(db, bookId)
+    return {"success": True, "data": rows, "addedCount": 1}
+
+
+@router.get("/story-background/attachments/content")
+async def open_attachment(storedPath: str = Query(...)):
+    base = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else Path(".")
+    root = base.resolve()
+    target = (root / storedPath).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return {"success": False, "error": "非法附件路径"}
+    if not target.is_file():
+        return {"success": False, "error": "附件不存在"}
+    return FileResponse(target, filename=target.name.split("-", 1)[-1])
 
 
 @router.delete("/story-background/attachments/{id}")

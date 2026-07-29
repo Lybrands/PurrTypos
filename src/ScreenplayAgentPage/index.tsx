@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import AppHeader from '../components/AppHeader'
 import {
@@ -344,7 +345,7 @@ export default function ScreenplayAgentPage({
 
   React.useEffect(() => () => {
     if (agentStreamIdRef.current) {
-      window.electronAPI.abortAiStream(agentStreamIdRef.current)
+      services.ai.abortAiStream(agentStreamIdRef.current)
     }
     agentUnsubscribeRef.current?.()
   }, [])
@@ -352,7 +353,7 @@ export default function ScreenplayAgentPage({
   const loadProjects = React.useCallback(async () => {
     setProjectsLoading(true)
     try {
-      const result = await window.electronAPI.listScreenplayProjects({
+      const result = await services.screenplay.listScreenplayProjects({
         includeArchived: true,
       })
       if (result.success && Array.isArray(result.data)) {
@@ -415,7 +416,7 @@ export default function ScreenplayAgentPage({
     setSourceChaptersError('')
     void (async () => {
       try {
-        const outlineResult = await window.electronAPI.getWritingOutline(
+        const outlineResult = await services.outlines.getWritingOutline(
           selectedBookId,
         )
         if (canceled) return
@@ -426,7 +427,7 @@ export default function ScreenplayAgentPage({
           )
           return
         }
-        const chapterResult = await window.electronAPI.getChapters({
+        const chapterResult = await services.chapters.getChapters({
           outlineId: outlineResult.data.id,
         })
         if (canceled) return
@@ -553,7 +554,7 @@ export default function ScreenplayAgentPage({
   }, [])
 
   const loadProjectDocuments = React.useCallback(async (projectId: EntityId) => {
-    const result = await window.electronAPI.listScreenplayDocuments({
+    const result = await services.screenplay.listScreenplayDocuments({
       projectId,
     })
     if (result.success && Array.isArray(result.data)) {
@@ -565,7 +566,7 @@ export default function ScreenplayAgentPage({
   }, [message])
 
   const loadProjectSourceRefs = React.useCallback(async (projectId: EntityId) => {
-    const result = await window.electronAPI.listScreenplaySourceRefs({
+    const result = await services.screenplay.listScreenplaySourceRefs({
       projectId,
     })
     if (result.success && Array.isArray(result.data)) {
@@ -577,7 +578,7 @@ export default function ScreenplayAgentPage({
 
   const openProject = React.useCallback(async (project: ScreenplayProject) => {
     if (agentStreamIdRef.current) {
-      window.electronAPI.abortAiStream(agentStreamIdRef.current)
+      services.ai.abortAiStream(agentStreamIdRef.current)
     }
     agentUnsubscribeRef.current?.()
     agentUnsubscribeRef.current = null
@@ -602,13 +603,13 @@ export default function ScreenplayAgentPage({
       const [documents, , sessionResult] = await Promise.all([
         loadProjectDocuments(project.id),
         loadProjectSourceRefs(project.id),
-        window.electronAPI.getOrCreateScreenplaySession({
+        services.screenplay.getOrCreateScreenplaySession({
           projectId: project.id,
         }),
       ])
       if (sessionResult.success && sessionResult.data) {
         setAgentSessionId(sessionResult.data.id)
-        const historyResult = await window.electronAPI.getConversations({
+        const historyResult = await services.conversations.getConversations({
           sessionId: sessionResult.data.id,
         })
         if (historyResult.success && Array.isArray(historyResult.data)) {
@@ -627,7 +628,7 @@ export default function ScreenplayAgentPage({
 
   const stopAgent = React.useCallback(() => {
     if (agentStreamIdRef.current) {
-      window.electronAPI.abortAiStream(agentStreamIdRef.current)
+      services.ai.abortAiStream(agentStreamIdRef.current)
     }
   }, [])
 
@@ -696,7 +697,7 @@ export default function ScreenplayAgentPage({
     const startedAt = Date.now()
     agentStreamIdRef.current = streamId
     agentUnsubscribeRef.current?.()
-    agentUnsubscribeRef.current = window.electronAPI.onAiChunk((chunk) => {
+    agentUnsubscribeRef.current = services.ai.onAiChunk((chunk) => {
       if (chunk.agentRunStarted?.runId) {
         currentAgentRunId = chunk.agentRunStarted.runId
         setAgentRunId(currentAgentRunId)
@@ -734,7 +735,7 @@ export default function ScreenplayAgentPage({
         terminalHandled = true
         const finish = async () => {
           if (chunk.done && !chunk.aborted) {
-            const saved = await window.electronAPI.saveConversation({
+            const saved = await services.conversations.saveConversation({
               sessionId: agentSessionId,
               bookId: openedProject.source_book_id,
               prompt,
@@ -774,7 +775,7 @@ export default function ScreenplayAgentPage({
       }
     }, streamId)
 
-    window.electronAPI.aiChatStream({
+    services.ai.aiChatStream({
       streamId,
       apiKey: model.apiKey,
       baseURL: model.baseUrl || undefined,
@@ -816,7 +817,7 @@ export default function ScreenplayAgentPage({
     if (savedAgentDocumentId) return savedAgentDocumentId
     setSavingAgentDraft(true)
     try {
-      const result = await window.electronAPI.createScreenplayDocument({
+      const result = await services.screenplay.createScreenplayDocument({
         projectId: openedProject.id,
         kind: agentProposal.kind,
         title: agentProposal.title,
@@ -854,14 +855,14 @@ export default function ScreenplayAgentPage({
     try {
       const documentId = await saveAgentProposal()
       if (!documentId) return
-      const accepted = await window.electronAPI.acceptScreenplayDocument({
+      const accepted = await services.screenplay.acceptScreenplayDocument({
         documentId,
       })
       if (!accepted.success) {
         message.error(accepted.error || '接受剧本文档提案失败')
         return
       }
-      const refreshed = await window.electronAPI.getScreenplayProject({
+      const refreshed = await services.screenplay.getScreenplayProject({
         projectId: openedProject.id,
       })
       const [documents] = await Promise.all([
@@ -913,7 +914,7 @@ export default function ScreenplayAgentPage({
           message.error('项目尚未生成最终交付清单')
           return
         }
-        const result = await window.electronAPI.writeScreenplayFile({
+        const result = await services.files.writeScreenplayFile({
           defaultName: `${openedProject.title || '剧本'}-交付清单`,
           content: `${JSON.stringify(
             openedProject.delivery_manifest,
@@ -930,7 +931,7 @@ export default function ScreenplayAgentPage({
         return
       }
       if (exportFormat === 'pdf') {
-        const result = await window.electronAPI.exportScreenplayPdf({
+        const result = await services.exports.exportScreenplayPdf({
           projectId: openedProject.id,
           defaultName: openedProject.title || '剧本',
         })
@@ -945,7 +946,7 @@ export default function ScreenplayAgentPage({
       const content = exportFormat === 'markdown'
         ? `# ${openedProject.title}\n\n${raw}\n`
         : raw
-      const result = await window.electronAPI.writeScreenplayFile({
+      const result = await services.files.writeScreenplayFile({
         defaultName: openedProject.title || '剧本',
         content,
         format: exportFormat,
@@ -1003,7 +1004,7 @@ export default function ScreenplayAgentPage({
               && openedProject.source_kind === 'book'
               ? 'source_analysis'
               : 'creative_brief'
-      const result = await window.electronAPI.createScreenplayDocument({
+      const result = await services.screenplay.createScreenplayDocument({
         projectId: openedProject.id,
         kind: fallbackKind,
         title: `Agent ${DOCUMENT_KIND_LABELS[fallbackKind]}候选`,
@@ -1045,7 +1046,7 @@ export default function ScreenplayAgentPage({
     if (!launchDraft || creatingProject) return
     setCreatingProject(true)
     try {
-      const result = await window.electronAPI.createScreenplayProject({
+      const result = await services.screenplay.createScreenplayProject({
         title: launchDraft.projectTitle,
         sourceKind: launchDraft.sourceKind,
         sourceBookId: launchDraft.sourceBookId,
@@ -1099,7 +1100,7 @@ export default function ScreenplayAgentPage({
     }
     setSavingDocument(true)
     try {
-      const result = await window.electronAPI.updateScreenplayDocument({
+      const result = await services.screenplay.updateScreenplayDocument({
         documentId: selectedDocument.id,
         patch: {
           title,
@@ -1133,7 +1134,7 @@ export default function ScreenplayAgentPage({
     if (!openedProject || openedProject.status === 'archived' || restoringDocumentId) return
     setRestoringDocumentId(document.id)
     try {
-      const result = await window.electronAPI.restoreScreenplayDocument({
+      const result = await services.screenplay.restoreScreenplayDocument({
         documentId: document.id,
       })
       if (!result.success || !result.data) {
@@ -1166,7 +1167,7 @@ export default function ScreenplayAgentPage({
     }
     setUpdatingProjectStatus(true)
     try {
-      const result = await window.electronAPI.updateScreenplayProject({
+      const result = await services.screenplay.updateScreenplayProject({
         projectId: openedProject.id,
         patch: { status: nextStatus },
       })

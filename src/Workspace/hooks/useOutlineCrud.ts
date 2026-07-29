@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import type { Chapter, EntityId, Outline, VolumeOutline } from '../../types'
 import { getTitleFromXmind, parseXmindToChapters } from '../../utils/outlineXmind'
@@ -44,20 +45,20 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
   const chaptersCache = React.useRef<Record<EntityId, Chapter[]>>({})
 
   const loadData = React.useCallback(() => {
-    window.electronAPI.getGlobalOutline(bookId).then((res) => {
+    services.outlines.getGlobalOutline(bookId).then((res) => {
       if (res.success && res.data != null) setGlobalOutline(res.data)
       else setGlobalOutline(null)
     })
     if (enableVolume) {
-      window.electronAPI.getVolumeOutlines(bookId).then((res) => {
+      services.outlines.getVolumeOutlines(bookId).then((res) => {
         if (res.success) setVolumeOutlines(res.data ?? [])
       })
       // 分卷模式下仍加载 chapter outlines（用于 XMind 上传/预览）
-      window.electronAPI.getChapterOutlines(bookId).then((res) => {
+      services.outlines.getChapterOutlines(bookId).then((res) => {
         if (res.success) setChapterOutlines(res.data ?? [])
       })
     } else {
-      window.electronAPI.getChapterOutlines(bookId).then((res) => {
+      services.outlines.getChapterOutlines(bookId).then((res) => {
         if (res.success) setChapterOutlines(res.data ?? [])
       })
     }
@@ -74,24 +75,24 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
   // 通用：上传 XMind 并更新指定大纲（volume 或 chapter 或 global）
   const uploadXmindToOutline = React.useCallback(
     async (outline: Outline): Promise<boolean> => {
-      const filePath = await window.electronAPI.openXmindFile()
+      const filePath = await services.files.openXmindFile()
       if (!filePath) return false
-      const parseRes = await window.electronAPI.parseXmind(filePath)
+      const parseRes = await services.files.parseXmind(filePath)
       if (!parseRes.success) { setError('解析失败：' + parseRes.error); return false }
       const rootTopic = parseRes.data[0]?.rootTopic
       if (!rootTopic) { setError('未找到根节点，请确认文件格式'); return false }
       const flatChapters = parseXmindToChapters(parseRes)
       const xmindJson = JSON.stringify(parseRes.data)
       const title = getTitleFromXmind(parseRes, filePath) || outline.title
-      await window.electronAPI.updateOutline({
+      await services.outlines.updateOutline({
         outlineId: outline.id,
         title: outline.title, // 保留原标题
         xmind_data: xmindJson,
         file_path: filePath,
       })
-      await window.electronAPI.saveChapters({ outlineId: outline.id, chapters: flatChapters })
+      await services.chapters.saveChapters({ outlineId: outline.id, chapters: flatChapters })
       delete chaptersCache.current[outline.id]
-      const chapRes = await window.electronAPI.getChapters({ outlineId: outline.id })
+      const chapRes = await services.chapters.getChapters({ outlineId: outline.id })
       if (chapRes.success && chapRes.data.length > 0) {
         chaptersCache.current[outline.id] = chapRes.data
       }
@@ -110,10 +111,10 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
       setLoading(true)
       setLoadingType(type)
       try {
-        const filePath = await window.electronAPI.openXmindFile()
+        const filePath = await services.files.openXmindFile()
         if (!filePath) return
 
-        const parseRes = await window.electronAPI.parseXmind(filePath)
+        const parseRes = await services.files.parseXmind(filePath)
         if (!parseRes.success) { setError('解析失败：' + parseRes.error); return }
         const rootTopic = parseRes.data[0]?.rootTopic
         if (!rootTopic) { setError('未找到根节点，请确认文件格式'); return }
@@ -126,19 +127,19 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
         const xmindJson = JSON.stringify(parseRes.data)
 
         if (type === 'global') {
-          const outlineRes = await window.electronAPI.saveOutline({
+          const outlineRes = await services.outlines.saveOutline({
             title, type, xmind_data: xmindJson, file_path: filePath, book_id: bookId ?? null,
           })
           if (!outlineRes.success) { setError('保存大纲失败：' + outlineRes.error); return }
           const saveId = outlineRes.data.id
-          await window.electronAPI.saveChapters({ outlineId: saveId, chapters: flatChapters })
-          const dbRes = await window.electronAPI.getGlobalOutline(bookId)
+          await services.chapters.saveChapters({ outlineId: saveId, chapters: flatChapters })
+          const dbRes = await services.outlines.getGlobalOutline(bookId)
           const dbOutline = dbRes.success && dbRes.data ? dbRes.data : { ...outlineRes.data, type }
           const dbId = dbOutline.id
           if (dbId !== saveId && saveId) {
-            await window.electronAPI.saveChapters({ outlineId: dbId, chapters: flatChapters })
+            await services.chapters.saveChapters({ outlineId: dbId, chapters: flatChapters })
           }
-          const chapRes = await window.electronAPI.getChapters({ outlineId: dbId })
+          const chapRes = await services.chapters.getChapters({ outlineId: dbId })
           const chapters = chapRes?.success && Array.isArray(chapRes.data) ? chapRes.data : []
           if (chapters.length > 0) chaptersCache.current[dbId] = chapters
           setGlobalOutline(dbOutline as Outline)
@@ -146,13 +147,13 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
           if (!forChapterTitle) return
           const existingOutline = chapterOutlines.find((o) => o.title === forChapterTitle)
           if (existingOutline && existingOutline.id != null) {
-            await window.electronAPI.updateOutline({
+            await services.outlines.updateOutline({
               outlineId: existingOutline.id, title: existingOutline.title,
               xmind_data: xmindJson, file_path: filePath,
             })
-            await window.electronAPI.saveChapters({ outlineId: existingOutline.id, chapters: flatChapters })
+            await services.chapters.saveChapters({ outlineId: existingOutline.id, chapters: flatChapters })
             delete chaptersCache.current[existingOutline.id]
-            const chapRes = await window.electronAPI.getChapters({ outlineId: existingOutline.id })
+            const chapRes = await services.chapters.getChapters({ outlineId: existingOutline.id })
             const chapters = chapRes?.success && Array.isArray(chapRes.data) ? chapRes.data : []
             if (chapters.length > 0) chaptersCache.current[existingOutline.id] = chapters
             setChapterOutlines((prev) =>
@@ -222,7 +223,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
         checkboxLabel,
         onConfirm: async (checked: boolean) => {
           setDeleteModal(null)
-          const res = await window.electronAPI.deleteOutline({ outlineId: outline.id })
+          const res = await services.outlines.deleteOutline({ outlineId: outline.id })
           if (res.success) {
             delete chaptersCache.current[outline.id]
             loadData()
@@ -251,11 +252,11 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
           setDeleteModal(null)
           // 先删章节大纲
           for (const ch of vol.chapters) {
-            await window.electronAPI.deleteOutline({ outlineId: ch.id })
+            await services.outlines.deleteOutline({ outlineId: ch.id })
             delete chaptersCache.current[ch.id]
           }
           // 再删卷大纲
-          await window.electronAPI.deleteOutline({ outlineId: vol.id })
+          await services.outlines.deleteOutline({ outlineId: vol.id })
           delete chaptersCache.current[vol.id]
           if (displayOutlineId === vol.id || vol.chapters.some((c) => c.id === displayOutlineId)) {
             setViewMode('list')
@@ -277,7 +278,7 @@ export function useOutlineCrud(options: UseOutlineCrudOptions) {
       message: `确认删除全局大纲「${outlineToDelete.title}」？删除后无法恢复。`,
       onConfirm: async () => {
         setDeleteModal(null)
-        const res = await window.electronAPI.deleteOutline({ outlineId: outlineToDelete.id })
+        const res = await services.outlines.deleteOutline({ outlineId: outlineToDelete.id })
         if (res.success) {
           delete chaptersCache.current[outlineToDelete.id]
           loadData()

@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import type { Article, Chapter, Character, EntityId, Outline, VolumeOutline } from '../../types'
 
 // ─── 纯文本提取 ────────────────────────────────────────────────
@@ -63,7 +64,7 @@ export async function batchGetChapterContents(
   }
   const results = await Promise.all(
     chapterIds.map(async (cid) => {
-      const res = await window.electronAPI.getArticle({ chapterId: cid })
+      const res = await services.articles.getArticle({ chapterId: cid })
       const raw = res.success && res.data?.content ? res.data.content : ''
       const plainText = extractTextFromLexical(raw).slice(0, maxTextLength)
       return { chapterId: cid, title: titleOf(cid), content: raw, plainText }
@@ -81,7 +82,7 @@ export async function getChapterContent(
   title?: string,
   maxTextLength = 12000,
 ): Promise<ChapterContent | null> {
-  const res = await window.electronAPI.getArticle({ chapterId })
+  const res = await services.articles.getArticle({ chapterId })
   if (!res.success || !res.data) return null
   const raw = typeof res.data.content === 'string' ? res.data.content : ''
   const plainText = raw ? extractTextFromLexical(raw).slice(0, maxTextLength) : ''
@@ -110,7 +111,7 @@ export interface BookOutlines {
 
 /** 给单个大纲加载其子章节列表 */
 async function loadOutlineWithChapters(outline: Outline): Promise<OutlineWithChapters> {
-  const res = await window.electronAPI.getChapters({ outlineId: outline.id })
+  const res = await services.chapters.getChapters({ outlineId: outline.id })
   const chapters = res.success ? res.data : []
   return { outline, chapters, chaptersText: formatChaptersAsText(chapters) }
 }
@@ -120,10 +121,10 @@ async function loadOutlineWithChapters(outline: Outline): Promise<OutlineWithCha
  */
 export async function getAllOutlines(bookId: EntityId): Promise<BookOutlines> {
   const [globalRes, volumeRes, chapterRes, writingRes] = await Promise.all([
-    window.electronAPI.getGlobalOutline(bookId),
-    window.electronAPI.getVolumeOutlines(bookId),
-    window.electronAPI.getChapterOutlines(bookId),
-    window.electronAPI.getWritingOutline(bookId),
+    services.outlines.getGlobalOutline(bookId),
+    services.outlines.getVolumeOutlines(bookId),
+    services.outlines.getChapterOutlines(bookId),
+    services.outlines.getWritingOutline(bookId),
   ])
 
   const globalOutline =
@@ -195,7 +196,7 @@ export function formatAssociableOutlineLabel(
  * 数据来自后端 `GET /outlines/associable/{bookId}`。
  */
 export async function getAvailableOutlines(bookId: EntityId): Promise<Outline[]> {
-  const res = await window.electronAPI.getAssociableOutlines(bookId)
+  const res = await services.outlines.getAssociableOutlines(bookId)
   return res.success && Array.isArray(res.data) ? res.data : []
 }
 
@@ -206,10 +207,10 @@ export async function getWritingOutlineWithChapters(
   bookId: EntityId | null | undefined,
 ): Promise<{ outlineId: EntityId; chapters: Chapter[] } | null> {
   if (bookId == null) return null
-  const res = await window.electronAPI.getWritingOutline(bookId)
+  const res = await services.outlines.getWritingOutline(bookId)
   if (!res.success || !res.data) return null
   const oid = String(res.data.id)
-  const chapRes = await window.electronAPI.getChapters({ outlineId: oid })
+  const chapRes = await services.chapters.getChapters({ outlineId: oid })
   const chapters = chapRes.success && chapRes.data ? chapRes.data : []
   return { outlineId: oid, chapters }
 }
@@ -220,7 +221,7 @@ export async function getWritingOutlineWithChapters(
  * 获取指定书籍的全部人物列表
  */
 export async function getBookCharacters(bookId: EntityId): Promise<Character[]> {
-  const res = await window.electronAPI.getCharacters({ bookId })
+  const res = await services.characters.getCharacters({ bookId })
   return res.success && res.data ? res.data : []
 }
 
@@ -235,7 +236,7 @@ export interface StoryBackground {
  * 获取指定书籍的小说背景文本
  */
 export async function getStoryBackground(bookId: EntityId): Promise<StoryBackground | null> {
-  const res = await window.electronAPI.getStoryBackground({ bookId })
+  const res = await services.storyBackground.getStoryBackground({ bookId })
   if (!res.success || !res.data) return null
   return { content: res.data.content, updateTime: res.data.update_time }
 }

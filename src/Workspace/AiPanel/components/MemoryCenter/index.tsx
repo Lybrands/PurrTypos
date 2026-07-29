@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button, Empty, Input, Modal, Radio, Select, Space, Spin, Switch, Tag, Tooltip, toast, useConfirm } from '../../../../ui'
 import {
@@ -177,7 +178,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       return
     }
     setLoading(true)
-    const res = await window.electronAPI.listUnifiedMemories({
+    const res = await services.memories.listUnifiedMemories({
       bookId,
       query,
       statuses: status ? [status] : undefined,
@@ -211,7 +212,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
 
   React.useEffect(() => {
     let cancelled = false
-    window.electronAPI.getSettings().then((res) => {
+    services.settings.getSettings().then((res) => {
       if (cancelled || !res.success) return
       setIntelligenceEnabled(!!res.data?.memory_intelligence_enabled)
       setAnalysisEnabled(!!res.data?.story_memory_analysis_enabled)
@@ -224,7 +225,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
 
   const saveSettings = React.useCallback(async (patch: Record<string, unknown>) => {
     setSettingsSaving(true)
-    const res = await window.electronAPI.setSettings(patch)
+    const res = await services.settings.setSettings(patch)
     setSettingsSaving(false)
     if (!res.success) toast.error(res.error || '保存记忆设置失败')
     return res.success
@@ -233,7 +234,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const handleCreate = React.useCallback(async () => {
     if (bookId == null || !newContent.trim()) return
     setCreating(true)
-    const res = await window.electronAPI.createMemory({
+    const res = await services.memories.createMemory({
       bookId,
       kind: newKind,
       content: newContent.trim(),
@@ -259,7 +260,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   ) => {
     const id = semanticId(item)
     if (!id) return false
-    const res = await window.electronAPI.updateMemory({ id, data })
+    const res = await services.memories.updateMemory({ id, data })
     if (!res.success) {
       toast.error(res.error || '更新记忆失败')
       return false
@@ -279,7 +280,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       confirmVariant: 'danger',
     }).then(async (result) => {
       if (result === 'confirm') {
-        const res = await window.electronAPI.archiveMemory({ id })
+        const res = await services.memories.archiveMemory({ id })
         if (!res.success) toast.error(res.error || '归档失败')
         await load()
       }
@@ -296,7 +297,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       return
     }
     setSubmittingId(deltaId)
-    const res = await window.electronAPI.resolveStoryMemoryEvolutionReview({
+    const res = await services.storyMemory.resolveStoryMemoryEvolutionReview({
       deltaId,
       resolutions: selected,
     })
@@ -315,7 +316,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setHistoryItem(item)
     setHistory([])
     setHistoryLoading(true)
-    const res = await window.electronAPI.getStoryMemoryVersions({
+    const res = await services.storyMemory.getStoryMemoryVersions({
       bookId,
       memoryKey: item.memory_key,
     })
