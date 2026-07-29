@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button } from '../../ui'
 import { CloseOutlined, CheckOutlined, RedoOutlined } from '../../ui'
@@ -138,7 +139,7 @@ export default function InlineEditPopover({
       const hadActiveStream = chunkUnsubRef.current != null
       cleanupStream()
       if (hadActiveStream) {
-        window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
+        services.ai.abortAiStream?.(streamIdRef.current ?? undefined)
       }
       streamIdRef.current = null
     }
@@ -160,13 +161,13 @@ export default function InlineEditPopover({
       setResult('')
       setError(null)
       if (streamIdRef.current) {
-        window.electronAPI.abortAiStream?.(streamIdRef.current)
+        services.ai.abortAiStream?.(streamIdRef.current)
       }
       cleanupStream()
 
       const streamId = createAiStreamId('inline-edit')
       streamIdRef.current = streamId
-      const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
+      const unsubscribe = services.ai.onAiChunk((chunk) => {
         if (chunk.error) {
           setError('请求失败：' + chunk.error)
           setLoading(false)
@@ -226,7 +227,7 @@ export default function InlineEditPopover({
       userPromptParts.push('请直接输出改写后的文本：')
       const userPrompt = userPromptParts.join('\n')
 
-      window.electronAPI.aiChatStream({
+      services.ai.aiChatStream({
         streamId,
         apiKey: model.apiKey,
         baseURL: model.baseUrl || undefined,
@@ -278,7 +279,7 @@ export default function InlineEditPopover({
 
   const handleAbort = () => {
     cleanupStream()
-    window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
+    services.ai.abortAiStream?.(streamIdRef.current ?? undefined)
     streamIdRef.current = null
     setLoading(false)
   }

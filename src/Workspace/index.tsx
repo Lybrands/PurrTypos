@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
 import {
   ArrowLeftOutlined,
@@ -209,7 +210,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       return
     }
     const t = window.setTimeout(() => {
-      void window.electronAPI.getBookWordCount({ bookId }).then((res) => {
+      void services.books.getBookWordCount({ bookId }).then((res) => {
         if (res.success && res.data != null && typeof res.data.count === 'number') {
           setBookWordWanDisplay((res.data.count / 10000).toFixed(2))
         } else {
@@ -243,8 +244,8 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
     if (bookId == null) return
     const wcKey = String(writingChapterId)
     for (const fetcher of [
-      window.electronAPI.getChapterOutlines,
-      window.electronAPI.getVolumeOutlines,
+      services.outlines.getChapterOutlines,
+      services.outlines.getVolumeOutlines,
     ] as const) {
       const res = await fetcher(bookId)
       if (!res.success) continue
@@ -253,7 +254,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
         (o) => o.writing_chapter_id != null && String(o.writing_chapter_id) === wcKey,
       )
       if (matched) {
-        await window.electronAPI.deleteOutline({ outlineId: matched.id })
+        await services.outlines.deleteOutline({ outlineId: matched.id })
         break
       }
     }

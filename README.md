@@ -1,17 +1,17 @@
 # PurrTypos
 
-**Electron 桌面写作应用** — 多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景，以及可配置多模型的 Writing Agent / 纯问答。
+**本地优先写作应用** — 支持 Electron 桌面窗口和本地浏览器两种运行方式，提供多书籍管理、大纲（XMind / Markdown / 思维导图）、章节正文（Lexical 富文本）、人物与小说背景，以及可配置多模型的 Writing Agent / 纯问答。
 
 ```
 ┌────────────────────┐    HTTP/SSE     ┌────────────────────────┐
-│ Electron 渲染进程  │  ────────────►  │  Python 后端 (FastAPI) │
+│ React 前端          │  ────────────►  │  Python 后端 (FastAPI) │
 │  (Vite + React)    │  127.0.0.1:18321│  uvicorn + aiosqlite   │
 └────────────────────┘                 └────────────────────────┘
-        ▲  IPC                                   │
-        │                                        ▼
+        ▲                                        │
+        │ Electron IPC（仅文件/系统能力）          ▼
 ┌────────────────────┐                   ┌──────────────────┐
-│ Electron 主进程    │  spawn(python)    │   purrtypos.db   │
-│ (main_python.js)   │  ───────────────► │   (SQLite WAL)   │
+│ Electron 或浏览器   │                   │   purrtypos.db   │
+│ 两种运行时          │                   │   (SQLite WAL)   │
 └────────────────────┘                   └──────────────────┘
 ```
 
@@ -42,33 +42,45 @@ npm rebuild electron
 ## 开发
 
 ```bash
+# 默认：在浏览器中启动
 npm run dev
+
+# 显式启动浏览器版
+npm run dev:web
+
+# Electron 桌面窗口
+npm run dev:electron
 ```
 
-会同时启动：
+两种方式都使用相同的 `src/services/` HTTP/SSE 服务层和 FastAPI 后端。Electron
+的 `preload_python.js` 只暴露文件选择、保存对话框和打开本地路径等系统能力；
+浏览器使用上传、下载和预览完成对应操作。`npm run dev` 默认等同于
+`npm run dev:web`。
 
-1. **Vite** 开发服务（`http://localhost:5173`，热更新）
-2. **Electron 主进程**（`electron/main_python.js`），它会再 `spawn` 一个 Python 后端子进程：
-   - 开发：直接调用本机 `python`/`py` 运行 `backend/main.py`
-   - 打包：调用 PyInstaller 产物 `purrtypos-backend.exe`
-3. 后端监听 `http://127.0.0.1:18321`，前端通过 `preload_python.js` 暴露的 `window.electronAPI` 走 fetch 调用 `/api/*`，AI 流式接口走 SSE。
-
-主进程（`electron/`）和后端 Python 代码改动后需重启 `npm run dev`；渲染进程（`src/`）支持 HMR。
+后端监听 `http://127.0.0.1:18321`。浏览器开发页面由 Vite 提供，生产版页面由
+FastAPI 在同一端口托管。
 
 ## 打包
 
 ```bash
-# Windows：先打 PyInstaller，再 electron-builder
+# Electron 安装包（macOS/当前平台）
+npm run build:electron
+
+# Electron Windows 安装包（先构建 PyInstaller 后端）
 npm run build:win
 
-# 仅前端打包（不包含 Python 后端）
-npm run build
+# 本地浏览器发行包
+npm run build:web
+
+# Windows 本地浏览器发行包（包含 PyInstaller 后端）
+npm run build:web:win
 ```
 
 产物：
 - 前端构建到 `dist/`
 - Python 后端到 `backend/dist/purrtypos-backend/`
 - 安装包到 `dist-electron/`（Windows NSIS / macOS DMG）
+- 本地浏览器发行目录到 `dist-web/`，通过 `start-web.cmd` 或 `start-web.sh` 启动
 
 ## AI 模式
 
@@ -99,8 +111,10 @@ Kimi K3 通过独立 profile 接入 `kimi-k3`，使用 1M 上下文和当前服�
 PurrTypos/
 ├── electron/                    # Electron 主进程
 │   ├── main_python.js           # 窗口、IPC、Python 后端进程的生命周期管理
-│   ├── preload_python.js        # 暴露 window.electronAPI（HTTP + SSE 透传）
+│   ├── preload_python.js        # 仅暴露 window.purrDesktop 原生能力
 │   └── ...
+├── src/services/                # 与运行时无关的领域服务、HTTP 与 AI SSE
+├── src/platform/                # Electron / Browser 文件和系统能力适配
 ├── backend/                     # Python 后端（FastAPI + aiosqlite）
 │   ├── main.py                  # FastAPI 入口，CORS、路由装载、生命周期
 │   ├── requirements.txt

@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { toast } from '../../../../ui'
 import type {
@@ -72,9 +73,9 @@ export function useMemoryModal({
     setCheckedIds(selectedIds)
     setCheckedForeshadowingIds(selectedForeshadowingIds)
     Promise.all([
-      window.electronAPI.getSparkIdeasByBook({ bookId }),
-      window.electronAPI.getForeshadowingByBook({ bookId }),
-      window.electronAPI.getCharacters({ bookId }),
+      services.memories.getSparkIdeasByBook({ bookId }),
+      services.memories.getForeshadowingByBook({ bookId }),
+      services.characters.getCharacters({ bookId }),
     ]).then(([memoryResponse, foreshadowingResponse, characterResponse]) => {
       setLoading(false)
       if (memoryResponse.success && Array.isArray(memoryResponse.data)) {
@@ -128,7 +129,7 @@ export function useMemoryModal({
     }
 
     setAdding(true)
-    const response = await window.electronAPI.addSparkIdea({
+    const response = await services.memories.addSparkIdea({
       bookId,
       layer: SPARK_IDEA_LAYER_LABELS[addLayer] as SparkIdeaLayer,
       content: addContent.trim(),
@@ -151,7 +152,7 @@ export function useMemoryModal({
   }, [])
 
   const handleDelete = React.useCallback(async (id: MemoryId) => {
-    await window.electronAPI.deleteSparkIdea({ id })
+    await services.memories.deleteSparkIdea({ id })
     setSparkIdeas((previous) => previous.filter((memory) => memory.id !== id))
     setCheckedIds((previous) => previous.filter((candidate) => candidate !== id))
   }, [])
@@ -199,7 +200,7 @@ export function useMemoryModal({
     }
 
     setEditSaving(true)
-    const response = await window.electronAPI.updateSparkIdea({
+    const response = await services.memories.updateSparkIdea({
       id: editingId,
       data: {
         content: trimmedContent,
@@ -230,7 +231,7 @@ export function useMemoryModal({
   const handleAddForeshadowing = React.useCallback(async () => {
     if (bookId == null || foreshadowChapterId == null || !foreshadowContent.trim()) return
     setAddingForeshadow(true)
-    const response = await window.electronAPI.addForeshadowing({
+    const response = await services.memories.addForeshadowing({
       bookId,
       chapterId: foreshadowChapterId,
       content: foreshadowContent.trim(),
@@ -244,7 +245,7 @@ export function useMemoryModal({
   }, [bookId, foreshadowChapterId, foreshadowContent, foreshadowType])
 
   const handleDeleteForeshadowing = React.useCallback(async (id: MemoryId) => {
-    await window.electronAPI.deleteForeshadowing({ id })
+    await services.memories.deleteForeshadowing({ id })
     setForeshadowing((previous) => previous.filter((item) => item.id !== id))
   }, [])
 
@@ -254,7 +255,7 @@ export function useMemoryModal({
       status: AiForeshadowing['status'],
       resolvedChapterId?: EntityId | null
     ) => {
-      const response = await window.electronAPI.updateForeshadowing({
+      const response = await services.memories.updateForeshadowing({
         id,
         data: { status, resolved_chapter_id: resolvedChapterId ?? undefined },
       })

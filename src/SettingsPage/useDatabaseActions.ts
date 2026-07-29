@@ -1,3 +1,4 @@
+import { runtimeCapabilities, services } from '@/services'
 import React from 'react'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 
@@ -18,7 +19,7 @@ export function useDatabaseActions(active: boolean) {
   const refreshDbInfo = React.useCallback(async () => {
     setDbInfoLoading(true)
     try {
-      const res = await window.electronAPI.getDatabaseInfo()
+      const res = await services.database.getDatabaseInfo()
       setDbInfo(res.success && res.data ? res.data : null)
     } finally {
       setDbInfoLoading(false)
@@ -33,7 +34,7 @@ export function useDatabaseActions(active: boolean) {
   const handleExportDatabase = React.useCallback(async () => {
     setExportingDb(true)
     try {
-      const res = await window.electronAPI.exportDatabase()
+      const res = await services.database.exportDatabase()
       if (res.success) {
         message.success('数据库已导出')
       } else if (res.error !== 'canceled') {
@@ -51,7 +52,7 @@ export function useDatabaseActions(active: boolean) {
     if (!confirmed) return
     setImportingDb(true)
     try {
-      const res = await window.electronAPI.importDatabase()
+      const res = await services.database.importDatabase()
       if (res.success) {
         const before = res.data?.beforeStats
         const after = res.data?.afterStats
@@ -62,6 +63,9 @@ export function useDatabaseActions(active: boolean) {
         } else {
           message.success('数据库已导入，正在刷新...')
         }
+        if (runtimeCapabilities.runtime === 'browser') {
+          window.setTimeout(() => window.location.reload(), 500)
+        }
       } else if (res.error !== 'canceled') {
         message.error(res.error || '导入失败')
       }
@@ -71,7 +75,7 @@ export function useDatabaseActions(active: boolean) {
   }, [message])
 
   const handleOpenDbDir = React.useCallback(async () => {
-    const res = await window.electronAPI.openDatabaseDirectory()
+    const res = await services.database.openDatabaseDirectory()
     if (!res.success) {
       message.error(res.error || '打开目录失败')
       return
@@ -88,5 +92,6 @@ export function useDatabaseActions(active: boolean) {
     handleExportDatabase,
     handleImportDatabase,
     handleOpenDbDir,
+    canOpenDbDir: runtimeCapabilities.openDatabaseDirectory,
   }
 }

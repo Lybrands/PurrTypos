@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button, Empty, Radio, Select, Space, Spin, Switch, Tag, toast } from '../../../../ui'
 import type {
@@ -77,7 +78,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
       return
     }
     setLoading(true)
-    const res = await window.electronAPI.listStoryMemoryEvolutionReviews({
+    const res = await services.storyMemory.listStoryMemoryEvolutionReviews({
       bookId,
       statuses: [status],
     })
@@ -103,7 +104,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
 
   React.useEffect(() => {
     let cancelled = false
-    window.electronAPI.getSettings().then((res) => {
+    services.settings.getSettings().then((res) => {
       if (cancelled || !res.success) return
       setAnalysisEnabled(!!res.data?.story_memory_analysis_enabled)
       setAutoApplyEnabled(!!res.data?.story_memory_auto_apply_enabled)
@@ -121,7 +122,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     story_memory_auto_apply_min_confidence?: number
   }) => {
     setSettingsSaving(true)
-    const res = await window.electronAPI.setSettings(patch)
+    const res = await services.settings.setSettings(patch)
     setSettingsSaving(false)
     if (!res.success) toast.error(res.error || '保存故事演化设置失败')
     return res.success
@@ -135,7 +136,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
       return
     }
     setSubmittingId(review.delta_id)
-    const res = await window.electronAPI.resolveStoryMemoryEvolutionReview({
+    const res = await services.storyMemory.resolveStoryMemoryEvolutionReview({
       deltaId: review.delta_id,
       resolutions: selected,
     })

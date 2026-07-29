@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import type {
   ApiResult,
   CharacterSettingHistory,
@@ -102,18 +103,18 @@ const ADAPTERS: Record<HistoryKind, SettingHistoryAdapter> = {
     restoreTooltip: '把当前设定替换为此版本',
     async list(target) {
       if (target.characterId == null) return null
-      const result = await window.electronAPI.listCharacterSettingHistory({
+      const result = await services.history.listCharacterSettingHistory({
         characterId: target.characterId,
         limit: HISTORY_LIMIT,
       })
       return mapHistoryList(result, profileHistoryViewModel)
     },
     async getDetail(historyId) {
-      const result = await window.electronAPI.getCharacterSettingHistory({ historyId })
+      const result = await services.history.getCharacterSettingHistory({ historyId })
       return mapHistoryDetail(result, profileHistoryViewModel)
     },
     async rollback(historyId) {
-      const result = await window.electronAPI.rollbackCharacterSettingHistory({ historyId })
+      const result = await services.history.rollbackCharacterSettingHistory({ historyId })
       return mapActionResult(result)
     },
   },
@@ -124,18 +125,18 @@ const ADAPTERS: Record<HistoryKind, SettingHistoryAdapter> = {
     restoreTooltip: '把当前设定替换为此版本',
     async list(target) {
       if (target.settingEntityId == null) return null
-      const result = await window.electronAPI.listEntitySettingHistory({
+      const result = await services.history.listEntitySettingHistory({
         entityId: target.settingEntityId,
         limit: HISTORY_LIMIT,
       })
       return mapHistoryList(result, profileHistoryViewModel)
     },
     async getDetail(historyId) {
-      const result = await window.electronAPI.getEntitySettingHistory({ historyId })
+      const result = await services.history.getEntitySettingHistory({ historyId })
       return mapHistoryDetail(result, profileHistoryViewModel)
     },
     async rollback(historyId) {
-      const result = await window.electronAPI.rollbackEntitySettingHistory({ historyId })
+      const result = await services.history.rollbackEntitySettingHistory({ historyId })
       return mapActionResult(result)
     },
   },
@@ -145,18 +146,18 @@ const ADAPTERS: Record<HistoryKind, SettingHistoryAdapter> = {
     loadErrorMessage: '加载背景历史失败',
     async list(target) {
       if (target.bookId == null) return null
-      const result = await window.electronAPI.listBackgroundSettingHistory({
+      const result = await services.history.listBackgroundSettingHistory({
         bookId: target.bookId,
         limit: HISTORY_LIMIT,
       })
       return mapHistoryList(result, backgroundHistoryViewModel)
     },
     async getDetail(historyId) {
-      const result = await window.electronAPI.getBackgroundSettingHistory({ historyId })
+      const result = await services.history.getBackgroundSettingHistory({ historyId })
       return mapHistoryDetail(result, backgroundHistoryViewModel)
     },
     async rollback(historyId) {
-      const result = await window.electronAPI.rollbackBackgroundSettingHistory({ historyId })
+      const result = await services.history.rollbackBackgroundSettingHistory({ historyId })
       return mapActionResult(result)
     },
   },

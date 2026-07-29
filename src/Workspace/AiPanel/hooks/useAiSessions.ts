@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import { useToast } from "../../../ui";
 import type { AiSession, EntityId } from "../../../types";
@@ -74,7 +75,7 @@ export function useAiSessions({
     setSessionsLoaded(false);
     setLoading(false);
 
-    window.electronAPI
+    services.sessions
       .getSessions(
         isSettingScope
           ? { bookId, scope: "setting" }
@@ -111,7 +112,7 @@ export function useAiSessions({
       return;
     }
     if (sessions.length > 0 && conversations.length === 0) return;
-    const res = await window.electronAPI.createSession({
+    const res = await services.sessions.createSession({
       bookId,
       chapterId: isSettingScope ? null : chapterId,
       ...(isSettingScope ? { scope: "setting" as const } : {}),
@@ -130,7 +131,7 @@ export function useAiSessions({
 
   const handleCloseTab = React.useCallback(
     (session: AiSession) => {
-      window.electronAPI.setSessionClosed({ sessionId: session.id });
+      services.sessions.setSessionClosed({ sessionId: session.id });
       setSessions((prev) => {
         const next = prev.filter((s) => s.id !== session.id);
         if (activeSessionId === session.id) {
@@ -144,7 +145,7 @@ export function useAiSessions({
 
   const handleOpenFromHistory = React.useCallback(
     (session: AiSession) => {
-      window.electronAPI.setSessionReopened({ sessionId: session.id });
+      services.sessions.setSessionReopened({ sessionId: session.id });
       setSessions((prev) =>
         prev.some((s) => s.id === session.id) ? prev : [...prev, session],
       );
@@ -179,7 +180,7 @@ export function useAiSessions({
       setEditingTabId(null);
       return;
     }
-    const res = await window.electronAPI.updateSessionTitle({
+    const res = await services.sessions.updateSessionTitle({
       sessionId: editingTabId,
       title,
     });

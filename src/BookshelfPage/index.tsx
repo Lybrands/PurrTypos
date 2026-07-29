@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { PlusOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '../ui'
 import { Button, Checkbox, Input, Modal, Tooltip } from '../ui'
@@ -93,7 +94,7 @@ export default function BookshelfPage({
           let okCount = 0
           for (const bookId of selectedIds) {
             const book = books.find((b) => b.id === bookId)
-            const res = await window.electronAPI.exportEpub({
+            const res = await services.exports.exportEpub({
               bookId,
               defaultName: book?.title || '书籍',
             })
@@ -118,7 +119,7 @@ export default function BookshelfPage({
               message.warning(`「${bookData.title}」暂无内容，已跳过`)
               continue
             }
-            const res = await window.electronAPI.writeSingleTextFile({
+            const res = await services.files.writeSingleTextFile({
               defaultName: `${bookData.title || '导出'}.txt`,
               content: buildSingleTxtContent(bookData),
             })
@@ -138,7 +139,7 @@ export default function BookshelfPage({
           message.warning('所选书籍暂无内容可导出')
           return
         }
-        const res = await window.electronAPI.writeExportFiles({ entries, exportAsZip })
+        const res = await services.files.writeExportFiles({ entries, exportAsZip })
         if (res.success) {
           message.success('导出成功')
           setExportModalOpen(false)

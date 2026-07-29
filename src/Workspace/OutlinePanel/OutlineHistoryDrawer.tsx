@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
 import { HistoryOutlined, RollbackOutlined } from '../../ui'
@@ -43,7 +44,7 @@ export default function OutlineHistoryDrawer({
     if (outlineId == null) return
     setLoading(true)
     try {
-      const res = await window.electronAPI.listOutlineHistory({ outlineId, limit: 100 })
+      const res = await services.outlines.listOutlineHistory({ outlineId, limit: 100 })
       if (res?.success) setItems(res.data ?? [])
       else appMessage.error('加载大纲历史失败')
     } catch (e) {
@@ -66,7 +67,7 @@ export default function OutlineHistoryDrawer({
     if (detailMap[historyId]) return
     setDetailLoadingId(historyId)
     try {
-      const res = await window.electronAPI.getOutlineHistory({ historyId })
+      const res = await services.outlines.getOutlineHistory({ historyId })
       if (res?.success && res.data) {
         setDetailMap((prev) => ({ ...prev, [historyId]: res.data! }))
       } else {
@@ -111,7 +112,7 @@ export default function OutlineHistoryDrawer({
       if (result === 'confirm') {
         setRestoringId(item.id)
         try {
-          const res = await window.electronAPI.restoreOutlineHistory({ historyId: item.id })
+          const res = await services.outlines.restoreOutlineHistory({ historyId: item.id })
           if (res?.success && outlineId != null) {
             appMessage.success('已回退到该版本')
             onRestored?.(outlineId)

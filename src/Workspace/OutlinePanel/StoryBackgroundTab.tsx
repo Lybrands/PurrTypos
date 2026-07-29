@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { CommentOutlined, EditOutlined, HistoryOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '../../ui'
 import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from '../../ui'
@@ -93,7 +94,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     try {
       const [bg, attRes] = await Promise.all([
         getStoryBackground(bookId),
-        window.electronAPI.getStoryBackgroundAttachments({ bookId }),
+        services.storyBackground.getStoryBackgroundAttachments({ bookId }),
       ])
       setContent(bg?.content ?? '')
       setAttachments(attRes.success && Array.isArray(attRes.data) ? attRes.data : [])
@@ -136,7 +137,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     const md = ed ? htmlToMarkdown(ed.getHTML()) : ''
     setLoading(true)
     try {
-      const res = await window.electronAPI.saveStoryBackground({ bookId, content: md })
+      const res = await services.storyBackground.saveStoryBackground({ bookId, content: md })
       if (res.success) {
         setContent(md)
         setEditing(false)
@@ -154,7 +155,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   }, [])
 
   const handleImportFile = React.useCallback(async () => {
-    const res = await window.electronAPI.openAndReadTextFile()
+    const res = await services.files.openAndReadTextFile()
     if (res.success && res.data != null) {
       const ed = editorRef.current
       if (ed) {
@@ -171,25 +172,25 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   const handlePickAttachments = React.useCallback(async () => {
     if (bookId == null) return
     try {
-      const res = await window.electronAPI.pickStoryBackgroundAttachments({ bookId })
+      const res = await services.storyBackground.pickStoryBackgroundAttachments({ bookId })
       if (res.success) {
         const count = (res as { addedCount?: number }).addedCount ?? res.data?.length ?? 0
         if (count > 0) message.success(`已添加 ${count} 个附件`)
         if (Array.isArray(res.data)) setAttachments(res.data)
       } else if (res.error !== 'canceled') {
         message.error(res.error || '导入附件失败')
-        const listRes = await window.electronAPI.getStoryBackgroundAttachments({ bookId })
+        const listRes = await services.storyBackground.getStoryBackgroundAttachments({ bookId })
         if (listRes.success && Array.isArray(listRes.data)) setAttachments(listRes.data)
       }
     } catch (_) {
       message.error('导入附件失败')
-      const listRes = await window.electronAPI.getStoryBackgroundAttachments({ bookId })
+      const listRes = await services.storyBackground.getStoryBackgroundAttachments({ bookId })
       if (listRes.success && Array.isArray(listRes.data)) setAttachments(listRes.data)
     }
   }, [bookId, message])
 
   const handleDeleteAttachment = React.useCallback(async (id: number) => {
-    const res = await window.electronAPI.deleteStoryBackgroundAttachment({ id })
+    const res = await services.storyBackground.deleteStoryBackgroundAttachment({ id })
     if (res.success) {
       setAttachments((prev) => prev.filter((a) => a.id !== id))
       message.success('已删除')
@@ -199,7 +200,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   }, [message])
 
   const handleOpenAttachment = React.useCallback((storedPath: string) => {
-    window.electronAPI.openStoryBackgroundAttachment({ storedPath })
+    services.storyBackground.openStoryBackgroundAttachment({ storedPath })
   }, [])
 
   const handlePickAttachmentsInModal = React.useCallback(async () => {

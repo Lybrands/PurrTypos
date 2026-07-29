@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import {
   PlusOutlined,
@@ -136,7 +137,7 @@ export default function WorldEntityTab({
 
   const loadEntities = React.useCallback(async () => {
     if (bookId == null) return
-    const res = await window.electronAPI.getSettingEntities({ bookId })
+    const res = await services.settingEntities.getSettingEntities({ bookId })
     if (res.success) setEntities(res.data ?? [])
   }, [bookId])
 
@@ -204,11 +205,11 @@ export default function WorldEntityTab({
     setSaving(true)
     try {
       const res = editTarget
-        ? await window.electronAPI.updateSettingEntity({
+        ? await services.settingEntities.updateSettingEntity({
             id: editTarget.id,
             data: { entityType: draftType, name, tags: draftTags.join(', '), profileMd },
           })
-        : await window.electronAPI.createSettingEntity({
+        : await services.settingEntities.createSettingEntity({
             bookId,
             entityType: draftType,
             name,
@@ -237,7 +238,7 @@ export default function WorldEntityTab({
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await window.electronAPI.deleteSettingEntity({ id: deleteTarget.id })
+    const res = await services.settingEntities.deleteSettingEntity({ id: deleteTarget.id })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)

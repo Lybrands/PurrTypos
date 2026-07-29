@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import { useToast } from "../../../ui";
 import {
@@ -123,7 +124,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
   const handleAbort = React.useCallback(() => {
     const runtime = getChatSessionRuntime(activeSessionId);
-    window.electronAPI.abortAiStream(runtime?.streamId);
+    services.ai.abortAiStream(runtime?.streamId);
     // 不在此处 unsubscribe：须等主进程发来 done（含 aborted），才能合并状态并入库
   }, [activeSessionId]);
 
@@ -274,7 +275,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       // 从数据库删除「该条之后」的对话记录，与界面截断一致
       const keepTurnCount = Math.floor(submitOverride.editIndex! / 2);
       if (sessionId != null && keepTurnCount >= 0) {
-        window.electronAPI.deleteConversationsAfterTurn({ sessionId, keepTurnCount }).catch(() => {});
+        services.conversations.deleteConversationsAfterTurn({ sessionId, keepTurnCount }).catch(() => {});
       }
     } else {
       historyMessages = baseConversations
@@ -391,7 +392,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         }
       },
     };
-    unsubscribe = window.electronAPI.onAiChunk(
+    unsubscribe = services.ai.onAiChunk(
       (chunk) => {
         dispatchChunk(chunk, ctx);
       },
@@ -405,7 +406,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       console.log('[AI 对话] 传入内容:', { messages: newMessages, options: streamOptions, enableAgentTools });
     }
 
-    window.electronAPI.aiChatStream({
+    services.ai.aiChatStream({
       streamId,
       apiKey: cfg.apiKey,
       baseURL: cfg.baseUrl || undefined,
