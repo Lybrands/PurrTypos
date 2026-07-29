@@ -1,14 +1,22 @@
 import React from 'react'
 import {
+  CheckCircleOutlined,
   CloseOutlined,
+  ClockCircleOutlined,
+  LoadingOutlined,
   MessageOutlined,
-  MenuFoldOutlined,
+  PanelToggleIcon,
+  PauseCircleOutlined,
   PlusOutlined,
   ReadOutlined,
 } from '../../../../ui'
 import { Button, Empty, Input, Segmented, Tooltip } from '../../../../ui'
 import type { AiSession, EntityId } from '../../../../types'
-import type { ChatSessionScope } from '../../hooks'
+import {
+  getSessionActivityLabel,
+  type ChatSessionActivity,
+  type ChatSessionScope,
+} from '../../hooks'
 import SessionHistoryPopover from '../SessionHistoryPopover'
 import './index.scss'
 
@@ -20,7 +28,7 @@ interface ConversationSidebarProps {
   scope: ChatSessionScope
   sessions: AiSession[]
   activeSessionId: number | null
-  loading: boolean
+  sessionActivities: Record<number, ChatSessionActivity>
   isCurrentSessionEmpty: boolean
   editingSessionId: number | null
   editingTitle: string
@@ -33,8 +41,15 @@ interface ConversationSidebarProps {
   onCloseSession: (session: AiSession) => void
   onOpenFromHistory: (session: AiSession) => void
   onDeleteFromHistory: (session: AiSession) => void
-  onBlockedByLoading: () => void
   onCollapse: () => void
+}
+
+function SessionActivityIcon({ activity }: { activity: ChatSessionActivity }) {
+  if (activity.state === 'running') return <LoadingOutlined spin />
+  if (activity.state === 'queued') return <ClockCircleOutlined />
+  if (activity.state === 'completed') return <CheckCircleOutlined />
+  if (activity.state === 'canceled') return <PauseCircleOutlined />
+  return <CloseOutlined />
 }
 
 function formatSessionTime(value?: string) {
@@ -57,7 +72,7 @@ export default function ConversationSidebar({
   scope,
   sessions,
   activeSessionId,
-  loading,
+  sessionActivities,
   isCurrentSessionEmpty,
   editingSessionId,
   editingTitle,
@@ -70,7 +85,6 @@ export default function ConversationSidebar({
   onCloseSession,
   onOpenFromHistory,
   onDeleteFromHistory,
-  onBlockedByLoading,
   onCollapse,
 }: ConversationSidebarProps) {
   const hasBlankSession = sessions.length > 0 && isCurrentSessionEmpty
@@ -97,7 +111,6 @@ export default function ConversationSidebar({
           { label: '全局', value: 'setting' },
         ]}
         onChange={(value) => {
-          if (loading) return onBlockedByLoading()
           onScopeChange(value as ChatSessionScope)
         }}
         className="conversation-scope-switch"
@@ -110,7 +123,7 @@ export default function ConversationSidebar({
             <Button
               type="text"
               size="small"
-              icon={<MenuFoldOutlined />}
+              icon={<PanelToggleIcon side="left" action="collapse" />}
               onClick={onCollapse}
               aria-label="收起对话列表"
             />
@@ -128,7 +141,7 @@ export default function ConversationSidebar({
               type="text"
               size="small"
               icon={<PlusOutlined />}
-              disabled={loading || hasBlankSession || (scope === 'chapter' && chapterId == null)}
+              disabled={hasBlankSession || (scope === 'chapter' && chapterId == null)}
               onClick={onNewSession}
               aria-label="新建对话"
             />
@@ -141,20 +154,19 @@ export default function ConversationSidebar({
           <Empty image={false} description={scope === 'chapter' && chapterId == null ? '先选择一个章节' : '暂无对话'} />
         ) : [...sessions].reverse().map((session) => {
           const active = session.id === activeSessionId
+          const activity = sessionActivities[session.id]
           return (
             <div
               key={session.id}
-              className={`conversation-session-item${active ? ' is-active' : ''}`}
+              className={`conversation-session-item${active ? ' is-active' : ''}${activity ? ` is-${activity.state}` : ''}`}
               role="button"
               tabIndex={0}
               onClick={() => {
-                if (loading) return onBlockedByLoading()
                 onActiveSessionChange(session.id)
               }}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return
                 event.preventDefault()
-                if (loading) return onBlockedByLoading()
                 onActiveSessionChange(session.id)
               }}
             >
@@ -184,7 +196,20 @@ export default function ConversationSidebar({
                     {session.title || '新对话'}
                   </span>
                 )}
-                <span className="conversation-session-time">{formatSessionTime(session.create_time)}</span>
+                <div className="conversation-session-subline">
+                  <span className="conversation-session-time">
+                    {formatSessionTime(session.create_time)}
+                  </span>
+                  {activity ? (
+                    <span
+                      className={`conversation-session-status conversation-session-status--${activity.state}`}
+                      role="status"
+                    >
+                      <SessionActivityIcon activity={activity} />
+                      <span>{getSessionActivityLabel(activity)}</span>
+                    </span>
+                  ) : null}
+                </div>
               </div>
               <Tooltip title="关闭对话">
                 <Button

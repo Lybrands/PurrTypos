@@ -8,14 +8,12 @@ import { type ChatMessage } from "../../hooks";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
-import ThinkingRegion from "../ThinkingRegion";
-import { TaskPlanSteps } from "../TaskPlanCard";
 import ToolApprovalCard from "../ToolApprovalCard";
-import WorkLog, { WorkLogStepGroup } from "../WorkLog";
+import WorkLog from "../WorkLog";
 import SubAgentStatusList from "../SubAgentStatusList";
 import {
   buildAssistantTimeline,
-  groupConsecutiveWorkSteps,
+  getAssistantProcessingLabel,
   type AssistantTimelinePart,
   type TimelineStepPart,
 } from "./assistantTimeline";
@@ -41,7 +39,6 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
     if (part.type === "contextCompaction") {
       return part.state.status === "failed";
     }
-    if (part.type === "taskPlan") return part.plan.status === "failed";
     if (part.type === "delegations") {
       return part.items.some((item) => item.status === "failed");
     }
@@ -52,51 +49,6 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
         !part.segment.cachedFlags?.[labelIndex],
     );
   });
-}
-
-function getStepCount(parts: TimelineStepPart[]): number {
-  return parts.reduce((count, part) => {
-    if (part.type === "thinking") return count + 1;
-    return (
-      count +
-      part.segment.labels.filter(
-        (_label, labelIndex) => !part.segment.cachedFlags?.[labelIndex],
-      ).length
-    );
-  }, 0);
-}
-
-function stepPartsHaveError(parts: TimelineStepPart[]): boolean {
-  return parts.some(
-    (part) =>
-      part.type === "tools" &&
-      part.segment.labelOutcomes?.some(
-        (outcome, labelIndex) =>
-          outcome === "context_error" &&
-          !part.segment.cachedFlags?.[labelIndex],
-      ),
-  );
-}
-
-function getStepDuration(parts: TimelineStepPart[]): number {
-  return parts.reduce((duration, part) => {
-    const partDuration =
-      part.type === "thinking" ? part.durationMs : part.segment.durationMs;
-    return duration + (partDuration ?? 0);
-  }, 0);
-}
-
-function getActiveStepStartedAt(
-  parts: TimelineStepPart[],
-): number | undefined {
-  const lastPart = parts.at(-1);
-  if (!lastPart) return undefined;
-  if (lastPart.type === "thinking") {
-    return lastPart.durationMs == null ? lastPart.startedAt : undefined;
-  }
-  return lastPart.segment.durationMs == null
-    ? lastPart.segment.startedAt
-    : undefined;
 }
 
 function AssistantMessageBodyInner({
@@ -124,25 +76,28 @@ function AssistantMessageBodyInner({
 
   const answerParts = timeline.filter((part) => part.type === "text");
   const workLogParts = timeline.filter(isVisibleWorkLogPart);
-  const workLogItems = groupConsecutiveWorkSteps(workLogParts, index);
   const hasAnswerContent = answerParts.length > 0;
   const hasWorkLog = workLogParts.length > 0;
+  const processingLabel = getAssistantProcessingLabel(message);
 
   const renderStepPart = (part: TimelineStepPart) => {
     if (part.type === "thinking") {
       const isActiveStream =
         isStreaming && part.regionKey.includes("-stream-");
       return (
-        <ThinkingRegion
+        <div
           key={part.regionKey}
-          regionKey={part.regionKey}
-          content={part.text}
-          streaming={isActiveStream}
-          startedAt={part.startedAt}
-          durationMs={part.durationMs}
-          showCursor={isActiveStream && !hasAnswerContent}
-          onWheelUp={handleWheelUp}
-        />
+          className={`work-log__thinking ${isActiveStream ? "work-log__thinking--active" : ""}`}
+          onWheel={(event) => {
+            event.stopPropagation();
+            if (event.deltaY < 0) handleWheelUp();
+          }}
+        >
+          <Markdown>{part.text}</Markdown>
+          {isActiveStream && !hasAnswerContent ? (
+            <span className="a-thinking-cursor" />
+          ) : null}
+        </div>
       );
     }
 
@@ -166,23 +121,17 @@ function AssistantMessageBodyInner({
 
   return (
     <div className="bubble-assistant-body">
-      {showPlaceholder && (
-        <div className="bubble-content bubble-content--thinking-placeholder">
-          <span className="bubble-placeholder-text">正在思考</span>
-          <span className="a-blink-dots">...</span>
-        </div>
-      )}
-
-      {!showPlaceholder && hasWorkLog ? (
+      {isStreaming || hasWorkLog ? (
         <WorkLog
           logKey={message.agentRunId || `${index}-work-log`}
           active={isStreaming}
-          autoOpen={isStreaming && !hasAnswerContent}
+          activeLabel={processingLabel}
+          autoOpen={isStreaming && hasWorkLog && !hasAnswerContent}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
           hasError={workLogHasError(workLogParts)}
         >
-          {workLogItems.map((part, partIndex) => {
+          {workLogParts.map((part, partIndex) => {
             if (part.type === "contextCompaction") {
               const running = part.state.status === "running";
               const failed = part.state.status === "failed";
@@ -223,55 +172,12 @@ function AssistantMessageBodyInner({
                 </div>
               );
             }
-            if (part.type === "taskPlan") {
-              const completed = part.plan.steps.filter(
-                (step) => step.status === "done",
-              ).length;
-              return (
-                <div key={`task-plan-${partIndex}`} className="work-log__plan">
-                  <div className="work-log__plan-header">
-                    <span>任务计划</span>
-                    <span className="work-log__plan-count">
-                      {completed}/{part.plan.steps.length}
-                    </span>
-                  </div>
-                  <TaskPlanSteps plan={part.plan} />
-                </div>
-              );
-            }
             if (part.type === "delegations") {
               return (
                 <SubAgentStatusList
                   key={`delegations-${partIndex}`}
                   items={part.items}
                 />
-              );
-            }
-            if (part.type === "stepGroup") {
-              const groupActive =
-                isStreaming &&
-                part.parts.some(
-                  (stepPart) =>
-                    (stepPart.type === "thinking" &&
-                      stepPart.regionKey.includes("-stream-")) ||
-                    (stepPart.type === "tools" && Boolean(stepPart.isLive)),
-                );
-              return (
-                <WorkLogStepGroup
-                  key={part.groupKey}
-                  groupKey={part.groupKey}
-                  stepCount={getStepCount(part.parts)}
-                  completedDurationMs={getStepDuration(part.parts)}
-                  activeStartedAt={
-                    groupActive
-                      ? getActiveStepStartedAt(part.parts)
-                      : undefined
-                  }
-                  active={groupActive}
-                  hasError={stepPartsHaveError(part.parts)}
-                >
-                  {part.parts.map(renderStepPart)}
-                </WorkLogStepGroup>
               );
             }
             if (part.type === "thinking" || part.type === "tools") {

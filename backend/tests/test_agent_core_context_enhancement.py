@@ -367,6 +367,66 @@ def test_stage_context_projection_only_removes_contract_proven_optional_blocks()
     assert final_round.messages == messages
 
 
+def test_final_projection_uses_receipts_only_under_budget_pressure():
+    call = ToolCall(id="call-1", name="read", arguments_json="{}")
+    content = "x" * 8_000
+    batch = ToolBatchResult(
+        results=(ToolCallResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            content=content,
+        ),),
+        outcome=ToolBatchOutcome.COMPLETED,
+    )
+    store = RunEvidenceStore()
+    receipts = store.record_batch((call,), batch)
+    messages = (
+        AgentMessage(role=MessageRole.USER, content="read"),
+        AgentMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=(call,),
+        ),
+        AgentMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=call.id,
+            content=content,
+        ),
+    )
+    contracts = {
+        "read": ToolContextContract(
+            final_projection=ToolResultProjection.RECEIPT,
+        ),
+    }
+
+    roomy = project_intermediate_tool_context(
+        messages,
+        visible_tool_names=frozenset(),
+        contracts=contracts,
+        evidence_store=store,
+        enabled=True,
+        initial_round=False,
+        token_budget=20_000,
+    )
+    pressured = project_intermediate_tool_context(
+        messages,
+        visible_tool_names=frozenset(),
+        contracts=contracts,
+        evidence_store=store,
+        enabled=True,
+        initial_round=False,
+        token_budget=2_000,
+    )
+
+    assert roomy.messages == messages
+    assert roomy.mode == "full"
+    assert pressured.mode == "final_budget_pressure"
+    assert pressured.compacted_tool_results == (receipts[0].evidence_id,)
+    assert pressured.saved_tokens > 0
+    payload = json.loads(pressured.messages[-1].content)
+    assert payload["completeEvidenceStoredByHost"] is True
+    assert payload["contentCharacters"] == len(content)
+
+
 @pytest.mark.asyncio
 async def test_runtime_projects_only_intermediate_round_and_restores_final_evidence():
     read_one = _schema("readOne")
@@ -468,6 +528,82 @@ async def test_runtime_projects_only_intermediate_round_and_restores_final_evide
     ]
     assert len(projection_traces) == 1
     assert projection_traces[0].details["savedTokens"] > 0
+    assert projection_traces[0].details["compactedToolResults"] == [
+        "tool:call-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_projects_before_budget_check_and_completes_final_round():
+    schema = _schema("readOne")
+    model = ScriptedModelGateway([
+        _tool_call("call-1", "readOne"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch("call-1", "readOne", content="x" * 10_000),
+    ])
+    observer = RecordingObserver(({"readOne"}, set()))
+    request = AgentRunRequest(
+        messages=(AgentMessage(role=MessageRole.USER, content="read once"),),
+        model=ModelRequest(provider="test", model="model"),
+        domain_context=DomainContext(namespace="test"),
+        context_window=4_096,
+        tools_enabled=True,
+    )
+    runtime = AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    )
+
+    updates = [
+        update
+        async for update in runtime.run(
+            request,
+            tools=(schema,),
+            context_budget=_matching_budget(
+                window=4_096,
+                tools=(schema,),
+            ),
+            force_tool_choice=True,
+            require_tool_call=True,
+            tool_context_contracts={
+                "readOne": ToolContextContract(
+                    final_projection=ToolResultProjection.RECEIPT,
+                ),
+            },
+            stage_context_projection_enabled=True,
+        )
+    ]
+
+    assert updates[-1].outcome.value == "completed"
+    assert len(model.message_rounds) == 2
+    final_result = next(
+        message
+        for message in model.message_rounds[-1]
+        if message.role is MessageRole.TOOL
+    )
+    payload = json.loads(final_result.content)
+    assert payload["completeEvidenceStoredByHost"] is True
+    assert payload["contentCharacters"] == 10_000
+    budget_traces = [
+        trace
+        for trace in observer.traces
+        if trace.stage == "runtime_context_budget"
+    ]
+    assert [trace.outcome for trace in budget_traces] == [
+        "within_budget",
+        "rebalanced",
+    ]
+    assert budget_traces[-1].details["completeEvidenceTokens"] > 0
+    assert budget_traces[-1].details["overflowTokens"] == 0
+    projection_traces = [
+        trace
+        for trace in observer.traces
+        if trace.stage == "context_projection"
+    ]
+    assert len(projection_traces) == 1
     assert projection_traces[0].details["compactedToolResults"] == [
         "tool:call-1",
     ]

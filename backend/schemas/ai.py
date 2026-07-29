@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -30,6 +30,21 @@ class ChatStreamRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     chatAgentMode: Optional[str] = None
     contextWindow: Optional[str] = None
+    agentProfile: Literal["writing", "screenplay"] = "writing"
+    screenplayProjectId: Optional[str] = None
+    sourceBookId: Optional[str] = None
+    activeDocumentId: Optional[str] = None
+    activeStage: Optional[
+        Literal[
+            "orientation",
+            "brief",
+            "structure",
+            "scenes",
+            "draft",
+            "review",
+            "completed",
+        ]
+    ] = None
 
     @field_validator("bookId")
     @classmethod
@@ -38,6 +53,24 @@ class ChatStreamRequest(BaseModel):
 
         normalized = str(value or "").strip()
         return normalized or None
+
+    @field_validator(
+        "screenplayProjectId",
+        "sourceBookId",
+        "activeDocumentId",
+    )
+    @classmethod
+    def normalize_screenplay_ids(cls, value: Optional[str]) -> Optional[str]:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def require_screenplay_scope(self) -> "ChatStreamRequest":
+        if self.agentProfile == "screenplay" and not self.screenplayProjectId:
+            raise ValueError(
+                "screenplayProjectId is required for screenplay Agent"
+            )
+        return self
 
 
 class ListModelsRequest(BaseModel):

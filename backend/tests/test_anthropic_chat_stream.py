@@ -86,6 +86,14 @@ async def _collect_chunks(monkeypatch, events, *, signal=None):
 async def test_anthropic_stream_emits_finish_only_after_message_stop(monkeypatch):
     chunks = await _collect_chunks(monkeypatch, (
         SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(
+                input_tokens=100,
+                cache_creation_input_tokens=20,
+                cache_read_input_tokens=30,
+            )),
+        ),
+        SimpleNamespace(
             type="content_block_delta",
             index=0,
             delta=SimpleNamespace(type="text_delta", text="answer"),
@@ -93,12 +101,19 @@ async def test_anthropic_stream_emits_finish_only_after_message_stop(monkeypatch
         SimpleNamespace(
             type="message_delta",
             delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(output_tokens=7),
         ),
         SimpleNamespace(type="message_stop"),
     ))
 
     assert chunks[0]["choices"][0]["delta"]["content"] == "answer"
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"] == {
+        "prompt_tokens": 150,
+        "completion_tokens": 7,
+        "total_tokens": 157,
+        "prompt_tokens_details": {"cached_tokens": 30},
+    }
 
 
 @pytest.mark.asyncio

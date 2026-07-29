@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, protocol } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -9,6 +9,7 @@ const {
 } = require('./backend_process')
 const { createAppProtocolHandler } = require('./app_protocol')
 const { registerDatabaseIpcHandlers } = require('./database_ipc')
+const { configureAppIcon } = require('./app_icon')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -19,6 +20,7 @@ if (!isDev) {
 }
 
 let mainWindow = null
+let appIcon = null
 const backendProcess = createBackendProcessManager({ app })
 
 // ─── Python backend lifecycle ────────────────────────────────────
@@ -29,21 +31,13 @@ const stopPythonBackend = (...args) => backendProcess.stop(...args)
 
 // ─── Window ──────────────────────────────────────────────────────
 
-function getLogoPath() {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'icon.ico')
-  }
-  return path.join(__dirname, '..', 'public', 'PurrTypos.png')
-}
-
 function createWindow() {
-  const iconPath = getLogoPath()
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    icon: iconPath,
+    icon: appIcon || undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload_python.js'),
       contextIsolation: true,
@@ -73,6 +67,13 @@ function createWindow() {
 // ─── App lifecycle ───────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  appIcon = configureAppIcon({
+    app,
+    nativeImage,
+    resourcesPath: process.resourcesPath,
+    moduleDir: __dirname,
+  }).image
+
   startPythonBackend()
   try {
     await waitForBackend()
@@ -250,6 +251,62 @@ ipcMain.handle('write-single-text-file', async (_, { defaultName, content }) => 
     })
     if (result.canceled || !result.filePath) return { success: false, error: 'canceled' }
     fs.writeFileSync(result.filePath, content || '', 'utf8')
+    return { success: true, data: { path: result.filePath } }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('write-screenplay-file', async (_, { defaultName, content, format }) => {
+  try {
+    const formats = {
+      fountain: { extension: 'fountain', name: 'Fountain 剧本' },
+      markdown: { extension: 'md', name: 'Markdown 文档' },
+      txt: { extension: 'txt', name: '纯文本' },
+      json: { extension: 'json', name: 'JSON 交付清单' },
+    }
+    const selected = formats[format] || formats.fountain
+    const baseName = String(defaultName || '剧本').replace(/\.(fountain|md|txt|json)$/i, '')
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出剧本',
+      defaultPath: `${baseName}.${selected.extension}`,
+      filters: [{ name: selected.name, extensions: [selected.extension] }],
+    })
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: 'canceled' }
+    }
+    fs.writeFileSync(result.filePath, content || '', 'utf8')
+    return { success: true, data: { path: result.filePath } }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('export-screenplay-pdf', async (_, { projectId, defaultName }) => {
+  try {
+    const res = await fetch(
+      `${BACKEND_URL}/api/screenplay-projects/${encodeURIComponent(String(projectId))}/export/pdf`,
+      { method: 'POST' },
+    )
+    if (!res.ok) {
+      let error = 'PDF 生成失败'
+      try {
+        const body = await res.json()
+        error = body.error || body.detail || error
+      } catch (_) {}
+      return { success: false, error }
+    }
+    const buffer = Buffer.from(await res.arrayBuffer())
+    const baseName = String(defaultName || '剧本').replace(/\.pdf$/i, '')
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出标准剧本 PDF',
+      defaultPath: `${baseName}.pdf`,
+      filters: [{ name: 'PDF 文档', extensions: ['pdf'] }],
+    })
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: 'canceled' }
+    }
+    fs.writeFileSync(result.filePath, buffer)
     return { success: true, data: { path: result.filePath } }
   } catch (err) {
     return { success: false, error: err.message }

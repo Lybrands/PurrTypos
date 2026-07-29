@@ -9,14 +9,20 @@ import {
   getModelContextWindowOptions,
 } from '../modelCatalog'
 import { useAppFeedback } from '../hooks/useAppFeedback'
+import {
+  getShortcutKeyLabel,
+  isApplePlatform,
+  KEYBOARD_SHORTCUT_GROUPS,
+} from '../keyboardShortcuts'
 import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import './index.scss'
 
-type SettingsTab = 'general' | 'models' | 'data'
+type SettingsTab = 'general' | 'models' | 'shortcuts' | 'data'
 const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
   { key: 'general', label: '通用' },
   { key: 'models', label: '模型配置' },
+  { key: 'shortcuts', label: '快捷键' },
   { key: 'data', label: '数据' },
 ]
 
@@ -44,6 +50,7 @@ export default function SettingsPage({
   const apiProviderWatch = Form.useWatch('apiProvider', form)
   const thinkingEnabledWatch = Form.useWatch('thinkingEnabled', form)
   const customizeTemperatureWatch = Form.useWatch('customizeTemperature', form)
+  const applePlatform = React.useMemo(() => isApplePlatform(), [])
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
@@ -498,6 +505,36 @@ export default function SettingsPage({
                   )}
                 </Form>
               </Modal>
+            </div>
+          )}
+          {activeTab === 'shortcuts' && (
+            <div className="settings-section">
+              <h2 className="settings-section-title">快捷键</h2>
+              <div className="settings-shortcut-groups">
+                {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
+                  <section className="settings-shortcut-group" key={group.title}>
+                    <h3>{group.title}</h3>
+                    <div className="settings-shortcut-list">
+                      {group.shortcuts.map((shortcut) => (
+                        <div className="settings-shortcut-row" key={`${group.title}-${shortcut.label}`}>
+                          <div className="settings-shortcut-copy">
+                            <span>{shortcut.label}</span>
+                            {shortcut.detail ? <small>{shortcut.detail}</small> : null}
+                          </div>
+                          <div className="settings-shortcut-keys" aria-label={shortcut.keys.map((key) => getShortcutKeyLabel(key, applePlatform)).join(' + ')}>
+                            {shortcut.keys.map((key, index) => (
+                              <React.Fragment key={`${shortcut.label}-${key}-${index}`}>
+                                {index > 0 ? <span className="settings-shortcut-plus">+</span> : null}
+                                <kbd>{getShortcutKeyLabel(key, applePlatform)}</kbd>
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
             </div>
           )}
           {activeTab === 'data' && (

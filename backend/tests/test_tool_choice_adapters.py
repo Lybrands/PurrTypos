@@ -48,6 +48,44 @@ async def test_openai_stream_forwards_required_tool_choice(monkeypatch: pytest.M
     )
 
     assert captured["tool_choice"] == "required"
+    assert captured["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_retries_without_unsupported_usage_option(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import openai_chat
+
+    calls: list[dict] = []
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if "stream_options" in kwargs:
+                raise ValueError("stream_options include_usage is unsupported")
+            return _empty_stream()
+
+    class _Client:
+        class _Chat:
+            completions = _Completions()
+
+        chat = _Chat()
+
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
+    await openai_chat.chat_stream(
+        "k",
+        [{"role": "user", "content": "read"}],
+        {"model": "mock", "baseURL": "http://example.invalid"},
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in calls[1]
 
 
 @pytest.mark.asyncio
@@ -186,19 +224,17 @@ async def test_openai_stream_propagates_consumer_close_to_raw_stream(
 
 
 @pytest.mark.asyncio
-async def test_openai_terminal_chunk_closes_raw_stream_before_consumer_break(
+async def test_openai_terminal_chunk_collects_usage_tail_before_consumer_break(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from infrastructure.models import openai_chat
 
     class _Chunk:
+        def __init__(self, value):
+            self.value = value
+
         def model_dump(self):
-            return {
-                "choices": [{
-                    "delta": {"content": "done"},
-                    "finish_reason": "stop",
-                }],
-            }
+            return self.value
 
     class _TrackedRawStream:
         def __init__(self):
@@ -211,8 +247,22 @@ async def test_openai_terminal_chunk_closes_raw_stream_before_consumer_break(
         async def __anext__(self):
             self.next_calls += 1
             if self.next_calls == 1:
-                return _Chunk()
-            raise AssertionError("consumer must stop after the terminal chunk")
+                return _Chunk({
+                    "choices": [{
+                        "delta": {"content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                })
+            if self.next_calls == 2:
+                return _Chunk({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "completion_tokens": 8,
+                        "total_tokens": 128,
+                    },
+                })
+            raise AssertionError("consumer must stop after the usage chunk")
 
         async def close(self):
             self.close_calls += 1
@@ -245,8 +295,13 @@ async def test_openai_terminal_chunk_closes_raw_stream_before_consumer_break(
             "delta": {"content": "done"},
             "finish_reason": "stop",
         }],
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "total_tokens": 128,
+        },
     }]
-    assert raw_stream.next_calls == 1
+    assert raw_stream.next_calls == 2
     assert raw_stream.close_calls == 1
 
 

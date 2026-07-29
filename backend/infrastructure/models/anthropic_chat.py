@@ -166,11 +166,58 @@ def openai_messages_to_anthropic(
 def _openai_chunk(
     delta: dict[str, Any] | None = None,
     finish_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     choice: dict[str, Any] = {"index": 0, "delta": delta or {}}
     if finish_reason is not None:
         choice["finish_reason"] = finish_reason
-    return {"choices": [choice]}
+    chunk: dict[str, Any] = {"choices": [choice]}
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
+
+
+def _merge_anthropic_usage(target: dict[str, int], usage: Any) -> None:
+    if usage is None:
+        return
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        raw = (
+            usage.get(name)
+            if isinstance(usage, dict)
+            else getattr(usage, name, None)
+        )
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            target[name] = value
+
+
+def _anthropic_usage_as_openai(
+    usage: dict[str, int],
+) -> dict[str, Any] | None:
+    if "input_tokens" not in usage:
+        return None
+    cache_creation = usage.get("cache_creation_input_tokens", 0)
+    cache_read = usage.get("cache_read_input_tokens", 0)
+    prompt_tokens = usage["input_tokens"] + cache_creation + cache_read
+    completion_tokens = usage.get("output_tokens", 0)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": cache_read,
+        },
+    }
 
 
 # ── Thinking parameter helpers ──────────────────────────────────
@@ -249,6 +296,7 @@ async def chat_stream_as_openai_format(
 
     async def _convert() -> AsyncIterator[dict]:
         tool_accum: dict[int, dict] = {}
+        native_usage: dict[str, int] = {}
         last_stop_reason: str | None = None
         message_stop_seen = False
 
@@ -259,7 +307,13 @@ async def chat_stream_as_openai_format(
 
                 ev_type = getattr(ev, "type", None)
 
-                if ev_type == "content_block_delta":
+                if ev_type == "message_start":
+                    _merge_anthropic_usage(
+                        native_usage,
+                        getattr(getattr(ev, "message", None), "usage", None),
+                    )
+
+                elif ev_type == "content_block_delta":
                     d = ev.delta
                     d_type = getattr(d, "type", None)
                     if d_type == "text_delta" and getattr(d, "text", None):
@@ -302,6 +356,10 @@ async def chat_stream_as_openai_format(
                     sr = getattr(getattr(ev, "delta", None), "stop_reason", None)
                     if sr:
                         last_stop_reason = sr
+                    _merge_anthropic_usage(
+                        native_usage,
+                        getattr(ev, "usage", None),
+                    )
 
                 elif ev_type == "message_stop":
                     message_stop_seen = True
@@ -317,12 +375,13 @@ async def chat_stream_as_openai_format(
         # as if Anthropic had sent ``message_stop``.
         if not message_stop_seen:
             return
+        usage = _anthropic_usage_as_openai(native_usage)
         if last_stop_reason == "tool_use":
-            yield _openai_chunk({}, "tool_calls")
+            yield _openai_chunk({}, "tool_calls", usage)
         elif last_stop_reason == "max_tokens":
-            yield _openai_chunk({}, "length")
+            yield _openai_chunk({}, "length", usage)
         else:
-            yield _openai_chunk({}, "stop")
+            yield _openai_chunk({}, "stop", usage)
 
     return {
         "stream": OwnedAsyncIterator(
@@ -437,7 +496,13 @@ async def chat_no_stream_as_openai_format(
     if tool_calls_openai:
         message["tool_calls"] = tool_calls_openai
 
-    return {"message": message, "model": getattr(msg, "model", None) or model}
+    native_usage: dict[str, int] = {}
+    _merge_anthropic_usage(native_usage, getattr(msg, "usage", None))
+    return {
+        "message": message,
+        "model": getattr(msg, "model", None) or model,
+        "usage": _anthropic_usage_as_openai(native_usage),
+    }
 
 
 # ── Title extraction helper ─────────────────────────────────────

@@ -59,6 +59,7 @@ def test_kimi_k3_profile_forces_currently_supported_max_reasoning():
 
     assert profile.build_openai_extra_body(True) == {"reasoning_effort": "max"}
     assert profile.build_openai_extra_body(False) == {"reasoning_effort": "max"}
+    assert profile.internal_output_token_floor() == 8_192
 
 
 def test_generic_profile_preserves_advanced_custom_thinking_contract():

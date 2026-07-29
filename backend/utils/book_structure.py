@@ -66,6 +66,7 @@ async def get_ordered_leaf_chapters(
                     "id": str(child["id"]),
                     "title": str(child.get("title") or ""),
                     "index": index,
+                    "volume_id": tid,
                     "volume_title": str(top.get("title") or "") or None,
                 })
         else:
@@ -74,6 +75,7 @@ async def get_ordered_leaf_chapters(
                 "id": str(top["id"]),
                 "title": str(top.get("title") or ""),
                 "index": index,
+                "volume_id": None,
                 "volume_title": None,
             })
     return leaves

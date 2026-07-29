@@ -13,6 +13,7 @@ from agent_core.contracts import (
     DomainContext,
     ModelInvocation,
     ModelRequest,
+    ModelTokenUsage,
     ReasoningMode,
     RuntimeOutcome,
     ToolCall,
@@ -43,6 +44,23 @@ def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
 
     assert options["temperature"] == 0
     assert options["thinking"] == {"type": "disabled"}
+
+
+def test_kimi_k3_internal_json_calls_receive_reasoning_headroom():
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="kimi-k3",
+            profile_id="moonshot:kimi-k3",
+            options={"baseURL": "https://api.moonshot.cn/v1"},
+        ),
+        max_output_tokens=1_200,
+        reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+    options = provider_model_gateway._provider_options(invocation)
+
+    assert options["max_tokens"] == 8_192
 
 
 def test_provider_message_downgrades_developer_role_to_system():
@@ -95,7 +113,14 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
                     }],
                 },
                 "finish_reason": "tool_calls",
-            }]
+            }],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "total_tokens": 128,
+                "prompt_tokens_details": {"cached_tokens": 20},
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            },
         }
 
     async def _stream(key, messages, options, provider, signal):
@@ -165,6 +190,13 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert chunks[0].tool_call_deltas[0].id == "call-1"
     assert chunks[0].tool_call_deltas[0].name == "readThing"
     assert chunks[0].tool_call_deltas[0].arguments_fragment == "{}"
+    assert chunks[0].usage == ModelTokenUsage(
+        input_tokens=120,
+        output_tokens=8,
+        total_tokens=128,
+        cached_input_tokens=20,
+        reasoning_output_tokens=3,
+    )
     assert captured["key"] == "secret"
     assert captured["provider"] == "anthropic"
     assert captured["messages"] == [{
@@ -197,6 +229,11 @@ async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypat
         return {
             "message": {"role": "assistant", "content": "planned", "reasoning_content": "brief"},
             "model": "resolved-model",
+            "usage": {
+                "input_tokens": 90,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 5,
+            },
         }
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", _complete)
@@ -215,6 +252,11 @@ async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypat
     assert completion.model == "resolved-model"
     assert completion.message.content == "planned"
     assert completion.message.thinking == "brief"
+    assert completion.usage == ModelTokenUsage(
+        input_tokens=95,
+        output_tokens=10,
+        cached_input_tokens=5,
+    )
 
 
 @pytest.mark.asyncio

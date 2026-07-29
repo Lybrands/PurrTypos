@@ -1,10 +1,13 @@
 import React from "react";
 import { Popover } from "../../../../ui";
+import Markdown from "../Markdown";
 
 export interface ConversationTurnIndexItem {
   dataIndex: number;
   userText: string;
+  userMarkdown: string;
   assistantText: string;
+  assistantMarkdown: string;
 }
 
 interface ConversationTurnIndexProps {
@@ -44,19 +47,6 @@ const TURN_INDEX_PREVIEW_STYLE: React.CSSProperties = {
   overflow: "hidden",
 };
 
-function getPreviewTextStyle(lineClamp: number): React.CSSProperties {
-  return {
-    display: "-webkit-box",
-    width: "100%",
-    maxWidth: "100%",
-    overflow: "hidden",
-    overflowWrap: "anywhere",
-    wordBreak: "break-all",
-    WebkitBoxOrient: "vertical",
-    WebkitLineClamp: lineClamp,
-  };
-}
-
 function ConversationTurnPreview({
   item,
   turnNumber,
@@ -67,17 +57,11 @@ function ConversationTurnPreview({
   return (
     <div className="chat-turn-index-preview" style={TURN_INDEX_PREVIEW_STYLE}>
       <div className="chat-turn-index-preview-meta">第 {turnNumber} 轮对话</div>
-      <div
-        className="chat-turn-index-preview-question"
-        style={getPreviewTextStyle(2)}
-      >
-        {item.userText}
+      <div className="chat-turn-index-preview-question">
+        <Markdown>{item.userMarkdown}</Markdown>
       </div>
-      <div
-        className="chat-turn-index-preview-answer"
-        style={getPreviewTextStyle(3)}
-      >
-        {item.assistantText}
+      <div className="chat-turn-index-preview-answer">
+        <Markdown>{item.assistantMarkdown}</Markdown>
       </div>
     </div>
   );
@@ -120,7 +104,7 @@ export default function ConversationTurnIndex({
             <Popover
               key={`${item.dataIndex}-${index}`}
               placement="right"
-              trigger={["hover", "focus"]}
+              trigger="hover"
               mouseEnterDelay={0.08}
               mouseLeaveDelay={0.06}
               arrow={{ pointAtCenter: true }}

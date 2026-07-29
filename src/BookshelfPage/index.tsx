@@ -187,9 +187,6 @@ export default function BookshelfPage({
             <h1>作品书架</h1>
             <p>{books.length > 0 ? `共 ${books.length} 部作品，挑一本继续创作吧。` : '从一个书名开始，写下你的第一部作品。'}</p>
           </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
-            新建书籍
-          </Button>
         </div>
 
         <div className="bookshelf-list">
@@ -213,7 +210,6 @@ export default function BookshelfPage({
                     {isLastOpened && <span className="book-last-opened-badge">上次打开</span>}
                     <span className="book-cover-mark">✦</span>
                   </span>
-                  <span className="book-title">{book.title}</span>
                 </button>
                 <div className="book-actions">
                   <Tooltip title="重命名">

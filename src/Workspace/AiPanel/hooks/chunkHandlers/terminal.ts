@@ -1,8 +1,14 @@
 import { mergeAssistantErrorNotice } from "../../rendering";
 import { type AiTaskPlan, type ChatMessage } from "../chat.types";
-import { synthesizeAssistantTextFromToolSegments } from "../chatHistory";
+import {
+  EMPTY_RESPONSE_MESSAGE,
+  synthesizeAssistantTextFromToolSegments,
+} from "../chatHistory";
 import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
+
+export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
+export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
 
 /**
  * 错误终态：把错误注释合并到当前助手轮，关 loading，cleanup 订阅与 refs。
@@ -46,7 +52,7 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
     });
     ctx.setLoading(false);
   }
-  ctx.cleanup();
+  ctx.cleanup("failed");
   return true;
 };
 
@@ -63,6 +69,11 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (chunk.aborted) {
     acc.taskPlan = markTaskPlanAborted(acc.taskPlan);
   }
+  const hasVisibleModelResponse = Boolean(
+    (acc.response || "").trim() ||
+      (acc.contentAfterToolCalls || "").trim(),
+  );
+  const emptyResponse = !chunk.aborted && !hasVisibleModelResponse;
 
   const finalThinking = (acc.thinking || "").trim();
   let savedThinkingBlocks = acc.thinkingBlocks ?? [];
@@ -73,13 +84,15 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
     savedThinkingDurations = finalized.durations;
   }
 
-  let resolvedAssistantContent =
-    acc.response ||
-    synthesizeAssistantTextFromToolSegments({
-      role: "assistant",
-      content: "",
-      toolCallSegments: acc.toolCallSegments,
-    } as ChatMessage).trim();
+  let resolvedAssistantContent = emptyResponse
+    ? EMPTY_RESPONSE_MESSAGE
+    : acc.response ||
+      synthesizeAssistantTextFromToolSegments({
+          role: "assistant",
+          content: "",
+          toolCallSegments: acc.toolCallSegments,
+        } as ChatMessage).trim() ||
+      (chunk.aborted ? MANUAL_ABORT_MESSAGE : "");
 
   if (ctx.isVisibleSession()) {
     ctx.setConversations((prev) => {
@@ -97,7 +110,9 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
         const accContent = (acc.response || "").trim();
         let finalContent = currentContent;
         if (!currentContent.trim()) {
-          if (accContent) {
+          if (emptyResponse) {
+            finalContent = EMPTY_RESPONSE_MESSAGE;
+          } else if (accContent) {
             finalContent = acc.response!;
           } else {
             const synthesized =
@@ -105,7 +120,9 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
             if (synthesized) {
               finalContent = synthesized;
             } else {
-              finalContent = "内容同步中。";
+              finalContent = chunk.aborted
+                ? MANUAL_ABORT_MESSAGE
+                : "内容同步中。";
             }
           }
         }
@@ -126,6 +143,7 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
             acc.taskPlan ??
             (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
           toolCalling: false,
+          ...(emptyResponse ? { isError: true } : {}),
         };
       }
       return next;
@@ -133,11 +151,13 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
     ctx.setLoading(false);
   }
 
-  ctx.cleanup();
+  ctx.cleanup(
+    chunk.aborted ? "canceled" : emptyResponse ? "failed" : "completed",
+  );
   acc.response = resolvedAssistantContent;
 
   saveConversationIfNeeded(ctx, savedThinkingBlocks, savedThinkingDurations);
-  maybeGenerateSessionTitle(ctx);
+  if (!emptyResponse) maybeGenerateSessionTitle(ctx);
 
   return true;
 };
@@ -152,7 +172,7 @@ function markTaskPlanAborted(plan: AiTaskPlan | undefined): AiTaskPlan | undefin
       return {
         ...step,
         status: "blocked" as const,
-        resultSummary: step.resultSummary || "本轮已由你手动停止。",
+        resultSummary: step.resultSummary || MANUAL_ABORT_MESSAGE,
       };
     }),
   };

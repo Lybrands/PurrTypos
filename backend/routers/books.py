@@ -98,7 +98,9 @@ async def delete_book(bookId: str):
         chapter_ids = [str(ch["id"]) for ch in chapters if ch.get("id") is not None]
 
         session_rows = await db.fetch_all(
-            "SELECT id FROM ai_sessions WHERE book_id = ?", [bookId]
+            "SELECT id FROM ai_sessions WHERE book_id = ? "
+            "AND (scope IS NULL OR scope != 'screenplay')",
+            [bookId],
         )
         if chapter_ids:
             session_rows.extend(await db.fetch_all(
@@ -131,6 +133,11 @@ async def delete_book(bookId: str):
         await _delete_where_in(db, "ai_conversations", "session_id", session_ids)
         await _delete_where_in(db, "ai_conversations", "chapter_id", chapter_ids)
         await _delete_where_in(db, "ai_sessions", "id", session_ids)
+        await db.execute(
+            "UPDATE ai_sessions SET book_id = NULL "
+            "WHERE book_id = ? AND scope = 'screenplay'",
+            [bookId],
+        )
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
@@ -184,6 +191,13 @@ async def delete_book(bookId: str):
         )
         await db.execute("DELETE FROM setting_entities WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM book_word_stats WHERE book_id = ?", [bookId])
+        # 剧本项目拥有独立生命周期。删除来源书籍时仅解除引用，
+        # 保留已产生的剧本文档与项目历史。
+        await db.execute(
+            "UPDATE screenplay_projects SET source_book_id = NULL, "
+            "update_time = CURRENT_TIMESTAMP WHERE source_book_id = ?",
+            [bookId],
+        )
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
     for stored_path in attachment_paths:

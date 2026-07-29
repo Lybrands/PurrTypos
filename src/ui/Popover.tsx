@@ -62,7 +62,21 @@ export function Popover({
   const triggers = Array.isArray(trigger) ? trigger : [trigger]
   const openOnHover = triggers.includes('hover') || triggers.includes('focus')
   return (
-    <BasePopover.Root open={open} onOpenChange={(nextOpen) => onOpenChange?.(nextOpen)}>
+    <BasePopover.Root
+      open={open}
+      onOpenChange={(nextOpen, eventDetails) => {
+        /*
+         * Base UI 的 Popover.Trigger 即使启用 openOnHover，也会默认响应点击。
+         * 对纯 hover / focus 浮层取消 trigger-press，避免点击触发器后把预览
+         * 固定在打开状态；只有显式声明 click 的 Popover 才允许点击切换。
+         */
+        if (!triggers.includes('click') && eventDetails.reason === 'trigger-press') {
+          eventDetails.cancel()
+          return
+        }
+        onOpenChange?.(nextOpen)
+      }}
+    >
       <BasePopover.Trigger
         render={children}
         nativeButton={nativeButton}

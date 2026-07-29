@@ -8,6 +8,7 @@ import {
 } from "../../../../ui";
 import React from "react";
 import type { AiTaskPlan, AiTaskStep } from "../../hooks/chat.types";
+import { getVisibleTaskPlanSteps } from "../../taskPlanSelection";
 import "./index.scss";
 
 export interface TaskPlanCardProps {
@@ -32,14 +33,15 @@ export function isTaskPlanTerminal(plan: AiTaskPlan): boolean {
 }
 
 export function getTaskPlanProgress(plan: AiTaskPlan) {
-  const total = plan.steps.length;
-  const completed = plan.steps.filter((step) => step.status === "done").length;
+  const steps = getVisibleTaskPlanSteps(plan);
+  const total = steps.length;
+  const completed = steps.filter((step) => step.status === "done").length;
   const currentStep =
-    plan.steps.find((step) => step.status === "running") ||
-    plan.steps.find(
+    steps.find((step) => step.status === "running") ||
+    steps.find(
       (step) => step.status === "blocked" || step.status === "failed",
     ) ||
-    plan.steps.find((step) => step.status === "pending");
+    steps.find((step) => step.status === "pending");
   return {
     total,
     completed,
@@ -83,9 +85,10 @@ function TaskStepItem({ step }: { step: AiTaskStep }) {
 }
 
 export function TaskPlanSteps({ plan }: { plan: AiTaskPlan }) {
+  const steps = getVisibleTaskPlanSteps(plan);
   return (
     <div className="task-plan-card__steps">
-      {plan.steps.map((step, idx) => (
+      {steps.map((step, idx) => (
         <TaskStepItem key={step.id || idx} step={step} />
       ))}
     </div>

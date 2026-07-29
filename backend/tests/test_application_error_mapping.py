@@ -43,3 +43,16 @@ def test_semantic_judge_failures_never_fall_back_to_a_generic_error():
     ) == {
         "error": "语义校验返回了无效结果，候选回答未展示；请稍后重试。",
     }
+
+
+def test_reasoning_only_failure_explains_that_no_visible_answer_was_returned():
+    assert core_update_to_sse_chunk(
+        AgentRunResult(
+            run_id="run-empty-response",
+            status=RunStatus.FAILED,
+            error="empty_model_response",
+        ),
+        model="model",
+    ) == {
+        "error": "模型多次只返回内部推理，没有生成可展示的答复。请重试或更换模型。",
+    }

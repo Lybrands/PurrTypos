@@ -29,6 +29,8 @@ import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
 import ContextUsageIndicator from "./components/ContextUsageIndicator";
+import { getActiveTaskPlan } from "./taskPlanSelection";
+import { getChatSessionRuntime } from "./hooks/chatRuntimeStore";
 import "./index.scss";
 
 interface AiPanelProps {
@@ -139,7 +141,6 @@ export default function AiPanel({
     scope: chatScope,
     conversations,
     setConversations,
-    loading,
     setLoading,
   });
 
@@ -171,16 +172,10 @@ export default function AiPanel({
     () => [...prependedHistory, ...conversations],
     [prependedHistory, conversations],
   );
-  const activeTaskPlan = React.useMemo(() => {
-    if (!loading) return undefined;
-    for (let index = conversations.length - 1; index >= 0; index -= 1) {
-      const message = conversations[index];
-      if (message.role === "assistant" && message.taskPlan) {
-        return message.taskPlan;
-      }
-    }
-    return undefined;
-  }, [conversations, loading]);
+  const activeTaskPlan = React.useMemo(
+    () => getActiveTaskPlan(conversations, loading),
+    [conversations, loading],
+  );
   const firstItemIndex = INITIAL_FIRST_ITEM_INDEX - prependedHistory.length;
 
   const {
@@ -266,7 +261,13 @@ export default function AiPanel({
     outlineSelectOptions,
   });
 
-  const { handleSubmit: doSubmit, handleAbort, runningSessionIdRef, runningAccRef } = useChatSubmit({
+  const {
+    handleSubmit: doSubmit,
+    handleAbort,
+    queuedCount,
+    queuedMessages,
+    sessionActivities,
+  } = useChatSubmit({
     selectedModelConfig,
     prompt,
     setPrompt,
@@ -293,7 +294,6 @@ export default function AiPanel({
     selectedForeshadowingIds,
     sessionScope: chatScope,
   });
-
   const {
     editingMessageIndex,
     setEditingMessageIndex,
@@ -330,40 +330,17 @@ export default function AiPanel({
       setConversations([]);
       return;
     }
+    const currentRuntime = getChatSessionRuntime(activeSessionId);
+    setConversations(currentRuntime?.messages ?? []);
+    setLoading(currentRuntime?.loading ?? false);
     window.electronAPI
       .getConversations({ sessionId: activeSessionId })
       .then((res) => {
         if (!res.success) return;
         const loaded = parseConversationsFromApi(res.data as Conversation[]);
-        const acc = runningAccRef.current;
-        if (
-          runningSessionIdRef.current === activeSessionId &&
-          acc != null
-        ) {
-          setConversations([
-            ...loaded,
-            { role: "user" as const, content: acc.userText },
-            {
-              role: "assistant" as const,
-              content: acc.response || "",
-              thinking: acc.thinking || undefined,
-              thinkingStartedAt: acc.thinkingBlockStartedAt,
-              turnStartedAt: acc.turnStartedAt,
-              toolCallSegments: acc.toolCallSegments,
-              contentAfterToolCalls: acc.toolCallSegments?.length
-                ? (acc.contentAfterToolCalls ?? "")
-                : undefined,
-              thinkingBlocks: acc.thinkingBlocks?.length
-                ? acc.thinkingBlocks
-                : undefined,
-              contextCompaction: acc.contextCompaction,
-              contextBudget: acc.contextBudget,
-            },
-          ]);
-          setLoading(true);
-        } else {
-          setConversations(loaded);
-        }
+        const runtime = getChatSessionRuntime(activeSessionId);
+        setConversations(runtime?.messages ?? loaded);
+        setLoading(runtime?.loading ?? false);
       });
   }, [activeSessionId]);
 
@@ -416,7 +393,7 @@ export default function AiPanel({
           chapterTitle={chatScope === "chapter" ? activeChapterTitle || undefined : undefined}
           sessions={sessions}
           activeSessionId={activeSessionId}
-          loading={loading}
+          sessionActivities={sessionActivities}
           isCurrentSessionEmpty={conversations.length === 0}
           editingSessionId={editingTabId}
           editingTitle={editingTitle}
@@ -429,9 +406,6 @@ export default function AiPanel({
           onCloseSession={handleCloseTab}
           onOpenFromHistory={handleOpenFromHistory}
           onDeleteFromHistory={handleDeleteFromHistory}
-          onBlockedByLoading={() => {
-            appMessage.warning("当前对话进行中，请先等待完成或停止");
-          }}
           onCollapse={() => onConversationSidebarOpenChange?.(false)}
         />
         )}
@@ -490,8 +464,7 @@ export default function AiPanel({
             className="chat-input"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="告诉我你要创作的内容，或者和我一起讨论你的想法吧"
-            disabled={loading}
+            placeholder="想写点什么"
             autoSize={{ minRows: 1, maxRows: 5 }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -499,7 +472,6 @@ export default function AiPanel({
                   !prompt.trim() ||
                   bookId == null ||
                   (chatScope === "chapter" && chapterId == null) ||
-                  loading ||
                   activeSessionId == null
                 ) {
                   return;
@@ -510,6 +482,21 @@ export default function AiPanel({
             }}
           />
         </div>
+        {queuedMessages.length > 0 ? (
+          <div className="chat-queued-messages" aria-label="待发送消息">
+            {queuedMessages.slice(0, 3).map((message, index) => (
+              <div className="chat-queued-message" key={`${index}-${message}`}>
+                <span>待发送 {index + 1}</span>
+                <span title={message}>{message}</span>
+              </div>
+            ))}
+            {queuedMessages.length > 3 ? (
+              <div className="chat-queued-more">
+                另有 {queuedMessages.length - 3} 条消息排队
+              </div>
+            ) : null}
+          </div>
+        ) : null}
             <AiComposeBottom
           modelConfigs={modelConfigs}
           {...modelSelection}
@@ -524,17 +511,20 @@ export default function AiPanel({
                 currentPrompt={prompt}
                 onInsertPrompt={handleInsertPrompt}
                 promptTemplateContext={promptTemplateContext}
-                promptTemplateDisabled={loading}
+                promptTemplateDisabled={false}
               />
             ) : null
           }
           rightContent={
             <div className="chat-compose-right">
+              {queuedCount > 0 ? (
+                <span className="chat-queue-count" role="status">
+                  排队 {queuedCount}
+                </span>
+              ) : null}
               <ContextUsageIndicator
                 conversations={conversations}
-                prompt={prompt}
                 selectedModelConfig={selectedModelConfig}
-                loading={loading}
               />
               {loading ? (
                 <Button
@@ -543,24 +533,22 @@ export default function AiPanel({
                   type="text"
                   onClick={handleAbort}
                 />
-              ) : (
-                <Tooltip title="发送 (Enter)">
-                  <Button
-                    type="primary"
-                    shape="circle"
-                    className="btn-submit btn-submit--icon"
-                    icon={<ArrowUpOutlined style={{ fontSize: 16 }} />}
-                    onClick={handleSubmit}
-                    disabled={
-                      !prompt.trim() ||
-                      bookId == null ||
-                      (chatScope === "chapter" && chapterId == null) ||
-                      loading ||
-                      activeSessionId == null
-                    }
-                  />
-                </Tooltip>
-              )}
+              ) : null}
+              <Tooltip title={loading ? "加入发送队列 (Enter)" : "发送 (Enter)"}>
+                <Button
+                  type="primary"
+                  shape="circle"
+                  className="btn-submit btn-submit--icon"
+                  icon={<ArrowUpOutlined style={{ fontSize: 16 }} />}
+                  onClick={handleSubmit}
+                  disabled={
+                    !prompt.trim() ||
+                    bookId == null ||
+                    (chatScope === "chapter" && chapterId == null) ||
+                    activeSessionId == null
+                  }
+                />
+              </Tooltip>
             </div>
           }
             />

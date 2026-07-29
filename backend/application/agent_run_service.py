@@ -24,10 +24,14 @@ from application.agent_delegation_service import AgentDelegationService
 from application.agent_delegation_tool import (
     build_delegation_tool_registration,
 )
-from application.conversation_compaction import ConversationCompactionService
+from application.conversation_compaction import (
+    ConversationCompactionService,
+    PostPlanningConversationContextOptimizer,
+)
 from application.request_mapping import (
-    to_writing_agent_request,
-    writing_run_options,
+    agent_context_claims,
+    agent_run_options,
+    to_agent_request,
 )
 from application.run_provenance import build_chat_run_provenance
 from infrastructure.models.capabilities import normalize_thinking_enabled
@@ -65,7 +69,8 @@ class AgentRunService:
     ) -> AsyncIterator[AgentRunUpdate]:
         composition = self._composition
         provider_capabilities = composition.provider_capabilities
-        request = to_writing_agent_request(body, provider_options)
+        request = to_agent_request(body, provider_options)
+        uncompacted_request = request
         if request.session_id is not None:
             # Conversation compaction is an optimization boundary: persistence
             # or summarization failures must never prevent the Agent Run.
@@ -84,6 +89,14 @@ class AgentRunService:
                     request,
                     signal,
                     on_compaction_started=notify_compaction_started,
+                    anticipated_context_tokens=sum(
+                        claim.desired_tokens
+                        for claim in agent_context_claims(request)
+                    ),
+                    output_reserve_tokens=_positive_token_value(
+                        provider_options.get("max_tokens"),
+                        8_192,
+                    ),
                 )
             )
             started_wait = asyncio.create_task(compaction_started.wait())
@@ -92,7 +105,7 @@ class AgentRunService:
                     (compaction_task, started_wait),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if started_wait in done and compaction_started.is_set():
+                if compaction_started.is_set():
                     yield AgentEvent(
                         type="conversation.compaction.started",
                         payload={
@@ -108,6 +121,7 @@ class AgentRunService:
                         "outcome": compaction.outcome,
                         "compactedTurnCount": compaction.compacted_turn_count,
                         "retainedRawTurnCount": compaction.retained_raw_turn_count,
+                        **dict(compaction.diagnostics),
                     }
                     request = replace(request, metadata=metadata)
                 if compaction_started.is_set():
@@ -116,7 +130,7 @@ class AgentRunService:
                         payload={
                             "status": (
                                 "completed"
-                                if compaction.outcome == "compacted"
+                                if compaction.outcome.startswith("compacted")
                                 else "failed"
                             ),
                             "outcome": compaction.outcome,
@@ -158,15 +172,23 @@ class AgentRunService:
                     await compaction_task
         trusted_instruction = str(host_system_instruction or "").strip()
         if trusted_instruction:
+            trusted_message = AgentMessage(
+                role=MessageRole.SYSTEM,
+                content=trusted_instruction,
+                origin=MessageOrigin.HOST_CONTEXT,
+            )
             request = replace(
                 request,
                 messages=(
-                    AgentMessage(
-                        role=MessageRole.SYSTEM,
-                        content=trusted_instruction,
-                        origin=MessageOrigin.HOST_CONTEXT,
-                    ),
+                    trusted_message,
                     *request.messages,
+                ),
+            )
+            uncompacted_request = replace(
+                uncompacted_request,
+                messages=(
+                    trusted_message,
+                    *uncompacted_request.messages,
                 ),
             )
         run_provenance = provenance or build_chat_run_provenance(body)
@@ -177,7 +199,7 @@ class AgentRunService:
             thinking_enabled=normalize_thinking_enabled(provider_options),
         )
         response_judges = composition.create_response_judges(api_key, request)
-        options = writing_run_options(
+        options = agent_run_options(
             request,
             provider_options,
             force_planned_tool_choice=(
@@ -203,7 +225,16 @@ class AgentRunService:
         )
         extra_registrations = ()
         if can_delegate:
-            role_registry = composition.agent_role_registry
+            registry_for_request = getattr(
+                composition,
+                "agent_role_registry_for_request",
+                None,
+            )
+            role_registry = (
+                registry_for_request(request)
+                if callable(registry_for_request)
+                else composition.agent_role_registry
+            )
             delegation_service = AgentDelegationService(
                 composition.delegation_repository,
                 role_registry=role_registry,
@@ -278,12 +309,31 @@ class AgentRunService:
                 )
             ),
         }
+        if request.session_id is not None:
+            create_core_kwargs["post_planning_context_optimizer"] = (
+                PostPlanningConversationContextOptimizer(
+                    ConversationCompactionService(
+                        composition.conversation_compaction_repository,
+                        ProviderModelGateway(api_key),
+                    ),
+                    uncompacted_request,
+                )
+            )
         if can_delegate or allowed_tool_modes is not None:
             create_core_kwargs.update({
                 "extra_tool_registrations": extra_registrations,
                 "allowed_tool_modes": allowed_tool_modes,
             })
-        core = composition.create_core(api_key, **create_core_kwargs)
+        core_for_request = getattr(
+            composition,
+            "create_core_for_request",
+            None,
+        )
+        core = (
+            core_for_request(request, api_key, **create_core_kwargs)
+            if callable(core_for_request)
+            else composition.create_core(api_key, **create_core_kwargs)
+        )
         session_factory = getattr(composition, "create_execution_session", None)
         execution_session = (
             session_factory(signal) if session_factory is not None else None
@@ -335,3 +385,11 @@ class AgentRunService:
                 pump_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pump_task
+
+
+def _positive_token_value(value, default: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return normalized if normalized > 0 else int(default)

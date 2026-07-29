@@ -59,6 +59,88 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE books ADD COLUMN enable_volume INTEGER DEFAULT 0")
 
+    # ── screenplay projects / versioned documents ────────────────
+    # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id
+    # 可以在来源书籍删除后置空，剧本项目及其文档仍然保留。
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_projects (
+        id TEXT PRIMARY KEY NOT NULL,
+        title TEXT NOT NULL,
+        source_kind TEXT NOT NULL DEFAULT 'original',
+        source_book_id TEXT DEFAULT NULL,
+        format TEXT NOT NULL DEFAULT '单集剧',
+        approach TEXT NOT NULL DEFAULT '',
+        premise TEXT NOT NULL DEFAULT '',
+        source_scope_json TEXT NOT NULL DEFAULT '{"schemaVersion":1,"mode":"whole_book"}',
+        delivery_manifest_json TEXT DEFAULT NULL,
+        active_stage TEXT NOT NULL DEFAULT 'orientation',
+        status TEXT NOT NULL DEFAULT 'active',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE screenplay_projects ADD COLUMN source_scope_json TEXT "
+        "NOT NULL DEFAULT '{\"schemaVersion\":1,\"mode\":\"whole_book\"}'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE screenplay_projects ADD COLUMN delivery_manifest_json "
+        "TEXT DEFAULT NULL",
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_projects_source_book "
+        "ON screenplay_projects(source_book_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_projects_updated "
+        "ON screenplay_projects(update_time DESC)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_documents (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content_json TEXT NOT NULL DEFAULT '{}',
+        content_text TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'draft',
+        derived_from_ids TEXT NOT NULL DEFAULT '[]',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(project_id, kind, version)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_documents_project "
+        "ON screenplay_documents(project_id, kind, version DESC)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_source_refs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        document_id TEXT DEFAULT NULL,
+        agent_run_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        excerpt TEXT NOT NULL DEFAULT '',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(agent_run_id, source_type, source_id)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_project "
+        "ON screenplay_source_refs(project_id, create_time DESC)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_document "
+        "ON screenplay_source_refs(document_id, create_time ASC)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_run "
+        "ON screenplay_source_refs(agent_run_id, create_time ASC)"
+    )
+
     # ── outlines ─────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS outlines (
         id TEXT PRIMARY KEY NOT NULL,
@@ -123,6 +205,14 @@ async def init_schema(db: DatabaseConnection) -> None:
     # scope: chapter = 章节会话（默认）；setting = 全局会话（不绑章节，整本书共享；UI 显示为「全局对话」）。
     # 历史遗留的无章节会话保持默认 chapter，不会被误判为全局会话。
     await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN scope TEXT DEFAULT 'chapter'")
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_sessions ADD COLUMN screenplay_project_id TEXT DEFAULT NULL",
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_sessions_screenplay_project "
+        "ON ai_sessions(screenplay_project_id, id DESC)"
+    )
 
     # ── ai_conversations ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_conversations (

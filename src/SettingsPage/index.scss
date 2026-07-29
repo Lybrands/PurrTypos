@@ -333,6 +333,86 @@
   .purr-form-item:last-child { margin-bottom: 0; }
 }
 
+.settings-shortcut-groups {
+  display: grid;
+  max-width: 720px;
+  gap: 26px;
+}
+
+.settings-shortcut-group {
+  h3 {
+    margin: 0 0 9px;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+}
+
+.settings-shortcut-list {
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-xs);
+}
+
+.settings-shortcut-row {
+  display: flex;
+  min-height: 54px;
+  padding: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+
+  & + & {
+    border-top: 1px solid var(--border-light);
+  }
+}
+
+.settings-shortcut-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-primary);
+  font-size: var(--font-size);
+
+  small {
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+}
+
+.settings-shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  flex-shrink: 0;
+
+  kbd {
+    display: inline-flex;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 8px;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--border) 72%, transparent);
+  }
+}
+
+.settings-shortcut-plus {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 @media (max-width: 760px) {
   .settings-nav { width: 150px; padding-inline: 9px; }
   .settings-content { padding-inline: 24px; }
@@ -342,4 +422,16 @@
     flex-direction: column;
   }
   .settings-model-preset-meta { justify-content: flex-start; }
+}
+
+@media (max-width: 520px) {
+  .settings-shortcut-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .settings-shortcut-keys {
+    justify-content: flex-start;
+  }
 }

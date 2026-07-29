@@ -173,8 +173,54 @@
 }
 
 .conversation-session-time {
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 10px;
+}
+
+.conversation-session-subline {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversation-session-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+
+  > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .purr-icon {
+    flex: 0 0 auto;
+    font-size: 10px;
+  }
+}
+
+.conversation-session-status--running {
+  color: var(--accent);
+}
+
+.conversation-session-status--queued {
+  color: var(--warning);
+}
+
+.conversation-session-status--completed {
+  color: var(--success);
+}
+
+.conversation-session-status--failed,
+.conversation-session-status--canceled {
+  color: color-mix(in srgb, var(--warning) 78%, var(--text-secondary));
 }
 
 .conversation-session-close {

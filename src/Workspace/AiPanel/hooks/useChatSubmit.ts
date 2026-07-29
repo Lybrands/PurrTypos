@@ -15,6 +15,25 @@ import {
   type ChunkCtx,
 } from "./chunkHandlers";
 import { createCommitScheduler } from "./chunkHandlers/commitScheduler";
+import {
+  countQueuedForSession,
+  getSettledSessionActivity,
+  type QueuedChatSubmission,
+} from "./chatQueue";
+import {
+  getChatRuntimeVersion,
+  getChatRuntimeQueue,
+  getChatSessionActivities,
+  getChatSessionRuntime,
+  replaceChatRuntimeMessages,
+  replaceChatRuntimeQueue,
+  setChatRuntimeActivity,
+  setChatRuntimeLoading,
+  setChatRuntimeStreamId,
+  subscribeChatRuntime,
+  updateChatRuntimeMessages,
+} from "./chatRuntimeStore";
+import { createAiStreamId } from "../../../utils/aiStream";
 
 export {
   type ChatMessage,
@@ -22,6 +41,15 @@ export {
   type ToolCallSegment,
   type UseChatSubmitParams,
 };
+
+type ChatSubmitOverride = {
+  editIndex?: number;
+  content: string;
+  queuedContext?: QueuedChatSubmission;
+  preservePrompt?: boolean;
+};
+
+type SubmitResult = "started" | "queued" | "rejected";
 
 export function useChatSubmit(params: UseChatSubmitParams) {
   const {
@@ -52,35 +80,77 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   } = params;
 
   const appMessage = useToast();
-  const unsubscribeRef = React.useRef<(() => void) | null>(null);
-  const visibleSessionIdRef = React.useRef<number | null>(activeSessionId);
-  const runningSessionIdRef = React.useRef<number | null>(null);
-  const runningAccRef = React.useRef<AccState | null>(null);
+  const runtimeVersion = React.useSyncExternalStore(
+    subscribeChatRuntime,
+    getChatRuntimeVersion,
+    getChatRuntimeVersion,
+  );
+  const sessionActivities = React.useMemo(
+    () => getChatSessionActivities(),
+    [runtimeVersion],
+  );
+  const queuedSubmissions = getChatRuntimeQueue();
+  const dequeueInProgressRef = React.useRef(false);
+  const handleSubmitRef = React.useRef<
+    ((override: ChatSubmitOverride) => SubmitResult) | null
+  >(null);
+
+  const replaceQueuedSubmissions = React.useCallback(
+    (next: QueuedChatSubmission[]) => {
+      replaceChatRuntimeQueue(next);
+    },
+    [],
+  );
 
   React.useEffect(() => {
-    visibleSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
+    dequeueInProgressRef.current = false;
+  }, [bookId, chapterId, sessionScope]);
+
+  React.useEffect(() => {
+    const runtime = getChatSessionRuntime(activeSessionId);
+    if (!runtime) {
+      setLoading(false);
+      return;
+    }
+    setConversations(runtime.messages);
+    setLoading(runtime.loading);
+  }, [
+    activeSessionId,
+    runtimeVersion,
+    setConversations,
+    setLoading,
+  ]);
 
   const handleAbort = React.useCallback(() => {
-    window.electronAPI.abortAiStream();
+    const runtime = getChatSessionRuntime(activeSessionId);
+    window.electronAPI.abortAiStream(runtime?.streamId);
     // 不在此处 unsubscribe：须等主进程发来 done（含 aborted），才能合并状态并入库
-    setLoading(false);
-  }, [setLoading]);
+  }, [activeSessionId]);
 
   /** 可选：从某条用户消息重新编辑并发送，或直接发送指定内容 */
   const handleSubmit = React.useCallback(
-    async (submitOverride?: { editIndex?: number; content: string }) => {
+    (submitOverride?: ChatSubmitOverride): SubmitResult => {
       const isResend = typeof submitOverride?.editIndex === "number";
       const rawUserText = (submitOverride?.content ?? prompt).trim();
-      if (!rawUserText || loading) return;
+      const queuedContext = submitOverride?.queuedContext;
+      const targetSessionId = queuedContext?.sessionId ?? activeSessionId;
+      const targetRuntime = getChatSessionRuntime(targetSessionId);
+      const sessionLoading =
+        targetRuntime?.loading ??
+        (targetSessionId === activeSessionId ? loading : false);
+      if (!rawUserText || (sessionLoading && isResend)) return "rejected";
 
       const userText = rawUserText;
       if (!userText) {
         appMessage.warning("请输入有效内容");
-        return;
+        return "rejected";
       }
 
-      const cfg = selectedModelConfig;
+      const cfg = queuedContext?.selectedModelConfig ?? selectedModelConfig;
+      const requestSelectedModel =
+        queuedContext?.selectedModel ?? selectedModel;
+      const requestAgentEnabled =
+        queuedContext?.agentEnabled ?? agentEnabled;
       const expectThinking = isModelThinkingEnabled(cfg);
       const turnStartedAt = performance.now();
       const assistantPlaceholder = {
@@ -91,6 +161,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       };
 
       if (!cfg?.apiKey?.trim()) {
+        if (sessionLoading || submitOverride?.queuedContext) {
+          appMessage.warning("请先在设置中添加模型并填写 API Key");
+          return "rejected";
+        }
         if (isResend) {
           setConversations((prev) => [
             ...prev.slice(0, submitOverride.editIndex!),
@@ -112,38 +186,80 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             },
           ]);
         }
-        setPrompt("");
-        return;
+        if (!submitOverride?.preservePrompt) setPrompt("");
+        return "rejected";
       }
       if (bookId == null || (sessionScope !== "setting" && chapterId == null)) {
         appMessage.warning("请先选择一个章节，再开始对话");
-        return;
+        return "rejected";
       }
-      if (activeSessionId == null) {
+      if (targetSessionId == null) {
         appMessage.warning("请先点击上方「+」新建对话，或从历史记录打开会话");
-        return;
+        return "rejected";
       }
-      const sessionId = activeSessionId;
+      const sessionId = targetSessionId;
+      if (sessionLoading) {
+        const queuedItem: QueuedChatSubmission = {
+          content: userText,
+          sessionId,
+          selectedModel,
+          selectedModelConfig: cfg,
+          agentEnabled,
+          associatedChapterIds: [...associatedChapterIds],
+          associatedOutlineIds: [...associatedOutlineIds],
+          selectedMemoryIds: [...(selectedMemoryIds ?? [])],
+          selectedForeshadowingIds: [...(selectedForeshadowingIds ?? [])],
+        };
+        const nextQueue = [...getChatRuntimeQueue(), queuedItem];
+        const queuedCount = countQueuedForSession(nextQueue, sessionId);
+        replaceQueuedSubmissions(nextQueue);
+        setChatRuntimeActivity(sessionId, {
+          state: "running",
+          queuedCount,
+        });
+        if (!submitOverride?.preservePrompt) setPrompt("");
+        appMessage.info(`已加入发送队列 · ${queuedCount} 条等待中`);
+        return "queued";
+      }
 
-    // 立刻把用户消息 + 助手占位推到 UI，并进入 loading
+      const requestAssociatedChapterIds =
+        queuedContext?.associatedChapterIds ?? associatedChapterIds;
+      const requestAssociatedOutlineIds =
+        queuedContext?.associatedOutlineIds ?? associatedOutlineIds;
+      const requestSelectedMemoryIds =
+        queuedContext?.selectedMemoryIds ?? selectedMemoryIds;
+      const requestSelectedForeshadowingIds =
+        queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
+
+    const baseConversations =
+      getChatSessionRuntime(sessionId)?.messages ?? conversations;
+
+    // 立刻把用户消息 + 助手占位推到运行存储，并进入 loading
+    let nextConversations: ChatMessage[];
     if (isResend) {
-      const nextConversations = [
-        ...conversations.slice(0, submitOverride.editIndex!),
+      nextConversations = [
+        ...baseConversations.slice(0, submitOverride.editIndex!),
         { role: "user" as const, content: submitOverride.content.trim() },
         assistantPlaceholder,
       ];
-      setConversations(nextConversations);
-      setPrompt("");
-      setLoading(true);
+      if (!submitOverride?.preservePrompt) setPrompt("");
     } else {
-      setConversations((prev) => [
-        ...prev,
+      nextConversations = [
+        ...baseConversations,
         { role: "user", content: userText },
         assistantPlaceholder,
-      ]);
-      setPrompt("");
-      setLoading(true);
+      ];
+      if (!submitOverride?.preservePrompt) setPrompt("");
     }
+    replaceChatRuntimeMessages(sessionId, nextConversations);
+    setChatRuntimeLoading(sessionId, true);
+    setChatRuntimeActivity(sessionId, {
+      state: "running",
+      queuedCount: countQueuedForSession(
+        getChatRuntimeQueue(),
+        sessionId,
+      ),
+    });
 
     // 系统提示（会话绑定说明、关联章节/大纲内容、勾选记忆）统一由后端组装注入；
     // 前端只传结构化字段（ids / 模式），不再拼接任何 prompt 文案。
@@ -151,11 +267,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
     let historyMessages: { role: string; content: string }[];
     if (isResend) {
-      const nextConversations = [
-        ...conversations.slice(0, submitOverride.editIndex!),
-        { role: "user" as const, content: submitOverride.content.trim() },
-        assistantPlaceholder,
-      ];
       historyMessages = nextConversations
         .slice(0, -1)
         .map(toHistoryApiMessage)
@@ -166,7 +277,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         window.electronAPI.deleteConversationsAfterTurn({ sessionId, keepTurnCount }).catch(() => {});
       }
     } else {
-      historyMessages = conversations
+      historyMessages = baseConversations
         .map(toHistoryApiMessage)
         .filter((row): row is { role: string; content: string } => row != null);
     }
@@ -203,17 +314,27 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       contextCompaction: undefined,
       contextBudget: undefined,
     };
-    runningSessionIdRef.current = sessionId;
-    runningAccRef.current = acc;
-
     const { options: streamOptions, apiModelName } = buildStreamOptions({
       cfg,
       modelConfigs,
-      selectedModel,
+      selectedModel: requestSelectedModel,
     });
 
+    const streamId = createAiStreamId(`chat-${sessionId}`);
+    setChatRuntimeStreamId(sessionId, streamId);
+    const runtimeSetConversations: React.Dispatch<
+      React.SetStateAction<ChatMessage[]>
+    > = (next) => {
+      if (typeof next === "function") {
+        updateChatRuntimeMessages(sessionId, next);
+      } else {
+        replaceChatRuntimeMessages(sessionId, next);
+      }
+    };
     let unsubscribe = (): void => {};
-    const { scheduleCommit, flushCommits } = createCommitScheduler(setConversations);
+    const { scheduleCommit, flushCommits } = createCommitScheduler(
+      runtimeSetConversations,
+    );
     const ctx: ChunkCtx = {
       acc,
       sessionId,
@@ -221,35 +342,71 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       apiModelName,
       writingChapters,
       availableOutlines,
-      setConversations,
+      setConversations: runtimeSetConversations,
       scheduleCommit,
       flushCommits,
-      setLoading,
+      setLoading: (next) => setChatRuntimeLoading(sessionId, next),
       setSessions,
       appMessage,
-      isVisibleSession: () => visibleSessionIdRef.current === sessionId,
-      cleanup: () => {
+      isVisibleSession: () => true,
+      cleanup: (outcome) => {
         flushCommits();
         unsubscribe();
-        unsubscribeRef.current = null;
-        runningSessionIdRef.current = null;
-        runningAccRef.current = null;
+        setChatRuntimeStreamId(sessionId, undefined);
+        const queuedCount = countQueuedForSession(
+          getChatRuntimeQueue(),
+          sessionId,
+        );
+        setChatRuntimeActivity(
+          sessionId,
+          getSettledSessionActivity(outcome, queuedCount),
+        );
+        if (outcome === "completed" && queuedCount === 0) {
+          appMessage.success("对话已完成");
+        }
+        if (queuedCount > 0) {
+          queueMicrotask(() => {
+            const queue = getChatRuntimeQueue();
+            const nextIndex = queue.findIndex(
+              (submission) => submission.sessionId === sessionId,
+            );
+            const submitQueued = handleSubmitRef.current;
+            if (
+              nextIndex < 0 ||
+              !submitQueued ||
+              getChatSessionRuntime(sessionId)?.loading
+            ) {
+              return;
+            }
+            const nextSubmission = queue[nextIndex];
+            replaceChatRuntimeQueue(
+              queue.filter((_submission, index) => index !== nextIndex),
+            );
+            submitQueued({
+              content: nextSubmission.content,
+              queuedContext: nextSubmission,
+              preservePrompt: true,
+            });
+          });
+        }
       },
     };
-    unsubscribe = window.electronAPI.onAiChunk((chunk) => {
-      dispatchChunk(chunk, ctx);
-    });
-
-    unsubscribeRef.current = unsubscribe;
+    unsubscribe = window.electronAPI.onAiChunk(
+      (chunk) => {
+        dispatchChunk(chunk, ctx);
+      },
+      streamId,
+    );
 
     const hasBookContext = bookId != null;
-    const enableAgentTools = Boolean(hasBookContext && agentEnabled);
+    const enableAgentTools = Boolean(hasBookContext && requestAgentEnabled);
 
     if (import.meta.env.DEV) {
       console.log('[AI 对话] 传入内容:', { messages: newMessages, options: streamOptions, enableAgentTools });
     }
 
     window.electronAPI.aiChatStream({
+      streamId,
       apiKey: cfg.apiKey,
       baseURL: cfg.baseUrl || undefined,
       apiProvider:
@@ -264,20 +421,26 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       writingChapters,
       availableOutlines,
       associatedChapterIds:
-        associatedChapterIds.length > 0 ? associatedChapterIds : undefined,
+        requestAssociatedChapterIds.length > 0
+          ? requestAssociatedChapterIds
+          : undefined,
       associatedOutlineIds:
-        associatedOutlineIds.length > 0 ? associatedOutlineIds : undefined,
+        requestAssociatedOutlineIds.length > 0
+          ? requestAssociatedOutlineIds
+          : undefined,
       selectedMemoryIds:
-        selectedMemoryIds && selectedMemoryIds.length > 0
-          ? selectedMemoryIds
+        requestSelectedMemoryIds && requestSelectedMemoryIds.length > 0
+          ? requestSelectedMemoryIds
           : undefined,
       selectedForeshadowingIds:
-        selectedForeshadowingIds && selectedForeshadowingIds.length > 0
-          ? selectedForeshadowingIds
+        requestSelectedForeshadowingIds &&
+        requestSelectedForeshadowingIds.length > 0
+          ? requestSelectedForeshadowingIds
           : undefined,
-      chatAgentMode: agentEnabled ? "agent" : "ask",
+      chatAgentMode: requestAgentEnabled ? "agent" : "ask",
       contextWindow: streamOptions.context_window,
     });
+    return "started";
   }, [
     prompt,
     loading,
@@ -304,7 +467,61 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedForeshadowingIds,
     sessionScope,
     appMessage,
+    replaceQueuedSubmissions,
+  ]);
+  handleSubmitRef.current = handleSubmit;
+
+  React.useEffect(() => {
+    if (dequeueInProgressRef.current || queuedSubmissions.length === 0) return;
+
+    const readyIndex = queuedSubmissions.findIndex(
+      (submission) =>
+        !getChatSessionRuntime(submission.sessionId)?.loading,
+    );
+    if (readyIndex < 0) return;
+
+    const nextSubmission = queuedSubmissions[readyIndex];
+    const remainingQueue = queuedSubmissions.filter(
+      (_submission, index) => index !== readyIndex,
+    );
+    dequeueInProgressRef.current = true;
+    replaceQueuedSubmissions(remainingQueue);
+    const result = handleSubmit({
+      content: nextSubmission.content,
+      queuedContext: nextSubmission,
+      preservePrompt: true,
+    });
+    queueMicrotask(() => {
+      dequeueInProgressRef.current = false;
+    });
+    if (result !== "started") {
+      const queuedCount = countQueuedForSession(
+        getChatRuntimeQueue(),
+        nextSubmission.sessionId,
+      );
+      setChatRuntimeActivity(
+        nextSubmission.sessionId,
+        getSettledSessionActivity(
+          "failed",
+          queuedCount,
+        ),
+      );
+    }
+  }, [
+    handleSubmit,
+    queuedSubmissions,
+    replaceQueuedSubmissions,
+    runtimeVersion,
   ]);
 
-  return { handleSubmit, handleAbort, runningSessionIdRef, runningAccRef };
+  const activeQueuedSubmissions = queuedSubmissions.filter(
+    (submission) => submission.sessionId === activeSessionId,
+  );
+  return {
+    handleSubmit,
+    handleAbort,
+    queuedCount: activeQueuedSubmissions.length,
+    queuedMessages: activeQueuedSubmissions.map((item) => item.content),
+    sessionActivities,
+  };
 }

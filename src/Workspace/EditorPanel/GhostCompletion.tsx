@@ -10,6 +10,7 @@
 
 import React from 'react'
 import type { AiModelConfig, EntityId } from '../../types'
+import { createAiStreamId } from '../../utils/aiStream'
 import './GhostCompletion.scss'
 
 export interface GhostTrigger {
@@ -42,6 +43,7 @@ export default function GhostCompletion({
   const [ghostText, setGhostText] = React.useState('')
   const [rect, setRect] = React.useState<DOMRect | null>(null)
   const chunkUnsubRef = React.useRef<(() => void) | null>(null)
+  const streamIdRef = React.useRef<string | null>(null)
   const currentTokenRef = React.useRef<number | null>(null)
   const ghostTextRef = React.useRef('')
 
@@ -56,8 +58,9 @@ export default function GhostCompletion({
     chunkUnsubRef.current?.()
     chunkUnsubRef.current = null
     if (hadActiveStream) {
-      window.electronAPI.abortAiStream?.()
+      window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
     }
+    streamIdRef.current = null
   }, [])
 
   const clearGhost = React.useCallback(() => {
@@ -83,6 +86,8 @@ export default function GhostCompletion({
     setRect(trigger.cursorRect)
 
     // 注册 chunk 订阅
+    const streamId = createAiStreamId('ghost-completion')
+    streamIdRef.current = streamId
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
       if (chunk.error) {
         clearGhost()
@@ -99,7 +104,7 @@ export default function GhostCompletion({
       if (chunk.done) {
         cleanup()
       }
-    })
+    }, streamId)
     chunkUnsubRef.current = unsubscribe
 
     const systemPrompt = [
@@ -118,6 +123,7 @@ export default function GhostCompletion({
     const userPrompt = `【上文】\n${trigger.prefix}\n\n【续写紧接上文】：`
 
     window.electronAPI.aiChatStream({
+      streamId,
       apiKey: model.apiKey,
       baseURL: model.baseUrl || undefined,
       apiProvider: model.apiProvider === 'anthropic' ? 'anthropic' : 'openai',

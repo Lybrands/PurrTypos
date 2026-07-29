@@ -48,6 +48,32 @@ function toIndexPreview(
   return normalized ? normalized.slice(0, maxLength) : fallback;
 }
 
+function toIndexMarkdownPreview(
+  value: string | undefined,
+  fallback: string,
+  maxLength: number,
+): string {
+  const normalized = (value ?? "").trim();
+  if (!normalized) return fallback;
+  if (normalized.length <= maxLength) return normalized;
+
+  const candidate = normalized.slice(0, maxLength);
+  const boundary = Math.max(
+    candidate.lastIndexOf("\n\n"),
+    candidate.lastIndexOf("\n"),
+    candidate.lastIndexOf(" "),
+  );
+  let preview = candidate.slice(
+    0,
+    boundary >= Math.floor(maxLength * 0.6) ? boundary : maxLength,
+  ).trimEnd();
+
+  // 截断发生在代码围栏内部时主动闭合，避免后续省略号也被当作代码。
+  const fenceCount = (preview.match(/^```/gm) ?? []).length;
+  if (fenceCount % 2 !== 0) preview += "\n```";
+  return `${preview}\n\n…`;
+}
+
 function buildConversationTurnIndex(
   messages: ChatMessage[],
 ): ConversationTurnIndexItem[] {
@@ -77,10 +103,20 @@ function buildConversationTurnIndex(
     turns.push({
       dataIndex,
       userText: toIndexPreview(message.content, "未命名提问", 180),
+      userMarkdown: toIndexMarkdownPreview(
+        message.content,
+        "未命名提问",
+        1000,
+      ),
       assistantText: toIndexPreview(
         assistantSource,
         assistant ? "AI 正在整理回复…" : "等待 AI 回复…",
         240,
+      ),
+      assistantMarkdown: toIndexMarkdownPreview(
+        assistantSource,
+        assistant ? "AI 正在整理回复…" : "等待 AI 回复…",
+        2400,
       ),
     });
   });
@@ -170,18 +206,15 @@ export default function ChatMessageList({
   }, [isAtBottom, turnIndexItems.length]);
 
   const handleVisibleRangeChange = React.useCallback(
-    ({ startIndex, endIndex }: { startIndex: number; endIndex: number }) => {
+    ({ startIndex }: { startIndex: number; endIndex: number }) => {
       if (turnIndexItems.length === 0) return;
       const normalizeIndex = (index: number) =>
         index >= firstItemIndex &&
         index < firstItemIndex + combinedData.length
           ? index - firstItemIndex
           : index;
-      const visibleCenter = Math.round(
-        (normalizeIndex(startIndex) + normalizeIndex(endIndex)) / 2,
-      );
       setActiveTurnIndex(
-        findTurnAtDataIndex(turnIndexItems, visibleCenter),
+        findTurnAtDataIndex(turnIndexItems, normalizeIndex(startIndex)),
       );
     },
     [combinedData.length, firstItemIndex, turnIndexItems],
@@ -193,7 +226,7 @@ export default function ChatMessageList({
       setActiveTurnIndex(findTurnAtDataIndex(turnIndexItems, item.dataIndex));
       virtuosoRef.current?.scrollToIndex({
         index: item.dataIndex,
-        align: "center",
+        align: "start",
         behavior: "smooth",
       });
     },

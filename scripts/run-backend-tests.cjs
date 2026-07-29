@@ -40,9 +40,19 @@ if (!python) {
   process.exit(1)
 }
 
+const forwardedArgs = process.argv.slice(2)
+const hasExplicitTarget = forwardedArgs.some((argument) => {
+  const selector = String(argument).split('::', 1)[0]
+  return selector.includes('::') || fs.existsSync(path.resolve(projectRoot, selector))
+})
+const pytestArgs = [
+  ...(hasExplicitTarget ? [] : ['backend/tests']),
+  ...forwardedArgs,
+]
+
 const result = spawnSync(
   python.command,
-  [...python.prefix, '-m', 'pytest', 'backend/tests', ...process.argv.slice(2)],
+  [...python.prefix, '-m', 'pytest', ...pytestArgs],
   { cwd: projectRoot, stdio: 'inherit' },
 )
 

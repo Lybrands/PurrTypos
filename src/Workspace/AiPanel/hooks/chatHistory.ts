@@ -1,5 +1,8 @@
 import type { ChatMessage } from "./chat.types";
 
+export const EMPTY_RESPONSE_MESSAGE =
+  "本轮处理已结束，但模型没有生成可展示的答复。请重试或更换模型。";
+
 /** 助手轮只有工具记录而正文为空时，拼出可供后续模型阅读的摘要。 */
 export function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): string {
   const segs = msg.toolCallSegments;
@@ -14,6 +17,15 @@ export function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): strin
   const after = (msg.contentAfterToolCalls || "").trim();
   if (after) parts.push(after);
   return parts.join("\n");
+}
+
+export function isSynthesizedToolOnlyResponse(msg: ChatMessage): boolean {
+  const response = String(msg.content ?? "").trim();
+  if (!response || !msg.toolCallSegments?.length) return false;
+  return response === synthesizeAssistantTextFromToolSegments({
+    ...msg,
+    contentAfterToolCalls: undefined,
+  }).trim();
 }
 
 /**

@@ -1,5 +1,5 @@
 import React from 'react'
-import { DoubleRightOutlined } from '../../ui'
+import { PanelToggleIcon } from '../../ui'
 import { Button, Tooltip } from '../../ui'
 import type { EntityId } from '../../types'
 import ChapterSection from './ChapterSection'
@@ -16,8 +16,10 @@ export interface ChapterOutlineSelectInfo {
 
 export interface DirectorNotebookProps {
   bookTitle: string
-  /** 把悬停预览固定展开；固定边栏本身不显示收起按钮。 */
+  /** 把悬停预览固定展开。 */
   onExpandDock?: () => void
+  /** 收起已固定展开的章节边栏。 */
+  onCollapseDock?: () => void
   /** 当前是否处于窄轨道触发的悬停预览。 */
   dockCollapsed?: boolean
   onItemCreated?: (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => void
@@ -36,6 +38,7 @@ export interface DirectorNotebookProps {
 export default function DirectorNotebook({
   bookTitle,
   onExpandDock,
+  onCollapseDock,
   dockCollapsed = false,
   onItemCreated,
   onWritingChapterDeleted,
@@ -50,9 +53,21 @@ export default function DirectorNotebook({
               <Button
                 type="text"
                 size="small"
-                icon={<DoubleRightOutlined style={{ fontSize: 14 }} />}
+                icon={<PanelToggleIcon side="left" action="expand" />}
                 onClick={onExpandDock}
                 className="director-notebook-fullscreen-btn"
+              />
+            </Tooltip>
+          ) : null}
+          {!dockCollapsed && onCollapseDock ? (
+            <Tooltip title="收起章节边栏">
+              <Button
+                type="text"
+                size="small"
+                icon={<PanelToggleIcon side="left" action="collapse" />}
+                onClick={onCollapseDock}
+                className="director-notebook-fullscreen-btn"
+                aria-label="收起章节边栏"
               />
             </Tooltip>
           ) : null}
