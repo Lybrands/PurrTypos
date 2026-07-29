@@ -1,3 +1,4 @@
+import { services } from '@/services'
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import {
@@ -153,7 +154,7 @@ export default function EditorPanel({
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
 
   const refreshArticle = React.useCallback((cid: EntityId) => {
-    window.electronAPI.getArticle({ chapterId: cid }).then((res) => {
+    services.articles.getArticle({ chapterId: cid }).then((res) => {
       const text = res.success && res.data ? res.data.content : ''
       setContent(text)
       setWordCount(text.replace(/\s/g, '').length)
@@ -193,7 +194,7 @@ export default function EditorPanel({
     saveTimerRef.current = setTimeout(async () => {
       const source = nextSaveSourceRef.current
       nextSaveSourceRef.current = null
-      const res = await window.electronAPI.saveArticle({ chapterId, content: text, source: source ?? undefined })
+      const res = await services.articles.saveArticle({ chapterId, content: text, source: source ?? undefined })
       setSaveStatus(res.success ? '已保存' : '保存失败')
     }, AUTOSAVE_DELAY)
   }, [chapterId])
@@ -299,7 +300,7 @@ export default function EditorPanel({
       aiChunkUnsubRef.current?.()
       aiChunkUnsubRef.current = null
       if (hadActiveStream) {
-        window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
+        services.ai.abortAiStream(aiStreamIdRef.current ?? undefined)
       }
       aiStreamIdRef.current = null
     }
@@ -309,7 +310,7 @@ export default function EditorPanel({
     aiChunkUnsubRef.current?.()
     aiChunkUnsubRef.current = null
     if (aiFloat.loading) {
-      window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
+      services.ai.abortAiStream(aiStreamIdRef.current ?? undefined)
     }
     aiStreamIdRef.current = null
     setAiFloat((prev) => ({ ...prev, visible: false, x: 0, y: 0, loading: false }))
@@ -323,7 +324,7 @@ export default function EditorPanel({
   const handleAiFloatAbort = React.useCallback(() => {
     aiChunkUnsubRef.current?.()
     aiChunkUnsubRef.current = null
-    window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
+    services.ai.abortAiStream(aiStreamIdRef.current ?? undefined)
     aiStreamIdRef.current = null
     setAiFloat((prev) => ({ ...prev, loading: false }))
   }, [])
@@ -339,7 +340,7 @@ export default function EditorPanel({
     aiChunkUnsubRef.current?.()
     const streamId = createAiStreamId('editor-float')
     aiStreamIdRef.current = streamId
-    const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
+    const unsubscribe = services.ai.onAiChunk((chunk) => {
       if (chunk.error) {
         setAiFloat((prev) => ({ ...prev, loading: false, result: '请求失败：' + chunk.error }))
         unsubscribe()
@@ -390,7 +391,7 @@ export default function EditorPanel({
       max_tokens: 8192,
     }
 
-    window.electronAPI.aiChatStream({
+    services.ai.aiChatStream({
       streamId,
       apiKey: selectedModelConfig.apiKey,
       baseURL: selectedModelConfig.baseUrl || undefined,

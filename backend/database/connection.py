@@ -14,7 +14,11 @@ Async SQLite connection wrapper using aiosqlite.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -60,6 +64,7 @@ class DatabaseConnection:
         self._tx_depth = 0
 
     async def init(self) -> None:
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
         # WAL：读写互不阻塞，符合 Electron 桌面端「读多写少」的画像。
@@ -257,6 +262,67 @@ class DatabaseConnection:
             await cursor.close()
             await conn.commit()
         return self._db_path.read_bytes()
+
+    async def import_from_buffer(self, payload: bytes) -> None:
+        """Atomically replace the active SQLite database from an uploaded backup.
+
+        The candidate is validated before the live connection is closed. The
+        same DatabaseConnection object is retained so repositories held by the
+        application composition continue to reference the active database.
+        """
+        if not payload:
+            raise ValueError("数据库备份为空")
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        candidate = self._db_path.with_suffix(".db.importing")
+        candidate.write_bytes(payload)
+        try:
+            try:
+                validation = sqlite3.connect(candidate)
+                try:
+                    integrity = validation.execute("PRAGMA integrity_check").fetchone()
+                    if not integrity or integrity[0] != "ok":
+                        raise ValueError("数据库完整性校验失败")
+                    has_books = validation.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='books'"
+                    ).fetchone()
+                    if not has_books:
+                        raise ValueError("不是有效的 PurrTypos 数据库备份")
+                finally:
+                    validation.close()
+            except sqlite3.DatabaseError as error:
+                raise ValueError("不是有效的 PurrTypos 数据库备份") from error
+
+            async with self._connection_lock:
+                if self._tx_owner is not None:
+                    raise RuntimeError("数据库正在执行事务，请稍后重试")
+                current = self._conn
+                if current is not None:
+                    await current.close()
+                    self._conn = None
+
+                backup = self._db_path.with_name(
+                    f"{self._db_path.name}.before-import-"
+                    f"{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
+                )
+                if self._db_path.exists():
+                    shutil.copy2(self._db_path, backup)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(f"{self._db_path}{suffix}")
+                    if sidecar.exists():
+                        sidecar.unlink()
+                os.replace(candidate, self._db_path)
+
+                self._conn = await aiosqlite.connect(self._db_path)
+                self._conn.row_factory = aiosqlite.Row
+                await self._conn.execute("PRAGMA journal_mode=WAL")
+                await self._conn.execute("PRAGMA busy_timeout=5000")
+                await self._conn.commit()
+                self._tx_owner = None
+                self._tx_depth = 0
+        finally:
+            if candidate.exists():
+                candidate.unlink()
 
     async def close(self) -> None:
         if self._conn is None:

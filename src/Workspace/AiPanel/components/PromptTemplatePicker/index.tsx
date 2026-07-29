@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import { FileTextOutlined, SettingOutlined } from "../../../../ui";
 import { Button, Empty, Popover, Tooltip, useConfirm, useToast } from "../../../../ui";
@@ -41,7 +42,7 @@ export default function PromptTemplatePicker({
   const loadUser = React.useCallback(async () => {
     setLoading(true);
     try {
-      const res = await window.electronAPI.listPromptTemplates();
+      const res = await services.promptTemplates.listPromptTemplates();
       if (res.success) setUserTemplates(res.data ?? []);
     } finally {
       setLoading(false);

@@ -5,6 +5,7 @@
 import { getWritingOutlineWithChapters, batchGetChapterContents } from '../Workspace/utils'
 import { shortUuid } from './common'
 import type { EntityId } from '../types'
+import { services } from '@/services'
 
 /** 单章数据（标题 + 正文；带卷时可选卷名与卷 id 用于子目录） */
 export interface ExportChapter {
@@ -111,13 +112,10 @@ export function buildSingleTxtContent(book: ExportBookData): string {
 
 /**
  * 根据选中的书籍 ID 拉取导出所需数据（写作大纲、章节、正文）
- * 依赖运行环境中的 window.electronAPI，使用方法库批量获取
+ * 通过书籍服务读取数据，不依赖具体桌面或浏览器运行时。
  */
 export async function fetchExportData(bookIds: EntityId[]): Promise<ExportBookData[]> {
-  const api = typeof window !== 'undefined' && (window as unknown as { electronAPI?: { getBooks: () => Promise<{ success: boolean; data?: { id: string; title: string; enable_volume?: number }[] }> } }).electronAPI
-  if (!api) return []
-
-  const booksRes = await api.getBooks()
+  const booksRes = await services.books.getBooks()
   if (!booksRes.success || !booksRes.data) return []
   const books = booksRes.data.filter((b) => bookIds.includes(b.id))
 

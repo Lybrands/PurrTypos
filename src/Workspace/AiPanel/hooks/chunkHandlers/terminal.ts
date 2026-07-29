@@ -7,6 +7,8 @@ import {
 import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
+const getServices = () => import('@/services').then((module) => module.services)
+
 export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
 export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
 
@@ -197,8 +199,8 @@ function saveConversationIfNeeded(
     );
   if (!shouldSave) return;
 
-  void window.electronAPI
-    .saveConversation({
+  void getServices()
+    .then((services) => services.conversations.saveConversation({
       sessionId: acc.sessionId,
       bookId: acc.bookId ?? undefined,
       chapterId: acc.chapterId ?? null,
@@ -220,7 +222,7 @@ function saveConversationIfNeeded(
       contextCompaction: acc.contextCompaction,
       contextBudget: acc.contextBudget,
       agentRunId: acc.agentRunId,
-    })
+    }))
     .then((res) => {
       if (res && res.success) {
         const conversationId = res.data?.id;
@@ -310,8 +312,8 @@ function maybeGenerateSessionTitle(
     apiProvider: cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
     model: apiModelName,
   });
-  window.electronAPI
-    .generateSessionTitle({
+  getServices()
+    .then((services) => services.ai.generateSessionTitle({
       apiKey: cfg.apiKey,
       baseURL: cfg.baseUrl || undefined,
       prompt:
@@ -319,7 +321,7 @@ function maybeGenerateSessionTitle(
       apiProvider:
         cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
       model: apiModelName,
-    })
+    }))
     .then(async (titleRes) => {
       if (!titleRes.success || !titleRes.data?.trim()) {
         console.warn("[AI 对话] 标题生成失败或为空", {
@@ -334,7 +336,8 @@ function maybeGenerateSessionTitle(
         return;
       }
       const nextTitle = titleRes.data.trim();
-      await window.electronAPI.updateSessionTitle({
+      const services = await getServices()
+      await services.sessions.updateSessionTitle({
         sessionId: acc.sessionId,
         title: nextTitle,
       });

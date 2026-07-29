@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { useToast } from '../../ui'
 import type {
@@ -386,7 +387,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       const finalSnap = composeCharacterFields(cur)
       const before = cur.before as CharacterSettingSnapshot
       const proposed = cur.proposed as CharacterSettingSnapshot
-      const res = await window.electronAPI.commitCharacterSettingDiff({
+      const res = await services.history.commitCharacterSettingDiff({
         characterId: cur.characterId!,
         name: finalSnap.name,
         tags: finalSnap.tags,
@@ -405,7 +406,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       const finalSnap = composeCharacterFields(cur)
       const before = cur.before as CharacterSettingSnapshot
       const proposed = cur.proposed as CharacterSettingSnapshot
-      const res = await window.electronAPI.commitEntitySettingDiff({
+      const res = await services.history.commitEntitySettingDiff({
         entityId: cur.entityId!,
         name: finalSnap.name,
         tags: finalSnap.tags,
@@ -424,7 +425,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       const beforeContent = (cur.before as { content: string }).content || ''
       const proposedContent = (cur.proposed as { content: string }).content || ''
       const finalContent = composeResult(cur.profileOps)
-      const res = await window.electronAPI.commitBackgroundSettingDiff({
+      const res = await services.history.commitBackgroundSettingDiff({
         bookId: cur.bookId,
         content: finalContent,
         beforeContent,

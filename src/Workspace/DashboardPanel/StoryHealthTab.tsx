@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { ReloadOutlined } from '../../ui'
 import { Button, Empty, Spin, Tag, Tooltip } from '../../ui'
@@ -17,7 +18,7 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
   const reload = React.useCallback(async () => {
     setLoading(true)
     try {
-      const res = await window.electronAPI.getStoryHealth({ bookId })
+      const res = await services.dashboard.getStoryHealth({ bookId })
       if (res.success && res.data) setData(res.data)
       else message.error(res.error || '加载故事健康数据失败')
     } finally {

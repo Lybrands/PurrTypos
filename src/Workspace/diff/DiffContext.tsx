@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { useToast } from '../../ui'
 import type { EntityId } from '../../types'
@@ -181,7 +182,7 @@ export function DiffProvider({ children }: { children: React.ReactNode }) {
     const finalText = composeResult(cur.ops)
     const stats = countByStatus(cur.ops)
 
-    const res = await window.electronAPI.commitChapterDiff({
+    const res = await services.history.commitChapterDiff({
       chapterId,
       content: finalText,
       beforeText: cur.beforeText,

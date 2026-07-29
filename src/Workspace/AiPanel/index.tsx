@@ -1,3 +1,4 @@
+import { services } from '@/services'
 /// <reference path="../../vite-env.d.ts" />
 import React from "react";
 import {
@@ -333,7 +334,7 @@ export default function AiPanel({
     const currentRuntime = getChatSessionRuntime(activeSessionId);
     setConversations(currentRuntime?.messages ?? []);
     setLoading(currentRuntime?.loading ?? false);
-    window.electronAPI
+    services.conversations
       .getConversations({ sessionId: activeSessionId })
       .then((res) => {
         if (!res.success) return;
@@ -347,7 +348,7 @@ export default function AiPanel({
   const handleAddFavorite = React.useCallback(
     async (prompt: string, content: string) => {
       if (activeSessionId == null) return;
-      const res = await window.electronAPI.saveAiFavorite({
+      const res = await services.favorites.saveAiFavorite({
         sessionId: activeSessionId,
         sessionTitle: currentSessionTitle,
         prompt,

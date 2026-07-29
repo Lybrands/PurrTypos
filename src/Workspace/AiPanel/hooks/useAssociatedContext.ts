@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import type { EntityId, Outline } from "../../../types";
 import { formatAssociableOutlineLabel, getAvailableOutlines } from "../../utils";
@@ -126,7 +127,7 @@ export function useAssociatedContext({
   // 查询当前章节对应的大纲并追加到关联大纲列表（已存在则跳过）
   const handleQuickAssociateOutline = React.useCallback(async () => {
     if (!chapterId) return;
-    const res = await window.electronAPI.getOutlineForChapter(chapterId);
+    const res = await services.outlines.getOutlineForChapter(chapterId);
     if (res.success && res.data) {
       const id = res.data.id;
       setAssociatedOutlineIds((prev) =>

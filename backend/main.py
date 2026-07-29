@@ -6,13 +6,18 @@ Launched as a child process by Electron.
 from __future__ import annotations
 
 import logging
+import mimetypes
+import os
 import sys
+import threading
+import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from config import HOST, PORT, DATA_DIR
 from exceptions import AppError, app_error_handler, generic_error_handler
@@ -165,6 +170,50 @@ app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(Exception, generic_error_handler)
 
 
+def _resolve_web_dist_dir() -> Path | None:
+    explicit = os.environ.get("PURRTYPOS_WEB_DIST_DIR", "").strip()
+    candidates = [
+        Path(explicit) if explicit else None,
+        Path(__file__).resolve().parent.parent / "dist",
+        Path(sys.executable).resolve().parent.parent / "web"
+        if getattr(sys, "frozen", False)
+        else None,
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "index.html").is_file():
+            return candidate.resolve()
+    return None
+
+
+WEB_DIST_DIR = _resolve_web_dist_dir()
+
+
+@app.middleware("http")
+async def serve_web_frontend(request: Request, call_next):
+    """Serve the production React bundle without affecting /api routes."""
+    if (
+        WEB_DIST_DIR is None
+        or request.method != "GET"
+        or request.url.path == "/health"
+        or request.url.path.startswith("/api/")
+    ):
+        return await call_next(request)
+
+    relative = request.url.path.lstrip("/") or "index.html"
+    candidate = (WEB_DIST_DIR / relative).resolve()
+    try:
+        candidate.relative_to(WEB_DIST_DIR)
+    except ValueError:
+        return await call_next(request)
+
+    if candidate.is_file():
+        media_type, _ = mimetypes.guess_type(candidate.name)
+        return FileResponse(candidate, media_type=media_type)
+    if "text/html" in request.headers.get("accept", ""):
+        return FileResponse(WEB_DIST_DIR / "index.html", media_type="text/html")
+    return await call_next(request)
+
+
 @app.get("/health")
 async def health():
     """健康检查：连同数据库连接一起探活。
@@ -188,11 +237,18 @@ async def debug_log():
 
 def main():
     port = PORT
-    if len(sys.argv) > 1:
+    args = sys.argv[1:]
+    for argument in args:
         try:
-            port = int(sys.argv[1])
+            port = int(argument)
+            break
         except ValueError:
             pass
+    if "--open-browser" in args:
+        threading.Timer(
+            0.8,
+            lambda: webbrowser.open(f"http://127.0.0.1:{port}"),
+        ).start()
     uvicorn.run(app, host=HOST, port=port, log_level="info")
 
 

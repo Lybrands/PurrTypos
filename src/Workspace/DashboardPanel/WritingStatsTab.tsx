@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import {
   AimOutlined,
@@ -26,7 +27,7 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
   const reload = React.useCallback(async () => {
     setLoading(true)
     try {
-      const res = await window.electronAPI.getWritingStats({ bookId })
+      const res = await services.dashboard.getWritingStats({ bookId })
       if (res.success && res.data) setData(res.data)
       else message.error(res.error || '加载写作统计失败')
     } finally {
@@ -39,7 +40,7 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
   const saveGoal = React.useCallback(async () => {
     setSavingGoal(true)
     try {
-      const res = await window.electronAPI.setWritingGoal({ bookId, dailyWords: goalDraft || 0 })
+      const res = await services.dashboard.setWritingGoal({ bookId, dailyWords: goalDraft || 0 })
       if (res.success) {
         setEditingGoal(false)
         reload()

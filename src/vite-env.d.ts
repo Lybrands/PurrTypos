@@ -1,11 +1,11 @@
 /// <reference types="vite/client" />
 /// <reference path="./modules.d.ts" />
 
-import type { ElectronAPI } from './types'
+import type { DesktopBridge } from './platform/types'
 
 declare global {
   interface Window {
-    electronAPI: ElectronAPI
+    purrDesktop?: DesktopBridge
   }
 }
 

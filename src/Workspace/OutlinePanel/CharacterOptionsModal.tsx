@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { DeleteOutlined, PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '../../ui'
 import { Button, Input, Modal, Tooltip } from '../../ui'
@@ -30,7 +31,7 @@ function OptionList({
   const editInputRef = React.useRef<any>(null)
 
   const load = React.useCallback(async () => {
-    const res = await window.electronAPI.getCharacterOptions({ category })
+    const res = await services.characters.getCharacterOptions({ category })
     if (res.success && res.data) setOptions(res.data)
   }, [category])
 
@@ -47,7 +48,7 @@ function OptionList({
   const handleAdd = React.useCallback(async () => {
     const val = addingValue.trim()
     if (!val) { setIsAdding(false); return }
-    const res = await window.electronAPI.addCharacterOption({ category, value: val })
+    const res = await services.characters.addCharacterOption({ category, value: val })
     if (res.success) {
       setAddingValue('')
       setIsAdding(false)
@@ -67,7 +68,7 @@ function OptionList({
     if (editingId == null) return
     const val = editingValue.trim()
     if (!val) { setEditingId(null); return }
-    const res = await window.electronAPI.updateCharacterOption({ id: editingId, value: val })
+    const res = await services.characters.updateCharacterOption({ id: editingId, value: val })
     if (res.success) {
       setEditingId(null)
       load()
@@ -78,7 +79,7 @@ function OptionList({
   }, [editingId, editingValue, load, onOptionsChange, message])
 
   const handleDelete = React.useCallback(async (id: number) => {
-    const res = await window.electronAPI.deleteCharacterOption({ id })
+    const res = await services.characters.deleteCharacterOption({ id })
     if (res.success) {
       load()
       onOptionsChange?.()

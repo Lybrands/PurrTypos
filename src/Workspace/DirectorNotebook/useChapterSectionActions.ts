@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { useToast } from '../../ui'
 import type { Chapter, EntityId, Outline } from '../../types'
@@ -27,7 +28,7 @@ interface UseChapterSectionActionsOptions {
 }
 
 async function ensureDefaultOutline(bookId?: EntityId | null): Promise<Outline | null> {
-  const result = await window.electronAPI.getWritingOutline(bookId)
+  const result = await services.outlines.getWritingOutline(bookId)
   return result.success && result.data ? result.data : null
 }
 
@@ -59,7 +60,7 @@ export function useChapterSectionActions({
   }, [bookId, writingOutlineId])
 
   const reloadChapters = React.useCallback(async (outlineId: EntityId) => {
-    const result = await window.electronAPI.getChapters({ outlineId })
+    const result = await services.chapters.getChapters({ outlineId })
     if (result.success) onChaptersChange(outlineId, result.data)
   }, [onChaptersChange])
 
@@ -74,7 +75,7 @@ export function useChapterSectionActions({
     try {
       const outlineId = await getOutlineId()
       if (!outlineId) return
-      const result = await window.electronAPI.addChapter({
+      const result = await services.chapters.addChapter({
         outlineId,
         title,
         parentId: parentId ?? undefined,
@@ -102,7 +103,7 @@ export function useChapterSectionActions({
       return
     }
 
-    await window.electronAPI.renameChapter({ id: chapter.id, title })
+    await services.chapters.renameChapter({ id: chapter.id, title })
     finishEditing()
     if (writingOutlineId) await reloadChapters(writingOutlineId)
     if (activeChapterId === chapter.id) onChapterSelect(chapter.id, title)
@@ -112,7 +113,7 @@ export function useChapterSectionActions({
     ids: EntityId[],
     notifyOutlineDeleted: boolean,
   ) => {
-    for (const id of ids) await window.electronAPI.deleteChapter({ id })
+    for (const id of ids) await services.chapters.deleteChapter({ id })
     if (writingOutlineId) await reloadChapters(writingOutlineId)
     if (activeChapterId != null && ids.includes(activeChapterId)) onChapterSelect('', '')
     if (notifyOutlineDeleted) {
@@ -137,7 +138,7 @@ export function useChapterSectionActions({
           message.error('未找到当前书籍')
           return
         }
-        const result = await window.electronAPI.exportEpub({
+        const result = await services.exports.exportEpub({
           bookId,
           chapterIds: selectedIds,
           defaultName: bookTitle,
@@ -154,7 +155,7 @@ export function useChapterSectionActions({
       const chaptersWithContent: ExportChapter[] = await Promise.all(
         selectedIds.map(async (chapterId) => {
           const chapter = chaptersById.get(chapterId)
-          const result = await window.electronAPI.getArticle({ chapterId })
+          const result = await services.articles.getArticle({ chapterId })
           const content = result.success && result.data?.content != null
             ? String(result.data.content)
             : ''
@@ -168,7 +169,7 @@ export function useChapterSectionActions({
       const bookData = { title: bookTitle, chapters: chaptersWithContent }
 
       if (format === 'txt-single') {
-        const result = await window.electronAPI.writeSingleTextFile({
+        const result = await services.files.writeSingleTextFile({
           defaultName: `${bookTitle || '导出'}.txt`,
           content: buildSingleTxtContent(bookData),
         })
@@ -182,7 +183,7 @@ export function useChapterSectionActions({
       }
 
       const entries = buildExportEntries([bookData], format)
-      const result = await window.electronAPI.writeExportFiles({ entries, exportAsZip })
+      const result = await services.files.writeExportFiles({ entries, exportAsZip })
       if (result.success) {
         message.success('导出成功')
         onExportSuccess()

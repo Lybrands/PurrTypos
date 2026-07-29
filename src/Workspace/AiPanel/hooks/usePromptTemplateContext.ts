@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from "react";
 import type { EntityId } from "../../../types";
 
@@ -51,7 +52,7 @@ export function usePromptTemplateContext({
     let aborted = false;
     (async () => {
       try {
-        const res = await window.electronAPI.getOutlineForChapter(chapterId);
+        const res = await services.outlines.getOutlineForChapter(chapterId);
         if (aborted) return;
         const md = res?.success
           ? (res.data?.markdown_content ?? "").toString()

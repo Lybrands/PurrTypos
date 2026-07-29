@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
 import { HistoryOutlined, RollbackOutlined } from '../../ui'
@@ -32,7 +33,7 @@ export default function DiffHistoryDrawer({
     if (chapterId == null) return
     setLoading(true)
     try {
-      const res = await window.electronAPI.listChapterDiff({ chapterId, limit: 100 })
+      const res = await services.history.listChapterDiff({ chapterId, limit: 100 })
       if (res?.success) setItems(res.data ?? [])
       else appMessage.error('加载 diff 历史失败')
     } catch (e) {
@@ -72,7 +73,7 @@ export default function DiffHistoryDrawer({
       if (result === 'confirm') {
         setRollbackingId(item.id)
         try {
-          const res = await window.electronAPI.rollbackChapterDiff({ diffId: item.id })
+          const res = await services.history.rollbackChapterDiff({ diffId: item.id })
           if (res?.success && chapterId != null) {
             appMessage.success('已回滚')
             window.dispatchEvent(new CustomEvent('chapter-content-updated', {

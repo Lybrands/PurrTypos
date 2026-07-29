@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React, { forwardRef, useImperativeHandle } from 'react'
 import { EditOutlined, HistoryOutlined, ImportOutlined, UserOutlined } from '../../ui'
 import { Button, Empty, Tooltip, useToast } from '../../ui'
@@ -127,7 +128,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
           if (!editingRef.current || !editorRef.current) return
           const md = htmlToMarkdown(editorRef.current.getHTML())
           if (md === baselineSavedRef.current) return
-          const res = await window.electronAPI.updateOutline({
+          const res = await services.outlines.updateOutline({
             outlineId,
             markdown_content: md,
           })
@@ -150,7 +151,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       const ed = editorRef.current
       if (!ed) return
       const md = htmlToMarkdown(ed.getHTML())
-      const res = await window.electronAPI.updateOutline({
+      const res = await services.outlines.updateOutline({
         outlineId,
         markdown_content: md,
       })
@@ -169,7 +170,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
     }
 
     const handleImportFile = React.useCallback(async () => {
-      const res = await window.electronAPI.openAndReadTextFile()
+      const res = await services.files.openAndReadTextFile()
       if (res.success && res.data != null) {
         const ed = editorRef.current
         if (ed) {

@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Alert, Button } from '../../ui'
 import { Spin, useToast } from '../../ui'
@@ -54,14 +55,14 @@ export default function ChapterOutlinePanel({
     setLoading(true)
     try {
       if (mode === 'global') {
-        const res = await window.electronAPI.getGlobalOutline(bookId)
+        const res = await services.outlines.getGlobalOutline(bookId)
         if (res.success) setOutline(res.data ?? null)
         else { setError(res.error || '加载总纲失败'); setOutline(null) }
         return
       }
 
       if (mode === 'volume' && chapter) {
-        const res = await window.electronAPI.getVolumeOutlines(bookId)
+        const res = await services.outlines.getVolumeOutlines(bookId)
         if (res.success) {
           const list = res.data ?? []
           const found =
@@ -77,7 +78,7 @@ export default function ChapterOutlinePanel({
 
       // chapter 模式
       if (chapter) {
-        const res = await window.electronAPI.getChapterOutlines(bookId)
+        const res = await services.outlines.getChapterOutlines(bookId)
         if (res.success) {
           const list = res.data ?? []
           const found =
@@ -106,7 +107,7 @@ export default function ChapterOutlinePanel({
     setCreating(true)
     try {
       if (mode === 'global') {
-        const res = await window.electronAPI.ensureGlobalOutline(bookId)
+        const res = await services.outlines.ensureGlobalOutline(bookId)
         if (res.success && res.data) {
           setOutline(res.data)
           onChanged?.()
@@ -117,7 +118,7 @@ export default function ChapterOutlinePanel({
       }
 
       if (!chapter) return
-      const res = await window.electronAPI.saveOutline({
+      const res = await services.outlines.saveOutline({
         title: chapter.title,
         type: mode,
         book_id: bookId ?? null,
@@ -138,7 +139,7 @@ export default function ChapterOutlinePanel({
     if (!outline?.file_path) return
     setOpeningSource(true)
     try {
-      const res = await window.electronAPI.openFilePath(outline.file_path)
+      const res = await services.files.openFilePath(outline.file_path)
       if (!res.success) appMessage.error('打开失败：' + (res.error || ''))
     } finally {
       setOpeningSource(false)

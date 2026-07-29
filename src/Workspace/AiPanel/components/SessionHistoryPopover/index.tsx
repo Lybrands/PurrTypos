@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React from 'react'
 import { Button, Empty, Input, List, Popover, Spin, Tooltip } from '../../../../ui'
 import { DeleteOutlined, HistoryOutlined } from '../../../../ui'
@@ -68,7 +69,7 @@ export default function SessionHistoryPopover({
     setSearch('')
     setLoadError(null)
     setLoading(true)
-    window.electronAPI
+    services.sessions
       .getSessions(
         scope === 'setting'
           ? { bookId, includeClosed: true, scope: 'setting' }
@@ -97,7 +98,7 @@ export default function SessionHistoryPopover({
 
   const handleDelete = React.useCallback(async (session: AiSession, e: React.MouseEvent) => {
     e.stopPropagation()
-    await window.electronAPI.deleteSession({ sessionId: session.id })
+    await services.sessions.deleteSession({ sessionId: session.id })
     setAllSessions((prev) => prev.filter((s) => s.id !== session.id))
     onDelete(session)
   }, [onDelete])

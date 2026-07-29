@@ -1,3 +1,4 @@
+import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
 import { Spin, useToast } from './ui'
 import GlobalActions from './components/GlobalActions'
@@ -53,14 +54,14 @@ export default function App() {
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
 
   React.useEffect(() => {
-    window.electronAPI.getSettings().then((res) => {
+    services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
         const migration = migrateKnownModelConfigs(res.data.ai_model_configs)
         setModelConfigs(migration.configs)
         if (migration.changed) {
-          void window.electronAPI.setSettings({ ai_model_configs: migration.configs })
+          void services.settings.setSettings({ ai_model_configs: migration.configs })
         }
       }
     })
@@ -68,7 +69,7 @@ export default function App() {
 
   const saveModelConfigs = React.useCallback((configs: AiModelConfig[]) => {
     setModelConfigs(configs)
-    window.electronAPI.setSettings({ ai_model_configs: configs })
+    services.settings.setSettings({ ai_model_configs: configs })
   }, [])
 
   const updateModelConfig = React.useCallback((
@@ -81,18 +82,18 @@ export default function App() {
           ? applyModelRuntimeConfigPatch(item, patch)
           : item,
       )
-      void window.electronAPI.setSettings({ ai_model_configs: next })
+      void services.settings.setSettings({ ai_model_configs: next })
       return next
     })
   }, [])
 
   const handleSyncOutlineChapterChange = React.useCallback((value: boolean) => {
     setSyncOutlineChapter(value)
-    window.electronAPI.setSettings({ sync_outline_chapter: value })
+    services.settings.setSettings({ sync_outline_chapter: value })
   }, [])
 
   const loadBooks = React.useCallback(async () => {
-    const res = await window.electronAPI.getBooks()
+    const res = await services.books.getBooks()
     if (res.success && res.data) {
       setBooks(res.data)
       setLastOpenedBookId((storedBookId) => {
@@ -126,7 +127,7 @@ export default function App() {
   }, [])
 
   const handleCreateBook = React.useCallback(async (title: string, enableVolume?: boolean) => {
-    const res = await window.electronAPI.createBook({ title, enableVolume })
+    const res = await services.books.createBook({ title, enableVolume })
     if (res.success) {
       await loadBooks()
     } else {
@@ -135,7 +136,7 @@ export default function App() {
   }, [loadBooks, appMessage])
 
   const handleDeleteBook = React.useCallback(async (bookId: EntityId) => {
-    const res = await window.electronAPI.deleteBook({ bookId })
+    const res = await services.books.deleteBook({ bookId })
     if (res.success) {
       await loadBooks()
       appMessage.success('书籍已删除')
@@ -145,7 +146,7 @@ export default function App() {
   }, [loadBooks, appMessage])
 
   const handleRenameBook = React.useCallback(async (bookId: EntityId, title: string) => {
-    const res = await window.electronAPI.renameBook({ bookId, title })
+    const res = await services.books.renameBook({ bookId, title })
     if (res.success) {
       await loadBooks()
     } else {

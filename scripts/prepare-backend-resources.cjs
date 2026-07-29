@@ -21,6 +21,7 @@ const SKIP_NAMES = new Set([
   '.git',
   '.mypy_cache',
   '.pytest_cache',
+  '.DS_Store',
 ])
 
 function copyDirFiltered(src, dest) {
