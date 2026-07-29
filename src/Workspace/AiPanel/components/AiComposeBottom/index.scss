@@ -30,6 +30,17 @@
   gap: 8px;
 }
 
+.chat-queue-count {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--warning);
+  background: var(--warning-dim);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* Agent/Ask 模式下拉：胶囊形 + 彩色边框 + 同色柔光（参考图） */
 .ai-agent-select.purr-select {
   width: auto;
@@ -101,5 +112,9 @@
 
   .context-usage__value {
     display: none;
+  }
+
+  .chat-queue-count {
+    padding-inline: 5px;
   }
 }

@@ -128,12 +128,12 @@
   justify-content: center;
 }
 
-.workspace-dock--utility {
-  --workspace-dock-viewport-max: 38vw;
+.workspace-dock--right-panel {
+  --workspace-dock-viewport-max: 48vw;
 }
 
 @media (max-width: 1100px) {
-  .workspace-dock--utility {
-    --workspace-dock-viewport-max: 34vw;
+  .workspace-dock--right-panel {
+    --workspace-dock-viewport-max: 44vw;
   }
 }

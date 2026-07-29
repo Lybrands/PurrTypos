@@ -11,6 +11,7 @@ from agent_core.contracts import (
     AgentMessage,
     ContextBudget,
     ContextBudgetClaim,
+    MessageOrigin,
     MessageRole,
     ToolSchema,
 )
@@ -224,16 +225,22 @@ def trim_agent_messages_by_turn(
     messages: Sequence[AgentMessage],
     token_budget: int,
 ) -> TrimmedAgentMessages:
-    """Keep system messages and newest complete user/assistant/tool turns."""
+    """Keep trusted host context and newest complete conversation turns."""
 
     rows = list(messages)
-    systems: list[tuple[int, AgentMessage]] = []
+    protected: list[tuple[int, AgentMessage]] = []
     turns: list[list[tuple[int, AgentMessage]]] = []
     current: list[tuple[int, AgentMessage]] = []
 
     for index, message in enumerate(rows):
-        if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
-            systems.append((index, message))
+        if (
+            message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}
+            or message.origin is MessageOrigin.HOST_CONTEXT
+        ):
+            if current:
+                turns.append(current)
+                current = []
+            protected.append((index, message))
             continue
         if message.role is MessageRole.USER and current:
             turns.append(current)
@@ -242,10 +249,10 @@ def trim_agent_messages_by_turn(
     if current:
         turns.append(current)
 
-    selected_indices = {index for index, _ in systems}
+    selected_indices = {index for index, _ in protected}
     used = 2 + sum(
         estimate_json_tokens(_budget_message_mapping(message)) + 4
-        for _, message in systems
+        for _, message in protected
     )
     for reverse_index, turn in enumerate(reversed(turns)):
         turn_cost = sum(

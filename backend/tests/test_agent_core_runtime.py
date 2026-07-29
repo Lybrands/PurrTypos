@@ -27,6 +27,7 @@ from agent_core.contracts import (
     ModelRequest,
     ModelStream,
     ModelStreamChunk,
+    ModelTokenUsage,
     ResponseConstraints,
     RuntimeLimits,
     RuntimeOutcome,
@@ -283,6 +284,143 @@ async def test_runtime_streams_provider_neutral_deltas_and_completes_without_too
     assert model.invocations[0].tool_choice is ToolChoiceMode.NONE
     assert observer.model_delta_count == 1
     assert observer.traces[-1].outcome == "stop"
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_reasoning_only_round_and_returns_visible_answer():
+    reasoning_only = [
+        ModelStreamChunk(thinking_delta="I still need to answer."),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]
+    model = ScriptedModelGateway([
+        _tool_call("call-a", "readA"),
+        reasoning_only,
+        _answer("给用户的完整答复"),
+    ])
+    tools = ScriptedToolGateway([_batch("call-a", "readA")])
+    observer = RecordingObserver([{"readA"}, set()])
+    runtime = AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    )
+
+    updates = await _collect(
+        runtime,
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "给用户的完整答复"
+    assert len(model.invocations) == 3
+    assert "without any user-visible response" in str(
+        model.message_rounds[2][-1].content
+    )
+    assert any(
+        trace.stage == "model_output"
+        and trace.outcome == "empty_response_retry"
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_repeated_reasoning_only_responses():
+    reasoning_only = [
+        ModelStreamChunk(thinking_delta="reasoning"),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]
+    model = ScriptedModelGateway([
+        reasoning_only,
+        reasoning_only,
+        reasoning_only,
+    ])
+    runtime = AgentRuntime(
+        model_gateway=model,
+        limits=RuntimeLimits(max_model_rounds=4),
+    )
+
+    updates = await _collect(runtime)
+
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "empty_model_response"
+    assert len(model.invocations) == 3
+
+
+@pytest.mark.asyncio
+async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
+    model = ScriptedModelGateway([[
+        ModelStreamChunk(
+            content_delta="answer",
+            finish_reason=ModelFinishReason.STOP,
+            usage=ModelTokenUsage(
+                input_tokens=1_234,
+                output_tokens=56,
+                cached_input_tokens=200,
+            ),
+        ),
+    ]])
+    observer = RecordingObserver()
+
+    updates = await _collect(
+        AgentRuntime(model_gateway=model, observer=observer),
+    )
+
+    usage_events = [
+        update
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.CONTEXT_USAGE_RECORDED
+    ]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload["actualInputTokens"] == 1_234
+    assert usage_events[0].payload["actualOutputTokens"] == 56
+    assert usage_events[0].payload["cachedInputTokens"] == 200
+    assert usage_events[0].payload["usageSource"] == "provider"
+    usage_trace = next(
+        trace for trace in observer.traces
+        if trace.stage == "model_usage"
+    )
+    assert usage_trace.details["actualInputTokens"] == 1_234
+    assert usage_trace.details["localInputEstimate"] > 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_replace_ui_anchor_with_transient_tool_round_usage():
+    first_call = _tool_call("call-a", "readA")[0]
+    model = ScriptedModelGateway([
+        [ModelStreamChunk(
+            tool_call_deltas=first_call.tool_call_deltas,
+            finish_reason=first_call.finish_reason,
+            usage=ModelTokenUsage(input_tokens=1_000, output_tokens=20),
+        )],
+        [ModelStreamChunk(
+            content_delta="final",
+            finish_reason=ModelFinishReason.STOP,
+            usage=ModelTokenUsage(input_tokens=9_000, output_tokens=30),
+        )],
+    ])
+    tools = ScriptedToolGateway([_batch("call-a", "readA")])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=False,
+    )
+
+    usage_events = [
+        update
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.CONTEXT_USAGE_RECORDED
+    ]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload["actualInputTokens"] == 1_000
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -1201,12 +1339,15 @@ async def test_runtime_keeps_logical_required_guard_after_provider_fallback():
     assert _result(updates).error_code == "missing_required_tool_call"
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type in {
-            CoreEventType.MODEL_DELTA,
-            CoreEventType.MODEL_THINKING_DELTA,
-        }
+        and update.type == CoreEventType.MODEL_DELTA
         for update in updates
     )
+    assert [
+        update.payload["delta"]
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_THINKING_DELTA
+    ] == ["private reasoning", "private reasoning"]
 
 
 @pytest.mark.asyncio
@@ -1234,7 +1375,7 @@ async def test_runtime_does_not_schedule_missing_call_retry_without_round_budget
 
 
 @pytest.mark.asyncio
-async def test_runtime_hides_required_tool_round_thinking_from_events():
+async def test_runtime_streams_required_tool_round_thinking_to_work_log():
     tool_round = [ModelStreamChunk(
         thinking_delta="private reasoning",
         tool_call_deltas=(ToolCallDelta(
@@ -1262,11 +1403,13 @@ async def test_runtime_hides_required_tool_round_thinking_from_events():
         require_tool_call=True,
     )
 
-    assert not any(
-        isinstance(update, AgentEvent)
-        and update.type == CoreEventType.MODEL_THINKING_DELTA
+    thinking = [
+        update.payload["delta"]
         for update in updates
-    )
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_THINKING_DELTA
+    ]
+    assert thinking == ["private reasoning"]
     started = next(
         update
         for update in updates

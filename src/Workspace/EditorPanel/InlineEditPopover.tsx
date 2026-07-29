@@ -10,6 +10,7 @@ import type { PromptTemplateContext } from '../AiPanel/promptTemplates'
 import ModelPicker from '../AiPanel/components/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
 import { isModelThinkingEnabled } from '../../modelCatalog'
+import { createAiStreamId } from '../../utils/aiStream'
 
 export interface InlineCapture {
   text: string
@@ -76,6 +77,7 @@ export default function InlineEditPopover({
   const [error, setError] = React.useState<string | null>(null)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
   const chunkUnsubRef = React.useRef<(() => void) | null>(null)
+  const streamIdRef = React.useRef<string | null>(null)
   const popoverRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
 
@@ -136,8 +138,9 @@ export default function InlineEditPopover({
       const hadActiveStream = chunkUnsubRef.current != null
       cleanupStream()
       if (hadActiveStream) {
-        window.electronAPI.abortAiStream?.()
+        window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
       }
+      streamIdRef.current = null
     }
   }, [cleanupStream])
 
@@ -156,21 +159,28 @@ export default function InlineEditPopover({
       setLoading(true)
       setResult('')
       setError(null)
+      if (streamIdRef.current) {
+        window.electronAPI.abortAiStream?.(streamIdRef.current)
+      }
       cleanupStream()
 
+      const streamId = createAiStreamId('inline-edit')
+      streamIdRef.current = streamId
       const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
         if (chunk.error) {
           setError('请求失败：' + chunk.error)
           setLoading(false)
           cleanupStream()
+          streamIdRef.current = null
           return
         }
         if (chunk.delta) setResult((prev) => prev + chunk.delta)
         if (chunk.done) {
           setLoading(false)
           cleanupStream()
+          streamIdRef.current = null
         }
-      })
+      }, streamId)
       chunkUnsubRef.current = unsubscribe
 
       const useConfiguredTemperature =
@@ -217,6 +227,7 @@ export default function InlineEditPopover({
       const userPrompt = userPromptParts.join('\n')
 
       window.electronAPI.aiChatStream({
+        streamId,
         apiKey: model.apiKey,
         baseURL: model.baseUrl || undefined,
         apiProvider: model.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
@@ -267,7 +278,8 @@ export default function InlineEditPopover({
 
   const handleAbort = () => {
     cleanupStream()
-    window.electronAPI.abortAiStream?.()
+    window.electronAPI.abortAiStream?.(streamIdRef.current ?? undefined)
+    streamIdRef.current = null
     setLoading(false)
   }
 

@@ -1,87 +1,41 @@
-import type { AiContextBudgetState } from "../../types";
 import type { ChatMessage } from "./hooks/chat.types";
 
 export interface ContextUsage {
   usedTokens: number;
   windowTokens: number;
   ratio: number;
-  source: "backend" | "estimate";
 }
 
-export function estimateConversationTextTokens(value: unknown): number {
-  const text = String(value ?? "");
-  let ascii = 0;
-  for (const character of text) {
-    if (character.codePointAt(0)! < 128) ascii += 1;
-  }
-  return text.length - ascii + Math.ceil(ascii / 4);
-}
-
-function messageText(message: ChatMessage): string {
-  if (message.isError || message.role === "system") return "";
-  if (message.content?.trim()) return message.content;
-  if (message.role !== "assistant") return "";
-  return (message.toolCallSegments ?? [])
-    .flatMap((segment) => [segment.textBefore, ...segment.labels])
-    .filter(Boolean)
-    .join("\n");
-}
-
-function estimatedMessages(messages: ChatMessage[]): number {
-  return messages.reduce((total, message) => {
-    const text = messageText(message);
-    return text ? total + estimateConversationTextTokens(text) + 6 : total;
-  }, 0);
-}
-
-function latestBackendBudget(
+function latestActualInputTokens(
   messages: ChatMessage[],
-): { index: number; budget: AiContextBudgetState } | null {
+  windowTokens: number,
+): number | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const budget = messages[index].contextBudget;
-    if (budget) return { index, budget };
+    const actualInputTokens = budget?.actualInputTokens;
+    if (
+      budget?.windowTokens === windowTokens
+      && typeof actualInputTokens === "number"
+      && Number.isFinite(actualInputTokens)
+      && actualInputTokens >= 0
+    ) {
+      return Math.round(actualInputTokens);
+    }
   }
   return null;
 }
 
 export function calculateContextUsage(params: {
   messages: ChatMessage[];
-  prompt: string;
   windowTokens: number;
-  loading?: boolean;
-}): ContextUsage {
+}): ContextUsage | null {
   const windowTokens = Math.max(1, Math.round(params.windowTokens));
-  const latestCandidate = latestBackendBudget(params.messages);
-  const latest =
-    latestCandidate?.budget.windowTokens === windowTokens
-      ? latestCandidate
-      : null;
-  let usedTokens: number;
-  let source: ContextUsage["source"];
-
-  if (latest) {
-    usedTokens =
-      latest.budget.estimatedInputTokens + latest.budget.toolSchemaTokens;
-    const budgetBelongsToActiveTurn =
-      Boolean(params.loading) && latest.index === params.messages.length - 1;
-    if (!budgetBelongsToActiveTurn) {
-      usedTokens += estimatedMessages(params.messages.slice(latest.index));
-      usedTokens += estimateConversationTextTokens(params.prompt);
-    }
-    source = "backend";
-  } else {
-    usedTokens =
-      estimatedMessages(params.messages) +
-      estimateConversationTextTokens(params.prompt);
-    source = "estimate";
-  }
-
-  usedTokens = Math.max(0, Math.round(usedTokens));
+  const usedTokens = latestActualInputTokens(params.messages, windowTokens);
+  if (usedTokens === null) return null;
   return {
     usedTokens,
     windowTokens,
     ratio: usedTokens / windowTokens,
-    source,
   };
 }
 

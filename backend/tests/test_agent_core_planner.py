@@ -113,6 +113,23 @@ async def test_planner_uses_non_streaming_gateway_and_normalizes_safe_plan():
 
 
 @pytest.mark.asyncio
+async def test_planner_repairs_invalid_json_once_before_stopping():
+    gateway = FakeModelGateway(
+        '{"needsTodos":true',
+        '{"needsTodos":false,"reason":"repaired"}',
+    )
+
+    result = await AgentPlanner(gateway).create_plan(
+        _request(),
+        PlanningCapabilities(),
+    )
+
+    assert result.kind is PlanningKind.DIRECT_RESPONSE
+    assert len(gateway.invocations) == 2
+    assert "not valid JSON" in gateway.invocations[1][0][-1].content
+
+
+@pytest.mark.asyncio
 async def test_runtime_revision_receives_completed_steps_and_tool_observations():
     gateway = FakeModelGateway(
         '{"needsTodos":false,"reason":"observed evidence is sufficient"}'
@@ -743,5 +760,8 @@ def test_planner_limit_accepts_zero_tool_steps_but_rejects_any_tool_step():
 
 def test_parser_accepts_json_fence_but_rejects_non_object_output():
     assert parse_planner_output('```json\n{"needsTodos":false}\n```')["needsTodos"] is False
+    assert parse_planner_output(
+        'Here is the plan:\n{"needsTodos":false,"reason":"done"}'
+    )["reason"] == "done"
     with pytest.raises(InvalidPlannerOutputError, match="object"):
         parse_planner_output("[]")

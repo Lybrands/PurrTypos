@@ -19,6 +19,168 @@ export interface Book {
   create_time?: string;
 }
 
+export type ScreenplaySourceKind = 'book' | 'original';
+export type ScreenplayFormat = '短片' | '电影' | '单集剧' | '连续剧' | '竖屏短剧';
+export type ScreenplayStage =
+  | 'orientation'
+  | 'brief'
+  | 'structure'
+  | 'scenes'
+  | 'draft'
+  | 'review'
+  | 'completed';
+export type ScreenplayProjectStatus = 'active' | 'archived';
+export type ScreenplaySourceScopeMode =
+  | 'whole_book'
+  | 'first_chapters'
+  | 'first_volumes'
+  | 'selected_chapters'
+  | 'selected_volumes';
+export interface ScreenplaySourceScopeRequest {
+  mode: ScreenplaySourceScopeMode;
+  count?: number;
+  chapterIds?: EntityId[];
+  volumeIds?: EntityId[];
+}
+export interface ScreenplaySourceScope {
+  schemaVersion: 1;
+  mode: ScreenplaySourceScopeMode;
+  requestedCount: number | null;
+  chapterIds: EntityId[];
+  volumeIds: EntityId[];
+  chapters: Array<{
+    id: EntityId;
+    title: string;
+    index: number;
+    volumeId: EntityId | null;
+    volumeTitle: string | null;
+  }>;
+}
+export type ScreenplayDocumentKind =
+  | 'source_analysis'
+  | 'creative_brief'
+  | 'beat_sheet'
+  | 'episode_outline'
+  | 'scene_list'
+  | 'scene_draft'
+  | 'review';
+export type ScreenplayDocumentStatus = 'draft' | 'accepted' | 'superseded';
+
+export interface ScreenplayDeliveryManifest {
+  schemaVersion: 1;
+  projectSnapshot: {
+    projectId: EntityId;
+    title: string;
+    sourceKind: ScreenplaySourceKind;
+    sourceBookId: EntityId | null;
+    sourceScope: ScreenplaySourceScope;
+    format: ScreenplayFormat;
+    approach: string;
+    premise: string;
+  };
+  lineage: {
+    sourceAnalysisId: EntityId | null;
+    creativeBriefId: EntityId;
+    structureId: EntityId;
+    sceneListId: EntityId;
+    finalDraftId: EntityId;
+    finalReviewId: EntityId;
+  };
+  documents: Array<{
+    role: string;
+    documentId: EntityId;
+    kind: ScreenplayDocumentKind;
+    title: string;
+    version: number;
+    contentDigest: string;
+    sourceRefCount: number;
+  }>;
+  qualityGate: {
+    verdict: 'ready';
+    openIssueCount: 0;
+    verifiedPriorIssueCount: number;
+    sceneCount: number;
+    sceneExecutionCount: number;
+  };
+  sourceTrace: {
+    totalSourceRefCount: number;
+  };
+  packageDigest: string;
+  generatedAt: string;
+}
+
+export interface ScreenplayProject {
+  id: EntityId;
+  title: string;
+  source_kind: ScreenplaySourceKind;
+  source_book_id: EntityId | null;
+  source_scope: ScreenplaySourceScope;
+  format: ScreenplayFormat;
+  approach: string;
+  premise: string;
+  delivery_manifest: ScreenplayDeliveryManifest | null;
+  active_stage: ScreenplayStage;
+  status: ScreenplayProjectStatus;
+  create_time?: string;
+  update_time?: string;
+}
+
+export interface ScreenplayDocument {
+  id: EntityId;
+  project_id: EntityId;
+  kind: ScreenplayDocumentKind;
+  title: string;
+  content_json: Record<string, unknown>;
+  content_text: string;
+  version: number;
+  status: ScreenplayDocumentStatus;
+  derived_from_ids: EntityId[];
+  create_time?: string;
+  update_time?: string;
+}
+
+export interface ScreenplayDocumentProposal {
+  kind: ScreenplayDocumentKind;
+  title: string;
+  contentJson: Record<string, unknown>;
+  contentText: string;
+  derivedFromIds: EntityId[];
+}
+
+export interface ScreenplaySourceRef {
+  id: number;
+  project_id: EntityId;
+  document_id: EntityId | null;
+  agent_run_id: string;
+  tool_name: string;
+  source_type:
+    | 'book'
+    | 'chapter'
+    | 'outline'
+    | 'character'
+    | 'setting'
+    | 'background';
+  source_id: string;
+  source_revision: string;
+  excerpt: string;
+  create_time?: string;
+}
+
+export interface CreateScreenplayProjectPayload {
+  title: string;
+  sourceKind: ScreenplaySourceKind;
+  sourceBookId?: EntityId | null;
+  format: ScreenplayFormat;
+  approach: string;
+  premise: string;
+  sourceScope?: ScreenplaySourceScopeRequest;
+}
+
+export interface CreateScreenplayProjectResult {
+  project: ScreenplayProject;
+  initialDocument: ScreenplayDocument;
+}
+
 export interface CharacterOption {
   id: number;
   category: string;
@@ -389,6 +551,8 @@ export interface AiSession {
   id: number;
   book_id?: EntityId | null;
   chapter_id?: EntityId | null;
+  screenplay_project_id?: EntityId | null;
+  scope?: 'chapter' | 'setting' | 'screenplay';
   title: string;
   create_time?: string;
 }
@@ -451,6 +615,14 @@ export interface AiContextBudgetState {
   overflowTokens: number;
   memoryTokens?: number;
   associatedTokens?: number;
+  actualInputTokens?: number;
+  actualOutputTokens?: number;
+  actualTotalTokens?: number;
+  cachedInputTokens?: number;
+  reasoningOutputTokens?: number;
+  actualUsageRound?: number;
+  inputTokenEstimateAtUsage?: number;
+  usageSource?: "provider";
 }
 
 export interface AiTaskPlanChunk {
@@ -698,6 +870,17 @@ export interface ElectronAPI {
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
   /** 整本导出为单个 TXT：保存对话框 + 写盘 */
   writeSingleTextFile: (data: { defaultName: string; content: string }) => Promise<ApiResult<{ path: string }>>;
+  /** 将已接受整稿或最终交付清单写入本地文件。 */
+  writeScreenplayFile: (data: {
+    defaultName: string;
+    content: string;
+    format: 'fountain' | 'markdown' | 'txt' | 'json';
+  }) => Promise<ApiResult<{ path: string }>>;
+  /** 后端生成标准剧本排版 PDF，主进程负责保存。 */
+  exportScreenplayPdf: (data: {
+    projectId: EntityId;
+    defaultName: string;
+  }) => Promise<ApiResult<{ path: string }>>;
   /** EPUB 导出：后端生成，主进程保存对话框 + 写盘；chapterIds 缺省导出全书 */
   exportEpub: (data: { bookId: EntityId; chapterIds?: EntityId[] | null; defaultName?: string }) => Promise<ApiResult<{ path: string }>>;
   exportDatabase: () => Promise<ApiResult<void>>;
@@ -722,6 +905,69 @@ export interface ElectronAPI {
   getBookWordCount: (data: {
     bookId: EntityId;
   }) => Promise<ApiResult<{ count: number }>>;
+  // 剧本项目
+  listScreenplayProjects: (data?: {
+    includeArchived?: boolean;
+  }) => Promise<ApiResult<ScreenplayProject[]>>;
+  getScreenplayProject: (data: {
+    projectId: EntityId;
+  }) => Promise<ApiResult<ScreenplayProject>>;
+  getOrCreateScreenplaySession: (data: {
+    projectId: EntityId;
+  }) => Promise<ApiResult<AiSession>>;
+  createScreenplayProject: (
+    data: CreateScreenplayProjectPayload,
+  ) => Promise<ApiResult<CreateScreenplayProjectResult>>;
+  updateScreenplayProject: (data: {
+    projectId: EntityId;
+    patch: Partial<Pick<
+      ScreenplayProject,
+      'title' | 'format' | 'approach' | 'premise' | 'status'
+    >>;
+  }) => Promise<ApiResult<ScreenplayProject>>;
+  deleteScreenplayProject: (data: {
+    projectId: EntityId;
+  }) => Promise<ApiResult<void>>;
+  listScreenplayDocuments: (data: {
+    projectId: EntityId;
+    kind?: ScreenplayDocumentKind;
+    status?: ScreenplayDocumentStatus;
+  }) => Promise<ApiResult<ScreenplayDocument[]>>;
+  getScreenplayDocument: (data: {
+    documentId: EntityId;
+  }) => Promise<ApiResult<ScreenplayDocument>>;
+  createScreenplayDocument: (data: {
+    projectId: EntityId;
+    kind: ScreenplayDocumentKind;
+    title: string;
+    contentJson?: Record<string, unknown>;
+    contentText?: string;
+    derivedFromIds?: EntityId[];
+    sourceRunId?: string;
+  }) => Promise<ApiResult<ScreenplayDocument>>;
+  listScreenplaySourceRefs: (data: {
+    projectId: EntityId;
+    documentId?: EntityId;
+    agentRunId?: string;
+  }) => Promise<ApiResult<ScreenplaySourceRef[]>>;
+  updateScreenplayDocument: (data: {
+    documentId: EntityId;
+    patch: {
+      title?: string;
+      contentJson?: Record<string, unknown>;
+      contentText?: string;
+      derivedFromIds?: EntityId[];
+    };
+  }) => Promise<ApiResult<ScreenplayDocument>>;
+  acceptScreenplayDocument: (data: {
+    documentId: EntityId;
+  }) => Promise<ApiResult<ScreenplayDocument>>;
+  restoreScreenplayDocument: (data: {
+    documentId: EntityId;
+  }) => Promise<ApiResult<ScreenplayDocument>>;
+  deleteScreenplayDocument: (data: {
+    documentId: EntityId;
+  }) => Promise<ApiResult<void>>;
   // 人物
   getCharacters: (data: { bookId: EntityId }) => Promise<ApiResult<Character[]>>;
   createCharacter: (data: {
@@ -1144,6 +1390,8 @@ export interface ElectronAPI {
     priority?: number;
   }) => Promise<ApiResult<AiAgentDelegation>>;
   aiChatStream: (data: {
+    /** Renderer-generated identifier used to isolate concurrent streams. */
+    streamId?: string;
     apiKey: string;
     baseURL?: string;
     /** 默认 openai：OpenAI 兼容 provider；anthropic 使用官方 Messages API */
@@ -1174,10 +1422,19 @@ export interface ElectronAPI {
     selectedForeshadowingIds?: (number | string)[];
     chatAgentMode?: ChatAgentMode;
     contextWindow?: AiContextWindow;
-  }) => void;
-  abortAiStream: () => void;
+    /** 领域运行配置；省略时保持现有 Writing Agent。 */
+    agentProfile?: "writing" | "screenplay";
+    /** screenplay profile 的唯一项目作用域。 */
+    screenplayProjectId?: EntityId;
+    /** 仅作一致性校验，不能覆盖项目持久化的来源书籍。 */
+    sourceBookId?: EntityId | null;
+    activeDocumentId?: EntityId | null;
+    activeStage?: ScreenplayStage;
+  }) => string;
+  abortAiStream: (streamId?: string) => void;
   onAiChunk: (
     callback: (chunk: {
+      streamId?: string;
       delta?: string;
       thinkingDelta?: string;
       done?: boolean;
@@ -1213,6 +1470,8 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
+      /** 剧本 Agent 生成的待审阅文档；只有用户明确操作后才会保存或接受。 */
+      proposedScreenplayDocument?: ScreenplayDocumentProposal;
       /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
       toolApprovalRequired?: ToolApprovalRequest;
       /** 审批的服务端最终状态（包含超时与连接取消）。 */
@@ -1223,7 +1482,7 @@ export interface ElectronAPI {
         status: Exclude<ToolApprovalStatus, "pending">;
       };
       /** Host-side accounting for the complete model context window. */
-      contextBudget?: AiContextBudgetState;
+      contextBudget?: Partial<AiContextBudgetState>;
       contextCompaction?: AiContextCompactionState;
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
@@ -1249,6 +1508,7 @@ export interface ElectronAPI {
       agentDelegationCreated?: AiAgentDelegation & { runId: string };
       agentDelegationUpdated?: AiAgentDelegation & { runId: string };
     }) => void,
+    streamId?: string,
   ) => () => void;
   // 设置
   getSettings: () => Promise<ApiResult<GeneralSettings>>;

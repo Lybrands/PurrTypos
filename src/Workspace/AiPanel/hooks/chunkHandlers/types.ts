@@ -16,6 +16,7 @@ import type {
   ToolCallSegment,
 } from "../chat.types";
 import type { ConversationUpdater } from "./commitScheduler";
+import type { ChatRunOutcome } from "../chatQueue";
 
 /** 主进程 SSE chunk 的真实类型（直接从 ElectronAPI 接口提取，避免重复声明漂移） */
 export type AiStreamChunk = Parameters<
@@ -76,7 +77,7 @@ export interface ChunkCtx {
    * 终态（done / error）时调用：取消订阅、清空 running refs、把 loading 关掉等。
    * 由 useChatSubmit 在创建 ctx 时注入，封装住 unsubscribe / *Ref / setLoading 的清理顺序。
    */
-  cleanup: () => void;
+  cleanup: (outcome: ChatRunOutcome) => void;
 }
 
 /**

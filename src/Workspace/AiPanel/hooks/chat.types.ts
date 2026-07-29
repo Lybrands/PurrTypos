@@ -61,6 +61,11 @@ export interface AiTaskPlan {
 export interface ToolCallSegment {
   textBefore: string;
   labels: string[];
+  /**
+   * 紧邻本段之前的 thinkingBlocks 下标。null 表示本段前没有思考；
+   * 缺失表示旧版数据，渲染时使用兼容推断。
+   */
+  thinkingBlockIndex?: number | null;
   /** 与 labels 同长度：目录/参数无法与当前书籍对齐时标记 context_error，气泡显示为失败 */
   labelOutcomes?: ToolCallLabelOutcome[];
   /** 与 labels 同长度：该次工具调用是否命中请求内只读缓存 */
@@ -101,7 +106,7 @@ export interface ChatMessage {
   settingDiffCards?: SettingDiffCardState[];
   /** 等待用户批准的高风险 Agent 工具调用。 */
   toolApprovals?: ToolApprovalRequest[];
-  /** AI 将用户目标拆成的任务计划（方案 A：对话内展示） */
+  /** AI 将用户目标拆成的任务计划；保存在消息上供顶部任务胶囊读取。 */
   taskPlan?: AiTaskPlan;
   /** 当前主 Run 调用的子 Agent 生命周期状态。 */
   delegations?: AiAgentDelegation[];

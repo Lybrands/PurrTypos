@@ -36,6 +36,10 @@ from agent_core.errors import (
 )
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
 from agent_core.ports import CancellationSignal, ModelGateway
+from agent_core.structured_output import (
+    StructuredOutputParseError,
+    parse_json_object,
+)
 
 
 PLANNER_SYSTEM_PROMPT = """You are the planning component of a host-controlled agent.
@@ -174,23 +178,33 @@ class AgentPlanner:
         signal: CancellationSignal | None,
     ) -> PlanningResult:
         completion = await self._complete(messages, request, signal)
-        raw = parse_planner_output(completion.message.content)
+        repaired = False
+        try:
+            raw = parse_planner_output(completion.message.content)
+        except InvalidPlannerOutputError as error:
+            completion = await self._repair(
+                messages,
+                completion,
+                request,
+                limits,
+                error,
+                signal,
+            )
+            repaired = True
+            raw = parse_planner_output(completion.message.content)
         try:
             result = normalize_task_plan(raw, capabilities, limits)
         except RepairablePlannerOutputError as error:
-            repair_messages = (
-                *messages,
-                completion.message,
-                AgentMessage(
-                    role=MessageRole.USER,
-                    content=PLANNER_REPAIR_PROMPT.format(
-                        reason=str(error),
-                        max_tool_steps=limits.max_tool_steps,
-                        max_steps=limits.max_steps,
-                    ),
-                ),
+            if repaired:
+                raise
+            completion = await self._repair(
+                messages,
+                completion,
+                request,
+                limits,
+                error,
+                signal,
             )
-            completion = await self._complete(repair_messages, request, signal)
             raw = parse_planner_output(completion.message.content)
             result = normalize_task_plan(raw, capabilities, limits)
         return PlanningResult(
@@ -199,6 +213,29 @@ class AgentPlanner:
             reason=result.reason,
             model=completion.model,
         )
+
+    async def _repair(
+        self,
+        messages: tuple[AgentMessage, ...],
+        completion: ModelCompletion,
+        request: AgentRunRequest,
+        limits: PlannerLimits,
+        error: InvalidPlannerOutputError,
+        signal: CancellationSignal | None,
+    ) -> ModelCompletion:
+        repair_messages = (
+            *messages,
+            completion.message,
+            AgentMessage(
+                role=MessageRole.USER,
+                content=PLANNER_REPAIR_PROMPT.format(
+                    reason=str(error),
+                    max_tool_steps=limits.max_tool_steps,
+                    max_steps=limits.max_steps,
+                ),
+            )
+        )
+        return await self._complete(repair_messages, request, signal)
 
     async def _complete(
         self,
@@ -394,19 +431,18 @@ def _recent_tool_observations(
 
 
 def parse_planner_output(content: Any) -> Mapping[str, Any]:
-    if isinstance(content, Mapping):
-        return content
-    text = str(content or "").strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S | re.I)
-    if fenced:
-        text = fenced.group(1)
     try:
-        value = json.loads(text)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise InvalidPlannerOutputError("planner output is not valid JSON") from error
-    if not isinstance(value, Mapping):
-        raise InvalidPlannerOutputError("planner output must be a JSON object")
-    return value
+        return parse_json_object(content)
+    except StructuredOutputParseError as error:
+        message = (
+            "planner output must be a JSON object"
+            if error.reason_code == "non_object_json"
+            else "planner output is not valid JSON"
+        )
+        raise InvalidPlannerOutputError(
+            message,
+            code=error.reason_code,
+        ) from error
 
 
 def normalize_task_plan(

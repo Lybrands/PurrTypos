@@ -19,6 +19,12 @@ class KimiK3Profile(ModelProfile):
         # callers that try to disable reasoning in narrow internal requests.
         return {"reasoning_effort": "max"}
 
+    def internal_output_token_floor(self) -> int:
+        # Planner, compaction, and judge calls request concise JSON and normally
+        # use a small token cap.  K3 cannot disable max reasoning, so that cap
+        # must also leave room for its hidden reasoning before the final JSON.
+        return 8_192
+
 
 KIMI_K3_PROFILE = KimiK3Profile()
 

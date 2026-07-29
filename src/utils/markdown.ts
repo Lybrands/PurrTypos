@@ -76,3 +76,73 @@ export function htmlToMarkdown(html: string): string {
   if (!html?.trim()) return ''
   return turndown.turndown(html.trim())
 }
+
+/** 无 DOM 环境下的保底转换；浏览器端优先使用下方的结构化 HTML 遍历。 */
+function markdownToPlainTextFallback(markdown: string): string {
+  return markdown
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, '')
+    .replace(/[*_~]+/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * Markdown 转可粘贴的纯文本。
+ *
+ * 保留段落、列表、代码和表格的可读结构，但移除 Markdown 标记与链接地址。
+ * 主要用于复制 AI 最终回答，不包含思考和工具调用过程。
+ */
+export function markdownToPlainText(markdown: string): string {
+  if (!markdown?.trim()) return ''
+  if (typeof DOMParser === 'undefined') {
+    return markdownToPlainTextFallback(markdown)
+  }
+
+  const html = marked.parse(markdown.trim(), { async: false, gfm: true })
+  const documentNode = new DOMParser().parseFromString(html || '', 'text/html')
+  const blockTags = new Set([
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'FIELDSET',
+    'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5',
+    'H6', 'HEADER', 'HR', 'MAIN', 'NAV', 'P', 'PRE', 'SECTION',
+  ])
+
+  const readNode = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue ?? ''
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+
+    const element = node as HTMLElement
+    const tag = element.tagName
+    if (tag === 'SCRIPT' || tag === 'STYLE') return ''
+    if (tag === 'BR') return '\n'
+    if (tag === 'IMG') return element.getAttribute('alt') ?? ''
+
+    const children = Array.from(element.childNodes).map(readNode).join('')
+    if (tag === 'LI') return `• ${children.trim()}\n`
+    if (tag === 'TR') {
+      const cells = Array.from(element.children)
+        .filter((child) => child.tagName === 'TH' || child.tagName === 'TD')
+        .map((child) => Array.from(child.childNodes).map(readNode).join('').trim())
+      return `${cells.join('\t')}\n`
+    }
+    if (tag === 'THEAD' || tag === 'TBODY' || tag === 'TFOOT' || tag === 'TABLE') {
+      return `${children}\n`
+    }
+    if (tag === 'UL' || tag === 'OL') return `${children}\n`
+    if (blockTags.has(tag)) return `${children}\n\n`
+    return children
+  }
+
+  return Array.from(documentNode.body.childNodes)
+    .map(readNode)
+    .join('')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}

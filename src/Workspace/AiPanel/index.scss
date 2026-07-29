@@ -105,7 +105,7 @@
       color: var(--accent);
     }
 
-    // × 按钮默认隐藏，hover / 激活时才显示（Cursor 风格）
+    // × 按钮保留占位，仅在 hover / 键盘聚焦时显示
     .purr-tabs__remove {
       opacity: 0;
       width: 16px;
@@ -121,8 +121,9 @@
     }
 
     &:hover .purr-tabs__remove,
-    &[data-active] .purr-tabs__remove {
+    &:focus-within .purr-tabs__remove {
       opacity: 1;
+      pointer-events: auto;
     }
   }
 
@@ -166,7 +167,7 @@
 .chat-history {
   flex: 1;
   min-height: 0;
-  padding: var(--spacing);
+  padding: var(--spacing) var(--spacing) var(--spacing) 48px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -332,27 +333,118 @@
 
 .chat-turn-index-preview-question,
 .chat-turn-index-preview-answer {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
+  position: relative;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
+  overflow: hidden;
   overflow-wrap: anywhere;
-  word-break: break-all;
+  word-break: break-word;
+
+  > :first-child {
+    margin-top: 0;
+  }
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+
+  p,
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  ul,
+  ol,
+  blockquote,
+  pre,
+  table,
+  hr {
+    margin: 0 0 5px;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    color: inherit;
+    font-size: 1em;
+    font-weight: var(--font-weight-semibold);
+    line-height: inherit;
+  }
+
+  ul,
+  ol {
+    padding-left: 18px;
+  }
+
+  li {
+    margin: 1px 0;
+  }
+
+  blockquote {
+    padding-left: 8px;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 65%, transparent);
+    color: var(--text-muted);
+  }
+
+  code {
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--bg-active);
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+  }
+
+  pre {
+    padding: 6px 8px;
+    overflow: hidden;
+    border-radius: 6px;
+    background: var(--bg-active);
+    white-space: pre-wrap;
+
+    code {
+      padding: 0;
+      background: transparent;
+    }
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9em;
+  }
+
+  th,
+  td {
+    padding: 2px 5px;
+    border: 1px solid var(--border-light);
+    text-align: left;
+  }
+
+  hr {
+    border: 0;
+    border-top: 1px solid var(--border-light);
+  }
 }
 
 .chat-turn-index-preview-question {
+  max-height: 3.1em;
   color: var(--text-primary);
   font-size: var(--font-size);
   font-weight: var(--font-weight-medium);
   line-height: 1.55;
-  -webkit-line-clamp: 2;
 }
 
 .chat-turn-index-preview-answer {
+  max-height: 4.8em;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   line-height: 1.6;
-  -webkit-line-clamp: 3;
 }
 
 .chat-empty {
@@ -475,6 +567,29 @@
     opacity: 0.7;
     line-height: 1.4;
     padding-left: 0;
+  }
+
+  .bubble-copy-btn {
+    min-width: 22px;
+    min-height: 22px;
+    height: 22px;
+    padding: 0 4px;
+    color: var(--text-muted);
+    opacity: 0.62;
+    transition:
+      color var(--transition-fast),
+      opacity var(--transition-fast);
+
+    &:hover,
+    &:focus-visible {
+      color: var(--text-primary);
+      opacity: 1;
+    }
+
+    &.is-copied {
+      color: var(--success);
+      opacity: 1;
+    }
   }
 
   .bubble-bookmark-btn {
@@ -666,6 +781,42 @@
   line-height: 1.5;
 }
 
+.chat-queued-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--warning-dim);
+}
+
+.chat-queued-message {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+
+  > span:first-child {
+    flex: 0 0 auto;
+    color: var(--warning);
+    font-weight: 600;
+  }
+
+  > span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.chat-queued-more {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
 .btn-stop.purr-button {
   color: var(--text-primary);
   border: none;
@@ -808,7 +959,7 @@
     width: var(--main-col-width);
     max-width: 100%;
     margin-inline: auto;
-    padding-inline: 24px;
+    padding: 0 24px 0 48px;
   }
 
   /*
@@ -830,7 +981,8 @@
       0 12px 36px rgba(0, 0, 0, 0.22),
       0 2px 8px rgba(0, 0, 0, 0.10);
     width: var(--main-col-width);
-    max-width: 100%;
+    /* 窄对话区域仍保留左右安全间距，避免输入卡片贴住面板边缘。 */
+    max-width: calc(100% - 32px);
     margin: 0 auto 24px;
     padding: 12px 14px;
     gap: 8px;

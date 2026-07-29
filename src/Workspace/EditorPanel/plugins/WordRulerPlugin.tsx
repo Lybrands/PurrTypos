@@ -4,6 +4,7 @@ import React from 'react'
 import ReactDOM from 'react-dom'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { $getRoot } from 'lexical'
+import { Tooltip } from '../../../ui'
 
 /**
  * 字数标尺插件：每 N 个字（默认 500）在编辑器右侧打一个浮签：「500字 / 1000字 ...」。
@@ -89,13 +90,20 @@ export function WordRulerPlugin({ interval = 500 }: { interval?: number }) {
   return ReactDOM.createPortal(
     <>
       {markers.map((m, i) => (
-        <div
+        <Tooltip
           key={`${m.label}-${i}`}
-          className="lexical-word-ruler"
-          style={{ top: m.top }}
+          title={m.label}
+          placement="left"
+          mouseEnterDelay={0.12}
         >
-          {m.label}
-        </div>
+          <span
+            className={`lexical-word-ruler${(i + 1) % 2 === 0 ? ' is-major' : ''}`}
+            style={{ top: m.top }}
+            role="note"
+            aria-label={m.label}
+            onPointerDown={(event) => event.preventDefault()}
+          />
+        </Tooltip>
       ))}
     </>,
     wrapEl,

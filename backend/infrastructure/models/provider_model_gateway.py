@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
@@ -11,6 +11,7 @@ from agent_core.contracts import (
     ModelCompletion,
     ModelFinishReason,
     ModelInvocation,
+    ModelTokenUsage,
     ReasoningMode,
     ModelStream,
     ModelStreamChunk,
@@ -21,6 +22,7 @@ from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
 from agent_core.ports import CancellationSignal
 from infrastructure.models import provider_router
+from infrastructure.models.profiles import resolve_model_profile
 from utils.async_stream import OwnedAsyncIterator
 
 
@@ -94,6 +96,7 @@ class ProviderModelGateway:
         return ModelCompletion(
             message=AgentMessage.from_mapping(raw_message),
             model=str(result.get("model") or request.model),
+            usage=_normalize_model_usage(result.get("usage")),
         )
 
 
@@ -109,7 +112,15 @@ def _provider_options(
     options.pop("tools", None)
     options.pop("tool_choice", None)
     if invocation.max_output_tokens is not None:
-        options["max_tokens"] = invocation.max_output_tokens
+        maximum = invocation.max_output_tokens
+        if invocation.reasoning_mode is ReasoningMode.DISABLED:
+            profile = resolve_model_profile(
+                request.profile_id,
+                request.model,
+                options.get("baseURL"),
+            )
+            maximum = max(maximum, profile.internal_output_token_floor())
+        options["max_tokens"] = maximum
     if invocation.reasoning_mode is ReasoningMode.DISABLED:
         caller_thinking = options.get("thinking")
         caller_had_thinking_enabled = bool(
@@ -197,8 +208,11 @@ def _normalize_openai_stream(raw_stream):
     async def _normalize():
         accumulated_content = ""
         async for raw in raw_stream:
+            usage = _normalize_model_usage(raw.get("usage"))
             choices = raw.get("choices") or []
             if not choices:
+                if usage is not None:
+                    yield ModelStreamChunk(usage=usage)
                 continue
             choice = choices[0]
             delta = choice.get("delta") or {}
@@ -240,6 +254,7 @@ def _normalize_openai_stream(raw_stream):
                 ),
                 tool_call_deltas=tool_deltas,
                 finish_reason=_normalize_finish_reason(choice.get("finish_reason")),
+                usage=usage,
             )
     async def _guarded():
         try:
@@ -260,6 +275,64 @@ def _normalize_openai_stream(raw_stream):
         raw_stream,
         terminal_predicate=lambda chunk: chunk.finish_reason is not None,
     )
+
+
+def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
+    """Normalize OpenAI- and Anthropic-shaped provider usage."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    prompt_tokens = _usage_int(raw, "prompt_tokens")
+    native_input_tokens = _usage_int(raw, "input_tokens")
+    if prompt_tokens is not None:
+        input_tokens = prompt_tokens
+    elif native_input_tokens is not None:
+        input_tokens = (
+            native_input_tokens
+            + (_usage_int(raw, "cache_creation_input_tokens") or 0)
+            + (_usage_int(raw, "cache_read_input_tokens") or 0)
+        )
+    else:
+        return None
+
+    output_tokens = (
+        _usage_int(raw, "completion_tokens")
+        if _usage_int(raw, "completion_tokens") is not None
+        else (_usage_int(raw, "output_tokens") or 0)
+    )
+    total_tokens = _usage_int(raw, "total_tokens")
+    prompt_details = raw.get("prompt_tokens_details")
+    completion_details = raw.get("completion_tokens_details")
+    cached_input_tokens = (
+        _usage_int(prompt_details, "cached_tokens")
+        if isinstance(prompt_details, Mapping)
+        else None
+    )
+    if cached_input_tokens is None:
+        cached_input_tokens = _usage_int(raw, "cache_read_input_tokens") or 0
+    reasoning_output_tokens = (
+        _usage_int(completion_details, "reasoning_tokens")
+        if isinstance(completion_details, Mapping)
+        else None
+    ) or 0
+    return ModelTokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
+    )
+
+
+def _usage_int(value: Mapping[str, Any], key: str) -> int | None:
+    raw = value.get(key)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        result = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return result if result >= 0 else None
 
 
 def _normalize_finish_reason(value) -> ModelFinishReason | None:

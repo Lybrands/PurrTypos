@@ -108,8 +108,6 @@
 .lexical-content {
   min-height: 100%;
   padding: var(--spacing-xl);
-  /* 右侧让出一段「字数标尺」专用槽，避免 .lexical-word-ruler 浮签压到行尾文字 */
-  padding-right: calc(var(--spacing-xl) + 64px);
   outline: none;
   font-size: var(--font-size-lg);
   line-height: 1.9;
@@ -127,39 +125,65 @@
   }
 }
 
-/* ─── 字数标尺：每 500 字浮签，贴在跨过该阈值的段落顶部右侧 ───── */
-/* 位置：坐在 .lexical-content 让出的 padding-right 槽里，不与正文重叠 */
+/* ─── 字数标尺：每 500 字一个短横线，不参与正文排版 ─────────── */
 .lexical-word-ruler {
   position: absolute;
   right: 8px;
   z-index: 4;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px;
-  font-size: 11px;
-  font-family: var(--font-family);
-  color: var(--text-muted);
-  background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-  border-radius: 999px;
-  pointer-events: none;
+  display: grid;
+  width: 18px;
+  height: 14px;
+  padding: 0;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  pointer-events: auto;
   user-select: none;
-  white-space: nowrap;
-  opacity: 0.65;
-  transition: opacity 0.18s, color 0.18s;
+  opacity: 0.46;
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
 
-  /* 整数千字位高亮一点 */
-  &:nth-child(2n) {
-    color: var(--text-secondary, var(--text-muted));
+  &::before {
+    width: 7px;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--text-muted);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--text-muted) 28%, transparent);
+    content: '';
+    transition:
+      width var(--transition-fast),
+      height var(--transition-fast),
+      background-color var(--transition-fast),
+      box-shadow var(--transition-fast);
+  }
+
+  /* 整数千字位只增加长度，不在默认状态使用强调色。 */
+  &.is-major::before {
+    width: 10px;
+    height: 2px;
+    background: var(--text-muted);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--text-muted) 28%, transparent);
+  }
+
+  &:hover::before {
+    width: 14px;
+    height: 3px;
+    background: var(--accent);
+    box-shadow:
+      0 0 5px color-mix(in srgb, var(--accent) 80%, transparent),
+      0 0 12px color-mix(in srgb, var(--accent) 46%, transparent);
   }
 }
 
 .editor-lexical-wrap:hover .lexical-word-ruler,
 .editor-lexical-wrap.lexical-focused .lexical-word-ruler {
+  opacity: 0.78;
+}
+
+.editor-lexical-wrap .lexical-word-ruler:hover {
   opacity: 1;
+  transform: translateX(-1px);
 }
 
 .lexical-placeholder {
@@ -215,9 +239,12 @@
     );
   }
 
-  /* 字数浮签贴在「居中列」右边内侧，而非 wrap 最右；窄屏退化贴 wrap 右侧 */
+  /*
+   * 宽屏时把字数浮签放到正文列右侧的空白区域，不占用正文宽度；
+   * 当侧边空白不足时退化为贴住滚动区域右侧的悬浮层。
+   */
   .lexical-word-ruler {
-    right: max(8px, calc(var(--main-col-gutter) + 16px));
+    right: max(8px, calc(var(--main-col-gutter) - 58px));
   }
 
   /* 底部工具栏（撤销/排版/字数）也居中限宽，与正文对齐

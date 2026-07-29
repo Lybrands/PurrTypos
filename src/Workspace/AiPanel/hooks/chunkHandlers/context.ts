@@ -37,7 +37,16 @@ export const handleContextCompaction: ChunkHandler = (chunk, ctx) => {
 
 export const handleContextBudget: ChunkHandler = (chunk, ctx) => {
   if (!chunk.contextBudget) return;
-  const budget: AiContextBudgetState = { ...chunk.contextBudget };
+  if (
+    !ctx.acc.contextBudget
+    && chunk.contextBudget.windowTokens === undefined
+  ) {
+    return;
+  }
+  const budget = {
+    ...(ctx.acc.contextBudget ?? {}),
+    ...chunk.contextBudget,
+  } as AiContextBudgetState;
   ctx.acc.contextBudget = budget;
   updateLastAssistant(ctx, { contextBudget: budget });
 };

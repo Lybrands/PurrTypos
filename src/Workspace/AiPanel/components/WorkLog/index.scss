@@ -40,6 +40,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+.work-log__toggle--static {
+  cursor: default;
+
+  &:hover {
+    color: var(--text-muted);
+    border-bottom-color: var(--border-light);
+  }
+}
+
 .work-log__chevron {
   flex-shrink: 0;
   font-size: 10px;
@@ -94,6 +103,35 @@
       margin-bottom: 0;
     }
   }
+}
+
+.work-log__thinking {
+  margin: 5px 0 8px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  word-break: break-word;
+
+  p {
+    margin: 0 0 0.45em;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  ul,
+  ol {
+    margin: 0 0 0.45em;
+    padding-left: 1.2em;
+  }
+
+  .a-thinking-cursor {
+    margin-left: 2px;
+  }
+}
+
+.work-log__thinking--active {
+  color: var(--text-primary);
 }
 
 .work-log__context-compaction {
