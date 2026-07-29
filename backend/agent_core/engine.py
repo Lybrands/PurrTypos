@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
 from agent_core.cancellation import OperationCanceled, await_with_cancellation
 from agent_core.context_budget import (
     allocate_context_budget,
+    estimate_agent_messages_tokens,
     estimate_json_tokens,
     trim_agent_messages_by_turn,
 )
@@ -34,6 +35,7 @@ from agent_core.contracts import (
     PlanningConstraints,
     PlanningKind,
     PlanningTurn,
+    PostPlanningContextOptimizationResult,
     ResponseConstraints,
     RunCreateParams,
     RunId,
@@ -80,6 +82,7 @@ from agent_core.ports import (
     ToolIdempotencyGateway,
     ToolRegistration,
     ModelGateway,
+    PostPlanningContextOptimizer,
 )
 from agent_core.run_controller import AgentRunController
 from agent_core.run_state import RunStateMachine
@@ -178,6 +181,9 @@ class AgentCore:
         context_provider: ContextProvider | None = None,
         execution_state_factory: ExecutionStateFactory | None = None,
         tool_catalog: ToolCatalog | None = None,
+        post_planning_context_optimizer: (
+            PostPlanningContextOptimizer | None
+        ) = None,
         approval_gateway: ApprovalGateway | None = None,
         tool_idempotency_gateway: ToolIdempotencyGateway | None = None,
         runtime_limits: RuntimeLimits = RuntimeLimits(),
@@ -186,6 +192,9 @@ class AgentCore:
         self._model_gateway = model_gateway
         self._repository = run_repository
         self._runtime_limits = runtime_limits
+        self._post_planning_context_optimizer = (
+            post_planning_context_optimizer
+        )
         default_planner_limits = PlannerLimits()
         self._planner = planner or AgentPlanner(
             model_gateway,
@@ -452,6 +461,7 @@ class AgentCore:
                     outcome="invalid",
                     error=error,
                     started=planning_started,
+                    safe_details={"reasonCode": error.code},
                 )
                 await controller.fail("planning_invalid")
                 for event in sink.drain():
@@ -591,6 +601,179 @@ class AgentCore:
                         duration_ms=_duration_ms(retrieval_started),
                     ))
                 _validate_context_allocations(bundle, budget)
+                post_planning_diagnostics: dict[str, Any] = {
+                    "outcome": "not_configured",
+                    "plannedStepCount": len(plan.steps) if plan is not None else 0,
+                    "plannedToolCount": (
+                        sum(
+                            step.executor is StepExecutor.TOOL
+                            for step in plan.steps
+                        )
+                        if plan is not None
+                        else 0
+                    ),
+                    "selectedToolCount": len(selected_names),
+                }
+                optimizer = self._post_planning_context_optimizer
+                if optimizer is not None:
+                    resolved_context_tokens = estimate_agent_messages_tokens(
+                        _assemble_messages((), bundle.blocks, plan)
+                    )
+                    optimization_started = asyncio.Event()
+                    optimization_started_payload: dict[str, Any] = {}
+
+                    async def notify_optimization_started(
+                        payload: Mapping[str, Any],
+                    ) -> None:
+                        optimization_started_payload.update(dict(payload))
+                        optimization_started.set()
+
+                    optimization_task = asyncio.create_task(optimizer.optimize(
+                        request,
+                        provider_input_tokens=budget.provider_input_tokens,
+                        resolved_context_tokens=resolved_context_tokens,
+                        output_reserve_tokens=budget.output_reserve_tokens,
+                        planned_step_count=post_planning_diagnostics[
+                            "plannedStepCount"
+                        ],
+                        planned_tool_count=post_planning_diagnostics[
+                            "plannedToolCount"
+                        ],
+                        selected_tool_names=tuple(sorted(selected_names)),
+                        signal=signal,
+                        on_compaction_started=notify_optimization_started,
+                    ))
+                    optimization_started_wait = asyncio.create_task(
+                        optimization_started.wait()
+                    )
+                    optimization_result: (
+                        PostPlanningContextOptimizationResult | None
+                    ) = None
+                    optimization_failed = False
+                    try:
+                        done, _pending = await asyncio.wait(
+                            (optimization_task, optimization_started_wait),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if optimization_started.is_set():
+                            started_event = AgentEvent(
+                                type="conversation.compaction.started",
+                                run_id=controller.run_id,
+                                payload={
+                                    "status": "running",
+                                    "postPlanning": True,
+                                    **optimization_started_payload,
+                                },
+                            )
+                            await self._publish_runtime_event(
+                                controller.run_id,
+                                started_event,
+                            )
+                            yield started_event
+                        candidate = await optimization_task
+                        if not isinstance(
+                            candidate,
+                            PostPlanningContextOptimizationResult,
+                        ):
+                            raise ContractViolationError(
+                                "post-planning context optimizer returned "
+                                "an invalid result"
+                            )
+                        optimization_result = candidate
+                    except OperationCanceled:
+                        raise
+                    except Exception as error:
+                        optimization_failed = True
+                        await _record_safe_exception(
+                            controller,
+                            stage="post_planning_context_optimization",
+                            outcome="failed_open",
+                            error=error,
+                        )
+                    finally:
+                        if not optimization_started_wait.done():
+                            optimization_started_wait.cancel()
+                        if not optimization_task.done():
+                            optimization_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await optimization_started_wait
+                        with suppress(asyncio.CancelledError, Exception):
+                            await optimization_task
+
+                    if optimization_result is not None:
+                        request = optimization_result.request
+                        post_planning_diagnostics = {
+                            **post_planning_diagnostics,
+                            **thaw_json_mapping(
+                                optimization_result.diagnostics
+                            ),
+                            "outcome": optimization_result.outcome,
+                            "postPlanning": True,
+                            "resolvedContextTokens": resolved_context_tokens,
+                            "compactedTurnCount": (
+                                optimization_result.compacted_turn_count
+                            ),
+                            "retainedRawTurnCount": (
+                                optimization_result.retained_raw_turn_count
+                            ),
+                            "summaryVersion": (
+                                optimization_result.summary_version
+                            ),
+                        }
+                        await controller.record_trace(TraceRecord(
+                            stage="post_planning_context_optimization",
+                            outcome=optimization_result.outcome,
+                            details=post_planning_diagnostics,
+                        ))
+                    elif optimization_failed:
+                        post_planning_diagnostics = {
+                            **post_planning_diagnostics,
+                            "outcome": "failed_open",
+                            "postPlanning": True,
+                            "resolvedContextTokens": resolved_context_tokens,
+                        }
+
+                    if optimization_started.is_set():
+                        completed_event = AgentEvent(
+                            type="conversation.compaction.completed",
+                            run_id=controller.run_id,
+                            payload={
+                                "status": (
+                                    "completed"
+                                    if optimization_result is not None
+                                    and optimization_result.outcome.startswith(
+                                        "compacted"
+                                    )
+                                    else "failed"
+                                ),
+                                "postPlanning": True,
+                                "outcome": (
+                                    optimization_result.outcome
+                                    if optimization_result is not None
+                                    else "failed_open"
+                                ),
+                                "compactedTurnCount": (
+                                    optimization_result.compacted_turn_count
+                                    if optimization_result is not None
+                                    else 0
+                                ),
+                                "retainedRawTurnCount": (
+                                    optimization_result.retained_raw_turn_count
+                                    if optimization_result is not None
+                                    else 0
+                                ),
+                                "summaryVersion": (
+                                    optimization_result.summary_version
+                                    if optimization_result is not None
+                                    else None
+                                ),
+                            },
+                        )
+                        await self._publish_runtime_event(
+                            controller.run_id,
+                            completed_event,
+                        )
+                        yield completed_event
                 prepared_request = replace(
                     request,
                     messages=_assemble_messages(request.messages, bundle.blocks, plan),
@@ -626,6 +809,7 @@ class AgentCore:
                         ),
                         "contextMode": context_mode,
                         "droppedMessages": trimmed.dropped_count,
+                        "postPlanningOptimization": post_planning_diagnostics,
                     },
                     duration_ms=_duration_ms(setup_started),
                 ))
@@ -656,7 +840,12 @@ class AgentCore:
                         "contextAllocations": thaw_json_mapping(
                             budget.context_allocations
                         ),
-                        "diagnostics": thaw_json_mapping(bundle.diagnostics),
+                        "diagnostics": {
+                            **thaw_json_mapping(bundle.diagnostics),
+                            "postPlanningOptimization": (
+                                post_planning_diagnostics
+                            ),
+                        },
                     },
                 )
                 await self._publish_runtime_event(controller.run_id, budget_event)
@@ -1326,11 +1515,15 @@ async def _record_safe_exception(
     outcome: str,
     error: Exception,
     started: float | None = None,
+    safe_details: Mapping[str, Any] | None = None,
 ) -> None:
     await controller.record_trace(TraceRecord(
         stage=stage,
         outcome=outcome,
-        details={"errorType": type(error).__name__},
+        details={
+            "errorType": type(error).__name__,
+            **dict(safe_details or {}),
+        },
         duration_ms=(_duration_ms(started) if started is not None else None),
     ))
 

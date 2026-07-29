@@ -7,7 +7,6 @@ export type FontSizeLevel = 'small' | 'medium' | 'large'
 interface FontSizeContextValue {
   fontSize: FontSizeLevel
   setFontSize: (level: FontSizeLevel) => void
-  cycleFontSize: () => void
 }
 
 const FontSizeContext = React.createContext<FontSizeContextValue | null>(null)
@@ -42,16 +41,45 @@ export function FontSizeProvider({ children }: { children: React.ReactNode }) {
     setFontSizeState(level)
   }, [])
 
-  const cycleFontSize = React.useCallback(() => {
-    setFontSizeState((prev) => {
-      const idx = LEVELS.indexOf(prev)
-      return LEVELS[(idx + 1) % LEVELS.length]
-    })
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+
+      const increase =
+        event.key === '+' ||
+        event.key === '=' ||
+        event.code === 'NumpadAdd'
+      const decrease =
+        event.key === '-' ||
+        event.key === '_' ||
+        event.code === 'NumpadSubtract'
+      const reset = event.key === '0' || event.code === 'Numpad0'
+
+      if (!increase && !decrease && !reset) return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (reset) {
+        setFontSizeState('medium')
+        return
+      }
+
+      const direction = increase ? 1 : -1
+      setFontSizeState((current) => {
+        const currentIndex = LEVELS.indexOf(current)
+        const nextIndex = Math.min(LEVELS.length - 1, Math.max(0, currentIndex + direction))
+        return LEVELS[nextIndex]
+      })
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [])
 
   const value = React.useMemo(
-    () => ({ fontSize, setFontSize, cycleFontSize }),
-    [fontSize, setFontSize, cycleFontSize]
+    () => ({ fontSize, setFontSize }),
+    [fontSize, setFontSize]
   )
 
   return <FontSizeContext.Provider value={value}>{children}</FontSizeContext.Provider>

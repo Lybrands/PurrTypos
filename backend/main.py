@@ -99,6 +99,7 @@ async def lifespan(application: FastAPI):
             memories,
             outlines,
             prompt_templates,
+            screenplay,
             sessions,
             setting_diff,
             setting_entities,
@@ -120,6 +121,7 @@ async def lifespan(application: FastAPI):
         application.include_router(story_background.router, prefix="/api")
         application.include_router(files.router, prefix="/api")
         application.include_router(prompt_templates.router, prefix="/api")
+        application.include_router(screenplay.router, prefix="/api")
         application.include_router(book_style.router, prefix="/api")
         application.include_router(chapter_diff.router, prefix="/api")
         application.include_router(setting_diff.router, prefix="/api")

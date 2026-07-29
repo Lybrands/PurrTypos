@@ -12,36 +12,32 @@ import "./index.scss";
 
 export interface ContextUsageIndicatorProps {
   conversations: ChatMessage[];
-  prompt: string;
   selectedModelConfig: AiModelConfig | null;
-  loading: boolean;
 }
 
 export default function ContextUsageIndicator({
   conversations,
-  prompt,
   selectedModelConfig,
-  loading,
 }: ContextUsageIndicatorProps) {
   const usage = React.useMemo(
     () => calculateContextUsage({
       messages: conversations,
-      prompt,
       windowTokens: contextWindowTokens(
         getDefaultModelContextWindow(selectedModelConfig),
       ),
-      loading,
     }),
-    [conversations, loading, prompt, selectedModelConfig],
+    [conversations, selectedModelConfig],
   );
+  if (!usage) return null;
+
   const percent = Math.max(0, Math.round(usage.ratio * 100));
+  const formattedUsage =
+    `${formatContextTokens(usage.usedTokens)} / ${formatContextTokens(usage.windowTokens)}`;
   const tooltip = (
     <div className="context-usage-tooltip">
-      <div>上下文已用约 {formatContextTokens(usage.usedTokens)} / {formatContextTokens(usage.windowTokens)}</div>
+      <div>最近一次模型实际输入 {formattedUsage}</div>
       <div className="context-usage-tooltip__hint">
-        {usage.source === "backend"
-          ? "基于最近一次后端实际输入预算，当前新增文字为估算。"
-          : "尚无运行预算，当前按对话文字保守估算。"}
+        仅使用模型供应商上报值，不包含本地估算。
       </div>
     </div>
   );
@@ -50,15 +46,13 @@ export default function ContextUsageIndicator({
     <Tooltip title={tooltip} placement="top">
       <span
         className="context-usage"
-        aria-label={`上下文已用 ${percent}%`}
+        aria-label={`最近一次模型实际输入 ${formattedUsage}`}
       >
         <span
           className="context-usage__gauge"
           style={{ "--context-usage": `${Math.min(100, percent)}%` } as React.CSSProperties}
         />
-        <span className="context-usage__value">
-          {formatContextTokens(usage.usedTokens)} / {formatContextTokens(usage.windowTokens)}
-        </span>
+        <span className="context-usage__value">{formattedUsage}</span>
       </span>
     </Tooltip>
   );

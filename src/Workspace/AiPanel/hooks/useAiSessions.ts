@@ -6,6 +6,10 @@ import type { ChatMessage } from "./chat.types";
 // "setting" 为历史存储值，对应 UI 上的「全局对话」（不绑章节、整本书共享）
 export type ChatSessionScope = "chapter" | "setting";
 
+// AiPanel 会随工作台切换卸载；把每个作用域最后打开的会话保留在模块生命周期内，
+// 返回工作台时优先恢复原会话，而不是总是跳到列表最后一项。
+const activeSessionByLoadKey = new Map<string, number>();
+
 interface UseAiSessionsParams {
   bookId: EntityId | null | undefined;
   chapterId: EntityId | null | undefined;
@@ -13,7 +17,6 @@ interface UseAiSessionsParams {
   scope?: ChatSessionScope;
   conversations: ChatMessage[];
   setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  loading: boolean;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
@@ -23,14 +26,13 @@ export function useAiSessions({
   scope = "chapter",
   conversations,
   setConversations,
-  loading,
   setLoading,
 }: UseAiSessionsParams) {
   const appMessage = useToast();
   const [sessions, setSessions] = React.useState<AiSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = React.useState<number | null>(
-    null,
-  );
+  const [activeSessionId, setActiveSessionIdState] = React.useState<
+    number | null
+  >(null);
   const [prependedHistory, setPrependedHistory] = React.useState<ChatMessage[]>(
     [],
   );
@@ -39,13 +41,24 @@ export function useAiSessions({
   /** 当前 book+scope(+chapter) 维度的会话列表是否已完成首次拉取 */
   const [sessionsLoaded, setSessionsLoaded] = React.useState(false);
   const loadKeyRef = React.useRef<string>("");
+  const setActiveSessionId = React.useCallback<
+    React.Dispatch<React.SetStateAction<number | null>>
+  >((next) => {
+    setActiveSessionIdState((current) => {
+      const resolved = typeof next === "function" ? next(current) : next;
+      if (resolved != null && loadKeyRef.current) {
+        activeSessionByLoadKey.set(loadKeyRef.current, resolved);
+      }
+      return resolved;
+    });
+  }, []);
 
   React.useEffect(() => {
     const isSettingScope = scope === "setting";
     if (bookId == null || (!isSettingScope && chapterId == null)) {
       setConversations([]);
       setSessions([]);
-      setActiveSessionId(null);
+      setActiveSessionIdState(null);
       setSessionsLoaded(false);
       setLoading(false);
       return;
@@ -57,7 +70,7 @@ export function useAiSessions({
     loadKeyRef.current = key;
     setConversations([]);
     setSessions([]);
-    setActiveSessionId(null);
+    setActiveSessionIdState(null);
     setSessionsLoaded(false);
     setLoading(false);
 
@@ -71,7 +84,16 @@ export function useAiSessions({
         if (loadKeyRef.current !== key) return;
         if (res.success && res.data.length > 0) {
           setSessions(res.data);
-          setActiveSessionId(res.data[res.data.length - 1].id);
+          const rememberedSessionId = activeSessionByLoadKey.get(key);
+          const restoredSession = res.data.find(
+            (session) => session.id === rememberedSessionId,
+          );
+          const nextSessionId =
+            restoredSession?.id ?? res.data[res.data.length - 1].id;
+          activeSessionByLoadKey.set(key, nextSessionId);
+          setActiveSessionIdState(nextSessionId);
+        } else if (res.success) {
+          activeSessionByLoadKey.delete(key);
         }
         setSessionsLoaded(true);
       });
@@ -86,10 +108,6 @@ export function useAiSessions({
     const isSettingScope = scope === "setting";
     if (!isSettingScope && chapterId == null) {
       appMessage.warning("请选择一个章节，再创建对话");
-      return;
-    }
-    if (loading) {
-      appMessage.warning("当前对话进行中，请先等待完成或停止");
       return;
     }
     if (sessions.length > 0 && conversations.length === 0) return;
@@ -107,7 +125,6 @@ export function useAiSessions({
     scope,
     sessions.length,
     conversations.length,
-    loading,
     appMessage,
   ]);
 
@@ -127,17 +144,13 @@ export function useAiSessions({
 
   const handleOpenFromHistory = React.useCallback(
     (session: AiSession) => {
-      if (loading) {
-        appMessage.warning("当前对话进行中，请先等待完成或停止");
-        return;
-      }
       window.electronAPI.setSessionReopened({ sessionId: session.id });
       setSessions((prev) =>
         prev.some((s) => s.id === session.id) ? prev : [...prev, session],
       );
       setActiveSessionId(session.id);
     },
-    [loading, appMessage],
+    [],
   );
 
   const handleDeleteFromHistory = React.useCallback(

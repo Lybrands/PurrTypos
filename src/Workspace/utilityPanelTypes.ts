@@ -1,6 +1,8 @@
 import type { Chapter } from '../types'
 import type { ChapterOutlineTarget } from './DirectorNotebook/ChapterOutlineModal'
 
+export const EDITOR_TAB_KEY = 'editor'
+
 export type WorkspaceUtilityTabKind =
   | 'outline'
   | 'memory'

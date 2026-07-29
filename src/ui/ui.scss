@@ -47,6 +47,25 @@
   animation: purr-spin 0.85s linear infinite;
 }
 
+.purr-panel-toggle-icon {
+  font-size: 17px;
+}
+
+.purr-panel-toggle-icon__arrow {
+  transform-origin: center;
+  transition: transform var(--transition-fast);
+}
+
+.purr-button:hover .purr-panel-toggle-icon[data-direction='left'] .purr-panel-toggle-icon__arrow,
+.purr-button:focus-visible .purr-panel-toggle-icon[data-direction='left'] .purr-panel-toggle-icon__arrow {
+  transform: translateX(-0.65px);
+}
+
+.purr-button:hover .purr-panel-toggle-icon[data-direction='right'] .purr-panel-toggle-icon__arrow,
+.purr-button:focus-visible .purr-panel-toggle-icon[data-direction='right'] .purr-panel-toggle-icon__arrow {
+  transform: translateX(0.65px);
+}
+
 /* ─── Button ────────────────────────────────────────── */
 .purr-button {
   position: relative;
@@ -989,8 +1008,19 @@
   border-radius: 5px;
   font-size: 15px;
   line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast),
+    background var(--transition-fast);
 
   &:hover { color: var(--text-primary); background: var(--bg-active); }
+}
+.purr-tabs__tab:hover > .purr-tabs__remove,
+.purr-tabs__tab:focus-within > .purr-tabs__remove {
+  opacity: 1;
+  pointer-events: auto;
 }
 .purr-tabs__extra {
   display: flex;

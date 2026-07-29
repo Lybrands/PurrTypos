@@ -20,6 +20,7 @@ from agent_core.cancellation import (
     await_with_cancellation,
 )
 from agent_core.context_budget import (
+    estimate_agent_messages_tokens,
     estimate_tool_schema_tokens,
     trim_agent_messages_by_turn,
 )
@@ -33,6 +34,7 @@ from agent_core.contracts import (
     MessageRole,
     ModelFinishReason,
     ModelInvocation,
+    ModelTokenUsage,
     ResponseConstraints,
     ResponseValidationResult,
     RuntimeLimits,
@@ -92,6 +94,14 @@ _MISSING_REQUIRED_TOOL_CALL_RETRY_GUIDANCE = (
     "to one of the tools currently exposed by the host. Do not describe, imitate, "
     "or wrap the call in ordinary text."
 )
+_EMPTY_RESPONSE_RETRY_GUIDANCE = (
+    "Your preceding model round ended after internal reasoning without any "
+    "user-visible response. Continue the task now. If more evidence is required, "
+    "use one of the currently exposed tools through a valid structured call; "
+    "otherwise provide a complete visible answer in the user's language. Do not "
+    "return reasoning alone."
+)
+_MAX_EMPTY_RESPONSE_RETRIES = 2
 _DECLINED_FINAL_RESPONSE_ZH = "您已拒绝审批；操作未执行，相关数据仍保留。"
 _DECLINED_FINAL_RESPONSE_EN = (
     "You rejected the approval. The operation was not executed, and the "
@@ -199,6 +209,7 @@ class AgentRuntime:
         textual_tool_call_retry_used = False
         response_repair_phases_used: set[str] = set()
         response_repair_pending = False
+        empty_response_retry_count = 0
         provider_interruption_retry_used = False
         pending_provider_attempt: _PendingProviderAttempt | None = None
         logical_round_number = 0
@@ -310,34 +321,6 @@ class AgentRuntime:
                         None if initial_logical_round else round_input_tokens
                     )
                 )
-                if active_token_budget is not None:
-                    trimmed = trim_agent_messages_by_turn(
-                        messages,
-                        active_token_budget,
-                    )
-                    messages = list(trimmed.messages)
-                    if trimmed.overflow_tokens > 0:
-                        await self._trace(
-                            "context_budget",
-                            (
-                                "overflow_initial"
-                                if initial_logical_round
-                                else "overflow_after_tool"
-                            ),
-                            details={"round": round_number},
-                        )
-                        yield _runtime_result(
-                            run_id,
-                            RuntimeOutcome.FAILED,
-                            used_model,
-                            round_index,
-                            error_code=(
-                                "context_overflow_initial"
-                                if initial_logical_round
-                                else "context_overflow_after_tool"
-                            ),
-                        )
-                        return
 
                 allowed_names = self._allowed_names(
                     configured_tools,
@@ -378,14 +361,33 @@ class AgentRuntime:
                     evidence_store=evidence_store,
                     enabled=stage_context_projection_enabled,
                     initial_round=initial_logical_round,
+                    token_budget=active_token_budget,
                 )
+                canonical_tokens = estimate_agent_messages_tokens(messages)
+                projected_tokens = estimate_agent_messages_tokens(
+                    projection.messages
+                )
+                if active_token_budget is not None:
+                    trimmed = trim_agent_messages_by_turn(
+                        projection.messages,
+                        active_token_budget,
+                    )
+                    round_context_messages = trimmed.messages
+                    sent_tokens = trimmed.token_estimate
+                    dropped_messages = trimmed.dropped_count
+                    overflow_tokens = trimmed.overflow_tokens
+                else:
+                    round_context_messages = projection.messages
+                    sent_tokens = projected_tokens
+                    dropped_messages = 0
+                    overflow_tokens = 0
                 if (
                     projection.dropped_context_blocks
                     or projection.compacted_tool_results
                 ):
                     await self._trace(
                         "context_projection",
-                        "optional_blocks_removed",
+                        projection.mode,
                         details={
                             "round": round_number,
                             "toolNames": sorted(
@@ -398,11 +400,84 @@ class AgentRuntime:
                                 projection.compacted_tool_results
                             ),
                             "savedTokens": projection.saved_tokens,
+                            "targetTokens": projection.target_tokens,
+                            "canonicalTokens": canonical_tokens,
+                            "projectedTokens": projected_tokens,
                         },
                     )
+                runtime_budget_outcome = (
+                    "overflow"
+                    if overflow_tokens
+                    else "rebalanced"
+                    if (
+                        projection.saved_tokens > 0
+                        or dropped_messages > 0
+                    )
+                    else "within_budget"
+                )
+                await self._trace(
+                    "runtime_context_budget",
+                    runtime_budget_outcome,
+                    details={
+                        "round": round_number,
+                        "logicalRound": logical_round_number + 1,
+                        "initialRound": initial_logical_round,
+                        "tokenBudget": active_token_budget,
+                        "canonicalTokens": canonical_tokens,
+                        "projectedTokens": projected_tokens,
+                        "sentTokens": sent_tokens,
+                        "pressureRatio": (
+                            round(
+                                sent_tokens / active_token_budget,
+                                4,
+                            )
+                            if active_token_budget
+                            else None
+                        ),
+                        "projectionMode": projection.mode,
+                        "projectionSavedTokens": projection.saved_tokens,
+                        "droppedMessages": dropped_messages,
+                        "overflowTokens": overflow_tokens,
+                        "completeEvidenceTokens": evidence_store.token_estimate,
+                    },
+                )
+                if overflow_tokens > 0:
+                    overflow_outcome = (
+                        "overflow_initial"
+                        if initial_logical_round
+                        else "overflow_after_tool"
+                    )
+                    await self._trace(
+                        "context_budget",
+                        overflow_outcome,
+                        details={
+                            "round": round_number,
+                            "tokenBudget": active_token_budget,
+                            "canonicalTokens": canonical_tokens,
+                            "projectedTokens": projected_tokens,
+                            "sentTokens": sent_tokens,
+                            "projectionMode": projection.mode,
+                            "projectionSavedTokens": (
+                                projection.saved_tokens
+                            ),
+                            "overflowTokens": overflow_tokens,
+                        },
+                    )
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.FAILED,
+                        used_model,
+                        round_index,
+                        error_code=(
+                            "context_overflow_initial"
+                            if initial_logical_round
+                            else "context_overflow_after_tool"
+                        ),
+                    )
+                    return
                 logical_round_number += 1
                 provider_attempt = _PendingProviderAttempt(
-                    messages=projection.messages,
+                    messages=round_context_messages,
                     invocation=ModelInvocation(
                         request=request.model,
                         tools=visible_tools,
@@ -431,6 +506,13 @@ class AgentRuntime:
             future_names = provider_attempt.future_names
             require_tool = provider_attempt.require_tool
             buffer_model_content = provider_attempt.buffer_model_content
+            # Tool-step answer text stays buffered until the structured call is
+            # validated, but ordinary provider thinking is part of the visible
+            # work log. Only protocol-repair rounds after an approval decline or
+            # a rejected final answer keep their reasoning private.
+            suppress_thinking = bool(
+                declined_response_pending or response_repair_pending
+            )
 
             model_started = perf_counter()
             accumulator = _ModelRoundAccumulator()
@@ -649,7 +731,7 @@ class AgentRuntime:
                         break
                     received_chunk_count += 1
                     accumulator.add(chunk)
-                    if chunk.thinking_delta and not buffer_model_content:
+                    if chunk.thinking_delta and not suppress_thinking:
                         emitted_delta_count += 1
                         yield AgentEvent(
                             type=CoreEventType.MODEL_THINKING_DELTA,
@@ -773,6 +855,55 @@ class AgentRuntime:
 
             calls, malformed_call_error = accumulator.tool_calls()
             finish_reason = accumulator.finish_reason
+            local_input_estimate = (
+                estimate_agent_messages_tokens(round_messages)
+                + estimate_tool_schema_tokens(invocation.tools)
+            )
+            if accumulator.usage is not None:
+                usage = accumulator.usage
+                await self._trace(
+                    "model_usage",
+                    "provider_reported",
+                    details={
+                        "round": round_number,
+                        "attempt": provider_attempt.attempt,
+                        "logicalRound": provider_attempt.logical_round,
+                        "actualInputTokens": usage.input_tokens,
+                        "actualOutputTokens": usage.output_tokens,
+                        "actualTotalTokens": usage.total_tokens,
+                        "cachedInputTokens": usage.cached_input_tokens,
+                        "reasoningOutputTokens": (
+                            usage.reasoning_output_tokens
+                        ),
+                        "localInputEstimate": local_input_estimate,
+                    },
+                )
+                # Later tool rounds can contain transient EvidenceStore
+                # projections that are not retained by the conversation.
+                # Only the first logical request is a valid UI anchor.
+                if provider_attempt.logical_round == 1:
+                    yield AgentEvent(
+                        type=CoreEventType.CONTEXT_USAGE_RECORDED,
+                        run_id=run_id,
+                        payload={
+                            "actualInputTokens": usage.input_tokens,
+                            "actualOutputTokens": usage.output_tokens,
+                            "actualTotalTokens": usage.total_tokens,
+                            "cachedInputTokens": (
+                                usage.cached_input_tokens
+                            ),
+                            "reasoningOutputTokens": (
+                                usage.reasoning_output_tokens
+                            ),
+                            "actualUsageRound": (
+                                provider_attempt.logical_round
+                            ),
+                            "inputTokenEstimateAtUsage": (
+                                local_input_estimate
+                            ),
+                            "usageSource": "provider",
+                        },
+                    )
             await self._trace(
                 "model_round",
                 (finish_reason.value if finish_reason is not None else "stream_end"),
@@ -942,6 +1073,54 @@ class AgentRuntime:
                         used_model,
                         round_number,
                         error_code="unstructured_tool_call_after_rejection",
+                    )
+                    return
+
+                if (
+                    not declined_response_pending
+                    and not accumulator.content.strip()
+                ):
+                    can_retry = bool(
+                        empty_response_retry_count
+                        < _MAX_EMPTY_RESPONSE_RETRIES
+                        and round_index < self._limits.max_model_rounds - 1
+                    )
+                    await self._trace(
+                        "model_output",
+                        (
+                            "empty_response_retry"
+                            if can_retry
+                            else "empty_response_rejected"
+                        ),
+                        details={
+                            "round": round_number,
+                            "retryCount": empty_response_retry_count,
+                            "retryScheduled": can_retry,
+                            "thinkingCharacters": len(
+                                accumulator.thinking or ""
+                            ),
+                        },
+                    )
+                    if can_retry:
+                        empty_response_retry_count += 1
+                        messages.extend((
+                            AgentMessage(
+                                role=MessageRole.ASSISTANT,
+                                content="",
+                                thinking=accumulator.thinking or None,
+                            ),
+                            AgentMessage(
+                                role=MessageRole.DEVELOPER,
+                                content=_EMPTY_RESPONSE_RETRY_GUIDANCE,
+                            ),
+                        ))
+                        continue
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.FAILED,
+                        used_model,
+                        round_number,
+                        error_code="empty_model_response",
                     )
                     return
 
@@ -1587,6 +1766,7 @@ class _ModelRoundAccumulator:
         self.content = ""
         self.thinking = ""
         self.finish_reason: ModelFinishReason | None = None
+        self.usage: ModelTokenUsage | None = None
         self._calls: dict[int, _ToolCallParts] = {}
         self._malformed_reason: str | None = None
 
@@ -1599,6 +1779,8 @@ class _ModelRoundAccumulator:
         self.thinking += chunk.thinking_delta
         if chunk.finish_reason is not None:
             self.finish_reason = chunk.finish_reason
+        if chunk.usage is not None:
+            self.usage = chunk.usage
         for delta in chunk.tool_call_deltas:
             current = self._calls.setdefault(delta.index, _ToolCallParts())
             if delta.id is not None:

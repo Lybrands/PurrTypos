@@ -9,8 +9,9 @@ const HomePage = lazy(() => import('./HomePage'))
 const BookshelfPage = lazy(() => import('./BookshelfPage'))
 const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
+const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
 
-type Page = 'home' | 'bookshelf' | 'workspace'
+type Page = 'home' | 'screenplay' | 'bookshelf' | 'workspace'
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
 
 function getStoredLastOpenedBookId(): EntityId | null {
@@ -105,11 +106,15 @@ export default function App() {
   }, [])
 
   React.useEffect(() => {
-    if (page === 'bookshelf') loadBooks()
+    if (page === 'bookshelf' || page === 'screenplay') loadBooks()
   }, [page, loadBooks])
 
   const handleEnterBookshelf = React.useCallback(() => {
     setPage('bookshelf')
+  }, [])
+
+  const handleEnterScreenplayAgent = React.useCallback(() => {
+    setPage('screenplay')
   }, [])
 
   const handleOpenBook = React.useCallback((book: Book) => {
@@ -178,8 +183,19 @@ export default function App() {
         <Suspense fallback={<div className="app-page-loading"><Spin size="large" /></div>}>
           {page === 'home' && (
             <HomePage
+              onEnterScreenplayAgent={handleEnterScreenplayAgent}
               onEnterBookshelf={handleEnterBookshelf}
               onOpenSettings={() => setShowSettings(true)}
+            />
+          )}
+          {page === 'screenplay' && (
+            <ScreenplayAgentPage
+              books={books}
+              lastOpenedBookId={lastOpenedBookId}
+              modelConfigs={configuredModelConfigs}
+              onOpenBookshelf={handleEnterBookshelf}
+              onOpenSettings={() => setShowSettings(true)}
+              onBack={handleBackToHome}
             />
           )}
           {page === 'bookshelf' && (

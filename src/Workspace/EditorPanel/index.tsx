@@ -2,13 +2,13 @@
 import React from 'react'
 import {
   CloseOutlined,
-  DoubleLeftOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
   UndoOutlined, RedoOutlined, AlignLeftOutlined,
   CopyOutlined,
   BorderlessTableOutlined,
   HistoryOutlined,
+  PanelToggleIcon,
 } from '../../ui'
 import { Button, Empty, Input, Tooltip, useToast, type TextAreaRef } from '../../ui'
 import type { AiModelConfig, EntityId } from '../../types'
@@ -24,6 +24,7 @@ import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
 import ModelPicker from '../AiPanel/components/ModelPicker'
 import { isModelThinkingEnabled } from '../../modelCatalog'
+import { createAiStreamId } from '../../utils/aiStream'
 import './index.scss'
 
 const AUTOSAVE_DELAY = 800
@@ -144,6 +145,7 @@ export default function EditorPanel({
     }
   )
   const aiChunkUnsubRef = React.useRef<(() => void) | null>(null)
+  const aiStreamIdRef = React.useRef<string | null>(null)
 
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
@@ -297,15 +299,19 @@ export default function EditorPanel({
       aiChunkUnsubRef.current?.()
       aiChunkUnsubRef.current = null
       if (hadActiveStream) {
-        window.electronAPI.abortAiStream()
+        window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
       }
+      aiStreamIdRef.current = null
     }
   }, [])
 
   const closeAiFloat = () => {
     aiChunkUnsubRef.current?.()
     aiChunkUnsubRef.current = null
-    if (aiFloat.loading) window.electronAPI.abortAiStream()
+    if (aiFloat.loading) {
+      window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
+    }
+    aiStreamIdRef.current = null
     setAiFloat((prev) => ({ ...prev, visible: false, x: 0, y: 0, loading: false }))
   }
 
@@ -317,7 +323,8 @@ export default function EditorPanel({
   const handleAiFloatAbort = React.useCallback(() => {
     aiChunkUnsubRef.current?.()
     aiChunkUnsubRef.current = null
-    window.electronAPI.abortAiStream()
+    window.electronAPI.abortAiStream(aiStreamIdRef.current ?? undefined)
+    aiStreamIdRef.current = null
     setAiFloat((prev) => ({ ...prev, loading: false }))
   }, [])
 
@@ -330,11 +337,14 @@ export default function EditorPanel({
     setAiFloat((prev) => ({ ...prev, loading: true, result: '' }))
 
     aiChunkUnsubRef.current?.()
+    const streamId = createAiStreamId('editor-float')
+    aiStreamIdRef.current = streamId
     const unsubscribe = window.electronAPI.onAiChunk((chunk) => {
       if (chunk.error) {
         setAiFloat((prev) => ({ ...prev, loading: false, result: '请求失败：' + chunk.error }))
         unsubscribe()
         aiChunkUnsubRef.current = null
+        aiStreamIdRef.current = null
         return
       }
       if (chunk.delta) {
@@ -344,8 +354,9 @@ export default function EditorPanel({
         setAiFloat((prev) => ({ ...prev, loading: false }))
         unsubscribe()
         aiChunkUnsubRef.current = null
+        aiStreamIdRef.current = null
       }
-    })
+    }, streamId)
     aiChunkUnsubRef.current = unsubscribe
 
     const useConfiguredTemperature =
@@ -380,6 +391,7 @@ export default function EditorPanel({
     }
 
     window.electronAPI.aiChatStream({
+      streamId,
       apiKey: selectedModelConfig.apiKey,
       baseURL: selectedModelConfig.baseUrl || undefined,
       apiProvider:
@@ -431,7 +443,7 @@ export default function EditorPanel({
               <Button
                 type="text"
                 size="small"
-                icon={<DoubleLeftOutlined style={{ fontSize: 14 }} />}
+                icon={<PanelToggleIcon side="right" action="expand" />}
                 onClick={onExpandDock}
                 aria-label="固定展开正文边栏"
               />

@@ -130,8 +130,26 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         if isinstance(diagnostics, Mapping):
             context_budget.update(dict(diagnostics))
         return {"contextBudget": context_budget}
+    if event.type == CoreEventType.CONTEXT_USAGE_RECORDED:
+        return {
+            "contextBudget": {
+                "actualInputTokens": payload.get("actualInputTokens"),
+                "actualOutputTokens": payload.get("actualOutputTokens"),
+                "actualTotalTokens": payload.get("actualTotalTokens"),
+                "cachedInputTokens": payload.get("cachedInputTokens"),
+                "reasoningOutputTokens": payload.get(
+                    "reasoningOutputTokens"
+                ),
+                "actualUsageRound": payload.get("actualUsageRound"),
+                "inputTokenEstimateAtUsage": payload.get(
+                    "inputTokenEstimateAtUsage"
+                ),
+                "usageSource": payload.get("usageSource"),
+            },
+        }
 
     domain_names = {
+        "screenplay.document_proposal": "proposedScreenplayDocument",
         "writing.proposed_chapter_diff": "proposedChapterDiff",
         "writing.proposed_setting_diff": "proposedSettingDiff",
         "writing.setting_updated": "settingUpdated",
@@ -179,6 +197,7 @@ def _runtime_error_message(error_code: str | None) -> str:
         "context_setup_failed": "写作上下文准备失败，Agent 已安全停止。",
         "context_overflow_after_tool": "工具结果超过剩余上下文窗口，Agent 已停止。",
         "missing_required_tool_call": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
+        "empty_model_response": "模型多次只返回内部推理，没有生成可展示的答复。请重试或更换模型。",
         "max_model_rounds": "Agent 已达到最大工具轮次，已停止继续执行。",
         "tool_not_authorized": "模型请求了当前计划未授权的工具，Agent 已停止。",
         "tool_call_after_approval_rejection": "您已拒绝审批；操作未执行，相关数据仍保留。Agent 已阻止再次调用工具。",

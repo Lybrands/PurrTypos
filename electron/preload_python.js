@@ -42,7 +42,8 @@ async function apiDelete(path) {
   return apiFetch(`/api${path}`, { method: 'DELETE' })
 }
 
-let _activeAiAbortController = null
+const _aiAbortControllers = new Map()
+let _latestAiStreamId = null
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // ─── File operations — IPC (need Electron native) ──────────────
@@ -52,6 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
   writeSingleTextFile: (data) => ipcRenderer.invoke('write-single-text-file', data),
+  writeScreenplayFile: (data) => ipcRenderer.invoke('write-screenplay-file', data),
+  exportScreenplayPdf: (data) => ipcRenderer.invoke('export-screenplay-pdf', data),
   exportEpub: (data) => ipcRenderer.invoke('export-epub', data),
   exportDatabase: () => ipcRenderer.invoke('export-database'),
   importDatabase: () => ipcRenderer.invoke('import-database'),
@@ -67,6 +70,55 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteBook: (data) => apiDelete(`/books/${data.bookId}`),
   renameBook: (data) => apiPut(`/books/${data.bookId}/rename`, { title: data.title }),
   getBookWordCount: (data) => apiGet(`/books/${data.bookId}/word-count`),
+
+  // ─── Screenplay projects — HTTP ────────────────────────────────
+  listScreenplayProjects: (data = {}) =>
+    apiGet(`/screenplay-projects${data.includeArchived ? '?includeArchived=true' : ''}`),
+  getScreenplayProject: (data) => apiGet(`/screenplay-projects/${data.projectId}`),
+  getOrCreateScreenplaySession: (data) =>
+    apiPost(`/screenplay-projects/${data.projectId}/agent-session`, {}),
+  createScreenplayProject: (data) => apiPost('/screenplay-projects', data),
+  updateScreenplayProject: (data) =>
+    apiPut(`/screenplay-projects/${data.projectId}`, data.patch || {}),
+  deleteScreenplayProject: (data) =>
+    apiDelete(`/screenplay-projects/${data.projectId}`),
+  listScreenplayDocuments: (data) => {
+    const params = new URLSearchParams()
+    if (data.kind) params.set('kind', data.kind)
+    if (data.status) params.set('status', data.status)
+    const query = params.toString()
+    return apiGet(
+      `/screenplay-projects/${data.projectId}/documents${query ? `?${query}` : ''}`,
+    )
+  },
+  getScreenplayDocument: (data) =>
+    apiGet(`/screenplay-documents/${data.documentId}`),
+  createScreenplayDocument: (data) =>
+    apiPost(`/screenplay-projects/${data.projectId}/documents`, {
+      kind: data.kind,
+      title: data.title,
+      contentJson: data.contentJson || {},
+      contentText: data.contentText || '',
+      derivedFromIds: data.derivedFromIds || [],
+      sourceRunId: data.sourceRunId || null,
+    }),
+  listScreenplaySourceRefs: (data) => {
+    const params = new URLSearchParams()
+    if (data.documentId) params.set('documentId', data.documentId)
+    if (data.agentRunId) params.set('agentRunId', data.agentRunId)
+    const query = params.toString()
+    return apiGet(
+      `/screenplay-projects/${data.projectId}/source-refs${query ? `?${query}` : ''}`,
+    )
+  },
+  updateScreenplayDocument: (data) =>
+    apiPut(`/screenplay-documents/${data.documentId}`, data.patch || {}),
+  acceptScreenplayDocument: (data) =>
+    apiPost(`/screenplay-documents/${data.documentId}/accept`, {}),
+  restoreScreenplayDocument: (data) =>
+    apiPost(`/screenplay-documents/${data.documentId}/restore`, {}),
+  deleteScreenplayDocument: (data) =>
+    apiDelete(`/screenplay-documents/${data.documentId}`),
 
   // ─── Characters — HTTP ─────────────────────────────────────────
   getCharacters: (data) => apiGet(`/books/${data.bookId}/characters`),
@@ -317,13 +369,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ─── AI streaming — fetch + ReadableStream SSE ─────────────────
   aiChatStream: (data) => {
+    const streamId = data.streamId || `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const requestData = { ...data }
+    delete requestData.streamId
     const abortController = new AbortController()
-    _activeAiAbortController = abortController
+    _aiAbortControllers.set(streamId, abortController)
+    _latestAiStreamId = streamId
 
     fetch(`${BACKEND_URL}/api/ai/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(requestData),
       signal: abortController.signal,
     })
       .then(async (response) => {
@@ -337,7 +393,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
               if (payload === '[DONE]') continue
               try {
                 const chunk = JSON.parse(payload)
-                _aiChunkListeners.forEach(cb => { try { cb(chunk) } catch (_e) {} })
+                if (
+                  abortController.signal.aborted &&
+                  chunk &&
+                  typeof chunk === 'object' &&
+                  chunk.done
+                ) {
+                  chunk.aborted = true
+                }
+                _aiChunkListeners.forEach(cb => { try { cb({ ...chunk, streamId }) } catch (_e) {} })
               } catch {}
             }
           }
@@ -355,31 +419,45 @@ contextBridge.exposeInMainWorld('electronAPI', {
         if (buffer.trim()) {
           _processLines(buffer.split('\n'))
         }
-        _aiChunkListeners.forEach(cb => { try { cb({ done: true }) } catch (_e) {} })
+        const terminalChunk = abortController.signal.aborted
+          ? { done: true, aborted: true, streamId }
+          : { done: true, streamId }
+        _aiChunkListeners.forEach(cb => { try { cb(terminalChunk) } catch (_e) {} })
       })
       .catch((err) => {
         if (abortController.signal.aborted) {
-          _aiChunkListeners.forEach(cb => { try { cb({ done: true, aborted: true }) } catch (_e) {} })
+          _aiChunkListeners.forEach(cb => { try { cb({ done: true, aborted: true, streamId }) } catch (_e) {} })
         } else {
-          _aiChunkListeners.forEach(cb => { try { cb({ error: err.message }) } catch (_e) {} })
+          _aiChunkListeners.forEach(cb => { try { cb({ error: err.message, streamId }) } catch (_e) {} })
         }
       })
       .finally(() => {
-        if (_activeAiAbortController === abortController) {
-          _activeAiAbortController = null
+        if (_aiAbortControllers.get(streamId) === abortController) {
+          _aiAbortControllers.delete(streamId)
+        }
+        if (_latestAiStreamId === streamId) {
+          _latestAiStreamId = Array.from(_aiAbortControllers.keys()).at(-1) || null
         }
       })
+    return streamId
   },
 
-  abortAiStream: () => {
-    if (_activeAiAbortController) {
-      _activeAiAbortController.abort()
-      _activeAiAbortController = null
+  abortAiStream: (streamId) => {
+    const targetId = streamId || _latestAiStreamId
+    const controller = targetId ? _aiAbortControllers.get(targetId) : null
+    if (controller) {
+      controller.abort()
+      _aiAbortControllers.delete(targetId)
+      if (_latestAiStreamId === targetId) {
+        _latestAiStreamId = Array.from(_aiAbortControllers.keys()).at(-1) || null
+      }
     }
   },
 
-  onAiChunk: (callback) => {
-    const handler = (chunk) => callback(chunk)
+  onAiChunk: (callback, streamId) => {
+    const handler = (chunk) => {
+      if (!streamId || chunk.streamId === streamId) callback(chunk)
+    }
     _aiChunkListeners.push(handler)
     return () => { _aiChunkListeners = _aiChunkListeners.filter(h => h !== handler) }
   },

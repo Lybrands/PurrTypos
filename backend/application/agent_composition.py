@@ -20,16 +20,24 @@ from agent_core.ports import (
     CheckpointStore,
     DelegationRepository,
     ExecutionLeaseStore,
+    PostPlanningContextOptimizer,
     ToolRegistration,
 )
 from agent_core.tools import InMemoryToolCatalog
 from application.response_judging import ModelBackedResponseJudge
+from application.agent_profile_registry import (
+    AgentProfileRegistration,
+    AgentProfileRegistry,
+)
 from application.run_execution_control import RunExecutionSession
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider
 from domains.writing.context_source import RepositoryWritingContextSource
 from domains.writing.response import writing_atomic_continuity_judge_policy
+from domains.screenplay.adapter import ScreenplayDomainAdapter
+from domains.screenplay.contracts import SCREENPLAY_DOMAIN_NAMESPACE
+from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
@@ -61,6 +69,7 @@ from infrastructure.writing import (
     WritingToolDependencies,
     build_writing_tool_catalog,
 )
+from infrastructure.screenplay import build_screenplay_tool_catalog
 from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 from domains.agent_roles import AgentRoleRegistry
 
@@ -74,6 +83,7 @@ class AgentComposition:
         *,
         skills_dir: Path | None = None,
         writing: WritingDomainAdapter | None = None,
+        screenplay: ScreenplayDomainAdapter | None = None,
         provider_capabilities: ProviderCapabilityCache | None = None,
         approval_gateway: ApprovalGateway | None = None,
         tool_execution_limits: ToolExecutionLimits | None = None,
@@ -122,6 +132,22 @@ class AgentComposition:
                     self._writing_context_source
                 ),
             )
+        self._screenplay = screenplay or ScreenplayDomainAdapter.build(
+            db,
+            tool_catalog=build_screenplay_tool_catalog(db),
+        )
+        self._profile_registry = AgentProfileRegistry((
+            AgentProfileRegistration(
+                id="writing",
+                domain_namespace=WRITING_DOMAIN_NAMESPACE,
+                adapter=self._writing,
+            ),
+            AgentProfileRegistration(
+                id="screenplay",
+                domain_namespace=SCREENPLAY_DOMAIN_NAMESPACE,
+                adapter=self._screenplay,
+            ),
+        ))
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
         self._tool_execution_limits = tool_execution_limits or ToolExecutionLimits(
             approval_timeout_seconds=AGENT_APPROVAL_TIMEOUT_SECONDS,
@@ -140,6 +166,10 @@ class AgentComposition:
     @property
     def provider_capabilities(self) -> ProviderCapabilityCache:
         return self._provider_capabilities
+
+    @property
+    def agent_profile_ids(self) -> tuple[str, ...]:
+        return self._profile_registry.ids
 
     @property
     def agent_role_registry(self) -> AgentRoleRegistry:
@@ -171,9 +201,13 @@ class AgentComposition:
         self,
         api_key: str,
         *,
+        agent_profile: str = "writing",
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
         allowed_tool_modes: Collection[ToolExecutionMode] | None = None,
+        post_planning_context_optimizer: (
+            PostPlanningContextOptimizer | None
+        ) = None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -183,16 +217,23 @@ class AgentComposition:
                 on_required_tool_choice_unsupported
             ),
         )
-        context_provider = self._writing.context_provider
-        if self._writing_context_source is not None:
+        registration = self._profile_registry.require(agent_profile)
+        adapter = registration.adapter
+        context_provider = adapter.context_provider
+        if (
+            agent_profile == "writing"
+            and self._writing_context_source is not None
+        ):
             context_provider = WritingContextProvider(
                 self._writing_context_source.with_memory_reranker(
                     ModelBackedMemoryReranker(model_gateway)
                 )
             )
         if context_provider is None:
-            raise RuntimeError("Writing ContextProvider is not configured")
-        base_catalog = self._writing.tool_catalog
+            raise RuntimeError(
+                f"{agent_profile} ContextProvider is not configured"
+            )
+        base_catalog = adapter.tool_catalog
         extras = tuple(extra_tool_registrations)
         tool_catalog = base_catalog
         normalized_modes = (
@@ -227,14 +268,36 @@ class AgentComposition:
         return AgentCore(
             model_gateway=model_gateway,
             run_repository=self._repository,
-            planning_policy=self._writing.planning_policy,
+            planning_policy=adapter.planning_policy,
             context_provider=context_provider,
-            execution_state_factory=self._writing.execution_state_factory,
+            execution_state_factory=adapter.execution_state_factory,
             tool_catalog=tool_catalog,
+            post_planning_context_optimizer=post_planning_context_optimizer,
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
             tool_execution_limits=self._tool_execution_limits,
         )
+
+    def create_core_for_request(
+        self,
+        request: AgentRunRequest,
+        api_key: str,
+        **kwargs,
+    ) -> AgentCore:
+        registration = self._profile_registry.for_request(request)
+        return self.create_core(
+            api_key,
+            agent_profile=registration.id,
+            **kwargs,
+        )
+
+    def agent_role_registry_for_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRoleRegistry:
+        return self._profile_registry.for_request(
+            request
+        ).adapter.agent_role_registry
 
     def create_response_judges(
         self,
@@ -245,6 +308,8 @@ class AgentComposition:
 
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
+        if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
+            return ()
         judge_policy = writing_atomic_continuity_judge_policy(request)
         if judge_policy is None:
             return ()

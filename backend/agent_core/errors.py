@@ -22,6 +22,15 @@ class ContextOverflowError(AgentCoreError):
 class InvalidPlannerOutputError(AgentCoreError):
     """A planner response could not be normalized into a safe typed plan."""
 
+    def __init__(
+        self,
+        message: str = "invalid planner output",
+        *,
+        code: str = "invalid_plan",
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "invalid_plan")
+
 
 class RepairablePlannerOutputError(InvalidPlannerOutputError):
     """A structurally valid plan may be corrected by one model re-plan."""

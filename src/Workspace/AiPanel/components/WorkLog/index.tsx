@@ -9,6 +9,7 @@ export interface WorkLogProps {
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
+  activeLabel?: string;
   children: React.ReactNode;
 }
 
@@ -23,6 +24,14 @@ const stepGroupOpenStateStore = new Map<string, boolean>();
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
   const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分钟`;
+}
+
+function formatActiveElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   if (totalSeconds < 60) return `${totalSeconds}秒`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -49,6 +58,7 @@ export default function WorkLog({
   startedAt,
   durationMs,
   hasError = false,
+  activeLabel,
   children,
 }: WorkLogProps) {
   const storedState = openStateStore.get(logKey);
@@ -76,7 +86,17 @@ export default function WorkLog({
     active && startedAt != null
       ? Math.max(0, now - startedAt)
       : durationMs;
-  const title = active ? "处理中" : hasError ? "处理过程有异常" : "已处理";
+  const title = active
+    ? activeLabel || "正在处理"
+    : hasError
+      ? "处理过程有异常"
+      : "已处理";
+  const hasDetails = React.Children.count(children) > 0;
+  const durationText = active
+    ? formatActiveElapsed(elapsedMs ?? 0)
+    : elapsedMs != null && elapsedMs > 0
+      ? formatDuration(elapsedMs)
+      : null;
 
   const toggleOpen = () => {
     const nextOpen = !open;
@@ -89,25 +109,37 @@ export default function WorkLog({
     <section
       className={`work-log ${open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
     >
-      <button
-        type="button"
-        className="work-log__toggle"
-        onClick={toggleOpen}
-        aria-expanded={open}
-      >
-        <RightOutlined className="work-log__chevron" />
-        {hasError ? (
-          <ExclamationCircleOutlined className="work-log__error-icon" />
-        ) : null}
-        <span>{title}</span>
-        {elapsedMs != null && elapsedMs > 0 ? (
-          <span className="work-log__duration">{formatDuration(elapsedMs)}</span>
-        ) : null}
-        {active ? <span className="a-blink-dots">...</span> : null}
-      </button>
-      <div className="work-log__collapsible">
-        <div className="work-log__body">{children}</div>
-      </div>
+      {hasDetails ? (
+        <button
+          type="button"
+          className="work-log__toggle"
+          onClick={toggleOpen}
+          aria-expanded={open}
+        >
+          <RightOutlined className="work-log__chevron" />
+          {hasError ? (
+            <ExclamationCircleOutlined className="work-log__error-icon" />
+          ) : null}
+          <span>{title}</span>
+          {durationText ? (
+            <span className="work-log__duration">{durationText}</span>
+          ) : null}
+          {active ? <span className="a-blink-dots">...</span> : null}
+        </button>
+      ) : (
+        <div className="work-log__toggle work-log__toggle--static" role="status">
+          <span>{title}</span>
+          {durationText ? (
+            <span className="work-log__duration">{durationText}</span>
+          ) : null}
+          {active ? <span className="a-blink-dots">...</span> : null}
+        </div>
+      )}
+      {hasDetails ? (
+        <div className="work-log__collapsible">
+          <div className="work-log__body">{children}</div>
+        </div>
+      ) : null}
     </section>
   );
 }

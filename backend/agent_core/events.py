@@ -28,6 +28,7 @@ class CoreEventType(StrEnum):
     DELEGATION_FAILED = "delegation.failed"
     DELEGATION_CANCELED = "delegation.canceled"
     CONTEXT_BUDGETED = "context.budgeted"
+    CONTEXT_USAGE_RECORDED = "context.usage_recorded"
     RUN_COMPLETED = "run.completed"
     RUN_BLOCKED = "run.blocked"
     RUN_FAILED = "run.failed"

@@ -15,12 +15,8 @@
 }
 
 .bookshelf-toolbar {
-  display: flex;
   max-width: 1180px;
   margin: 0 auto 34px;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
 
   h1 {
     margin: 3px 0 5px;
@@ -84,7 +80,6 @@
   padding: 0;
   flex-direction: column;
   align-items: center;
-  gap: 9px;
   text-align: center;
   border-radius: var(--radius-lg);
 
@@ -248,17 +243,6 @@
   }
 }
 
-.book-title {
-  max-width: 150px;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: var(--font-size);
-  font-weight: var(--font-weight-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .book-card-add {
   min-height: 188px;
   padding: 0;
@@ -336,6 +320,5 @@
 
 @media (max-width: 640px) {
   .bookshelf-main { padding-inline: 20px; }
-  .bookshelf-toolbar { align-items: flex-start; flex-direction: column; }
   .bookshelf-list { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
 }

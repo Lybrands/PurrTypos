@@ -1,13 +1,10 @@
 import React from 'react'
-import { SunOutlined, MoonOutlined, FontSizeOutlined, SettingOutlined } from '../../ui'
+import { SunOutlined, MoonOutlined, SettingOutlined } from '../../ui'
 import { Button, Tooltip } from '../../ui'
 import { useTheme } from '../../contexts/ThemeContext'
-import { useFontSize } from '../../contexts/FontSizeContext'
 import homeLogoLight from '../../imgs/home_logo_light.png'
 import homeLogoDark from '../../imgs/home_logo_dark.png'
 import './index.scss'
-
-const FONT_SIZE_LABELS: Record<string, string> = { small: '小', medium: '中', large: '大' }
 
 /** 顶栏面板 toggle 按钮描述（工作台用来唤起/关闭浮窗） */
 export interface HeaderPanelToggle {
@@ -44,7 +41,6 @@ export default function AppHeader({
   onOpenSettings,
 }: AppHeaderProps) {
   const { theme, toggleTheme } = useTheme()
-  const { fontSize, cycleFontSize } = useFontSize()
 
   const headerLogo = theme === 'dark' ? homeLogoDark : homeLogoLight
 
@@ -95,15 +91,6 @@ export default function AppHeader({
               onClick={toggleTheme}
               className="app-header-action-btn"
             />
-            <Tooltip title={`字体大小：${FONT_SIZE_LABELS[fontSize]}（点击切换）`}>
-              <Button
-                type="text"
-                size="small"
-                icon={<FontSizeOutlined style={{ fontSize: 16 }} />}
-                onClick={cycleFontSize}
-                className="app-header-action-btn"
-              />
-            </Tooltip>
           </>
         )}
 

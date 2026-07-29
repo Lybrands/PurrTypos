@@ -1,7 +1,7 @@
 import React from 'react'
 
-/** 工作区停靠布局状态。AI 居中，辅助面板和正文依次停靠在右侧。 */
-export type PanelKey = 'left' | 'conversation' | 'utility' | 'editor'
+/** 工作区停靠布局状态。AI 居中，左右各使用一个可调整宽度的组合面板。 */
+export type PanelKey = 'left' | 'conversation' | 'right'
 
 export interface FloatingState {
   open: boolean
@@ -10,13 +10,12 @@ export interface FloatingState {
   width: number
 }
 
-const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_layout_v5'
+const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_layout_v6'
 
 export interface PersistedPanelState {
   left: FloatingState
   conversation: FloatingState
-  utility: FloatingState
-  editor: FloatingState
+  right: FloatingState
 }
 
 function defaultRightX(width: number): number {
@@ -29,10 +28,8 @@ const DEFAULT_STATE: PersistedPanelState = {
   left: { open: false, x: 0, y: 0, width: 300 },
   // AI 区域内部导航，只通过 AI 内部按钮收起/展开。
   conversation: { open: true, x: 0, y: 0, width: 220 },
-  // 点击全书工具或大纲后展开，位于正文栏左侧。
-  utility: { open: false, x: 0, y: 0, width: 440 },
-  // 正文栏默认固定展开；收起后由右侧悬停轨道临时唤起。
-  editor: { open: true, x: defaultRightX(480), y: 0, width: 480 },
+  // 正文与所有辅助功能共享一个右侧多标签面板。
+  right: { open: true, x: defaultRightX(560), y: 0, width: 560 },
 }
 
 function loadPanelState(): PersistedPanelState {
@@ -54,8 +51,7 @@ function loadPanelState(): PersistedPanelState {
       return {
         left: merge('left'),
         conversation: merge('conversation'),
-        utility: merge('utility'),
-        editor: merge('editor'),
+        right: merge('right'),
       }
     }
   } catch {

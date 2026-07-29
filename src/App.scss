@@ -92,6 +92,16 @@
   transform: translate3d(0, 0, 0) rotate(3deg) scale(1.06);
 }
 
+.app-root--ambient-screenplay .app-ambient-glow {
+  top: 4%;
+  left: 42%;
+  width: 58%;
+  height: 64%;
+  opacity: 0.74;
+  filter: blur(46px) saturate(1.08);
+  transform: translate3d(0, 0, 0) rotate(-3deg) scale(1.02);
+}
+
 .app-root--ambient-workspace .app-ambient-glow::after {
   animation: app-ambient-glow-settle 1480ms linear both;
 }
@@ -269,8 +279,8 @@
   transition-delay: .08s, .08s, 0s;
 }
 
-/* 正文栏收起后在最右侧保留感应区；右侧内边距避免感应区压住相邻面板滚动条。 */
-.app-body--editor-collapsed {
+/* 右侧组合面板收起后保留感应区；内边距避免感应区压住主区域滚动条。 */
+.app-body--right-panel-collapsed {
   padding-right: 10px;
 }
 
@@ -290,7 +300,7 @@
   top: 0;
   right: 0;
   bottom: 0;
-  width: clamp(340px, var(--editor-hover-width), 640px);
+  width: clamp(420px, var(--editor-hover-width), 760px);
   z-index: 12;
   border-left: 1px solid var(--border-light);
   background: var(--bg-panel);

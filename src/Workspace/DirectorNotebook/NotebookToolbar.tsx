@@ -25,7 +25,7 @@ const TOOLS: ToolDef[] = [
   { tab: STYLE_TAB, icon: <HighlightOutlined /> },
 ]
 
-/** 工作台顶部的全书级工具入口；内容统一在正文左侧的辅助面板中打开。 */
+/** 工作台顶部的全书级工具入口；内容统一在右侧组合面板中以标签打开。 */
 export default function NotebookToolbar() {
   const { utilityPanelOpen, activeUtilityTabKey, toggleUtilityTab } = useWorkspace()
 

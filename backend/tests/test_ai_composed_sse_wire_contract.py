@@ -158,9 +158,10 @@ def _event_name(event: dict[str, Any]) -> str:
         "agentRunStarted",
         "agentRunTodosUpdated",
         "agentRunTodoUpdated",
-        "contextBudget",
-        "delta",
-        "toolCalls",
+            "contextBudget",
+            "delta",
+            "thinkingDelta",
+            "toolCalls",
         "toolApprovalRequired",
         "toolApprovalResolved",
         "agentDelegationCreated",
@@ -718,13 +719,15 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
+        "thinkingDelta",
+        "thinkingDelta",
         "agentRunTodoUpdated",
         "agentRunFailed",
         "error",
     ]
     assert events[1]["agentRunTodosUpdated"]["runId"] == "<run-1>"
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
-    assert events[3]["agentRunTodoUpdated"] == {
+    assert events[5]["agentRunTodoUpdated"] == {
         "runId": "<run-1>",
         "stepId": "host-prerequisite-listBookCharacters-1",
         "step": {
@@ -744,17 +747,22 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         },
         "status": "failed",
     }
-    assert events[4] == {
+    assert events[6] == {
         "agentRunFailed": {
             "runId": "<run-1>",
             "status": "failed",
             "error": "missing_required_tool_call",
         },
     }
-    assert events[5] == {
+    assert events[7] == {
         "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
     }
-    assert not any("delta" in event or "thinkingDelta" in event for event in events)
+    assert [
+        event["thinkingDelta"]
+        for event in events
+        if "thinkingDelta" in event
+    ] == ["PRIVATE", "PRIVATE"]
+    assert not any("delta" in event for event in events)
     _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
 
 

@@ -36,40 +36,45 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
 
   return (
     <div className="dashboard-scroll">
-      <div className="dashboard-summary-row">
-        <div className="dashboard-stat-card">
-          <div className="dashboard-stat-value">
-            {data.writtenChapters}<span className="dashboard-stat-sub"> / {data.totalChapters} 章</span>
+      <div className="dashboard-summary">
+        <div className="dashboard-summary-header">
+          <span>统计概览</span>
+          <Tooltip title="重新统计">
+            <Button
+              type="text"
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={reload}
+              loading={loading}
+              className="dashboard-refresh-btn"
+            />
+          </Tooltip>
+        </div>
+        <div className="dashboard-summary-row">
+          <div className="dashboard-stat-card">
+            <div className="dashboard-stat-value">
+              {data.writtenChapters}<span className="dashboard-stat-sub"> / {data.totalChapters} 章</span>
+            </div>
+            <div className="dashboard-stat-label">已动笔章节</div>
           </div>
-          <div className="dashboard-stat-label">已动笔章节</div>
-        </div>
-        <div className="dashboard-stat-card">
-          <div className="dashboard-stat-value">{formatWords(data.totalWords)}</div>
-          <div className="dashboard-stat-label">正文总字数</div>
-        </div>
-        <div className="dashboard-stat-card">
-          <div className="dashboard-stat-value">
-            {fs.unresolvedCount}
-            {fs.overdueCount > 0 ? (
-              <span className="dashboard-stat-sub dashboard-stat-sub--danger"> 逾期 {fs.overdueCount}</span>
-            ) : null}
+          <div className="dashboard-stat-card">
+            <div className="dashboard-stat-value">{formatWords(data.totalWords)}</div>
+            <div className="dashboard-stat-label">正文总字数</div>
           </div>
-          <div className="dashboard-stat-label">未回收伏笔</div>
+          <div className="dashboard-stat-card">
+            <div className="dashboard-stat-value">
+              {fs.unresolvedCount}
+              {fs.overdueCount > 0 ? (
+                <span className="dashboard-stat-sub dashboard-stat-sub--danger"> 逾期 {fs.overdueCount}</span>
+              ) : null}
+            </div>
+            <div className="dashboard-stat-label">未回收伏笔</div>
+          </div>
+          <div className="dashboard-stat-card">
+            <div className="dashboard-stat-value">{fs.resolvedCount}</div>
+            <div className="dashboard-stat-label">已回收伏笔</div>
+          </div>
         </div>
-        <div className="dashboard-stat-card">
-          <div className="dashboard-stat-value">{fs.resolvedCount}</div>
-          <div className="dashboard-stat-label">已回收伏笔</div>
-        </div>
-        <Tooltip title="重新统计">
-          <Button
-            type="text"
-            size="small"
-            icon={<ReloadOutlined />}
-            onClick={reload}
-            loading={loading}
-            className="dashboard-refresh-btn"
-          />
-        </Tooltip>
       </div>
 
       <div className="dashboard-section">

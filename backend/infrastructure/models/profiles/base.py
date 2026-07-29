@@ -25,6 +25,11 @@ class ModelProfile:
             },
         }
 
+    def internal_output_token_floor(self) -> int:
+        """Minimum output budget for narrow host-controlled model calls."""
+
+        return 0
+
     def normalize_openai_chunk(self, chunk: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(chunk)
         choices = value.get("choices")

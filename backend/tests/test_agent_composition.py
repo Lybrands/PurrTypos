@@ -391,6 +391,14 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
+    screenplay_effect = core_update_to_sse_chunk(
+        AgentEvent(
+            type="screenplay.document_proposal",
+            run_id="run-1",
+            payload={"kind": "creative_brief", "title": "创作简报"},
+        ),
+        model="model",
+    )
     done = core_update_to_sse_chunk(
         AgentRunResult(
             run_id="run-1",
@@ -439,16 +447,51 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
+    usage = core_update_to_sse_chunk(
+        AgentEvent(
+            type=CoreEventType.CONTEXT_USAGE_RECORDED,
+            run_id="run-1",
+            payload={
+                "actualInputTokens": 12_345,
+                "actualOutputTokens": 678,
+                "actualTotalTokens": 13_023,
+                "cachedInputTokens": 2_000,
+                "reasoningOutputTokens": 50,
+                "actualUsageRound": 1,
+                "inputTokenEstimateAtUsage": 12_000,
+                "usageSource": "provider",
+            },
+        ),
+        model="model",
+    )
 
     assert started == {
         "agentRunStarted": {"runId": "run-1", "status": "running"},
     }
     assert effect == {"proposedSettingDiff": {"kind": "character"}}
+    assert screenplay_effect == {
+        "proposedScreenplayDocument": {
+            "kind": "creative_brief",
+            "title": "创作简报",
+        },
+    }
     assert done == {"done": True, "model": "provider-resolved-model"}
     assert compaction == {
         "contextCompaction": {
             "status": "running",
             "selectedTurnCount": 4,
+        },
+    }
+    assert usage == {
+        "contextBudget": {
+            "actualInputTokens": 12_345,
+            "actualOutputTokens": 678,
+            "actualTotalTokens": 13_023,
+            "cachedInputTokens": 2_000,
+            "reasoningOutputTokens": 50,
+            "actualUsageRound": 1,
+            "inputTokenEstimateAtUsage": 12_000,
+            "usageSource": "provider",
         },
     }
     assert cached == {"toolIndexCompleted": 2, "toolFromCache": True}

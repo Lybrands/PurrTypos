@@ -306,11 +306,50 @@ class ToolCallDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelTokenUsage:
+    """Provider-reported token usage for one completed model request.
+
+    ``input_tokens`` is the complete provider input, including cached input
+    tokens when the provider reports those as separate counters.
+    """
+
+    input_tokens: int
+    output_tokens: int = 0
+    total_tokens: int | None = None
+    cached_input_tokens: int = 0
+    reasoning_output_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "reasoning_output_tokens",
+        ):
+            value = int(getattr(self, name))
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+            object.__setattr__(self, name, value)
+        if self.total_tokens is None:
+            object.__setattr__(
+                self,
+                "total_tokens",
+                self.input_tokens + self.output_tokens,
+            )
+        else:
+            total = int(self.total_tokens)
+            if total < 0:
+                raise ValueError("total_tokens must be non-negative")
+            object.__setattr__(self, "total_tokens", total)
+
+
+@dataclass(frozen=True, slots=True)
 class ModelStreamChunk:
     content_delta: str = ""
     thinking_delta: str = ""
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
     finish_reason: ModelFinishReason | None = None
+    usage: ModelTokenUsage | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_call_deltas", tuple(self.tool_call_deltas))
@@ -320,6 +359,11 @@ class ModelStreamChunk:
                 "finish_reason",
                 ModelFinishReason(self.finish_reason),
             )
+        if self.usage is not None and not isinstance(
+            self.usage,
+            ModelTokenUsage,
+        ):
+            raise TypeError("model stream usage must be ModelTokenUsage")
 
 
 @dataclass(slots=True)
@@ -341,12 +385,18 @@ class ModelCompletion:
     message: AgentMessage
     model: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    usage: ModelTokenUsage | None = None
 
     def __post_init__(self) -> None:
         model = str(self.model or "").strip()
         if not model:
             raise ValueError("model completion requires a model name")
         object.__setattr__(self, "model", model)
+        if self.usage is not None and not isinstance(
+            self.usage,
+            ModelTokenUsage,
+        ):
+            raise TypeError("model completion usage must be ModelTokenUsage")
         object.__setattr__(self, "metadata", _frozen_mapping(self.metadata))
 
 
@@ -494,6 +544,41 @@ class AgentRunRequest:
             if message.role == "user":
                 return str(message.content or "")
         return ""
+
+
+@dataclass(frozen=True, slots=True)
+class PostPlanningContextOptimizationResult:
+    """Application-owned conversation optimization returned to Agent Core."""
+
+    request: AgentRunRequest
+    outcome: str
+    compacted_turn_count: int = 0
+    retained_raw_turn_count: int = 0
+    summary_version: int | None = None
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, AgentRunRequest):
+            raise TypeError("context optimization requires an AgentRunRequest")
+        outcome = str(self.outcome or "").strip()
+        if not outcome:
+            raise ValueError("context optimization outcome is required")
+        object.__setattr__(self, "outcome", outcome)
+        for name in ("compacted_turn_count", "retained_raw_turn_count"):
+            value = int(getattr(self, name))
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+            object.__setattr__(self, name, value)
+        if self.summary_version is not None:
+            version = int(self.summary_version)
+            if version <= 0:
+                raise ValueError("summary_version must be positive")
+            object.__setattr__(self, "summary_version", version)
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _frozen_mapping(self.diagnostics),
+        )
 
 
 @dataclass(frozen=True, slots=True)

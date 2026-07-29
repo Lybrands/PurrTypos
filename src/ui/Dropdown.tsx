@@ -1,4 +1,5 @@
 import React from 'react'
+import { ContextMenu } from '@base-ui/react/context-menu'
 import { Menu } from '@base-ui/react/menu'
 import { Button, type ButtonProps } from './Button'
 import './ui.scss'
@@ -30,9 +31,58 @@ export interface DropdownProps {
   trigger?: Array<'click' | 'hover' | 'contextMenu'>
 }
 
-/** 基于 Base UI Menu 的项目内下拉操作菜单。 */
-function DropdownBase({ children, menu, placement = 'bottomLeft', disabled }: DropdownProps) {
+function DropdownMenuItems({
+  items,
+  onClick,
+  Item,
+}: {
+  items: Array<DropdownItem | null>
+  onClick?: (info: { key: React.Key }) => void
+  Item: typeof Menu.Item
+}) {
+  return items.filter((item): item is DropdownItem => item != null).map((item) => (
+    <Item
+      key={item.key}
+      className={['purr-dropdown__item', item.danger && 'purr-dropdown__item--danger'].filter(Boolean).join(' ')}
+      disabled={item.disabled}
+      onClick={() => {
+        const info = { key: item.key }
+        item.onClick?.(info)
+        onClick?.(info)
+      }}
+    >
+      {item.icon && <span className="purr-dropdown__icon">{item.icon}</span>}
+      {item.label}
+    </Item>
+  ))
+}
+
+/** 基于 Base UI Menu 的项目内下拉操作菜单，同时支持右键上下文菜单。 */
+function DropdownBase({ children, menu, placement = 'bottomLeft', disabled, trigger }: DropdownProps) {
   const position = placementMap[placement]
+  const items = menu.items ?? []
+
+  if (trigger?.includes('contextMenu')) {
+    return (
+      <ContextMenu.Root disabled={disabled}>
+        <ContextMenu.Trigger render={<span className="purr-popup-trigger" />}>
+          {children}
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Positioner>
+            <ContextMenu.Popup className="purr-dropdown">
+              <DropdownMenuItems
+                items={items}
+                onClick={menu.onClick}
+                Item={ContextMenu.Item}
+              />
+            </ContextMenu.Popup>
+          </ContextMenu.Positioner>
+        </ContextMenu.Portal>
+      </ContextMenu.Root>
+    )
+  }
+
   return (
     <Menu.Root>
       <Menu.Trigger render={<span className="purr-popup-trigger" />} nativeButton={false} disabled={disabled}>
@@ -41,21 +91,7 @@ function DropdownBase({ children, menu, placement = 'bottomLeft', disabled }: Dr
       <Menu.Portal>
         <Menu.Positioner side={position.side} align={position.align} sideOffset={6}>
           <Menu.Popup className="purr-dropdown">
-            {(menu.items ?? []).filter((item): item is DropdownItem => item != null).map((item) => (
-              <Menu.Item
-                key={item.key}
-                className={['purr-dropdown__item', item.danger && 'purr-dropdown__item--danger'].filter(Boolean).join(' ')}
-                disabled={item.disabled}
-                onClick={() => {
-                  const info = { key: item.key }
-                  item.onClick?.(info)
-                  menu.onClick?.(info)
-                }}
-              >
-                {item.icon && <span className="purr-dropdown__icon">{item.icon}</span>}
-                {item.label}
-              </Menu.Item>
-            ))}
+            <DropdownMenuItems items={items} onClick={menu.onClick} Item={Menu.Item} />
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>

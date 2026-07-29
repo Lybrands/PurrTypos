@@ -2,17 +2,22 @@ import React, { Suspense, lazy } from 'react'
 import {
   BookOutlined,
   BulbOutlined,
-  CloseOutlined,
   DashboardOutlined,
+  FileTextOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
   HighlightOutlined,
+  PanelToggleIcon,
   TeamOutlined,
 } from '../ui'
 import { Button, Spin, Tabs, Tooltip } from '../ui'
 import type { EntityId } from '../types'
 import type { OpenSettingPanelDetail } from './SettingPanel'
-import type { WorkspaceUtilityTab, WorkspaceUtilityTabKind } from './utilityPanelTypes'
+import {
+  EDITOR_TAB_KEY,
+  type WorkspaceUtilityTab,
+  type WorkspaceUtilityTabKind,
+} from './utilityPanelTypes'
 import './WorkspaceUtilityPanel.scss'
 
 const ChapterOutlinePanel = lazy(() => import('./DirectorNotebook/ChapterOutlineModal'))
@@ -35,7 +40,10 @@ interface WorkspaceUtilityPanelProps {
   activeKey: string | null
   onActiveKeyChange: (key: string) => void
   onCloseTab: (key: string) => void
-  onCollapse: () => void
+  editorContent: React.ReactNode
+  onCollapse?: () => void
+  dockCollapsed?: boolean
+  onExpandDock?: () => void
   fullscreen?: boolean
   onToggleFullscreen?: () => void
   settingOpenRequest?: OpenSettingPanelDetail | null
@@ -51,7 +59,10 @@ export default function WorkspaceUtilityPanel({
   activeKey,
   onActiveKeyChange,
   onCloseTab,
+  editorContent,
   onCollapse,
+  dockCollapsed = false,
+  onExpandDock,
   fullscreen = false,
   onToggleFullscreen,
   settingOpenRequest,
@@ -66,7 +77,17 @@ export default function WorkspaceUtilityPanel({
     window.dispatchEvent(new CustomEvent('chapter-outline-changed'))
   }, [])
 
-  const items = tabs.map((tab) => ({
+  const items = [{
+    key: EDITOR_TAB_KEY,
+    label: (
+      <span className="workspace-utility-tab-label">
+        <FileTextOutlined />
+        <span>正文</span>
+      </span>
+    ),
+    children: editorContent,
+    closable: false,
+  }, ...tabs.map((tab) => ({
     key: tab.key,
     label: (
       <span className="workspace-utility-tab-label">
@@ -106,7 +127,7 @@ export default function WorkspaceUtilityPanel({
       </Suspense>
     ),
     closable: true,
-  }))
+  }))]
 
   return (
     <div className="workspace-utility-panel">
@@ -119,7 +140,7 @@ export default function WorkspaceUtilityPanel({
         className="workspace-utility-tabs"
         tabBarExtraContent={(
           <div className="workspace-utility-actions">
-            {onToggleFullscreen ? (
+            {!dockCollapsed && onToggleFullscreen ? (
               <Tooltip
                 title={fullscreen ? '退出全屏' : '全屏'}
                 open={fullscreenTooltipOpen}
@@ -135,20 +156,34 @@ export default function WorkspaceUtilityPanel({
                     onToggleFullscreen()
                   }}
                   className="workspace-utility-action-btn"
-                  aria-label={fullscreen ? '退出辅助面板全屏' : '全屏显示辅助面板'}
+                  aria-label={fullscreen ? '退出工作面板全屏' : '全屏显示工作面板'}
                 />
               </Tooltip>
             ) : null}
-            <Tooltip title="收起辅助面板">
-              <Button
-                type="text"
-                size="small"
-                icon={<CloseOutlined />}
-                onClick={onCollapse}
-                className="workspace-utility-action-btn"
-                aria-label="收起辅助面板"
-              />
-            </Tooltip>
+            {dockCollapsed && onExpandDock ? (
+              <Tooltip title="固定展开工作面板">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<PanelToggleIcon side="right" action="expand" />}
+                  onClick={onExpandDock}
+                  className="workspace-utility-action-btn"
+                  aria-label="固定展开工作面板"
+                />
+              </Tooltip>
+            ) : null}
+            {!dockCollapsed && onCollapse ? (
+              <Tooltip title="收起工作面板">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<PanelToggleIcon side="right" action="collapse" />}
+                  onClick={onCollapse}
+                  className="workspace-utility-action-btn"
+                  aria-label="收起工作面板"
+                />
+              </Tooltip>
+            ) : null}
           </div>
         )}
       />

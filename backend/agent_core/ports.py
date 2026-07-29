@@ -28,6 +28,7 @@ from agent_core.contracts import (
     PlanningConstraints,
     PlanningResult,
     PlanningTurn,
+    PostPlanningContextOptimizationResult,
     ResponseValidationResult,
     RunCreateParams,
     RunCheckpoint,
@@ -125,6 +126,27 @@ class ConversationCompactionRepository(Protocol):
     ) -> None: ...
 
     async def delete_summary(self, session_id: str | int) -> None: ...
+
+
+@runtime_checkable
+class PostPlanningContextOptimizer(Protocol):
+    """Re-evaluate conversation pressure after the actual plan is compiled."""
+
+    async def optimize(
+        self,
+        request: AgentRunRequest,
+        *,
+        provider_input_tokens: int,
+        resolved_context_tokens: int,
+        output_reserve_tokens: int,
+        planned_step_count: int,
+        planned_tool_count: int,
+        selected_tool_names: Sequence[str],
+        signal: CancellationSignal | None = None,
+        on_compaction_started: (
+            Callable[[Mapping[str, Any]], Awaitable[None]] | None
+        ) = None,
+    ) -> PostPlanningContextOptimizationResult: ...
 
 
 @runtime_checkable

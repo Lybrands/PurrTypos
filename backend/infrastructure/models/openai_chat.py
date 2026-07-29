@@ -25,6 +25,7 @@ from utils.async_stream import OwnedAsyncIterator, openai_chunk_is_terminal
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)
+_STREAM_USAGE_TAIL_TIMEOUT_SECONDS = 0.75
 
 
 def _create_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
@@ -81,7 +82,12 @@ async def chat_no_stream(
     message = profile.normalize_openai_message(
         choice.message.model_dump() if choice and choice.message else {}
     )
-    return {"message": message, "model": res.model or model}
+    usage = res.usage.model_dump() if getattr(res, "usage", None) else None
+    return {
+        "message": message,
+        "model": res.model or model,
+        "usage": usage,
+    }
 
 
 # ── Streaming chat ──────────────────────────────────────────────
@@ -135,13 +141,51 @@ async def chat_stream(
         except (TypeError, ValueError):
             pass
 
-    raw_stream = await client.chat.completions.create(**params)
+    # OpenAI returns stream usage in a final choices=[] chunk when explicitly
+    # requested. Compatible providers may reject this option; retry the same
+    # request without it only when the error identifies this exact option.
+    params["stream_options"] = {"include_usage": True}
+    usage_tail_expected = True
+    try:
+        raw_stream = await client.chat.completions.create(**params)
+    except Exception as error:
+        if not _is_stream_usage_option_error(error):
+            raise
+        params.pop("stream_options", None)
+        usage_tail_expected = False
+        raw_stream = await client.chat.completions.create(**params)
 
     async def _generate() -> AsyncIterator[dict]:
         async for chunk in raw_stream:
             if signal and signal.is_set():
                 break
-            yield profile.normalize_openai_chunk(chunk.model_dump())
+            normalized = profile.normalize_openai_chunk(chunk.model_dump())
+            if (
+                usage_tail_expected
+                and openai_chunk_is_terminal(normalized)
+                and normalized.get("usage") is None
+            ):
+                try:
+                    tail = await asyncio.wait_for(
+                        anext(raw_stream),
+                        timeout=_STREAM_USAGE_TAIL_TIMEOUT_SECONDS,
+                    )
+                except (StopAsyncIteration, TimeoutError):
+                    tail = None
+                except Exception:
+                    # The finish chunk remains authoritative. A malformed
+                    # usage tail must not turn a completed answer into a
+                    # failed request.
+                    tail = None
+                if signal and signal.is_set():
+                    return
+                if tail is not None:
+                    tail_value = profile.normalize_openai_chunk(
+                        tail.model_dump()
+                    )
+                    if tail_value.get("usage") is not None:
+                        normalized["usage"] = tail_value["usage"]
+            yield normalized
 
     return {
         "stream": OwnedAsyncIterator(
@@ -151,6 +195,27 @@ async def chat_stream(
         ),
         "model": model,
     }
+
+
+def _is_stream_usage_option_error(error: Exception) -> bool:
+    message = str(error or "").strip().lower()
+    if not (
+        "stream_options" in message
+        or "include_usage" in message
+    ):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "unsupported",
+            "not support",
+            "unrecognized",
+            "unknown",
+            "unexpected",
+            "invalid",
+            "extra input",
+        )
+    )
 
 
 # ── Title generation ────────────────────────────────────────────

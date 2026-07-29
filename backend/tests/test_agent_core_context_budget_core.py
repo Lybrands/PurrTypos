@@ -110,6 +110,31 @@ def test_trimming_keeps_system_developer_and_latest_complete_turn():
     assert trimmed.overflow_tokens == 0
 
 
+def test_trimming_never_drops_host_compacted_conversation_summary():
+    summary = AgentMessage(
+        role=MessageRole.USER,
+        content="host summary",
+        origin=MessageOrigin.HOST_CONTEXT,
+        attributes={"conversation_summary": True},
+    )
+    messages = (
+        summary,
+        AgentMessage(role=MessageRole.USER, content="old"),
+        AgentMessage(role=MessageRole.ASSISTANT, content="old answer"),
+        AgentMessage(role=MessageRole.USER, content="latest"),
+    )
+    required = (summary, messages[-1])
+
+    trimmed = trim_agent_messages_by_turn(
+        messages,
+        estimate_agent_messages_tokens(required),
+    )
+
+    assert trimmed.messages == required
+    assert trimmed.dropped_count == 2
+    assert trimmed.overflow_tokens == 0
+
+
 def test_host_only_message_metadata_is_not_charged_to_provider_budget():
     visible = AgentMessage(
         role=MessageRole.DEVELOPER,

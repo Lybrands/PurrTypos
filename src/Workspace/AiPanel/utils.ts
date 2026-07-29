@@ -7,6 +7,10 @@ import {
 import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
+import {
+  EMPTY_RESPONSE_MESSAGE,
+  isSynthesizedToolOnlyResponse,
+} from './hooks/chatHistory'
 
 function parseJsonObject<T>(value: string | null | undefined): T | undefined {
   if (!value) return undefined
@@ -173,6 +177,17 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
                 content: resp,
                 toolCallSegments: segments,
                 contentAfterToolCalls: contentAfterToolCalls || undefined,
+              }
+            }
+            if (isSynthesizedToolOnlyResponse({
+              ...assistantMsg,
+              contentAfterToolCalls: undefined,
+            })) {
+              assistantMsg = {
+                ...assistantMsg,
+                content: EMPTY_RESPONSE_MESSAGE,
+                contentAfterToolCalls: undefined,
+                isError: true,
               }
             }
           }

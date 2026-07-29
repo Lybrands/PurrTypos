@@ -35,6 +35,7 @@ export interface SessionHistoryPopoverProps {
   /** setting 时查询不绑章节的全局会话历史 */
   scope?: 'chapter' | 'setting'
   activeSessionId: number | null
+  disabled?: boolean
   /** 用户点击某条历史对话时回调，父组件负责加入标签栏并激活 */
   onOpen: (session: AiSession) => void
   /** 用户删除某条历史对话后回调，父组件负责同步标签栏状态 */
@@ -48,6 +49,7 @@ export default function SessionHistoryPopover({
   chapterId,
   scope = 'chapter',
   activeSessionId,
+  disabled = false,
   onOpen,
   onDelete,
 }: SessionHistoryPopoverProps) {
@@ -88,9 +90,10 @@ export default function SessionHistoryPopover({
   }, [bookId, chapterId, scope])
 
   const handleOpenChange = React.useCallback((visible: boolean) => {
+    if (disabled) return
     setPopoverOpen(visible)
     if (visible) loadSessions()
-  }, [loadSessions])
+  }, [disabled, loadSessions])
 
   const handleDelete = React.useCallback(async (session: AiSession, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -196,7 +199,7 @@ export default function SessionHistoryPopover({
           icon={<HistoryOutlined style={{ fontSize: 13 }} />}
           className="session-new-btn"
           aria-label="打开历史对话"
-          disabled={bookId == null}
+          disabled={disabled || bookId == null}
         />
         </Popover>
       </span>
