@@ -10,9 +10,13 @@ from agent_core.cancellation import OperationCanceled
 from agent_core.contracts import (
     DomainEffect,
     ToolCall,
+    ToolEffectState,
     ToolHandlerResult,
+    ToolPlanningDisposition,
+    ToolStepDisposition,
 )
 from agent_core.errors import ContractViolationError
+from agent_core.json_values import thaw_json_mapping
 from infrastructure.persistence.run_execution_store import now_ms
 
 
@@ -52,7 +56,9 @@ class SqliteToolIdempotencyGateway:
 
             existing = await self._db.fetch_one(
                 "SELECT tool_name, arguments_digest, content, effects_json, "
-                "error_code FROM ai_agent_tool_receipts "
+                "error_code, step_disposition, planning_disposition, "
+                "effect_state "
+                "FROM ai_agent_tool_receipts "
                 "WHERE run_id = ? AND tool_call_id = ?",
                 [normalized_run, tool_call.id],
             )
@@ -72,7 +78,9 @@ class SqliteToolIdempotencyGateway:
             await self._db.execute(
                 "INSERT INTO ai_agent_tool_receipts "
                 "(run_id, tool_call_id, tool_name, arguments_digest, content, "
-                "effects_json, error_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "effects_json, error_code, step_disposition, "
+                "planning_disposition, effect_state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     normalized_run,
                     tool_call.id,
@@ -80,10 +88,16 @@ class SqliteToolIdempotencyGateway:
                     digest,
                     result.content,
                     json.dumps([
-                        {"type": effect.type, "payload": dict(effect.payload)}
+                        {
+                            "type": effect.type,
+                            "payload": thaw_json_mapping(effect.payload),
+                        }
                         for effect in result.effects
                     ], ensure_ascii=False),
                     result.error_code,
+                    result.step_disposition.value,
+                    result.planning_disposition.value,
+                    result.effect_state.value,
                 ],
             )
             return result
@@ -112,4 +126,13 @@ def _stored_result(row: dict) -> ToolHandlerResult:
         from_cache=True,
         effects=tuple(effects),
         error_code=row.get("error_code"),
+        step_disposition=ToolStepDisposition(
+            str(row.get("step_disposition") or "complete")
+        ),
+        planning_disposition=ToolPlanningDisposition(
+            str(row.get("planning_disposition") or "keep_plan")
+        ),
+        effect_state=ToolEffectState(
+            str(row.get("effect_state") or "unknown")
+        ),
     )

@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button, Empty, Radio, Select, Space, Spin, Switch, Tag, toast } from '../../../../ui'
+import { PurrButton, PurrEmpty, PurrRadio, PurrSelect, PurrSpace, PurrSpin, PurrSwitch, PurrTag, purrToast } from '@/purr-components'
 import type {
   EntityId,
   StoryMemoryEvolutionDecision,
@@ -85,7 +85,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     setLoading(false)
     if (!res.success || !Array.isArray(res.data)) {
       setReviews([])
-      toast.error(res.error || '读取故事演化审查失败')
+      purrToast.error(res.error || '读取故事演化审查失败')
       return
     }
     setReviews(res.data)
@@ -124,7 +124,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     setSettingsSaving(true)
     const res = await services.settings.setSettings(patch)
     setSettingsSaving(false)
-    if (!res.success) toast.error(res.error || '保存故事演化设置失败')
+    if (!res.success) purrToast.error(res.error || '保存故事演化设置失败')
     return res.success
   }, [])
 
@@ -132,7 +132,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     const selected = resolutions[review.delta_id] || {}
     const complete = review.decisions.every((decision) => !!selected[decision.target_key])
     if (!complete) {
-      toast.warning('请先处理所有需要人工判断的候选')
+      purrToast.warning('请先处理所有需要人工判断的候选')
       return
     }
     setSubmittingId(review.delta_id)
@@ -142,11 +142,11 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     })
     setSubmittingId(null)
     if (!res.success) {
-      toast.error(res.error || '提交故事演化决议失败')
+      purrToast.error(res.error || '提交故事演化决议失败')
       await load()
       return
     }
-    toast.success(res.data?.applied_delta_id ? '已应用接受的故事设定' : '候选已全部拒绝')
+    purrToast.success(res.data?.applied_delta_id ? '已应用接受的故事设定' : '候选已全部拒绝')
     await load()
   }, [load, resolutions])
 
@@ -169,16 +169,16 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
     return (
       <div className="story-memory-decision" key={decision.target_key}>
         <div className="story-memory-decision-header">
-          <Space size={6} wrap>
-            <Tag>{KIND_LABEL[decision.kind]}</Tag>
-            <Tag>{CLASSIFICATION_LABEL[decision.classification]}</Tag>
-            <Tag>{RISK_LABEL[decision.risk]}</Tag>
+          <PurrSpace size={6} wrap>
+            <PurrTag>{KIND_LABEL[decision.kind]}</PurrTag>
+            <PurrTag>{CLASSIFICATION_LABEL[decision.classification]}</PurrTag>
+            <PurrTag>{RISK_LABEL[decision.risk]}</PurrTag>
             <span className="story-memory-confidence">
               可信度 {Math.round(decision.candidate_confidence * 100)}%
             </span>
-          </Space>
+          </PurrSpace>
           {review.status === 'open' ? (
-            <Radio.Group
+            <PurrRadio.Group
               size="small"
               value={selected}
               onChange={(event) => updateResolution(
@@ -187,11 +187,11 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
                 event.target.value as Resolution,
               )}
             >
-              <Radio.Button value="accepted">接受</Radio.Button>
-              <Radio.Button value="rejected">拒绝</Radio.Button>
-            </Radio.Group>
+              <PurrRadio.Button value="accepted">接受</PurrRadio.Button>
+              <PurrRadio.Button value="rejected">拒绝</PurrRadio.Button>
+            </PurrRadio.Group>
           ) : (
-            <Tag>{decision.resolution === 'accepted' ? '已接受' : decision.resolution === 'rejected' ? '已拒绝' : '未处理'}</Tag>
+            <PurrTag>{decision.resolution === 'accepted' ? '已接受' : decision.resolution === 'rejected' ? '已拒绝' : '未处理'}</PurrTag>
           )}
         </div>
 
@@ -237,7 +237,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
               开启后，用户确认的 AI 正文改动会生成带原文证据的结构化候选。
             </div>
           </div>
-          <Switch
+          <PurrSwitch
             checked={analysisEnabled}
             loading={settingsSaving}
             onChange={async (checked) => {
@@ -255,8 +255,8 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
               仅自动接受白名单中的低风险新增；更新、冲突、替代和高风险候选始终人工处理。
             </div>
           </div>
-          <Space size={8}>
-            <Select
+          <PurrSpace size={8}>
+            <PurrSelect
               size="small"
               value={minConfidence}
               disabled={!autoApplyEnabled || settingsSaving}
@@ -271,7 +271,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
                 }
               }}
             />
-            <Switch
+            <PurrSwitch
               checked={autoApplyEnabled}
               loading={settingsSaving}
               onChange={async (checked) => {
@@ -280,16 +280,16 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
                 }
               }}
             />
-          </Space>
+          </PurrSpace>
         </div>
       </div>
 
       <div className="story-memory-review-toolbar">
-        <Select value={status} options={STATUS_OPTIONS} onChange={setStatus} />
-        <Button onClick={() => void load()} loading={loading}>刷新</Button>
+        <PurrSelect value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+        <PurrButton onClick={() => void load()} loading={loading}>刷新</PurrButton>
       </div>
 
-      <Spin spinning={loading}>
+      <PurrSpin spinning={loading}>
         {reviews.length ? (
           <div className="story-memory-review-list">
             {reviews.map((review) => (
@@ -303,7 +303,7 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
                       冲突 {review.summary.conflict} · 替代 {review.summary.supersession}
                     </div>
                   </div>
-                  <Tag>{STATUS_OPTIONS.find((item) => item.value === review.status)?.label || review.status}</Tag>
+                  <PurrTag>{STATUS_OPTIONS.find((item) => item.value === review.status)?.label || review.status}</PurrTag>
                 </div>
 
                 <div className="story-memory-decision-list">
@@ -313,13 +313,13 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
                 {review.status === 'open' ? (
                   <div className="story-memory-review-footer">
                     <span>接受的候选会确认为正式设定；拒绝的候选仅保留审计记录。</span>
-                    <Button
+                    <PurrButton
                       type="primary"
                       loading={submittingId === review.delta_id}
                       onClick={() => void resolveReview(review)}
                     >
                       提交本组决议
-                    </Button>
+                    </PurrButton>
                   </div>
                 ) : null}
               </div>
@@ -327,12 +327,12 @@ export default function StoryMemoryReviewList({ bookId }: StoryMemoryReviewListP
             ))}
           </div>
         ) : (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          <PurrEmpty
+            image={PurrEmpty.PRESENTED_IMAGE_SIMPLE}
             description={status === 'open' ? '暂无待处理故事演化' : '暂无审查记录'}
           />
         )}
-      </Spin>
+      </PurrSpin>
     </div>
   )
 }

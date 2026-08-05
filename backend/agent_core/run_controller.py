@@ -170,6 +170,20 @@ class AgentRunController:
         state = self._require_started()
         await self._repository.append_trace(state.run_id, trace)
 
+    async def record_event(
+        self,
+        event_type: CoreEventType,
+        payload: dict[str, object],
+    ) -> None:
+        state = self._require_started()
+        event = AgentEvent(
+            type=event_type,
+            run_id=state.run_id,
+            payload=payload,
+        )
+        await self._repository.append_event(state.run_id, event)
+        await self._event_sink.emit(event)
+
     async def on_model_delta(self) -> None:
         async with self._mutation_lock:
             state = self._require_started()
@@ -204,6 +218,19 @@ class AgentRunController:
         async with self._mutation_lock:
             state = self._require_started()
             await self._apply(RunStateMachine.complete(state, final_response))
+
+    async def complete_durable_execution(
+        self,
+        final_response: str = "",
+    ) -> None:
+        async with self._mutation_lock:
+            state = self._require_started()
+            await self._apply(
+                RunStateMachine.complete_durable_execution(
+                    state,
+                    final_response,
+                )
+            )
 
     async def fail(self, error: str) -> None:
         async with self._mutation_lock:

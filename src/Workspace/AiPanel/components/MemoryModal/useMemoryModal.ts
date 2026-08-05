@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
-import { toast } from '../../../../ui'
+import { purrToast } from '@/purr-components'
 import type {
   AiForeshadowing,
   AiSparkIdea,
@@ -118,13 +118,13 @@ export function useMemoryModal({
     const needsChapter = needsChapterRelation(addLayer)
     const needsCharacter = needsCharacterRelation(addLayer)
     if (needsChapter && addChapterId == null) {
-      toast.warning(
+      purrToast.warning(
         `请先选择关联${addLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`
       )
       return
     }
     if (needsCharacter && addCharacterId == null) {
-      toast.warning('请先选择关联人物')
+      purrToast.warning('请先选择关联人物')
       return
     }
 
@@ -141,7 +141,7 @@ export function useMemoryModal({
       setSparkIdeas((previous) => [response.data as AiSparkIdea, ...previous])
       setAddContent('')
     } else if (!response.success) {
-      toast.error(response.error || '添加失败')
+      purrToast.error(response.error || '添加失败')
     }
   }, [bookId, addLayer, addContent, addChapterId, addCharacterId])
 
@@ -182,20 +182,20 @@ export function useMemoryModal({
     if (editingId == null) return
     const trimmedContent = editingContent.trim()
     if (!trimmedContent) {
-      toast.warning('设定内容不能为空')
+      purrToast.warning('设定内容不能为空')
       return
     }
 
     const needsChapter = needsChapterRelation(editingLayer)
     const needsCharacter = needsCharacterRelation(editingLayer)
     if (needsChapter && editingChapterId == null) {
-      toast.warning(
+      purrToast.warning(
         `请先选择关联${editingLayer === SparkIdeaLayerFour.Outline ? '大纲' : '章节'}`
       )
       return
     }
     if (needsCharacter && editingCharacterId == null) {
-      toast.warning('请先选择关联人物')
+      purrToast.warning('请先选择关联人物')
       return
     }
 
@@ -217,7 +217,7 @@ export function useMemoryModal({
       )
       handleEditCancel()
     } else {
-      toast.error(response.error || '保存失败')
+      purrToast.error(response.error || '保存失败')
     }
   }, [
     editingId,

@@ -22,11 +22,11 @@ from domains.writing.planning import WRITING_TOOL_PLANNING_DEPENDENCIES
 from domains.writing.tools.host_arguments import (
     bind_host_writing_arguments,
     model_visible_writing_parameters,
-    validate_host_chapter_reference,
 )
 from domains.writing.tools.context_contracts import (
     WRITING_TOOL_CONTEXT_CONTRACTS,
 )
+from domains.writing.tools.display_names import WRITING_TOOL_DISPLAY_NAMES
 
 
 WritingToolHandler = Callable[[dict, dict, Callable[[dict], None] | None], Any]
@@ -114,10 +114,12 @@ def build_writing_tool_catalog(
 
 
 def _schema_from_skill(item: Mapping[str, Any]) -> ToolSchema:
+    name = str(item.get("name") or "").strip()
     return ToolSchema(
-        name=str(item.get("name") or "").strip(),
+        name=name,
         description=str(item.get("description") or ""),
         parameters=model_visible_writing_parameters(item.get("parameters")),
+        display_names=WRITING_TOOL_DISPLAY_NAMES.get(name, {}),
     )
 
 
@@ -164,11 +166,7 @@ def _writing_scope_validator(tool_name: str):
         supplied_book = str(arguments.get("bookId") or "").strip()
         if host_book and supplied_book and host_book != supplied_book:
             return "The requested bookId is outside the current Agent Run scope."
-        return validate_host_chapter_reference(
-            state.domain,
-            tool_name,
-            arguments,
-        )
+        return None
 
     return _validate
 

@@ -3,8 +3,8 @@
 import React from 'react'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { $getSelection, $isRangeSelection, FORMAT_TEXT_COMMAND } from 'lexical'
-import { Dropdown } from '../../../ui'
-import { DownOutlined, UnorderedListOutlined, OrderedListOutlined } from '../../../ui'
+import { PurrDropdown } from '@/purr-components'
+import { ChevronDownIcon, UnorderedListIcon, OrderedListIcon } from '@/purr-components'
 import { $setBlocksType } from '@lexical/selection'
 import { $createHeadingNode } from '@lexical/rich-text'
 import { INSERT_ORDERED_LIST_COMMAND, INSERT_UNORDERED_LIST_COMMAND } from '@lexical/list'
@@ -53,7 +53,7 @@ export function FormatToolbar() {
       </span>
       <span className="format-bar-divider" />
       <span className="format-bar-group">
-        <Dropdown
+        <PurrDropdown
           menu={{
             items: [
               { key: 'h1', label: '标题 1', onClick: () => applyHeading('h1') },
@@ -64,17 +64,17 @@ export function FormatToolbar() {
           }}
         >
           <button type="button" title="标题" className="format-bar-heading-trigger">
-            标题 <DownOutlined />
+            标题 <ChevronDownIcon />
           </button>
-        </Dropdown>
+        </PurrDropdown>
       </span>
       <span className="format-bar-divider" />
       <span className="format-bar-group">
         <button type="button" onClick={() => applyList(false)} title="无序列表">
-          <UnorderedListOutlined />
+          <UnorderedListIcon />
         </button>
         <button type="button" onClick={() => applyList(true)} title="有序列表（1. 2. 3.）">
-          <OrderedListOutlined />
+          <OrderedListIcon />
         </button>
       </span>
     </div>

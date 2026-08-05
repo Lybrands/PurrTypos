@@ -15,9 +15,8 @@ from agent_core.contracts import (
     ApprovalResult,
     ApprovalStatus,
     ContextBudget,
+    ContextBudgetClaim,
     ContextBundle,
-    ConversationSummary,
-    ConversationTurn,
     DelegationAggregation,
     DelegationClaim,
     ExecutionState,
@@ -37,6 +36,7 @@ from agent_core.contracts import (
     RunStatus,
     TaskStep,
     TaskContextRequest,
+    TaskSpec,
     TaskStepUpdate,
     TerminalRunStatus,
     ToolBatchOutcome,
@@ -44,11 +44,17 @@ from agent_core.contracts import (
     ToolBatchResult,
     ToolCall,
     ToolContextContract,
+    ToolDataContract,
     ToolHandlerResult,
     ToolPolicy,
     ToolSchema,
     TraceRecord,
 )
+from agent_core.context_orchestration.contracts import (
+    ContextCompressionRequest,
+    ConversationCompactionResult,
+)
+from agent_core.context_orchestration.ledger import ContextCompactionBudget
 from agent_core.events import AgentEvent, CoreEventType
 
 
@@ -87,6 +93,17 @@ class ContextProvider(Protocol):
 
 
 @runtime_checkable
+class ContextDemandProvider(Protocol):
+    """Optionally describe request-specific demand before Core allocates it."""
+
+    async def describe_context_demands(
+        self,
+        request: AgentRunRequest,
+        signal: CancellationSignal | None = None,
+    ) -> tuple[ContextBudgetClaim, ...]: ...
+
+
+@runtime_checkable
 class StagedContextProvider(Protocol):
     """Optional provider separating lightweight planning from formal recall."""
 
@@ -107,25 +124,49 @@ class StagedContextProvider(Protocol):
 
 
 @runtime_checkable
-class ConversationCompactionRepository(Protocol):
-    async def load_summary(
-        self,
-        session_id: str | int,
-    ) -> ConversationSummary | None: ...
+class TaskContextDemandProvider(Protocol):
+    """Optionally declare post-planning demand from a compiled TaskSpec."""
 
-    async def list_turns(
+    async def describe_task_context_demands(
         self,
-        session_id: str | int,
+        request: AgentRunRequest,
+        task: TaskContextRequest,
+        signal: CancellationSignal | None = None,
+    ) -> tuple[ContextBudgetClaim, ...]: ...
+
+
+@runtime_checkable
+class ContextCompressionHook(Protocol):
+    """Application-owned implementation of semantic context reduction."""
+
+    async def compress(
+        self,
+        compression: ContextCompressionRequest,
+        signal: CancellationSignal | None = None,
+    ) -> ConversationCompactionResult: ...
+
+
+@runtime_checkable
+class ConversationCompactor(Protocol):
+    """Core coordinator used by the run lifecycle."""
+
+    async def prepare(
+        self,
+        request: AgentRunRequest,
+        signal: CancellationSignal | None = None,
         *,
-        after_conversation_id: int = 0,
-    ) -> tuple[ConversationTurn, ...]: ...
-
-    async def save_summary(
-        self,
-        summary: ConversationSummary,
-    ) -> None: ...
-
-    async def delete_summary(self, session_id: str | int) -> None: ...
+        on_compaction_started: (
+            Callable[[Mapping[str, Any]], Awaitable[None]] | None
+        ) = None,
+        budget: ContextCompactionBudget | None = None,
+        anticipated_context_tokens: int = 0,
+        resolved_context_tokens: int | None = None,
+        output_reserve_tokens: int | None = None,
+        provider_input_tokens: int | None = None,
+        planned_step_count: int | None = None,
+        planned_tool_count: int | None = None,
+        selected_tool_count: int | None = None,
+    ) -> ConversationCompactionResult: ...
 
 
 @runtime_checkable
@@ -161,6 +202,23 @@ class PlanningPolicy(Protocol):
         self,
         request: AgentRunRequest,
         capabilities: PlanningCapabilities,
+    ) -> PlanningConstraints: ...
+
+
+@runtime_checkable
+class TaskPlanningConstraintProvider(Protocol):
+    """Refine host constraints after semantic TaskSpec selection.
+
+    This hook may only narrow or mark already-satisfied registered dependency
+    edges.  Agent Core validates the result against the same tool contracts as
+    request-level constraints before plan compilation.
+    """
+
+    def planning_constraints_for_task(
+        self,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+        task_spec: TaskSpec,
     ) -> PlanningConstraints: ...
 
 
@@ -260,6 +318,10 @@ class ToolRegistration:
     host_managed_durability: bool = False
     planning_dependencies: tuple[str, ...] = ()
     context_contract: ToolContextContract = ToolContextContract()
+    data_contract: ToolDataContract = ToolDataContract()
+    # Exceptional tools may narrow or replace Core's raw-JSON transport safety
+    # envelope. Semantic payload bounds belong in schema keywords instead.
+    max_argument_chars: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -278,6 +340,13 @@ class ToolRegistration:
         )
         if not isinstance(self.context_contract, ToolContextContract):
             raise TypeError("tool context_contract must be ToolContextContract")
+        if not isinstance(self.data_contract, ToolDataContract):
+            raise TypeError("tool data_contract must be ToolDataContract")
+        if self.max_argument_chars is not None:
+            limit = int(self.max_argument_chars)
+            if limit <= 0:
+                raise ValueError("tool max_argument_chars must be positive")
+            object.__setattr__(self, "max_argument_chars", limit)
 
     @property
     def prerequisite_tools(self) -> tuple[str, ...]:
@@ -331,7 +400,12 @@ class RuntimeObserver(Protocol):
 
 @runtime_checkable
 class RuntimePlanningHook(Protocol):
-    """Revise runtime authority after a completed tool transition."""
+    """Revise runtime authority after an exceptional planning event.
+
+    Normal successful progress follows the compiled plan. Runtime invokes this
+    hook only for recoverable failures/protocol drift or when a host-owned tool
+    result explicitly requests replanning because it changed the future path.
+    """
 
     async def replan_after_tool(
         self,
@@ -615,6 +689,15 @@ class DelegationRepository(Protocol):
         worker_id: str,
         max_parallel_children: int,
         agent_role: str | None = None,
+    ) -> DelegationClaim | None: ...
+
+    async def claim(
+        self,
+        *,
+        delegation_id: str,
+        parent_run_id: RunId,
+        worker_id: str,
+        max_parallel_children: int,
     ) -> DelegationClaim | None: ...
 
     async def record_result(

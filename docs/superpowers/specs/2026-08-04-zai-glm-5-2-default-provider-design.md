@@ -44,7 +44,7 @@ All request-building paths must preserve `apiProvider: "zai"` instead of collaps
 
 ### Backend routing
 
-`provider_router` gains an explicit `zai` branch for streaming and non-streaming chat. The `/ai/title` route uses the same Z.ai adapter when `apiProvider` is `zai`. The models-list route lists models through the public `zai-sdk` models API and never falls back to the OpenAI SDK. The settings UI does not depend on model listing for built-in profiles.
+`provider_router` gains an explicit `zai` branch for streaming and non-streaming chat. The `/ai/title` route uses the same Z.ai adapter when `apiProvider` is `zai`. Because `zai-sdk` 0.2.3 does not expose a models collection, the models-list route returns the application's supported built-in GLM-5.2 catalog and never falls back to the OpenAI SDK. The settings UI does not depend on model listing for built-in profiles.
 
 ### Z.ai adapter
 

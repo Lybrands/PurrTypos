@@ -93,6 +93,10 @@ export function setChatRuntimeActivity(
 ): void {
   const current = runtimes.get(sessionId);
   if (!current) return;
+  if (
+    current.activity?.state === activity.state
+    && current.activity.queuedCount === activity.queuedCount
+  ) return;
   runtimes.set(sessionId, {
     ...current,
     activity,

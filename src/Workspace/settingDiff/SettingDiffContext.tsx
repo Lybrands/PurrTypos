@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
-import { useToast } from '../../ui'
+import { usePurrToast } from '@/purr-components'
 import type {
   CharacterSettingSnapshot,
   EntityId,
@@ -117,7 +117,7 @@ export function useSettingDiff(): SettingDiffContextValue {
 }
 
 export function SettingDiffProvider({ children }: { children: React.ReactNode }) {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const [sessions, setSessions] = React.useState<Record<string, SettingDiffSession>>({})
   const [resolvedCards, setResolvedCards] = React.useState<Record<string, SettingDiffCardState>>({})
   const sessionsRef = React.useRef(sessions)

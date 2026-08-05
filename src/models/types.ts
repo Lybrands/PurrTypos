@@ -3,7 +3,7 @@ import type { AiBuiltinProviderId, AiContextWindow, AiModelConfig } from '../typ
 export interface AiBuiltinProvider {
   id: AiBuiltinProviderId
   name: string
-  apiProvider: 'openai' | 'anthropic'
+  apiProvider: 'openai' | 'anthropic' | 'zai'
   baseUrl: string
   keyPlaceholder: string
 }
@@ -16,6 +16,10 @@ export interface AiModelPreset {
   summary: string
   contextWindowOptions: readonly AiContextWindow[]
   contextWindow: AiContextWindow
+  /** 应用默认的单次响应输出预算；与上下文窗口是两项独立能力。 */
+  defaultOutputTokens: number
+  /** 服务商公布的单次响应输出上限；未知时不填写。 */
+  maxOutputTokens?: number
   supportsThinking: boolean
   thinkingOnly: boolean
   thinkingEnabled: boolean

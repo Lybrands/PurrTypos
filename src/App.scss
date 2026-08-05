@@ -77,7 +77,8 @@
   left: 61%;
   width: 48%;
   height: 66%;
-  opacity: 0.88;
+  visibility: hidden;
+  opacity: 0;
   filter: blur(38px) saturate(1.05);
   transform: translate3d(0, 0, 0) rotate(-6deg) scale(1);
 }
@@ -87,7 +88,8 @@
   left: 25%;
   width: 56%;
   height: min(440px, 44vh);
-  opacity: 0.72;
+  visibility: hidden;
+  opacity: 0;
   filter: blur(46px) saturate(1.08);
   transform: translate3d(0, 0, 0) rotate(3deg) scale(1.06);
 }
@@ -106,11 +108,8 @@
   animation: app-ambient-glow-settle 1480ms linear both;
 }
 
-[data-theme='dark'] .app-root--ambient-bookshelf .app-ambient-glow {
-  opacity: 0.98;
-}
-
 [data-theme='dark'] .app-root--ambient-workspace .app-ambient-glow {
+  visibility: visible;
   opacity: 0.82;
 }
 

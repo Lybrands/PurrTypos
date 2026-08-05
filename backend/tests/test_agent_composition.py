@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from agent_core.context_orchestration.compaction import (
+    ConversationContextCompactor,
+)
 from agent_core.contracts import (
     AgentRunResult,
     ApprovalRequest,
@@ -17,11 +20,13 @@ from agent_core.contracts import (
     ToolExecutionMode,
 )
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.long_tasks import LongTaskUnitRecord, LongTaskUnitStatus
 from agent_core.tools import InMemoryApprovalGateway
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
 )
+from application.conversation_compaction import ConversationCompactionService
 from application.request_mapping import (
     context_window_tokens,
     to_writing_agent_request,
@@ -40,6 +45,65 @@ from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+@pytest.mark.asyncio
+async def test_cancel_screenplay_long_task_stops_worker_and_bound_child_run():
+    units = (
+        LongTaskUnitRecord(
+            task_id="task-1",
+            id="batch-0001",
+            position=0,
+            status=LongTaskUnitStatus.RUNNING,
+            run_id="run-child",
+        ),
+        LongTaskUnitRecord(
+            task_id="task-1",
+            id="batch-0002",
+            position=1,
+            status=LongTaskUnitStatus.PENDING,
+        ),
+    )
+    canceled_task = object()
+
+    class _Repository:
+        async def list_units(self, task_id):
+            assert task_id == "task-1"
+            return units
+
+        async def cancel(self, task_id):
+            assert task_id == "task-1"
+            return canceled_task
+
+    class _LeaseStore:
+        def __init__(self):
+            self.canceled_runs = []
+
+        async def request_cancellation(self, run_id):
+            self.canceled_runs.append(run_id)
+            return True
+
+    class _Composition:
+        _long_task_repository = _Repository()
+        _execution_lease_store = _LeaseStore()
+        _active_long_task_parent_runs = {"task-1": "run-parent"}
+
+        _request_long_task_execution_stop = (
+            AgentComposition._request_long_task_execution_stop
+        )
+
+    composition = _Composition()
+
+    result = await AgentComposition.cancel_screenplay_long_task(
+        composition,
+        "task-1",
+    )
+
+    assert result is canceled_task
+    assert composition._execution_lease_store.canceled_runs == [
+        "run-child",
+        "run-parent",
+    ]
 
 
 @pytest_asyncio.fixture
@@ -83,6 +147,7 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         enableAgentTools=True,
         bookId="book-1",
         chapterId="chapter-1",
+        locale="zh-Hans-CN",
         selectedMemoryIds=[1],
         contextWindow="64k",
     )
@@ -94,6 +159,7 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     options = writing_run_options(request, {"max_tokens": 2048})
 
     assert request.context_window == 64_000
+    assert request.metadata["locale"] == "zh-Hans-CN"
     assert request.model.options["baseURL"] == "https://example.test/v1"
     assert request.model.profile_id == "minimax:MiniMax-M3"
     assert "model_profile" not in request.model.options
@@ -102,6 +168,120 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     assert domain.selected_memory_ids == (1,)
     assert options.output_reserve_tokens == 2048
     assert options.context_claims[0].name == "writing_retrieval"
+
+
+@pytest.mark.asyncio
+async def test_composition_hydrates_authoritative_book_catalogs(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-1", "测试书籍"],
+    )
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-2", "其他书籍"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'writing', ?)",
+        ["writing-1", "写作目录", "book-1"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'writing', ?)",
+        ["writing-2", "其他写作目录", "book-2"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, parent_id, level, sort) "
+        "VALUES (?, ?, ?, NULL, 1, 1)",
+        ["volume-1", "writing-1", "第一卷"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, parent_id, level, sort) "
+        "VALUES (?, ?, ?, ?, 2, 2)",
+        ["chapter-1", "writing-1", "第一章", "volume-1"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, parent_id, level, sort) "
+        "VALUES (?, ?, ?, NULL, 1, 1)",
+        ["chapter-other", "writing-2", "其他章节"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines "
+        "(id, title, type, book_id, writing_chapter_id) "
+        "VALUES (?, ?, 'chapter', ?, ?)",
+        ["outline-1", "第一章大纲", "book-1", "chapter-1"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'chapter', ?)",
+        ["outline-other", "其他大纲", "book-2"],
+    )
+
+    body = ChatStreamRequest.model_validate({
+        "messages": [{"role": "user", "content": "读取第一章"}],
+        "apiKey": "key",
+        "apiProvider": "openai",
+        "options": {"model": "model"},
+        "enableAgentTools": True,
+        "bookId": "book-1",
+        "chapterId": "chapter-1",
+        # Legacy renderer snapshots are ignored even if an old client sends
+        # them; the composition always replaces catalogs from SQLite.
+        "writingChapters": [{
+            "id": "forged-chapter",
+            "title": "伪造章节",
+        }],
+        "availableOutlines": [{
+            "id": "forged-outline",
+            "title": "伪造大纲",
+        }],
+    })
+    assert "writingChapters" not in body.model_dump()
+    assert "availableOutlines" not in body.model_dump()
+
+    request = to_writing_agent_request(
+        body,
+        {"model": "model", "baseURL": "https://example.test/v1"},
+    )
+    before = WritingDomainContext.from_core_context(
+        request.domain_context
+    )
+    assert before.writing_chapters == ()
+    assert before.available_outlines == ()
+
+    composition = AgentComposition(temp_db)
+    try:
+        prepared = await composition.prepare_request(request)
+    finally:
+        await composition.shutdown()
+    domain = WritingDomainContext.from_core_context(
+        prepared.domain_context
+    )
+
+    assert [item["id"] for item in domain.writing_chapters] == [
+        "volume-1",
+        "chapter-1",
+    ]
+    assert domain.writing_chapters[1]["parent_id"] == "volume-1"
+    assert [item["id"] for item in domain.available_outlines] == [
+        "outline-1",
+    ]
+    assert domain.available_outlines[0]["writing_chapter_id"] == (
+        "chapter-1"
+    )
+    assert all(
+        "forged" not in str(item["id"])
+        and "other" not in str(item["id"])
+        for item in (
+            *domain.writing_chapters,
+            *domain.available_outlines,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -229,6 +409,32 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
     assert len(p5_options.response_judges) == 1
     assert p3_options.response_judges == ()
     assert not hasattr(core, "_response_judges")
+
+
+@pytest.mark.asyncio
+async def test_composition_wires_compaction_into_core_not_run_service(
+    temp_db: DatabaseConnection,
+):
+    composition = AgentComposition(temp_db)
+
+    core = composition.create_core("key")
+
+    assert isinstance(
+        core._conversation_compactor,
+        ConversationContextCompactor,
+    )
+    assert isinstance(
+        core._conversation_compactor.hook,
+        ConversationCompactionService,
+    )
+    assert core._conversation_compactor.hook._repository is (
+        composition.conversation_compaction_repository
+    )
+    assert core._conversation_compactor.settings.trigger_ratio == 0.85
+    assert (
+        core._conversation_compactor.settings.default_keep_recent_messages
+        == 20
+    )
 
 
 @pytest.mark.asyncio
@@ -415,6 +621,25 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
+    tool_started = core_update_to_sse_chunk(
+        AgentEvent(
+            type=CoreEventType.TOOL_CALLS_STARTED,
+            run_id="run-1",
+            payload={
+                "calls": [{
+                    "id": "call-1",
+                    "name": "readSource",
+                    "arguments_json": "{}",
+                    "display_names": {
+                        "zh-CN": "读取原作",
+                        "en-US": "Read Source",
+                    },
+                }],
+                "in_progress": True,
+            },
+        ),
+        model="model",
+    )
     delegation_created = core_update_to_sse_chunk(
         AgentEvent(
             type=CoreEventType.DELEGATION_CREATED,
@@ -436,6 +661,34 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
                 "agentRole": "researcher",
                 "status": "done",
                 "resultSummary": "verified",
+            },
+        ),
+        model="model",
+    )
+    delegated_tool_event = core_update_to_sse_chunk(
+        AgentEvent(
+            type=CoreEventType.DELEGATION_EVENT,
+            run_id="run-1",
+            payload={
+                "delegationId": "delegation-1",
+                "parentRunId": "run-1",
+                "rootRunId": "run-1",
+                "childRunId": "child-1",
+                "agentRole": "researcher",
+                "agentTitle": "研究 Agent",
+                "objective": "核验事实",
+                "event": {
+                    "type": CoreEventType.TOOL_CALLS_STARTED,
+                    "runId": "child-1",
+                    "payload": {
+                        "calls": [{
+                            "id": "call-child",
+                            "name": "readSource",
+                            "arguments_json": "{}",
+                        }],
+                        "in_progress": True,
+                    },
+                },
             },
         ),
         model="model",
@@ -495,6 +748,12 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         },
     }
     assert cached == {"toolIndexCompleted": 2, "toolFromCache": True}
+    assert tool_started is not None
+    assert tool_started["toolCalls"][0]["function"]["name"] == "readSource"
+    assert tool_started["toolCalls"][0]["displayNames"] == {
+        "zh-CN": "读取原作",
+        "en-US": "Read Source",
+    }
     assert delegation_created == {
         "agentDelegationCreated": {
             "runId": "run-1",
@@ -510,6 +769,33 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
             "agentRole": "researcher",
             "status": "done",
             "resultSummary": "verified",
+        },
+    }
+    assert delegated_tool_event == {
+        "agentSubRunEvent": {
+            "runId": "run-1",
+            "parentRunId": "run-1",
+            "rootRunId": "run-1",
+            "delegationId": "delegation-1",
+            "childRunId": "child-1",
+            "agentRole": "researcher",
+            "agentTitle": "研究 Agent",
+            "objective": "核验事实",
+            "chunk": {
+                "toolCalls": [{
+                    "id": "call-child",
+                    "type": "function",
+                    "displayNames": {},
+                    "function": {
+                        "name": "readSource",
+                        "arguments": "{}",
+                    },
+                }],
+                "toolCallsInProgress": True,
+                "partialContent": "",
+                "partialThinking": "",
+                "model": None,
+            },
         },
     }
 
@@ -898,3 +1184,29 @@ async def test_composition_shutdown_cancels_all_live_approvals(
     assert late_sink.events == []
     with pytest.raises(RuntimeError, match="shut down"):
         composition.create_core("key")
+
+
+@pytest.mark.asyncio
+async def test_composition_shutdown_cancels_owned_root_execution_tasks(
+    temp_db: DatabaseConnection,
+):
+    composition = AgentComposition(
+        temp_db,
+        writing=object(),  # type: ignore[arg-type]
+    )
+    canceled = asyncio.Event()
+
+    async def _worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.set()
+
+    worker = asyncio.create_task(_worker())
+    composition.track_background_run(worker)
+    await asyncio.sleep(0)
+
+    await composition.shutdown()
+
+    assert canceled.is_set()
+    assert worker.done()

@@ -1,5 +1,5 @@
 import React from 'react'
-import { Select } from '../../../../ui'
+import { PurrSelect } from '@/purr-components'
 import type { Character, EntityId } from '../../../../types'
 import { SparkIdeaLayerFour } from '../../types'
 import type { WritingChapter } from './types'
@@ -29,7 +29,7 @@ export default function LayerRelationSelect({
 }: LayerRelationSelectProps) {
   if (layer === SparkIdeaLayerFour.Outline || layer === SparkIdeaLayerFour.Chapter) {
     return (
-      <Select
+      <PurrSelect
         size="small"
         placeholder={layer === SparkIdeaLayerFour.Outline ? '关联大纲（章节）' : '关联章节'}
         value={chapterId}
@@ -49,7 +49,7 @@ export default function LayerRelationSelect({
 
   if (layer === SparkIdeaLayerFour.Character) {
     return (
-      <Select
+      <PurrSelect
         size="small"
         placeholder="关联人物"
         value={characterId}

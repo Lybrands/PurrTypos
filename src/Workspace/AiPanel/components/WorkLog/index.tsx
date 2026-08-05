@@ -1,5 +1,5 @@
 import React from "react";
-import { ExclamationCircleOutlined, RightOutlined } from "../../../../ui";
+import { AlertCircleIcon, ChevronRightIcon } from '@/purr-components';
 import "./index.scss";
 
 export interface WorkLogProps {
@@ -116,9 +116,9 @@ export default function WorkLog({
           onClick={toggleOpen}
           aria-expanded={open}
         >
-          <RightOutlined className="work-log__chevron" />
+          <ChevronRightIcon className="work-log__chevron" />
           {hasError ? (
-            <ExclamationCircleOutlined className="work-log__error-icon" />
+            <AlertCircleIcon className="work-log__error-icon" />
           ) : null}
           <span>{title}</span>
           {durationText ? (
@@ -193,9 +193,9 @@ export function WorkLogStepGroup({
         onClick={toggleOpen}
         aria-expanded={open}
       >
-        <RightOutlined className="work-log-step-group__chevron" />
+        <ChevronRightIcon className="work-log-step-group__chevron" />
         {hasError ? (
-          <ExclamationCircleOutlined className="work-log-step-group__error-icon" />
+          <AlertCircleIcon className="work-log-step-group__error-icon" />
         ) : null}
         <span>{active ? "正在执行" : "执行了"}</span>
         <span className="work-log-step-group__count">{stepCount} 个步骤</span>

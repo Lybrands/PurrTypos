@@ -297,9 +297,11 @@ async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gatewa
         scope_tools_to_observer=False,
     )
 
-    started = await asyncio.wait_for(anext(stream), timeout=1)
-    assert isinstance(started, AgentEvent)
-    assert started.type == CoreEventType.TOOL_CALLS_STARTED
+    while True:
+        started = await asyncio.wait_for(anext(stream), timeout=1)
+        assert isinstance(started, AgentEvent)
+        if started.type == CoreEventType.TOOL_CALLS_STARTED:
+            break
     assert await asyncio.wait_for(anext(stream), timeout=1) is progress
     assert tracked_streams and not tracked_streams[0].closed
 

@@ -24,14 +24,6 @@ export function useAiModelPrefs(
     () => modelConfigs.find((c) => c.id === selectedModel) ?? null,
     [modelConfigs, selectedModel],
   );
-  const modelConfigsRecord = React.useMemo(() => {
-    const r: Record<string, { label?: string; max_tokens?: number }> = {};
-    modelConfigs.forEach((c) => {
-      r[c.id] = { label: c.name };
-    });
-    return r;
-  }, [modelConfigs]);
-
   React.useEffect(() => {
     const prefs = loadModelPrefs(prefBookId, ids);
     setSelectedModel(prefs.model);
@@ -57,6 +49,5 @@ export function useAiModelPrefs(
     chatAgentMode,
     setChatAgentMode,
     selectedModelConfig,
-    modelConfigsRecord,
   };
 }

@@ -1,14 +1,14 @@
 import { services } from '@/services'
 import React from 'react'
 import {
-  PlusOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  HistoryOutlined,
-  CommentOutlined,
-  CompassOutlined,
-} from '../../ui'
-import { Button, Empty, Input, Modal, Segmented, Select, Tag, Tooltip } from '../../ui'
+  PlusIcon,
+  DeleteIcon,
+  EditIcon,
+  HistoryIcon,
+  AiChatIcon,
+  CompassIcon,
+} from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
 import { useEditor, EditorContent } from '@tiptap/react'
@@ -256,7 +256,7 @@ export default function WorldEntityTab({
   if (bookId == null) {
     return (
       <div className="character-tab character-tab-empty">
-        <Empty description="请先选择书籍" />
+        <PurrEmpty description="请先选择书籍" />
       </div>
     )
   }
@@ -264,26 +264,26 @@ export default function WorldEntityTab({
   return (
     <div className="character-tab world-entity-tab">
       <div className="character-tab-header">
-        <Segmented
+        <PurrSegmented
           size="small"
           value={typeFilter}
           onChange={(v) => setTypeFilter(v as SettingEntityType | 'all')}
           options={[{ value: 'all', label: '全部' }, ...ENTITY_TYPE_OPTIONS]}
         />
-        <Tooltip title="新建设定条目">
-          <Button
+        <PurrTooltip title="新建设定条目">
+          <PurrButton
             type="text"
             size="small"
-            icon={<PlusOutlined style={{ fontSize: 14 }} />}
+            icon={<PlusIcon style={{ fontSize: 14 }} />}
             onClick={openCreate}
             className="character-add-btn"
           />
-        </Tooltip>
+        </PurrTooltip>
       </div>
       <div className="character-tab-list">
         {visibleEntities.length === 0 ? (
           <div className="character-tab-empty-card">
-            <CompassOutlined className="character-tab-empty-icon" />
+            <CompassIcon className="character-tab-empty-icon" />
             <p>暂无设定条目</p>
             <small>地点、势力、物品等世界观设定都可以记录在这里</small>
           </div>
@@ -302,54 +302,54 @@ export default function WorldEntityTab({
                   <div className="character-card-name-row">
                     <span className="character-card-index">{index + 1}.</span>
                     {preview ? (
-                      <Tooltip
+                      <PurrTooltip
                         zIndex={1301}
                         title={<div className="character-info-tooltip">{preview}</div>}
                       >
                         <span className="character-card-name">{ent.name}</span>
-                      </Tooltip>
+                      </PurrTooltip>
                     ) : (
                       <span className="character-card-name">{ent.name}</span>
                     )}
-                    <Tag className="world-entity-type-tag">
+                    <PurrTag className="world-entity-type-tag">
                       {ENTITY_TYPE_LABEL[ent.entity_type] || '其他'}
-                    </Tag>
+                    </PurrTag>
                   </div>
                   {ent.tags && (
                     <div className="character-card-tags">
                       {splitToArray(ent.tags).map((t, i) => (
-                        <Tag key={i} variant="filled" color="default">{t}</Tag>
+                        <PurrTag key={i} variant="filled" color="default">{t}</PurrTag>
                       ))}
                     </div>
                   )}
                 </div>
                 <div className="character-card-actions">
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<EditOutlined />}
+                    icon={<EditIcon />}
                     onClick={() => openEdit(ent)}
                     title={hasDiff ? '审阅 diff 中，暂不可编辑' : '编辑'}
                     disabled={hasDiff}
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<CommentOutlined />}
+                    icon={<AiChatIcon />}
                     onClick={() => openAiChat(ent)}
                     title="与 AI 讨论此设定"
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<HistoryOutlined />}
+                    icon={<HistoryIcon />}
                     onClick={() => { setHistoryEntity(ent); setHistoryOpen(true) }}
                     title="历史"
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<DeleteOutlined />}
+                    icon={<DeleteIcon />}
                     onClick={() => setDeleteTarget(ent)}
                     title="删除"
                     className="character-add-btn"
@@ -377,7 +377,7 @@ export default function WorldEntityTab({
         onRestored={loadEntities}
       />
 
-      <Modal
+      <PurrModal
         title={editTarget ? '编辑设定条目' : '新建设定条目'}
         open={editModalOpen}
         onOk={handleSave}
@@ -390,21 +390,21 @@ export default function WorldEntityTab({
         className="character-edit-modal"
       >
         <div className="character-edit-meta">
-          <Select
+          <PurrSelect
             value={draftType}
             onChange={(v) => setDraftType(v as SettingEntityType)}
             options={ENTITY_TYPE_OPTIONS}
             className="world-entity-edit-type"
             popupMatchSelectWidth={false}
           />
-          <Input
+          <PurrInput
             placeholder="条目名称（必填）"
             value={draftName}
             onChange={(e) => setDraftName(e.target.value)}
             maxLength={50}
             className="character-edit-name"
           />
-          <Select
+          <PurrSelect
             mode="tags"
             placeholder="标签：输入后回车确认"
             value={draftTags}
@@ -418,9 +418,9 @@ export default function WorldEntityTab({
         <div className="character-edit-profile story-background-tiptap-wrap">
           <EditorContent editor={editor} className="story-background-tiptap-container" />
         </div>
-      </Modal>
+      </PurrModal>
 
-      <Modal
+      <PurrModal
         title="删除设定条目"
         open={!!deleteTarget}
         onOk={handleDelete}
@@ -430,7 +430,7 @@ export default function WorldEntityTab({
         cancelText="取消"
       >
         <p>确认删除「{deleteTarget?.name}」？此操作不可恢复。</p>
-      </Modal>
+      </PurrModal>
     </div>
   )
 }

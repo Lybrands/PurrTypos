@@ -1,17 +1,18 @@
 import {
-  CheckOutlined,
-  CopyOutlined,
-  EditOutlined,
-  StarOutlined,
-} from "../../../../ui";
-import { Button, Dropdown, Tooltip, useToast } from "../../../../ui";
+  CheckIcon,
+  CopyIcon,
+  StarIcon,
+} from '@/purr-components';
+import { PurrButton, PurrDropdown, PurrTooltip, usePurrToast } from '@/purr-components';
 import React from "react";
+import AgentUserMessageBody from "@/components/AgentConversation/UserMessageBody";
 import { markdownToPlainText } from "../../../../utils/markdown";
 import { formatModelName } from "../../utils";
 import { type ChatMessage } from "../../hooks";
 import { getAssistantRenderableMarkdown } from "../../rendering";
 import MessageEditor from "../MessageEditor";
 import AssistantMessageBody from "./AssistantMessageBody";
+import ErrorReportNotice from "./ErrorReportNotice";
 import type { ChatMessageListProps } from "./index";
 
 export interface ChatMessageBubbleProps
@@ -30,6 +31,7 @@ export interface ChatMessageBubbleProps
     | "modelSelection"
     | "onAbort"
     | "onAddFavorite"
+    | "onStructuredAnswer"
     | "setScrolledUpByReason"
   > {
   index: number;
@@ -58,9 +60,10 @@ function ChatMessageBubbleInner({
   modelSelection,
   onAbort,
   onAddFavorite,
+  onStructuredAnswer,
   setScrolledUpByReason,
 }: ChatMessageBubbleProps) {
-  const appMessage = useToast();
+  const appMessage = usePurrToast();
   const [copiedFormat, setCopiedFormat] = React.useState<
     "plain" | "markdown" | null
   >(null);
@@ -74,9 +77,9 @@ function ChatMessageBubbleInner({
   const isEmpty =
     !message.content &&
     !message.toolCallSegments?.length &&
-    !message.taskPlan &&
     !message.delegations?.length &&
     !message.contextCompaction &&
+    !message.error &&
     !hasAnyThinking;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;
@@ -132,12 +135,8 @@ function ChatMessageBubbleInner({
     [copyAnswer, copyMarkdown],
   );
 
-  if (message.role === "assistant" && isEmpty && !isLast) {
-    return (
-      <div className="chat-bubble assistant">
-        <div className="bubble-content">内容同步中。</div>
-      </div>
-    );
+  if (message.role === "assistant" && isEmpty && !(isLast && loading)) {
+    return null;
   }
 
   return (
@@ -162,7 +161,7 @@ function ChatMessageBubbleInner({
             editingMessageIndex={editingMessageIndex}
             editingMessageDraftRef={editingMessageDraftRef}
             editTextareaRef={editTextareaRef}
-            onSend={() => onEditSend(convIndex)}
+            onSend={(content) => onEditSend(convIndex, content)}
             onCancel={() => {
               setEditingMessageIndex(null);
               editingMessageDraftRef.current = "";
@@ -172,32 +171,20 @@ function ChatMessageBubbleInner({
         )}
       {message.role === "user" &&
         (convIndex < 0 || editingMessageIndex !== convIndex) && (
-          <>
-            {message.content ? (
-              <div className="bubble-content">{message.content}</div>
-            ) : null}
-            {!loading && convIndex >= 0 && (
-              <div className="bubble-user-actions">
-                <Tooltip title="编辑提问">
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<EditOutlined style={{ fontSize: 12 }} />}
-                    className="bubble-edit-btn"
-                    onClick={() => {
-                      editingMessageDraftRef.current = message.content ?? "";
-                      setEditingMessageIndex(convIndex);
-                    }}
-                  />
-                </Tooltip>
-              </div>
-            )}
-          </>
+          <AgentUserMessageBody
+            content={message.content}
+            sentAt={message.sentAt}
+            onEdit={!loading && convIndex >= 0 ? () => {
+              editingMessageDraftRef.current = message.content ?? "";
+              setEditingMessageIndex(convIndex);
+            } : undefined}
+          />
         )}
       {message.role === "assistant" && message.isError && (
-        <div className="bubble-content bubble-content--error">
-          {String(message.content || "")}
-        </div>
+        <ErrorReportNotice
+          message={String(message.content || "")}
+          report={message.errorReport}
+        />
       )}
       {message.role === "assistant" && !message.isError && (
         <AssistantMessageBody
@@ -207,6 +194,7 @@ function ChatMessageBubbleInner({
           isLastAssistant={isLastAssistant}
           showPlaceholder={showPlaceholder}
           setScrolledUpByReason={setScrolledUpByReason}
+          onStructuredAnswer={onStructuredAnswer}
         />
       )}
       {message.role === "assistant" &&
@@ -220,56 +208,56 @@ function ChatMessageBubbleInner({
               </span>
             )}
             {copyText && (
-              <Dropdown
+              <PurrDropdown
                 trigger={["contextMenu"]}
                 menu={{
                   items: [
                     {
                       key: "copy-plain",
                       label: "复制纯文本",
-                      icon: <CopyOutlined />,
+                      icon: <CopyIcon />,
                       onClick: handleCopyPlainText,
                     },
                     {
                       key: "copy-markdown",
                       label: "复制 Markdown",
-                      icon: <CopyOutlined />,
+                      icon: <CopyIcon />,
                       onClick: handleCopyMarkdown,
                     },
                   ],
                 }}
               >
-                <Tooltip
+                <PurrTooltip
                   title={copiedFormat
                     ? `已复制${copiedFormat === "plain" ? "纯文本" : " Markdown"}`
                     : "复制纯文本 · 右键选择格式"}
                 >
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
                     icon={
                       copiedFormat ? (
-                        <CheckOutlined style={{ fontSize: 12 }} />
+                        <CheckIcon style={{ fontSize: 12 }} />
                       ) : (
-                        <CopyOutlined style={{ fontSize: 12 }} />
+                        <CopyIcon style={{ fontSize: 12 }} />
                       )
                     }
                     className={`bubble-copy-btn${copiedFormat ? " is-copied" : ""}`}
                     onClick={handleCopyPlainText}
                     aria-label="复制回复纯文本"
                   />
-                </Tooltip>
-              </Dropdown>
+                </PurrTooltip>
+              </PurrDropdown>
             )}
-            <Tooltip title="收藏">
-              <Button
+            <PurrTooltip title="收藏">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<StarOutlined style={{ fontSize: 12 }} />}
+                icon={<StarIcon style={{ fontSize: 12 }} />}
                 className="bubble-bookmark-btn"
                 onClick={() => onAddFavorite(prevUserContent, message.content)}
               />
-            </Tooltip>
+            </PurrTooltip>
           </div>
         )}
     </div>

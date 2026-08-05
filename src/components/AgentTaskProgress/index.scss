@@ -1,0 +1,123 @@
+.ai-task-progress-trigger.purr-button {
+  max-width: min(280px, 38vw);
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+  font-size: var(--font-size-sm);
+  opacity: 1 !important;
+
+  &:hover,
+  &:focus-visible {
+    color: var(--text-primary);
+    border-color: var(--border);
+    background: var(--bg-panel);
+  }
+
+  .purr-button__icon {
+    display: inline-flex;
+    color: var(--accent);
+  }
+
+  .purr-button__label {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+.ai-task-progress-trigger--blocked.purr-button .purr-button__icon,
+.ai-task-progress-trigger--failed.purr-button .purr-button__icon,
+.ai-task-progress-trigger--canceled.purr-button .purr-button__icon {
+  color: var(--danger);
+}
+
+.ai-task-progress-trigger--done.purr-button .purr-button__icon {
+  color: var(--success);
+}
+
+.ai-task-progress-trigger__status {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.ai-task-progress-trigger__current {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-task-progress-trigger__count {
+  flex: 0 0 auto;
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-task-progress-popover {
+  width: min(320px, calc(100vw - 32px));
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.ai-task-progress-popover__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-task-progress-popover__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-task-progress-popover__count {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-task-progress-popover__current {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-task-progress-popover__progress {
+  height: 3px;
+  margin: 9px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-light);
+
+  > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    transition: width 0.25s ease;
+  }
+}
+
+.ai-task-progress-popover .task-plan-card__steps {
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

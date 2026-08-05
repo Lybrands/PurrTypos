@@ -160,7 +160,7 @@ class SqliteRunRepository:
                 agent_role=(lineage.agent_role if lineage else None),
                 run_depth=(lineage.depth if lineage else 0),
             )
-        if lineage is None:
+        if lineage is None or lineage.delegation_id is None:
             return await create_row()
         async with self._db.transaction():
             run_id = await create_row()

@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
-import { HistoryOutlined, RollbackOutlined } from '../../ui'
+import { PurrButton, PurrDrawer, PurrEmpty, PurrSpin, PurrTag, PurrTooltip, usePurrConfirm, usePurrToast } from '@/purr-components'
+import { HistoryIcon, RollbackIcon } from '@/purr-components'
 import type { ChapterDiffHistory, EntityId } from '../../types'
 import { diffParagraphs } from './paragraphDiff'
 import './diff.scss'
@@ -22,8 +22,8 @@ interface DiffHistoryDrawerProps {
 export default function DiffHistoryDrawer({
   chapterId, chapterTitle, open, onClose,
 }: DiffHistoryDrawerProps) {
-  const appMessage = useToast()
-  const confirm = useConfirm()
+  const appMessage = usePurrToast()
+  const confirm = usePurrConfirm()
   const [loading, setLoading] = React.useState(false)
   const [items, setItems] = React.useState<ChapterDiffHistory[]>([])
   const [expandedId, setExpandedId] = React.useState<number | null>(null)
@@ -94,10 +94,10 @@ export default function DiffHistoryDrawer({
   }
 
   return (
-    <Drawer
+    <PurrDrawer
       title={
         <span>
-          <HistoryOutlined style={{ marginRight: 8 }} />
+          <HistoryIcon style={{ marginRight: 8 }} />
           diff 历史
           {chapterTitle ? <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>· {chapterTitle}</span> : null}
         </span>
@@ -109,9 +109,9 @@ export default function DiffHistoryDrawer({
       destroyOnHidden
     >
       {loading ? (
-        <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+        <div style={{ textAlign: 'center', padding: 60 }}><PurrSpin /></div>
       ) : items.length === 0 ? (
-        <Empty description="该章节还没有 diff 历史" />
+        <PurrEmpty description="该章节还没有 diff 历史" />
       ) : (
         <div className="diff-history-list">
           {items.map((item) => {
@@ -123,39 +123,39 @@ export default function DiffHistoryDrawer({
                   <div className="diff-history-item-meta">
                     <span className="diff-history-item-id">#{item.id}</span>
                     {isRollback ? (
-                      <Tag color="orange">回滚</Tag>
+                      <PurrTag color="orange">回滚</PurrTag>
                     ) : (
-                      <Tag color="blue">{item.source || 'unknown'}</Tag>
+                      <PurrTag color="blue">{item.source || 'unknown'}</PurrTag>
                     )}
                     <span className="diff-history-item-time">
                       {item.create_time ? new Date(item.create_time).toLocaleString() : '—'}
                     </span>
                   </div>
                   <div className="diff-history-item-stats">
-                    {item.accepted_segments > 0 && <Tag color="success">接受 {item.accepted_segments}</Tag>}
-                    {item.rejected_segments > 0 && <Tag>拒绝 {item.rejected_segments}</Tag>}
+                    {item.accepted_segments > 0 && <PurrTag color="success">接受 {item.accepted_segments}</PurrTag>}
+                    {item.rejected_segments > 0 && <PurrTag>拒绝 {item.rejected_segments}</PurrTag>}
                   </div>
                 </div>
                 <div className="diff-history-item-actions">
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
                     onClick={() => setExpandedId(isExpanded ? null : item.id)}
                   >
                     {isExpanded ? '收起对比' : '查看对比'}
-                  </Button>
-                  <Tooltip title="把当前正文替换为此版本的「之前」状态">
-                    <Button
+                  </PurrButton>
+                  <PurrTooltip title="把当前正文替换为此版本的「之前」状态">
+                    <PurrButton
                       type="text"
                       size="small"
                       danger
-                      icon={<RollbackOutlined />}
+                      icon={<RollbackIcon />}
                       loading={rollbackingId === item.id}
                       onClick={() => handleRollback(item)}
                     >
                       回滚到此版本
-                    </Button>
-                  </Tooltip>
+                    </PurrButton>
+                  </PurrTooltip>
                 </div>
                 {isExpanded ? <DiffHistoryPreview item={item} /> : null}
               </div>
@@ -163,7 +163,7 @@ export default function DiffHistoryDrawer({
           })}
         </div>
       )}
-    </Drawer>
+    </PurrDrawer>
   )
 }
 

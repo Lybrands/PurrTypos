@@ -1,5 +1,5 @@
 import React from 'react'
-import { Empty, Tabs } from '../../ui'
+import { PurrEmpty, PurrTabs } from '@/purr-components'
 import type { EntityId } from '../../types'
 import StoryHealthTab from './StoryHealthTab'
 import WritingStatsTab from './WritingStatsTab'
@@ -17,14 +17,14 @@ export default function DashboardPanel({ bookId }: DashboardPanelProps) {
   if (bookId == null) {
     return (
       <div className="dashboard-panel dashboard-panel--empty">
-        <Empty description="请先选择书籍" />
+        <PurrEmpty description="请先选择书籍" />
       </div>
     )
   }
 
   return (
     <div className="dashboard-panel">
-      <Tabs
+      <PurrTabs
         activeKey={activeTab}
         onChange={(key) => setActiveTab(key as DashboardTab)}
         className="dashboard-panel-tabs"

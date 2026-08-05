@@ -3,7 +3,10 @@ import {
   type ToolCallLabelOutcome,
   type ToolCallSegment,
 } from "../chat.types";
-import { toolCallDisplayRow } from "../toolCallLabels";
+import {
+  resolveLocalizedToolDisplayName,
+  toolCallDisplayRow,
+} from "../toolCallLabels";
 import { finalizeThinkingBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
@@ -42,11 +45,16 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
   }
 
   const rows = visibleToolCalls.map(
-    (tc: { function?: { name?: string; arguments?: string }; id?: string }) => {
+    (tc: {
+      function?: { name?: string; arguments?: string };
+      id?: string;
+      displayNames?: Record<string, string>;
+    }) => {
       const fn = tc.function?.name;
       if (!fn) {
         return { label: "（未识别工具）", outcome: "ok" as ToolCallLabelOutcome };
       }
+      const displayName = resolveLocalizedToolDisplayName(tc.displayNames);
       try {
         const args = JSON.parse(tc.function?.arguments || "{}") as Record<
           string,
@@ -57,6 +65,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
           args,
           ctx.writingChapters || [],
           ctx.availableOutlines || [],
+          displayName,
         );
       } catch {
         if (fn === "queryOutline") {
@@ -70,6 +79,7 @@ export const handleToolCallsInProgress: ChunkHandler = (chunk, ctx) => {
           {},
           ctx.writingChapters || [],
           ctx.availableOutlines || [],
+          displayName,
         );
       }
     },

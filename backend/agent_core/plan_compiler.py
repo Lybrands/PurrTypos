@@ -81,7 +81,11 @@ def compile_task_plan(
             existing_ids.add(step_id)
             expanded.append(TaskStep(
                 id=step_id,
-                title=f"Prepare {dependency}",
+                # ToolPolicy.title is the host-owned, product-localized label.
+                # Showing the internal tool name here leaked English protocol
+                # identifiers such as ``Prepare getSourceCoveragePlan`` into
+                # the user-facing execution progress UI.
+                title=dependency_registration.policy.title,
                 type=(
                     StepType.READ
                     if dependency_registration.policy.mode is ToolExecutionMode.READ

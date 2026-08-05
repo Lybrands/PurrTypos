@@ -1,12 +1,14 @@
 import React from 'react'
-import { ArrowLeftOutlined, CheckOutlined, CopyOutlined, DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined } from '../ui'
-import { Button, Checkbox, Form, Input, Modal, Radio, Slider, Switch, Tag, Tooltip } from '../ui'
+import { ArrowLeftIcon, CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, PlusIcon } from '@/purr-components'
+import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrModal, PurrRadio, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
 import type { AiModelConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
   getBuiltinProvider,
+  getDefaultModelOutputTokens,
   getModelPreset,
   getModelContextWindowOptions,
+  normalizeApiProvider,
 } from '../modelCatalog'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 import {
@@ -46,14 +48,16 @@ export default function SettingsPage({
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
-  const [form] = Form.useForm<Omit<AiModelConfig, 'id'>>()
-  const apiProviderWatch = Form.useWatch('apiProvider', form)
-  const thinkingEnabledWatch = Form.useWatch('thinkingEnabled', form)
-  const customizeTemperatureWatch = Form.useWatch('customizeTemperature', form)
+  const [form] = PurrForm.useForm<Omit<AiModelConfig, 'id'>>()
+  const apiProviderWatch = PurrForm.useWatch('apiProvider', form)
+  const thinkingEnabledWatch = PurrForm.useWatch('thinkingEnabled', form)
+  const customizeTemperatureWatch = PurrForm.useWatch('customizeTemperature', form)
   const applePlatform = React.useMemo(() => isApplePlatform(), [])
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
+  const displayOutputBudget = (c: AiModelConfig) =>
+    `${Math.round(getDefaultModelOutputTokens(c) / 1024)}K`
 
   React.useEffect(() => {
     setModelConfigList(modelConfigs)
@@ -141,9 +145,8 @@ export default function SettingsPage({
         message.warning('请填写 API Key')
         return
       }
-      const prov: 'openai' | 'anthropic' =
-        editingPresetProvider?.apiProvider
-          ?? (values.apiProvider === 'anthropic' ? 'anthropic' : 'openai')
+      const prov = editingPresetProvider?.apiProvider
+        ?? normalizeApiProvider(values.apiProvider)
       if (!baseUrl) {
         message.warning('请填写接口地址')
         return
@@ -239,15 +242,15 @@ export default function SettingsPage({
   return (
     <div className="settings-page">
       <header className="settings-header">
-        <Tooltip title="返回">
-          <Button
+        <PurrTooltip title="返回">
+          <PurrButton
             type="text"
             size="small"
-            icon={<ArrowLeftOutlined style={{ fontSize: 14 }} />}
+            icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
             onClick={onClose}
             style={{ marginRight: 4 }}
           />
-        </Tooltip>
+        </PurrTooltip>
         <span className="settings-title">设置</span>
       </header>
 
@@ -269,12 +272,12 @@ export default function SettingsPage({
             <div className="settings-section">
               <h2 className="settings-section-title">通用</h2>
               <p className="settings-section-desc">通用相关配置将在此展示。</p>
-              <Checkbox
+              <PurrCheckbox
                 checked={syncOutlineChapter}
                 onChange={(e) => onSyncOutlineChapterChange(e.target.checked)}
               >
                 点击章节大纲或章节列表时，同步切换另一侧选中项
-              </Checkbox>
+              </PurrCheckbox>
             </div>
           )}
           {activeTab === 'models' && (
@@ -284,9 +287,9 @@ export default function SettingsPage({
                 内置模型由系统统一提供，只需配置凭据和运行参数；代理、自建服务和目录外模型可继续使用高级自定义接入。
               </p>
               <div className="settings-models-actions" style={{ marginBottom: 12 }}>
-                <Button type="primary" icon={<PlusOutlined />} onClick={openAddModel}>
+                <PurrButton type="primary" icon={<PlusIcon />} onClick={openAddModel}>
                   新增自定义模型
-                </Button>
+                </PurrButton>
               </div>
               {modelConfigList.length === 0 ? (
                 <p className="settings-field-desc">暂无模型，请点击「新增模型」添加后，在 AI 对话中选择使用。</p>
@@ -299,12 +302,15 @@ export default function SettingsPage({
                       <li key={c.id} className="settings-model-item">
                         <div className="settings-model-item-main">
                           <span style={{ fontWeight: 500 }}>{displayName(c)}</span>
-                          {preset ? <Tag color="blue" className="settings-model-builtin-tag">内置</Tag> : null}
+                          {preset ? <PurrTag color="blue" className="settings-model-builtin-tag">内置</PurrTag> : null}
                           {c.nickname?.trim() ? (
                             <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>{c.name}</span>
                           ) : null}
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                             Context {(c.contextWindow ?? '128k').toUpperCase()}
+                          </span>
+                          <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                            Output {displayOutputBudget(c)}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                             {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
@@ -316,30 +322,30 @@ export default function SettingsPage({
                             {c.baseUrl?.trim() || (c.apiProvider === 'anthropic' ? '默认 api.anthropic.com' : '未填写接口地址')}
                             {c.apiKey ? (
                               <span style={{ marginLeft: 8 }}>
-                                <CheckOutlined style={{ fontSize: 12 }} /> 已配置 Key
+                                <CheckIcon style={{ fontSize: 12 }} /> 已配置 Key
                               </span>
                             ) : <span style={{ marginLeft: 8 }}>未配置 Key</span>}
                           </div>
                         </div>
                         <div className="settings-model-item-actions">
-                          <Tooltip title={preset ? '配置' : '编辑'}>
-                            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditModel(c)} />
-                          </Tooltip>
+                          <PurrTooltip title={preset ? '配置' : '编辑'}>
+                            <PurrButton type="text" size="small" icon={<EditIcon />} onClick={() => openEditModel(c)} />
+                          </PurrTooltip>
                           {!preset ? (
                             <>
-                              <Tooltip title="复制一项">
-                                <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => handleDuplicateModel(c)} />
-                              </Tooltip>
-                              <Tooltip title="删除">
-                                <Button
+                              <PurrTooltip title="复制一项">
+                                <PurrButton type="text" size="small" icon={<CopyIcon />} onClick={() => handleDuplicateModel(c)} />
+                              </PurrTooltip>
+                              <PurrTooltip title="删除">
+                                <PurrButton
                                   type="text"
                                   size="small"
-                                  icon={<DeleteOutlined />}
+                                  icon={<DeleteIcon />}
                                   onClick={() => {
                                     if (window.confirm(`确定删除模型「${displayName(c)}」？`)) handleDeleteModel(c.id)
                                   }}
                                 />
-                              </Tooltip>
+                              </PurrTooltip>
                             </>
                           ) : null}
                         </div>
@@ -348,7 +354,7 @@ export default function SettingsPage({
                   })}
                 </ul>
               )}
-              <Modal
+              <PurrModal
                 title={getModelPreset(editingConfig?.presetId)
                   ? '配置内置模型'
                   : (editingConfig ? '编辑自定义模型' : '新增自定义模型')}
@@ -371,7 +377,7 @@ export default function SettingsPage({
                   footer: { flexShrink: 0 },
                 }}
               >
-                <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+                <PurrForm form={form} layout="vertical" style={{ marginTop: 16 }}>
                   {getModelPreset(editingConfig?.presetId) ? (
                     <>
                       <div className="settings-model-preset-summary">
@@ -380,31 +386,32 @@ export default function SettingsPage({
                           <span>{getModelPreset(editingConfig?.presetId)?.summary}</span>
                         </div>
                         <div className="settings-model-preset-meta">
-                          <Tag>系统内置</Tag>
-                          <Tag>Context {getModelPreset(editingConfig?.presetId)?.contextWindow.toUpperCase()}</Tag>
+                          <PurrTag>系统内置</PurrTag>
+                          <PurrTag>Context {getModelPreset(editingConfig?.presetId)?.contextWindow.toUpperCase()}</PurrTag>
+                          <PurrTag>Output {displayOutputBudget(editingConfig!)}</PurrTag>
                         </div>
                       </div>
-                      <Form.Item name="nickname" label="昵称">
-                        <Input placeholder="选填，AI 对话中优先显示昵称" />
-                      </Form.Item>
-                      <Form.Item
+                      <PurrForm.Item name="nickname" label="昵称">
+                        <PurrInput placeholder="选填，AI 对话中优先显示昵称" />
+                      </PurrForm.Item>
+                      <PurrForm.Item
                         name="contextWindow"
                         label="Context"
                         rules={[{ required: true, message: '请选择 Context' }]}
                       >
-                        <Radio.Group optionType="button" buttonStyle="solid">
+                        <PurrRadio.Group optionType="button" buttonStyle="solid">
                           {getModelContextWindowOptions(editingConfig).map((value) => (
-                            <Radio.Button key={value} value={value}>
+                            <PurrRadio.Button key={value} value={value}>
                               {AI_CONTEXT_WINDOW_LABELS[value]}
-                            </Radio.Button>
+                            </PurrRadio.Button>
                           ))}
-                        </Radio.Group>
-                      </Form.Item>
-                      <Form.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
-                        <Input.Password
+                        </PurrRadio.Group>
+                      </PurrForm.Item>
+                      <PurrForm.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
+                        <PurrInput.Password
                           placeholder={getBuiltinProvider(editingConfig?.providerId)?.keyPlaceholder ?? 'sk-xxxxxxxxxxxxxxxx'}
                         />
-                      </Form.Item>
+                      </PurrForm.Item>
                       <div className="settings-model-preset-endpoint">
                         <span>接口地址</span>
                         <code>{getBuiltinProvider(editingConfig?.providerId)?.baseUrl}</code>
@@ -412,48 +419,48 @@ export default function SettingsPage({
                     </>
                   ) : (
                     <>
-                  <Form.Item name="apiProvider" label="API 类型" rules={[{ required: true }]}>
-                    <Radio.Group>
-                      <Radio value="openai">OpenAI</Radio>
-                      <Radio value="anthropic">Anthropic</Radio>
-                    </Radio.Group>
-                  </Form.Item>
-                  <Form.Item name="name" label="模型名称" rules={[{ required: true, message: '请填写模型名称' }]}>
-                    <Input placeholder="如 gpt-4、moonshot-v1-32k 等 API 模型名" />
-                  </Form.Item>
-                  <Form.Item name="nickname" label="昵称">
-                    <Input placeholder="选填，AI 对话中优先显示昵称" />
-                  </Form.Item>
-                  <Form.Item
+                  <PurrForm.Item name="apiProvider" label="API 类型" rules={[{ required: true }]}>
+                    <PurrRadio.Group>
+                      <PurrRadio value="openai">OpenAI</PurrRadio>
+                      <PurrRadio value="anthropic">Anthropic</PurrRadio>
+                    </PurrRadio.Group>
+                  </PurrForm.Item>
+                  <PurrForm.Item name="name" label="模型名称" rules={[{ required: true, message: '请填写模型名称' }]}>
+                    <PurrInput placeholder="如 gpt-4、moonshot-v1-32k 等 API 模型名" />
+                  </PurrForm.Item>
+                  <PurrForm.Item name="nickname" label="昵称">
+                    <PurrInput placeholder="选填，AI 对话中优先显示昵称" />
+                  </PurrForm.Item>
+                  <PurrForm.Item
                     name="contextWindow"
                     label="Context"
                     extra="必须与模型服务商公布的真实上下文窗口一致；设置过大会导致上游拒绝请求。"
                     rules={[{ required: true, message: '请选择 Context' }]}
                   >
-                    <Radio.Group optionType="button" buttonStyle="solid">
+                    <PurrRadio.Group optionType="button" buttonStyle="solid">
                       {getModelContextWindowOptions(editingConfig).map((value) => (
-                        <Radio.Button key={value} value={value}>
+                        <PurrRadio.Button key={value} value={value}>
                           {AI_CONTEXT_WINDOW_LABELS[value]}
-                        </Radio.Button>
+                        </PurrRadio.Button>
                       ))}
-                    </Radio.Group>
-                  </Form.Item>
-                  <Form.Item
+                    </PurrRadio.Group>
+                  </PurrForm.Item>
+                  <PurrForm.Item
                     name="thinkingEnabled"
                     valuePropName="checked"
                     label="Thinking"
                     extra={editingConfig?.thinkingOnly ? '该模型使用思考模式，服务端不支持关闭。' : undefined}
                   >
-                    <Switch size='small' disabled={editingConfig?.thinkingOnly} />
-                  </Form.Item>
-                  <Form.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
-                    <Switch size='small' />
-                  </Form.Item>
+                    <PurrSwitch size='small' disabled={editingConfig?.thinkingOnly} />
+                  </PurrForm.Item>
+                  <PurrForm.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
+                    <PurrSwitch size='small' />
+                  </PurrForm.Item>
                   {customizeTemperatureWatch === true ? (
                   <div className="settings-model-temperature-panel">
                     <div className="settings-model-temperature-panel-title">Temperature</div>
                     {thinkingEnabledWatch === true ? (
-                      <Form.Item
+                      <PurrForm.Item
                         name="temperatureThinking"
                         label="Thinking 请求"
                         rules={[
@@ -461,15 +468,17 @@ export default function SettingsPage({
                           { type: 'number', min: 0, max: 1, message: '范围为 0～1' },
                         ]}
                       >
-                        <Slider
+                        <PurrSlider
                           min={0}
                           max={1}
                           step={0.1}
-                          tooltip={{ formatter: (v) => (v != null ? String(v) : '') }}
+                          showValue
+                          valueLabel="Thinking 请求 Temperature"
+                          tooltip={{ formatter: (v) => (v != null ? v.toFixed(1) : '') }}
                         />
-                      </Form.Item>
+                      </PurrForm.Item>
                     ) : null}
-                    <Form.Item
+                    <PurrForm.Item
                       name="temperatureNonThinking"
                       label={thinkingEnabledWatch === true ? '普通请求（备用）' : '普通请求'}
                       rules={[
@@ -477,35 +486,37 @@ export default function SettingsPage({
                         { type: 'number', min: 0, max: 1, message: '范围为 0～1' },
                       ]}
                     >
-                      <Slider
+                      <PurrSlider
                         min={0}
                         max={1}
                         step={0.1}
-                        tooltip={{ formatter: (v) => (v != null ? String(v) : '') }}
+                        showValue
+                        valueLabel="普通请求 Temperature"
+                        tooltip={{ formatter: (v) => (v != null ? v.toFixed(1) : '') }}
                       />
-                    </Form.Item>
+                    </PurrForm.Item>
                   </div>
                   ) : null}
-                  <Form.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
-                    <Input.Password placeholder="sk-xxxxxxxxxxxxxxxx" />
-                  </Form.Item>
-                  <Form.Item
+                  <PurrForm.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
+                    <PurrInput.Password placeholder="sk-xxxxxxxxxxxxxxxx" />
+                  </PurrForm.Item>
+                  <PurrForm.Item
                     name="baseUrl"
                     label="接口地址"
                     rules={[{ required: true, message: '请填写接口地址' }]}
                   >
-                    <Input
+                    <PurrInput
                       placeholder={
                         apiProviderWatch === 'anthropic'
                           ? '建议 https://api.anthropic.com（或填代理 / 自建反代地址）'
                           : 'https://api.example.com/v1'
                       }
                     />
-                  </Form.Item>
+                  </PurrForm.Item>
                     </>
                   )}
-                </Form>
-              </Modal>
+                </PurrForm>
+              </PurrModal>
             </div>
           )}
           {activeTab === 'shortcuts' && (
@@ -565,29 +576,29 @@ export default function SettingsPage({
                 </div>
                 <div className="settings-field-actions">
                   {canOpenDbDir && (
-                    <Button onClick={handleOpenDbDir}>打开数据库目录</Button>
+                    <PurrButton onClick={handleOpenDbDir}>打开数据库目录</PurrButton>
                   )}
-                  <Button onClick={refreshDbInfo} loading={dbInfoLoading}>刷新统计</Button>
+                  <PurrButton onClick={refreshDbInfo} loading={dbInfoLoading}>刷新统计</PurrButton>
                 </div>
               </div>
               <div className="settings-data-actions">
-                <Button
+                <PurrButton
                   type="default"
-                  icon={<ExportOutlined />}
+                  icon={<ExportIcon />}
                   onClick={handleExportDatabase}
                   loading={exportingDb}
                 >
                   导出数据库
-                </Button>
-                <Button
+                </PurrButton>
+                <PurrButton
                   type="default"
-                  icon={<ImportOutlined />}
+                  icon={<ImportIcon />}
                   onClick={handleImportDatabase}
                   loading={importingDb}
                   danger
                 >
                   导入数据库
-                </Button>
+                </PurrButton>
               </div>
             </div>
           )}

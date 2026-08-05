@@ -17,6 +17,7 @@ export const handleToolIndexCompleted: ChunkHandler = (chunk, ctx) => {
 
   const completeSegment = <T extends {
     labels: string[];
+    labelOutcomes?: Array<"ok" | "context_error">;
     cachedFlags?: boolean[];
     completedToolCount?: number;
     startedAt?: number;
@@ -26,11 +27,22 @@ export const handleToolIndexCompleted: ChunkHandler = (chunk, ctx) => {
     const nextCount = Math.min(idx + 1, n);
     const flags = [...(segment.cachedFlags ?? new Array(n).fill(false))];
     if (fromCache && idx >= 0 && idx < flags.length) flags[idx] = true;
+    const outcomes = [...(
+      segment.labelOutcomes ?? new Array(n).fill("ok")
+    )];
+    if (
+      idx >= 0
+      && idx < outcomes.length
+      && (chunk.toolOutcome === "failed" || chunk.toolErrorCode)
+    ) {
+      outcomes[idx] = "context_error";
+    }
     const finished = nextCount >= n;
     return {
       ...segment,
       completedToolCount: nextCount,
       cachedFlags: flags,
+      labelOutcomes: outcomes,
       ...(finished && segment.startedAt != null
         ? {
             durationMs: Math.max(0, Math.round(performance.now() - segment.startedAt)),

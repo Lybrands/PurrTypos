@@ -1,16 +1,18 @@
 import type React from "react";
-import type { ToastApi } from "../../../../ui";
+import type { PurrToastApi } from '@/purr-components';
 import type {
   AiModelConfig,
   AiAgentDelegation,
   AiContextBudgetState,
   AiContextCompactionState,
+  ScreenplayDocumentProposal,
   AiSession,
   ElectronAPI,
   EntityId,
   Outline,
 } from "../../../../types";
 import type {
+  AiSubAgentActivity,
   AiTaskPlan,
   ChatMessage,
   ToolCallSegment,
@@ -24,7 +26,7 @@ export type AiStreamChunk = Parameters<
 >[0];
 
 /** 项目内统一的反馈 API。 */
-export type AppMessage = ToastApi;
+export type AppMessage = PurrToastApi;
 
 /** 单次 handleSubmit 调用期间在 onAiChunk 各分支共享的累加状态 */
 export interface AccState {
@@ -44,10 +46,17 @@ export interface AccState {
   /** 当前思考块开始时间（performance.now），用于计算 thinkingDurationsMs */
   thinkingBlockStartedAt?: number;
   agentRunId?: string;
+  /** Run whose persisted conversation row owns this visible turn. */
+  conversationRunId?: string;
+  longTaskId?: string;
   taskPlan?: AiTaskPlan;
   delegations?: AiAgentDelegation[];
   contextCompaction?: AiContextCompactionState;
   contextBudget?: AiContextBudgetState;
+  screenplayProposal?: ScreenplayDocumentProposal;
+  subAgentActivities?: AiSubAgentActivity[];
+  /** Live reducer state is isolated per delegation to prevent token mixing. */
+  subAgentAccumulators?: Record<string, AccState>;
 }
 
 /**
@@ -68,10 +77,19 @@ export interface ChunkCtx {
   flushCommits: () => void;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>;
+  /** Optional domain surface hook; accumulation and persistence remain generic. */
+  setScreenplayProposal?: (proposal: ScreenplayDocumentProposal) => void;
   appMessage: AppMessage;
 
   // 跨会话守卫
   isVisibleSession: () => boolean;
+
+  /**
+   * Durable task continuations replay into an already persisted parent turn.
+   * They use the same rendering reducer, but must not insert a second
+   * conversation row when the continuation reaches its terminal event.
+   */
+  persistConversation?: boolean;
 
   /**
    * 终态（done / error）时调用：取消订阅、清空 running refs、把 loading 关掉等。

@@ -2,7 +2,7 @@ import { services } from '@/services'
 import React from "react";
 import type { EntityId } from "../../../types";
 
-interface SelectOption {
+interface PurrSelectOption {
   label: string;
   value: EntityId;
 }
@@ -20,8 +20,8 @@ export interface UsePromptTemplateContextParams {
   activeChapterTitle: string;
   associatedChapterIds: EntityId[];
   associatedOutlineIds: EntityId[];
-  chapterSelectOptions: SelectOption[];
-  outlineSelectOptions: SelectOption[];
+  chapterSelectOptions: PurrSelectOption[];
+  outlineSelectOptions: PurrSelectOption[];
 }
 
 /**

@@ -13,8 +13,12 @@ from agent_core.contracts import (
     ToolBatchOutcome,
     ToolBatchRequest,
     ToolCall,
+    ToolDataContract,
     ToolExecutionLimits,
+    ToolEffectState,
     ToolHandlerResult,
+    ToolPlanningDisposition,
+    ToolStepDisposition,
     ToolPolicy,
     ToolSchema,
 )
@@ -55,12 +59,21 @@ def _registration(
     mode="read",
     scope=None,
     probe=None,
+    parameters=None,
+    data_contract=ToolDataContract(),
+    cancellation_linearizable=False,
+    host_managed_durability=False,
+    max_argument_chars=None,
 ):
     return ToolRegistration(
         schema=ToolSchema(
             name=name,
             description=f"Tool {name}",
-            parameters={"type": "object", "properties": {}},
+            parameters=(
+                parameters
+                if parameters is not None
+                else {"type": "object", "properties": {}}
+            ),
         ),
         handler=handler,
         policy=ToolPolicy(
@@ -70,6 +83,10 @@ def _registration(
         ),
         scope_validator=scope,
         cache_probe=probe,
+        data_contract=data_contract,
+        cancellation_linearizable=cancellation_linearizable,
+        host_managed_durability=host_managed_durability,
+        max_argument_chars=max_argument_chars,
     )
 
 
@@ -131,6 +148,293 @@ async def test_same_name_read_calls_execute_sequentially_with_shared_state():
 
 
 @pytest.mark.asyncio
+async def test_successful_partial_batch_is_not_reported_as_step_completion():
+    calls = 0
+
+    async def _append(state, arguments, signal=None):
+        del state, arguments, signal
+        nonlocal calls
+        calls += 1
+        return ToolHandlerResult(
+            '{"success":true}',
+            step_disposition=(
+                ToolStepDisposition.CONTINUE
+                if calls == 1
+                else ToolStepDisposition.COMPLETE
+            ),
+        )
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("appendBatch", _append),
+    )))
+
+    partial = await executor.execute_batch(
+        _request(_call("call-partial", "appendBatch")),
+        RecordingSink(),
+    )
+    completed = await executor.execute_batch(
+        _request(_call("call-complete", "appendBatch")),
+        RecordingSink(),
+    )
+
+    assert partial.outcome is ToolBatchOutcome.PROGRESSED
+    assert partial.results[0].step_disposition is ToolStepDisposition.CONTINUE
+    assert completed.outcome is ToolBatchOutcome.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_host_replan_signal_survives_tool_execution_boundary():
+    async def _branch(state, arguments, signal=None):
+        del state, arguments, signal
+        return ToolHandlerResult(
+            '{"branch":"selected"}',
+            planning_disposition=ToolPlanningDisposition.REPLAN,
+        )
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("selectBranch", _branch),
+    )))
+    result = await executor.execute_batch(
+        _request(_call("call-branch", "selectBranch")),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert result.replan_requested is True
+    assert result.results[0].planning_disposition is (
+        ToolPlanningDisposition.REPLAN
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_receives_detached_standard_json_containers():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments)
+        arguments["coverage"]["readChapterIds"].append("chapter-2")
+        return ToolHandlerResult('{"success":true}')
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("readA", _read),
+    )))
+    result = await executor.execute_batch(
+        _request(_call(
+            "call-a",
+            "readA",
+            '{"coverage":{"readChapterIds":["chapter-1"]}}',
+        )),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert isinstance(observed[0], dict)
+    assert isinstance(observed[0]["coverage"], dict)
+    assert isinstance(observed[0]["coverage"]["readChapterIds"], list)
+    assert observed[0]["coverage"]["readChapterIds"] == [
+        "chapter-1",
+        "chapter-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_schema_guided_normalization_recovers_stringified_array_arguments():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments)
+        return ToolHandlerResult('{"success":true}')
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "episodes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+    # This mirrors the provider output from run_45eb136a8c074c9c: the array
+    # was encoded as a string and quotes inside prose were not escaped for the
+    # nested JSON layer, while the outer function arguments remained valid.
+    stringified_episodes = (
+        '[{"id":"ep-01","summary":"看到"犬域"门匾"}]'
+    )
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("readA", _read, parameters=parameters),
+    )))
+    sink = RecordingSink()
+
+    result = await executor.execute_batch(
+        _request(_call(
+            "call-a",
+            "readA",
+            json.dumps({"episodes": stringified_episodes}, ensure_ascii=False),
+        )),
+        sink,
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert observed == [{
+        "episodes": [{"id": "ep-01", "summary": '看到"犬域"门匾'}],
+    }]
+    assert sink.events[-1].payload["normalizedArgumentPaths"] == ["$.episodes"]
+
+
+@pytest.mark.asyncio
+async def test_schema_guided_normalization_fails_closed_for_undecodable_structure():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments)
+        return ToolHandlerResult('{"success":true}')
+
+    parameters = {
+        "type": "object",
+        "properties": {"episodes": {"type": "array", "items": {}}},
+    }
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("readA", _read, parameters=parameters),
+    )))
+
+    result = await executor.execute_batch(
+        _request(_call(
+            "call-a",
+            "readA",
+            json.dumps({"episodes": "[not-json]"}),
+        )),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.FAILED
+    assert result.error == "invalid_tool_arguments_schema"
+    assert result.effect_state is ToolEffectState.NOT_STARTED
+    assert json.loads(result.results[0].content)["error"].startswith(
+        "Tool argument $.episodes must be a JSON array"
+    )
+    assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_core_enforces_schema_limits_after_json_decode_with_diagnostics():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments)
+        return ToolHandlerResult('{"success":true}')
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration(
+            "boundedText",
+            _read,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "maxLength": 4},
+                },
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        ),
+    )))
+
+    result = await executor.execute_batch(
+        _request(_call("too-long", "boundedText", '{"value":"12345"}')),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.FAILED
+    assert result.error == "invalid_tool_arguments_schema"
+    payload = json.loads(result.results[0].content)
+    assert payload["diagnostics"] == {
+        "stage": "schema_validation",
+        "toolName": "boundedText",
+        "path": "$.value",
+        "keyword": "maxLength",
+        "actualChars": 5,
+        "maxChars": 4,
+        "measurement": "decoded_string_chars",
+    }
+    assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_core_measures_escaped_unicode_by_decoded_schema_value():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments["value"])
+        return ToolHandlerResult('{"success":true}')
+
+    raw = json.dumps({"value": "雾" * 6_000}, ensure_ascii=True)
+    assert len(raw) > 32_000
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration(
+            "unicodeText",
+            _read,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "maxLength": 6_000},
+                },
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        ),
+    )))
+
+    result = await executor.execute_batch(
+        _request(_call("unicode", "unicodeText", raw)),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert observed == ["雾" * 6_000]
+
+
+@pytest.mark.asyncio
+async def test_core_rejects_host_owned_fields_omitted_from_strict_schema():
+    observed = []
+
+    async def _read(state, arguments, signal=None):
+        observed.append(arguments)
+        return ToolHandlerResult('{"success":true}')
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration(
+            "hostBound",
+            _read,
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+    )))
+
+    result = await executor.execute_batch(
+        _request(_call(
+            "host-field",
+            "hostBound",
+            '{"value":"ok","projectId":"forged"}',
+        )),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.FAILED
+    payload = json.loads(result.results[0].content)
+    assert payload["diagnostics"]["keyword"] == "additionalProperties"
+    assert payload["diagnostics"]["unknownProperties"] == ["projectId"]
+    assert observed == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["propose", "confirm"])
 async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handler(mode):
     order = []
@@ -179,6 +483,44 @@ async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handle
     ]
     assert order == []
     assert sink.events == []
+
+
+@pytest.mark.asyncio
+async def test_recoverable_host_durable_artifact_batches_allow_same_tool_calls():
+    observed = []
+
+    async def _append(state, arguments, signal=None):
+        observed.append(arguments["value"])
+        return ToolHandlerResult('{"success":true}')
+
+    registration = _registration(
+        "appendArtifactBatch",
+        _append,
+        mode="propose",
+        parameters={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        },
+        data_contract=ToolDataContract(
+            model_owned_paths=("value",),
+            host_derived_paths=("revision",),
+            payload_mode="batch",
+        ),
+        cancellation_linearizable=True,
+        host_managed_durability=True,
+    )
+    executor = CoreToolExecutor(InMemoryToolCatalog((registration,)))
+
+    result = await executor.execute_batch(
+        _request(
+            _call("call-a", "appendArtifactBatch", '{"value":"first"}'),
+            _call("call-b", "appendArtifactBatch", '{"value":"second"}'),
+        ),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert observed == ["first", "second"]
 
 
 @pytest.mark.asyncio
@@ -419,14 +761,51 @@ async def test_scope_rejection_and_handler_exception_never_leak_or_execute_unsaf
     failing_executor = CoreToolExecutor(InMemoryToolCatalog((
         _registration("failing", _handler, probe=Probe(raises=True)),
     )))
+    failing_sink = RecordingSink()
     failed = await failing_executor.execute_batch(
         _request(_call("f", "failing")),
-        RecordingSink(),
+        failing_sink,
     )
     assert failed.outcome is ToolBatchOutcome.FAILED
     assert failed.cache_hits == (False,)
+    assert failed.effect_state is ToolEffectState.NOT_STARTED
     assert "secret" not in failed.results[0].content
     assert "private" not in failed.results[0].content
+    assert failing_sink.events[-1].payload["exceptionType"] == "RuntimeError"
+    assert "secret" not in str(failing_sink.events[-1].payload)
+
+    failing_write_executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("failingWrite", _handler, mode="propose"),
+    )))
+    failed_write = await failing_write_executor.execute_batch(
+        _request(_call("fw", "failingWrite")),
+        RecordingSink(),
+    )
+    assert failed_write.outcome is ToolBatchOutcome.FAILED
+    assert failed_write.effect_state is ToolEffectState.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_write_handler_can_prove_input_failure_started_no_effect():
+    async def _handler(state, arguments, signal=None):
+        return ToolHandlerResult(
+            '{"success":false,"error":"invalid item"}',
+            error_code="tool_input_invalid",
+            effect_state=ToolEffectState.NOT_STARTED,
+        )
+
+    executor = CoreToolExecutor(InMemoryToolCatalog((
+        _registration("validateWrite", _handler, mode="propose"),
+    )))
+
+    result = await executor.execute_batch(
+        _request(_call("invalid", "validateWrite")),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.FAILED
+    assert result.error == "tool_input_invalid"
+    assert result.effect_state is ToolEffectState.NOT_STARTED
 
 
 @pytest.mark.asyncio
@@ -451,6 +830,37 @@ async def test_oversized_handler_result_fails_without_emitting_domain_effects():
     assert result.error == "tool_result_too_large"
     assert json.loads(result.results[0].content)["errorCode"] == "tool_result_too_large"
     assert "test.must_not_emit" not in [event.type for event in sink.events]
+
+
+@pytest.mark.asyncio
+async def test_registration_can_override_core_argument_size_default():
+    observed = []
+
+    async def _handler(state, arguments, signal=None):
+        observed.append(arguments["value"])
+        return ToolHandlerResult('{"success":true}')
+
+    registration = _registration(
+        "boundedLargeInput",
+        _handler,
+        parameters={
+            "type": "object",
+            "properties": {"value": {"type": "string", "maxLength": 40}},
+            "required": ["value"],
+        },
+        max_argument_chars=64,
+    )
+    executor = CoreToolExecutor(
+        InMemoryToolCatalog((registration,)),
+        limits=ToolExecutionLimits(max_argument_chars=8),
+    )
+    result = await executor.execute_batch(
+        _request(_call("large", "boundedLargeInput", '{"value":"123456789"}')),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert observed == ["123456789"]
 
 
 @pytest.mark.asyncio

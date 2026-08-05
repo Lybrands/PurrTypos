@@ -1,12 +1,11 @@
 import React from 'react'
-import { Button, Dropdown, Input, Modal, Space, Tag, Tooltip, useConfirm, type DropdownItem } from '../../ui'
+import { PurrButton, PurrDropdown, PurrInput, PurrModal, PurrSpace, PurrTag, PurrTooltip, usePurrConfirm, type PurrDropdownItem } from '@/purr-components'
 import {
-  CheckOutlined,
-  CloseOutlined,
-  DownOutlined,
-  RollbackOutlined,
-  SaveOutlined,
-} from '../../ui'
+  CheckIcon,
+  CloseIcon,
+  ChevronDownIcon,
+  SaveIcon,
+} from '@/purr-components'
 import type { EntityId } from '../../types'
 import { useDiff } from './DiffContext'
 import { countByStatus, type DiffOp } from './paragraphDiff'
@@ -20,7 +19,7 @@ interface DiffOverlayProps {
 export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProps) {
   const diff = useDiff()
   const session = diff.getSession(chapterId)
-  const confirm = useConfirm()
+  const confirm = usePurrConfirm()
   const [committing, setCommitting] = React.useState(false)
 
   if (!session) return null
@@ -69,36 +68,36 @@ export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProp
         <div className="diff-overlay-title">
           <span className="diff-badge">AI diff</span>
           <span className="diff-overlay-chapter">{chapterTitle || '当前章节'}</span>
-          <Tag color="blue">{stats.total} 段差异</Tag>
-          {stats.pending > 0 && <Tag color="warning">待处理 {stats.pending}</Tag>}
-          {stats.accepted > 0 && <Tag color="success">接受 {stats.accepted}</Tag>}
-          {stats.rejected > 0 && <Tag color="default">拒绝 {stats.rejected}</Tag>}
+          <PurrTag color="blue">{stats.total} 段差异</PurrTag>
+          {stats.pending > 0 && <PurrTag color="warning">待处理 {stats.pending}</PurrTag>}
+          {stats.accepted > 0 && <PurrTag color="success">接受 {stats.accepted}</PurrTag>}
+          {stats.rejected > 0 && <PurrTag color="default">拒绝 {stats.rejected}</PurrTag>}
         </div>
-        <Space size="small">
-          <Tooltip title="把所有未处理段标记为「接受」（你也可以单段操作）">
-            <Button
+        <PurrSpace size="small">
+          <PurrTooltip title="把所有未处理段标记为「接受」（你也可以单段操作）">
+            <PurrButton
               size="small"
-              icon={<CheckOutlined />}
+              icon={<CheckIcon />}
               onClick={handleAcceptAll}
               disabled={stats.pending === 0}
             >
               全部接受
-            </Button>
-          </Tooltip>
-          <Tooltip title="把所有未处理段标记为「拒绝」">
-            <Button
+            </PurrButton>
+          </PurrTooltip>
+          <PurrTooltip title="把所有未处理段标记为「拒绝」">
+            <PurrButton
               size="small"
-              icon={<CloseOutlined />}
+              icon={<CloseIcon />}
               onClick={handleRejectAll}
               disabled={stats.pending === 0}
             >
               全部拒绝
-            </Button>
-          </Tooltip>
-          <Button
+            </PurrButton>
+          </PurrTooltip>
+          <PurrButton
             size="small"
             type="primary"
-            icon={<SaveOutlined />}
+            icon={<SaveIcon />}
             loading={committing}
             disabled={session.computing}
             onClick={handleCommit}
@@ -108,18 +107,18 @@ export default function DiffOverlay({ chapterId, chapterTitle }: DiffOverlayProp
               : allHandled
                 ? '应用并保存'
                 : `应用（剩 ${stats.pending} 段保留原文）`}
-          </Button>
-          <Tooltip title="放弃整次 diff，正文不变">
-            <Button
+          </PurrButton>
+          <PurrTooltip title="放弃整次 diff，正文不变">
+            <PurrButton
               size="small"
-              icon={<RollbackOutlined />}
+              icon={<CloseIcon />}
               danger
               onClick={handleExit}
             >
               退出
-            </Button>
-          </Tooltip>
-        </Space>
+            </PurrButton>
+          </PurrTooltip>
+        </PurrSpace>
       </div>
 
       {/* ── 段落对比列表 ───────────────────────────────────────── */}
@@ -179,7 +178,7 @@ function DiffParagraphRow({ op, onAccept, onReject, onPending }: DiffParagraphRo
     `diff-status-${op.status}`,
   ].join(' ')
 
-  const rejectMenuItems: DropdownItem[] = [
+  const rejectMenuItems: PurrDropdownItem[] = [
     {
       key: 'discard',
       label: '直接放弃（保留原文）',
@@ -221,46 +220,46 @@ function DiffParagraphRow({ op, onAccept, onReject, onPending }: DiffParagraphRo
       <div className="diff-row-actions">
         {op.status === 'pending' ? (
           <>
-            <Tooltip title="接受此段">
-              <Button
+            <PurrTooltip title="接受此段">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<CheckOutlined />}
+                icon={<CheckIcon />}
                 onClick={onAccept}
                 className="diff-action-accept"
               />
-            </Tooltip>
-            <Dropdown.Button
+            </PurrTooltip>
+            <PurrDropdown.Button
               menu={{ items: rejectMenuItems }}
               size="small"
               type="text"
               trigger={['click']}
-              icon={<DownOutlined />}
+              icon={<ChevronDownIcon />}
               onClick={() => onReject(undefined)}
               className="diff-action-reject-dropdown"
             >
-              <CloseOutlined />
-            </Dropdown.Button>
+              <CloseIcon />
+            </PurrDropdown.Button>
           </>
         ) : (
-          <Tooltip title={`已${op.status === 'accepted' ? '接受' : '拒绝'} · 点击撤销`}>
-            <Button
+          <PurrTooltip title={`已${op.status === 'accepted' ? '接受' : '拒绝'} · 点击撤销`}>
+            <PurrButton
               type="text"
               size="small"
               onClick={onPending}
               className={`diff-action-revert diff-action-revert-${op.status}`}
             >
               {op.status === 'accepted' ? (
-                <><CheckOutlined /> 接受</>
+                <><CheckIcon /> 接受</>
               ) : (
-                <><CloseOutlined /> 拒绝</>
+                <><CloseIcon /> 拒绝</>
               )}
-            </Button>
-          </Tooltip>
+            </PurrButton>
+          </PurrTooltip>
         )}
       </div>
 
-      <Modal
+      <PurrModal
         title="说明拒绝理由"
         open={reasonModalOpen}
         onCancel={() => setReasonModalOpen(false)}
@@ -275,14 +274,14 @@ function DiffParagraphRow({ op, onAccept, onReject, onPending }: DiffParagraphRo
         <p style={{ marginBottom: 8, color: 'var(--text-muted)' }}>
           描述这段为什么不合适（一句话即可），将来可作为再生成时给 AI 的反馈。
         </p>
-        <Input.TextArea
+        <PurrInput.TextArea
           autoFocus
           rows={3}
           value={reasonDraft}
           onChange={(e) => setReasonDraft(e.target.value)}
           placeholder="例如：太啰嗦 / 与人物性格不符 / 偏离主线…"
         />
-      </Modal>
+      </PurrModal>
     </div>
   )
 }

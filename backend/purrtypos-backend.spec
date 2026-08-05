@@ -29,6 +29,7 @@ _hiddenimports = [
     "httpx",
     "openai",
     "anthropic",
+    "zai",
     "sse_starlette.sse",
     "pydantic",
     "pydantic.deprecated.decorator",
@@ -77,6 +78,7 @@ _hiddenimports = [
     "services.screenplay_pdf",
     "infrastructure.models.openai_chat",
     "infrastructure.models.anthropic_chat",
+    "infrastructure.models.zai_chat",
     "infrastructure.models.provider_router",
     "infrastructure.models.capabilities",
 ]

@@ -21,6 +21,7 @@ def normalize_scene_trace(
     seen_scene_ids: set[str] = set()
     covered_unit_ids: set[str] = set()
     is_series = structure_kind == "episode_outline"
+    previous_episode_number: int | None = None
     for expected_order, scene in enumerate(scenes, start=1):
         if not isinstance(scene, Mapping):
             raise ValueError("每个场景都必须是结构化对象")
@@ -52,12 +53,28 @@ def normalize_scene_trace(
             if len(structure_unit_ids) != 1:
                 raise ValueError("连续剧中的每个场景必须且只能归属一个分集")
             expected_episode = units[structure_unit_ids[0]]
-            try:
-                episode_number = int(scene.get("episodeNumber"))
-            except (TypeError, ValueError):
-                raise ValueError("连续剧场景必须声明有效的 episodeNumber") from None
+            declared_episode = scene.get("episodeNumber")
+            if declared_episode is None:
+                # structureUnitIds is the authoritative scene-to-episode
+                # mapping. Deriving the redundant display field keeps legacy
+                # and provider-generated batches finalizable while preserving
+                # the strict one-scene-to-one-episode invariant above.
+                episode_number = expected_episode
+            else:
+                try:
+                    episode_number = int(declared_episode)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "连续剧场景 episodeNumber 必须是有效集数"
+                    ) from None
             if episode_number != expected_episode:
                 raise ValueError("场景 episodeNumber 与所映射分集不一致")
+            if (
+                previous_episode_number is not None
+                and episode_number < previous_episode_number
+            ):
+                raise ValueError("连续剧场景必须按分集顺序连续排列")
+            previous_episode_number = episode_number
             normalized_scene["episodeNumber"] = episode_number
         covered_unit_ids.update(structure_unit_ids)
         normalized.append(normalized_scene)

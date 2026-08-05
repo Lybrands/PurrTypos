@@ -11,6 +11,7 @@ import { services } from '@/services'
 
 import React from 'react'
 import type { AiModelConfig, EntityId } from '../../types'
+import { normalizeApiProvider } from '../../modelCatalog'
 import { createAiStreamId } from '../../utils/aiStream'
 import './GhostCompletion.scss'
 
@@ -127,7 +128,7 @@ export default function GhostCompletion({
       streamId,
       apiKey: model.apiKey,
       baseURL: model.baseUrl || undefined,
-      apiProvider: model.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
+      apiProvider: normalizeApiProvider(model.apiProvider),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -143,8 +144,6 @@ export default function GhostCompletion({
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,
-      writingChapters: [],
-      availableOutlines: [],
       chatAgentMode: 'ask',
     })
 

@@ -1,13 +1,13 @@
 import { services } from '@/services'
 import React from 'react'
 import {
-  AimOutlined,
-  CheckOutlined,
-  EditOutlined,
-  FireOutlined,
-  ReloadOutlined,
-} from '../../ui'
-import { Button, Empty, InputNumber, Progress, Spin, Tooltip } from '../../ui'
+  AimIcon,
+  CheckIcon,
+  EditIcon,
+  FlameIcon,
+  RefreshIcon,
+} from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrInputNumber, PurrProgress, PurrSpin, PurrTooltip } from '@/purr-components'
 import type { EntityId, WritingStatsData } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { formatWords } from './dashboardFormatters'
@@ -53,9 +53,9 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
   }, [bookId, goalDraft, reload, message])
 
   if (loading && !data) {
-    return <div className="dashboard-loading"><Spin /></div>
+    return <div className="dashboard-loading"><PurrSpin /></div>
   }
-  if (!data) return <Empty description="暂无数据" />
+  if (!data) return <PurrEmpty description="暂无数据" />
 
   const goalPercent = data.goalWords > 0
     ? Math.min(100, Math.round((data.todayWords / data.goalWords) * 100))
@@ -73,7 +73,7 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
             <span className="dashboard-goal-unit">字 · 今日</span>
           </div>
           {data.goalWords > 0 ? (
-            <Progress
+            <PurrProgress
               percent={goalPercent}
               size="small"
               status={goalPercent >= 100 ? 'success' : 'active'}
@@ -86,7 +86,7 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
         <div className="dashboard-goal-side">
           {editingGoal ? (
             <span className="dashboard-goal-edit">
-              <InputNumber
+              <PurrInputNumber
                 size="small"
                 min={0}
                 max={100000}
@@ -95,41 +95,41 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
                 onChange={(v) => setGoalDraft(Number(v) || 0)}
                 placeholder="每日字数"
               />
-              <Button
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<CheckOutlined />}
+                icon={<CheckIcon />}
                 loading={savingGoal}
                 onClick={saveGoal}
                 title="保存目标"
               />
             </span>
           ) : (
-            <Button
+            <PurrButton
               type="text"
               size="small"
-              icon={data.goalWords > 0 ? <EditOutlined /> : <AimOutlined />}
+              icon={data.goalWords > 0 ? <EditIcon /> : <AimIcon />}
               onClick={() => { setGoalDraft(data.goalWords || 2000); setEditingGoal(true) }}
             >
               {data.goalWords > 0 ? `目标 ${data.goalWords} 字/天` : '设定目标'}
-            </Button>
+            </PurrButton>
           )}
-          <Tooltip title="刷新统计">
-            <Button
+          <PurrTooltip title="刷新统计">
+            <PurrButton
               type="text"
               size="small"
-              icon={<ReloadOutlined />}
+              icon={<RefreshIcon />}
               onClick={reload}
               loading={loading}
             />
-          </Tooltip>
+          </PurrTooltip>
         </div>
       </div>
 
       <div className="dashboard-summary-row">
         <div className="dashboard-stat-card">
           <div className="dashboard-stat-value">
-            <FireOutlined className="dashboard-streak-icon" /> {data.streakDays}
+            <FlameIcon className="dashboard-streak-icon" /> {data.streakDays}
             <span className="dashboard-stat-sub"> 天</span>
           </div>
           <div className="dashboard-stat-label">{data.goalWords > 0 ? '连续达标' : '连续有更新'}</div>
@@ -153,14 +153,14 @@ export default function WritingStatsTab({ bookId }: WritingStatsTabProps) {
             {data.daily.map((d) => {
               const met = data.goalWords > 0 && d.words >= data.goalWords
               return (
-                <Tooltip key={d.date} title={`${d.date}：${d.words} 字`}>
+                <PurrTooltip key={d.date} title={`${d.date}：${d.words} 字`}>
                   <div className="dashboard-daily-col">
                     <div
                       className={`dashboard-daily-bar${met ? ' is-met' : ''}${d.words === 0 ? ' is-zero' : ''}`}
                       style={{ height: `${Math.max(2, Math.round((d.words / maxDaily) * 100))}%` }}
                     />
                   </div>
-                </Tooltip>
+                </PurrTooltip>
               )
             })}
           </div>

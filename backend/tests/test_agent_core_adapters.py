@@ -11,6 +11,7 @@ from agent_core.contracts import (
     AgentRunRequest,
     AgentRuntimeResult,
     DomainContext,
+    ModelFinishReason,
     ModelInvocation,
     ModelRequest,
     ModelTokenUsage,
@@ -25,6 +26,27 @@ from agent_core.ports import ModelGateway
 from agent_core.runtime import AgentRuntime
 from infrastructure.models import provider_model_gateway
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
+
+
+@pytest.mark.parametrize(
+    ("native_reason", "normalized"),
+    [
+        ("end_turn", ModelFinishReason.STOP),
+        ("stop_sequence", ModelFinishReason.STOP),
+        ("max_tokens", ModelFinishReason.LENGTH),
+        ("max_output_tokens", ModelFinishReason.LENGTH),
+        ("content_filter", ModelFinishReason.FILTERED),
+        ("blocked", ModelFinishReason.FILTERED),
+        ("provider_specific_unknown", ModelFinishReason.OTHER),
+    ],
+)
+def test_provider_finish_reasons_are_normalized_fail_closed(
+    native_reason,
+    normalized,
+):
+    assert provider_model_gateway._normalize_finish_reason(
+        native_reason
+    ) is normalized
 
 
 def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
@@ -61,6 +83,99 @@ def test_kimi_k3_internal_json_calls_receive_reasoning_headroom():
     options = provider_model_gateway._provider_options(invocation)
 
     assert options["max_tokens"] == 8_192
+
+
+def test_provider_tool_wire_keeps_display_names_host_only():
+    invocation = ModelInvocation(
+        request=ModelRequest(provider="openai", model="model"),
+        tools=(ToolSchema(
+            name="readSource",
+            description="Read source data. User-facing name: 读取原作。",
+            parameters={"type": "object", "properties": {}},
+            display_names={
+                "zh-CN": "读取原作",
+                "en-US": "Read Source",
+            },
+        ),),
+        tool_choice=ToolChoiceMode.AUTO,
+    )
+
+    options = provider_model_gateway._provider_options(invocation)
+
+    function = options["tools"][0]["function"]
+    assert function["name"] == "readSource"
+    assert "读取原作" in function["description"]
+    assert "displayNames" not in function
+    assert "display_names" not in function
+
+
+def test_model_call_parameters_are_provider_normalized_and_redacted():
+    gateway = ProviderModelGateway("private-provider-key")
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="model",
+            profile_id="profile",
+            options={
+                "baseURL": (
+                    "https://name:password@example.invalid/v1"
+                    "?api_key=private-query-key&region=cn"
+                ),
+                "apiKey": "private-option-key",
+                "authorization": "Bearer private-token",
+                "metadata": {
+                    "access_token": "private-access-token",
+                    "label": "writing",
+                },
+                "tools": [{"function": {"name": "caller-owned"}}],
+            },
+        ),
+        tools=(ToolSchema(
+            name="readThing",
+            description="Read a thing",
+            parameters={"type": "object"},
+        ),),
+        tool_choice=ToolChoiceMode.AUTO,
+        max_output_tokens=2_048,
+        reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+    parameters = gateway.describe_invocation(
+        [AgentMessage(role="user", content="private message")],
+        invocation,
+    )
+
+    assert parameters == {
+        "provider": "openai",
+        "model": "model",
+        "options": {
+            "baseURL": (
+                "https://example.invalid/v1"
+                "?api_key=%3Credacted%3E&region=cn"
+            ),
+            "apiKey": "<redacted>",
+            "authorization": "<redacted>",
+            "metadata": {
+                "access_token": "<redacted>",
+                "label": "writing",
+            },
+            "model": "model",
+            "model_profile": "profile",
+            "max_tokens": 2_048,
+            "thinking_enabled": False,
+            "thinking": {"type": "disabled"},
+        },
+        "maxOutputTokens": 2_048,
+        "reasoningMode": "disabled",
+        "toolChoice": "auto",
+        "toolNames": ["readThing"],
+        "messageCount": 1,
+        "messageRoles": ["user"],
+        "profileId": "profile",
+    }
+    assert "private message" not in json.dumps(parameters)
+    assert "private-provider-key" not in json.dumps(parameters)
+    assert "caller-owned" not in json.dumps(parameters)
 
 
 def test_provider_message_downgrades_developer_role_to_system():

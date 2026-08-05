@@ -17,6 +17,10 @@ def _trace(stage: str, outcome: str, **details: Any) -> dict[str, Any]:
     return {"eventType": TRACE_EVENT_TYPE, "payload": payload}
 
 
+def _event(event_type: str, **payload: Any) -> dict[str, Any]:
+    return {"eventType": event_type, "payload": payload}
+
+
 WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
     AgentRuntimeRegressionCase(
         case_id="healthy-sequential-read",
@@ -46,6 +50,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
             "plannerHealth": "pass",
             "toolGovernance": "pass",
         },
+        expected_failure_codes=(),
     ),
     AgentRuntimeRegressionCase(
         case_id="planner-silent-fallback",
@@ -60,6 +65,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
         expected_planner_outcome="fallback_after_error",
         expected_terminal_status="done",
         expected_check_statuses={"plannerHealth": "fail"},
+        expected_failure_codes=("planner.contract_failure",),
     ),
     AgentRuntimeRegressionCase(
         case_id="missing-required-tool-call",
@@ -75,6 +81,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
         expected_planner_outcome="model_plan",
         expected_terminal_status="failed",
         expected_check_statuses={"toolGovernance": "fail"},
+        expected_failure_codes=("tool.missing_required_call",),
     ),
     AgentRuntimeRegressionCase(
         case_id="unauthorized-tool-rejected",
@@ -94,6 +101,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
         expected_planner_outcome="model_plan",
         expected_terminal_status="failed",
         expected_check_statuses={"toolGovernance": "fail"},
+        expected_failure_codes=("tool.authorization_rejected",),
     ),
     AgentRuntimeRegressionCase(
         case_id="context-overflow-stops-run",
@@ -108,6 +116,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
         expected_planner_outcome="model_plan",
         expected_terminal_status="failed",
         expected_check_statuses={"contextSafety": "fail"},
+        expected_failure_codes=("context.overflow",),
     ),
     AgentRuntimeRegressionCase(
         case_id="tool-handler-error-stops-run",
@@ -127,6 +136,7 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
         expected_planner_outcome="model_plan",
         expected_terminal_status="failed",
         expected_check_statuses={"toolReliability": "fail"},
+        expected_failure_codes=("tool.execution_failed",),
     ),
     AgentRuntimeRegressionCase(
         case_id="client-disconnect-cancels-run",
@@ -144,6 +154,89 @@ WRITING_RUNTIME_REGRESSION_CASES: tuple[AgentRuntimeRegressionCase, ...] = (
             "terminalState": "pass",
             "toolReliability": "pass",
         },
+        expected_failure_codes=(),
+    ),
+    AgentRuntimeRegressionCase(
+        case_id="malformed-tool-json-is-classified",
+        title="工具 JSON 解析失败必须保留协议根因",
+        run={"id": "fixture_tool_json", "status": "failed"},
+        events=(
+            _trace("planner", "model_plan"),
+            _trace("context_budget", "within_budget"),
+            _event(
+                "tool.calls_started",
+                calls=[{"id": "call-json", "name": "persistArtifactBatch"}],
+            ),
+            _event(
+                "tool.results",
+                results=[{
+                    "tool_call_id": "call-json",
+                    "tool_name": "persistArtifactBatch",
+                    "error": "invalid_tool_arguments_json",
+                }],
+            ),
+            _trace("terminal", "failed"),
+        ),
+        expected_report_verdict="fail",
+        expected_planner_outcome="model_plan",
+        expected_terminal_status="failed",
+        expected_failure_codes=("tool.protocol_invalid_arguments",),
+    ),
+    AgentRuntimeRegressionCase(
+        case_id="started-tool-without-result-is-classified",
+        title="已发起但没有结果的工具必须归类为生命周期未收口",
+        run={"id": "fixture_incomplete_tool", "status": "failed"},
+        events=(
+            _trace("planner", "model_plan"),
+            _trace("context_budget", "within_budget"),
+            _event(
+                "tool.calls_started",
+                calls=[{"id": "call-lost", "name": "persistArtifactBatch"}],
+            ),
+            _trace("terminal", "failed"),
+        ),
+        expected_report_verdict="fail",
+        expected_planner_outcome="model_plan",
+        expected_terminal_status="failed",
+        expected_failure_codes=("tool.incomplete_terminalization",),
+    ),
+    AgentRuntimeRegressionCase(
+        case_id="compaction-failure-is-classified",
+        title="上下文压缩失败必须保留压缩阶段根因",
+        run={"id": "fixture_compaction_failure", "status": "failed"},
+        events=(
+            _trace("planner", "model_plan"),
+            _trace(
+                "conversation_compaction",
+                "generation_failed",
+                compactedTurnCount=0,
+            ),
+            _trace("context_budget", "within_budget"),
+            _trace("terminal", "failed"),
+        ),
+        expected_report_verdict="fail",
+        expected_planner_outcome="model_plan",
+        expected_terminal_status="failed",
+        expected_failure_codes=("context.compaction_failed",),
+    ),
+    AgentRuntimeRegressionCase(
+        case_id="model-interruption-is-classified",
+        title="模型流中断必须归类为模型传输故障",
+        run={"id": "fixture_model_interrupted", "status": "failed"},
+        events=(
+            _trace("planner", "model_plan"),
+            _trace("context_budget", "within_budget"),
+            _trace(
+                "stream",
+                "interrupted",
+                providerAttemptTerminal=True,
+            ),
+            _trace("terminal", "failed"),
+        ),
+        expected_report_verdict="fail",
+        expected_planner_outcome="model_plan",
+        expected_terminal_status="failed",
+        expected_failure_codes=("model.interrupted",),
     ),
 )
 

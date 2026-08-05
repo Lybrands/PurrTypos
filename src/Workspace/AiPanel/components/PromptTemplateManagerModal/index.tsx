@@ -1,11 +1,11 @@
 import { services } from '@/services'
 import React from "react";
-import { Button, Empty, Form, Input, List, Modal, Popconfirm, Space, Tag, Tooltip, useToast, type TextAreaRef } from "../../../../ui";
+import { PurrButton, PurrEmpty, PurrForm, PurrInput, PurrList, PurrModal, PurrPopconfirm, PurrSpace, PurrTag, PurrTooltip, usePurrToast, type PurrTextAreaRef } from '@/purr-components';
 import {
-  DeleteOutlined,
-  EditOutlined,
-  PlusOutlined,
-} from "../../../../ui";
+  DeleteIcon,
+  EditIcon,
+  PlusIcon,
+} from '@/purr-components';
 import type { AiPromptTemplate } from "../../../../types";
 import { PROMPT_PLACEHOLDERS } from "../../promptTemplates";
 import "./index.scss";
@@ -27,12 +27,12 @@ export default function PromptTemplateManagerModal({
   open,
   onClose,
 }: PromptTemplateManagerModalProps) {
-  const appMessage = useToast();
+  const appMessage = usePurrToast();
   const [templates, setTemplates] = React.useState<AiPromptTemplate[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [form, setForm] = React.useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = React.useState(false);
-  const contentRef = React.useRef<TextAreaRef | null>(null);
+  const contentRef = React.useRef<PurrTextAreaRef | null>(null);
 
   const insertPlaceholder = React.useCallback((token: string) => {
     const el = contentRef.current;
@@ -126,7 +126,7 @@ export default function PromptTemplateManagerModal({
   );
 
   return (
-    <Modal
+    <PurrModal
       open={open}
       onCancel={onClose}
       title="管理提示词模版"
@@ -139,21 +139,21 @@ export default function PromptTemplateManagerModal({
         <div className="prompt-template-manager-left">
           <div className="prompt-template-manager-left-header">
             <span>我的模版</span>
-            <Button
+            <PurrButton
               size="small"
               type="text"
-              icon={<PlusOutlined />}
+              icon={<PlusIcon />}
               onClick={() => setForm(EMPTY_FORM)}
             >
               新增
-            </Button>
+            </PurrButton>
           </div>
-          <List
+          <PurrList
             size="small"
             loading={loading}
             locale={{
               emptyText: (
-                <Empty
+                <PurrEmpty
                   image={false}
                   description="还没有自定义模版，右侧填写后保存"
                 />
@@ -163,14 +163,14 @@ export default function PromptTemplateManagerModal({
             renderItem={(item) => {
               const active = form.id === item.id;
               return (
-                <List.Item
+                <PurrList.Item
                   className={`prompt-template-manager-item ${active ? "is-active" : ""}`}
                   actions={[
-                    <Tooltip key="edit" title="编辑">
-                      <Button
+                    <PurrTooltip key="edit" title="编辑">
+                      <PurrButton
                         type="text"
                         size="small"
-                        icon={<EditOutlined />}
+                        icon={<EditIcon />}
                         onClick={() =>
                           setForm({
                             id: item.id,
@@ -179,8 +179,8 @@ export default function PromptTemplateManagerModal({
                           })
                         }
                       />
-                    </Tooltip>,
-                    <Popconfirm
+                    </PurrTooltip>,
+                    <PurrPopconfirm
                       key="del"
                       title="删除模版？"
                       okText="删除"
@@ -188,16 +188,16 @@ export default function PromptTemplateManagerModal({
                       cancelText="取消"
                       onConfirm={() => handleDelete(item.id)}
                     >
-                      <Button
+                      <PurrButton
                         type="text"
                         size="small"
                         danger
-                        icon={<DeleteOutlined />}
+                        icon={<DeleteIcon />}
                       />
-                    </Popconfirm>,
+                    </PurrPopconfirm>,
                   ]}
                 >
-                  <List.Item.Meta
+                  <PurrList.Item.Meta
                     title={
                       <span
                         className="prompt-template-manager-item-title"
@@ -212,7 +212,7 @@ export default function PromptTemplateManagerModal({
                       </span>
                     }
                   />
-                </List.Item>
+                </PurrList.Item>
               );
             }}
           />
@@ -222,9 +222,9 @@ export default function PromptTemplateManagerModal({
           <div className="prompt-template-manager-right-header">
             {isEditing ? "编辑模版" : "新建模版"}
           </div>
-          <Form layout="vertical" className="prompt-template-manager-form">
-            <Form.Item label="标题" required>
-              <Input
+          <PurrForm layout="vertical" className="prompt-template-manager-form">
+            <PurrForm.Item label="标题" required>
+              <PurrInput
                 value={form.title}
                 maxLength={80}
                 placeholder="例如：续写本章 / 审校穿帮"
@@ -232,9 +232,9 @@ export default function PromptTemplateManagerModal({
                   setForm((s) => ({ ...s, title: e.target.value }))
                 }
               />
-            </Form.Item>
-            <Form.Item label="内容">
-              <Input.TextArea
+            </PurrForm.Item>
+            <PurrForm.Item label="内容">
+              <PurrInput.TextArea
                 ref={contentRef}
                 value={form.content}
                 autoSize={{ minRows: 8, maxRows: 16 }}
@@ -249,39 +249,39 @@ export default function PromptTemplateManagerModal({
                 </span>
                 <div className="prompt-template-placeholder-chips">
                   {PROMPT_PLACEHOLDERS.map((p) => (
-                    <Tooltip key={p.token} title={p.description}>
-                      <Tag
+                    <PurrTooltip key={p.token} title={p.description}>
+                      <PurrTag
                         className="prompt-template-placeholder-chip"
                         onClick={() => insertPlaceholder(p.token)}
                       >
                         {p.token}
-                      </Tag>
-                    </Tooltip>
+                      </PurrTag>
+                    </PurrTooltip>
                   ))}
                 </div>
                 <span className="prompt-template-placeholder-hint">
                   发送时会自动替换为当前上下文
                 </span>
               </div>
-            </Form.Item>
-            <Form.Item>
-              <Space>
-                <Button
+            </PurrForm.Item>
+            <PurrForm.Item>
+              <PurrSpace>
+                <PurrButton
                   type="primary"
                   loading={saving}
                   onClick={handleSave}
                   disabled={!form.title.trim()}
                 >
                   {isEditing ? "保存修改" : "创建模版"}
-                </Button>
+                </PurrButton>
                 {isEditing && (
-                  <Button onClick={() => setForm(EMPTY_FORM)}>取消编辑</Button>
+                  <PurrButton onClick={() => setForm(EMPTY_FORM)}>取消编辑</PurrButton>
                 )}
-              </Space>
-            </Form.Item>
-          </Form>
+              </PurrSpace>
+            </PurrForm.Item>
+          </PurrForm>
         </div>
       </div>
-    </Modal>
+    </PurrModal>
   );
 }

@@ -1,6 +1,6 @@
 import React from 'react'
-import { SunOutlined, MoonOutlined, SettingOutlined } from '../../ui'
-import { Button, Tooltip } from '../../ui'
+import { SunIcon, MoonIcon, SettingsIcon } from '@/purr-components'
+import { PurrButton, PurrTooltip } from '@/purr-components'
 import { useTheme } from '../../contexts/ThemeContext'
 import homeLogoLight from '../../imgs/home_logo_light.png'
 import homeLogoDark from '../../imgs/home_logo_dark.png'
@@ -65,8 +65,8 @@ export default function AppHeader({
         {panelToggles && panelToggles.length > 0 && (
           <div className="app-header-panel-toggles">
             {panelToggles.map((t) => (
-              <Tooltip key={t.key} title={t.tooltip}>
-                <Button
+              <PurrTooltip key={t.key} title={t.tooltip}>
+                <PurrButton
                   type="text"
                   size="small"
                   icon={t.icon}
@@ -74,36 +74,37 @@ export default function AppHeader({
                   className={`app-header-action-btn panel-toggle-btn${t.active ? ' panel-toggle-active' : ''}${t.disabled ? ' panel-toggle-static' : ''}`}
                   aria-pressed={!!t.active}
                 />
-              </Tooltip>
+              </PurrTooltip>
             ))}
           </div>
         )}
 
         {showActions && (
-          <>
-            <Button
+          <PurrTooltip title={theme === 'light' ? '切换到深色' : '切换到浅色'}>
+            <PurrButton
               type="text"
               size="small"
               icon={theme === 'light'
-                ? <MoonOutlined style={{ fontSize: 16 }} />
-                : <SunOutlined style={{ fontSize: 16 }} />}
-              title={theme === 'light' ? '切换到深色' : '切换到浅色'}
+                ? <MoonIcon style={{ fontSize: 16 }} />
+                : <SunIcon style={{ fontSize: 16 }} />}
               onClick={toggleTheme}
               className="app-header-action-btn"
+              aria-label={theme === 'light' ? '切换到深色' : '切换到浅色'}
             />
-          </>
+          </PurrTooltip>
         )}
 
         {onOpenSettings && (
-          <Tooltip title="设置">
-            <Button
+          <PurrTooltip title="设置">
+            <PurrButton
               type="text"
               size="small"
-              icon={<SettingOutlined style={{ fontSize: 16 }} />}
+              icon={<SettingsIcon style={{ fontSize: 16 }} />}
               onClick={onOpenSettings}
               className="app-header-action-btn"
+              aria-label="打开设置"
             />
-          </Tooltip>
+          </PurrTooltip>
         )}
       </div>
     </header>

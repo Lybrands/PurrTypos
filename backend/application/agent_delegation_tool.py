@@ -12,6 +12,7 @@ from agent_core.contracts import (
     RunLineage,
     ToolExecutionMode,
     ToolHandlerResult,
+    ToolPlanningDisposition,
     ToolPolicy,
     ToolRiskLevel,
     ToolSchema,
@@ -136,11 +137,20 @@ def build_delegation_tool_registration(
                 if aggregate["state"] == "blocked"
                 else None
             ),
+            # Child results are new semantic evidence whose contents can make
+            # tentative parent steps unnecessary or select a different branch.
+            # Unlike ordinary reads/appends, delegation therefore opts into a
+            # single dynamic plan revision explicitly.
+            planning_disposition=ToolPlanningDisposition.REPLAN,
         )
 
     return ToolRegistration(
         schema=ToolSchema(
             name="delegateToAgents",
+            display_names={
+                "zh-CN": "委派子 Agent 协作",
+                "en-US": "Delegate to Sub-agents",
+            },
             description=(
                 "Delegate 1-3 independent tasks to role-scoped child agents "
                 "and wait for their results. Use this "

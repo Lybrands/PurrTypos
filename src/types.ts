@@ -590,6 +590,10 @@ export interface Conversation {
   task_plan?: string | null;
   context_compaction?: string | null;
   context_budget?: string | null;
+  screenplay_proposal?: string | null;
+  agent_process?: string | null;
+  agent_run_id?: string | null;
+  long_task_id?: string | null;
   create_time?: string;
 }
 
@@ -649,6 +653,8 @@ export interface AiAgentRunEventEnvelope {
   type: string;
   runId: string;
   payload: Record<string, unknown>;
+  /** Canonical public chunk produced by the same mapper as live SSE. */
+  chunk?: Record<string, unknown>;
   createdAt?: string | null;
 }
 
@@ -695,6 +701,136 @@ export interface AiAgentRunSnapshot {
   hasMore: boolean;
 }
 
+export interface AiLongTaskUnit {
+  id: string;
+  position: number;
+  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'canceled';
+  attempt: number;
+  maxAttempts: number;
+  runId?: string | null;
+  inputRef?: string | null;
+  outputRef?: string | null;
+  errorCode?: string | null;
+  createTime?: string | null;
+  updateTime?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface AiLongTask {
+  id: string;
+  workItemId: string;
+  namespace: string;
+  kind: string;
+  ownerId: EntityId;
+  parentRunId: string;
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled';
+  revision: number;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  maxParallelism: number;
+  createTime?: string | null;
+  updateTime?: string | null;
+  metadata: Record<string, unknown>;
+  units: AiLongTaskUnit[];
+}
+
+export type AiLongTaskConversationEvent = {
+  type:
+    | 'turn.started'
+    | 'turn.thinking.delta'
+    | 'turn.thinking.snapshot'
+    | 'turn.chunk'
+    | 'turn.model.call'
+    | 'turn.context.budgeted'
+    | 'turn.context.usage'
+    | 'turn.tool.started'
+    | 'turn.tool.results'
+    | 'turn.tool.completed'
+    | 'turn.response'
+    | 'turn.completed';
+  taskId: string;
+  unitId: string;
+  attempt: number;
+  runId: string;
+  title?: string;
+  cursor?: number;
+  createdAt?: string | null;
+  delta?: string;
+  content?: string;
+  /** Canonical ordinary Agent SSE chunk for a durable child Run. */
+  chunk?: Record<string, unknown>;
+  modelInvocation?: {
+    phase: string;
+    count?: number;
+    toolNames?: string[];
+    toolChoice?: string;
+    round?: number;
+    logicalRound?: number;
+    attempt?: number;
+    revision?: number;
+    judgeIndex?: number;
+    parameters?: Record<string, unknown>;
+  };
+  contextBudget?: Partial<AiContextBudgetState>;
+  toolCallId?: string;
+  toolName?: string;
+  label?: string;
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    argumentsJson: string;
+    displayNames?: Record<string, string>;
+  }>;
+  toolResults?: Array<{
+    toolCallId: string;
+    toolName?: string;
+    content: string;
+  }>;
+  inProgress?: boolean;
+  partialContent?: string;
+  partialThinking?: string;
+  model?: string;
+  toolIndex?: number;
+  fromCache?: boolean;
+  exceptionType?: string;
+  status?: string;
+  errorCode?: string;
+} | {
+  type: 'task.progress';
+  taskId: string;
+  status: AiLongTask['status'];
+  revision: number;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  updateTime?: string | null;
+  units: Array<{
+    id: string;
+    position: number;
+    status: AiLongTaskUnit['status'];
+    attempt: number;
+    maxAttempts: number;
+    runId?: string | null;
+    outputRef?: string | null;
+    errorCode?: string | null;
+    updateTime?: string | null;
+  }>;
+} | {
+  type: 'task.terminal';
+  taskId: string;
+  status: AiLongTask['status'];
+  cursor?: number;
+  /** Final validated proposal, routed through the ordinary chat reducer. */
+  proposal?: ScreenplayDocumentProposal;
+  /** Root/coordinator response shown as the ordinary assistant answer. */
+  finalResponse?: string;
+} | {
+  type: 'stream.error';
+  taskId: string;
+  error: string;
+};
+
 export interface AiAgentDelegation {
   delegationId: string;
   parentRunId: string;
@@ -703,6 +839,10 @@ export interface AiAgentDelegation {
   agentRole: string;
   agentTitle?: string | null;
   objective: string;
+  /** Planner-owned durable unit identity, when this delegation executes one. */
+  unitId?: string | null;
+  /** One-based execution attempt for the same Planner unit. */
+  attempt?: number | null;
   status: 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'canceled';
   required: boolean;
   priority: number;
@@ -862,6 +1002,257 @@ export interface ApiResult<T = unknown> {
   error?: string;
 }
 
+export type AiErrorReportStatus = "captured" | "submitted" | "resolved";
+
+export interface AiErrorReport {
+  id: string;
+  streamId: string;
+  agentRunId?: string;
+  sessionId?: number;
+  conversationId?: number;
+  bookId?: EntityId;
+  chapterId?: EntityId;
+  source: string;
+  status: AiErrorReportStatus;
+  errorCode?: string;
+  errorMessage: string;
+  model?: string;
+  diagnostics: Record<string, unknown>;
+  userNote?: string;
+  submittedAt?: string;
+  resolvedAt?: string;
+  createTime: string;
+  updateTime: string;
+}
+
+export interface AiAgentRunStabilityReport {
+  verdict: "pass" | "warn" | "fail";
+  metrics: {
+    toolCalls: number;
+    completedToolCalls: number;
+    failedToolCalls: number;
+    incompleteToolCalls: number;
+    toolSuccessRate?: number | null;
+    toolProtocolFailures: number;
+    toolErrorCodes: Record<string, number>;
+    modelAttempts: number;
+    interruptedModelAttempts: number;
+    retryAttempts: number;
+    contextOverflows: number;
+    maxDroppedMessages: number;
+    compactionPasses: number;
+    compactedTurns: number;
+    compactionFallbacks: number;
+    compactionFailures: number;
+    compactionOutcomes: Record<string, number>;
+  };
+  checks: Array<{
+    name: string;
+    status: "pass" | "warn" | "fail";
+    detail: unknown;
+  }>;
+}
+
+export interface AiAgentRunArtifactMetrics {
+  artifactCount: number;
+  openArtifacts: number;
+  finalizedArtifacts: number;
+  abortedArtifacts: number;
+  batchCount: number;
+  committedItemCount: number;
+  expectedItemCount: number;
+  completionRate?: number | null;
+  artifacts: Array<{
+    artifactId: string;
+    namespace: string;
+    kind: string;
+    status: string;
+    scope: "run" | "work_item" | string;
+    workItemId?: string | null;
+    workItemStatus?: string | null;
+    runRelation?: "created" | "continuation" | "reference" | string | null;
+    revision: number;
+    committedItemCount: number;
+    expectedItemCount?: number | null;
+    batchCount: number;
+    batchItemCount: number;
+  }>;
+}
+
+export interface AiArtifactMaintenanceSnapshot {
+  checkedAtMs: number;
+  scopeRunId?: string | null;
+  workItemCount: number;
+  openWorkItems: number;
+  completedWorkItems: number;
+  canceledWorkItems: number;
+  unknownWorkItems: number;
+  artifactCount: number;
+  openArtifacts: number;
+  finalizedArtifacts: number;
+  abortedArtifacts: number;
+  unknownArtifacts: number;
+  claimCount: number;
+  activeClaims: number;
+  expiredClaims: number;
+  unavailableRunClaims: number;
+  invalidTargetClaims: number;
+  reclaimableClaims: number;
+  consistencyIssues: number;
+  requiresAttention: boolean;
+}
+
+export interface AiArtifactMaintenanceReport {
+  expiredClaimsReleased: number;
+  unavailableRunClaimsReleased: number;
+  invalidTargetClaimsReleased: number;
+  releasedClaims: number;
+  purgedWorkItems: number;
+  purgedArtifacts: number;
+  consistencyIssues: number;
+  changed: boolean;
+}
+
+export interface AiArtifactMaintenanceResult {
+  report: AiArtifactMaintenanceReport;
+  snapshot: AiArtifactMaintenanceSnapshot;
+}
+
+export interface AiAgentRunStabilityTrendAlert {
+  code: string;
+  severity: "warn" | "fail";
+  value: number | null;
+  threshold: number;
+}
+
+export interface AiAgentRunFailureFinding {
+  code: string;
+  category: string;
+  severity: "warn" | "fail";
+  confidence: "high" | "medium" | "low";
+  evidence: Record<string, unknown>;
+  remediation: string;
+}
+
+export interface AiAgentRunFailureClassification {
+  verdict: "pass" | "warn" | "fail";
+  primaryFinding?: AiAgentRunFailureFinding | null;
+  findings: AiAgentRunFailureFinding[];
+  summary: {
+    findingCount: number;
+    categoryCounts: Record<string, number>;
+  };
+}
+
+export interface AiAgentRunRecoveryDecision {
+  round: number;
+  cause: string;
+  action: "retry_model" | "fallback_provider_mode" | "replan" | string;
+  allowed: boolean;
+  reasonCode: string;
+  attempt: number;
+  maxAttempts: number;
+  remainingModelRounds: number;
+  effectState: "not_started" | "committed" | "unknown" | string;
+  mayRepeatSideEffect: boolean;
+}
+
+export interface AiAgentRunRecoveryReport {
+  summary: {
+    decisionCount: number;
+    allowedCount: number;
+    deniedCount: number;
+    safetyProtectedCount: number;
+    causes: Record<string, number>;
+    allowedActions: Record<string, number>;
+    deniedReasons: Record<string, number>;
+  };
+  decisions: AiAgentRunRecoveryDecision[];
+}
+
+export interface AiAgentRunStabilityRegressionGate {
+  verdict: "pass" | "warn" | "fail" | "insufficient_data";
+  candidateSampleSize: number;
+  baselineSampleSize: number;
+  minimumWindowSize: number;
+  metricDeltas: Record<string, number | null>;
+  newToolErrorCodes: string[];
+  newCriticalSignals: string[];
+  checks: Array<{
+    name: string;
+    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
+    detail: Record<string, unknown>;
+  }>;
+  alerts: Array<{
+    code: string;
+    severity: "warn" | "fail";
+    detail: Record<string, unknown>;
+  }>;
+}
+
+export interface AiAgentRunStabilityTrendReport {
+  verdict: "pass" | "warn" | "fail" | "insufficient_data";
+  sampleSize: number;
+  minimumSampleSize: number;
+  windowLimit: number;
+  comparisonWindowSize: number;
+  scope: {
+    type: "session" | "book" | "screenplay_project" | "global";
+    id?: EntityId | null;
+  };
+  metrics: {
+    failedRuns: number;
+    runFailureRate: number | null;
+    stabilityFailedRuns: number;
+    stabilityFailureRate: number | null;
+    toolRuns: number;
+    toolProtocolFailureRuns: number;
+    toolProtocolRunRate: number | null;
+    incompleteToolRuns: number;
+    incompleteToolRunRate: number | null;
+    contextOverflowRuns: number;
+    contextOverflowRunRate: number | null;
+    compactionFailureRuns: number;
+    compactionFailureRunRate: number | null;
+    modelRuns: number;
+    retryRuns: number;
+    retryRunRate: number | null;
+    currentFailureStreak: number;
+    toolErrorCodes: Record<string, number>;
+    topToolErrorCodes: Array<{ code: string; count: number }>;
+  };
+  checks: Array<{
+    name: string;
+    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
+    value: number | null;
+    numerator: number;
+    denominator: number | null;
+    warnAt: number;
+    failAt: number;
+  }>;
+  alerts: AiAgentRunStabilityTrendAlert[];
+  regressionGate: AiAgentRunStabilityRegressionGate;
+  recentRuns: Array<{
+    runId: string;
+    runStatus: string;
+    stabilityVerdict: "pass" | "warn" | "fail" | string;
+    createTime?: string | null;
+  }>;
+}
+
+export interface AiAgentRunDiagnostics {
+  runId?: string;
+  runStatus?: string;
+  verdict: "pass" | "warn" | "fail";
+  performance: Record<string, unknown>;
+  stability: AiAgentRunStabilityReport;
+  recovery: AiAgentRunRecoveryReport;
+  failureClassification: AiAgentRunFailureClassification;
+  artifacts: AiAgentRunArtifactMetrics;
+  artifactMaintenance: AiArtifactMaintenanceSnapshot;
+  [key: string]: unknown;
+}
+
 export interface ElectronAPI {
   openXmindFile: () => Promise<string | null>;
   parseXmind: (filePath: string) => Promise<ApiResult<XmindSheet[]>>;
@@ -913,6 +1304,13 @@ export interface ElectronAPI {
     projectId: EntityId;
   }) => Promise<ApiResult<ScreenplayProject>>;
   getOrCreateScreenplaySession: (data: {
+    projectId: EntityId;
+  }) => Promise<ApiResult<AiSession>>;
+  listScreenplaySessions: (data: {
+    projectId: EntityId;
+    includeClosed?: boolean;
+  }) => Promise<ApiResult<AiSession[]>>;
+  createScreenplaySession: (data: {
     projectId: EntityId;
   }) => Promise<ApiResult<AiSession>>;
   createScreenplayProject: (
@@ -1249,6 +1647,11 @@ export interface ElectronAPI {
     taskPlan?: AiTaskPlanChunk;
     contextCompaction?: AiContextCompactionState;
     contextBudget?: AiContextBudgetState;
+    screenplayProposal?: ScreenplayDocumentProposal;
+    agentProcess?: {
+      delegations?: AiAgentDelegation[];
+      subAgentActivities?: unknown[];
+    };
     agentRunId?: string;
   }) => Promise<ApiResult<{ id: number | null }>>;
   getConversations: (data: {
@@ -1361,26 +1764,83 @@ export interface ElectronAPI {
     apiKey: string;
     baseURL?: string;
     prompt: string;
-    apiProvider?: "openai" | "anthropic";
+    apiProvider?: AiApiProvider;
     model?: string;
   }) => Promise<ApiResult<string>>;
   listModels: (data: {
     apiKey: string;
     baseURL?: string;
-    apiProvider?: "openai" | "anthropic";
+    apiProvider?: AiApiProvider;
   }) => Promise<ApiResult<string[]>>;
   getAgentRunSnapshot: (data: {
     runId: string;
     after?: number;
     limit?: number;
   }) => Promise<ApiResult<AiAgentRunSnapshot>>;
+  getAgentRunDiagnostics: (data: {
+    runId: string;
+  }) => Promise<ApiResult<AiAgentRunDiagnostics>>;
+  maintainAgentArtifacts: () => Promise<
+    ApiResult<AiArtifactMaintenanceResult>
+  >;
+  getAgentRunStabilityTrend: (data: {
+    runId: string;
+    scope?: "auto" | "session" | "book" | "screenplay_project" | "global";
+    limit?: number;
+  }) => Promise<ApiResult<AiAgentRunStabilityTrendReport>>;
+  getLatestSessionAgentRun: (data: {
+    sessionId: number;
+  }) => Promise<ApiResult<{
+    prompt: string;
+    snapshot: AiAgentRunSnapshot;
+  } | null>>;
+  captureAiErrorReport: (data: {
+    streamId: string;
+    agentRunId?: string;
+    sessionId?: number;
+    conversationId?: number;
+    bookId?: EntityId | null;
+    chapterId?: EntityId | null;
+    source?: string;
+    errorCode?: string;
+    errorMessage: string;
+    model?: string;
+    diagnostics?: Record<string, unknown>;
+  }) => Promise<ApiResult<AiErrorReport>>;
+  listAiErrorReports: (data?: {
+    status?: AiErrorReportStatus;
+    limit?: number;
+  }) => Promise<ApiResult<AiErrorReport[]>>;
+  getAiErrorReport: (data: {
+    reportId: string;
+  }) => Promise<ApiResult<AiErrorReport>>;
+  submitAiErrorReport: (data: {
+    reportId: string;
+    userNote?: string;
+  }) => Promise<ApiResult<AiErrorReport>>;
   cancelAgentRun: (data: {
     runId: string;
   }) => Promise<ApiResult<{
-    status: 'cancel_requested';
+    status: 'cancel_requested' | 'canceled';
     newlyRequested: boolean;
     childrenCanceled: number;
+    terminalized: boolean;
   }>>;
+  getLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
+  streamLongTaskConversation: (
+    data: {
+      taskId: string;
+      sessionId: number;
+      after?: number;
+    },
+    listener: (event: AiLongTaskConversationEvent) => void,
+  ) => () => void;
+  listScreenplayLongTasks: (data: {
+    projectId: EntityId;
+    limit?: number;
+  }) => Promise<ApiResult<AiLongTask[]>>;
+  pauseLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
+  cancelLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
   createAgentDelegation: (data: {
     runId: string;
     agentRole: string;
@@ -1394,8 +1854,9 @@ export interface ElectronAPI {
     streamId?: string;
     apiKey: string;
     baseURL?: string;
+    locale?: string;
     /** 默认 openai：OpenAI 兼容 provider；anthropic 使用官方 Messages API */
-    apiProvider?: "openai" | "anthropic";
+    apiProvider?: AiApiProvider;
     sessionId?: number;
     messages: Array<{ role: string; content: string; tool_calls?: unknown[]; reasoning_content?: string } | { role: "tool"; tool_call_id: string; content: string }>;
     options?: {
@@ -1412,8 +1873,6 @@ export interface ElectronAPI {
     bookId?: EntityId | null;
     chapterId?: EntityId | null;
     currentChapterTitle?: string;
-    writingChapters?: { id: EntityId; title: string }[];
-    availableOutlines?: { id: EntityId; title: string; type?: string }[];
     /** 与界面「关联章节」一致，后端预取内容直接注入 system */
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
@@ -1430,6 +1889,12 @@ export interface ElectronAPI {
     sourceBookId?: EntityId | null;
     activeDocumentId?: EntityId | null;
     activeStage?: ScreenplayStage;
+    /** 区分自由对话与必须产出当前阶段正式提案的任务。 */
+    screenplayTaskIntent?: "chat" | "stage_deliverable";
+    /** 正文阶段一次生成的连续场景数；超长范围由宿主转交持久化任务。 */
+    screenplayDraftSceneCount?: number;
+    /** 稳定的正文范围意图；实际场景由后端在运行开始时解析。 */
+    screenplayDraftScope?: "planner" | "next_scene" | "next_episode" | "next_3_episodes" | "next_5_episodes" | "all_remaining" | "count";
   }) => string;
   abortAiStream: (streamId?: string) => void;
   onAiChunk: (
@@ -1440,11 +1905,25 @@ export interface ElectronAPI {
       done?: boolean;
       aborted?: boolean;
       error?: string;
+      /** 本地自动创建的脱敏错误报告。 */
+      errorReport?: AiErrorReport;
       model?: string;
-      toolCalls?: { id: string; type: string; function: { name: string; arguments: string } }[];
+      toolCalls?: {
+        id: string;
+        type: string;
+        displayNames?: Record<string, string>;
+        function: { name: string; arguments: string };
+      }[];
       toolCallsInProgress?: boolean;
+      toolResults?: {
+        tool_call_id: string;
+        name?: string;
+        content: string;
+      }[];
       partialContent?: string;
       partialThinking?: string;
+      /** Final thinking state used when replaying a durable Run. */
+      thinkingSnapshot?: string;
       chapterCreated?: {
         chapterId: EntityId;
         title: string;
@@ -1484,8 +1963,26 @@ export interface ElectronAPI {
       /** Host-side accounting for the complete model context window. */
       contextBudget?: Partial<AiContextBudgetState>;
       contextCompaction?: AiContextCompactionState;
+      modelInvocation?: {
+        phase: string;
+        count?: number;
+        toolNames?: string[];
+        toolChoice?: string;
+        round?: number;
+        logicalRound?: number;
+        attempt?: number;
+        revision?: number;
+        judgeIndex?: number;
+        parameters?: Record<string, unknown>;
+      };
       /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
       toolIndexCompleted?: number;
+      /** 完成事件的稳定工具标识和结果，用于错误诊断。 */
+      toolCallId?: string;
+      toolName?: string;
+      toolOutcome?: "completed" | "failed" | "rejected" | "canceled" | string;
+      toolErrorCode?: string;
+      toolExceptionType?: string;
       /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
       toolFromCache?: boolean;
       agentRunStarted?: {
@@ -1501,12 +1998,71 @@ export interface ElectronAPI {
         step: AiTaskPlanChunk["steps"][number];
         status?: string;
       };
-      agentRunCompleted?: { runId: string; status: "done" };
+      agentRunCompleted?: {
+        runId: string;
+        status: "done";
+        finalResponse?: string;
+      };
       agentRunFailed?: { runId: string; status: "failed"; error?: string };
       agentRunBlocked?: { runId: string; status: "blocked" };
       agentRunCanceled?: { runId: string; status: "canceled"; reason?: string };
       agentDelegationCreated?: AiAgentDelegation & { runId: string };
       agentDelegationUpdated?: AiAgentDelegation & { runId: string };
+      /** Canonical child-Run event projected through the parent Run stream. */
+      agentSubRunEvent?: {
+        runId: string;
+        parentRunId: string;
+        rootRunId: string;
+        delegationId: string;
+        childRunId?: string | null;
+        agentRole: string;
+        agentTitle?: string | null;
+        objective?: string;
+        unitId?: string;
+        attempt?: number;
+        chunk: Record<string, unknown>;
+      };
+      taskAdmission?: {
+        runId: string;
+        mode: 'inline' | 'durable' | 'clarify' | 'reject';
+        reasonCode: string;
+        estimatedUnits: number;
+        estimatedModelCalls: number;
+        requiresConfirmation: boolean;
+      };
+      longTaskDispatched?: {
+        runId: string;
+        taskId: string;
+        kind?: string;
+        taskTitle?: string;
+        message?: string;
+        projectId?: EntityId;
+        status: AiLongTask['status'];
+        totalUnits: number;
+        completedUnits: number;
+        estimatedScenes?: number;
+      };
+      longTaskProgress?: {
+        runId: string;
+        taskId: string;
+        status: AiLongTask['status'];
+        revision: number;
+        totalUnits: number;
+        completedUnits: number;
+        failedUnits: number;
+        updateTime?: string | null;
+        units: Array<{
+          id: string;
+          position: number;
+          status: AiLongTaskUnit['status'];
+          attempt: number;
+          maxAttempts: number;
+          runId?: string | null;
+          outputRef?: string | null;
+          errorCode?: string | null;
+          updateTime?: string | null;
+        }>;
+      };
     }) => void,
     streamId?: string,
   ) => () => void;
@@ -1538,7 +2094,8 @@ export interface GeneralSettings {
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
 
-export type AiBuiltinProviderId = 'moonshot' | 'minimax' | 'mimo';
+export type AiBuiltinProviderId = 'zai' | 'moonshot' | 'minimax' | 'mimo';
+export type AiApiProvider = 'openai' | 'anthropic' | 'zai';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export interface AiModelConfig {
@@ -1548,10 +2105,10 @@ export interface AiModelConfig {
   /** 内置目录中的服务商 id，仅用于设置页展示与后续目录升级。 */
   providerId?: AiBuiltinProviderId;
   /**
-   * API 协议：openai 为 OpenAI 兼容 Chat Completions；anthropic 为 Anthropic Messages API（@anthropic-ai/sdk）。
+   * API 协议：openai 为 OpenAI 兼容 Chat Completions；anthropic 为 Anthropic Messages API；zai 为官方 Z.ai SDK。
    * 未设置时按 openai 处理。
    */
-  apiProvider?: "openai" | "anthropic";
+  apiProvider?: AiApiProvider;
   /** 模型名称（如 API 模型 id 或正式名称） */
   name: string;
   /** 昵称，选模型时优先显示；为空则显示 name */
@@ -1563,6 +2120,8 @@ export interface AiModelConfig {
   thinkingEnabled?: boolean;
   /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
   contextWindow?: AiContextWindow;
+  /** 单次模型响应的最大输出 token 预算；未设置时使用模型预设或运行时推导值。 */
+  outputTokenBudget?: number;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。
    * 为 false 时不传 temperature，由大模型接口使用其默认采样行为。

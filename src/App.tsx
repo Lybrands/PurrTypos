@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
-import { Spin, useToast } from './ui'
+import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
 import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
@@ -11,6 +11,9 @@ const BookshelfPage = lazy(() => import('./BookshelfPage'))
 const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
+const AiDevInspector = import.meta.env.DEV
+  ? lazy(() => import('./components/AiDevInspector'))
+  : null
 
 type Page = 'home' | 'screenplay' | 'bookshelf' | 'workspace'
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
@@ -36,7 +39,7 @@ function storeLastOpenedBookId(bookId: EntityId | null) {
 }
 
 export default function App() {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const [page, setPage] = React.useState<Page>('home')
   const [books, setBooks] = React.useState<Book[]>([])
   const [activeBook, setActiveBook] = React.useState<Book | null>(null)
@@ -181,7 +184,7 @@ export default function App() {
         </div>
       )}
       <main className="app-main">
-        <Suspense fallback={<div className="app-page-loading"><Spin size="large" /></div>}>
+        <Suspense fallback={<div className="app-page-loading"><PurrSpin size="large" /></div>}>
           {page === 'home' && (
             <HomePage
               onEnterScreenplayAgent={handleEnterScreenplayAgent}
@@ -192,8 +195,8 @@ export default function App() {
           {page === 'screenplay' && (
             <ScreenplayAgentPage
               books={books}
-              lastOpenedBookId={lastOpenedBookId}
               modelConfigs={configuredModelConfigs}
+              onUpdateModelConfig={updateModelConfig}
               onOpenBookshelf={handleEnterBookshelf}
               onOpenSettings={() => setShowSettings(true)}
               onBack={handleBackToHome}
@@ -232,7 +235,7 @@ export default function App() {
 
       {showSettings && (
         <div className="app-settings-overlay">
-          <Suspense fallback={<Spin size="large" />}>
+          <Suspense fallback={<PurrSpin size="large" />}>
             <SettingsPage
             modelConfigs={modelConfigs}
             onSaveModelConfigs={saveModelConfigs}
@@ -242,6 +245,11 @@ export default function App() {
           />
           </Suspense>
         </div>
+      )}
+      {AiDevInspector && (
+        <Suspense fallback={null}>
+          <AiDevInspector />
+        </Suspense>
       )}
     </div>
   )

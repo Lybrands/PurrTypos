@@ -4,9 +4,9 @@ import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
 import { highlightNodeChildren } from './highlightText'
 
-function wrapWithHighlight(query: string, Tag: keyof JSX.IntrinsicElements) {
+function wrapWithHighlight(query: string, tag: keyof JSX.IntrinsicElements) {
   function MdTag({ children, ...rest }: React.HTMLAttributes<HTMLElement>) {
-    return React.createElement(Tag, rest, highlightNodeChildren(children, query))
+    return React.createElement(tag, rest, highlightNodeChildren(children, query))
   }
   return MdTag
 }

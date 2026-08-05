@@ -7,12 +7,17 @@ from agent_core.contracts import (
     AgentRunRequest,
     DomainContext,
     ModelRequest,
+    ToolDataContract,
     ToolHandlerResult,
     ToolPolicy,
     ToolSchema,
 )
 from agent_core.errors import ContractViolationError
 from agent_core.ports import ToolCatalog, ToolRegistration
+from agent_core.tools import (
+    model_visible_tool_schema,
+    resolve_tool_display_name,
+)
 from agent_core.tools.contract import inspect_tool_contract
 from agent_core.tools.registry import InMemoryToolCatalog
 
@@ -30,6 +35,7 @@ def _registration(
     scope_validator=None,
     cache_probe=None,
     cancellation_linearizable=False,
+    data_contract=ToolDataContract(),
 ):
     return ToolRegistration(
         schema=ToolSchema(
@@ -42,6 +48,7 @@ def _registration(
         scope_validator=scope_validator,
         cache_probe=cache_probe,
         cancellation_linearizable=cancellation_linearizable,
+        data_contract=data_contract,
     )
 
 
@@ -81,6 +88,50 @@ def test_catalog_registration_schema_is_recursively_immutable_and_detached():
     assert schema.parameters["properties"]["value"]["type"] == "string"
     with pytest.raises(TypeError):
         schema.parameters["properties"]["value"]["type"] = "boolean"
+
+
+def test_tool_schema_localizes_display_names_without_changing_protocol_name():
+    schema = ToolSchema(
+        name="readSource",
+        description="Read source data.",
+        parameters={"type": "object", "properties": {}},
+        display_names={
+            "zh_cn": "读取原作",
+            "en-US": "Read Source",
+        },
+    )
+
+    assert dict(schema.display_names) == {
+        "zh-CN": "读取原作",
+        "en-US": "Read Source",
+    }
+    assert resolve_tool_display_name(schema, "zh-Hans-CN") == "读取原作"
+    assert resolve_tool_display_name(schema, "en-GB") == "Read Source"
+    assert resolve_tool_display_name(schema, "invalid locale!") == "读取原作"
+    localized = model_visible_tool_schema(schema, "zh-CN")
+    assert localized.name == "readSource"
+    assert localized.parameters == schema.parameters
+    assert "读取原作" in localized.description
+    assert "readSource" in localized.description
+    with pytest.raises(TypeError):
+        schema.display_names["ja-JP"] = "原作を読む"
+
+
+def test_tool_schema_rejects_empty_or_duplicate_localized_names():
+    with pytest.raises(ValueError, match="must not be empty"):
+        ToolSchema(
+            name="readSource",
+            description="Read source data.",
+            parameters={"type": "object", "properties": {}},
+            display_names={"zh-CN": ""},
+        )
+    with pytest.raises(ValueError, match="duplicate normalized"):
+        ToolSchema(
+            name="readSource",
+            description="Read source data.",
+            parameters={"type": "object", "properties": {}},
+            display_names={"zh-CN": "读取原作", "zh_cn": "阅读原作"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -134,6 +185,91 @@ def test_async_callable_scope_and_sync_cache_probe_are_valid():
     ))
 
     assert catalog.names == {"alpha"}
+
+
+def test_catalog_enforces_model_and_host_data_ownership_paths():
+    parameters = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "hostId": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+    registration = _registration(
+        "audited",
+        parameters=parameters,
+        data_contract=ToolDataContract(
+            model_owned_paths=("items[].text", "missing"),
+            host_derived_paths=("items[].hostId",),
+        ),
+    )
+
+    report = inspect_tool_contract((registration,))
+
+    assert not report.is_valid
+    assert any("model-owned path is absent" in item for item in report.violations)
+    assert any("host-owned path is exposed" in item for item in report.violations)
+
+
+def test_catalog_accepts_audited_schema_with_hidden_host_fields():
+    registration = _registration(
+        "audited",
+        parameters={
+            "type": "object",
+            "properties": {"semanticDelta": {"type": "string"}},
+        },
+        data_contract=ToolDataContract(
+            model_owned_paths=("semanticDelta",),
+            host_bound_paths=("projectId",),
+            host_derived_paths=("revision", "contentText"),
+            payload_mode="delta",
+        ),
+    )
+
+    catalog = InMemoryToolCatalog((registration,))
+
+    assert catalog.get("audited").data_contract.payload_mode.value == "delta"
+
+
+def test_audited_catalog_rejects_new_model_field_without_an_owner():
+    registration = _registration(
+        "audited",
+        parameters={
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "forgotten": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+        data_contract=ToolDataContract(
+            model_owned_paths=("items[].text",),
+            host_derived_paths=("revision",),
+        ),
+    )
+
+    report = inspect_tool_contract((registration,))
+
+    assert not report.is_valid
+    assert any(
+        "model-visible path has no declared owner: items[].forgotten" in item
+        for item in report.violations
+    )
 
 
 def test_request_enablement_must_be_a_registered_subset():

@@ -1,6 +1,6 @@
 import React from 'react'
-import { PanelToggleIcon } from '../../ui'
-import { Button, Tooltip } from '../../ui'
+import { PanelToggleIcon } from '@/purr-components'
+import { PurrButton, PurrTooltip } from '@/purr-components'
 import type { EntityId } from '../../types'
 import ChapterSection from './ChapterSection'
 import './index.scss'
@@ -49,27 +49,27 @@ export default function DirectorNotebook({
         <span className="director-notebook-title">章节列表</span>
         <div className="director-notebook-header-right">
           {dockCollapsed && onExpandDock ? (
-            <Tooltip title="固定展开章节边栏">
-              <Button
+            <PurrTooltip title="固定展开章节边栏">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PanelToggleIcon side="left" action="expand" />}
+                icon={<PanelToggleIcon side="left" state="collapsed" />}
                 onClick={onExpandDock}
                 className="director-notebook-fullscreen-btn"
               />
-            </Tooltip>
+            </PurrTooltip>
           ) : null}
           {!dockCollapsed && onCollapseDock ? (
-            <Tooltip title="收起章节边栏">
-              <Button
+            <PurrTooltip title="收起章节边栏">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PanelToggleIcon side="left" action="collapse" />}
+                icon={<PanelToggleIcon side="left" state="expanded" />}
                 onClick={onCollapseDock}
                 className="director-notebook-fullscreen-btn"
                 aria-label="收起章节边栏"
               />
-            </Tooltip>
+            </PurrTooltip>
           ) : null}
         </div>
       </div>

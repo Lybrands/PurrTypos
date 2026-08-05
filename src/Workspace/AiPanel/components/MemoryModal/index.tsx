@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Modal } from '../../../../ui'
-import { Tabs } from '../../../../ui'
+import { PurrButton, PurrModal } from '@/purr-components'
+import { PurrTabs } from '@/purr-components'
 import ManageTab from './ManageTab'
 import SelectionTab from './SelectionTab'
 import type { MemoryModalProps } from './types'
@@ -29,7 +29,7 @@ export default function MemoryModal({
   })
 
   return (
-    <Modal
+    <PurrModal
       title="本轮强制注入"
       open={open}
       onCancel={onCancel}
@@ -38,14 +38,14 @@ export default function MemoryModal({
       className="ai-memory-modal"
       footer={
         controller.activeTab === 'select' ? (
-          <Button type="primary" onClick={controller.handleSelectOk}>
+          <PurrButton type="primary" onClick={controller.handleSelectOk}>
             本轮带上（{controller.checkedIds.length + controller.checkedForeshadowingIds.length} 条）
-          </Button>
+          </PurrButton>
         ) : null
       }
       styles={{ body: { height: '60vh', overflow: 'auto' } }}
     >
-      <Tabs
+      <PurrTabs
         activeKey={controller.activeTab}
         onChange={controller.setActiveTab}
         items={[
@@ -63,6 +63,6 @@ export default function MemoryModal({
           },
         ]}
       />
-    </Modal>
+    </PurrModal>
   )
 }

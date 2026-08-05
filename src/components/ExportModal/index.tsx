@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Checkbox, Dialog, Radio } from '../../ui';
+import { PurrButton, PurrCheckbox, PurrDialog, PurrRadio } from '@/purr-components';
 
 /** md/txt：每章一个文件；txt-single：整本一个 TXT；epub：电子书 */
 export type ExportFormat = "md" | "txt" | "txt-single" | "epub";
@@ -96,40 +96,40 @@ export default function ExportModal({
   const listMaxHeight = groups.length > 0 ? 320 : 280;
 
   return (
-    <Dialog
+    <PurrDialog
       title={title}
       open={open}
       onOpenChange={(nextOpen) => { if (!nextOpen) onCancel() }}
       width={480}
       footer={(
         <>
-          <Button onClick={onCancel}>取消</Button>
-          <Button variant="primary" loading={confirmLoading} onClick={handleOk}>导出</Button>
+          <PurrButton onClick={onCancel}>取消</PurrButton>
+          <PurrButton variant="primary" loading={confirmLoading} onClick={handleOk}>导出</PurrButton>
         </>
       )}
     >
       <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
         <span style={{ flexShrink: 0 }}>导出格式：</span>
         <div style={{ display: 'grid', gap: 4 }}>
-          <Radio value="md" checked={exportFormat === 'md'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>Markdown（每章一个 .md）</Radio>
-          <Radio value="txt" checked={exportFormat === 'txt'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>纯文本（每章一个 .txt）</Radio>
-          <Radio value="txt-single" checked={exportFormat === 'txt-single'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>整本 TXT（单文件，适合投稿 / 发布平台）</Radio>
-          <Radio value="epub" checked={exportFormat === 'epub'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>EPUB 电子书</Radio>
+          <PurrRadio value="md" checked={exportFormat === 'md'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>Markdown（每章一个 .md）</PurrRadio>
+          <PurrRadio value="txt" checked={exportFormat === 'txt'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>纯文本（每章一个 .txt）</PurrRadio>
+          <PurrRadio value="txt-single" checked={exportFormat === 'txt-single'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>整本 TXT（单文件，适合投稿 / 发布平台）</PurrRadio>
+          <PurrRadio value="epub" checked={exportFormat === 'epub'} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>EPUB 电子书</PurrRadio>
         </div>
       </div>
       {!isSingleFileFormat && (
         <div style={{ marginBottom: 16 }}>
           <span style={{ marginRight: 8 }}>导出方式：</span>
-          <Radio value={false} checked={!exportAsZip} onChange={(event) => setExportAsZip(event.target.value)}>导出到文件夹</Radio>
-          <Radio value={true} checked={exportAsZip} onChange={(event) => setExportAsZip(event.target.value)}>导出为压缩包{showFolderHint ? "" : " (.zip)"}</Radio>
+          <PurrRadio value={false} checked={!exportAsZip} onChange={(event) => setExportAsZip(event.target.value)}>导出到文件夹</PurrRadio>
+          <PurrRadio value={true} checked={exportAsZip} onChange={(event) => setExportAsZip(event.target.value)}>导出为压缩包{showFolderHint ? "" : " (.zip)"}</PurrRadio>
         </div>
       )}
       <div>
         <div style={{ marginBottom: 8 }}>
           <span>{selectLabel}</span>
-          <Button variant="link" size="small" onClick={handleSelectAll}>
+          <PurrButton variant="link" size="small" onClick={handleSelectAll}>
             全选
-          </Button>
+          </PurrButton>
         </div>
         <div
           style={{
@@ -150,22 +150,22 @@ export default function ExportModal({
                 !volSelected;
               return (
                 <div key={group.id} style={{ marginBottom: 8 }}>
-                  <Checkbox
+                  <PurrCheckbox
                     checked={volSelected}
                     indeterminate={volIndeterminate}
                     onChange={() => toggleGroup(group)}
                   >
                     <strong>{group.title}</strong>
-                  </Checkbox>
+                  </PurrCheckbox>
                   <div style={{ marginLeft: 20, marginTop: 4 }}>
                     {group.children.map((ch) => (
                       <div key={ch.id} style={{ marginBottom: 2 }}>
-                        <Checkbox
+                        <PurrCheckbox
                           checked={selectedIds.includes(ch.id)}
                           onChange={() => toggleItem(ch.id)}
                         >
                           {ch.title}
-                        </Checkbox>
+                        </PurrCheckbox>
                       </div>
                     ))}
                   </div>
@@ -177,17 +177,17 @@ export default function ExportModal({
           ) : (
             items.map((item) => (
               <div key={item.id} style={{ marginBottom: 4 }}>
-                <Checkbox
+                <PurrCheckbox
                   checked={selectedIds.includes(item.id)}
                   onChange={() => toggleItem(item.id)}
                 >
                   {item.title}
-                </Checkbox>
+                </PurrCheckbox>
               </div>
             ))
           )}
         </div>
       </div>
-    </Dialog>
+    </PurrDialog>
   );
 }

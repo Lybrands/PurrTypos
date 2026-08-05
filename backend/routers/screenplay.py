@@ -62,6 +62,25 @@ async def get_or_create_screenplay_agent_session(project_id: str):
     return {"success": True, "data": data}
 
 
+@router.get("/screenplay-projects/{project_id}/agent-sessions")
+async def list_screenplay_agent_sessions(
+    project_id: str,
+    includeClosed: bool = False,
+):
+    data = await screenplay_crud.list_agent_sessions(
+        get_db(),
+        project_id,
+        include_closed=includeClosed,
+    )
+    return {"success": True, "data": data}
+
+
+@router.post("/screenplay-projects/{project_id}/agent-sessions")
+async def create_screenplay_agent_session(project_id: str):
+    data = await screenplay_crud.create_agent_session(get_db(), project_id)
+    return {"success": True, "data": data}
+
+
 @router.put("/screenplay-projects/{project_id}")
 async def update_screenplay_project(
     project_id: str,
@@ -103,8 +122,20 @@ async def create_screenplay_document(
     project_id: str,
     body: CreateScreenplayDocumentRequest,
 ):
+    db = get_db()
+    if body.sourceRunId:
+        await screenplay_crud.require_agent_document_proposal(
+            db,
+            project_id=project_id,
+            source_run_id=body.sourceRunId,
+            kind=str(body.kind),
+            title=body.title,
+            content_json=body.contentJson,
+            content_text=body.contentText,
+            derived_from_ids=body.derivedFromIds,
+        )
     data = await screenplay_crud.create_document(
-        get_db(),
+        db,
         project_id=project_id,
         kind=body.kind,
         title=body.title,

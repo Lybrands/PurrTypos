@@ -3,18 +3,18 @@ import ReactDOM from 'react-dom/client'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { FontSizeProvider } from './contexts/FontSizeContext'
 import App from './App'
-import { ConfirmProvider, ToastProvider, TooltipProvider } from './ui'
+import { PurrConfirmProvider, PurrToastProvider, PurrTooltipProvider } from '@/purr-components'
 import './index.scss'
 
 function ThemedApp() {
   return (
-    <TooltipProvider>
-      <ToastProvider>
-        <ConfirmProvider>
+    <PurrTooltipProvider>
+      <PurrToastProvider>
+        <PurrConfirmProvider>
           <App />
-        </ConfirmProvider>
-      </ToastProvider>
-    </TooltipProvider>
+        </PurrConfirmProvider>
+      </PurrToastProvider>
+    </PurrTooltipProvider>
   )
 }
 

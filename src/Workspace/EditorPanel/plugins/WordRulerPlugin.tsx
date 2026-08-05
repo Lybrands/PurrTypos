@@ -4,7 +4,7 @@ import React from 'react'
 import ReactDOM from 'react-dom'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { $getRoot } from 'lexical'
-import { Tooltip } from '../../../ui'
+import { PurrTooltip } from '@/purr-components'
 
 /**
  * 字数标尺插件：每 N 个字（默认 500）在编辑器右侧打一个浮签：「500字 / 1000字 ...」。
@@ -90,7 +90,7 @@ export function WordRulerPlugin({ interval = 500 }: { interval?: number }) {
   return ReactDOM.createPortal(
     <>
       {markers.map((m, i) => (
-        <Tooltip
+        <PurrTooltip
           key={`${m.label}-${i}`}
           title={m.label}
           placement="left"
@@ -103,7 +103,7 @@ export function WordRulerPlugin({ interval = 500 }: { interval?: number }) {
             aria-label={m.label}
             onPointerDown={(event) => event.preventDefault()}
           />
-        </Tooltip>
+        </PurrTooltip>
       ))}
     </>,
     wrapEl,

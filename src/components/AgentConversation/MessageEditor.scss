@@ -1,0 +1,38 @@
+.agent-message-editor {
+  display: flex;
+  width: min(78%, 680px);
+  min-width: 0;
+  padding: var(--spacing-sm);
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border-light));
+  border-radius: 15px 15px 4px 15px;
+  background: var(--accent-dim);
+  box-sizing: border-box;
+}
+
+.agent-message-editor__textarea.purr-input {
+  width: 100%;
+  min-width: 0;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  font-size: var(--font-size);
+  line-height: 1.6;
+  resize: none;
+  box-sizing: border-box;
+}
+
+.agent-message-editor__actions {
+  display: flex;
+  min-width: 0;
+  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .agent-message-editor {
+    width: 92%;
+  }
+}

@@ -1,12 +1,12 @@
 import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
 import {
-  ArrowLeftOutlined,
-  DashboardOutlined,
-  HomeOutlined,
-  TeamOutlined,
-} from '../ui'
-import { Button, Spin, Tooltip } from '../ui'
+  ArrowLeftIcon,
+  DashboardIcon,
+  HomeIcon,
+  StorySettingIcon,
+} from '@/purr-components'
+import { PurrButton, PurrSpin, PurrTooltip } from '@/purr-components'
 import type { LexicalEditor } from 'lexical'
 import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
 import type { Chapter, AiModelConfig, EntityId } from '../types'
@@ -39,7 +39,7 @@ const EditorPanel = lazy(() => import('./EditorPanel'))
 const AiPanel = lazy(() => import('./AiPanel'))
 
 const PanelFallback = () => (
-  <div className="workspace-panel-fallback"><Spin size="small" /></div>
+  <div className="workspace-panel-fallback"><PurrSpin size="small" /></div>
 )
 
 /**
@@ -318,19 +318,19 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
     {
       key: 'setting',
-      icon: <TeamOutlined style={{ fontSize: 16 }} />,
+      icon: <StorySettingIcon style={{ fontSize: 16 }} />,
       tooltip: panelState.right.open && activeUtilityTabKey === SETTING_TAB.key
         ? '返回正文'
-        : '小说设定：人物 / 故事背景 / 世界设定',
+        : '小说背景',
       active: panelState.right.open && activeUtilityTabKey === SETTING_TAB.key,
       onClick: () => toggleUtilityTab(SETTING_TAB),
     },
     {
       key: 'dashboard',
-      icon: <DashboardOutlined style={{ fontSize: 16 }} />,
+      icon: <DashboardIcon style={{ fontSize: 16 }} />,
       tooltip: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key
         ? '返回正文'
-        : '仪表盘：故事健康 / 写作统计',
+        : '写作仪表盘',
       active: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
       onClick: () => toggleUtilityTab(DASHBOARD_TAB),
     },
@@ -379,24 +379,24 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
         left={
           <>
             {onGoHome && (
-              <Tooltip title="返回首页">
-                <Button
+              <PurrTooltip title="返回首页">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<HomeOutlined style={{ fontSize: 14 }} />}
+                  icon={<HomeIcon style={{ fontSize: 14 }} />}
                   onClick={onGoHome}
                 />
-              </Tooltip>
+              </PurrTooltip>
             )}
             {onBack && (
-              <Tooltip title="返回书架">
-                <Button
+              <PurrTooltip title="返回书架">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<ArrowLeftOutlined style={{ fontSize: 14 }} />}
+                  icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
                   onClick={onBack}
                 />
-              </Tooltip>
+              </PurrTooltip>
             )}
           </>
         }

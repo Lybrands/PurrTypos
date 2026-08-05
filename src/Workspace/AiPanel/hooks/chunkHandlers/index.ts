@@ -5,14 +5,17 @@ import {
   handleAgentRunTodoUpdated,
   handleAgentRunTodosUpdated,
   handleAgentDelegation,
+  handleLongTaskDispatched,
 } from "./agentRun";
 import {
   handleDelta,
   handleThinkingDelta,
+  handleThinkingSnapshot,
 } from "./streaming";
 import {
   handleChapterCreated,
   handleProposedChapterDiff,
+  handleProposedScreenplayDocument,
   handleSettingUpdated,
 } from "./sideEffects";
 import { handleProposedSettingDiff } from "./settingDiff";
@@ -27,6 +30,7 @@ import {
   handleContextBudget,
   handleContextCompaction,
 } from "./context";
+import { handleAgentSubRunEvent } from "./subAgent";
 
 export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
 
@@ -38,10 +42,15 @@ export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
  * - error / done 由 handler 自身负责清理订阅 + refs（通过 ctx.cleanup()）。
  */
 export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
+  // Child Runs reuse this exact reducer but write into delegation-scoped
+  // activity blocks, so concurrent token streams can never share acc.response.
+  if (handleAgentSubRunEvent(chunk, ctx, dispatchChunk)) return;
+
   // 1. 错误终态：合并提示 + cleanup，必须立即停（避免后续分支二次写 state）
   if (handleError(chunk, ctx)) return;
 
   // 2. 流式正文 / 思考流（无短路）
+  handleThinkingSnapshot(chunk, ctx);
   handleThinkingDelta(chunk, ctx);
   handleDelta(chunk, ctx);
   handleContextCompaction(chunk, ctx);
@@ -49,6 +58,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
 
   // 3. 副作用：派发 DOM 事件（无短路）
   handleProposedChapterDiff(chunk, ctx);
+  handleProposedScreenplayDocument(chunk, ctx);
   handleProposedSettingDiff(chunk, ctx);
   handleToolApprovalRequired(chunk, ctx);
   handleToolApprovalResolved(chunk, ctx);
@@ -57,6 +67,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleAgentRunStarted(chunk, ctx);
   handleAgentRunTodosUpdated(chunk, ctx);
   handleAgentRunTodoUpdated(chunk, ctx);
+  handleLongTaskDispatched(chunk, ctx);
   handleAgentRunTerminal(chunk, ctx);
   handleAgentDelegation(chunk, ctx);
 

@@ -1,6 +1,6 @@
 import React from 'react'
-import { CloseOutlined, DownOutlined, SearchOutlined, UpOutlined } from '../ui'
-import { Button, Input, Tooltip, type InputRef } from '../ui'
+import { CloseIcon, ChevronDownIcon, SearchIcon, ChevronUpIcon } from '@/purr-components'
+import { PurrButton, PurrInput, PurrTooltip, type PurrInputRef } from '@/purr-components'
 import { useWorkspace } from './WorkspaceContext'
 import './workspaceSearch.scss'
 
@@ -36,7 +36,7 @@ export default function WorkspaceSearchPanel({ fixed = true, className }: Worksp
   } = useWorkspace()
 
   const [open, setOpen] = React.useState(false)
-  const inputRef = React.useRef<InputRef>(null)
+  const inputRef = React.useRef<PurrInputRef>(null)
   const findShortcutLabel = React.useMemo(() => getFindShortcutLabel(), [])
 
   React.useEffect(() => {
@@ -91,13 +91,13 @@ export default function WorkspaceSearchPanel({ fixed = true, className }: Worksp
       role="search"
     >
       <div className="workspace-search-bar">
-        <Input
+        <PurrInput
           ref={inputRef}
           className="workspace-search-input"
           allowClear
           placeholder={`搜索大纲 / 小说背景 / 正文…（${findShortcutLabel}）`}
           aria-label={`搜索大纲、小说背景与正文，快捷键 ${findShortcutLabel}`}
-          prefix={<SearchOutlined className="workspace-search-prefix-icon" />}
+          prefix={<SearchIcon className="workspace-search-prefix-icon" />}
           value={workspaceSearchQuery}
           onChange={(e) => setWorkspaceSearchQuery(e.target.value)}
           onPressEnter={() => goToNextWorkspaceSearch()}
@@ -113,36 +113,36 @@ export default function WorkspaceSearchPanel({ fixed = true, className }: Worksp
             {workspaceSearchActiveIndex + 1}/{total}
           </span>
         )}
-        <Tooltip title="上一个 (Shift+Enter)">
-          <Button
+        <PurrTooltip title="上一个 (Shift+Enter)">
+          <PurrButton
             type="text"
             size="small"
             className="workspace-search-nav-btn"
-            icon={<UpOutlined style={{ fontSize: 14 }} />}
+            icon={<ChevronUpIcon style={{ fontSize: 14 }} />}
             onClick={() => goToPrevWorkspaceSearch()}
             disabled={!q || total === 0}
           />
-        </Tooltip>
-        <Tooltip title="下一个 (Enter)">
-          <Button
+        </PurrTooltip>
+        <PurrTooltip title="下一个 (Enter)">
+          <PurrButton
             type="text"
             size="small"
             className="workspace-search-nav-btn"
-            icon={<DownOutlined style={{ fontSize: 14 }} />}
+            icon={<ChevronDownIcon style={{ fontSize: 14 }} />}
             onClick={() => goToNextWorkspaceSearch()}
             disabled={!q || total === 0}
           />
-        </Tooltip>
-        <Tooltip title="关闭 (Esc)">
-          <Button
+        </PurrTooltip>
+        <PurrTooltip title="关闭 (Esc)">
+          <PurrButton
             type="text"
             size="small"
             className="workspace-search-nav-btn"
-            icon={<CloseOutlined style={{ fontSize: 14 }} />}
+            icon={<CloseIcon style={{ fontSize: 14 }} />}
             onClick={() => setOpen(false)}
             aria-label="关闭搜索"
           />
-        </Tooltip>
+        </PurrTooltip>
       </div>
     </div>
   )
