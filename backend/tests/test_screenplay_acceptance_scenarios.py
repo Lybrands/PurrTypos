@@ -109,6 +109,222 @@ def _execution(scene_id: str, unit_id: str, detail: str) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_scene_draft_batch_is_applied_atomically(
+    acceptance_db: DatabaseConnection,
+):
+    created = await screenplay_crud.create_project(
+        acceptance_db,
+        title="批量正文应用",
+        source_kind="original",
+        source_book_id=None,
+        screenplay_format="电影",
+        approach="先推情节",
+        premise="一次创作并应用连续场景。",
+    )
+    project_id = created["project"]["id"]
+    brief = await screenplay_crud.accept_document(
+        acceptance_db,
+        created["initialDocument"]["id"],
+    )
+    structure = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="beat_sheet",
+        title="批量正文节拍表",
+        content_json=_film_structure(brief["id"]),
+        content_text="主角必须作出选择。",
+        derived_from_ids=[brief["id"]],
+    )
+    scene_list = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="scene_list",
+        title="批量正文场景表",
+        content_json=_film_scene_list(structure["id"]),
+        content_text="候车室与站台两场。",
+        derived_from_ids=[structure["id"]],
+    )
+    batch = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="scene_draft",
+        title="一次完成两场",
+        content_json={
+            "generatedBy": "screenplay-agent-long-task",
+            "sceneListId": scene_list["id"],
+            "sceneId": "scene-1",
+            "newSceneIds": ["scene-1", "scene-2"],
+            "completedSceneIds": ["scene-1", "scene-2"],
+            "sceneExecutions": [
+                _execution("scene-1", "beat-choice", "拿到车票"),
+                _execution("scene-2", "beat-choice", "跳下列车"),
+            ],
+            "isComplete": True,
+        },
+        content_text=(
+            "INT. 候车室 - 夜\n\n最后一张车票。\n\n"
+            "EXT. 站台 - 夜\n\n他跳下列车。"
+        ),
+        derived_from_ids=[scene_list["id"]],
+    )
+
+    assert batch["status"] == "accepted"
+    project = await screenplay_crud.get_project(acceptance_db, project_id)
+    assert project["active_stage"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_scene_draft_acceptance_repairs_legacy_interleaved_scene_order(
+    acceptance_db: DatabaseConnection,
+):
+    created = await screenplay_crud.create_project(
+        acceptance_db,
+        title="历史场景顺序修复",
+        source_kind="original",
+        source_book_id=None,
+        screenplay_format="连续剧",
+        approach="先推情节",
+        premise="验证旧场景表中的迟到场景仍能按分集接受正文。",
+    )
+    project_id = created["project"]["id"]
+    await screenplay_crud.update_document(
+        acceptance_db,
+        created["initialDocument"]["id"],
+        {
+            "contentJson": {
+                "brief": {
+                    "formatPlan": {
+                        "targetFormat": "连续剧",
+                        "episodeCount": 2,
+                        "episodeDurationMinutes": 10,
+                    },
+                },
+            },
+            "contentText": "两集连续剧创作简报。",
+        },
+    )
+    brief = await screenplay_crud.accept_document(
+        acceptance_db,
+        created["initialDocument"]["id"],
+    )
+    structure = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="episode_outline",
+        title="两集结构",
+        content_json={
+            "creativeBriefId": brief["id"],
+            "episodes": [{
+                "id": "episode-1",
+                "number": 1,
+                "title": "进入",
+                "summary": "主角进入异常空间。",
+            }, {
+                "id": "episode-2",
+                "number": 2,
+                "title": "追踪",
+                "summary": "主角开始追踪真相。",
+            }],
+            "decisionCoverage": [],
+        },
+        content_text="第一集进入，第二集追踪。",
+        derived_from_ids=[brief["id"]],
+    )
+    ordered_scenes = [{
+        "id": "scene-1",
+        "order": 1,
+        "episodeNumber": 1,
+        "heading": "外景·入口·夜",
+        "structureUnitIds": ["episode-1"],
+        "objective": "找到入口",
+        "conflict": "入口正在关闭",
+        "turn": "主角挤入缝隙",
+        "synopsis": "主角进入异常空间。",
+    }, {
+        "id": "scene-1-late",
+        "order": 2,
+        "episodeNumber": 1,
+        "heading": "内景·异常空间·夜",
+        "structureUnitIds": ["episode-1"],
+        "objective": "确认身处何处",
+        "conflict": "出口已经消失",
+        "turn": "掌心印记亮起",
+        "synopsis": "第一集迟到的补充场景。",
+    }, {
+        "id": "scene-2",
+        "order": 3,
+        "episodeNumber": 2,
+        "heading": "外景·街道·晨",
+        "structureUnitIds": ["episode-2"],
+        "objective": "追踪线索",
+        "conflict": "线索突然中断",
+        "turn": "陌生人主动来电",
+        "synopsis": "第二集开始追踪。",
+    }]
+    scene_list = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="scene_list",
+        title="两集场景表",
+        content_json={
+            "structureId": structure["id"],
+            "scenes": ordered_scenes,
+        },
+        content_text="两集三个场景。",
+        derived_from_ids=[structure["id"]],
+    )
+
+    # Simulate an accepted pre-fix document: the provider omitted an episode-1
+    # scene and appended it only after an episode-2 scene in its final batch.
+    legacy_scenes = [
+        {**ordered_scenes[0], "order": 1},
+        {**ordered_scenes[2], "order": 2},
+        {**ordered_scenes[1], "order": 3},
+    ]
+    await acceptance_db.execute(
+        "UPDATE screenplay_documents SET content_json = ? WHERE id = ?",
+        [
+            json.dumps(
+                {
+                    "structureId": structure["id"],
+                    "scenes": legacy_scenes,
+                },
+                ensure_ascii=False,
+            ),
+            scene_list["id"],
+        ],
+    )
+
+    draft = await _create_and_accept(
+        acceptance_db,
+        project_id=project_id,
+        kind="scene_draft",
+        title="第一集批量正文",
+        content_json={
+            "generatedBy": "screenplay-agent-long-task",
+            "sceneListId": scene_list["id"],
+            "sceneId": "scene-1",
+            "newSceneIds": ["scene-1", "scene-1-late"],
+            "completedSceneIds": ["scene-1", "scene-1-late"],
+            "sceneExecutions": [
+                _execution("scene-1", "episode-1", "进入异常空间"),
+                _execution("scene-1-late", "episode-1", "发现掌心印记"),
+            ],
+            "isComplete": False,
+        },
+        content_text=(
+            "EXT. 入口 - 夜\n\n主角挤入缝隙。\n\n"
+            "INT. 异常空间 - 夜\n\n掌心印记亮起。"
+        ),
+        derived_from_ids=[scene_list["id"]],
+    )
+
+    assert draft["status"] == "accepted"
+    project = await screenplay_crud.get_project(acceptance_db, project_id)
+    assert project["active_stage"] == "draft"
+
+
+@pytest.mark.asyncio
 async def test_original_film_completes_and_failed_review_rolls_back(
     acceptance_db: DatabaseConnection,
 ):

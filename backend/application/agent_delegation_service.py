@@ -70,6 +70,27 @@ class AgentDelegationService:
             claimed.lineage,
         )
 
+    async def claim_delegation(
+        self,
+        *,
+        delegation_id: str,
+        parent_run_id: str,
+        worker_id: str,
+        max_parallel_children: int,
+    ) -> tuple[dict[str, Any], RunLineage] | None:
+        claimed = await self._repository.claim(
+            delegation_id=delegation_id,
+            parent_run_id=parent_run_id,
+            worker_id=worker_id,
+            max_parallel_children=max_parallel_children,
+        )
+        if claimed is None:
+            return None
+        return (
+            _delegation_view(claimed.delegation, self._role_registry),
+            claimed.lineage,
+        )
+
     async def record_result(
         self,
         *,
@@ -121,7 +142,7 @@ def _delegation_view(
         "rootRunId": row.root_run_id,
         "childRunId": row.child_run_id,
         "agentRole": row.agent_role,
-        "agentTitle": _role_title(row.agent_role, role_registry),
+        "agentTitle": _delegation_title(row, role_registry),
         "objective": row.objective,
         "input": dict(row.input_payload),
         "status": row.status.value,
@@ -156,7 +177,7 @@ def _aggregate(
             {
                 "delegationId": row.id,
                 "agentRole": row.agent_role,
-                "agentTitle": _role_title(row.agent_role, role_registry),
+                "agentTitle": _delegation_title(row, role_registry),
                 "childRunId": row.child_run_id,
                 "summary": row.result_summary or "",
             }
@@ -164,6 +185,23 @@ def _aggregate(
             if row.status.value == "done"
         ),
     )
+
+
+def _delegation_title(
+    row: AgentDelegation,
+    role_registry: AgentRoleRegistry | None,
+) -> str:
+    title = _role_title(row.agent_role, role_registry)
+    unit_id = str(row.input_payload.get("unitId") or "").strip()
+    try:
+        attempt = max(1, int(row.input_payload.get("attempt") or 1))
+    except (TypeError, ValueError):
+        attempt = 1
+    if unit_id:
+        title += f" · {unit_id}"
+    if attempt > 1:
+        title += f" · 重试 {attempt - 1}"
+    return title
 
 
 def _aggregation_view(value: DelegationAggregation) -> dict[str, Any]:

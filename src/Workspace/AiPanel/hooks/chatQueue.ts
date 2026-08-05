@@ -16,6 +16,7 @@ export interface QueuedChatSubmission {
 
 export type ChatSessionActivityState =
   | "running"
+  | "paused"
   | "queued"
   | ChatRunOutcome;
 
@@ -52,6 +53,7 @@ export function getSessionActivityLabel(
   if (activity.state === "queued") {
     return `等待发送 · ${activity.queuedCount} 条`;
   }
+  if (activity.state === "paused") return "已暂停";
   if (activity.state === "completed") return "已完成";
   if (activity.state === "failed") return "生成失败";
   return "已终止";

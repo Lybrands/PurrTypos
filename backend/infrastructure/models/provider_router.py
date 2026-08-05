@@ -21,6 +21,11 @@ async def create_chat_stream(
 
         return await chat_stream_as_openai_format(key, messages, request_params, signal)
 
+    if api_provider == "zai":
+        from infrastructure.models.zai_chat import chat_stream
+
+        return await chat_stream(key, messages, request_params, signal)
+
     from infrastructure.models.openai_chat import chat_stream
 
     return await chat_stream(key, messages, request_params, signal)
@@ -40,6 +45,11 @@ async def create_chat_no_stream(
         )
 
         return await chat_no_stream_as_openai_format(key, messages, options, signal)
+
+    if api_provider == "zai":
+        from infrastructure.models.zai_chat import chat_no_stream
+
+        return await chat_no_stream(key, messages, options, signal)
 
     from infrastructure.models.openai_chat import chat_no_stream
 

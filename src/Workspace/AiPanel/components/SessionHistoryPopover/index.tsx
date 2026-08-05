@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button, Empty, Input, List, Popover, Spin, Tooltip } from '../../../../ui'
-import { DeleteOutlined, HistoryOutlined } from '../../../../ui'
+import { PurrButton, PurrEmpty, PurrInput, PurrList, PurrPopover, PurrSpin, PurrTooltip } from '@/purr-components'
+import { DeleteIcon, HistoryIcon } from '@/purr-components'
 import type { AiSession, EntityId } from '../../../../types'
 import './index.scss'
 
@@ -127,7 +127,7 @@ export default function SessionHistoryPopover({
 
   const content = (
     <div className="history-popover-body">
-      <Input.Search
+      <PurrInput.Search
         placeholder="搜索对话标题..."
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -135,32 +135,32 @@ export default function SessionHistoryPopover({
         className="history-search"
       />
       {loading ? (
-        <div className="history-loading"><Spin size="small" /></div>
+        <div className="history-loading"><PurrSpin size="small" /></div>
       ) : loadError ? (
-        <Empty image={false} description={loadError} className="history-empty" />
+        <PurrEmpty image={false} description={loadError} className="history-empty" />
       ) : filtered.length === 0 ? (
-        <Empty image={false} description="暂无历史对话" className="history-empty" />
+        <PurrEmpty image={false} description="暂无历史对话" className="history-empty" />
       ) : (
         <div className="history-list">
           {grouped.map(({ group, items }) => (
             <div key={group} className="history-group">
               <div className="history-group-label">{group}</div>
-              <List
+              <PurrList
                 dataSource={items}
                 renderItem={(session) => (
-                  <List.Item
+                  <PurrList.Item
                     className={`history-item${activeSessionId === session.id ? ' active' : ''}`}
                     actions={[
-                      <Tooltip title="删除" key="del">
-                        <Button
+                      <PurrTooltip title="删除" key="del">
+                        <PurrButton
                           type="text"
                           size="small"
-                          icon={<DeleteOutlined />}
+                          icon={<DeleteIcon />}
                           className="history-delete-btn"
                           onClick={(e) => handleDelete(session, e)}
                           aria-label={`删除对话：${session.title}`}
                         />
-                      </Tooltip>,
+                      </PurrTooltip>,
                     ]}
                   >
                     <button
@@ -171,7 +171,7 @@ export default function SessionHistoryPopover({
                     >
                       <span className="history-item-title">{session.title}</span>
                     </button>
-                  </List.Item>
+                  </PurrList.Item>
                 )}
               />
             </div>
@@ -182,9 +182,9 @@ export default function SessionHistoryPopover({
   )
 
   return (
-    <Tooltip title="历史对话" mouseEnterDelay={0.5} placement="left" getPopupContainer={() => document.body}>
+    <PurrTooltip title="历史对话" mouseEnterDelay={0.5} placement="left" getPopupContainer={() => document.body}>
       <span className="purr-popup-trigger session-history-trigger">
-        <Popover
+        <PurrPopover
           content={content}
           title="历史对话"
           trigger="click"
@@ -194,16 +194,16 @@ export default function SessionHistoryPopover({
           overlayClassName="session-history-popover"
           arrow={false}
         >
-        <Button
+        <PurrButton
           type="text"
           size="small"
-          icon={<HistoryOutlined style={{ fontSize: 13 }} />}
+          icon={<HistoryIcon />}
           className="session-new-btn"
           aria-label="打开历史对话"
           disabled={disabled || bookId == null}
         />
-        </Popover>
+        </PurrPopover>
       </span>
-    </Tooltip>
+    </PurrTooltip>
   )
 }

@@ -294,11 +294,16 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
+  box-sizing: border-box;
+  flex: 0 0 36px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
   padding: var(--spacing-xs) var(--spacing-sm);
   font-size: var(--font-size);
   color: var(--text-primary);
   cursor: pointer;
-  transition: all 0.12s;
+  transition: background-color 0.12s, color 0.12s;
   white-space: nowrap;
 
   &.nav-volume-item {
@@ -341,19 +346,11 @@
 
   &:hover {
     background: var(--bg-hover-list);
-
-    .nav-chapter-actions {
-      display: flex;
-    }
   }
 
   &.active {
     background: var(--bg-active);
     border-left: 2px solid var(--accent);
-
-    .nav-chapter-actions {
-      display: flex;
-    }
   }
 
   &.selected {
@@ -373,13 +370,19 @@
 }
 
 .nav-chapter-actions {
-  flex-shrink: 0;
-  display: none;
+  flex: 0 0 auto;
+  display: flex;
   align-items: center;
   gap: 2px;
+  height: var(--control-height-sm);
 }
 
 .nav-action-btn {
+  width: var(--control-height-sm);
+  min-width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0;
   font-size: var(--font-size-sm);
   color: var(--text-muted);
 

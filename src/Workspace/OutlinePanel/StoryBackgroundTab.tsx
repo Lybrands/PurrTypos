@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { CommentOutlined, EditOutlined, HistoryOutlined, ImportOutlined, PaperClipOutlined, PlusOutlined } from '../../ui'
-import { Button, Modal, Popconfirm, Space, Tooltip, Typography } from '../../ui'
+import { AiChatIcon, EditIcon, HistoryIcon, ImportIcon, PaperclipIcon, PlusIcon } from '@/purr-components'
+import { PurrButton, PurrModal, PurrPopconfirm, PurrSpace, PurrTooltip, PurrTypography } from '@/purr-components'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
 import type { Editor } from '@tiptap/core'
@@ -215,26 +215,26 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
         <ul className="story-background-attachment-list">
           {attachments.map((a) => (
             <li key={a.id} className="story-background-attachment-item">
-              <Space size="small" style={{ width: '100%' }}>
-                <PaperClipOutlined />
-                <Typography.Link
+              <PurrSpace size="small" style={{ width: '100%' }}>
+                <PaperclipIcon />
+                <PurrTypography.Link
                   ellipsis
                   onClick={() => handleOpenAttachment(a.stored_path)}
                   style={{ flex: 1, minWidth: 0 }}
                 >
                   {a.name}
-                </Typography.Link>
+                </PurrTypography.Link>
                 {editing && (
-                  <Popconfirm
+                  <PurrPopconfirm
                     title="确定删除该附件？"
                     onConfirm={() => handleDeleteAttachment(a.id)}
                   >
-                    <Button type="text" size="small" danger>
+                    <PurrButton type="text" size="small" danger>
                       删除
-                    </Button>
-                  </Popconfirm>
+                    </PurrButton>
+                  </PurrPopconfirm>
                 )}
-              </Space>
+              </PurrSpace>
             </li>
           ))}
         </ul>
@@ -273,59 +273,59 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
       <div className="story-background-tab story-background-editing">
         <div className="story-background-editing-header">
           <div className="story-background-toolbar story-background-toolbar-top">
-            <Tooltip title="导入文件">
-              <Button
+            <PurrTooltip title="导入文件">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<ImportOutlined />}
+                icon={<ImportIcon />}
                 onClick={handleImportFile}
                 disabled={loading}
               />
-            </Tooltip>
-            <Tooltip title={attachments.length > 0 ? `附件 (${attachments.length})` : '附件'}>
-              <Button
+            </PurrTooltip>
+            <PurrTooltip title={attachments.length > 0 ? `附件 (${attachments.length})` : '附件'}>
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PaperClipOutlined />}
+                icon={<PaperclipIcon />}
                 onClick={() => setAttachmentModalOpen(true)}
               />
-            </Tooltip>
+            </PurrTooltip>
           </div>
         </div>
         <div className="story-background-editor-wrap story-background-tiptap-wrap">
           <EditorContent editor={editor} className="story-background-tiptap-container" />
         </div>
         <div className="story-background-toolbar story-background-toolbar-bottom">
-          <Button type="primary" size="small" onClick={handleSave} disabled={loading}>
+          <PurrButton type="primary" size="small" onClick={handleSave} disabled={loading}>
             保存
-          </Button>
-          <Button size="small" onClick={handleCancel} disabled={loading}>
+          </PurrButton>
+          <PurrButton size="small" onClick={handleCancel} disabled={loading}>
             取消
-          </Button>
+          </PurrButton>
         </div>
-        <Modal
+        <PurrModal
           title="附件"
           open={attachmentModalOpen}
           onCancel={() => setAttachmentModalOpen(false)}
           footer={
             editing
               ? [
-                  <Button key="add" icon={<PaperClipOutlined />} onClick={handlePickAttachmentsInModal}>
+                  <PurrButton key="add" icon={<PaperclipIcon />} onClick={handlePickAttachmentsInModal}>
                     导入附件
-                  </Button>,
-                  <Button key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
+                  </PurrButton>,
+                  <PurrButton key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
                     关闭
-                  </Button>,
+                  </PurrButton>,
                 ]
               : [
-                  <Button key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
+                  <PurrButton key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
                     关闭
-                  </Button>,
+                  </PurrButton>,
                 ]
           }
         >
           {attachmentModalContent}
-        </Modal>
+        </PurrModal>
       </div>
     )
   }
@@ -340,7 +340,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
           role="button"
           tabIndex={0}
         >
-          <PlusOutlined className="outline-empty-card-icon" />
+          <PlusIcon className="outline-empty-card-icon" />
           <p className="outline-empty-card-title">添加小说背景</p>
           <p className="outline-empty-card-desc">点击此处填写世界观、时代背景、设定等</p>
         </div>
@@ -353,48 +353,48 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
       <div className="story-background-view">
         <div className="story-background-view-header">
           <div className="story-background-toolbar story-background-toolbar-top">
-            <Tooltip title="编辑">
-              <Button type="text" size="small" icon={<EditOutlined />} onClick={handleAdd} disabled={diffLocked} />
-            </Tooltip>
-            <Tooltip title="与 AI 讨论背景设定">
-              <Button
+            <PurrTooltip title="编辑">
+              <PurrButton type="text" size="small" icon={<EditIcon />} onClick={handleAdd} disabled={diffLocked} />
+            </PurrTooltip>
+            <PurrTooltip title="与 AI 讨论背景设定">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<CommentOutlined />}
+                icon={<AiChatIcon />}
                 onClick={() => {
                   window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
                   window.dispatchEvent(new CustomEvent('open-setting-chat', { detail: { prefill: '关于小说背景设定：' } }))
                 }}
               />
-            </Tooltip>
-            <Tooltip title="历史">
-              <Button type="text" size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)} />
-            </Tooltip>
-            <Tooltip title={attachments.length > 0 ? `附件 (${attachments.length})` : '附件'}>
-              <Button
+            </PurrTooltip>
+            <PurrTooltip title="历史">
+              <PurrButton type="text" size="small" icon={<HistoryIcon />} onClick={() => setHistoryOpen(true)} />
+            </PurrTooltip>
+            <PurrTooltip title={attachments.length > 0 ? `附件 (${attachments.length})` : '附件'}>
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PaperClipOutlined />}
+                icon={<PaperclipIcon />}
                 onClick={() => setAttachmentModalOpen(true)}
               />
-            </Tooltip>
+            </PurrTooltip>
           </div>
         </div>
         <div className="story-background-content story-background-markdown">
           <MarkdownWithSearch content={content || ''} searchQuery={workspaceSearchQuery} />
         </div>
-        <Modal
+        <PurrModal
           title="附件"
           open={attachmentModalOpen}
           onCancel={() => setAttachmentModalOpen(false)}
           footer={[
-            <Button key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
+            <PurrButton key="close" type="primary" onClick={() => setAttachmentModalOpen(false)}>
               关闭
-            </Button>,
+            </PurrButton>,
           ]}
         >
           {attachmentModalContent}
-        </Modal>
+        </PurrModal>
         <SettingHistoryDrawer
           kind="background"
           bookId={bookId}

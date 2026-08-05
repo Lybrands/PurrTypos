@@ -108,6 +108,23 @@
   --accent-dim: rgba(201, 67, 97, 0.17);
   --accent-light: #fbecef;
   --accent-contrast: #ffffff;
+  --entry-surface-background:
+    radial-gradient(
+      circle at 88% 12%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 34%
+    ),
+    color-mix(in srgb, var(--accent-light) 36%, var(--bg-surface));
+  --entry-surface-background-hover:
+    radial-gradient(
+      circle at 84% 16%,
+      color-mix(in srgb, var(--accent) 18%, transparent),
+      transparent 38%
+    ),
+    color-mix(in srgb, var(--accent-light) 52%, var(--bg-elevated));
+  --data-entry-background: color-mix(in srgb, var(--bg-surface) 64%, transparent);
+  --data-entry-background-hover:
+    color-mix(in srgb, var(--bg-elevated) 82%, var(--accent-light));
   --success: #2f8a62;
   --success-dim: rgba(47, 138, 98, 0.14);
   --warning: #b87416;
@@ -250,6 +267,26 @@ button {
     border-color var(--transition-fast),
     box-shadow var(--transition-fast),
     transform var(--transition-fast);
+}
+
+/* 可导航到新页面、项目或创作流程的入口型表面。 */
+.purr-entry-surface {
+  background: var(--entry-surface-background);
+
+  &:hover,
+  &:focus-visible {
+    background: var(--entry-surface-background-hover);
+  }
+}
+
+/* 书籍、项目等重复数据项：比主入口更克制，仅提供轻量可点击表面。 */
+.purr-data-entry-surface {
+  background: var(--data-entry-background);
+
+  &:hover,
+  &:focus-visible {
+    background: var(--data-entry-background-hover);
+  }
 }
 
 input, textarea, select {

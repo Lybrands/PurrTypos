@@ -1,7 +1,7 @@
 import React from 'react'
-import { Button, Input, Popconfirm, Select } from '../../../../ui'
-import { Empty } from '../../../../ui'
-import { DeleteOutlined } from '../../../../ui'
+import { PurrButton, PurrInput, PurrPopconfirm, PurrSelect } from '@/purr-components'
+import { PurrEmpty } from '@/purr-components'
+import { DeleteIcon } from '@/purr-components'
 import type { AiForeshadowing } from '../../../../types'
 import { FORESHADOWING_TYPES } from '../../types'
 import type { WritingChapter } from './types'
@@ -64,7 +64,7 @@ export default function ForeshadowingManager({
       <div className="memory-add-card">
         <div className="memory-add-form memory-add-form--layer memory-add-form--foreshadow">
           <div className="memory-add-form-row memory-add-form-row--controls">
-            <Select
+            <PurrSelect
               size="small"
               placeholder="埋入章节"
               value={foreshadowChapterId}
@@ -72,7 +72,7 @@ export default function ForeshadowingManager({
               options={chapterOptions}
               className="memory-add-foreshadow-chapter"
             />
-            <Select
+            <PurrSelect
               size="small"
               value={foreshadowType}
               onChange={setForeshadowType}
@@ -81,7 +81,7 @@ export default function ForeshadowingManager({
             />
           </div>
           <div className="memory-add-form-row memory-add-form-row--content">
-            <Input.TextArea
+            <PurrInput.TextArea
               placeholder="伏笔内容"
               value={foreshadowContent}
               onChange={(event) => setForeshadowContent(event.target.value)}
@@ -89,7 +89,7 @@ export default function ForeshadowingManager({
               autoSize={{ minRows: 1, maxRows: 4 }}
               className="memory-add-content-input"
             />
-            <Button
+            <PurrButton
               type="primary"
               size="small"
               loading={addingForeshadow}
@@ -97,13 +97,13 @@ export default function ForeshadowingManager({
               disabled={!foreshadowContent.trim() || foreshadowChapterId == null}
             >
               添加伏笔
-            </Button>
+            </PurrButton>
           </div>
         </div>
       </div>
 
       {foreshadowing.length === 0 ? (
-        <Empty image={false} description="暂无伏笔" className="memory-manage-empty" />
+        <PurrEmpty image={false} description="暂无伏笔" className="memory-manage-empty" />
       ) : (
         <div className="memory-manage-list">
           <div className="memory-layer-block">
@@ -120,7 +120,7 @@ export default function ForeshadowingManager({
                   </span>
                 </div>
                 <div className="memory-foreshadow-actions">
-                  <Select
+                  <PurrSelect
                     size="small"
                     value={item.status}
                     onChange={(status: AiForeshadowing['status']) =>
@@ -130,7 +130,7 @@ export default function ForeshadowingManager({
                     className="memory-foreshadow-status-select"
                   />
                   {item.status === '已回收' && (
-                    <Select
+                    <PurrSelect
                       size="small"
                       placeholder="回收于"
                       allowClear
@@ -146,7 +146,7 @@ export default function ForeshadowingManager({
                       className="memory-foreshadow-resolved-select"
                     />
                   )}
-                  <Popconfirm
+                  <PurrPopconfirm
                     title="删除这条伏笔？"
                     description="删除后不可恢复，已回收/未回收状态一并丢失。"
                     okText="删除"
@@ -155,13 +155,13 @@ export default function ForeshadowingManager({
                     placement="topRight"
                     onConfirm={() => handleDeleteForeshadowing(item.id)}
                   >
-                    <Button
+                    <PurrButton
                       type="text"
                       size="small"
-                      icon={<DeleteOutlined />}
+                      icon={<DeleteIcon />}
                       className="memory-manage-delete-btn"
                     />
-                  </Popconfirm>
+                  </PurrPopconfirm>
                 </div>
               </div>
             ))}

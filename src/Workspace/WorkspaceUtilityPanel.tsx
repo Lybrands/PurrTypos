@@ -1,16 +1,17 @@
 import React, { Suspense, lazy } from 'react'
 import {
-  BookOutlined,
-  BulbOutlined,
-  DashboardOutlined,
-  FileTextOutlined,
-  FullscreenExitOutlined,
-  FullscreenOutlined,
-  HighlightOutlined,
+  DashboardIcon,
+  FullscreenExitIcon,
+  FullscreenIcon,
+  HighlightIcon,
+  ManuscriptIcon,
+  MasterOutlineIcon,
+  OutlineIcon,
   PanelToggleIcon,
-  TeamOutlined,
-} from '../ui'
-import { Button, Spin, Tabs, Tooltip } from '../ui'
+  StoryMemoryIcon,
+  StorySettingIcon,
+} from '@/purr-components'
+import { PurrButton, PurrSpin, PurrTabs, PurrTooltip } from '@/purr-components'
 import type { EntityId } from '../types'
 import type { OpenSettingPanelDetail } from './SettingPanel'
 import {
@@ -27,12 +28,18 @@ const SettingPanel = lazy(() => import('./SettingPanel'))
 const DashboardPanel = lazy(() => import('./DashboardPanel'))
 
 const TAB_ICONS: Record<WorkspaceUtilityTabKind, React.ReactNode> = {
-  outline: <BookOutlined />,
-  memory: <BulbOutlined />,
-  style: <HighlightOutlined />,
-  setting: <TeamOutlined />,
-  dashboard: <DashboardOutlined />,
+  outline: <OutlineIcon />,
+  memory: <StoryMemoryIcon />,
+  style: <HighlightIcon />,
+  setting: <StorySettingIcon />,
+  dashboard: <DashboardIcon />,
 }
+
+const getUtilityTabIcon = (tab: WorkspaceUtilityTab) => (
+  tab.kind === 'outline' && tab.outlineTarget?.mode === 'global'
+    ? <MasterOutlineIcon />
+    : TAB_ICONS[tab.kind]
+)
 
 interface WorkspaceUtilityPanelProps {
   bookId: EntityId | null
@@ -50,7 +57,7 @@ interface WorkspaceUtilityPanelProps {
 }
 
 const PanelFallback = () => (
-  <div className="workspace-utility-loading"><Spin size="small" /></div>
+  <div className="workspace-utility-loading"><PurrSpin size="small" /></div>
 )
 
 export default function WorkspaceUtilityPanel({
@@ -81,7 +88,7 @@ export default function WorkspaceUtilityPanel({
     key: EDITOR_TAB_KEY,
     label: (
       <span className="workspace-utility-tab-label">
-        <FileTextOutlined />
+        <ManuscriptIcon />
         <span>正文</span>
       </span>
     ),
@@ -91,7 +98,7 @@ export default function WorkspaceUtilityPanel({
     key: tab.key,
     label: (
       <span className="workspace-utility-tab-label">
-        {TAB_ICONS[tab.kind]}
+        {getUtilityTabIcon(tab)}
         <span>{tab.title}</span>
       </span>
     ),
@@ -131,7 +138,7 @@ export default function WorkspaceUtilityPanel({
 
   return (
     <div className="workspace-utility-panel">
-      <Tabs
+      <PurrTabs
         activeKey={activeKey ?? undefined}
         onChange={onActiveKeyChange}
         onEdit={(targetKey) => onCloseTab(targetKey)}
@@ -141,15 +148,15 @@ export default function WorkspaceUtilityPanel({
         tabBarExtraContent={(
           <div className="workspace-utility-actions">
             {!dockCollapsed && onToggleFullscreen ? (
-              <Tooltip
+              <PurrTooltip
                 title={fullscreen ? '退出全屏' : '全屏'}
                 open={fullscreenTooltipOpen}
                 onOpenChange={setFullscreenTooltipOpen}
               >
-                <Button
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                  icon={fullscreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
                   onClick={(event) => {
                     setFullscreenTooltipOpen(false)
                     event.currentTarget.blur()
@@ -158,31 +165,31 @@ export default function WorkspaceUtilityPanel({
                   className="workspace-utility-action-btn"
                   aria-label={fullscreen ? '退出工作面板全屏' : '全屏显示工作面板'}
                 />
-              </Tooltip>
+              </PurrTooltip>
             ) : null}
             {dockCollapsed && onExpandDock ? (
-              <Tooltip title="固定展开工作面板">
-                <Button
+              <PurrTooltip title="固定展开工作面板">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<PanelToggleIcon side="right" action="expand" />}
+                  icon={<PanelToggleIcon side="right" state="collapsed" />}
                   onClick={onExpandDock}
                   className="workspace-utility-action-btn"
                   aria-label="固定展开工作面板"
                 />
-              </Tooltip>
+              </PurrTooltip>
             ) : null}
             {!dockCollapsed && onCollapse ? (
-              <Tooltip title="收起工作面板">
-                <Button
+              <PurrTooltip title="收起工作面板">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<PanelToggleIcon side="right" action="collapse" />}
+                  icon={<PanelToggleIcon side="right" state="expanded" />}
                   onClick={onCollapse}
                   className="workspace-utility-action-btn"
                   aria-label="收起工作面板"
                 />
-              </Tooltip>
+              </PurrTooltip>
             ) : null}
           </div>
         )}

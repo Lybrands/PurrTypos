@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from infrastructure.models.profiles.base import GenericModelProfile, ModelProfile
+from infrastructure.models.profiles.glm5_2 import GLM5_2_PROFILE
 from infrastructure.models.profiles.kimi_k3 import KIMI_K3_PROFILE
 from infrastructure.models.profiles.kimi_k2_6 import KIMI_K2_6_PROFILE
 from infrastructure.models.profiles.minimax_m3 import MINIMAX_M3_PROFILE
@@ -10,6 +11,7 @@ from infrastructure.models.profiles.mimo_v2_5_pro import MIMO_V2_5_PRO_PROFILE
 
 
 BUILTIN_MODEL_PROFILES: tuple[ModelProfile, ...] = (
+    GLM5_2_PROFILE,
     KIMI_K3_PROFILE,
     KIMI_K2_6_PROFILE,
     MINIMAX_M3_PROFILE,

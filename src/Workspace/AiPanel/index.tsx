@@ -2,11 +2,14 @@ import { services } from '@/services'
 /// <reference path="../../vite-env.d.ts" />
 import React from "react";
 import {
-  ArrowUpOutlined,
-  MessageOutlined,
-} from "../../ui";
-import StopCircleIcon from "../../icons/StopCircleIcon";
-import { Button, Input, Tooltip, useToast, type DropdownItem } from "../../ui";
+  ArrowUpIcon,
+  MessageIcon,
+} from '@/purr-components';
+import { StopCircleIcon } from '@/purr-components';
+import { PurrButton, PurrTooltip, usePurrToast, type PurrDropdownItem } from '@/purr-components';
+import AgentComposer from '../../components/AgentComposer'
+import AgentTaskProgress from '../../components/AgentTaskProgress'
+import { getAgentConversationCapabilities } from '../../agent-runtime/conversationCapabilities'
 import type {
   AiModelConfig,
   Conversation,
@@ -67,7 +70,7 @@ export default function AiPanel({
     }
   }, [onReady])
 
-  const appMessage = useToast();
+  const appMessage = usePurrToast();
   const {
     activeChapterId: chapterId,
     activeChapterTitle,
@@ -78,6 +81,11 @@ export default function AiPanel({
   const [prompt, setPrompt] = React.useState("");
   const [conversations, setConversations] = React.useState<ChatMessage[]>([]);
   const [loading, setLoading] = React.useState(false);
+  const conversationCapabilities = getAgentConversationCapabilities({
+    running: loading,
+    readOnly: false,
+    sessionLoading: false,
+  });
   /** 会话作用域：chapter = 章节对话（默认）；setting = 全局对话（不绑章节，整本书共享；存储值仍为 setting 以兼容历史） */
   const [chatScope, setChatScope] = React.useState<ChatSessionScope>("chapter");
   /** 人物卡/背景「与 AI 讨论」入口触发后，待会话列表就绪时自动建会话 */
@@ -107,7 +115,6 @@ export default function AiPanel({
     chatAgentMode,
     setChatAgentMode,
     selectedModelConfig,
-    modelConfigsRecord,
   } = useAiModelPrefs(bookId, modelConfigs);
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
@@ -290,7 +297,6 @@ export default function AiPanel({
       chatScope === "setting" ? undefined : activeChapterTitle || undefined,
     selectedModel,
     agentEnabled: chatAgentMode !== "ask",
-    modelConfigs: modelConfigsRecord,
     selectedMemoryIds,
     selectedForeshadowingIds,
     sessionScope: chatScope,
@@ -309,6 +315,18 @@ export default function AiPanel({
     setSelectedMemoryIds([]);
     setSelectedForeshadowingIds([]);
   }, [doSubmit, pinNewTurnToTop]);
+
+  const handleStructuredAnswer = React.useCallback(
+    (answer: string) => {
+      const trimmed = answer.trim();
+      if (!trimmed) return;
+      pinNewTurnToTop();
+      doSubmit({ content: trimmed });
+      setSelectedMemoryIds([]);
+      setSelectedForeshadowingIds([]);
+    },
+    [doSubmit, pinNewTurnToTop],
+  );
 
   const handleEditSend = React.useCallback(
     (editIndex: number, content?: string) => {
@@ -369,7 +387,7 @@ export default function AiPanel({
    * 因此 handleWriteToCanvas / handleInsertAtCursor / handleApplyAsDiff 全部移除。
    */
 
-  const ellipsisMenuItems: DropdownItem[] = [
+  const ellipsisMenuItems: PurrDropdownItem[] = [
     {
       key: "favorites",
       label: "查看收藏列表",
@@ -381,7 +399,6 @@ export default function AiPanel({
     <div className="ai-panel panel-main">
       <AiPanelHeader
         menuItems={ellipsisMenuItems}
-        activeTaskPlan={activeTaskPlan}
       />
 
       <div className="ai-panel-body">
@@ -412,15 +429,15 @@ export default function AiPanel({
         )}
 
         {bookId != null && !conversationSidebarOpen && (
-          <Tooltip title="展开对话列表" placement="right">
-            <Button
+          <PurrTooltip title="展开对话列表" placement="right">
+            <PurrButton
               type="text"
               className="conversation-sidebar-reopen"
-              icon={<MessageOutlined />}
+              icon={<MessageIcon />}
               onClick={() => onConversationSidebarOpenChange?.(true)}
               aria-label="展开对话列表"
             />
-          </Tooltip>
+          </PurrTooltip>
         )}
 
         <div className="ai-conversation-main">
@@ -456,104 +473,107 @@ export default function AiPanel({
             modelSelection={modelSelection}
             onAbort={handleAbort}
             onAddFavorite={handleAddFavorite}
+            onStructuredAnswer={handleStructuredAnswer}
           />
             </div>
           </div>
-          <div className="chat-input-area">
-        <div className="chat-input-inner">
-          <Input.TextArea
-            className="chat-input"
+          <AgentComposer
+            className="ai-conversation-composer"
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={setPrompt}
+            onSubmit={handleSubmit}
             placeholder="想写点什么"
+            disabled={conversationCapabilities.inputDisabled}
             autoSize={{ minRows: 1, maxRows: 5 }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                if (
-                  !prompt.trim() ||
-                  bookId == null ||
-                  (chatScope === "chapter" && chapterId == null) ||
-                  activeSessionId == null
-                ) {
-                  return;
-                }
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-          />
-        </div>
-        {queuedMessages.length > 0 ? (
-          <div className="chat-queued-messages" aria-label="待发送消息">
-            {queuedMessages.slice(0, 3).map((message, index) => (
-              <div className="chat-queued-message" key={`${index}-${message}`}>
-                <span>待发送 {index + 1}</span>
-                <span title={message}>{message}</span>
-              </div>
-            ))}
-            {queuedMessages.length > 3 ? (
-              <div className="chat-queued-more">
-                另有 {queuedMessages.length - 3} 条消息排队
+            submitDisabled={
+              !prompt.trim()
+              || bookId == null
+              || (chatScope === "chapter" && chapterId == null)
+              || activeSessionId == null
+            }
+            floatingContent={activeTaskPlan ? (
+              <AgentTaskProgress
+                plan={activeTaskPlan}
+                placement="topLeft"
+              />
+            ) : null}
+            supplementaryContent={queuedMessages.length > 0 ? (
+              <div className="chat-queued-messages" aria-label="待发送消息">
+                {queuedMessages.slice(0, 3).map((message, index) => (
+                  <div className="chat-queued-message" key={`${index}-${message}`}>
+                    <span>待发送 {index + 1}</span>
+                    <span title={message}>{message}</span>
+                  </div>
+                ))}
+                {queuedMessages.length > 3 ? (
+                  <div className="chat-queued-more">
+                    另有 {queuedMessages.length - 3} 条消息排队
+                  </div>
+                ) : null}
               </div>
             ) : null}
-          </div>
-        ) : null}
-            <AiComposeBottom
-          modelConfigs={modelConfigs}
-          {...modelSelection}
-          loading={loading}
-          onAbort={handleAbort}
-          leftContent={
-            bookId != null ? (
-              <AiContextBar
-                bookId={bookId}
-                chapterId={effectiveChapterId ?? null}
-                {...contextBar}
-                currentPrompt={prompt}
-                onInsertPrompt={handleInsertPrompt}
-                promptTemplateContext={promptTemplateContext}
-                promptTemplateDisabled={false}
+            footer={(
+              <AiComposeBottom
+                modelConfigs={modelConfigs}
+                {...modelSelection}
+                loading={loading}
+                onAbort={handleAbort}
+                leftContent={bookId != null ? (
+                  <AiContextBar
+                    bookId={bookId}
+                    chapterId={effectiveChapterId ?? null}
+                    {...contextBar}
+                    currentPrompt={prompt}
+                    onInsertPrompt={handleInsertPrompt}
+                    promptTemplateContext={promptTemplateContext}
+                    promptTemplateDisabled={false}
+                  />
+                ) : null}
+                rightContent={(
+                  <div className="chat-compose-right">
+                    {queuedCount > 0 ? (
+                      <span className="chat-queue-count" role="status">
+                        排队 {queuedCount}
+                      </span>
+                    ) : null}
+                    <ContextUsageIndicator
+                      conversations={conversations}
+                      selectedModelConfig={selectedModelConfig}
+                    />
+                    {loading ? (
+                      <PurrButton
+                        className="agent-composer__stop"
+                        icon={<StopCircleIcon size={18} />}
+                        type="text"
+                        onClick={handleAbort}
+                        aria-label="停止生成"
+                      />
+                    ) : null}
+                    <PurrTooltip title={conversationCapabilities.submitMode === 'queue'
+                      ? "加入发送队列 (Enter)"
+                      : "发送 (Enter)"}>
+                      <PurrButton
+                        type="primary"
+                        shape="circle"
+                        className="agent-composer__send"
+                        icon={<ArrowUpIcon style={{ fontSize: 16 }} />}
+                        onClick={handleSubmit}
+                        disabled={
+                          !prompt.trim()
+                          || bookId == null
+                          || (chatScope === "chapter" && chapterId == null)
+                          || activeSessionId == null
+                        }
+                        aria-label={conversationCapabilities.submitMode === 'queue'
+                          ? '加入发送队列'
+                          : '发送'}
+                      />
+                    </PurrTooltip>
+                  </div>
+                )}
               />
-            ) : null
-          }
-          rightContent={
-            <div className="chat-compose-right">
-              {queuedCount > 0 ? (
-                <span className="chat-queue-count" role="status">
-                  排队 {queuedCount}
-                </span>
-              ) : null}
-              <ContextUsageIndicator
-                conversations={conversations}
-                selectedModelConfig={selectedModelConfig}
-              />
-              {loading ? (
-                <Button
-                  className="btn-submit btn-stop btn-submit--icon"
-                  icon={<StopCircleIcon size={18} />}
-                  type="text"
-                  onClick={handleAbort}
-                />
-              ) : null}
-              <Tooltip title={loading ? "加入发送队列 (Enter)" : "发送 (Enter)"}>
-                <Button
-                  type="primary"
-                  shape="circle"
-                  className="btn-submit btn-submit--icon"
-                  icon={<ArrowUpOutlined style={{ fontSize: 16 }} />}
-                  onClick={handleSubmit}
-                  disabled={
-                    !prompt.trim() ||
-                    bookId == null ||
-                    (chatScope === "chapter" && chapterId == null) ||
-                    activeSessionId == null
-                  }
-                />
-              </Tooltip>
-            </div>
-          }
-            />
-          </div>
+            )}
+          />
         </div>
       </div>
 

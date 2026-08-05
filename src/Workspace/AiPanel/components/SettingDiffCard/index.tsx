@@ -1,10 +1,10 @@
 import React from 'react'
-import { Button, Card, Space, Tag } from '../../../../ui'
+import { PurrButton, PurrCard, PurrSpace, PurrTag } from '@/purr-components'
 import {
-  CheckOutlined,
-  CloseOutlined,
-  EyeOutlined,
-} from '../../../../ui'
+  CheckIcon,
+  CloseIcon,
+  EyeIcon,
+} from '@/purr-components'
 import type { SettingDiffCardState } from '../../../../types'
 import { useSettingDiff } from '../../../settingDiff/SettingDiffContext'
 import { countByStatus } from '../../../diff/paragraphDiff'
@@ -31,7 +31,7 @@ export default function SettingDiffCard({ card }: SettingDiffCardProps) {
 
   if (display && display.status !== 'pending') {
     return (
-      <Card size="small" className="setting-diff-card setting-diff-card--resolved">
+      <PurrCard size="small" className="setting-diff-card setting-diff-card--resolved">
         <div className="setting-diff-card-title">
           {display.status === 'committed' ? '已应用设定修改' : '已拒绝设定修改'}
           <span className="setting-diff-card-subtitle"> · {display.title}</span>
@@ -41,44 +41,44 @@ export default function SettingDiffCard({ card }: SettingDiffCardProps) {
             接受 {display.acceptedSegments ?? 0} 段，拒绝 {display.rejectedSegments ?? 0} 段
           </div>
         ) : null}
-      </Card>
+      </PurrCard>
     )
   }
 
   if (!session) {
     return (
-      <Card size="small" className="setting-diff-card">
+      <PurrCard size="small" className="setting-diff-card">
         <div className="setting-diff-card-title">设定修改 · {card.title}</div>
         <div className="setting-diff-card-meta">会话已结束</div>
-      </Card>
+      </PurrCard>
     )
   }
 
   return (
-    <Card size="small" className="setting-diff-card">
+    <PurrCard size="small" className="setting-diff-card">
       <div className="setting-diff-card-header">
         <div>
           <div className="setting-diff-card-title">
             提议修改{session.kind === 'character' ? '人物' : session.kind === 'entity' ? '世界设定' : '故事背景'}
             <span className="setting-diff-card-subtitle"> · {card.title}</span>
           </div>
-          <Space size={4} wrap className="setting-diff-card-tags">
-            {diffCount > 0 ? <Tag>{diffCount} 段差异</Tag> : null}
-            {pendingCount > 0 ? <Tag color="warning">待处理 {pendingCount}</Tag> : null}
-          </Space>
+          <PurrSpace size={4} wrap className="setting-diff-card-tags">
+            {diffCount > 0 ? <PurrTag>{diffCount} 段差异</PurrTag> : null}
+            {pendingCount > 0 ? <PurrTag color="warning">待处理 {pendingCount}</PurrTag> : null}
+          </PurrSpace>
         </div>
       </div>
-      <Space size="small" wrap className="setting-diff-card-actions">
-        <Button
+      <PurrSpace size="small" wrap className="setting-diff-card-actions">
+        <PurrButton
           size="small"
-          icon={<EyeOutlined />}
+          icon={<EyeIcon />}
           onClick={() => diff.openPanelForSession(card.sessionKey)}
         >
           在设定面板审阅
-        </Button>
-        <Button
+        </PurrButton>
+        <PurrButton
           size="small"
-          icon={<CheckOutlined />}
+          icon={<CheckIcon />}
           onClick={() => {
             diff.acceptAllPending(card.sessionKey)
             void diff.commit(card.sessionKey)
@@ -86,15 +86,15 @@ export default function SettingDiffCard({ card }: SettingDiffCardProps) {
           disabled={session.computing}
         >
           全部接受
-        </Button>
-        <Button
+        </PurrButton>
+        <PurrButton
           size="small"
-          icon={<CloseOutlined />}
+          icon={<CloseIcon />}
           onClick={() => diff.exitDiff(card.sessionKey)}
         >
           拒绝
-        </Button>
-      </Space>
-    </Card>
+        </PurrButton>
+      </PurrSpace>
+    </PurrCard>
   )
 }

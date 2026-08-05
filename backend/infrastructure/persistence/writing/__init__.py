@@ -3,6 +3,9 @@
 from infrastructure.persistence.writing.sqlite_context_repository import (
     SqliteAssociatedContextRepository,
 )
+from infrastructure.persistence.writing.sqlite_catalog_repository import (
+    SqliteWritingCatalogRepository,
+)
 from infrastructure.persistence.writing.sqlite_memory_repository import (
     SqliteMemoryRecallRepository,
 )
@@ -21,6 +24,7 @@ from infrastructure.persistence.writing.sqlite_writing_tool_memory_repository im
 
 __all__ = [
     "SqliteAssociatedContextRepository",
+    "SqliteWritingCatalogRepository",
     "SqliteMemoryRecallRepository",
     "SqliteStoryMemoryRepository",
     "SqliteStoryMemoryRecallRepository",

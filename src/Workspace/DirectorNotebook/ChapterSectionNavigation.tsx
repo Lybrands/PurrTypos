@@ -1,6 +1,6 @@
 import React from 'react'
-import { DeleteOutlined, EditOutlined, PlusOutlined, ProfileOutlined } from '../../ui'
-import { Button, Checkbox, Empty, Input, Tooltip, type InputRef } from '../../ui'
+import { DeleteIcon, EditIcon, OutlineIcon, PlusIcon } from '@/purr-components'
+import { PurrButton, PurrCheckbox, PurrEmpty, PurrInput, PurrTooltip, type PurrInputRef } from '@/purr-components'
 import type { Chapter, EntityId } from '../../types'
 import { HighlightText } from '../search/highlightText'
 
@@ -95,9 +95,10 @@ export default function ChapterSectionNavigation({
   onOpenVolumeOutline,
   onDeleteItem,
 }: ChapterSectionNavigationProps) {
-  const addInputRef = React.useRef<InputRef>(null)
-  const addVolumeInputRef = React.useRef<InputRef>(null)
-  const addChapterInputRef = React.useRef<InputRef>(null)
+  const addInputRef = React.useRef<PurrInputRef>(null)
+  const addVolumeInputRef = React.useRef<PurrInputRef>(null)
+  const addChapterInputRef = React.useRef<PurrInputRef>(null)
+  const [hoveredItemId, setHoveredItemId] = React.useState<EntityId | null>(null)
 
   React.useEffect(() => {
     if (showAddInput) addInputRef.current?.focus()
@@ -112,7 +113,7 @@ export default function ChapterSectionNavigation({
   }, [addingChapterVolumeId])
 
   const renderRenameInput = (chapter: Chapter) => (
-    <Input
+    <PurrInput
       className="nav-rename-input"
       value={editingTitle}
       autoFocus
@@ -143,12 +144,14 @@ export default function ChapterSectionNavigation({
         key={chapter.id}
         className={className}
         style={options?.style}
+        onMouseEnter={() => setHoveredItemId(chapter.id)}
+        onMouseLeave={() => setHoveredItemId(null)}
         onClick={() => {
           if (editingChapterId !== chapter.id) onSelectChapter(chapter)
         }}
       >
         {batchMode && (
-          <Checkbox
+          <PurrCheckbox
             checked={selectedIds.has(chapter.id)}
             onClick={(event) => event.stopPropagation()}
             onChange={() => onToggleSelect(chapter.id)}
@@ -160,33 +163,35 @@ export default function ChapterSectionNavigation({
             <span className="nav-chapter-title">
               <HighlightText text={chapter.title} query={searchQuery} />
             </span>
-            <div className="nav-chapter-actions" onClick={(event) => event.stopPropagation()}>
-              <Tooltip title="大纲">
-                <Button
+            {hoveredItemId === chapter.id && (
+              <div className="nav-chapter-actions" onClick={(event) => event.stopPropagation()}>
+                <PurrTooltip title="大纲">
+                  <PurrButton
+                    type="text"
+                    size="small"
+                    icon={<OutlineIcon />}
+                    onClick={() => onOpenChapterOutline(chapter)}
+                    className="nav-action-btn"
+                  />
+                </PurrTooltip>
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<ProfileOutlined style={{ fontSize: 14 }} />}
-                  onClick={() => onOpenChapterOutline(chapter)}
+                  icon={<EditIcon style={{ fontSize: 14 }} />}
+                  title="重命名"
+                  onClick={() => onStartRename(chapter)}
                   className="nav-action-btn"
                 />
-              </Tooltip>
-              <Button
-                type="text"
-                size="small"
-                icon={<EditOutlined style={{ fontSize: 14 }} />}
-                title="重命名"
-                onClick={() => onStartRename(chapter)}
-                className="nav-action-btn"
-              />
-              <Button
-                type="text"
-                size="small"
-                icon={<DeleteOutlined style={{ fontSize: 14 }} />}
-                title="删除"
-                onClick={() => onDeleteItem(chapter)}
-                className="nav-action-btn"
-              />
-            </div>
+                <PurrButton
+                  type="text"
+                  size="small"
+                  icon={<DeleteIcon style={{ fontSize: 14 }} />}
+                  title="删除"
+                  onClick={() => onDeleteItem(chapter)}
+                  className="nav-action-btn"
+                />
+              </div>
+            )}
           </>
         )}
       </div>
@@ -197,7 +202,7 @@ export default function ChapterSectionNavigation({
     return (
       <div className="nav-chapter-list">
         {chapters.length === 0 && !showAddInput && (
-          <Empty
+          <PurrEmpty
             image={false}
             description={<><span>暂无章节，点击 + 新建</span><br /><small>或打开 XMind 导入大纲</small></>}
             className="nav-empty"
@@ -209,7 +214,7 @@ export default function ChapterSectionNavigation({
         {showAddInput && (
           <div className="nav-add-row">
             <span className="nav-add-prefix">第{writableChapterCount + 1}章</span>
-            <Input
+            <PurrInput
               ref={addInputRef}
               className="nav-add-input"
               value={newTitle}
@@ -229,7 +234,7 @@ export default function ChapterSectionNavigation({
             onClick={onQuickAddChapter}
             title="新建章节（如需自定义副标题，请用顶部 + 按钮）"
           >
-            <PlusOutlined />
+            <PlusIcon />
             <span>新建第{writableChapterCount + 1}章</span>
           </div>
         )}
@@ -240,7 +245,7 @@ export default function ChapterSectionNavigation({
   return (
     <div className="nav-chapter-list">
       {volumes.length === 0 && !addingVolume && (
-        <Empty
+        <PurrEmpty
           image={false}
           description={<><span>暂无卷，点击 + 新建卷</span><br /><small>再在卷内新增章节</small></>}
           className="nav-empty"
@@ -252,9 +257,13 @@ export default function ChapterSectionNavigation({
         const collapsed = collapsedVolumeIds.has(volume.id)
         return (
           <React.Fragment key={volume.id}>
-            <div className={`nav-chapter-item nav-volume-item ${batchMode && selectedIds.has(volume.id) ? 'selected' : ''}`}>
+            <div
+              className={`nav-chapter-item nav-volume-item ${batchMode && selectedIds.has(volume.id) ? 'selected' : ''}`}
+              onMouseEnter={() => setHoveredItemId(volume.id)}
+              onMouseLeave={() => setHoveredItemId(null)}
+            >
               {batchMode && (
-                <Checkbox
+                <PurrCheckbox
                   checked={selectedIds.has(volume.id)}
                   onClick={(event) => event.stopPropagation()}
                   onChange={() => onToggleSelect(volume.id)}
@@ -272,42 +281,44 @@ export default function ChapterSectionNavigation({
                   <span className="nav-chapter-title nav-volume-title">
                     <HighlightText text={volume.title} query={searchQuery} />
                   </span>
-                  <div className="nav-chapter-actions" onClick={(event) => event.stopPropagation()}>
-                    <Tooltip title="新建章节">
-                      <Button
+                  {hoveredItemId === volume.id && (
+                    <div className="nav-chapter-actions" onClick={(event) => event.stopPropagation()}>
+                      <PurrTooltip title="新建章节">
+                        <PurrButton
+                          type="text"
+                          size="small"
+                          icon={<PlusIcon style={{ fontSize: 12 }} />}
+                          onClick={() => onStartAddingChapterToVolume(volume.id)}
+                          className="nav-action-btn"
+                        />
+                      </PurrTooltip>
+                      <PurrTooltip title="卷大纲">
+                        <PurrButton
+                          type="text"
+                          size="small"
+                          icon={<OutlineIcon />}
+                          onClick={() => onOpenVolumeOutline(volume)}
+                          className="nav-action-btn"
+                        />
+                      </PurrTooltip>
+                      <PurrButton
                         type="text"
                         size="small"
-                        icon={<PlusOutlined style={{ fontSize: 12 }} />}
-                        onClick={() => onStartAddingChapterToVolume(volume.id)}
+                        icon={<EditIcon style={{ fontSize: 14 }} />}
+                        title="重命名"
+                        onClick={() => onStartRename(volume)}
                         className="nav-action-btn"
                       />
-                    </Tooltip>
-                    <Tooltip title="卷大纲">
-                      <Button
+                      <PurrButton
                         type="text"
                         size="small"
-                        icon={<ProfileOutlined style={{ fontSize: 14 }} />}
-                        onClick={() => onOpenVolumeOutline(volume)}
+                        icon={<DeleteIcon style={{ fontSize: 14 }} />}
+                        title="删除"
+                        onClick={() => onDeleteItem(volume)}
                         className="nav-action-btn"
                       />
-                    </Tooltip>
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<EditOutlined style={{ fontSize: 14 }} />}
-                      title="重命名"
-                      onClick={() => onStartRename(volume)}
-                      className="nav-action-btn"
-                    />
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<DeleteOutlined style={{ fontSize: 14 }} />}
-                      title="删除"
-                      onClick={() => onDeleteItem(volume)}
-                      className="nav-action-btn"
-                    />
-                  </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -321,7 +332,7 @@ export default function ChapterSectionNavigation({
                 {addingChapterVolumeId === volume.id && (
                   <div className="nav-add-row nav-add-row-indent">
                     <span className="nav-add-prefix">第{volumeChapters.length + 1}章</span>
-                    <Input
+                    <PurrInput
                       ref={addChapterInputRef}
                       className="nav-add-input"
                       value={newChapterSubtitle}
@@ -341,7 +352,7 @@ export default function ChapterSectionNavigation({
                     onClick={() => onQuickAddChapterToVolume(volume.id)}
                     title="新建章节（如需自定义副标题，请用卷上的 + 按钮）"
                   >
-                    <PlusOutlined />
+                    <PlusIcon />
                     <span>新建第{volumeChapters.length + 1}章</span>
                   </div>
                 )}
@@ -354,7 +365,7 @@ export default function ChapterSectionNavigation({
       {addingVolume && (
         <div className="nav-add-row">
           <span className="nav-add-prefix">第{volumes.length + 1}卷</span>
-          <Input
+          <PurrInput
             ref={addVolumeInputRef}
             className="nav-add-input"
             value={newVolumeSubtitle}

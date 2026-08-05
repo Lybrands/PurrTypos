@@ -69,6 +69,34 @@ class SqliteDelegationRepository:
             ),
         )
 
+    async def claim(
+        self,
+        *,
+        delegation_id: str,
+        parent_run_id: str,
+        worker_id: str,
+        max_parallel_children: int,
+    ) -> DelegationClaim | None:
+        row = await delegation_store.claim_delegation(
+            self._db,
+            delegation_id=delegation_id,
+            parent_run_id=parent_run_id,
+            worker_id=worker_id,
+            max_parallel_children=max_parallel_children,
+        )
+        if row is None:
+            return None
+        parent = await run_store.get_run(self._db, parent_run_id)
+        if parent is None:
+            return None
+        return DelegationClaim(
+            delegation=_delegation(row),
+            lineage=delegation_store.lineage_for_claim(
+                row,
+                parent_depth=int(parent.get("run_depth") or 0),
+            ),
+        )
+
     async def attach_child_run(
         self,
         *,

@@ -6,24 +6,40 @@ from pathlib import Path
 
 import pytest
 
+from agent_core.context_orchestration.compaction import (
+    ContextCompressionCoordinator,
+    ConversationContextCompactor,
+)
+from agent_core.context_orchestration.contracts import (
+    ContextCompressionSettings,
+    ConversationCompactionResult,
+)
 from agent_core.contracts import (
     AgentMessage,
     AgentRunRequest,
-    ConversationSummary,
-    ConversationTurn,
     DomainContext,
     MessageOrigin,
     MessageRole,
     ModelCompletion,
     ModelRequest,
     PlanningCapabilities,
+    ToolCall,
 )
+from application.conversation_compaction_contracts import (
+    ConversationSummary,
+    ConversationTurn,
+)
+from agent_core.errors import ContextOverflowError, ContractViolationError
 from agent_core.planner import build_planner_messages
 from application.conversation_compaction import (
     ConversationCompactionService,
+    ConversationSummaryCompressionPolicy,
     PostPlanningConversationContextOptimizer,
 )
 from database.connection import DatabaseConnection
+from infrastructure.models.model_conversation_summarizer import (
+    ModelBackedConversationSummarizer,
+)
 from infrastructure.persistence.sqlite_conversation_compaction_repository import (
     SqliteConversationCompactionRepository,
 )
@@ -128,6 +144,249 @@ async def _record_started(target: list, payload) -> None:
     target.append(dict(payload))
 
 
+def _coordinator(
+    repository,
+    gateway,
+    *,
+    settings: ContextCompressionSettings = ContextCompressionSettings(),
+) -> ContextCompressionCoordinator:
+    return ContextCompressionCoordinator(
+        ConversationCompactionService(
+            repository,
+            ModelBackedConversationSummarizer(gateway),
+        ),
+        settings,
+    )
+
+
+@pytest.mark.asyncio
+async def test_core_compactor_depends_only_on_application_compression_hook():
+    class _Hook:
+        def __init__(self):
+            self.calls = []
+
+        async def compress(self, compression, signal=None):
+            self.calls.append((compression, signal))
+            return ConversationCompactionResult(
+                compression.request,
+                "application_no_change",
+            )
+
+    turns = _turns(8)
+    hook = _Hook()
+
+    result = await ConversationContextCompactor(hook).prepare(
+        _request(turns, context_window=200_000)
+    )
+
+    assert result.outcome == "application_no_change"
+    assert len(hook.calls) == 1
+    compression = hook.calls[0][0]
+    assert compression.compression_required is False
+    assert compression.trigger_reason == "below_threshold"
+    assert compression.available_message_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_core_default_uses_recent_twenty_message_window_only_without_hook():
+    turns = _turns(30)
+
+    result = await ContextCompressionCoordinator().prepare(_request(turns))
+
+    assert result.outcome == "compacted_default_trim"
+    caller_messages = [
+        message
+        for message in result.request.messages
+        if message.origin is MessageOrigin.CALLER
+    ]
+    assert len(caller_messages) <= 20
+    assert result.request.messages[-1].content == "current"
+    assert result.compression_state_version is None
+    assert result.diagnostics["strategy"] == "recent_messages"
+
+
+@pytest.mark.asyncio
+async def test_application_hook_replaces_instead_of_chaining_default_trim():
+    class _Hook:
+        async def compress(self, compression, signal=None):
+            current = compression.request.messages[-1]
+            return ConversationCompactionResult(
+                replace(compression.request, messages=(current,)),
+                "application_reduced",
+            )
+
+    turns = _turns(30)
+    result = await ContextCompressionCoordinator(_Hook()).prepare(
+        _request(turns)
+    )
+
+    assert result.outcome == "application_reduced"
+    assert [message.content for message in result.request.messages] == [
+        "current"
+    ]
+    assert result.diagnostics["strategy"] == "application_hook"
+
+
+@pytest.mark.asyncio
+async def test_application_owns_stateless_fallback_when_session_is_missing():
+    turns = _turns(30)
+    original = replace(_request(turns), session_id=None)
+    gateway = _Gateway()
+
+    result = await _coordinator(
+        _Repository(turns),
+        gateway,
+    ).prepare(original)
+
+    assert result.outcome == "compacted_application_fallback"
+    assert result.diagnostics["fallbackCause"] == "no_session"
+    assert result.diagnostics["strategy"] == "application_hook"
+    assert result.request.messages[-1].content == "current"
+    assert len(result.request.messages) < len(original.messages)
+    assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_application_bounds_semantic_passes_before_emergency_projection():
+    turns = _turns(30)
+    repository = _Repository(turns)
+    gateway = _Gateway(_SUMMARY_JSON)
+    policy = ConversationSummaryCompressionPolicy(
+        max_input_characters=3_000,
+        max_compaction_passes=1,
+    )
+    coordinator = ContextCompressionCoordinator(
+        ConversationCompactionService(
+            repository,
+            ModelBackedConversationSummarizer(gateway),
+            policy,
+        )
+    )
+
+    result = await coordinator.prepare(_request(turns))
+
+    assert result.outcome == "compacted_application_fallback"
+    assert result.diagnostics["fallbackCause"] == (
+        "semantic_pass_limit_reached"
+    )
+    assert result.diagnostics["semanticPassCount"] == 1
+    assert result.diagnostics["maxSemanticPasses"] == 1
+    assert result.request.messages[-1].content == "current"
+    assert repository.summary is not None
+    assert repository.summary.covered_turn_count == 1
+    assert len(gateway.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_failure_without_summary_uses_application_fallback():
+    turns = _turns(5)
+    repository = _Repository(turns)
+
+    result = await _coordinator(
+        repository,
+        _Gateway(RuntimeError("provider unavailable")),
+    ).prepare(_request(turns, context_window=24_000))
+
+    assert result.outcome == "compacted_application_fallback"
+    assert result.diagnostics["failureStage"] == "generation"
+    assert result.diagnostics["fallbackCause"] == "generation_failed"
+    assert result.request.messages[-1].content == "current"
+    assert repository.summary is None
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_uses_transient_application_projection():
+    class _FailingSaveRepository(_Repository):
+        async def save_summary(self, summary):
+            raise RuntimeError("database unavailable")
+
+    turns = _turns(30)
+    repository = _FailingSaveRepository(turns)
+
+    result = await _coordinator(
+        repository,
+        _Gateway(_SUMMARY_JSON),
+    ).prepare(_request(turns))
+
+    assert result.outcome == "persistence_failed_transient"
+    assert result.diagnostics["failureStage"] == "persistence"
+    assert result.compression_state_version == 1
+    assert result.request.messages[-1].content == "current"
+    assert repository.summary is None
+
+
+@pytest.mark.asyncio
+async def test_core_rejects_hook_that_removes_current_user_request():
+    class _Hook:
+        async def compress(self, compression, signal=None):
+            return ConversationCompactionResult(
+                replace(compression.request, messages=()),
+                "invalid",
+            )
+
+    with pytest.raises(ContractViolationError, match="current user"):
+        await ContextCompressionCoordinator(_Hook()).prepare(
+            _request(_turns(30))
+        )
+
+
+@pytest.mark.asyncio
+async def test_core_rejects_partial_tool_exchange_from_application_hook():
+    call = ToolCall(id="call-1", name="read", arguments_json="{}")
+    request = replace(
+        _request((), context_window=200_000),
+        messages=(
+            AgentMessage(role=MessageRole.USER, content="older"),
+            AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=(call,),
+            ),
+            AgentMessage(
+                role=MessageRole.TOOL,
+                content="result",
+                tool_call_id=call.id,
+            ),
+            AgentMessage(role=MessageRole.ASSISTANT, content="done"),
+            AgentMessage(role=MessageRole.USER, content="current"),
+        ),
+    )
+
+    class _Hook:
+        async def compress(self, compression, signal=None):
+            invalid = tuple(
+                message
+                for message in compression.request.messages
+                if message.role is not MessageRole.TOOL
+            )
+            return ConversationCompactionResult(
+                replace(compression.request, messages=invalid),
+                "invalid",
+            )
+
+    with pytest.raises(ContractViolationError, match="tool calls"):
+        await ContextCompressionCoordinator(_Hook()).prepare(request)
+
+
+@pytest.mark.asyncio
+async def test_core_rejects_application_result_that_still_exceeds_budget():
+    class _Hook:
+        async def compress(self, compression, signal=None):
+            return ConversationCompactionResult(
+                compression.request,
+                "insufficient",
+            )
+
+    with pytest.raises(ContextOverflowError) as captured:
+        await ContextCompressionCoordinator(_Hook()).prepare(
+            _request(_turns(30))
+        )
+
+    assert captured.value.reason_code == (
+        "context_compression_result_exceeds_budget"
+    )
+
+
 @pytest.mark.asyncio
 async def test_initial_compaction_keeps_recent_raw_turns_and_injects_host_summary():
     turns = _turns(8)
@@ -135,7 +394,7 @@ async def test_initial_compaction_keeps_recent_raw_turns_and_injects_host_summar
     gateway = _Gateway(_SUMMARY_JSON)
     started = []
 
-    result = await ConversationCompactionService(repository, gateway).prepare(
+    result = await _coordinator(repository, gateway).prepare(
         _request(turns),
         on_compaction_started=lambda payload: _record_started(started, payload),
     )
@@ -143,10 +402,9 @@ async def test_initial_compaction_keeps_recent_raw_turns_and_injects_host_summar
     assert result.outcome == "compacted"
     assert result.compacted_turn_count == 4
     assert result.retained_raw_turn_count == 4
-    assert result.summary is repository.summary
-    assert result.summary is not None
-    assert result.summary.covered_turn_count == 4
-    assert result.request.conversation_summary is result.summary
+    assert repository.summary is not None
+    assert repository.summary.covered_turn_count == 4
+    assert result.compression_state_version == repository.summary.version
     assert result.request.messages[0].role is MessageRole.USER
     assert result.request.messages[0].origin is MessageOrigin.HOST_CONTEXT
     assert [message.content for message in result.request.messages[1:]] == [
@@ -159,10 +417,12 @@ async def test_initial_compaction_keeps_recent_raw_turns_and_injects_host_summar
     assert [row["user"] for row in payload["newTurns"]] == [
         turn.prompt for turn in turns[:4]
     ]
-    assert started[0]["selectedTurnCount"] == 4
-    assert started[0]["previousSummaryVersion"] is None
-    assert started[0]["coveredTurnCountBefore"] == 0
-    assert started[0]["pressureRatio"] >= 0.70
+    assert started[0]["strategy"] == "application_hook"
+    assert started[0]["triggerReason"] in {
+        "pressure_threshold",
+        "message_budget_exceeded",
+    }
+    assert started[0]["pressureRatio"] >= 0.85
 
 
 @pytest.mark.asyncio
@@ -172,7 +432,7 @@ async def test_short_conversation_does_not_add_a_summary_model_call():
     gateway = _Gateway(_SUMMARY_JSON)
     original = _request(turns, context_window=200_000)
 
-    result = await ConversationCompactionService(repository, gateway).prepare(
+    result = await _coordinator(repository, gateway).prepare(
         original
     )
 
@@ -187,68 +447,105 @@ async def test_large_window_does_not_compact_by_turn_count_alone():
     repository = _Repository(turns)
     gateway = _Gateway(_SUMMARY_JSON)
 
-    result = await ConversationCompactionService(repository, gateway).prepare(
+    result = await _coordinator(repository, gateway).prepare(
         _request(turns, context_window=256_000)
     )
 
     assert result.outcome == "below_threshold"
-    assert result.diagnostics["decisionReason"] == "below_pressure"
-    assert result.diagnostics["pressureRatio"] < 0.70
-    assert result.diagnostics["conversationTokens"] > 0
+    assert result.diagnostics["triggerReason"] == "below_threshold"
+    assert result.diagnostics["pressureRatio"] < 0.85
+    assert result.diagnostics["messageTokensBefore"] > 0
     assert gateway.calls == []
 
 
 @pytest.mark.asyncio
-async def test_tool_mode_uses_more_headroom_than_direct_mode():
+async def test_hundreds_of_turns_use_bounded_multi_pass_summary_without_losing_current():
+    initial_turns = _turns(160)
+    repository = _Repository(initial_turns)
+    gateway = _Gateway(*([_SUMMARY_JSON] * 12))
+    service = _coordinator(repository, gateway)
+
+    covered_counts = []
+    result = None
+    for _ in range(10):
+        result = await service.prepare(_request(initial_turns))
+        assert result.outcome == "compacted"
+        assert repository.summary is not None
+        covered_counts.append(repository.summary.covered_turn_count)
+        assert result.request.messages[-1].content == "current"
+        if repository.summary.covered_turn_count == 156:
+            break
+
+    assert result is not None
+    assert covered_counts == sorted(set(covered_counts))
+    assert covered_counts[-1] == 156
+    assert result.retained_raw_turn_count == 4
+
+    expanded_turns = _turns(200)
+    repository.turns = expanded_turns
+    added_counts = []
+    for _ in range(4):
+        result = await service.prepare(_request(expanded_turns))
+        assert result.outcome == "compacted"
+        assert repository.summary is not None
+        added_counts.append(repository.summary.covered_turn_count)
+        assert result.request.messages[-1].content == "current"
+        if repository.summary.covered_turn_count == 196:
+            break
+
+    assert added_counts == sorted(set(added_counts))
+    assert added_counts[-1] == 196
+    assert result.retained_raw_turn_count == 4
+    assert len(gateway.calls) > len(covered_counts) + len(added_counts)
+    assert repository.summary is not None
+    assert repository.summary.version == len(gateway.calls)
+
+
+@pytest.mark.asyncio
+async def test_semantic_target_belongs_to_application_not_tool_mode():
     turns = _turns(8)
-    tool_result = await ConversationCompactionService(
+    tool_result = await _coordinator(
         _Repository(turns),
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(turns, tools_enabled=True))
-    direct_result = await ConversationCompactionService(
+    direct_result = await _coordinator(
         _Repository(turns),
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(turns, tools_enabled=False))
 
-    assert tool_result.diagnostics["targetRatio"] < (
-        direct_result.diagnostics["targetRatio"]
-    )
-    assert tool_result.diagnostics["contextReserveTokens"] > (
-        direct_result.diagnostics["contextReserveTokens"]
-    )
+    assert tool_result.diagnostics["targetRatio"] == 0.65
+    assert direct_result.diagnostics["targetRatio"] == 0.65
 
 
 @pytest.mark.asyncio
-async def test_resolved_plan_complexity_adjusts_post_planning_target():
+async def test_core_does_not_change_compression_target_from_plan_complexity():
     turns = _turns(8)
-    simple = await ConversationCompactionService(
+    simple = await _coordinator(
         _Repository(turns),
         _Gateway(_SUMMARY_JSON),
     ).prepare(
         _request(turns),
-        provider_input_tokens=100_000,
+        provider_input_tokens=18_000,
         resolved_context_tokens=2_000,
         planned_step_count=2,
         planned_tool_count=1,
         selected_tool_count=1,
     )
-    complex_result = await ConversationCompactionService(
+    complex_result = await _coordinator(
         _Repository(turns),
         _Gateway(_SUMMARY_JSON),
     ).prepare(
         _request(turns),
-        provider_input_tokens=100_000,
+        provider_input_tokens=18_000,
         resolved_context_tokens=2_000,
         planned_step_count=8,
         planned_tool_count=4,
         selected_tool_count=4,
     )
 
-    assert simple.diagnostics["providerBudgetKind"] == "resolved"
-    assert simple.diagnostics["contextEstimateKind"] == "resolved"
-    assert complex_result.diagnostics["plannedToolCount"] == 4
-    assert complex_result.diagnostics["expectedGrowthRounds"] == 5
-    assert complex_result.diagnostics["targetRatio"] < (
+    assert simple.diagnostics["compactionPhase"] == "post_planning"
+    assert complex_result.diagnostics["compactionPhase"] == "post_planning"
+    assert complex_result.diagnostics["targetRatio"] == (
         simple.diagnostics["targetRatio"]
     )
 
@@ -257,22 +554,22 @@ async def test_resolved_plan_complexity_adjusts_post_planning_target():
 async def test_compaction_updates_incrementally_from_persisted_summary():
     first_turns = _turns(8)
     repository = _Repository(first_turns)
-    first = await ConversationCompactionService(
+    first = await _coordinator(
         repository,
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(first_turns))
-    assert first.summary is not None
+    assert repository.summary is not None
 
     repository.turns = _turns(12)
     gateway = _Gateway(_SUMMARY_JSON)
-    second = await ConversationCompactionService(repository, gateway).prepare(
+    second = await _coordinator(repository, gateway).prepare(
         _request(repository.turns)
     )
 
     assert second.outcome == "compacted"
-    assert second.summary is not None
-    assert second.summary.version == 2
-    assert second.summary.covered_turn_count == 8
+    assert repository.summary is not None
+    assert repository.summary.version == 2
+    assert repository.summary.covered_turn_count == 8
     assert second.retained_raw_turn_count == 4
     payload = json.loads(gateway.calls[0][0][1].content)
     assert payload["existingSummary"]["activeGoal"] == "finish the edit"
@@ -285,15 +582,16 @@ async def test_compaction_updates_incrementally_from_persisted_summary():
 async def test_post_planning_optimizer_extends_summary_from_raw_source():
     initial_turns = _turns(8)
     repository = _Repository(initial_turns)
-    first = await ConversationCompactionService(
+    first = await _coordinator(
         repository,
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(initial_turns))
-    assert first.summary is not None
+    assert repository.summary is not None
+    first_covered_count = repository.summary.covered_turn_count
 
     repository.turns = _turns(12)
     raw_request = _request(repository.turns, context_window=256_000)
-    preflight = await ConversationCompactionService(
+    preflight = await _coordinator(
         repository,
         _Gateway(_SUMMARY_JSON),
     ).prepare(raw_request)
@@ -301,7 +599,7 @@ async def test_post_planning_optimizer_extends_summary_from_raw_source():
 
     started = []
     optimizer = PostPlanningConversationContextOptimizer(
-        ConversationCompactionService(
+        _coordinator(
             repository,
             _Gateway(_SUMMARY_JSON),
         ),
@@ -320,46 +618,41 @@ async def test_post_planning_optimizer_extends_summary_from_raw_source():
 
     assert optimized.outcome == "compacted"
     assert optimized.summary_version == 2
-    assert optimized.request.conversation_summary is repository.summary
     assert repository.summary is not None
     assert repository.summary.covered_turn_count > (
-        first.summary.covered_turn_count
+        first_covered_count
     )
-    assert optimized.diagnostics["providerBudgetKind"] == "resolved"
-    assert optimized.diagnostics["plannedToolCount"] == 4
-    assert started[0]["coveredTurnCountBefore"] == 4
+    assert optimized.diagnostics["compactionPhase"] == "post_planning"
+    assert started[0]["strategy"] == "application_hook"
 
 
 @pytest.mark.asyncio
 async def test_generation_failure_advances_with_host_fallback_without_blocking():
     turns = _turns(8)
     repository = _Repository(turns)
-    first = await ConversationCompactionService(
+    first = await _coordinator(
         repository,
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(turns))
-    assert first.summary is not None
+    assert repository.summary is not None
     repository.turns = _turns(12)
 
-    result = await ConversationCompactionService(
+    result = await _coordinator(
         repository,
         _Gateway(RuntimeError("provider unavailable")),
     ).prepare(_request(repository.turns))
 
     assert result.outcome == "compacted_fallback"
-    assert result.summary is repository.summary
-    assert result.summary is not None
-    assert result.summary.version == 2
-    assert result.summary.covered_turn_count == 6
+    assert repository.summary is not None
+    assert result.compression_state_version == repository.summary.version
+    assert repository.summary.version == 2
+    assert repository.summary.covered_turn_count == 6
     assert result.retained_raw_turn_count == 6
-    assert "主机按回合保留的原文摘录" in result.summary.summary
+    assert "主机按回合保留的原文摘录" in repository.summary.summary
     assert result.diagnostics["failureStage"] == "generation"
     assert result.diagnostics["failureType"] == "RuntimeError"
     assert result.diagnostics["fallback"] == "host_extractive"
-    assert result.diagnostics["decisionReason"] in {
-        "soft_pressure",
-        "hard_pressure",
-    }
+    assert result.diagnostics["strategy"] == "application_hook"
 
 
 @pytest.mark.asyncio
@@ -368,16 +661,16 @@ async def test_initial_generation_failure_creates_persisted_host_fallback():
     repository = _Repository(turns)
     original = _request(turns)
 
-    result = await ConversationCompactionService(
+    result = await _coordinator(
         repository,
         _Gateway(RuntimeError("provider unavailable")),
     ).prepare(original)
 
     assert result.outcome == "compacted_fallback"
     assert result.request is not original
-    assert result.request.conversation_summary is repository.summary
-    assert result.summary is not None
-    assert result.summary.covered_turn_count == 2
+    assert repository.summary is not None
+    assert result.compression_state_version == repository.summary.version
+    assert repository.summary.covered_turn_count == 2
     assert result.compacted_turn_count == 2
     assert result.retained_raw_turn_count == 6
 
@@ -388,7 +681,7 @@ async def test_invalid_summary_json_is_repaired_once():
     repository = _Repository(turns)
     gateway = _Gateway('{"activeGoal":', _SUMMARY_JSON)
 
-    result = await ConversationCompactionService(repository, gateway).prepare(
+    result = await _coordinator(repository, gateway).prepare(
         _request(turns)
     )
 
@@ -401,20 +694,20 @@ async def test_invalid_summary_json_is_repaired_once():
 async def test_history_mismatch_invalidates_summary_and_preserves_full_request():
     turns = _turns(8)
     repository = _Repository(turns)
-    first = await ConversationCompactionService(
+    first = await _coordinator(
         repository,
         _Gateway(_SUMMARY_JSON),
     ).prepare(_request(turns))
-    assert first.summary is not None
+    assert repository.summary is not None
     changed = (*turns[:-1], replace(turns[-1], response="edited"))
     original = _request(changed)
     gateway = _Gateway(_SUMMARY_JSON)
 
-    result = await ConversationCompactionService(repository, gateway).prepare(original)
+    result = await _coordinator(repository, gateway).prepare(original)
 
     assert result.outcome == "history_mismatch"
     assert result.request is original
-    assert result.request.conversation_summary is None
+    assert result.compression_state_version is None
     assert repository.deleted is True
     assert gateway.calls == []
 
@@ -431,13 +724,25 @@ def test_planner_receives_summary_as_host_wrapped_history_data():
         active_goal="finish the edit",
         summary="Earlier dialogue state",
     )
-    request = replace(_request(()), conversation_summary=summary)
+    summary_message = AgentMessage(
+        role=MessageRole.USER,
+        content=json.dumps(summary.to_mapping(include_persistence=False)),
+        origin=MessageOrigin.HOST_CONTEXT,
+        attributes={"context_name": "conversation_summary"},
+    )
+    request = replace(
+        _request(()),
+        messages=(summary_message, AgentMessage(
+            role=MessageRole.USER,
+            content="current",
+        )),
+    )
 
     messages = build_planner_messages(request, PlanningCapabilities())
 
     assert "Earlier dialogue state" not in messages[0].content
     payload = json.loads(messages[1].content)
-    assert payload["conversationSummary"]["summary"] == "Earlier dialogue state"
+    assert "Earlier dialogue state" in payload["hostContext"][0]["content"]
 
 
 @pytest.mark.asyncio

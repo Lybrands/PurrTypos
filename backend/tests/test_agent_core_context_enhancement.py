@@ -118,7 +118,7 @@ async def test_planner_accepts_semantic_task_spec_but_rejects_authority_fields()
         deliverable="updated prose",
     )
 
-    invalid = FakeModelGateway(json.dumps({
+    invalid_response = json.dumps({
         "needsTodos": True,
         "title": "Invalid",
         "taskSpec": {"goal": "edit", "requires": ["database.all"]},
@@ -129,12 +129,14 @@ async def test_planner_accepts_semantic_task_spec_but_rejects_authority_fields()
             "executor": "tool",
             "expectedTools": ["edit"],
         }],
-    }))
+    })
+    invalid = FakeModelGateway(invalid_response, invalid_response)
     with pytest.raises(Exception, match="host-owned fields"):
         await AgentPlanner(invalid).create_plan(
             _request(),
             PlanningCapabilities(available_tool_names=frozenset({"edit"})),
         )
+    assert len(invalid.invocations) == 2
 
 
 def test_legacy_task_brief_input_is_rejected_and_new_output_uses_task_spec():

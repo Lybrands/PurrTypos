@@ -1,16 +1,17 @@
 import React from "react";
-import { VerticalAlignBottomOutlined } from "../../../../ui";
-import { Button, Tooltip } from "../../../../ui";
-import type { TextAreaRef } from "../../../../ui";
+import { AlignBottomIcon } from '@/purr-components';
+import { PurrButton, PurrTooltip } from '@/purr-components';
+import type { PurrTextAreaRef } from '@/purr-components';
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import type { AiModelConfig, EntityId } from "../../../../types";
+import AgentConversationTurnIndex, {
+  buildAgentConversationTurnIndex,
+  type AgentConversationTurnIndexItem,
+} from '../../../../components/AgentConversationTurnIndex';
 import { type ChatMessage } from "../../hooks";
 import { type AiContextBarBindings } from "../AiContextBar";
 import { type ModelSelectionBindings } from "../AiComposeBottom";
 import ChatMessageBubble from "./ChatMessageBubble";
-import ConversationTurnIndex, {
-  type ConversationTurnIndexItem,
-} from "./ConversationTurnIndex";
 
 const VirtuosoList = React.forwardRef<HTMLDivElement, ListProps>(
   ({ style, children, ...rest }, ref) => (
@@ -30,102 +31,8 @@ const VIRTUOSO_COMPONENTS = {
   List: VirtuosoList,
 };
 
-function toIndexPreview(
-  value: string | undefined,
-  fallback: string,
-  maxLength: number,
-): string {
-  const normalized = (value ?? "")
-    .slice(0, maxLength * 4)
-    .replace(/```[\s\S]*?```/g, " 代码片段 ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, " 图片 ")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]\s|\d+[.)]\s)\s*/gm, "")
-    .replace(/[*_~]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return normalized ? normalized.slice(0, maxLength) : fallback;
-}
-
-function toIndexMarkdownPreview(
-  value: string | undefined,
-  fallback: string,
-  maxLength: number,
-): string {
-  const normalized = (value ?? "").trim();
-  if (!normalized) return fallback;
-  if (normalized.length <= maxLength) return normalized;
-
-  const candidate = normalized.slice(0, maxLength);
-  const boundary = Math.max(
-    candidate.lastIndexOf("\n\n"),
-    candidate.lastIndexOf("\n"),
-    candidate.lastIndexOf(" "),
-  );
-  let preview = candidate.slice(
-    0,
-    boundary >= Math.floor(maxLength * 0.6) ? boundary : maxLength,
-  ).trimEnd();
-
-  // 截断发生在代码围栏内部时主动闭合，避免后续省略号也被当作代码。
-  const fenceCount = (preview.match(/^```/gm) ?? []).length;
-  if (fenceCount % 2 !== 0) preview += "\n```";
-  return `${preview}\n\n…`;
-}
-
-function buildConversationTurnIndex(
-  messages: ChatMessage[],
-): ConversationTurnIndexItem[] {
-  const turns: ConversationTurnIndexItem[] = [];
-
-  messages.forEach((message, dataIndex) => {
-    if (message.role !== "user") return;
-
-    let assistant: ChatMessage | undefined;
-    for (let index = dataIndex + 1; index < messages.length; index += 1) {
-      const candidate = messages[index];
-      if (candidate.role === "user") break;
-      if (candidate.role === "assistant") {
-        assistant = candidate;
-        break;
-      }
-    }
-    const toolSummary = assistant?.toolCallSegments
-      ?.flatMap((segment) => segment.labels)
-      .join("、");
-    const assistantSource =
-      assistant?.contentAfterToolCalls ||
-      assistant?.content ||
-      assistant?.thinking ||
-      toolSummary;
-
-    turns.push({
-      dataIndex,
-      userText: toIndexPreview(message.content, "未命名提问", 180),
-      userMarkdown: toIndexMarkdownPreview(
-        message.content,
-        "未命名提问",
-        1000,
-      ),
-      assistantText: toIndexPreview(
-        assistantSource,
-        assistant ? "AI 正在整理回复…" : "等待 AI 回复…",
-        240,
-      ),
-      assistantMarkdown: toIndexMarkdownPreview(
-        assistantSource,
-        assistant ? "AI 正在整理回复…" : "等待 AI 回复…",
-        2400,
-      ),
-    });
-  });
-
-  return turns;
-}
-
 function findTurnAtDataIndex(
-  turns: ConversationTurnIndexItem[],
+  turns: AgentConversationTurnIndexItem[],
   dataIndex: number,
 ): number {
   let activeIndex = 0;
@@ -154,13 +61,14 @@ export interface ChatMessageListProps {
   editingMessageIndex: number | null;
   setEditingMessageIndex: React.Dispatch<React.SetStateAction<number | null>>;
   editingMessageDraftRef: React.MutableRefObject<string>;
-  editTextareaRef: React.RefObject<TextAreaRef | null>;
+  editTextareaRef: React.RefObject<PurrTextAreaRef | null>;
   onEditSend: (editIndex: number, content?: string) => void;
   modelConfigs: AiModelConfig[];
   /** 模型选择的整组绑定（对话模式、所选模型、思考开关）。 */
   modelSelection: ModelSelectionBindings;
   onAbort: () => void;
   onAddFavorite: (prompt: string, content: string) => void;
+  onStructuredAnswer: (answer: string) => void;
 }
 
 export default function ChatMessageList({
@@ -186,9 +94,11 @@ export default function ChatMessageList({
   modelSelection,
   onAbort,
   onAddFavorite,
+  onStructuredAnswer,
 }: ChatMessageListProps) {
+  const scrollerCleanupRef = React.useRef<(() => void) | null>(null);
   const turnIndexItems = React.useMemo(
-    () => buildConversationTurnIndex(combinedData),
+    () => buildAgentConversationTurnIndex(combinedData),
     [combinedData],
   );
   const [activeTurnIndex, setActiveTurnIndex] = React.useState(0);
@@ -221,7 +131,7 @@ export default function ChatMessageList({
   );
 
   const handleSelectTurn = React.useCallback(
-    (item: ConversationTurnIndexItem) => {
+    (item: AgentConversationTurnIndexItem) => {
       setScrolledUpByReason(true, "conversation-index-jump");
       setActiveTurnIndex(findTurnAtDataIndex(turnIndexItems, item.dataIndex));
       virtuosoRef.current?.scrollToIndex({
@@ -231,6 +141,44 @@ export default function ChatMessageList({
       });
     },
     [setScrolledUpByReason, turnIndexItems, virtuosoRef],
+  );
+
+  const handleScrollerRef = React.useCallback(
+    (ref: HTMLElement | Window | null) => {
+      scrollerCleanupRef.current?.();
+      scrollerCleanupRef.current = null;
+      if (!ref || ref instanceof Window) return;
+
+      const handleWheel = (event: WheelEvent) => {
+        if (event.deltaY < 0) {
+          setScrolledUpByReason(true, "chat-scroller-wheel-up");
+        }
+      };
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (
+          event.key === "ArrowUp" ||
+          event.key === "PageUp" ||
+          event.key === "Home"
+        ) {
+          setScrolledUpByReason(true, "chat-scroller-keyboard-up");
+        }
+      };
+      ref.addEventListener("wheel", handleWheel, { passive: true });
+      ref.addEventListener("keydown", handleKeyDown);
+      scrollerCleanupRef.current = () => {
+        ref.removeEventListener("wheel", handleWheel);
+        ref.removeEventListener("keydown", handleKeyDown);
+      };
+    },
+    [setScrolledUpByReason],
+  );
+
+  React.useEffect(
+    () => () => {
+      scrollerCleanupRef.current?.();
+      scrollerCleanupRef.current = null;
+    },
+    [],
   );
 
   if (combinedData.length === 0) return null;
@@ -247,15 +195,13 @@ export default function ChatMessageList({
         }}
         alignToBottom={!userHasScrolledUp}
         followOutput="auto"
+        scrollerRef={handleScrollerRef}
         rangeChanged={handleVisibleRangeChange}
         atBottomThreshold={40}
         atBottomStateChange={(atBottom) => {
           setIsAtBottom(atBottom);
-          if (atBottom) return;
-          if (loading) {
-            setScrolledUpByReason(true, "atBottom-false-while-loading");
-          } else {
-            setScrolledUpByReason(true, "atBottom-false-idle");
+          if (atBottom) {
+            setScrolledUpByReason(false, "chat-scroller-returned-to-bottom");
           }
         }}
         atTopStateChange={() => {
@@ -292,26 +238,27 @@ export default function ChatMessageList({
               modelSelection={modelSelection}
               onAbort={onAbort}
               onAddFavorite={onAddFavorite}
+              onStructuredAnswer={onStructuredAnswer}
               setScrolledUpByReason={setScrolledUpByReason}
             />
           );
         }}
       />
-      <ConversationTurnIndex
+      <AgentConversationTurnIndex
         items={turnIndexItems}
         activeIndex={activeTurnIndex}
         onSelect={handleSelectTurn}
       />
       {userHasScrolledUp && !isAtBottom && (
-        <Tooltip title="回到底部">
-          <Button
+        <PurrTooltip title="回到底部">
+          <PurrButton
             type="primary"
             size="small"
-            icon={<VerticalAlignBottomOutlined />}
+            icon={<AlignBottomIcon />}
             className="chat-scroll-to-bottom-btn"
             onClick={onScrollToBottom}
           />
-        </Tooltip>
+        </PurrTooltip>
       )}
     </>
   );

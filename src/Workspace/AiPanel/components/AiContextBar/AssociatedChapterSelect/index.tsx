@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, MultiSelect, Tooltip } from '../../../../../ui'
-import { ThunderboltOutlined } from '../../../../../ui'
+import { PurrButton, PurrMultiSelect, PurrTooltip } from '@/purr-components'
+import { BoltIcon } from '@/purr-components'
 import type { EntityId } from '../../../../../types'
 
 export interface AssociatedChapterSelectProps {
@@ -20,7 +20,7 @@ export default function AssociatedChapterSelect({
 }: AssociatedChapterSelectProps) {
   return (
     <div className="ai-context-group">
-      <MultiSelect
+      <PurrMultiSelect
         className="ai-context-select"
         size="small"
         placeholder="章节内容"
@@ -30,15 +30,15 @@ export default function AssociatedChapterSelect({
         options={options}
       />
       {chapterId != null && (
-        <Tooltip title="快捷关联当前章节内容">
-          <Button
+        <PurrTooltip title="快捷关联当前章节内容">
+          <PurrButton
             type="text"
             size="small"
-            icon={<ThunderboltOutlined style={{ fontSize: 12 }} />}
+            icon={<BoltIcon style={{ fontSize: 12 }} />}
             onClick={onQuickAssociate}
             className="ai-context-quick-btn"
           />
-        </Tooltip>
+        </PurrTooltip>
       )}
     </div>
   )

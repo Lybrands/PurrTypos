@@ -2,29 +2,29 @@ import { services } from '@/services'
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import {
-  CloseOutlined,
-  FullscreenExitOutlined,
-  FullscreenOutlined,
-  UndoOutlined, RedoOutlined, AlignLeftOutlined,
-  CopyOutlined,
-  BorderlessTableOutlined,
-  HistoryOutlined,
+  CloseIcon,
+  FullscreenExitIcon,
+  FullscreenIcon,
+  UndoIcon, RedoIcon, AlignLeftIcon,
+  CopyIcon, CopyTitleIcon,
+  HistoryIcon,
   PanelToggleIcon,
-} from '../../ui'
-import { Button, Empty, Input, Tooltip, useToast, type TextAreaRef } from '../../ui'
+} from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrInput, PurrTooltip, usePurrToast, type PurrTextAreaRef } from '@/purr-components'
 import type { AiModelConfig, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useWorkspace } from '../WorkspaceContext'
 import LexicalEditorComponent, { type LexicalEditorHandle } from './LexicalEditor'
-import StopCircleIcon from '../../icons/StopCircleIcon'
+import { StopCircleIcon } from '@/purr-components'
 import { useDiff } from '../diff/DiffContext'
 import DiffOverlay from '../diff/DiffOverlay'
 import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
 import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
 import ModelPicker from '../AiPanel/components/ModelPicker'
-import { isModelThinkingEnabled } from '../../modelCatalog'
+import { normalizeApiProvider } from '../../modelCatalog'
+import { buildStreamOptions } from '../AiPanel/hooks/streamOptions'
 import { createAiStreamId } from '../../utils/aiStream'
 import './index.scss'
 
@@ -78,7 +78,7 @@ export default function EditorPanel({
   onUpdateModelConfig,
   onLexicalEditor,
 }: EditorPanelProps) {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const {
     writingChapters: chapters,
     activeChapterId: chapterId,
@@ -360,43 +360,16 @@ export default function EditorPanel({
     }, streamId)
     aiChunkUnsubRef.current = unsubscribe
 
-    const useConfiguredTemperature =
-      selectedModelConfig.customizeTemperature === undefined ||
-      selectedModelConfig.customizeTemperature === true
-    const useThinking = isModelThinkingEnabled(selectedModelConfig)
-
-    const streamOptions: {
-      model: string
-      model_profile?: string
-      temperature?: number
-      thinking: { type: 'enabled' | 'disabled' }
-      context_window: '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m'
-      max_tokens: number
-    } = {
-      model: selectedModelConfig.name,
-      ...(selectedModelConfig.presetId
-        ? { model_profile: selectedModelConfig.presetId }
-        : {}),
-      ...(useConfiguredTemperature
-        ? {
-            temperature: useThinking
-              ? (selectedModelConfig.temperatureThinking ?? 0.6)
-              : (selectedModelConfig.temperatureNonThinking ?? 0.6),
-          }
-        : {}),
-      thinking: {
-        type: (useThinking ? 'enabled' : 'disabled') as 'enabled' | 'disabled',
-      },
-      context_window: selectedModelConfig.contextWindow ?? '128k',
-      max_tokens: 8192,
-    }
+    const { options: streamOptions } = buildStreamOptions({
+      cfg: selectedModelConfig,
+      selectedModel: selectedModelConfig.id,
+    })
 
     services.ai.aiChatStream({
       streamId,
       apiKey: selectedModelConfig.apiKey,
       baseURL: selectedModelConfig.baseUrl || undefined,
-      apiProvider:
-        selectedModelConfig.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
+      apiProvider: normalizeApiProvider(selectedModelConfig.apiProvider),
       messages: [
         { role: 'system', content: '你是一位专业写作助手，请根据用户需求提供写作建议或内容。' },
         { role: 'user', content: aiFloat.prompt },
@@ -406,8 +379,6 @@ export default function EditorPanel({
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: chapterTitle || undefined,
-      writingChapters: chapters.map((c) => ({ id: c.id, title: c.title })),
-      availableOutlines: [],
       chatAgentMode: 'ask',
       contextWindow: streamOptions.context_window,
     })
@@ -419,17 +390,17 @@ export default function EditorPanel({
         <span className="panel-title">{chapterTitle || '选择章节开始写作'}</span>
         <div className="panel-header-actions">
           {onToggleFullscreen ? (
-            <Tooltip
+            <PurrTooltip
               title={fullscreen ? '退出全屏' : '全屏'}
               open={fullscreenTooltipOpen}
               onOpenChange={setFullscreenTooltipOpen}
             >
-              <Button
+              <PurrButton
                 type="text"
                 size="small"
                 icon={fullscreen
-                  ? <FullscreenExitOutlined style={{ fontSize: 14 }} />
-                  : <FullscreenOutlined style={{ fontSize: 14 }} />}
+                  ? <FullscreenExitIcon style={{ fontSize: 14 }} />
+                  : <FullscreenIcon style={{ fontSize: 14 }} />}
                 onClick={(event) => {
                   setFullscreenTooltipOpen(false)
                   event.currentTarget.blur()
@@ -437,29 +408,29 @@ export default function EditorPanel({
                 }}
                 aria-label={fullscreen ? '退出正文全屏' : '全屏显示正文'}
               />
-            </Tooltip>
+            </PurrTooltip>
           ) : null}
           {dockCollapsed && onExpandDock ? (
-            <Tooltip title="固定展开正文边栏">
-              <Button
+            <PurrTooltip title="固定展开正文边栏">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PanelToggleIcon side="right" action="expand" />}
+                icon={<PanelToggleIcon side="right" state="collapsed" />}
                 onClick={onExpandDock}
                 aria-label="固定展开正文边栏"
               />
-            </Tooltip>
+            </PurrTooltip>
           ) : null}
           {/*
            * diff 历史回滚按钮：始终可见且可点击，
            * 即使未选章节，也允许点开提示用户"请先选择章节"，
            * 这是 AI 误改正文后唯一的兜底入口，不能被任何状态遮蔽。
            */}
-          <Tooltip title="查看本章 diff 历史 / 回滚">
-            <Button
+          <PurrTooltip title="查看本章 diff 历史 / 回滚">
+            <PurrButton
               type="text"
               size="small"
-              icon={<HistoryOutlined style={{ fontSize: 14 }} />}
+              icon={<HistoryIcon />}
               onClick={() => {
                 if (chapterId == null) {
                   appMessage.info('请先选择章节，再查看 diff 历史')
@@ -468,7 +439,7 @@ export default function EditorPanel({
                 setDiffHistoryOpen(true)
               }}
             />
-          </Tooltip>
+          </PurrTooltip>
         </div>
       </div>
 
@@ -484,7 +455,7 @@ export default function EditorPanel({
           <DiffOverlay chapterId={chapterId} chapterTitle={chapterTitle ?? ''} />
         )}
         {!chapterId ? (
-          <Empty image={false} description={
+          <PurrEmpty image={false} description={
             <><p>从导演笔记本选择章节</p><small>点击左侧「章节」分组中的章节可切换，输入 <kbd>\</kbd> 可唤起 AI 助手</small></>
           } className="editor-empty" />
         ) : (
@@ -506,26 +477,26 @@ export default function EditorPanel({
             />
             <div className="editor-footer">
               <div className="editor-footer-left">
-                <Tooltip title="撤回 (Ctrl+Z)">
-                  <Button type="text" size="small" icon={<UndoOutlined />} className="editor-toolbar-btn"
+                <PurrTooltip title="撤回 (Ctrl+Z)">
+                  <PurrButton type="text" size="small" icon={<UndoIcon />} className="editor-toolbar-btn"
                     onClick={() => lexicalEditorRef.current?.undo()} />
-                </Tooltip>
-                <Tooltip title="前进 (Ctrl+Shift+Z)">
-                  <Button type="text" size="small" icon={<RedoOutlined />} className="editor-toolbar-btn"
+                </PurrTooltip>
+                <PurrTooltip title="前进 (Ctrl+Shift+Z)">
+                  <PurrButton type="text" size="small" icon={<RedoIcon />} className="editor-toolbar-btn"
                     onClick={() => lexicalEditorRef.current?.redo()} />
-                </Tooltip>
-                <Tooltip title="一键排版">
-                  <Button type="text" size="small" icon={<AlignLeftOutlined />} className="editor-toolbar-btn"
+                </PurrTooltip>
+                <PurrTooltip title="一键排版">
+                  <PurrButton type="text" size="small" icon={<AlignLeftIcon />} className="editor-toolbar-btn"
                     onClick={handleReformat} />
-                </Tooltip>
-                <Tooltip title="复制标题">
-                  <Button type="text" size="small" icon={<BorderlessTableOutlined />} className="editor-toolbar-btn"
+                </PurrTooltip>
+                <PurrTooltip title="复制标题">
+                  <PurrButton type="text" size="small" icon={<CopyTitleIcon />} aria-label="复制标题" className="editor-toolbar-btn"
                     onClick={() => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')} />
-                </Tooltip>
-                <Tooltip title="复制正文">
-                  <Button type="text" size="small" icon={<CopyOutlined />} className="editor-toolbar-btn"
+                </PurrTooltip>
+                <PurrTooltip title="复制正文">
+                  <PurrButton type="text" size="small" icon={<CopyIcon />} aria-label="复制正文" className="editor-toolbar-btn"
                     onClick={() => handleCopyToClipboard(content ?? '', '正文')} />
-                </Tooltip>
+                </PurrTooltip>
               </div>
               <div className="editor-footer-right">
                 <span className="word-count">{wordCount} 字</span>
@@ -619,16 +590,16 @@ function AiFloatBox({
   onAbort,
   onClose,
 }: AiFloatBoxProps) {
-  const textareaRef = React.useRef<TextAreaRef>(null)
+  const textareaRef = React.useRef<PurrTextAreaRef>(null)
   React.useEffect(() => { textareaRef.current?.focus() }, [])
   return (
     <div className="ai-float-box" style={{ left: x, top: y }}>
       <div className="ai-float-header">
         <span>AI 写作助手</span>
-        <Button type="text" size="small" icon={<CloseOutlined style={{ fontSize: 16 }} />} onClick={onClose} className="btn-close" />
+        <PurrButton type="text" size="small" icon={<CloseIcon style={{ fontSize: 16 }} />} onClick={onClose} className="btn-close" />
       </div>
       <div className="ai-float-input-row ai-float-input-row--textarea">
-        <Input.TextArea
+        <PurrInput.TextArea
           ref={textareaRef}
           className="ai-float-textarea"
           value={prompt}
@@ -657,16 +628,16 @@ function AiFloatBox({
         </div>
         <div className="ai-float-bottom-right">
           {loading ? (
-            <Button
+            <PurrButton
               className="btn-submit btn-stop"
               icon={<StopCircleIcon size={18} />}
               type="text"
               onClick={onAbort}
             />
           ) : (
-            <Button type="primary" size="small" onClick={onSubmit} disabled={!prompt.trim()}>
+            <PurrButton type="primary" size="small" onClick={onSubmit} disabled={!prompt.trim()}>
               发送
-            </Button>
+            </PurrButton>
           )}
         </div>
       </div>

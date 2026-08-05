@@ -1,5 +1,15 @@
-import type { ElectronAPI } from '../types'
+import type {
+  AiErrorReport,
+  AiLongTaskConversationEvent,
+  ElectronAPI,
+} from '../types'
 import { apiDelete, apiGet, apiPost, apiPut, backendBaseUrl } from './httpClient'
+import {
+  markAiDebugAbortRequested,
+  recordAiDebugConversationSaved,
+  recordAiDebugChunk,
+  startAiDebugRun,
+} from '../components/AiDevInspector/store'
 
 export type PlatformApiKey =
   | 'openXmindFile'
@@ -21,10 +31,53 @@ export type PlatformApiKey =
 export type BackendApi = Omit<ElectronAPI, PlatformApiKey>
 
 type AiChunk = Parameters<ElectronAPI['onAiChunk']>[0] extends (chunk: infer T) => void ? T : never
+type AiStreamRequest = Parameters<ElectronAPI['aiChatStream']>[0]
 
 let aiChunkListeners: Array<(chunk: AiChunk) => void> = []
 const aiAbortControllers = new Map<string, AbortController>()
 let latestAiStreamId: string | null = null
+
+function aiErrorReportSource(streamId: string, data: AiStreamRequest): string {
+  if (data.agentProfile === 'screenplay' || streamId.startsWith('screenplay-')) return 'screenplay_agent'
+  if (streamId.startsWith('chat-')) return 'workspace_chat'
+  if (streamId.startsWith('inline-edit-')) return 'inline_edit'
+  if (streamId.startsWith('editor-float-')) return 'editor_rewrite'
+  if (streamId.startsWith('ghost-completion-')) return 'ghost_completion'
+  return 'ai_chat_stream'
+}
+
+function aiErrorReportDiagnostics(data: AiStreamRequest): Record<string, unknown> {
+  const screenplayStageLabels: Record<string, string> = {
+    orientation: '原作分析',
+    brief: '创作简报',
+    structure: '剧本结构',
+    scenes: '场景表',
+    draft: '场景正文',
+    review: '剧本审阅',
+    completed: '已完成项目',
+  }
+  const taskType = data.agentProfile === 'screenplay'
+    ? data.screenplayTaskIntent === 'stage_deliverable'
+      ? `剧本阶段交付 · ${screenplayStageLabels[String(data.activeStage || '')] || data.activeStage || '当前阶段'}`
+      : '剧本自由对话'
+    : data.chatAgentMode === 'agent'
+      ? '写作 Agent 任务'
+      : '普通对话'
+  return {
+    provider: data.apiProvider || 'openai',
+    agentMode: data.chatAgentMode || '',
+    agentProfile: data.agentProfile || 'writing',
+    taskType,
+    toolsEnabled: data.enableAgentTools === true,
+    thinkingEnabled: data.options?.thinking?.type === 'enabled',
+    contextWindow: data.contextWindow || data.options?.context_window || '',
+    messageCount: data.messages.length,
+    associatedChapterCount: data.associatedChapterIds?.length || 0,
+    associatedOutlineCount: data.associatedOutlineIds?.length || 0,
+    selectedMemoryCount: data.selectedMemoryIds?.length || 0,
+    selectedForeshadowingCount: data.selectedForeshadowingIds?.length || 0,
+  }
+}
 
 export const backendApi: BackendApi = {
   getDatabaseInfo: () => apiGet('/database/info'),
@@ -40,6 +93,10 @@ export const backendApi: BackendApi = {
   getScreenplayProject: (data) => apiGet(`/screenplay-projects/${data.projectId}`),
   getOrCreateScreenplaySession: (data) =>
     apiPost(`/screenplay-projects/${data.projectId}/agent-session`, {}),
+  listScreenplaySessions: (data) =>
+    apiGet(`/screenplay-projects/${data.projectId}/agent-sessions${data.includeClosed ? '?includeClosed=true' : ''}`),
+  createScreenplaySession: (data) =>
+    apiPost(`/screenplay-projects/${data.projectId}/agent-sessions`, {}),
   createScreenplayProject: (data) => apiPost('/screenplay-projects', data),
   updateScreenplayProject: (data) =>
     apiPut(`/screenplay-projects/${data.projectId}`, data.patch || {}),
@@ -245,7 +302,20 @@ export const backendApi: BackendApi = {
   updateSessionTitle: (data) =>
     apiPut(`/sessions/${data.sessionId}/title`, { title: data.title }),
 
-  saveConversation: (data) => apiPost('/conversations', data),
+  saveConversation: async (data) => {
+    const response = await apiPost<{ id: number | null }>('/conversations', data)
+    const conversationId = response.data?.id
+    if (response.success && typeof conversationId === 'number') {
+      recordAiDebugConversationSaved({
+        conversationId,
+        sessionId: data.sessionId,
+        agentRunId: data.agentRunId,
+        prompt: data.prompt,
+        response: data.response,
+      })
+    }
+    return response
+  },
   getConversations: (data) => apiGet(`/conversations/${data.sessionId}`),
   deleteConversationsAfterTurn: (data) =>
     apiDelete(`/conversations/${data.sessionId}/after-turn?keepTurnCount=${data.keepTurnCount}`),
@@ -304,8 +374,104 @@ export const backendApi: BackendApi = {
     const query = params.toString()
     return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}${query ? `?${query}` : ''}`)
   },
+  getAgentRunDiagnostics: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/diagnostics`),
+  maintainAgentArtifacts: () => apiPost('/ai/artifacts/maintenance', {}),
+  getAgentRunStabilityTrend: (data) => {
+    const params = new URLSearchParams()
+    if (data.scope) params.set('scope', data.scope)
+    if (data.limit != null) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/stability-trend${query ? `?${query}` : ''}`)
+  },
+  getLatestSessionAgentRun: (data) =>
+    apiGet(`/ai/session-runs/latest?sessionId=${encodeURIComponent(data.sessionId)}`),
+  captureAiErrorReport: (data) => apiPost('/ai/error-reports', data),
+  listAiErrorReports: (data = {}) => {
+    const params = new URLSearchParams()
+    if (data.status) params.set('status', data.status)
+    if (data.limit != null) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(`/ai/error-reports${query ? `?${query}` : ''}`)
+  },
+  getAiErrorReport: (data) =>
+    apiGet(`/ai/error-reports/${encodeURIComponent(data.reportId)}`),
+  submitAiErrorReport: (data) =>
+    apiPost(`/ai/error-reports/${encodeURIComponent(data.reportId)}/submit`, {
+      userNote: data.userNote || null,
+    }),
   cancelAgentRun: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/cancel`, {}),
+  getLongTask: (data) =>
+    apiGet(`/ai/long-tasks/${encodeURIComponent(data.taskId)}`),
+  streamLongTaskConversation: (data, listener) => {
+    const controller = new AbortController()
+    const params = new URLSearchParams({ sessionId: String(data.sessionId) })
+    if (data.after != null) params.set('after', String(data.after))
+    const url = `${backendBaseUrl}/api/ai/long-tasks/${
+      encodeURIComponent(data.taskId)
+    }/conversation/stream?${params.toString()}`
+    void fetch(url, { signal: controller.signal }).then(async (response) => {
+      if (!response.ok || !response.body) {
+        throw new Error(`长任务对话流请求失败 (${response.status})`)
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let sawTerminal = false
+      const processLines = (lines: string[]) => {
+        lines.forEach((line) => {
+          if (!line.startsWith('data: ')) return
+          const payload = line.slice(6).trim()
+          if (!payload || payload === '[DONE]') return
+          try {
+            const event = JSON.parse(payload) as AiLongTaskConversationEvent
+            if (event.type === 'task.terminal' || event.type === 'stream.error') {
+              sawTerminal = true
+            }
+            listener(event)
+          } catch {
+            // A later complete SSE event can still be consumed.
+          }
+        })
+      }
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ''
+        processLines(lines)
+      }
+      buffer += decoder.decode()
+      if (buffer) processLines(buffer.split(/\r?\n/))
+      if (!controller.signal.aborted && !sawTerminal) {
+        listener({
+          type: 'stream.error',
+          taskId: data.taskId,
+          error: '长任务对话流意外结束',
+        })
+      }
+    }).catch((error) => {
+      if (controller.signal.aborted) return
+      listener({
+        type: 'stream.error',
+        taskId: data.taskId,
+        error: error instanceof Error ? error.message : '长任务对话流中断',
+      })
+    })
+    return () => controller.abort()
+  },
+  listScreenplayLongTasks: (data) => {
+    const params = new URLSearchParams()
+    if (data.limit != null) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(`/ai/screenplay-projects/${encodeURIComponent(data.projectId)}/long-tasks${query ? `?${query}` : ''}`)
+  },
+  pauseLongTask: (data) =>
+    apiPost(`/ai/long-tasks/${encodeURIComponent(data.taskId)}/pause`, {}),
+  cancelLongTask: (data) =>
+    apiPost(`/ai/long-tasks/${encodeURIComponent(data.taskId)}/cancel`, {}),
   createAgentDelegation: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/delegations`, {
       agentRole: data.agentRole,
@@ -326,6 +492,41 @@ export const backendApi: BackendApi = {
     const abortController = new AbortController()
     aiAbortControllers.set(streamId, abortController)
     latestAiStreamId = streamId
+    startAiDebugRun(streamId, data)
+    let observedAgentRunId: string | undefined
+    let observedErrorCode: string | undefined
+    let observedTaskType: string | undefined
+    let receivedVisibleOutput = false
+
+    const attachErrorReport = async (
+      chunk: AiChunk,
+      errorMessage = chunk.error,
+      errorCode = observedErrorCode,
+    ): Promise<void> => {
+      if (!errorMessage || chunk.aborted || chunk.errorReport) return
+      try {
+        const response = await apiPost<AiErrorReport>('/ai/error-reports', {
+          streamId,
+          agentRunId: observedAgentRunId,
+          sessionId: data.sessionId,
+          bookId: data.bookId || null,
+          chapterId: data.chapterId || null,
+          source: aiErrorReportSource(streamId, data),
+          errorCode,
+          errorMessage,
+          model: chunk.model || data.options?.model,
+          diagnostics: {
+            ...aiErrorReportDiagnostics(data),
+            ...(observedTaskType ? { taskType: observedTaskType } : {}),
+          },
+        })
+        if (response.success && response.data?.id) {
+          chunk.errorReport = response.data
+        }
+      } catch {
+        // Error capture must never replace or delay the original terminal error.
+      }
+    }
 
     fetch(`${backendBaseUrl}/api/ai/chat/stream`, {
       method: 'POST',
@@ -339,7 +540,8 @@ export const backendApi: BackendApi = {
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
-      const processLines = (lines: string[]) => {
+      let receivedTerminalChunk = false
+      const processLines = async (lines: string[]) => {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           const payload = line.slice(6).trim()
@@ -347,6 +549,44 @@ export const backendApi: BackendApi = {
           try {
             const chunk = JSON.parse(payload) as AiChunk
             if (abortController.signal.aborted && chunk.done) chunk.aborted = true
+            observedAgentRunId =
+              chunk.agentRunStarted?.runId ||
+              chunk.agentRunTodosUpdated?.runId ||
+              chunk.agentRunTodoUpdated?.runId ||
+              chunk.agentRunCompleted?.runId ||
+              chunk.agentRunFailed?.runId ||
+              chunk.agentRunBlocked?.runId ||
+              chunk.agentRunCanceled?.runId ||
+              observedAgentRunId
+            observedErrorCode =
+              chunk.agentRunFailed?.error || observedErrorCode
+            if (chunk.longTaskDispatched?.taskId) {
+              observedTaskType = chunk.longTaskDispatched.kind === 'screenplay_draft_generation'
+                ? '持久化长任务 · 剧本正文分批创作'
+                : `持久化长任务 · ${chunk.longTaskDispatched.kind || '通用任务'}`
+            }
+            if (
+              chunk.delta?.trim()
+              || chunk.agentRunCompleted?.finalResponse?.trim()
+              || chunk.longTaskDispatched?.taskId
+            ) {
+              receivedVisibleOutput = true
+            }
+            if (chunk.done || chunk.error) receivedTerminalChunk = true
+            if (chunk.error) {
+              await attachErrorReport(chunk)
+            } else if (
+              chunk.done &&
+              !chunk.aborted &&
+              !receivedVisibleOutput
+            ) {
+              await attachErrorReport(
+                chunk,
+                '模型未返回可见内容。',
+                'empty_model_response',
+              )
+            }
+            recordAiDebugChunk(streamId, chunk)
             aiChunkListeners.forEach((listener) => listener({ ...chunk, streamId }))
           } catch {
             // Ignore malformed/incomplete SSE events; the next event can still be valid.
@@ -359,17 +599,22 @@ export const backendApi: BackendApi = {
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
-        processLines(lines)
+        await processLines(lines)
       }
-      if (buffer.trim()) processLines(buffer.split('\n'))
-      const terminalChunk = abortController.signal.aborted
-        ? { done: true, aborted: true, streamId }
-        : { done: true, streamId }
-      aiChunkListeners.forEach((listener) => listener(terminalChunk))
-    }).catch((error) => {
+      if (buffer.trim()) await processLines(buffer.split('\n'))
+      if (!receivedTerminalChunk) {
+        const terminalChunk = abortController.signal.aborted
+          ? { done: true, aborted: true, streamId }
+          : { done: true, streamId }
+        recordAiDebugChunk(streamId, terminalChunk)
+        aiChunkListeners.forEach((listener) => listener(terminalChunk))
+      }
+    }).catch(async (error) => {
       const chunk = abortController.signal.aborted
         ? { done: true, aborted: true, streamId }
         : { error: error instanceof Error ? error.message : String(error), streamId }
+      await attachErrorReport(chunk)
+      recordAiDebugChunk(streamId, chunk)
       aiChunkListeners.forEach((listener) => listener(chunk))
     }).finally(() => {
       if (aiAbortControllers.get(streamId) === abortController) {
@@ -386,6 +631,7 @@ export const backendApi: BackendApi = {
     const targetId = streamId || latestAiStreamId
     const controller = targetId ? aiAbortControllers.get(targetId) : null
     if (!controller || !targetId) return
+    markAiDebugAbortRequested(targetId)
     controller.abort()
     aiAbortControllers.delete(targetId)
     if (latestAiStreamId === targetId) {

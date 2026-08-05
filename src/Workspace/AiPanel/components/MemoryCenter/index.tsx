@@ -1,15 +1,15 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button, Empty, Input, Modal, Radio, Select, Space, Spin, Switch, Tag, Tooltip, toast, useConfirm } from '../../../../ui'
+import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrRadio, PurrSelect, PurrSpace, PurrSpin, PurrSwitch, PurrTag, PurrTooltip, purrToast, usePurrConfirm } from '@/purr-components'
 import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  CloseOutlined,
-  HistoryOutlined,
-  InboxOutlined,
-  PlusOutlined,
-  PushpinOutlined,
-} from '../../../../ui'
+  CheckCircleIcon,
+  ClockIcon,
+  CloseIcon,
+  HistoryIcon,
+  InboxIcon,
+  PlusIcon,
+  PinIcon,
+} from '@/purr-components'
 import type {
   EntityId,
   MemoryItem,
@@ -145,7 +145,7 @@ function structuredFieldLabel(key: string): string {
 }
 
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
-  const confirm = useConfirm()
+  const confirm = usePurrConfirm()
   const [query, setQuery] = React.useState('')
   const [status, setStatus] = React.useState<UnifiedMemoryStatus | undefined>()
   const [kind, setKind] = React.useState<UnifiedMemoryItem['kind'] | undefined>()
@@ -189,7 +189,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setLoading(false)
     if (!res.success || !res.data || !Array.isArray(res.data.items)) {
       setItems([])
-      toast.error(res.error || '读取记忆失败')
+      purrToast.error(res.error || '读取记忆失败')
       return
     }
     setItems(res.data.items)
@@ -227,7 +227,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setSettingsSaving(true)
     const res = await services.settings.setSettings(patch)
     setSettingsSaving(false)
-    if (!res.success) toast.error(res.error || '保存记忆设置失败')
+    if (!res.success) purrToast.error(res.error || '保存记忆设置失败')
     return res.success
   }, [])
 
@@ -244,13 +244,13 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setCreating(false)
     if (!res.success) {
-      toast.error(res.error || '保存记忆失败')
+      purrToast.error(res.error || '保存记忆失败')
       return
     }
     setNewContent('')
     setNewPinned(false)
     setCreateOpen(false)
-    toast.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
+    purrToast.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
     await load()
   }, [bookId, load, newContent, newKind, newPinned, newStatus])
 
@@ -262,7 +262,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     if (!id) return false
     const res = await services.memories.updateMemory({ id, data })
     if (!res.success) {
-      toast.error(res.error || '更新记忆失败')
+      purrToast.error(res.error || '更新记忆失败')
       return false
     }
     await load()
@@ -281,7 +281,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     }).then(async (result) => {
       if (result === 'confirm') {
         const res = await services.memories.archiveMemory({ id })
-        if (!res.success) toast.error(res.error || '归档失败')
+        if (!res.success) purrToast.error(res.error || '归档失败')
         await load()
       }
     })
@@ -293,7 +293,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   ) => {
     const selected = resolutions[deltaId] || {}
     if (!candidates.every((item) => item.target_key && selected[item.target_key])) {
-      toast.warning('请先处理这一组中的所有候选')
+      purrToast.warning('请先处理这一组中的所有候选')
       return
     }
     setSubmittingId(deltaId)
@@ -303,11 +303,11 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setSubmittingId(null)
     if (!res.success) {
-      toast.error(res.error || '提交记忆审核失败')
+      purrToast.error(res.error || '提交记忆审核失败')
       await load()
       return
     }
-    toast.success(res.data?.applied_delta_id ? '已应用接受的故事状态' : '候选已全部拒绝')
+    purrToast.success(res.data?.applied_delta_id ? '已应用接受的故事状态' : '候选已全部拒绝')
     await load()
   }, [load, resolutions])
 
@@ -322,7 +322,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     })
     setHistoryLoading(false)
     if (res.success && Array.isArray(res.data)) setHistory(res.data)
-    else toast.error(res.error || '读取版本历史失败')
+    else purrToast.error(res.error || '读取版本历史失败')
   }, [bookId])
 
   const displayEntries = React.useMemo<DisplayEntry[]>(() => {
@@ -361,20 +361,20 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             </div>
             <div className="story-memory-review-summary">AI 提取的故事状态候选 · {candidates.length} 条</div>
           </div>
-          <Tag>{STATUS_LABEL[candidates[0]?.status || 'pending']}</Tag>
+          <PurrTag>{STATUS_LABEL[candidates[0]?.status || 'pending']}</PurrTag>
         </div>
         <div className="story-memory-decision-list">
           {candidates.map((item) => (
             <div className="story-memory-decision" key={item.id}>
               <div className="story-memory-decision-header">
-                <Space size={6} wrap>
-                  <Tag>{KIND_LABEL[item.kind] || item.kind}</Tag>
-                  {item.classification ? <Tag>{item.classification}</Tag> : null}
-                  {item.risk ? <Tag>{item.risk} risk</Tag> : null}
+                <PurrSpace size={6} wrap>
+                  <PurrTag>{KIND_LABEL[item.kind] || item.kind}</PurrTag>
+                  {item.classification ? <PurrTag>{item.classification}</PurrTag> : null}
+                  {item.risk ? <PurrTag>{item.risk} risk</PurrTag> : null}
                   <span className="story-memory-confidence">可信度 {Math.round(item.confidence * 100)}%</span>
-                </Space>
+                </PurrSpace>
                 {open && item.target_key ? (
-                  <Radio.Group
+                  <PurrRadio.Group
                     size="small"
                     value={resolutions[deltaId]?.[item.target_key]}
                     onChange={(event) => setResolutions((previous) => ({
@@ -385,10 +385,10 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                       },
                     }))}
                   >
-                    <Radio.Button value="accepted">接受</Radio.Button>
-                    <Radio.Button value="rejected">拒绝</Radio.Button>
-                  </Radio.Group>
-                ) : <Tag>{STATUS_LABEL[item.status]}</Tag>}
+                    <PurrRadio.Button value="accepted">接受</PurrRadio.Button>
+                    <PurrRadio.Button value="rejected">拒绝</PurrRadio.Button>
+                  </PurrRadio.Group>
+                ) : <PurrTag>{STATUS_LABEL[item.status]}</PurrTag>}
               </div>
               <div className="story-memory-rationale">{item.summary}</div>
               <div className="story-memory-target-key">{item.target_key}</div>
@@ -409,13 +409,13 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
         {open ? (
           <div className="story-memory-review-footer">
             <span>接受项会成为正式故事状态；拒绝项仅保留审计记录。</span>
-            <Button
+            <PurrButton
               type="primary"
               loading={submittingId === deltaId}
               onClick={() => void submitCandidateGroup(deltaId, candidates)}
             >
               提交本组决议
-            </Button>
+            </PurrButton>
           </div>
         ) : null}
       </article>
@@ -425,14 +425,14 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const renderMemory = (item: UnifiedMemoryItem) => (
     <article className="unified-memory-card" key={item.id}>
       <div className="unified-memory-card-main">
-        <Space size={6} wrap>
-          <Tag>{SOURCE_LABEL[item.source]}</Tag>
-          <Tag>{KIND_LABEL[item.kind] || item.kind}</Tag>
-          <Tag>{STATUS_LABEL[item.status]}</Tag>
-          {item.pinned ? <Tag>固定</Tag> : null}
+        <PurrSpace size={6} wrap>
+          <PurrTag>{SOURCE_LABEL[item.source]}</PurrTag>
+          <PurrTag>{KIND_LABEL[item.kind] || item.kind}</PurrTag>
+          <PurrTag>{STATUS_LABEL[item.status]}</PurrTag>
+          {item.pinned ? <PurrTag>固定</PurrTag> : null}
           {item.version ? <span className="memory-center-item-source">v{item.version}</span> : null}
           {item.chapter_title ? <span className="memory-center-item-source">{item.chapter_title}</span> : null}
-        </Space>
+        </PurrSpace>
         <div className="unified-memory-content">{item.content}</div>
         {item.summary ? <div className="memory-center-item-summary">{item.summary}</div> : null}
         {(item.evidence_excerpt || Object.keys(item.structured_data).length) ? (
@@ -451,30 +451,30 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
           </details>
         ) : null}
       </div>
-      <Space size={6} wrap className="unified-memory-actions">
+      <PurrSpace size={6} wrap className="unified-memory-actions">
         {item.actions.includes('activate') ? (
-          <Button size="small" type="primary" onClick={() => void updateSemantic(item, { status: 'active' })}>启用</Button>
+          <PurrButton size="small" type="primary" onClick={() => void updateSemantic(item, { status: 'active' })}>启用</PurrButton>
         ) : null}
         {item.actions.includes('edit') ? (
-          <Button size="small" onClick={() => { setEditingItem(item); setEditingContent(item.content) }}>编辑</Button>
+          <PurrButton size="small" onClick={() => { setEditingItem(item); setEditingContent(item.content) }}>编辑</PurrButton>
         ) : null}
         {item.actions.includes('pin') ? (
-          <Tooltip title={item.pinned ? '取消固定' : '固定优先召回'}>
-            <Button
+          <PurrTooltip title={item.pinned ? '取消固定' : '固定优先召回'}>
+            <PurrButton
               size="small"
               type={item.pinned ? 'primary' : 'default'}
-              icon={<PushpinOutlined />}
+              icon={<PinIcon />}
               onClick={() => void updateSemantic(item, { pinned: item.pinned ? 0 : 1 })}
             />
-          </Tooltip>
+          </PurrTooltip>
         ) : null}
         {item.actions.includes('archive') ? (
-          <Button size="small" icon={<InboxOutlined />} onClick={() => archiveSemantic(item)}>归档</Button>
+          <PurrButton size="small" icon={<InboxIcon />} onClick={() => archiveSemantic(item)}>归档</PurrButton>
         ) : null}
         {item.actions.includes('view_history') ? (
-          <Button size="small" icon={<HistoryOutlined />} onClick={() => void openHistory(item)}>版本</Button>
+          <PurrButton size="small" icon={<HistoryIcon />} onClick={() => void openHistory(item)}>版本</PurrButton>
         ) : null}
-      </Space>
+      </PurrSpace>
     </article>
   )
 
@@ -493,7 +493,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <div className="memory-center-intelligence-title">智能长期记忆</div>
             <div className="memory-center-intelligence-desc">从已接受的改动中提炼语义记忆。</div>
           </div>
-          <Switch checked={intelligenceEnabled} loading={settingsSaving} onChange={async (checked) => {
+          <PurrSwitch checked={intelligenceEnabled} loading={settingsSaving} onChange={async (checked) => {
             if (await saveSettings({ memory_intelligence_enabled: checked })) setIntelligenceEnabled(checked)
           }} />
         </div>
@@ -502,7 +502,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <div className="memory-center-intelligence-title">章节故事状态分析</div>
             <div className="memory-center-intelligence-desc">生成带原文证据的精确故事状态候选。</div>
           </div>
-          <Switch checked={analysisEnabled} loading={settingsSaving} onChange={async (checked) => {
+          <PurrSwitch checked={analysisEnabled} loading={settingsSaving} onChange={async (checked) => {
             if (await saveSettings({ story_memory_analysis_enabled: checked })) setAnalysisEnabled(checked)
           }} />
         </div>
@@ -511,8 +511,8 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <div className="memory-center-intelligence-title">低风险自动应用</div>
             <div className="memory-center-intelligence-desc">只处理白名单内的高置信度低风险新增。</div>
           </div>
-          <Space size={8}>
-            <Select
+          <PurrSpace size={8}>
+            <PurrSelect
               size="small"
               value={minConfidence}
               disabled={!autoApplyEnabled || settingsSaving}
@@ -525,33 +525,33 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 if (await saveSettings({ story_memory_auto_apply_min_confidence: value })) setMinConfidence(value)
               }}
             />
-            <Switch checked={autoApplyEnabled} loading={settingsSaving} onChange={async (checked) => {
+            <PurrSwitch checked={autoApplyEnabled} loading={settingsSaving} onChange={async (checked) => {
               if (await saveSettings({ story_memory_auto_apply_enabled: checked })) setAutoApplyEnabled(checked)
             }} />
-          </Space>
+          </PurrSpace>
         </div>
       </div>
 
       <div className="memory-center-toolbar unified-memory-toolbar">
         <div className="memory-center-filters unified-memory-filters">
-          <Input.Search
+          <PurrInput.Search
             allowClear
             placeholder="搜索全部记忆、故事状态与证据…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onSearch={() => void load()}
           />
-          <Select allowClear placeholder="全部状态" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
-          <Select allowClear placeholder="全部类型" value={kind} options={ALL_KIND_OPTIONS} onChange={setKind} />
-          <Select allowClear placeholder="全部来源" value={source} options={SOURCE_OPTIONS} onChange={setSource} />
+          <PurrSelect allowClear placeholder="全部状态" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+          <PurrSelect allowClear placeholder="全部类型" value={kind} options={ALL_KIND_OPTIONS} onChange={setKind} />
+          <PurrSelect allowClear placeholder="全部来源" value={source} options={SOURCE_OPTIONS} onChange={setSource} />
         </div>
-        <Button onClick={() => void load()} loading={loading}>刷新</Button>
+        <PurrButton onClick={() => void load()} loading={loading}>刷新</PurrButton>
       </div>
 
       <section className={`memory-center-create ${createOpen ? 'is-open' : 'is-collapsed'}`} aria-label="手动添加记忆">
         {!createOpen ? (
           <button type="button" className="memory-center-create-launcher" onClick={() => setCreateOpen(true)} disabled={bookId == null}>
-            <span className="memory-center-create-launcher-icon"><PlusOutlined /></span>
+            <span className="memory-center-create-launcher-icon"><PlusIcon /></span>
             <span className="memory-center-create-launcher-copy">
               <span className="memory-center-create-launcher-title">手动添加记忆</span>
               <span className="memory-center-create-launcher-desc">补充设定、剧情事实、人物状态、伏笔或风格偏好</span>
@@ -565,11 +565,11 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 <div className="memory-center-create-title">手动添加记忆</div>
                 <div className="memory-center-create-desc">写下希望 AI 在后续创作中持续记住的信息。</div>
               </div>
-              <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setCreateOpen(false)} aria-label="关闭添加记忆" />
+              <PurrButton type="text" size="small" icon={<CloseIcon />} onClick={() => setCreateOpen(false)} aria-label="关闭添加记忆" />
             </div>
             <div className="memory-center-create-field">
               <div className="memory-center-create-label">记忆类型</div>
-              <Radio.Group
+              <PurrRadio.Group
                 value={newKind}
                 onChange={(event) => {
                   const value = event.target.value as MemoryKind
@@ -588,7 +588,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 <div className="memory-center-create-label">记忆内容</div>
                 <span className="memory-center-create-count">{newContent.length} / 2000</span>
               </div>
-              <Input.TextArea
+              <PurrInput.TextArea
                 autoFocus
                 autoSize={{ minRows: 3, maxRows: 7 }}
                 maxLength={2000}
@@ -606,34 +606,34 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <div className="memory-center-create-options">
               <div className="memory-center-create-status">
                 <div className="memory-center-create-label">保存后状态</div>
-                <Radio.Group value={newStatus} onChange={(event) => setNewStatus(event.target.value)} className="memory-center-create-status-choices">
-                  <Radio.Button value="active">
-                    <CheckCircleOutlined />
+                <PurrRadio.Group value={newStatus} onChange={(event) => setNewStatus(event.target.value)} className="memory-center-create-status-choices">
+                  <PurrRadio.Button value="active">
+                    <CheckCircleIcon />
                     <span className="memory-center-create-status-copy"><span className="memory-center-create-status-title">立即生效</span><span className="memory-center-create-status-desc">马上参与召回</span></span>
-                  </Radio.Button>
-                  <Radio.Button value="pending">
-                    <ClockCircleOutlined />
+                  </PurrRadio.Button>
+                  <PurrRadio.Button value="pending">
+                    <ClockIcon />
                     <span className="memory-center-create-status-copy"><span className="memory-center-create-status-title">待确认</span><span className="memory-center-create-status-desc">审核后生效</span></span>
-                  </Radio.Button>
-                </Radio.Group>
+                  </PurrRadio.Button>
+                </PurrRadio.Group>
               </div>
               <div className="memory-center-create-pinned">
                 <div><div className="memory-center-create-label">固定优先召回</div><div className="memory-center-create-hint">固定后，AI 会优先召回。</div></div>
-                <Switch size="small" checked={newPinned} onChange={setNewPinned} />
+                <PurrSwitch size="small" checked={newPinned} onChange={setNewPinned} />
               </div>
             </div>
             <div className="memory-center-create-footer">
               <span className="memory-center-create-shortcut">Ctrl/⌘ + Enter 快速添加</span>
-              <Space size={8}>
-                <Button onClick={() => setCreateOpen(false)}>取消</Button>
-                <Button type="primary" loading={creating} disabled={!newContent.trim()} onClick={() => void handleCreate()}>添加到记忆库</Button>
-              </Space>
+              <PurrSpace size={8}>
+                <PurrButton onClick={() => setCreateOpen(false)}>取消</PurrButton>
+                <PurrButton type="primary" loading={creating} disabled={!newContent.trim()} onClick={() => void handleCreate()}>添加到记忆库</PurrButton>
+              </PurrSpace>
             </div>
           </div>
         )}
       </section>
 
-      <Spin spinning={loading}>
+      <PurrSpin spinning={loading}>
         {displayEntries.length ? (
           <div className="unified-memory-list">
             {displayEntries.map((entry) => (
@@ -642,10 +642,10 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                 : renderMemory(entry.item)
             ))}
           </div>
-        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无符合条件的记忆" />}
-      </Spin>
+        ) : <PurrEmpty image={PurrEmpty.PRESENTED_IMAGE_SIMPLE} description="暂无符合条件的记忆" />}
+      </PurrSpin>
 
-      <Modal
+      <PurrModal
         title="编辑记忆"
         open={!!editingItem}
         confirmLoading={editingSaving}
@@ -660,23 +660,23 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
           if (saved) setEditingItem(null)
         }}
       >
-        <Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} />
-      </Modal>
+        <PurrInput.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} />
+      </PurrModal>
 
-      <Modal title={historyItem ? `${historyItem.content} · 版本历史` : '版本历史'} open={!!historyItem} footer={null} onCancel={() => setHistoryItem(null)}>
-        <Spin spinning={historyLoading}>
+      <PurrModal title={historyItem ? `${historyItem.content} · 版本历史` : '版本历史'} open={!!historyItem} footer={null} onCancel={() => setHistoryItem(null)}>
+        <PurrSpin spinning={historyLoading}>
           {history.length ? (
             <div className="unified-memory-history">
               {history.map((version) => (
                 <div key={`${version.record_id}:${version.version}`}>
-                  <Space size={6}><Tag>v{version.version}</Tag><Tag>{version.action}</Tag><Tag>{version.provenance_status}</Tag></Space>
+                  <PurrSpace size={6}><PurrTag>v{version.version}</PurrTag><PurrTag>{version.action}</PurrTag><PurrTag>{version.provenance_status}</PurrTag></PurrSpace>
                   <pre>{JSON.stringify(version.payload, null, 2)}</pre>
                 </div>
               ))}
             </div>
-          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无版本记录" />}
-        </Spin>
-      </Modal>
+          ) : <PurrEmpty image={PurrEmpty.PRESENTED_IMAGE_SIMPLE} description="暂无版本记录" />}
+        </PurrSpin>
+      </PurrModal>
     </div>
   )
 }

@@ -19,6 +19,7 @@ from infrastructure.persistence.run_store import (
 )
 from infrastructure.persistence.run_execution_store import (
     SqliteExecutionLeaseStore,
+    now_ms,
 )
 from infrastructure.persistence.sqlite_checkpoint_store import (
     SqliteCheckpointStore,
@@ -154,6 +155,125 @@ async def test_run_snapshot_route_uses_the_same_resume_contract(temp_db):
     assert invalid.status_code == 422
 
 
+async def test_run_snapshot_reuses_live_sse_mapper_for_replay(temp_db):
+    run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="replay delegated tool",
+        mode="agent",
+    )
+    await append_event(
+        temp_db,
+        run_id,
+        "delegation.event",
+        {
+            "delegationId": "delegation-1",
+            "parentRunId": run_id,
+            "rootRunId": run_id,
+            "childRunId": "child-1",
+            "agentRole": "researcher",
+            "event": {
+                "type": "tool.calls_started",
+                "runId": "child-1",
+                "payload": {
+                    "calls": [{
+                        "id": "call-1",
+                        "name": "readSource",
+                        "arguments_json": "{}",
+                    }],
+                    "in_progress": True,
+                },
+            },
+        },
+    )
+
+    snapshot = await _queries(temp_db).get_snapshot(run_id)
+
+    assert snapshot is not None
+    assert snapshot["events"][0]["chunk"] == {
+        "agentSubRunEvent": {
+            "runId": run_id,
+            "parentRunId": run_id,
+            "rootRunId": run_id,
+            "delegationId": "delegation-1",
+            "childRunId": "child-1",
+            "agentRole": "researcher",
+            "agentTitle": None,
+            "objective": None,
+            "chunk": {
+                "toolCalls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "displayNames": {},
+                    "function": {
+                        "name": "readSource",
+                        "arguments": "{}",
+                    },
+                }],
+                "toolCallsInProgress": True,
+                "partialContent": "",
+                "partialThinking": "",
+                "model": None,
+            },
+        },
+    }
+
+
+async def test_validated_child_response_replays_as_natural_language_delta(temp_db):
+    run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="write scenes",
+        mode="agent",
+    )
+    await append_event(
+        temp_db,
+        run_id,
+        "delegation.event",
+        {
+            "delegationId": "delegation-writer",
+            "parentRunId": run_id,
+            "rootRunId": run_id,
+            "childRunId": "child-writer",
+            "agentRole": "screenplay_writer",
+            "unitId": "ep05",
+            "attempt": 1,
+            "event": {
+                "type": "screenplay.long_task.response",
+                "runId": "child-writer",
+                "payload": {"content": "已完成第五集正文。"},
+            },
+        },
+    )
+
+    snapshot = await _queries(temp_db).get_snapshot(run_id)
+
+    assert snapshot is not None
+    envelope = snapshot["events"][0]["chunk"]["agentSubRunEvent"]
+    assert envelope["unitId"] == "ep05"
+    assert envelope["attempt"] == 1
+    assert envelope["chunk"] == {"delta": "已完成第五集正文。"}
+
+
+async def test_latest_session_run_route_returns_prompt_and_snapshot(temp_db):
+    run_id = await _seed_run(temp_db)
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="GET",
+        path="/api/ai/session-runs/latest?sessionId=7",
+        json_body=None,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["prompt"] == "private prompt must not be exposed by snapshots"
+    assert payload["snapshot"]["run"]["runId"] == run_id
+    assert "prompt" not in payload["snapshot"]["run"]
+
+
 async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     run_id = await _seed_run(temp_db)
     app = FastAPI()
@@ -174,12 +294,56 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     snapshot = await _queries(temp_db).get_snapshot(run_id)
 
     assert first.json()["data"] == {
+        "status": "canceled",
+        "newlyRequested": True,
+        "childrenCanceled": 0,
+        "terminalized": True,
+    }
+    assert second.json()["data"] == {
+        "status": "canceled",
+        "newlyRequested": False,
+        "childrenCanceled": 0,
+        "terminalized": False,
+    }
+    assert snapshot is not None
+    assert snapshot["run"]["status"] == "canceled"
+    assert snapshot["todos"][0]["status"] == "blocked"
+    assert snapshot["events"][-1]["type"] == "run.canceled"
+
+
+async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
+    timestamp = now_ms()
+    run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="still owned",
+        mode="agent",
+        execution_owner_id="live-worker",
+        heartbeat_at_ms=timestamp,
+        lease_expires_at_ms=timestamp + 60_000,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/cancel",
+        json_body={},
+    )
+    snapshot = await _queries(temp_db).get_snapshot(run_id)
+
+    assert response.json()["data"] == {
         "status": "cancel_requested",
         "newlyRequested": True,
         "childrenCanceled": 0,
+        "terminalized": False,
     }
-    assert second.json()["data"]["newlyRequested"] is False
     assert snapshot is not None
+    assert snapshot["run"]["status"] == "running"
+    assert snapshot["run"]["execution"]["leaseExpiresAtMs"] == (
+        timestamp + 60_000
+    )
     assert snapshot["run"]["execution"]["cancellationRequested"] is True
 
 

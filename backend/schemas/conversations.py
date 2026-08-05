@@ -21,4 +21,6 @@ class SaveConversationRequest(BaseModel):
     taskPlan: Optional[Any] = None
     contextCompaction: Optional[Any] = None
     contextBudget: Optional[Any] = None
+    screenplayProposal: Optional[Any] = None
+    agentProcess: Optional[Any] = None
     agentRunId: Optional[str] = None

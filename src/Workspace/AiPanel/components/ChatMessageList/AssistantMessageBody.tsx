@@ -1,9 +1,9 @@
 import React from "react";
 import {
-  CheckCircleOutlined,
-  ExclamationCircleOutlined,
-  LoadingOutlined,
-} from "../../../../ui";
+  CheckCircleIcon,
+  AlertCircleIcon,
+  LoadingIcon,
+} from '@/purr-components';
 import { type ChatMessage } from "../../hooks";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
@@ -11,6 +11,9 @@ import SettingDiffCard from "../SettingDiffCard";
 import ToolApprovalCard from "../ToolApprovalCard";
 import WorkLog from "../WorkLog";
 import SubAgentStatusList from "../SubAgentStatusList";
+import StructuredQuestionCard from "../StructuredQuestionCard";
+import ErrorReportNotice from "./ErrorReportNotice";
+import { parseStructuredQuestions } from "../../structuredQuestions";
 import {
   buildAssistantTimeline,
   getAssistantProcessingLabel,
@@ -25,6 +28,7 @@ export interface AssistantMessageBodyProps {
   isLastAssistant: boolean;
   showPlaceholder: boolean;
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
+  onStructuredAnswer?: (answer: string) => void;
 }
 
 function isVisibleWorkLogPart(part: AssistantTimelinePart): boolean {
@@ -58,6 +62,7 @@ function AssistantMessageBodyInner({
   isLastAssistant,
   showPlaceholder,
   setScrolledUpByReason,
+  onStructuredAnswer,
 }: AssistantMessageBodyProps) {
   const isStreaming = loading && isLastAssistant;
   const handleWheelUp = () =>
@@ -144,11 +149,11 @@ function AssistantMessageBodyInner({
                   className={`work-log__context-compaction ${failed ? "work-log__context-compaction--failed" : ""}`}
                 >
                   {running ? (
-                    <LoadingOutlined spin />
+                    <LoadingIcon spin />
                   ) : failed ? (
-                    <ExclamationCircleOutlined />
+                    <AlertCircleIcon />
                   ) : (
-                    <CheckCircleOutlined />
+                    <CheckCircleIcon />
                   )}
                   <span>
                     {running
@@ -177,6 +182,7 @@ function AssistantMessageBodyInner({
                 <SubAgentStatusList
                   key={`delegations-${partIndex}`}
                   items={part.items}
+                  activities={message.subAgentActivities}
                 />
               );
             }
@@ -189,19 +195,41 @@ function AssistantMessageBodyInner({
       ) : null}
 
       {!showPlaceholder &&
-        answerParts.map((part, partIndex) =>
-          part.type === "text" ? (
+        answerParts.map((part, partIndex) => {
+          if (part.type !== "text") return null;
+          const structuredQuestions = isStreaming
+            ? null
+            : parseStructuredQuestions(part.md);
+          return structuredQuestions ? (
+            <StructuredQuestionCard
+              key={`questions-${partIndex}`}
+              questions={structuredQuestions}
+              disabled={loading}
+              onAnswer={onStructuredAnswer}
+            />
+          ) : (
             <div key={`text-${partIndex}`} className="bubble-content">
               <Markdown>{part.md}</Markdown>
             </div>
-          ) : null,
-        )}
+          );
+        })}
 
       {!showPlaceholder && isLastAssistant && loading && hasAnswerContent && (
         <div className="bubble-content bubble-content--waiting-dots">
           <span className="a-blink-dots">...</span>
         </div>
       )}
+      {message.error ? (
+        <ErrorReportNotice
+          message={`生成中断：${message.error}`}
+          report={message.errorReport}
+        />
+      ) : null}
+      {message.termination ? (
+        <div className="bubble-content bubble-content--termination">
+          {message.termination}
+        </div>
+      ) : null}
       {(message.settingDiffCards || []).map((card) => (
         <SettingDiffCard key={card.sessionKey} card={card} />
       ))}

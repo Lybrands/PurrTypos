@@ -8,6 +8,10 @@ from agent_core.tools.contract import (
     validate_tool_contract,
 )
 from agent_core.tools.executor import CoreToolExecutor
+from agent_core.tools.display_names import (
+    model_visible_tool_schema,
+    resolve_tool_display_name,
+)
 from agent_core.tools.registry import InMemoryToolCatalog, ToolEnablement
 from agent_core.tools.security import (
     ParsedToolCall,
@@ -31,8 +35,10 @@ __all__ = [
     "ToolSecurityFailure",
     "await_with_cancellation",
     "inspect_tool_contract",
+    "model_visible_tool_schema",
     "parse_tool_arguments",
     "preflight_tool_calls",
+    "resolve_tool_display_name",
     "safe_error_content",
     "sanitize_error_message",
     "sanitize_tool_result",

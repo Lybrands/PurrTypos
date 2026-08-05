@@ -1,5 +1,6 @@
 import React from "react";
-import { Button, Input, type TextAreaRef } from "../../../../ui";
+import { type PurrTextAreaRef } from '@/purr-components';
+import AgentMessageEditor from '@/components/AgentConversation/MessageEditor';
 import type { AiModelConfig, EntityId } from "../../../../types";
 import AiContextBar, { type AiContextBarBindings } from "../AiContextBar";
 import AiComposeBottom, {
@@ -15,15 +16,15 @@ export interface MessageEditorProps {
   /** 编辑中条目的对话索引，用作 textarea key，确保切换编辑目标时重建。 */
   editingMessageIndex: number | null;
   editingMessageDraftRef: React.MutableRefObject<string>;
-  editTextareaRef: React.RefObject<TextAreaRef | null>;
-  onSend: () => void;
+  editTextareaRef: React.RefObject<PurrTextAreaRef | null>;
+  onSend: (content: string) => void;
   onCancel: () => void;
   onAbort: () => void;
 }
 
 /**
- * 用户消息的“编辑重发”表单：关联上下文栏 + 文本域 + 底部模型条（取消 / 发送）。
- * 从 ChatMessageBubble 内联块抽出，让气泡组件本身只负责消息形态分发。
+ * 小说业务对共享编辑器的适配层：只注入关联上下文与模型栏，
+ * 编辑器结构、文本域、按钮和键盘行为由 AgentMessageEditor 统一负责。
  */
 export default function MessageEditor({
   bookId,
@@ -39,48 +40,34 @@ export default function MessageEditor({
   onAbort,
 }: MessageEditorProps) {
   return (
-    <div className="bubble-content bubble-content--edit">
-      {bookId != null && (
+    <AgentMessageEditor
+      key={`edit-${editingMessageIndex}`}
+      initialContent={editingMessageDraftRef.current}
+      textareaRef={editTextareaRef}
+      beforeEditor={bookId != null ? (
         <AiContextBar
           bookId={bookId}
           chapterId={chapterId ?? null}
           {...contextBar}
         />
+      ) : undefined}
+      onDraftChange={(content) => {
+        editingMessageDraftRef.current = content;
+      }}
+      onSubmit={(content) => {
+        editingMessageDraftRef.current = content;
+        onSend(content);
+      }}
+      onCancel={onCancel}
+      renderFooter={(actions) => (
+        <AiComposeBottom
+          modelConfigs={modelConfigs}
+          {...modelSelection}
+          loading={false}
+          onAbort={onAbort}
+          rightContent={actions}
+        />
       )}
-      <Input.TextArea
-        key={`edit-${editingMessageIndex}`}
-        className="bubble-edit-textarea"
-        defaultValue={editingMessageDraftRef.current}
-        ref={editTextareaRef as React.RefObject<TextAreaRef>}
-        placeholder="编辑内容，发送将从此处重新对话…"
-        autoSize={{ minRows: 2, maxRows: 8 }}
-        autoFocus
-        onChange={(e) => {
-          editingMessageDraftRef.current = e.target.value;
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            onSend();
-          }
-        }}
-      />
-      <AiComposeBottom
-        modelConfigs={modelConfigs}
-        {...modelSelection}
-        loading={false}
-        onAbort={onAbort}
-        rightContent={
-          <div className="bubble-edit-actions">
-            <Button type="text" size="small" onClick={onCancel}>
-              取消
-            </Button>
-            <Button type="primary" size="small" onClick={onSend}>
-              发送
-            </Button>
-          </div>
-        }
-      />
-    </div>
+    />
   );
 }

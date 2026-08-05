@@ -10,7 +10,7 @@ def test_runtime_regression_suite_covers_promoted_incidents():
 
     suite = run_runtime_regression_suite()
 
-    assert suite["summary"] == {"total": 7, "passed": 7, "failed": 0}
+    assert suite["summary"] == {"total": 11, "passed": 11, "failed": 0}
     assert [result["caseId"] for result in suite["results"]] == [
         "healthy-sequential-read",
         "planner-silent-fallback",
@@ -19,6 +19,10 @@ def test_runtime_regression_suite_covers_promoted_incidents():
         "context-overflow-stops-run",
         "tool-handler-error-stops-run",
         "client-disconnect-cancels-run",
+        "malformed-tool-json-is-classified",
+        "started-tool-without-result-is-classified",
+        "compaction-failure-is-classified",
+        "model-interruption-is-classified",
     ]
 
 
@@ -65,3 +69,27 @@ async def test_runtime_regression_endpoint_returns_suite_report():
 
     assert response["success"] is True
     assert response["data"]["summary"]["failed"] == 0
+
+
+def test_stability_quality_gate_passes_only_when_all_incidents_are_recognized():
+    from application.operations.deterministic_checks import (
+        run_agent_stability_quality_gate,
+    )
+
+    gate = run_agent_stability_quality_gate()
+
+    assert gate["verdict"] == "pass"
+    assert gate["summary"] == {
+        "promotedIncidents": 11,
+        "failedIncidents": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stability_quality_gate_endpoint_returns_gate_report():
+    from routers.ai import get_agent_stability_quality_gate
+
+    response = await get_agent_stability_quality_gate()
+
+    assert response["success"] is True
+    assert response["data"]["verdict"] == "pass"

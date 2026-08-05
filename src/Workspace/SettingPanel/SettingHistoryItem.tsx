@@ -1,5 +1,5 @@
-import { RollbackOutlined } from '../../ui'
-import { Button, Spin, Tag, Tooltip } from '../../ui'
+import { RollbackIcon } from '@/purr-components'
+import { PurrButton, PurrSpin, PurrTag, PurrTooltip } from '@/purr-components'
 import type { HistoryViewModel } from './SettingHistoryAdapter'
 
 interface SettingHistoryItemProps {
@@ -20,11 +20,11 @@ const SOURCE_LABEL: Record<string, { color: string; text: string }> = {
 }
 
 function renderSourceTag(source: string) {
-  if (source.startsWith('rollback_of:')) return <Tag color="orange">回退</Tag>
+  if (source.startsWith('rollback_of:')) return <PurrTag color="orange">回退</PurrTag>
   const metadata = SOURCE_LABEL[source]
   return metadata
-    ? <Tag color={metadata.color}>{metadata.text}</Tag>
-    : <Tag>{source || 'unknown'}</Tag>
+    ? <PurrTag color={metadata.color}>{metadata.text}</PurrTag>
+    : <PurrTag>{source || 'unknown'}</PurrTag>
 }
 
 function previewText(text: string, maxLength = 200): string {
@@ -46,16 +46,16 @@ export default function SettingHistoryItem({
   onRestore,
 }: SettingHistoryItemProps) {
   const restoreButton = (
-    <Button
+    <PurrButton
       type="text"
       size="small"
       danger
-      icon={<RollbackOutlined />}
+      icon={<RollbackIcon />}
       loading={restoring}
       onClick={onRestore}
     >
       回退到此版本
-    </Button>
+    </PurrButton>
   )
 
   return (
@@ -72,14 +72,14 @@ export default function SettingHistoryItem({
       </div>
       <div className="setting-history-item-preview">{previewText(item.previewContent)}</div>
       <div className="setting-history-item-actions">
-        <Button type="text" size="small" onClick={onToggle}>
+        <PurrButton type="text" size="small" onClick={onToggle}>
           {expanded ? '收起' : '查看完整内容'}
-        </Button>
+        </PurrButton>
         {restoreTooltip ? (
-          <Tooltip title={restoreTooltip}>{restoreButton}</Tooltip>
+          <PurrTooltip title={restoreTooltip}>{restoreButton}</PurrTooltip>
         ) : restoreButton}
       </div>
-      {expanded && detailLoading && !detail ? <Spin size="small" /> : null}
+      {expanded && detailLoading && !detail ? <PurrSpin size="small" /> : null}
       {expanded && detail?.id === item.id ? (
         <pre className="setting-history-item-full">{detail.beforeContent || '（空）'}</pre>
       ) : null}

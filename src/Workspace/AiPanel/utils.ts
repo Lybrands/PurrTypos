@@ -11,6 +11,13 @@ import {
   EMPTY_RESPONSE_MESSAGE,
   isSynthesizedToolOnlyResponse,
 } from './hooks/chatHistory'
+import { KNOWN_TOOL_CALL_LABELS } from './hooks/toolCallLabels'
+
+function normalizeStoredToolCallLabel(label: string): string {
+  return KNOWN_TOOL_CALL_LABELS[
+    label as keyof typeof KNOWN_TOOL_CALL_LABELS
+  ] || label
+}
 
 function parseJsonObject<T>(value: string | null | undefined): T | undefined {
   if (!value) return undefined
@@ -138,6 +145,8 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         role: 'assistant',
         content: item.response,
         conversationId: item.id,
+        agentRunId: item.agent_run_id || undefined,
+        longTaskId: item.long_task_id || undefined,
         model: item.model || undefined,
         durationMs: typeof item.duration_ms === 'number' ? item.duration_ms : undefined,
         thinking: item.thinking || undefined,
@@ -150,11 +159,32 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         contextBudget: parseJsonObject<
           NonNullable<ChatMessage['contextBudget']>
         >(item.context_budget),
+        screenplayProposal: parseJsonObject<
+          NonNullable<ChatMessage['screenplayProposal']>
+        >(item.screenplay_proposal),
+      }
+      const agentProcess = parseJsonObject<{
+        delegations?: ChatMessage['delegations']
+        subAgentActivities?: ChatMessage['subAgentActivities']
+      }>(item.agent_process)
+      if (Array.isArray(agentProcess?.delegations)) {
+        assistantMsg.delegations = agentProcess.delegations
+      }
+      if (Array.isArray(agentProcess?.subAgentActivities)) {
+        assistantMsg.subAgentActivities = agentProcess.subAgentActivities
       }
       const rawSegments = item.tool_call_segments
       if (rawSegments) {
         try {
-          const segments = JSON.parse(rawSegments) as { textBefore: string; labels: string[] }[]
+          const parsedSegments = JSON.parse(rawSegments) as { textBefore: string; labels: string[] }[]
+          const segments = Array.isArray(parsedSegments)
+            ? parsedSegments.map((segment) => ({
+                ...segment,
+                labels: Array.isArray(segment.labels)
+                  ? segment.labels.map((label) => normalizeStoredToolCallLabel(String(label)))
+                  : [],
+              }))
+            : []
           if (Array.isArray(segments) && segments.length > 0) {
             const textBeforeJoined = segments.map((s) => s.textBefore || '').join('')
             const resp = item.response ?? ''
@@ -194,7 +224,11 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         } catch (_) {}
       }
       return [
-        { role: 'user' as const, content: item.prompt },
+        {
+          role: 'user' as const,
+          content: item.prompt,
+          sentAt: item.create_time || undefined,
+        },
         assistantMsg,
       ]
     })

@@ -1,5 +1,5 @@
 import React from "react";
-import { RightOutlined } from "../../../../ui";
+import { ChevronRightIcon } from '@/purr-components';
 import Markdown from "../Markdown";
 import "./index.scss";
 
@@ -103,7 +103,7 @@ export default function ThinkingRegion({
         onClick={toggleOpen}
         aria-expanded={open}
       >
-        <RightOutlined
+        <ChevronRightIcon
           className={`thinking-region__chevron ${open ? "thinking-region__chevron--open" : ""}`}
         />
         <span>{headerLabel(streaming, elapsedMs, durationMs)}</span>

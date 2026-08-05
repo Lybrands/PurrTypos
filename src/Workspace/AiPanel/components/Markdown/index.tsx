@@ -1,8 +1,17 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import "./index.scss";
 
 const REMARK_PLUGINS = [remarkGfm];
+const MARKDOWN_COMPONENTS: Components = {
+  table: ({ children }) => (
+    <div className="agent-markdown__table-scroll">
+      <table>{children}</table>
+    </div>
+  ),
+};
 
 export interface MarkdownProps {
   children: string;
@@ -10,13 +19,16 @@ export interface MarkdownProps {
 }
 
 function MarkdownInner({ children, className }: MarkdownProps) {
-  const md = (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{children}</ReactMarkdown>
+  return (
+    <div className={['agent-markdown', className || ''].filter(Boolean).join(' ')}>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        components={MARKDOWN_COMPONENTS}
+      >
+        {children}
+      </ReactMarkdown>
+    </div>
   );
-  if (className) {
-    return <div className={className}>{md}</div>;
-  }
-  return md;
 }
 
 export default React.memo(

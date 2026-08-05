@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_core.contracts import RuntimeLimits
 from agent_core.ports import ContextProvider, ToolCatalog
+from agent_core.recovery import RecoveryPolicy
 from agent_core.tools import InMemoryToolCatalog
 from domains.agent_roles import AgentRoleRegistry
 from domains.screenplay.agent_roles import (
@@ -22,6 +24,8 @@ class ScreenplayDomainAdapter:
     tool_catalog: ToolCatalog
     agent_role_registry: AgentRoleRegistry
     context_provider: ContextProvider
+    runtime_limits: RuntimeLimits = RuntimeLimits(max_model_rounds=12)
+    recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
     @classmethod
     def build(
@@ -29,11 +33,15 @@ class ScreenplayDomainAdapter:
         db,
         *,
         tool_catalog: ToolCatalog | None = None,
+        artifact_continuity=None,
     ) -> "ScreenplayDomainAdapter":
         return cls(
             planning_policy=ScreenplayPlanningPolicy(),
             execution_state_factory=ScreenplayExecutionStateFactory(),
             tool_catalog=tool_catalog or InMemoryToolCatalog(()),
             agent_role_registry=build_screenplay_agent_role_registry(),
-            context_provider=ScreenplayContextProvider(db),
+            context_provider=ScreenplayContextProvider(
+                db,
+                artifact_continuity=artifact_continuity,
+            ),
         )

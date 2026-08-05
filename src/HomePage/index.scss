@@ -116,13 +116,11 @@
   overflow: hidden;
   color: var(--text-primary);
   border: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--bg-elevated) 91%, transparent);
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(16px);
 
   &:hover {
     border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
-    background: var(--bg-elevated);
     box-shadow: var(--shadow-md);
     transform: translateY(-4px);
 
@@ -197,15 +195,6 @@
     font-size: var(--font-size-h3);
     letter-spacing: -0.02em;
   }
-}
-
-.home-entry-btn--agent {
-  background:
-    linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--accent-light) 54%, var(--bg-elevated)),
-      color-mix(in srgb, var(--bg-elevated) 94%, transparent) 64%
-    );
 }
 
 .home-entry-btn--secondary {

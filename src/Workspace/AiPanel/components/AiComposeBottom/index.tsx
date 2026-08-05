@@ -1,5 +1,5 @@
 import React from 'react'
-import { Select } from '../../../../ui'
+import { PurrSelect } from '@/purr-components'
 import ModelPicker, { type ModelRuntimeConfigPatch } from '../ModelPicker'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
@@ -44,7 +44,7 @@ export default function AiComposeBottom({
   return (
     <div className="chat-input-bottom">
       <div className="chat-input-bottom-left">
-        <Select
+        <PurrSelect
           className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''}`}
           size="small"
           value={chatAgentMode}

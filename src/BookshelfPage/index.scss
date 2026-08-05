@@ -253,7 +253,6 @@
     .book-card-add-inner {
       color: var(--accent);
       border-color: color-mix(in srgb, var(--accent) 54%, var(--border));
-      background: var(--accent-light);
       box-shadow: var(--shadow-sm);
       transform: translateY(-3px);
     }
@@ -283,7 +282,6 @@
   color: var(--text-secondary);
   border: 1px dashed var(--border-strong);
   border-radius: 4px 13px 13px 4px;
-  background: color-mix(in srgb, var(--bg-panel) 56%, transparent);
   transition:
     color var(--transition-base),
     border-color var(--transition-base),

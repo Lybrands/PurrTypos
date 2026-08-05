@@ -8,11 +8,14 @@ import pytest
 from agent_core.cancellation import OperationCanceled, await_with_cancellation
 from agent_core.contracts import ToolCall, ToolExecutionLimits
 from agent_core.tools.security import (
+    ParsedToolCall,
+    normalize_tool_arguments_to_schema,
     parse_tool_arguments,
     preflight_tool_calls,
     sanitize_error_message,
     sanitize_tool_result,
     summarize_tool_arguments,
+    validate_tool_arguments_schema,
 )
 
 
@@ -55,6 +58,143 @@ def test_batch_preflight_rejects_duplicates_limits_and_oversized_arguments():
 
     _, oversized = parse_tool_arguments('{"x":1}', max_chars=4)
     assert oversized is not None and oversized.code == "tool_arguments_too_large"
+    assert oversized.diagnostics == {
+        "stage": "transport_preflight",
+        "actualChars": 7,
+        "maxChars": 4,
+        "measurement": "raw_json_transport_chars",
+    }
+
+
+def test_invalid_json_reports_position_without_echoing_payload():
+    _, failure = parse_tool_arguments(
+        '{"sceneText":"没有闭合}',
+        tool_name="proposeSceneDraft",
+    )
+
+    assert failure is not None
+    assert failure.code == "invalid_tool_arguments_json"
+    assert failure.diagnostics["stage"] == "json_decode"
+    assert failure.diagnostics["toolName"] == "proposeSceneDraft"
+    assert failure.diagnostics["line"] == 1
+    assert failure.diagnostics["column"] > 1
+    assert "没有闭合" not in failure.message
+
+
+def test_default_transport_envelope_does_not_reintroduce_the_legacy_32k_limit():
+    raw = json.dumps({"sceneText": "雾" * 6_000}, ensure_ascii=True)
+    assert len(raw) > 32_000
+
+    value, failure = parse_tool_arguments(raw)
+
+    assert failure is None
+    assert value == {"sceneText": "雾" * 6_000}
+
+
+def test_discriminated_any_of_reports_the_selected_variant_requirement():
+    parameters = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {
+                            "itemType": {
+                                "type": "string",
+                                "enum": ["text_item"],
+                            },
+                            "text": {"type": "string"},
+                        },
+                        "required": ["itemType", "text"],
+                        "additionalProperties": False,
+                    }, {
+                        "type": "object",
+                        "properties": {
+                            "itemType": {
+                                "type": "string",
+                                "enum": ["evidence"],
+                            },
+                            "sourceIds": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["itemType", "sourceIds"],
+                        "additionalProperties": False,
+                    }],
+                },
+            },
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+    parsed = ParsedToolCall(
+        call=ToolCall(
+            id="call-any-of",
+            name="appendItems",
+            arguments_json='{"items":[{"itemType":"text_item"}]}',
+        ),
+        arguments={"items": [{"itemType": "text_item"}]},
+    )
+
+    failure = validate_tool_arguments_schema(parsed, parameters)
+
+    assert failure is not None
+    assert failure.code == "invalid_tool_arguments_schema"
+    assert failure.diagnostics["path"] == "$.items[0].text"
+    assert failure.diagnostics["keyword"] == "required"
+
+
+def test_discriminated_any_of_normalizes_nested_structures():
+    parameters = {
+        "type": "object",
+        "properties": {
+            "item": {
+                "anyOf": [{
+                    "type": "object",
+                    "properties": {
+                        "itemType": {
+                            "type": "string",
+                            "enum": ["evidence"],
+                        },
+                        "sourceIds": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["itemType", "sourceIds"],
+                    "additionalProperties": False,
+                }],
+            },
+        },
+        "required": ["item"],
+        "additionalProperties": False,
+    }
+    parsed = ParsedToolCall(
+        call=ToolCall(
+            id="call-normalize-any-of",
+            name="appendItems",
+            arguments_json="{}",
+        ),
+        arguments={
+            "item": {
+                "itemType": "evidence",
+                "sourceIds": '["chapter-1"]',
+            },
+        },
+    )
+
+    normalized, failure = normalize_tool_arguments_to_schema(
+        parsed,
+        parameters,
+    )
+
+    assert failure is None
+    assert normalized is not None
+    assert normalized.arguments["item"]["sourceIds"] == ("chapter-1",)
+    assert normalized.normalized_argument_paths == ("$.item.sourceIds",)
 
 
 def test_tool_result_and_error_sanitization_are_bounded_and_redacted():

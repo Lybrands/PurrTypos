@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { DeleteOutlined, PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '../../ui'
-import { Button, Input, Modal, Tooltip } from '../../ui'
+import { DeleteIcon, PlusIcon, EditIcon, CheckIcon, CloseIcon } from '@/purr-components'
+import { PurrButton, PurrInput, PurrModal, PurrTooltip } from '@/purr-components'
 import type { CharacterOption } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 
@@ -93,7 +93,7 @@ function OptionList({
       {options.map((opt) => (
         <div key={opt.id} className="char-option-item">
           {editingId === opt.id ? (
-            <Input
+            <PurrInput
               ref={editInputRef}
               size="small"
               value={editingValue}
@@ -108,21 +108,21 @@ function OptionList({
           <div className="char-option-actions">
             {editingId === opt.id ? (
               <>
-                <Tooltip title="确认">
-                  <Button type="text" size="small" icon={<CheckOutlined />} onClick={handleConfirmEdit} />
-                </Tooltip>
-                <Tooltip title="取消">
-                  <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setEditingId(null)} />
-                </Tooltip>
+                <PurrTooltip title="确认">
+                  <PurrButton type="text" size="small" icon={<CheckIcon />} onClick={handleConfirmEdit} />
+                </PurrTooltip>
+                <PurrTooltip title="取消">
+                  <PurrButton type="text" size="small" icon={<CloseIcon />} onClick={() => setEditingId(null)} />
+                </PurrTooltip>
               </>
             ) : (
               <>
-                <Tooltip title="编辑">
-                  <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleStartEdit(opt)} />
-                </Tooltip>
-                <Tooltip title="删除">
-                  <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => handleDelete(opt.id)} />
-                </Tooltip>
+                <PurrTooltip title="编辑">
+                  <PurrButton type="text" size="small" icon={<EditIcon />} onClick={() => handleStartEdit(opt)} />
+                </PurrTooltip>
+                <PurrTooltip title="删除">
+                  <PurrButton type="text" size="small" icon={<DeleteIcon />} onClick={() => handleDelete(opt.id)} />
+                </PurrTooltip>
               </>
             )}
           </div>
@@ -131,7 +131,7 @@ function OptionList({
 
       {isAdding ? (
         <div className="char-option-item char-option-add-row">
-          <Input
+          <PurrInput
             ref={addInputRef}
             size="small"
             placeholder="输入新值，回车确认"
@@ -141,23 +141,23 @@ function OptionList({
             onBlur={handleAdd}
             style={{ flex: 1 }}
           />
-          <Tooltip title="取消">
-            <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => { setIsAdding(false); setAddingValue('') }} />
-          </Tooltip>
+          <PurrTooltip title="取消">
+            <PurrButton type="text" size="small" icon={<CloseIcon />} onClick={() => { setIsAdding(false); setAddingValue('') }} />
+          </PurrTooltip>
         </div>
       ) : (
-        <Tooltip title="添加选项">
-          <Button
+        <PurrTooltip title="添加选项">
+          <PurrButton
             type="dashed"
             size="small"
-            icon={<PlusOutlined />}
+            icon={<PlusIcon />}
             onClick={() => setIsAdding(true)}
             block
             style={{ marginTop: 8 }}
           >
             添加
-          </Button>
-        </Tooltip>
+          </PurrButton>
+        </PurrTooltip>
       )}
     </div>
   )
@@ -165,7 +165,7 @@ function OptionList({
 
 export default function CharacterOptionsModal({ open, onClose, onOptionsChange }: Props) {
   return (
-    <Modal
+    <PurrModal
       title="标签选项"
       open={open}
       onCancel={onClose}
@@ -177,6 +177,6 @@ export default function CharacterOptionsModal({ open, onClose, onOptionsChange }
       <div className="char-options-tab-content">
         <OptionList category="tag" onOptionsChange={onOptionsChange} />
       </div>
-    </Modal>
+    </PurrModal>
   )
 }

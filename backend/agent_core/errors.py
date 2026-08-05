@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any
 
 class AgentCoreError(Exception):
     """Base class for errors with host-controlled public handling."""
@@ -17,6 +20,17 @@ class ResponseJudgeContractError(ContractViolationError):
 
 class ContextOverflowError(AgentCoreError):
     """The complete request cannot fit inside the configured budget."""
+
+    def __init__(
+        self,
+        message: str = "context exceeds the configured budget",
+        *,
+        reason_code: str = "context_overflow",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code or "context_overflow")
+        self.details = MappingProxyType(dict(details or {}))
 
 
 class InvalidPlannerOutputError(AgentCoreError):

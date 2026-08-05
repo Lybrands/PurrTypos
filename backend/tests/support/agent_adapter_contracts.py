@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
+from agent_core.artifacts import (
+    ArtifactClaimLeaseCommand,
+    ArtifactWriteClaimCommand,
+)
+from agent_core.artifacts.errors import ArtifactConflictError
+from agent_core.artifacts.ports import ArtifactClaimRepository
 from agent_core.contracts import ToolCall, ToolHandlerResult
 from agent_core.ports import (
     CheckpointStore,
@@ -11,6 +18,14 @@ from agent_core.ports import (
     ExecutionLeaseStore,
     ToolIdempotencyGateway,
 )
+from agent_core.work_items import (
+    WorkItemCreateCommand,
+    WorkItemRunLinkCommand,
+    WorkItemRunRelation,
+    WorkItemStatus,
+    WorkItemTransitionCommand,
+)
+from agent_core.work_items.ports import WorkItemRepository
 
 
 async def assert_execution_lease_store_contract(
@@ -65,6 +80,14 @@ async def assert_delegation_repository_contract(
         worker_id="worker-b",
         max_parallel_children=1,
     ) is None
+    exact = await repository.claim(
+        delegation_id=low.id,
+        parent_run_id=parent_run_id,
+        worker_id="worker-b",
+        max_parallel_children=2,
+    )
+    assert exact is not None
+    assert exact.delegation.id == low.id
     rows = await repository.list_for_parent(parent_run_id)
     assert {row.id for row in rows} == {low.id, high.id}
     assert (await repository.aggregate(parent_run_id)).state == "pending"
@@ -113,3 +136,99 @@ async def assert_tool_idempotency_gateway_contract(
     assert first.from_cache is False
     assert replay.from_cache is True
     assert replay.content == first.content
+
+
+async def assert_work_item_repository_contract(
+    repository: WorkItemRepository,
+) -> None:
+    assert isinstance(repository, WorkItemRepository)
+    item = await repository.create(
+        "contract-work-item",
+        WorkItemCreateCommand(
+            namespace="contract",
+            kind="durable_task",
+            owner_id="contract-owner",
+            created_by_run_id="contract-run-a",
+            metadata={"version": 1},
+        ),
+    )
+    assert item.status is WorkItemStatus.OPEN
+    creator_links = await repository.list_run_links(item.id)
+    assert len(creator_links) == 1
+    assert creator_links[0].relation is WorkItemRunRelation.CREATED
+
+    command = WorkItemRunLinkCommand(
+        work_item_id=item.id,
+        run_id="contract-run-b",
+        relation=WorkItemRunRelation.CONTINUATION,
+        expected_revision=1,
+    )
+    link = await repository.link_run(command)
+    assert await repository.link_run(command) == link
+    current = await repository.load(item.id)
+    assert current is not None and current.revision == 1
+
+    completed = await repository.complete(WorkItemTransitionCommand(
+        work_item_id=item.id,
+        expected_revision=1,
+    ))
+    assert completed.status is WorkItemStatus.COMPLETED
+    assert completed.revision == 2
+    reference = await repository.link_run(WorkItemRunLinkCommand(
+        work_item_id=item.id,
+        run_id="contract-run-c",
+        relation=WorkItemRunRelation.REFERENCE,
+        expected_revision=2,
+    ))
+    assert reference.relation is WorkItemRunRelation.REFERENCE
+
+
+async def assert_artifact_claim_repository_contract(
+    repository: ArtifactClaimRepository,
+    *,
+    artifact_id: str,
+    work_item_id: str,
+    revision: int,
+    first_run_id: str,
+    second_run_id: str,
+) -> None:
+    assert isinstance(repository, ArtifactClaimRepository)
+
+    async def acquire(run_id: str):
+        return await repository.acquire(ArtifactWriteClaimCommand(
+            artifact_id=artifact_id,
+            work_item_id=work_item_id,
+            run_id=run_id,
+            expected_revision=revision,
+            lease_duration_ms=30_000,
+        ))
+
+    results = await asyncio.gather(
+        acquire(first_run_id),
+        acquire(second_run_id),
+        return_exceptions=True,
+    )
+    claims = [result for result in results if not isinstance(result, Exception)]
+    conflicts = [
+        result for result in results
+        if isinstance(result, ArtifactConflictError)
+    ]
+    assert len(claims) == 1
+    assert len(conflicts) == 1
+    claim = claims[0]
+    active = await repository.load_active(artifact_id)
+    assert active == claim
+    assert not await repository.release(ArtifactClaimLeaseCommand(
+        artifact_id=artifact_id,
+        run_id=claim.run_id,
+        claim_token="wrong-token",
+    ))
+    assert await repository.release(ArtifactClaimLeaseCommand(
+        artifact_id=artifact_id,
+        run_id=claim.run_id,
+        claim_token=claim.claim_token,
+    ))
+    reacquired = await acquire(claim.run_id)
+    assert reacquired.run_id == claim.run_id
+    assert await repository.release_for_run(claim.run_id) == 1
+    assert await repository.load_active(artifact_id) is None

@@ -130,6 +130,56 @@ def test_state_machine_reports_only_unfinished_tools_after_current_transition():
     assert RunStateMachine.future_allowed_tool_names(read_a_done) == frozenset()
 
 
+def test_partial_tool_progress_keeps_same_planner_step_authorized():
+    state = RunStateMachine.initialize(
+        "run-partial",
+        TaskPlan(
+            title="bounded append",
+            steps=(
+                _step(
+                    "append",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.WRITE,
+                    tools=("appendBatch",),
+                ),
+                _step(
+                    "finalize",
+                    executor=StepExecutor.TOOL,
+                    step_type=StepType.WRITE,
+                    tools=("finalizeArtifact",),
+                ),
+            ),
+        ),
+    )
+
+    progressed = RunStateMachine.on_tool_round_completed(
+        state,
+        ToolBatchOutcome.PROGRESSED,
+    )
+
+    assert progressed.changed is False
+    assert progressed.step_updates == ()
+    assert [step.status for step in progressed.after.steps] == [
+        StepStatus.RUNNING,
+        StepStatus.PENDING,
+    ]
+    assert RunStateMachine.allowed_tool_names_for_current_transition(
+        progressed.after
+    ) == {"appendBatch"}
+
+    completed = RunStateMachine.on_tool_round_completed(
+        progressed.after,
+        ToolBatchOutcome.COMPLETED,
+    )
+    assert [step.status for step in completed.after.steps] == [
+        StepStatus.DONE,
+        StepStatus.RUNNING,
+    ]
+    assert RunStateMachine.allowed_tool_names_for_current_transition(
+        completed.after
+    ) == {"finalizeArtifact"}
+
+
 def test_declined_tool_round_blocks_step_and_final_model_can_finish_run():
     state = RunStateMachine.initialize(
         "run-declined",

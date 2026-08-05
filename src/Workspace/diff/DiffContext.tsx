@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
-import { useToast } from '../../ui'
+import { usePurrToast } from '@/purr-components'
 import type { EntityId } from '../../types'
 import {
   composeResult,
@@ -72,7 +72,7 @@ export function useDiff(): DiffContextValue {
 }
 
 export function DiffProvider({ children }: { children: React.ReactNode }) {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const [sessions, setSessions] = React.useState<Record<string, DiffSession>>({})
   // 用 ref 存当前 sessions 给事件监听器读，避免依赖闭包
   const sessionsRef = React.useRef(sessions)

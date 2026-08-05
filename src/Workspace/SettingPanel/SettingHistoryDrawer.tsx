@@ -1,6 +1,6 @@
 import React from 'react'
-import { HistoryOutlined } from '../../ui'
-import { Drawer, Empty, Spin, useConfirm, useToast } from '../../ui'
+import { HistoryIcon } from '@/purr-components'
+import { PurrDrawer, PurrEmpty, PurrSpin, usePurrConfirm, usePurrToast } from '@/purr-components'
 import type { EntityId } from '../../types'
 import {
   getSettingHistoryAdapter,
@@ -35,8 +35,8 @@ export default function SettingHistoryDrawer({
   onClose,
   onRestored,
 }: SettingHistoryDrawerProps) {
-  const appMessage = useToast()
-  const confirm = useConfirm()
+  const appMessage = usePurrToast()
+  const confirm = usePurrConfirm()
   const adapter = getSettingHistoryAdapter(kind)
   const [loading, setLoading] = React.useState(false)
   const [itemsByStorage, setItemsByStorage] = React.useState<HistoryBuckets<HistoryViewModel[]>>({
@@ -129,10 +129,10 @@ export default function SettingHistoryDrawer({
   const detail = detailByStorage[adapter.storageKey]
 
   return (
-    <Drawer
+    <PurrDrawer
       title={(
         <span>
-          <HistoryOutlined style={{ marginRight: 8 }} />
+          <HistoryIcon style={{ marginRight: 8 }} />
           {adapter.title}
           {entityTitle ? (
             <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
@@ -148,9 +148,9 @@ export default function SettingHistoryDrawer({
       destroyOnHidden
     >
       {loading ? (
-        <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+        <div style={{ textAlign: 'center', padding: 60 }}><PurrSpin /></div>
       ) : items.length === 0 ? (
-        <Empty description="还没有修改历史" />
+        <PurrEmpty description="还没有修改历史" />
       ) : (
         <div className="setting-history-list">
           {items.map((item) => {
@@ -178,6 +178,6 @@ export default function SettingHistoryDrawer({
           })}
         </div>
       )}
-    </Drawer>
+    </PurrDrawer>
   )
 }

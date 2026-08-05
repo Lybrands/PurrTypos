@@ -1,4 +1,5 @@
 import { mergeAssistantErrorNotice } from "../../rendering";
+import { normalizeApiProvider } from "../../../../modelCatalog";
 import { type AiTaskPlan, type ChatMessage } from "../chat.types";
 import {
   EMPTY_RESPONSE_MESSAGE,
@@ -13,13 +14,22 @@ export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
 export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
 
 /**
- * 错误终态：把错误注释合并到当前助手轮，关 loading，cleanup 订阅与 refs。
+ * 错误终态：保留已产生的思考/工具过程并附上终止原因，随后清理运行态。
  */
 export const handleError: ChunkHandler = (chunk, ctx) => {
   if (!chunk.error) return;
   const { acc } = ctx;
   const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
   acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
+  const finalThinking = (acc.thinking || "").trim();
+  let savedThinkingBlocks = acc.thinkingBlocks ?? [];
+  let savedThinkingDurations = acc.thinkingDurationsMs ?? [];
+  if (finalThinking) {
+    const finalized = finalizeThinkingBlock(ctx, finalThinking);
+    savedThinkingBlocks = finalized.blocks;
+    savedThinkingDurations = finalized.durations;
+    acc.thinking = "";
+  }
   ctx.flushCommits();
 
   if (ctx.isVisibleSession()) {
@@ -27,28 +37,56 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
       const next = [...prev];
       const last = next[next.length - 1];
       if (!last || last.role !== "assistant") return prev;
+      const cm = last as ChatMessage;
+      const hasInspectableProcess = Boolean(
+        (acc.response || cm.content || "").trim() ||
+          savedThinkingBlocks.length ||
+          (acc.toolCallSegments?.length ?? cm.toolCallSegments?.length ?? 0) ||
+          acc.taskPlan ||
+          cm.taskPlan ||
+          acc.delegations?.length ||
+          cm.delegations?.length ||
+          cm.subAgentActivities?.length ||
+          acc.contextCompaction ||
+          cm.contextCompaction,
+      );
       const merged = mergeAssistantErrorNotice(
         {
-          content: acc.response || (last as ChatMessage).content || "",
+          content: acc.response || cm.content || "",
           contentAfterToolCalls:
             acc.toolCallSegments?.length
               ? (acc.contentAfterToolCalls ??
-                (last as ChatMessage).contentAfterToolCalls)
-              : (last as ChatMessage).contentAfterToolCalls,
-          toolCallSegments:
-            acc.toolCallSegments ?? (last as ChatMessage).toolCallSegments,
+                cm.contentAfterToolCalls)
+              : cm.contentAfterToolCalls,
+          toolCallSegments: acc.toolCallSegments ?? cm.toolCallSegments,
         },
         chunk.error,
       );
       next[next.length - 1] = {
-        ...(last as ChatMessage),
-        content: merged.content ?? (last as ChatMessage).content,
-        contentAfterToolCalls: merged.contentAfterToolCalls,
-        taskPlan: acc.taskPlan ?? (last as ChatMessage).taskPlan,
+        ...cm,
+        content: hasInspectableProcess
+          ? acc.response || cm.content || ""
+          : merged.content ?? cm.content,
+        contentAfterToolCalls: hasInspectableProcess
+          ? acc.contentAfterToolCalls ?? cm.contentAfterToolCalls
+          : merged.contentAfterToolCalls,
+        thinking: "",
+        thinkingStartedAt: undefined,
+        thinkingBlocks: savedThinkingBlocks.length
+          ? savedThinkingBlocks
+          : cm.thinkingBlocks,
+        thinkingDurationsMs: savedThinkingDurations.length
+          ? savedThinkingDurations
+          : cm.thinkingDurationsMs,
+        toolCallSegments: acc.toolCallSegments ?? cm.toolCallSegments,
+        taskPlan: acc.taskPlan ?? cm.taskPlan,
         durationMs,
         turnStartedAt: undefined,
         toolCalling: false,
-        ...(merged.isError ? { isError: true } : {}),
+        errorReport: chunk.errorReport ?? cm.errorReport,
+        ...(hasInspectableProcess
+          ? { error: chunk.error, isError: false }
+          : { isError: true }),
       };
       return next;
     });
@@ -144,7 +182,16 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           taskPlan:
             acc.taskPlan ??
             (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
+          screenplayProposal: acc.screenplayProposal ?? cm.screenplayProposal,
+          longTaskId: acc.longTaskId ?? cm.longTaskId,
+          termination:
+            chunk.aborted && hasVisibleModelResponse
+              ? MANUAL_ABORT_MESSAGE
+              : undefined,
           toolCalling: false,
+          errorReport: emptyResponse
+            ? chunk.errorReport ?? cm.errorReport
+            : cm.errorReport,
           ...(emptyResponse ? { isError: true } : {}),
         };
       }
@@ -158,8 +205,10 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   );
   acc.response = resolvedAssistantContent;
 
-  saveConversationIfNeeded(ctx, savedThinkingBlocks, savedThinkingDurations);
-  if (!emptyResponse) maybeGenerateSessionTitle(ctx);
+  if (ctx.persistConversation !== false) {
+    saveConversationIfNeeded(ctx, savedThinkingBlocks, savedThinkingDurations);
+    if (!emptyResponse) maybeGenerateSessionTitle(ctx);
+  }
 
   return true;
 };
@@ -195,7 +244,9 @@ function saveConversationIfNeeded(
         thinkTrim ||
         acc.taskPlan ||
         savedThinkingBlocks.length > 0 ||
-        (acc.toolCallSegments?.length ?? 0) > 0,
+        (acc.toolCallSegments?.length ?? 0) > 0 ||
+        acc.screenplayProposal ||
+        acc.longTaskId,
     );
   if (!shouldSave) return;
 
@@ -221,7 +272,14 @@ function saveConversationIfNeeded(
       taskPlan: acc.taskPlan ?? undefined,
       contextCompaction: acc.contextCompaction,
       contextBudget: acc.contextBudget,
-      agentRunId: acc.agentRunId,
+      screenplayProposal: acc.screenplayProposal,
+      agentProcess: (
+        acc.delegations?.length || acc.subAgentActivities?.length
+      ) ? {
+          delegations: acc.delegations,
+          subAgentActivities: acc.subAgentActivities,
+        } : undefined,
+      agentRunId: acc.conversationRunId ?? acc.agentRunId,
     }))
     .then((res) => {
       if (res && res.success) {
@@ -309,7 +367,7 @@ function maybeGenerateSessionTitle(
 
   console.log("[AI 对话] 请求生成标题", {
     sessionId: acc.sessionId,
-    apiProvider: cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
+    apiProvider: normalizeApiProvider(cfg.apiProvider),
     model: apiModelName,
   });
   getServices()
@@ -318,8 +376,7 @@ function maybeGenerateSessionTitle(
       baseURL: cfg.baseUrl || undefined,
       prompt:
         `User:\n${acc.userText}\n\nAssistant:\n${titleSource}`.trim(),
-      apiProvider:
-        cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
+      apiProvider: normalizeApiProvider(cfg.apiProvider),
       model: apiModelName,
     }))
     .then(async (titleRes) => {

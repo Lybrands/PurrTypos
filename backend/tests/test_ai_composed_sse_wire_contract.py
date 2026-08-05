@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -10,6 +11,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from agent_core.events import CoreEventType
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
@@ -156,9 +158,10 @@ def _normalize_dynamic_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _event_name(event: dict[str, Any]) -> str:
     for key in (
         "agentRunStarted",
-        "agentRunTodosUpdated",
-        "agentRunTodoUpdated",
-            "contextBudget",
+            "agentRunTodosUpdated",
+            "agentRunTodoUpdated",
+            "modelInvocation",
+                "contextBudget",
             "delta",
             "thinkingDelta",
             "toolCalls",
@@ -166,6 +169,7 @@ def _event_name(event: dict[str, Any]) -> str:
         "toolApprovalResolved",
         "agentDelegationCreated",
         "agentDelegationUpdated",
+        "agentSubRunEvent",
         "toolIndexCompleted",
         "toolResults",
         "agentRunCompleted",
@@ -178,6 +182,22 @@ def _event_name(event: dict[str, Any]) -> str:
         if key in event:
             return key
     raise AssertionError(f"unclassified SSE event: {event!r}")
+
+
+def _without_model_invocations(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [event for event in events if "modelInvocation" not in event]
+
+
+def _model_invocations(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        event["modelInvocation"]
+        for event in events
+        if "modelInvocation" in event
+    ]
 
 
 @pytest.mark.asyncio
@@ -332,6 +352,11 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
         for event in events
         if "agentDelegationUpdated" in event
     ]
+    child_events = [
+        event["agentSubRunEvent"]
+        for event in events
+        if "agentSubRunEvent" in event
+    ]
     assert len(created) == 1, events
     assert [item["status"] for item in updated] == [
         "claimed",
@@ -345,6 +370,16 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
     assert updated[1]["childRunId"]
     assert updated[2]["childRunId"] == updated[1]["childRunId"]
     assert updated[2]["resultSummary"] == "子 Agent 已核验三条证据。"
+    assert child_events, events
+    assert all(
+        item["delegationId"] == delegation_id
+        and item["childRunId"] == updated[1]["childRunId"]
+        for item in child_events
+    )
+    assert any(
+        item["chunk"].get("delta") == "子 Agent 已核验三条证据。"
+        for item in child_events
+    )
     assert planner_calls == ["parent", "child", "parent-replan"]
     assert runtime_calls == ["parent-delegate", "child", "parent-final"]
     assert sum(event.get("done") is True for event in events) == 1
@@ -358,6 +393,20 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
     assert snapshot is not None
     assert len(snapshot.delegations) == 1
     assert snapshot.delegations[0].status.value == "done"
+    persisted_child_events = [
+        item for item in snapshot.events
+        if item["eventType"] == CoreEventType.DELEGATION_EVENT
+    ]
+    assert persisted_child_events
+    # Token frames stay transport-only, but lifecycle/tool/final snapshots are
+    # durable on the parent and therefore replayable after reconnect.
+    persisted_child_types = [
+        item["payload"]["event"]["type"]
+        for item in persisted_child_events
+    ]
+    assert CoreEventType.MODEL_DELTA not in persisted_child_types
+    assert CoreEventType.RUN_STARTED in persisted_child_types
+    assert CoreEventType.RUN_COMPLETED in persisted_child_types
 
 
 def _assert_terminal_exclusive(
@@ -459,6 +508,8 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     await live.wait_started()
     response = await live.finish()
     events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    invocations = _model_invocations(events)
+    events = _without_model_invocations(events)
 
     assert provider_calls == 1, events
     assert [_event_name(event) for event in events] == [
@@ -468,6 +519,30 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
         "agentRunCompleted",
         "done",
     ]
+    assert invocations == [{
+        "phase": "generation",
+        "count": 1,
+        "toolNames": [],
+        "toolChoice": "none",
+        "round": 1,
+        "logicalRound": 1,
+        "attempt": 1,
+        "parameters": {
+            "provider": "openai",
+            "model": "wire-model",
+            "options": {
+                "baseURL": "https://provider.test/v1",
+                "model": "wire-model",
+                "max_tokens": 8_192,
+            },
+            "maxOutputTokens": 8_192,
+            "reasoningMode": "default",
+            "toolChoice": "none",
+            "toolNames": [],
+            "messageCount": 3,
+            "messageRoles": ["developer", "developer", "user"],
+        },
+    }]
     assert events[2] == {"delta": "这是一个直接回答。"}
     _assert_terminal_exclusive(
         events,
@@ -558,7 +633,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
 
 
 @pytest.mark.asyncio
-async def test_composed_planning_invalid_has_failed_asgi_sse_snapshot(
+async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -570,8 +645,20 @@ async def test_composed_planning_invalid_has_failed_asgi_sse_snapshot(
             "model": "planner-model",
         }
 
-    async def _model_must_not_run(*_args, **_kwargs):
-        raise AssertionError("runtime model stream must not start after invalid planning")
+    async def _model_fallback(_key, _messages, options, _provider, signal=None):
+        assert signal is not None
+        assert "tools" not in options
+        assert "tool_choice" not in options
+
+        async def _stream():
+            yield {
+                "choices": [{
+                    "delta": {"content": "计划格式异常，先提供安全说明。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -579,7 +666,7 @@ async def test_composed_planning_invalid_has_failed_asgi_sse_snapshot(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_must_not_run,
+        _model_fallback,
     )
 
     live = start_asgi_request(
@@ -597,26 +684,29 @@ async def test_composed_planning_invalid_has_failed_asgi_sse_snapshot(
         if "agentRunStarted" in event
     )
     events = _normalize_dynamic_ids(raw_events)
+    invocations = _model_invocations(events)
+    events = _without_model_invocations(events)
 
-    assert events == [
-        {
-            "agentRunStarted": {
-                "runId": "<run-1>",
-                "status": "running",
-                "title": "To-dos",
-                "goal": None,
-            },
-        },
-        {
-            "agentRunFailed": {
-                "runId": "<run-1>",
-                "status": "failed",
-                "error": "planning_invalid",
-            },
-        },
-        {"error": FAILED_MESSAGE},
+    assert [_event_name(event) for event in events] == [
+        "agentRunStarted",
+        "agentRunTodosUpdated",
+        "contextBudget",
+        "delta",
+        "agentRunTodoUpdated",
+        "agentRunCompleted",
+        "done",
     ]
-    _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
+    assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] == "model"
+    assert events[1]["agentRunTodosUpdated"]["steps"][0]["suggestedTools"] == []
+    assert events[3] == {"delta": "计划格式异常，先提供安全说明。"}
+    assert len(invocations) == 1
+    assert invocations[0]["toolNames"] == []
+    assert invocations[0]["toolChoice"] == "none"
+    _assert_terminal_exclusive(
+        events,
+        terminal="agentRunCompleted",
+        result="done",
+    )
     from infrastructure.persistence.run_store import get_run
 
     persisted_run = await get_run(db, run_id)
@@ -671,7 +761,11 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         assert options.get("tool_choice") is None
         assert [
             item["function"]["name"] for item in options.get("tools", [])
-        ] == ["listBookCharacters"]
+        ] == (
+            ["listBookCharacters"]
+            if model_calls <= 2
+            else ["getBookCharacters"]
+        )
 
         async def _stream():
                 yield {
@@ -713,13 +807,19 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     await live.wait_started()
     response = await live.finish()
     events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    invocations = _model_invocations(events)
+    events = _without_model_invocations(events)
 
-    assert model_calls == 2
+    assert model_calls == 3
+    assert sum(item["count"] for item in invocations) == 5
     assert [_event_name(event) for event in events] == [
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
         "thinkingDelta",
+        "thinkingDelta",
+        "agentRunTodoUpdated",
+        "agentRunTodosUpdated",
         "thinkingDelta",
         "agentRunTodoUpdated",
         "agentRunFailed",
@@ -732,7 +832,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         "stepId": "host-prerequisite-listBookCharacters-1",
         "step": {
             "id": "host-prerequisite-listBookCharacters-1",
-            "title": "Prepare listBookCharacters",
+            "title": "查看人物列表",
             "type": "read",
             "executor": "tool",
             "status": "failed",
@@ -742,26 +842,34 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
                 "Host-inserted prerequisite for getBookCharacters; derived "
                 "from the registered tool context contract."
             ),
-            "resultSummary": None,
-            "error": "missing_required_tool_call",
-        },
-        "status": "failed",
-    }
-    assert events[6] == {
+                "resultSummary": (
+                    "Tool execution failed; runtime replanning requested."
+                ),
+                "error": "tool_execution_failed",
+            },
+            "status": "running",
+        }
+    assert events[8]["agentRunTodoUpdated"]["stepId"] == "read-characters"
+    assert events[8]["agentRunTodoUpdated"]["step"]["status"] == "failed"
+    assert (
+        events[8]["agentRunTodoUpdated"]["step"]["error"]
+        == "missing_required_tool_call"
+    )
+    assert events[9] == {
         "agentRunFailed": {
             "runId": "<run-1>",
             "status": "failed",
             "error": "missing_required_tool_call",
         },
     }
-    assert events[7] == {
+    assert events[10] == {
         "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
     }
     assert [
         event["thinkingDelta"]
         for event in events
         if "thinkingDelta" in event
-    ] == ["PRIVATE", "PRIVATE"]
+    ] == ["PRIVATE", "PRIVATE", "PRIVATE"]
     assert not any("delta" in event for event in events)
     _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
 
@@ -967,10 +1075,6 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     request_body.update({
         "chapterId": "chapter-wire",
         "currentChapterTitle": "第一章：北门雨夜",
-        "writingChapters": [{
-            "id": "chapter-wire",
-            "title": "第一章：北门雨夜",
-        }],
     })
 
     live = start_asgi_request(
@@ -1170,7 +1274,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         planner_payload = json.loads(messages[1]["content"])
         planner_available_tools = planner_payload["availableTools"]
         assert "getChapterContent" in planner_available_tools
-        assert "queryOutline" not in planner_available_tools
+        assert "queryOutline" in planner_available_tools
 
         if planner_round == 1:
             content = {
@@ -1380,14 +1484,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     request_body.update({
         "chapterId": "chapter-wire",
         "currentChapterTitle": "第一章：北门雨夜",
-        "writingChapters": [{
-            "id": "chapter-wire",
-            "title": "第一章：北门雨夜",
-        }],
         "associatedOutlineIds": ["outline-wire"],
-        "availableOutlines": [
-            {"id": "outline-wire", "title": "第一章情节大纲"},
-        ],
     })
 
     live = start_asgi_request(
@@ -1404,7 +1501,9 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         for event in raw_events
         if "agentRunStarted" in event
     )
-    assert planner_round == 3
+    # The second planning call repairs the initial redundant-read proposal.
+    # A successful chapter read then follows that compiled plan directly.
+    assert planner_round == 2
     assert judge_round == 2
     assert final_messages[-2]["role"] == "assistant"
     assert final_messages[-2]["content"] == invalid_response
@@ -1437,7 +1536,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     assert invalid_response not in json.dumps(judge_traces, ensure_ascii=False)
     assert len(policy_rounds) == 3
     assert policy_rounds == [policy_rounds[0]] * 3
-    assert planner_available_tools and "queryOutline" not in planner_available_tools
+    assert planner_available_tools and "queryOutline" in planner_available_tools
     assert final_messages
     retrieval_message = next(
         message for message in final_messages
@@ -1722,8 +1821,11 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         if "agentRunStarted" in event
     )
     events = _normalize_dynamic_ids(raw_events)
+    invocations = _model_invocations(events)
+    events = _without_model_invocations(events)
     names = [_event_name(event) for event in events]
 
+    assert sum(item["count"] for item in invocations) >= model_round
     assert names == [
         "agentRunStarted",
         "agentRunTodosUpdated",
@@ -1733,7 +1835,6 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         "toolResults",
         "agentRunTodoUpdated",
         "agentRunTodoUpdated",
-        "agentRunTodosUpdated",
         "toolCalls",
         "toolApprovalRequired",
         "toolApprovalResolved",
@@ -1746,17 +1847,17 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         "agentRunCompleted",
         "done",
     ]
-    requested = events[10]["toolApprovalRequired"]
-    resolved_event = events[11]["toolApprovalResolved"]
+    requested = events[9]["toolApprovalRequired"]
+    resolved_event = events[10]["toolApprovalResolved"]
     assert requested["runId"] == resolved_event["runId"] == "<run-1>"
     assert requested["approvalId"] == resolved_event["approvalId"] == "<approval-1>"
     assert requested["toolName"] == resolved_event["toolName"] == "deleteCharacter"
     assert resolved_event["status"] == "rejected"
-    tool_result = json.loads(events[13]["toolResults"][0]["content"])
+    tool_result = json.loads(events[12]["toolResults"][0]["content"])
     assert tool_result["success"] is False
     assert tool_result["errorCode"] == "approval_rejected"
     assert continuation_tool_result == tool_result
-    declined_todo = events[14]["agentRunTodoUpdated"]
+    declined_todo = events[13]["agentRunTodoUpdated"]
     assert declined_todo["stepId"] == "delete-character"
     assert declined_todo["step"]["status"] == "blocked"
     assert declined_todo["step"]["resultSummary"] == (
@@ -1764,13 +1865,13 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    assert events[15]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[15]["agentRunTodoUpdated"]["step"]["status"] == "running"
-    assert events[16] == {
+    assert events[14]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[14]["agentRunTodoUpdated"]["step"]["status"] == "running"
+    assert events[15] == {
         "delta": "您已拒绝审批；操作未执行，相关数据仍保留。",
     }
-    assert events[17]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[17]["agentRunTodoUpdated"]["step"]["status"] == "done"
+    assert events[16]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[16]["agentRunTodoUpdated"]["step"]["status"] == "done"
     delete_statuses = [
         event["agentRunTodoUpdated"]["step"]["status"]
         for event in events
@@ -1836,7 +1937,85 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
 
 
 @pytest.mark.asyncio
-async def test_composed_disconnect_wins_before_late_approval_resolve(
+async def test_composed_run_finishes_and_persists_after_transport_disconnect(
+    composed_app,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app, _composition, db = composed_app
+    release_response = asyncio.Event()
+
+    async def _direct_response(
+        _key,
+        _messages,
+        _options,
+        _provider,
+        signal=None,
+    ):
+        assert signal is not None
+
+        async def _stream():
+            await release_response.wait()
+            yield {
+                "choices": [{
+                    "delta": {"content": "断线后仍然完成。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "wire-model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _direct_response,
+    )
+    request_body = _chat_request("验证断线恢复")
+    request_body.update({
+        "sessionId": 9,
+        "chatAgentMode": "ask",
+        "enableAgentTools": False,
+    })
+    live = start_asgi_request(
+        app,
+        method="POST",
+        path="/api/ai/chat/stream",
+        json_body=request_body,
+    )
+    await live.wait_started()
+    while True:
+        event = await live.next_sse_json()
+        if event.get("agentRunStarted"):
+            run_id = str(event["agentRunStarted"]["runId"])
+            break
+
+    await live.disconnect()
+    await live.wait_closed(timeout=1)
+    release_response.set()
+
+    for _ in range(100):
+        run = await db.fetch_one(
+            "SELECT status, final_response, conversation_id "
+            "FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is not None and run["status"] == "done" and run["conversation_id"]:
+            break
+        await asyncio.sleep(0.01)
+
+    assert run is not None
+    assert run["status"] == "done"
+    assert run["final_response"] == "断线后仍然完成。"
+    conversation = await db.fetch_one(
+        "SELECT prompt, response FROM ai_conversations WHERE id = ?",
+        [run["conversation_id"]],
+    )
+    assert conversation == {
+        "prompt": "验证断线恢复",
+        "response": "断线后仍然完成。",
+    }
+
+
+@pytest.mark.asyncio
+async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1925,34 +2104,38 @@ async def test_composed_disconnect_wins_before_late_approval_resolve(
     assert disconnected.status_code == 200
     assert disconnected.headers["content-type"].startswith("text/event-stream")
 
-    # Waiting for the stream task first makes this a deterministic
-    # disconnect-wins ordering rather than a scheduler-dependent race.
-    assert composition._approval_gateway.pending_count(run_id) == 0
-    assert composition._approval_runs == {}
+    assert composition._approval_gateway.pending_count(run_id) == 1
+    assert composition._approval_runs == {approval_id: run_id}
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "running"}
     late_resolve = await request_json(
         app,
         method="POST",
         path=f"/api/ai/tool-approvals/{approval_id}",
-        json_body={"approved": True},
+        json_body={"approved": False},
     )
     assert late_resolve.status_code == 200
-    assert late_resolve.json() == {
-        "success": False,
-        "error": "确认请求不存在、已过期或已被处理。",
-    }
+    assert late_resolve.json()["success"] is True
+
+    for _ in range(100):
+        run = await db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is not None and run["status"] != "running":
+            break
+        await asyncio.sleep(0.01)
 
     assert delete_calls == []
-    assert model_round == 1
+    assert model_round >= 1
     persisted_character = await db.fetch_one(
         "SELECT id FROM characters WHERE id = ? AND book_id = ?",
         [character_id, "book-wire"],
     )
     assert persisted_character is not None
-    run = await db.fetch_one(
-        "SELECT status FROM ai_agent_runs WHERE id = ?",
-        [run_id],
-    )
-    assert run is not None and run["status"] == "canceled"
+    assert run is not None and run["status"] != "canceled"
     terminal_events = await db.fetch_all(
         "SELECT event_type FROM ai_agent_run_events "
         "WHERE run_id = ? AND event_type IN (?, ?, ?, ?)",
@@ -1964,14 +2147,19 @@ async def test_composed_disconnect_wins_before_late_approval_resolve(
             "run.canceled",
         ],
     )
-    assert [item["event_type"] for item in terminal_events] == ["run.canceled"]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["event_type"] != "run.canceled"
 
-    # Once disconnect is observed the transport wrapper drains Core cleanup
-    # without attempting another socket write. Only pre-disconnect frames are
-    # visible; the canceled terminal remains durable in SQLite.
+    # The old subscriber receives no post-disconnect frames; the terminal is
+    # recovered from the durable Run snapshot instead.
     delivered_events = _normalize_dynamic_ids(
         decode_sse_json(disconnected.content)
     )
+    invocations = _model_invocations(delivered_events)
+    delivered_events = _without_model_invocations(delivered_events)
+    assert len(invocations) == 1
+    assert invocations[0]["count"] == 1
+    assert "deleteCharacter" in invocations[0]["toolNames"]
     assert [_event_name(item) for item in delivered_events] == [
         "agentRunStarted",
         "contextBudget",
@@ -1983,7 +2171,7 @@ async def test_composed_disconnect_wins_before_late_approval_resolve(
 
 
 @pytest.mark.asyncio
-async def test_composed_send_side_disconnect_cleans_pending_approval_and_run(
+async def test_composed_send_side_disconnect_detaches_pending_run(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2071,18 +2259,29 @@ async def test_composed_send_side_disconnect_cleans_pending_approval_and_run(
     response = await live.wait_closed(timeout=1)
 
     assert response.status_code == 200
-    assert composition._approval_gateway.pending_count(run_id) == 0
-    assert composition._approval_runs == {}
+    assert composition._approval_gateway.pending_count(run_id) == 1
+    assert composition._approval_runs == {approval_id: run_id}
+    rejected = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/tool-approvals/{approval_id}",
+        json_body={"approved": False},
+    )
+    assert rejected.json()["success"] is True
+    for _ in range(100):
+        run = await db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is not None and run["status"] != "running":
+            break
+        await asyncio.sleep(0.01)
     assert delete_calls == []
     assert await db.fetch_one(
         "SELECT id FROM characters WHERE id = ?",
         [character_id],
     ) == {"id": character_id}
-    run = await db.fetch_one(
-        "SELECT status FROM ai_agent_runs WHERE id = ?",
-        [run_id],
-    )
-    assert run == {"status": "canceled"}
+    assert run is not None and run["status"] != "canceled"
     terminal_events = await db.fetch_all(
         "SELECT event_type FROM ai_agent_run_events "
         "WHERE run_id = ? AND event_type IN (?, ?, ?, ?)",
@@ -2094,11 +2293,5 @@ async def test_composed_send_side_disconnect_cleans_pending_approval_and_run(
             "run.canceled",
         ],
     )
-    assert terminal_events == [{"event_type": "run.canceled"}]
-    stale = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/tool-approvals/{approval_id}",
-        json_body={"approved": True},
-    )
-    assert stale.json()["success"] is False
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["event_type"] != "run.canceled"

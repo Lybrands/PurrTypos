@@ -1,0 +1,28 @@
+.agent-user-message-meta {
+  display: flex;
+  min-height: 24px;
+  margin-top: 4px;
+  margin-right: 2px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.agent-user-message-meta__time {
+  padding-inline: 4px;
+  font-size: 11px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+:where(.agent-conversation__message.is-user, .chat-bubble.user):hover .agent-user-message-meta,
+:where(.agent-conversation__message.is-user, .chat-bubble.user):focus-within .agent-user-message-meta {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}

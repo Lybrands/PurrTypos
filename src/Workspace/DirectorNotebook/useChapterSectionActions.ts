@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
-import { useToast } from '../../ui'
+import { usePurrToast } from '@/purr-components'
 import type { Chapter, EntityId, Outline } from '../../types'
 import type { ExportFormat } from '../../components/ExportModal'
 import { buildExportEntries, buildSingleTxtContent } from '../../utils/exportBooks'
@@ -49,7 +49,7 @@ export function useChapterSectionActions({
   onWritingChapterDeleted,
   onExportSuccess,
 }: UseChapterSectionActionsOptions) {
-  const message = useToast()
+  const message = usePurrToast()
   const addingRef = React.useRef(false)
   const [exportLoading, setExportLoading] = React.useState(false)
 

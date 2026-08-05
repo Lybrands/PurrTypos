@@ -9,14 +9,71 @@ from typing import Any, Iterable, Sequence
 
 from agent_core.contracts import (
     AgentMessage,
+    AgentRunRequest,
     ContextBudget,
     ContextBudgetClaim,
     MessageOrigin,
     MessageRole,
+    TaskContextRequest,
     ToolSchema,
 )
 from agent_core.errors import ContextOverflowError
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
+
+
+async def resolve_context_budget_claims(
+    provider: object,
+    request: AgentRunRequest,
+    fallback_claims: Sequence[ContextBudgetClaim] = (),
+    signal: Any = None,
+) -> tuple[ContextBudgetClaim, ...]:
+    """Resolve dynamic demand through an optional provider capability.
+
+    Core owns this resolution contract so application entry points and the
+    engine use the same demand source.  Providers without the optional method
+    retain the legacy static-claim path.
+    """
+
+    resolver = getattr(provider, "describe_context_demands", None)
+    raw_claims = (
+        await resolver(request, signal)
+        if callable(resolver)
+        else tuple(fallback_claims)
+    )
+    claims = tuple(raw_claims)
+    if any(not isinstance(claim, ContextBudgetClaim) for claim in claims):
+        raise TypeError("context demand provider returned an invalid claim")
+    names = [claim.name for claim in claims]
+    if len(names) != len(set(names)):
+        raise ValueError("context demand names must be unique")
+    return claims
+
+
+async def resolve_task_context_budget_claims(
+    provider: object,
+    request: AgentRunRequest,
+    task: TaskContextRequest,
+    signal: Any = None,
+) -> tuple[ContextBudgetClaim, ...]:
+    """Resolve extra demand that exists only after semantic planning.
+
+    These claims supplement, rather than replace, the provider's ordinary
+    context claims. This prevents optional recovery or retrieval sources from
+    reserving a large partition for unrelated requests.
+    """
+
+    resolver = getattr(provider, "describe_task_context_demands", None)
+    if not callable(resolver):
+        return ()
+    claims = tuple(await resolver(request, task, signal))
+    if any(not isinstance(claim, ContextBudgetClaim) for claim in claims):
+        raise TypeError(
+            "task context demand provider returned an invalid claim"
+        )
+    names = [claim.name for claim in claims]
+    if len(names) != len(set(names)):
+        raise ValueError("task context demand names must be unique")
+    return claims
 
 
 def _estimate_units(value: str, *, ascii_divisor: int) -> int:
@@ -144,7 +201,17 @@ def allocate_context_budget(
     provider_input = window - output - safety - runtime - schema_tokens
     if provider_input < minimum:
         raise ContextOverflowError(
-            "fixed model, tool and safety reserves leave no message budget"
+            "fixed model, tool and safety reserves leave no message budget",
+            reason_code="fixed_reserves_exceed_window",
+            details={
+                "windowTokens": window,
+                "outputReserveTokens": output,
+                "safetyReserveTokens": safety,
+                "runtimeReserveTokens": runtime,
+                "toolSchemaTokens": schema_tokens,
+                "providerInputTokens": provider_input,
+                "minimumMessageTokens": minimum,
+            },
         )
 
     normalized_claims: list[ContextBudgetClaim] = []
@@ -185,25 +252,65 @@ def _allocate_claims(
 ) -> dict[str, int]:
     if not claims:
         return {}
-    desired_total = sum(claim.desired_tokens for claim in claims)
-    if desired_total <= available_tokens:
-        return {claim.name: claim.desired_tokens for claim in claims}
-    if desired_total <= 0 or available_tokens <= 0:
-        return {claim.name: 0 for claim in claims}
+    available = max(0, int(available_tokens))
+    minimum_total = sum(claim.minimum_tokens for claim in claims)
+    if minimum_total > available:
+        raise ContextOverflowError(
+            "minimum context demand exceeds the provider input pool",
+            reason_code="minimum_context_demand_exceeds_pool",
+            details={
+                "minimumContextDemandTokens": minimum_total,
+                "availableContextPoolTokens": available,
+                "overflowTokens": minimum_total - available,
+            },
+        )
 
-    quotients_and_remainders = [
-        divmod(claim.desired_tokens * available_tokens, desired_total)
+    allocations = {
+        claim.name: claim.minimum_tokens
         for claim in claims
+    }
+    remaining = available - minimum_total
+    priorities = sorted({claim.priority for claim in claims}, reverse=True)
+    for priority in priorities:
+        group = [claim for claim in claims if claim.priority == priority]
+        needs = [
+            max(0, claim.desired_tokens - allocations[claim.name])
+            for claim in group
+        ]
+        needed_total = sum(needs)
+        if needed_total <= 0:
+            continue
+        if needed_total <= remaining:
+            for claim, need in zip(group, needs):
+                allocations[claim.name] += need
+            remaining -= needed_total
+            continue
+        shares = _proportional_shares(needs, remaining)
+        for claim, share in zip(group, shares):
+            allocations[claim.name] += share
+        remaining = 0
+        break
+    return allocations
+
+
+def _proportional_shares(weights: Sequence[int], available: int) -> list[int]:
+    total = sum(max(0, int(weight)) for weight in weights)
+    pool = max(0, int(available))
+    if total <= 0 or pool <= 0:
+        return [0 for _ in weights]
+    quotients_and_remainders = [
+        divmod(max(0, int(weight)) * pool, total)
+        for weight in weights
     ]
-    base = [quotient for quotient, _ in quotients_and_remainders]
-    remaining = available_tokens - sum(base)
+    shares = [quotient for quotient, _ in quotients_and_remainders]
+    remaining = pool - sum(shares)
     order = sorted(
-        range(len(claims)),
+        range(len(weights)),
         key=lambda index: (-quotients_and_remainders[index][1], index),
     )
     for index in order[:remaining]:
-        base[index] += 1
-    return {claim.name: base[index] for index, claim in enumerate(claims)}
+        shares[index] += 1
+    return shares
 
 
 def estimate_agent_messages_tokens(messages: Iterable[AgentMessage]) -> int:
@@ -224,8 +331,16 @@ class TrimmedAgentMessages:
 def trim_agent_messages_by_turn(
     messages: Sequence[AgentMessage],
     token_budget: int,
+    *,
+    max_recent_messages: int | None = None,
 ) -> TrimmedAgentMessages:
-    """Keep trusted host context and newest complete conversation turns."""
+    """Keep trusted host context and newest complete conversation turns.
+
+    ``max_recent_messages`` is a structural fallback window, not a semantic
+    importance rule.  Whole turns may exceed that count when the newest turn
+    contains a complete tool exchange; Core never slices such a turn merely
+    to satisfy the message-count preference.
+    """
 
     rows = list(messages)
     protected: list[tuple[int, AgentMessage]] = []
@@ -250,6 +365,7 @@ def trim_agent_messages_by_turn(
         turns.append(current)
 
     selected_indices = {index for index, _ in protected}
+    selected_message_count = 0
     used = 2 + sum(
         estimate_json_tokens(_budget_message_mapping(message)) + 4
         for _, message in protected
@@ -260,9 +376,18 @@ def trim_agent_messages_by_turn(
             for _, message in turn
         )
         required = reverse_index == 0
-        if required or used + turn_cost <= max(0, int(token_budget)):
+        count_fits = bool(
+            max_recent_messages is None
+            or selected_message_count + len(turn)
+            <= max(1, int(max_recent_messages))
+        )
+        if required or (
+            count_fits
+            and used + turn_cost <= max(0, int(token_budget))
+        ):
             selected_indices.update(index for index, _ in turn)
             used += turn_cost
+            selected_message_count += len(turn)
             continue
         break
 

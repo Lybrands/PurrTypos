@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -348,3 +350,115 @@ async def test_openai_stream_closes_raw_stream_before_first_iteration(
 
     assert raw_stream.next_calls == 0
     assert raw_stream.close_calls == 1
+
+
+class _ClosableOpenAIClient:
+    def __init__(self, create):
+        self.close_calls = 0
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        )
+
+    async def close(self):
+        self.close_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_close_releases_owning_client(monkeypatch):
+    from infrastructure.models import openai_chat
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    async def _create(**_kwargs):
+        return _empty_stream()
+
+    client = _ClosableOpenAIClient(_create)
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
+
+    result = await openai_chat.chat_stream(
+        "k",
+        [{"role": "user", "content": "read"}],
+        {"model": "mock", "baseURL": "http://example.invalid"},
+    )
+    await result["stream"].aclose()
+
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_creation_failure_releases_client(monkeypatch):
+    from infrastructure.models import openai_chat
+
+    async def _create(**_kwargs):
+        raise RuntimeError("stream setup failed")
+
+    client = _ClosableOpenAIClient(_create)
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
+
+    with pytest.raises(RuntimeError, match="stream setup failed"):
+        await openai_chat.chat_stream(
+            "k",
+            [{"role": "user", "content": "read"}],
+            {"model": "mock", "baseURL": "http://example.invalid"},
+        )
+
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_no_stream_releases_client_after_success(monkeypatch):
+    from infrastructure.models import openai_chat
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(model_dump=lambda: {
+                "role": "assistant",
+                "content": "done",
+            }),
+        )],
+        usage=None,
+        model="mock",
+    )
+
+    async def _create(**_kwargs):
+        return response
+
+    client = _ClosableOpenAIClient(_create)
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
+
+    result = await openai_chat.chat_no_stream(
+        "k",
+        [{"role": "user", "content": "read"}],
+        {"model": "mock", "baseURL": "http://example.invalid"},
+    )
+
+    assert result["message"]["content"] == "done"
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_title_generation_releases_client_after_success(monkeypatch):
+    from infrastructure.models import openai_chat
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="新的标题"),
+        )],
+    )
+
+    async def _create(**_kwargs):
+        return response
+
+    client = _ClosableOpenAIClient(_create)
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
+
+    title = await openai_chat.generate_title(
+        "k",
+        "conversation",
+        {"model": "mock", "baseURL": "http://example.invalid"},
+    )
+
+    assert title == "新的标题"
+    assert client.close_calls == 1

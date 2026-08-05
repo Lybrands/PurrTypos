@@ -61,18 +61,14 @@ async def create_delegation(
                 int(priority),
             ],
         )
+        row = await get_delegation(db, delegation_id)
+        assert row is not None
         await run_store.append_event(
             db,
             normalized_parent,
             CoreEventType.DELEGATION_CREATED,
-            {
-                "delegationId": delegation_id,
-                "agentRole": normalized_role,
-                "required": bool(required),
-            },
+            _delegation_event_payload(row, status="queued"),
         )
-        row = await get_delegation(db, delegation_id)
-    assert row is not None
     row["child_depth"] = child_depth
     return row
 
@@ -155,13 +151,81 @@ async def claim_next(
         changed = await db.fetch_one("SELECT changes() AS count")
         if int((changed or {}).get("count") or 0) != 1:
             return None
+        claimed = await get_delegation(db, delegation_id)
+        assert claimed is not None
         await run_store.append_event(
             db,
             normalized_parent,
             CoreEventType.DELEGATION_CLAIMED,
-            {"delegationId": delegation_id},
+            _delegation_event_payload(claimed, status="claimed"),
         )
-        claimed = await get_delegation(db, delegation_id)
+    return claimed
+
+
+async def claim_delegation(
+    db,
+    *,
+    delegation_id: str,
+    parent_run_id: str,
+    worker_id: str,
+    max_parallel_children: int,
+    claim_lease_duration_ms: int = 30_000,
+    timestamp_ms: int | None = None,
+) -> dict[str, Any] | None:
+    """Atomically claim one exact Planner-owned delegation."""
+
+    normalized_id = _required_text(delegation_id, "delegation id")
+    normalized_parent = _required_text(parent_run_id, "parent run id")
+    normalized_worker = _required_text(worker_id, "worker id")
+    limit = int(max_parallel_children)
+    if limit <= 0:
+        raise ValueError("max parallel children must be positive")
+    claimed_at = (
+        run_execution_store.now_ms()
+        if timestamp_ms is None
+        else int(timestamp_ms)
+    )
+    claim_duration = int(claim_lease_duration_ms)
+    if claim_duration <= 0:
+        raise ValueError("claim lease duration must be positive")
+    async with db.transaction():
+        parent = await run_store.get_run(db, normalized_parent)
+        if (
+            parent is None
+            or parent.get("status") != RunStatus.RUNNING.value
+            or parent.get("cancel_requested_at_ms") is not None
+        ):
+            return None
+        active = await db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_delegations "
+            "WHERE parent_run_id = ? AND status IN ('claimed', 'running')",
+            [normalized_parent],
+        )
+        if int((active or {}).get("count") or 0) >= limit:
+            return None
+        await db.execute(
+            "UPDATE ai_agent_delegations SET status = 'claimed', worker_id = ?, "
+            "claim_expires_at_ms = ?, claim_attempt = claim_attempt + 1, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND parent_run_id = ? AND status = 'queued'",
+            [
+                normalized_worker,
+                claimed_at + claim_duration,
+                normalized_id,
+                normalized_parent,
+            ],
+        )
+        changed = await db.fetch_one("SELECT changes() AS count")
+        if int((changed or {}).get("count") or 0) != 1:
+            return None
+        claimed = await get_delegation(db, normalized_id)
+        assert claimed is not None
+        await run_store.append_event(
+            db,
+            normalized_parent,
+            CoreEventType.DELEGATION_CLAIMED,
+            _delegation_event_payload(claimed, status="claimed"),
+        )
     return claimed
 
 
@@ -194,7 +258,17 @@ async def attach_child_run(
         [normalized_child, normalized_delegation, normalized_worker],
     )
     changed = await db.fetch_one("SELECT changes() AS count")
-    return int((changed or {}).get("count") or 0) == 1
+    attached = int((changed or {}).get("count") or 0) == 1
+    if attached:
+        updated = await get_delegation(db, normalized_delegation)
+        assert updated is not None
+        await run_store.append_event(
+            db,
+            str(updated["parent_run_id"]),
+            CoreEventType.DELEGATION_CLAIMED,
+            _delegation_event_payload(updated, status="running"),
+        )
+    return attached
 
 
 async def record_result(
@@ -237,11 +311,15 @@ async def record_result(
             db,
             str(row["parent_run_id"]),
             event_type,
-            {
-                "delegationId": normalized_delegation,
-                "childRunId": normalized_child,
-                "status": status,
-            },
+            _delegation_event_payload(
+                {
+                    **row,
+                    "child_run_id": normalized_child,
+                    "result_summary": result.final_response or None,
+                    "error": result.error,
+                },
+                status=status,
+            ),
         )
     return True
 
@@ -278,10 +356,15 @@ async def fail_claim(
             str(row["parent_run_id"]),
             CoreEventType.DELEGATION_FAILED,
             {
-                "delegationId": normalized_delegation,
-                "status": "failed",
+                **_delegation_event_payload(
+                    {
+                        **row,
+                        "child_run_id": child_run_id or None,
+                        "error": normalized_error,
+                    },
+                    status="failed",
+                ),
                 "reason": "child_execution_failed",
-                "childRunId": child_run_id or None,
             },
         )
     return True
@@ -313,9 +396,45 @@ async def cancel_children(db, parent_run_id: str) -> int:
                 db,
                 normalized_parent,
                 CoreEventType.DELEGATION_CANCELED,
-                {"delegationId": row["id"], "childRunId": child_run_id or None},
+                _delegation_event_payload(
+                    {**row, "child_run_id": child_run_id or None},
+                    status="canceled",
+                ),
             )
     return canceled
+
+
+def _delegation_event_payload(
+    row: dict[str, Any],
+    *,
+    status: str,
+) -> dict[str, Any]:
+    """Canonical lifecycle projection shared by live and replay consumers."""
+
+    input_value = row.get("input_json")
+    if isinstance(input_value, str):
+        try:
+            input_payload = json.loads(input_value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            input_payload = {}
+    elif isinstance(input_value, dict):
+        input_payload = input_value
+    else:
+        input_payload = {}
+    return {
+        "delegationId": str(row.get("id") or ""),
+        "parentRunId": str(row.get("parent_run_id") or ""),
+        "rootRunId": str(row.get("root_run_id") or ""),
+        "childRunId": str(row.get("child_run_id") or "").strip() or None,
+        "agentRole": str(row.get("agent_role") or ""),
+        "objective": str(row.get("objective") or ""),
+        "input": input_payload,
+        "status": status,
+        "required": bool(row.get("required")),
+        "priority": int(row.get("priority") or 0),
+        "resultSummary": row.get("result_summary"),
+        "error": row.get("error"),
+    }
 
 
 async def recover_delegations(

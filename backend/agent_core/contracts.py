@@ -76,6 +76,14 @@ class ToolExecutionMode(StrEnum):
     CONFIRM = "confirm"
 
 
+class ToolEffectState(StrEnum):
+    """Whether a failed tool batch could already have changed host state."""
+
+    NOT_STARTED = "not_started"
+    COMMITTED = "committed"
+    UNKNOWN = "unknown"
+
+
 class ToolRiskLevel(StrEnum):
     READ = "read"
     WRITE = "write"
@@ -127,15 +135,42 @@ class ModelFinishReason(StrEnum):
     STOP = "stop"
     LENGTH = "length"
     TOOL_CALLS = "tool_calls"
+    FILTERED = "filtered"
     OTHER = "other"
 
 
 class ToolBatchOutcome(StrEnum):
+    PROGRESSED = "progressed"
     COMPLETED = "completed"
     DECLINED = "declined"
     CANCELED = "canceled"
     REJECTED = "rejected"
     FAILED = "failed"
+
+
+class ToolStepDisposition(StrEnum):
+    """Whether a successful tool result satisfies the active plan step.
+
+    Tool-call success and plan-step completion are separate facts.  A bounded
+    append can commit durable progress while requiring another call to the
+    same capability before the Planner may advance to a later step.
+    """
+
+    CONTINUE = "continue"
+    COMPLETE = "complete"
+
+
+class ToolPlanningDisposition(StrEnum):
+    """Whether a successful host tool result invalidates the future plan.
+
+    Successful progress normally follows the already compiled plan.  A tool
+    may explicitly request replanning only when its authoritative result
+    selects a branch or otherwise changes which future steps are valid.  This
+    signal is host-owned and cannot be supplied by model tool arguments.
+    """
+
+    KEEP_PLAN = "keep_plan"
+    REPLAN = "replan"
 
 
 class RuntimeOutcome(StrEnum):
@@ -401,108 +436,6 @@ class ModelCompletion:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationTurn:
-    id: int
-    prompt: str
-    response: str
-
-    def __post_init__(self) -> None:
-        turn_id = int(self.id)
-        if turn_id <= 0:
-            raise ValueError("conversation turn id must be positive")
-        object.__setattr__(self, "id", turn_id)
-        object.__setattr__(self, "prompt", str(self.prompt or ""))
-        object.__setattr__(self, "response", str(self.response or ""))
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationSummary:
-    """Persisted semantic compaction for one conversation session."""
-
-    session_id: SessionId
-    version: int
-    covered_through_conversation_id: int
-    covered_turn_count: int
-    source_digest: str
-    active_goal: str | None = None
-    targets: tuple[Mapping[str, Any], ...] = ()
-    decisions: tuple[str, ...] = ()
-    constraints: tuple[str, ...] = ()
-    unresolved_items: tuple[str, ...] = ()
-    completed_actions: tuple[str, ...] = ()
-    summary: str = ""
-
-    def __post_init__(self) -> None:
-        if isinstance(self.session_id, bool) or not str(self.session_id).strip():
-            raise ValueError("conversation summary session_id is required")
-        version = int(self.version)
-        covered_id = int(self.covered_through_conversation_id)
-        covered_count = int(self.covered_turn_count)
-        if version <= 0:
-            raise ValueError("conversation summary version must be positive")
-        if covered_id <= 0 or covered_count <= 0:
-            raise ValueError("conversation summary coverage must be positive")
-        digest = str(self.source_digest or "").strip().lower()
-        if len(digest) != 64 or any(
-            char not in "0123456789abcdef" for char in digest
-        ):
-            raise ValueError("conversation summary source_digest must be sha256")
-        object.__setattr__(self, "version", version)
-        object.__setattr__(self, "covered_through_conversation_id", covered_id)
-        object.__setattr__(self, "covered_turn_count", covered_count)
-        object.__setattr__(self, "source_digest", digest)
-        object.__setattr__(self, "active_goal", _optional_text(self.active_goal))
-        object.__setattr__(
-            self,
-            "targets",
-            tuple(_frozen_mapping(value) for value in self.targets),
-        )
-        for name in (
-            "decisions",
-            "constraints",
-            "unresolved_items",
-            "completed_actions",
-        ):
-            object.__setattr__(
-                self,
-                name,
-                tuple(dict.fromkeys(
-                    str(value).strip()
-                    for value in getattr(self, name)
-                    if str(value).strip()
-                )),
-            )
-        object.__setattr__(self, "summary", str(self.summary or "").strip())
-
-    def to_mapping(self, *, include_persistence: bool = True) -> dict[str, Any]:
-        value = {
-            "activeGoal": self.active_goal,
-            "targets": [thaw_json_mapping(item) for item in self.targets],
-            "decisions": list(self.decisions),
-            "constraints": list(self.constraints),
-            "unresolvedItems": list(self.unresolved_items),
-            "completedActions": list(self.completed_actions),
-            "summary": self.summary,
-        }
-        if include_persistence:
-            value = {
-                "sessionId": self.session_id,
-                "version": self.version,
-                "coveredThroughConversationId": (
-                    self.covered_through_conversation_id
-                ),
-                "coveredTurnCount": self.covered_turn_count,
-                "sourceDigest": self.source_digest,
-                **value,
-            }
-        return {
-            key: item
-            for key, item in value.items()
-            if item not in (None, "", [], {})
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class AgentRunRequest:
     messages: tuple[AgentMessage, ...]
     model: ModelRequest
@@ -511,7 +444,6 @@ class AgentRunRequest:
     mode: str | None = None
     context_window: int | None = None
     tools_enabled: bool = False
-    conversation_summary: ConversationSummary | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -522,13 +454,6 @@ class AgentRunRequest:
             raise TypeError("agent run model must be ModelRequest")
         if not isinstance(self.domain_context, DomainContext):
             raise TypeError("agent run domain context must be DomainContext")
-        if self.conversation_summary is not None and not isinstance(
-            self.conversation_summary,
-            ConversationSummary,
-        ):
-            raise TypeError(
-                "agent run conversation_summary must be ConversationSummary"
-            )
         object.__setattr__(self, "messages", messages)
         object.__setattr__(self, "mode", _optional_text(self.mode))
         object.__setattr__(self, "tools_enabled", bool(self.tools_enabled))
@@ -878,11 +803,24 @@ class PlanningResult:
     plan: TaskPlan
     reason: str | None = None
     model: str | None = None
+    model_call_count: int = 0
+    model_call_parameters: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", PlanningKind(self.kind))
         object.__setattr__(self, "reason", _optional_text(self.reason))
         object.__setattr__(self, "model", _optional_text(self.model))
+        call_count = int(self.model_call_count)
+        if call_count < 0:
+            raise ValueError("planning model call count cannot be negative")
+        parameters = tuple(
+            _frozen_mapping(item)
+            for item in self.model_call_parameters
+        )
+        if parameters:
+            call_count = len(parameters)
+        object.__setattr__(self, "model_call_count", call_count)
+        object.__setattr__(self, "model_call_parameters", parameters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -986,18 +924,45 @@ class ContextBudget:
 
 @dataclass(frozen=True, slots=True)
 class ContextBudgetClaim:
+    """One domain-neutral context demand submitted to Core's allocator.
+
+    ``minimum_tokens`` is the hard floor needed to keep the context usable,
+    ``desired_tokens`` is the complete useful demand, and ``maximum_tokens``
+    prevents a source from consuming space beyond that demand.  Priorities are
+    compared only after every minimum has been funded.
+
+    The first two fields intentionally preserve the former positional API.
+    """
+
     name: str
     desired_tokens: int
+    minimum_tokens: int = 0
+    maximum_tokens: int | None = None
+    priority: int = 0
 
     def __post_init__(self) -> None:
         name = str(self.name or "").strip()
         desired = int(self.desired_tokens)
+        minimum = int(self.minimum_tokens)
+        maximum = (
+            desired
+            if self.maximum_tokens is None
+            else int(self.maximum_tokens)
+        )
+        priority = int(self.priority)
         if not name:
             raise ValueError("context budget claim name is required")
-        if desired < 0:
-            raise ValueError("context budget claim must be non-negative")
+        if min(minimum, desired, maximum) < 0:
+            raise ValueError("context budget claim tokens must be non-negative")
+        if minimum > desired:
+            raise ValueError("context budget claim minimum exceeds desired")
+        if desired > maximum:
+            raise ValueError("context budget claim desired exceeds maximum")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "desired_tokens", desired)
+        object.__setattr__(self, "minimum_tokens", minimum)
+        object.__setattr__(self, "maximum_tokens", maximum)
+        object.__setattr__(self, "priority", priority)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1055,6 +1020,7 @@ class TaskContextRequest:
     required_context_blocks: tuple[str, ...] = ()
     evidence_kinds: tuple[str, ...] = ()
     include_response_context: bool = False
+    run_id: RunId | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_spec, TaskSpec):
@@ -1075,6 +1041,11 @@ class TaskContextRequest:
             "include_response_context",
             bool(self.include_response_context),
         )
+        if self.run_id is not None:
+            run_id = str(self.run_id or "").strip()
+            if not run_id:
+                raise ValueError("task context run_id must be non-empty")
+            object.__setattr__(self, "run_id", run_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1100,14 +1071,108 @@ class ToolSchema:
     name: str
     description: str
     parameters: Mapping[str, Any]
+    display_names: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         name = str(self.name or "").strip()
         if not name:
             raise ValueError("tool schema name is required")
+        display_names: dict[str, str] = {}
+        for raw_locale, raw_display_name in self.display_names.items():
+            locale = normalize_locale_tag(raw_locale)
+            display_name = str(raw_display_name or "").strip()
+            if not display_name:
+                raise ValueError(
+                    f"tool display name for {locale!r} must not be empty"
+                )
+            if locale in display_names:
+                raise ValueError(
+                    f"duplicate normalized tool display locale: {locale}"
+                )
+            display_names[locale] = display_name
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", str(self.description or ""))
         object.__setattr__(self, "parameters", _frozen_mapping(self.parameters))
+        object.__setattr__(
+            self,
+            "display_names",
+            _frozen_mapping(display_names),
+        )
+
+
+def normalize_locale_tag(value: Any) -> str:
+    parts = [
+        part
+        for part in str(value or "").strip().replace("_", "-").split("-")
+        if part
+    ]
+    if not parts or any(not part.isalnum() for part in parts):
+        raise ValueError(f"invalid locale tag: {value!r}")
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) in {2, 3}:
+            normalized.append(part.upper())
+        elif len(part) == 4:
+            normalized.append(part.title())
+        else:
+            normalized.append(part.lower())
+    return "-".join(normalized)
+
+
+class ToolPayloadMode(StrEnum):
+    """How model-generated data is committed by a registered tool."""
+
+    INLINE = "inline"
+    DELTA = "delta"
+    BATCH = "batch"
+    RESOURCE_REFERENCE = "resource_reference"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDataContract:
+    """Declare authority boundaries without exposing host state to the model.
+
+    Paths use a compact dotted form. ``items[].id`` addresses a property of an
+    array item. Model-owned paths must be present in the model-visible JSON
+    Schema. Host-bound and host-derived paths must be absent from it; adapters
+    bind or calculate those values after model input validation.
+
+    An empty contract preserves compatibility for tools that have not yet been
+    audited. Domains can adopt the contract incrementally while Core startup
+    validation prevents audited tools from regressing their authority boundary.
+    """
+
+    model_owned_paths: tuple[str, ...] = ()
+    host_bound_paths: tuple[str, ...] = ()
+    host_derived_paths: tuple[str, ...] = ()
+    payload_mode: ToolPayloadMode = ToolPayloadMode.INLINE
+
+    def __post_init__(self) -> None:
+        groups: dict[str, tuple[str, ...]] = {}
+        for name in (
+            "model_owned_paths",
+            "host_bound_paths",
+            "host_derived_paths",
+        ):
+            values = tuple(dict.fromkeys(
+                _tool_data_path(value)
+                for value in getattr(self, name)
+            ))
+            object.__setattr__(self, name, values)
+            groups[name] = values
+        object.__setattr__(
+            self,
+            "payload_mode",
+            ToolPayloadMode(self.payload_mode),
+        )
+        seen: dict[str, str] = {}
+        for group, paths in groups.items():
+            for path in paths:
+                previous = seen.setdefault(path, group)
+                if previous != group:
+                    raise ValueError(
+                        f"tool data path {path!r} has conflicting owners"
+                    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,18 +1268,42 @@ class ToolHandlerResult:
     from_cache: bool = False
     effects: tuple[DomainEffect, ...] = ()
     error_code: str | None = None
+    step_disposition: ToolStepDisposition = ToolStepDisposition.COMPLETE
+    planning_disposition: ToolPlanningDisposition = (
+        ToolPlanningDisposition.KEEP_PLAN
+    )
+    effect_state: ToolEffectState = ToolEffectState.UNKNOWN
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "content", str(self.content or ""))
         object.__setattr__(self, "from_cache", bool(self.from_cache))
         object.__setattr__(self, "effects", tuple(self.effects))
         object.__setattr__(self, "error_code", _optional_text(self.error_code))
+        object.__setattr__(
+            self,
+            "step_disposition",
+            ToolStepDisposition(self.step_disposition),
+        )
+        object.__setattr__(
+            self,
+            "planning_disposition",
+            ToolPlanningDisposition(self.planning_disposition),
+        )
+        object.__setattr__(
+            self,
+            "effect_state",
+            ToolEffectState(self.effect_state),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionLimits:
     max_calls_per_batch: int = 8
-    max_argument_chars: int = 32_000
+    # Raw JSON is bounded before parsing only as a configurable memory-safety
+    # envelope. Model-visible semantic limits belong to each tool's schema and
+    # are enforced after JSON decoding, so escaping and whitespace cannot
+    # consume an unrelated 32K workflow budget.
+    max_argument_chars: int = 1_000_000
     max_result_chars: int = 64_000
     approval_timeout_seconds: float = 300.0
     approval_summary_chars: int = 420
@@ -1281,6 +1370,10 @@ class ToolCallResult:
     approval_status: ApprovalStatus | None = None
     error: str | None = None
     effects: tuple[DomainEffect, ...] = ()
+    step_disposition: ToolStepDisposition = ToolStepDisposition.COMPLETE
+    planning_disposition: ToolPlanningDisposition = (
+        ToolPlanningDisposition.KEEP_PLAN
+    )
 
     def __post_init__(self) -> None:
         call_id = str(self.tool_call_id or "").strip()
@@ -1300,6 +1393,16 @@ class ToolCallResult:
             )
         object.__setattr__(self, "error", _optional_text(self.error))
         object.__setattr__(self, "effects", tuple(self.effects))
+        object.__setattr__(
+            self,
+            "step_disposition",
+            ToolStepDisposition(self.step_disposition),
+        )
+        object.__setattr__(
+            self,
+            "planning_disposition",
+            ToolPlanningDisposition(self.planning_disposition),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1308,14 +1411,27 @@ class ToolBatchResult:
     outcome: ToolBatchOutcome
     error: str | None = None
     cache_hits: tuple[bool, ...] = ()
+    effect_state: ToolEffectState = ToolEffectState.UNKNOWN
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "results", tuple(self.results))
         object.__setattr__(self, "outcome", ToolBatchOutcome(self.outcome))
         object.__setattr__(self, "error", _optional_text(self.error))
         object.__setattr__(self, "cache_hits", tuple(bool(item) for item in self.cache_hits))
+        object.__setattr__(
+            self,
+            "effect_state",
+            ToolEffectState(self.effect_state),
+        )
         if self.cache_hits and len(self.cache_hits) != len(self.results):
             raise ValueError("tool batch cache hits must align with results")
+
+    @property
+    def replan_requested(self) -> bool:
+        return any(
+            result.planning_disposition is ToolPlanningDisposition.REPLAN
+            for result in self.results
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1387,11 +1503,17 @@ class RunProvenance:
 
 @dataclass(frozen=True, slots=True)
 class RunLineage:
-    """Immutable parent/delegation identity for one child Agent Run."""
+    """Immutable parent identity for one child Agent Run.
+
+    ``delegation_id`` is present only when a model-created delegation claim
+    owns the child. Host-orchestrated children, such as durable task units,
+    retain parent/root lineage without pretending that a delegation lease
+    exists.
+    """
 
     parent_run_id: RunId
     root_run_id: RunId
-    delegation_id: str
+    delegation_id: str | None
     agent_role: str
     depth: int
 
@@ -1399,13 +1521,17 @@ class RunLineage:
         for name in (
             "parent_run_id",
             "root_run_id",
-            "delegation_id",
             "agent_role",
         ):
             value = str(getattr(self, name) or "").strip()
             if not value:
                 raise ValueError(f"run lineage {name} is required")
             object.__setattr__(self, name, value)
+        object.__setattr__(
+            self,
+            "delegation_id",
+            str(self.delegation_id or "").strip() or None,
+        )
         depth = int(self.depth)
         if depth < 1:
             raise ValueError("child run depth must be positive")
@@ -1604,12 +1730,29 @@ class AgentRunResult:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeLimits:
+    """Bound stalled execution separately from monotonic partial progress.
+
+    ``max_model_rounds`` is the base budget for planned transitions,
+    corrections, and the final response. A ``PROGRESSED`` tool result has a
+    stronger contract: it committed valid partial work while keeping the same
+    plan step active. Such rounds may unlock the separately bounded progress
+    allowance without turning malformed or stalled loops into unbounded runs.
+    """
+
     max_model_rounds: int = 6
+    max_progress_rounds: int = 32
 
     def __post_init__(self) -> None:
         if int(self.max_model_rounds) <= 0:
             raise ValueError("max model rounds must be positive")
+        if int(self.max_progress_rounds) < 0:
+            raise ValueError("max progress rounds must be non-negative")
         object.__setattr__(self, "max_model_rounds", int(self.max_model_rounds))
+        object.__setattr__(
+            self,
+            "max_progress_rounds",
+            int(self.max_progress_rounds),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1627,6 +1770,22 @@ class AgentRuntimeResult:
         object.__setattr__(self, "model", str(self.model or ""))
         object.__setattr__(self, "round_count", max(0, int(self.round_count)))
         object.__setattr__(self, "error_code", _optional_text(self.error_code))
+
+
+def _tool_data_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise ValueError("tool data path must not be empty")
+    segments = path.split(".")
+    if any(
+        not segment
+        or segment == "[]"
+        or "[" in segment.removesuffix("[]")
+        or "]" in segment.removesuffix("[]")
+        for segment in segments
+    ):
+        raise ValueError(f"invalid tool data path: {path!r}")
+    return path
 
 
 def _optional_text(value: Any) -> str | None:

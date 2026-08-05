@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from "react";
-import { Button, Card, Space, Tag } from "../../../../ui";
-import { CheckOutlined, CloseOutlined } from "../../../../ui";
+import { PurrButton, PurrCard, PurrSpace, PurrTag } from '@/purr-components';
+import { CheckIcon, CloseIcon } from '@/purr-components';
 import type { ToolApprovalRequest } from "../../../../types";
 import "./ToolApprovalCard.scss";
 
@@ -51,12 +51,12 @@ export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
   const riskLabel = approval.riskLevel === "destructive" ? "高风险" : "写入操作";
 
   return (
-    <Card size="small" className="tool-approval-card">
+    <PurrCard size="small" className="tool-approval-card">
       <div className="tool-approval-card__header">
         <strong>{approval.title}</strong>
-        <Tag color={approval.riskLevel === "destructive" ? "red" : "orange"}>
+        <PurrTag color={approval.riskLevel === "destructive" ? "red" : "orange"}>
           {riskLabel}
-        </Tag>
+        </PurrTag>
       </div>
       <div className="tool-approval-card__hint">
         Agent 正在请求执行此操作。请核对参数后决定；未批准前后端不会执行。
@@ -69,27 +69,27 @@ export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
       ) : state === "error" ? (
         <div className="tool-approval-card__error">{error}</div>
       ) : (
-        <Space size="small" className="tool-approval-card__actions">
-          <Button
+        <PurrSpace size="small" className="tool-approval-card__actions">
+          <PurrButton
             size="small"
             type="primary"
             danger={approval.riskLevel === "destructive"}
-            icon={<CheckOutlined />}
+            icon={<CheckIcon />}
             loading={state === "submitting"}
             onClick={() => void decide(true)}
           >
             批准执行
-          </Button>
-          <Button
+          </PurrButton>
+          <PurrButton
             size="small"
-            icon={<CloseOutlined />}
+            icon={<CloseIcon />}
             disabled={state === "submitting"}
             onClick={() => void decide(false)}
           >
             拒绝
-          </Button>
-        </Space>
+          </PurrButton>
+        </PurrSpace>
       )}
-    </Card>
+    </PurrCard>
   );
 }

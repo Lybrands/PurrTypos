@@ -1,6 +1,6 @@
 import React from 'react'
-import { Tabs } from '../../ui'
-import { TeamOutlined, GlobalOutlined, CompassOutlined } from '../../ui'
+import { PurrTabs } from '@/purr-components'
+import { TeamIcon, GlobeIcon, CompassIcon } from '@/purr-components'
 import type { EntityId } from '../../types'
 import CharacterTab from '../OutlinePanel/CharacterTab'
 import StoryBackgroundTab from '../OutlinePanel/StoryBackgroundTab'
@@ -48,7 +48,7 @@ export default function SettingPanel({ bookId, openRequest }: SettingPanelProps)
     {
       key: 'characters',
       label: '人物',
-      icon: <TeamOutlined />,
+      icon: <TeamIcon />,
       children: (
         <CharacterTab
           bookId={bookId}
@@ -61,13 +61,13 @@ export default function SettingPanel({ bookId, openRequest }: SettingPanelProps)
     {
       key: 'background',
       label: '故事背景',
-      icon: <GlobalOutlined />,
+      icon: <GlobeIcon />,
       children: <StoryBackgroundTab bookId={bookId} />,
     },
     {
       key: 'entities',
       label: '世界设定',
-      icon: <CompassOutlined />,
+      icon: <CompassIcon />,
       children: (
         <WorldEntityTab
           bookId={bookId}
@@ -80,7 +80,7 @@ export default function SettingPanel({ bookId, openRequest }: SettingPanelProps)
 
   return (
     <div className="setting-panel">
-      <Tabs
+      <PurrTabs
         activeKey={activeTab}
         onChange={(key) => setActiveTab(key as SettingPanelTab)}
         items={tabItems}

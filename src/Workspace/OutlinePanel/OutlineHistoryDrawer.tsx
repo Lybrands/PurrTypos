@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button, Drawer, Empty, Spin, Tag, Tooltip, useConfirm, useToast } from '../../ui'
-import { HistoryOutlined, RollbackOutlined } from '../../ui'
+import { PurrButton, PurrDrawer, PurrEmpty, PurrSpin, PurrTag, PurrTooltip, usePurrConfirm, usePurrToast } from '@/purr-components'
+import { HistoryIcon, RollbackIcon } from '@/purr-components'
 import type { EntityId, OutlineHistoryDetail, OutlineHistoryListItem } from '../../types'
 import './OutlineHistoryDrawer.scss'
 
@@ -21,18 +21,18 @@ const SOURCE_LABEL: Record<string, { color: string; text: string }> = {
 
 function renderSourceTag(source: string) {
   if (source.startsWith('rollback_of:')) {
-    return <Tag color="orange">回退</Tag>
+    return <PurrTag color="orange">回退</PurrTag>
   }
   const meta = SOURCE_LABEL[source]
-  if (meta) return <Tag color={meta.color}>{meta.text}</Tag>
-  return <Tag>{source || 'unknown'}</Tag>
+  if (meta) return <PurrTag color={meta.color}>{meta.text}</PurrTag>
+  return <PurrTag>{source || 'unknown'}</PurrTag>
 }
 
 export default function OutlineHistoryDrawer({
   outlineId, outlineTitle, open, onClose, onRestored,
 }: OutlineHistoryDrawerProps) {
-  const appMessage = useToast()
-  const confirm = useConfirm()
+  const appMessage = usePurrToast()
+  const confirm = usePurrConfirm()
   const [loading, setLoading] = React.useState(false)
   const [items, setItems] = React.useState<OutlineHistoryListItem[]>([])
   const [expandedId, setExpandedId] = React.useState<number | null>(null)
@@ -131,10 +131,10 @@ export default function OutlineHistoryDrawer({
   }
 
   return (
-    <Drawer
+    <PurrDrawer
       title={
         <span>
-          <HistoryOutlined style={{ marginRight: 8 }} />
+          <HistoryIcon style={{ marginRight: 8 }} />
           大纲历史
           {outlineTitle ? (
             <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
@@ -150,9 +150,9 @@ export default function OutlineHistoryDrawer({
       destroyOnHidden
     >
       {loading ? (
-        <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+        <div style={{ textAlign: 'center', padding: 60 }}><PurrSpin /></div>
       ) : items.length === 0 ? (
-        <Empty description="该大纲还没有修改历史" />
+        <PurrEmpty description="该大纲还没有修改历史" />
       ) : (
         <div className="outline-history-list">
           {items.map((item) => {
@@ -165,9 +165,9 @@ export default function OutlineHistoryDrawer({
                     <span className="outline-history-item-id">#{item.id}</span>
                     {renderSourceTag(item.source)}
                     {item.note ? (
-                      <Tooltip title={item.note}>
+                      <PurrTooltip title={item.note}>
                         <span className="outline-history-item-note">{item.note}</span>
-                      </Tooltip>
+                      </PurrTooltip>
                     ) : null}
                   </div>
                   <span className="outline-history-item-time">
@@ -187,31 +187,31 @@ export default function OutlineHistoryDrawer({
                 )}
 
                 <div className="outline-history-item-actions">
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
                     onClick={() => handleToggleExpand(item)}
                   >
                     {isExpanded ? '收起' : '查看完整内容'}
-                  </Button>
-                  <Tooltip title="把当前大纲替换为此版本">
-                    <Button
+                  </PurrButton>
+                  <PurrTooltip title="把当前大纲替换为此版本">
+                    <PurrButton
                       type="text"
                       size="small"
                       danger
-                      icon={<RollbackOutlined />}
+                      icon={<RollbackIcon />}
                       loading={restoringId === item.id}
                       onClick={() => handleRestore(item)}
                     >
                       回退到此版本
-                    </Button>
-                  </Tooltip>
+                    </PurrButton>
+                  </PurrTooltip>
                 </div>
 
                 {isExpanded ? (
                   <div className="outline-history-item-full">
                     {detailLoadingId === item.id && !detail ? (
-                      <Spin size="small" />
+                      <PurrSpin size="small" />
                     ) : detail ? (
                       <pre className="outline-history-item-full-text">
                         {detail.before_markdown_content || '（空）'}
@@ -226,6 +226,6 @@ export default function OutlineHistoryDrawer({
           })}
         </div>
       )}
-    </Drawer>
+    </PurrDrawer>
   )
 }

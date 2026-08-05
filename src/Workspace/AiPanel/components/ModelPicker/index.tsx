@@ -1,6 +1,6 @@
 import React from 'react'
-import { CheckOutlined, EditOutlined } from '../../../../ui'
-import { Divider, Popover, Select } from '../../../../ui'
+import { CheckIcon, EditIcon } from '@/purr-components'
+import { PurrDivider, PurrPopover, PurrSelect } from '@/purr-components'
 import type { AiModelConfig } from '../../../../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
@@ -32,7 +32,7 @@ const displayModelName = (model: AiModelConfig | null | undefined): string =>
  *
  * 关键点 —— 配置与选择完全解耦：
  * - 下拉框本身只负责「选模型」，配置入口保持为独立浮层。
- * - 每行 hover 出现「编辑」入口，点击后弹出**独立** Popover 配置 Context / Thinking。
+ * - 每行 hover 出现「编辑」入口，点击后弹出**独立** PurrPopover 配置 Context / Thinking。
  * - 编辑浮层浮在上层（portal 到 body），不在下拉里占位、不改变下拉布局。
  * - 编辑浮层打开时用 ref 守卫，避免它的外部点击把模型下拉一起关掉。
  */
@@ -46,7 +46,7 @@ export default function ModelPicker({
 }: ModelPickerProps) {
   const [open, setOpen] = React.useState(false)
   const [editingId, setEditingId] = React.useState<string | null>(null)
-  // 同步镜像 editingId，供 Select.onOpenChange 即时读取（避免闭包拿到旧值）
+  // 同步镜像 editingId，供 PurrSelect.onOpenChange 即时读取（避免闭包拿到旧值）
   const editingRef = React.useRef<string | null>(null)
 
   const setEditing = React.useCallback((id: string | null) => {
@@ -65,7 +65,7 @@ export default function ModelPicker({
   )
 
   return (
-    <Select
+    <PurrSelect
       className={`model-picker ${className ?? ''}`.trim()}
       classNames={{ popup: { root: 'model-picker-popup' } }}
       size="small"
@@ -96,7 +96,7 @@ export default function ModelPicker({
         return (
           <div className="model-picker-option">
             <span className="model-picker-option-name">{option.label}</span>
-            <Popover
+            <PurrPopover
               trigger="click"
               nativeButton={false}
               placement="right"
@@ -120,7 +120,7 @@ export default function ModelPicker({
                   editingId === config.id ? 'model-picker-option-edit--active' : ''
                 }`}
                 onMouseDown={(event) => {
-                  // 阻止 Select 把这次点击当成「选中该项」
+                  // 阻止 PurrSelect 把这次点击当成「选中该项」
                   event.preventDefault()
                   event.stopPropagation()
                 }}
@@ -129,9 +129,9 @@ export default function ModelPicker({
                   event.stopPropagation()
                 }}
               >
-                <EditOutlined style={{ fontSize: 12 }} />
+                <EditIcon style={{ fontSize: 12 }} />
               </span>
-            </Popover>
+            </PurrPopover>
           </div>
         )
       }}
@@ -183,11 +183,11 @@ function ModelRuntimeConfig({
             }}
           >
             <span>{AI_CONTEXT_WINDOW_LABELS[value]}</span>
-            {contextWindow === value ? <CheckOutlined style={{ fontSize: 12 }} /> : null}
+            {contextWindow === value ? <CheckIcon style={{ fontSize: 12 }} /> : null}
           </button>
         ))}
       </div>
-      <Divider style={{ margin: '6px 0' }} />
+      <PurrDivider style={{ margin: '6px 0' }} />
       <div className="model-picker-config-group">
         <div className="model-picker-config-title">推理模式</div>
         {thinkingItems.map(([value, label]) => (
@@ -202,7 +202,7 @@ function ModelRuntimeConfig({
             }}
           >
             <span>{label}</span>
-            {thinkingEnabled === value ? <CheckOutlined style={{ fontSize: 12 }} /> : null}
+            {thinkingEnabled === value ? <CheckIcon style={{ fontSize: 12 }} /> : null}
           </button>
         ))}
       </div>

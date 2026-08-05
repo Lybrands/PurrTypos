@@ -95,6 +95,39 @@ async def test_claim_respects_priority_and_parent_parallel_limit(db):
 
 
 @pytest.mark.asyncio
+async def test_exact_claim_never_steals_an_older_same_role_delegation(db):
+    parent_run_id = await _parent(db)
+    service = _service(db)
+    older = await service.delegate(
+        parent_run_id=parent_run_id,
+        agent_role="screenplay_writer",
+        objective="older unit",
+    )
+    target = await service.delegate(
+        parent_run_id=parent_run_id,
+        agent_role="screenplay_writer",
+        objective="Planner target unit",
+    )
+
+    claimed = await service.claim_delegation(
+        delegation_id=target["delegationId"],
+        parent_run_id=parent_run_id,
+        worker_id="worker-target",
+        max_parallel_children=2,
+    )
+
+    assert claimed is not None
+    assert claimed[0]["delegationId"] == target["delegationId"]
+    snapshot = await service.snapshot(parent_run_id)
+    statuses = {
+        item["delegationId"]: item["status"]
+        for item in snapshot["items"]
+    }
+    assert statuses[older["delegationId"]] == "queued"
+    assert statuses[target["delegationId"]] == "claimed"
+
+
+@pytest.mark.asyncio
 async def test_claimed_delegation_atomically_attaches_child_run_and_result(db):
     parent_run_id = await _parent(db)
     service = _service(db)

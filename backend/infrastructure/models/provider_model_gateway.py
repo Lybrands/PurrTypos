@@ -20,6 +20,7 @@ from agent_core.contracts import (
 )
 from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
+from agent_core.model_call_parameters import build_model_call_parameters
 from agent_core.ports import CancellationSignal
 from infrastructure.models import provider_router
 from infrastructure.models.profiles import resolve_model_profile
@@ -40,6 +41,17 @@ class ProviderModelGateway:
             raise ValueError("API key is required")
         self._on_required_tool_choice_unsupported = (
             on_required_tool_choice_unsupported
+        )
+
+    def describe_invocation(
+        self,
+        messages: Sequence[AgentMessage],
+        invocation: ModelInvocation,
+    ) -> dict[str, Any]:
+        return build_model_call_parameters(
+            messages,
+            invocation,
+            provider_options=_provider_options(invocation),
         )
 
     async def stream(
@@ -339,12 +351,20 @@ def _normalize_finish_reason(value) -> ModelFinishReason | None:
     if value is None:
         return None
     normalized = str(value).strip().lower()
-    if normalized == "stop":
+    if normalized in {"stop", "end_turn", "stop_sequence"}:
         return ModelFinishReason.STOP
-    if normalized == "length":
+    if normalized in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "token_limit",
+    }:
         return ModelFinishReason.LENGTH
     if normalized in {"tool_calls", "function_call"}:
         return ModelFinishReason.TOOL_CALLS
+    if normalized in {"content_filter", "safety", "blocked"}:
+        return ModelFinishReason.FILTERED
     return ModelFinishReason.OTHER
 
 

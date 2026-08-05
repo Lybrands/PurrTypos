@@ -1,5 +1,5 @@
 import React from 'react'
-import { Button, Checkbox, Dialog } from '../../ui'
+import { PurrButton, PurrCheckbox, PurrDialog } from '@/purr-components'
 import './index.scss'
 
 interface ConfirmModalProps {
@@ -20,25 +20,25 @@ export default function ConfirmModal({
   const [checked, setChecked] = React.useState(false)
 
   return (
-    <Dialog
+    <PurrDialog
       title={title}
       open
       onOpenChange={(open) => { if (!open) onCancel() }}
       footer={(
         <>
-          <Button onClick={onCancel}>取消</Button>
-          <Button variant="danger" onClick={() => onConfirm(checked)}>确认删除</Button>
+          <PurrButton onClick={onCancel}>取消</PurrButton>
+          <PurrButton variant="danger" onClick={() => onConfirm(checked)}>确认删除</PurrButton>
         </>
       )}
     >
       <p className="confirm-modal-message">{message}</p>
       {checkboxLabel && (
         <div className="confirm-modal-checkbox">
-          <Checkbox checked={checked} onChange={(event) => setChecked(event.target.checked)}>
+          <PurrCheckbox checked={checked} onChange={(event) => setChecked(event.target.checked)}>
             {checkboxLabel}
-          </Checkbox>
+          </PurrCheckbox>
         </div>
       )}
-    </Dialog>
+    </PurrDialog>
   )
 }

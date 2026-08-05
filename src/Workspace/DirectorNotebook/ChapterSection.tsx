@@ -1,11 +1,11 @@
 import React from 'react'
 import {
-  CheckSquareOutlined,
-  DeleteOutlined,
-  ExportOutlined,
-  PlusOutlined,
-} from '../../ui'
-import { Button, Tooltip } from '../../ui'
+  CheckSquareIcon,
+  DeleteIcon,
+  ExportIcon,
+  PlusIcon,
+} from '@/purr-components'
+import { PurrButton, PurrTooltip } from '@/purr-components'
 import type { Chapter, EntityId } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import ExportModal from '../../components/ExportModal'
@@ -277,29 +277,29 @@ export default function ChapterSection({
       <div className="chapter-list-actionbar">
         <span className="chapter-list-count">共 {writableChapters.length} 章</span>
         <div className="chapter-list-actionbar-actions">
-          <Tooltip title="导出章节">
-            <Button
+          <PurrTooltip title="导出章节">
+            <PurrButton
               type="text"
               size="small"
-              icon={<ExportOutlined style={{ fontSize: 14 }} />}
+              icon={<ExportIcon style={{ fontSize: 14 }} />}
               onClick={openExportModal}
               className="nav-action-btn"
             />
-          </Tooltip>
+          </PurrTooltip>
           {batchMode ? (
             <>
               {selectedIds.size > 0 && (
-                <Tooltip title={`删除(${selectedIds.size})`}>
-                  <Button
+                <PurrTooltip title={`删除(${selectedIds.size})`}>
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<DeleteOutlined style={{ fontSize: 14 }} />}
+                    icon={<DeleteIcon style={{ fontSize: 14 }} />}
                     onClick={handleBatchDelete}
                     className="nav-batch-delete"
                   />
-                </Tooltip>
+                </PurrTooltip>
               )}
-              <Button
+              <PurrButton
                 type="text"
                 size="small"
                 onClick={() => {
@@ -309,23 +309,23 @@ export default function ChapterSection({
                 className="nav-batch-cancel"
               >
                 取消
-              </Button>
+              </PurrButton>
             </>
           ) : (
-            <Button
+            <PurrButton
               type="text"
               size="small"
-              icon={<CheckSquareOutlined style={{ fontSize: 14 }} />}
+              icon={<CheckSquareIcon style={{ fontSize: 14 }} />}
               onClick={() => setBatchMode(true)}
               title="批量操作"
               className="nav-batch-btn"
             />
           )}
           {enableVolume ? (
-            <Button
+            <PurrButton
               type="text"
               size="small"
-              icon={<PlusOutlined style={{ fontSize: 14 }} />}
+              icon={<PlusIcon style={{ fontSize: 14 }} />}
               title="新建卷"
               onClick={() => {
                 setAddingVolume(true)
@@ -334,10 +334,10 @@ export default function ChapterSection({
               className="nav-add-btn"
             />
           ) : (
-            <Button
+            <PurrButton
               type="text"
               size="small"
-              icon={<PlusOutlined style={{ fontSize: 14 }} />}
+              icon={<PlusIcon style={{ fontSize: 14 }} />}
               title="新建章节"
               onClick={() => {
                 setShowAddInput((visible) => !visible)

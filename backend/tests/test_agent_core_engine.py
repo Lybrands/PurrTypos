@@ -9,6 +9,9 @@ from typing import Sequence
 
 import pytest
 
+from agent_core.context_orchestration.contracts import (
+    ConversationCompactionResult,
+)
 from agent_core.contracts import (
     AgentMessage,
     AgentRunRequest,
@@ -46,6 +49,7 @@ from agent_core.contracts import (
     ToolCallDelta,
     ToolExecutionMode,
     ToolHandlerResult,
+    ToolPlanningDisposition,
     ToolPolicy,
     ToolRiskLevel,
     ToolSchema,
@@ -55,11 +59,19 @@ from agent_core.engine import (
     AgentCore,
     AgentCoreRunOptions,
     _validate_planning_constraints,
+    _validate_task_constraint_refinement,
 )
-from agent_core.errors import ContractViolationError
+from agent_core.errors import ContractViolationError, InvalidPlannerOutputError
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.ports import RunBeginResult, RunCommit, ToolRegistration
 from agent_core.tools import InMemoryToolCatalog
+from agent_core.task_admission import (
+    ExecutionMode,
+    LongTaskDispatchReceipt,
+    LongTaskExecutionResult,
+    LongTaskExecutionStatus,
+    TaskAdmissionDecision,
+)
 
 
 PLAN = {
@@ -300,6 +312,28 @@ class StopAfterObservationPlanner(StaticPlanner):
         )
 
 
+class InvalidAfterObservationPlanner(StaticPlanner):
+    """Fixture for a provider that repeatedly violates replanning schema."""
+
+    def __init__(self, plan: TaskPlan):
+        super().__init__(plan)
+        self.turns = []
+
+    async def revise_plan(
+        self,
+        request,
+        capabilities,
+        turn,
+        signal=None,
+    ):
+        del request, capabilities, signal
+        self.turns.append(turn)
+        raise InvalidPlannerOutputError(
+            "planner output is missing needsTodos",
+            code="invalid_plan",
+        )
+
+
 class FixtureContextProvider:
     async def build_context(self, request, budget, signal=None):
         assert budget.allocation_for("fixture") == 1_000
@@ -490,12 +524,25 @@ def _core_fixture(
     proposed_effect_type: str = "test.change_proposed",
     planner=None,
     runtime_limits: RuntimeLimits = RuntimeLimits(),
+    read_error_code: str | None = None,
+    task_admission_evaluator=None,
+    long_task_dispatcher=None,
+    context_provider=None,
+    replan_after_tools: frozenset[str] = frozenset(),
 ):
     state_factory = SharedStateFactory()
 
     async def read_resource(state, arguments, signal=None):
         state.domain["handler_order"].append("read")
-        return ToolHandlerResult(json.dumps({"value": state.domain["value"]}))
+        return ToolHandlerResult(
+            json.dumps({"value": state.domain["value"]}),
+            error_code=read_error_code,
+            planning_disposition=(
+                ToolPlanningDisposition.REPLAN
+                if "read_resource" in replan_after_tools
+                else ToolPlanningDisposition.KEEP_PLAN
+            ),
+        )
 
     async def propose_change(state, arguments, signal=None):
         state.domain["handler_order"].append("propose")
@@ -507,12 +554,24 @@ def _core_fixture(
                 type=proposed_effect_type,
                 payload={"value": arguments["value"]},
             ),),
+            planning_disposition=(
+                ToolPlanningDisposition.REPLAN
+                if "propose_change" in replan_after_tools
+                else ToolPlanningDisposition.KEEP_PLAN
+            ),
         )
 
     async def apply_change(state, arguments, signal=None):
         state.domain["handler_order"].append("apply")
         state.domain["value"] = state.domain["proposal"]
-        return ToolHandlerResult(json.dumps({"value": state.domain["value"]}))
+        return ToolHandlerResult(
+            json.dumps({"value": state.domain["value"]}),
+            planning_disposition=(
+                ToolPlanningDisposition.REPLAN
+                if "apply_change" in replan_after_tools
+                else ToolPlanningDisposition.KEEP_PLAN
+            ),
+        )
 
     catalog = InMemoryToolCatalog((
         _registration(
@@ -544,10 +603,12 @@ def _core_fixture(
         run_repository=repository,
         planner=planner,
         planning_policy=AlwaysPlan(),
-        context_provider=FixtureContextProvider(),
+        context_provider=context_provider or FixtureContextProvider(),
         execution_state_factory=state_factory,
         tool_catalog=catalog,
         runtime_limits=runtime_limits,
+        task_admission_evaluator=task_admission_evaluator,
+        long_task_dispatcher=long_task_dispatcher,
     )
     request = AgentRunRequest(
         messages=(AgentMessage(
@@ -569,6 +630,110 @@ def _core_fixture(
         output_reserve_tokens=1_024,
     )
     return core, request, options, repository, model, state_factory.state
+
+
+@pytest.mark.asyncio
+async def test_durable_task_admission_dispatches_before_runtime_execution():
+    plan = TaskPlan(
+        title="Generate a large deliverable",
+        task_spec=TaskSpec(
+            goal="Generate all remaining units",
+            operation="write",
+            target={"scope": "all_remaining"},
+        ),
+        steps=(TaskStep(
+            id="write",
+            title="Write units",
+            type=StepType.WRITE,
+            executor=StepExecutor.TOOL,
+            risk_level=ToolRiskLevel.WRITE,
+            suggested_tools=("propose_change",),
+        ),),
+    )
+
+    class _Admission:
+        async def evaluate(self, request, planned, signal=None):
+            assert request.messages[-1].content
+            assert planned.task_spec == plan.task_spec
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.DURABLE,
+                reason_code="multiple_model_calls_required",
+                estimated_units=100,
+                estimated_model_calls=20,
+            )
+
+    class _Dispatcher:
+        def __init__(self):
+            self.calls = []
+
+        async def dispatch(
+            self,
+            request,
+            planned,
+            decision,
+            *,
+            parent_run_id,
+            signal=None,
+        ):
+            self.calls.append((request, planned, decision, parent_run_id))
+            return LongTaskDispatchReceipt(
+                task_id="task-1",
+                message="Long task created.",
+                metadata={"totalUnits": 100},
+            )
+
+        async def execute(
+            self,
+            task_id,
+            *,
+            parent_run_id,
+            observer,
+            signal=None,
+        ):
+            del parent_run_id, observer, signal
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="Long task finished.",
+            )
+
+    dispatcher = _Dispatcher()
+    planner = CapturePlanner(plan)
+    core, request, options, repository, model, state = _core_fixture(
+        planner=planner,
+        task_admission_evaluator=_Admission(),
+        long_task_dispatcher=dispatcher,
+    )
+
+    updates = [update async for update in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert result.final_response == "Long task finished."
+    assert planner.call_count == 1
+    assert len(dispatcher.calls) == 1
+    assert dispatcher.calls[0][3] == result.run_id
+    assert state.domain["handler_order"] == []
+    assert model.invocations == []
+    assert [event.type for event in repository.events] == [
+        CoreEventType.RUN_STARTED,
+        CoreEventType.TASK_ADMISSION_DECIDED,
+        CoreEventType.RUN_TODOS_UPDATED,
+        CoreEventType.LONG_TASK_DISPATCHED,
+        CoreEventType.RUN_TODO_UPDATED,
+        CoreEventType.RUN_COMPLETED,
+    ]
+    planning_trace = next(
+        trace for trace in repository.traces
+        if trace.stage == "planning"
+    )
+    assert planning_trace.outcome == "planned"
+    persisted_steps = repository.runs[result.run_id]["steps"]
+    assert persisted_steps[0].status is StepStatus.DONE
+    assert persisted_steps[0].result_summary == (
+        "Durable execution completed this planned step."
+    )
 
 
 @pytest.mark.asyncio
@@ -675,6 +840,55 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
 
 
 @pytest.mark.asyncio
+async def test_dynamic_planner_is_not_recalled_for_normal_success():
+    initial = TaskPlan(
+        title="Stable roadmap",
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="propose",
+                title="Propose change",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("propose_change",),
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+            TaskStep(
+                id="respond",
+                title="Respond",
+                type=StepType.REVIEW,
+                executor=StepExecutor.MODEL,
+                risk_level=ToolRiskLevel.READ,
+            ),
+        ),
+    )
+    planner = StopAfterObservationPlanner(initial)
+    core, request, options, repository, _model, state = _core_fixture(
+        planner=planner,
+    )
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert state.domain["handler_order"] == ["read", "propose"]
+    assert planner.turns == []
+    assert not any(
+        trace.stage == "planning"
+        and trace.outcome in {"replan_requested", "replanned"}
+        for trace in repository.traces
+    )
+
+
+@pytest.mark.asyncio
 async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result():
     initial = TaskPlan(
         title="Tentative roadmap",
@@ -700,6 +914,7 @@ async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result()
     planner = StopAfterObservationPlanner(initial)
     core, request, options, repository, model, state = _core_fixture(
         planner=planner,
+        replan_after_tools=frozenset({"read_resource"}),
     )
 
     updates = [item async for item in core.run(request, options=options)]
@@ -730,6 +945,126 @@ async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result()
     assert len(todo_replacements) == 2
     assert any(
         trace.stage == "planning" and trace.outcome == "replanned"
+        for trace in repository.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_dynamic_replan_falls_back_to_trusted_remaining_plan():
+    initial = TaskPlan(
+        title="Trusted roadmap",
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="propose",
+                title="Propose change",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("propose_change",),
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+            TaskStep(
+                id="respond",
+                title="Respond",
+                type=StepType.REVIEW,
+                executor=StepExecutor.MODEL,
+                risk_level=ToolRiskLevel.READ,
+            ),
+        ),
+    )
+    planner = InvalidAfterObservationPlanner(initial)
+    core, request, options, repository, model, state = _core_fixture(
+        planner=planner,
+        replan_after_tools=frozenset({
+            "read_resource",
+            "propose_change",
+        }),
+    )
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert state.domain["handler_order"] == ["read", "propose"]
+    assert [
+        tuple(schema.name for schema in call.tools)
+        for call in model.invocations
+    ] == [
+        ("read_resource",),
+        ("propose_change",),
+        (),
+    ]
+    assert len(planner.turns) == 2
+    fallbacks = [
+        trace
+        for trace in repository.traces
+        if trace.stage == "planning"
+        and trace.outcome == "fallback_previous_plan"
+    ]
+    assert len(fallbacks) == 2
+    assert all(
+        trace.details["validationReason"]
+        == "planner output is missing needsTodos"
+        for trace in fallbacks
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_failure_replan_falls_back_to_safe_model_only_response():
+    initial = TaskPlan(
+        title="Trusted roadmap",
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("read_resource",),
+                risk_level=ToolRiskLevel.READ,
+            ),
+            TaskStep(
+                id="propose",
+                title="Propose change",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("propose_change",),
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+        ),
+    )
+    planner = InvalidAfterObservationPlanner(initial)
+    core, request, options, repository, model, state = _core_fixture(
+        planner=planner,
+        read_error_code="source_unavailable",
+    )
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert state.domain["handler_order"] == ["read"]
+    assert [
+        tuple(schema.name for schema in call.tools)
+        for call in model.invocations
+    ] == [("read_resource",), ()]
+    persisted_steps = repository.runs[result.run_id]["steps"]
+    assert [(step.id, step.status) for step in persisted_steps] == [
+        ("read", StepStatus.FAILED),
+        ("respond-after-tool-failure-1", StepStatus.DONE),
+    ]
+    assert any(
+        trace.stage == "planning"
+        and trace.outcome == "fallback_safe_response"
+        and trace.details["fallbackToolCount"] == 0
         for trace in repository.traces
     )
 
@@ -811,6 +1146,97 @@ async def test_staged_context_runs_formal_retrieval_after_task_spec_planning():
         and trace.outcome == "task_spec"
         for trace in repository.traces
     )
+
+
+@pytest.mark.asyncio
+async def test_task_specific_context_demand_is_allocated_after_planning():
+    class _TaskDemandProvider:
+        def __init__(self):
+            self.task_demand_calls = 0
+            self.allocated = 0
+
+        async def describe_context_demands(self, request, signal=None):
+            del request, signal
+            return (ContextBudgetClaim(
+                name="base",
+                minimum_tokens=100,
+                desired_tokens=100,
+                priority=100,
+            ),)
+
+        async def build_planning_context(self, request, budget, signal=None):
+            del request, signal
+            assert budget.allocation_for("artifact") == 0
+            return ContextBundle()
+
+        async def describe_task_context_demands(
+            self,
+            request,
+            task,
+            signal=None,
+        ):
+            del request, signal
+            assert task.task_spec.target["resume"] is True
+            self.task_demand_calls += 1
+            return (ContextBudgetClaim(
+                name="artifact",
+                minimum_tokens=1_000,
+                desired_tokens=3_000,
+                priority=90,
+            ),)
+
+        async def build_task_context(
+            self,
+            request,
+            budget,
+            task,
+            signal=None,
+        ):
+            del request, task, signal
+            self.allocated = budget.allocation_for("artifact")
+            return ContextBundle(blocks=(ContextBlock(
+                name="artifact",
+                content="bounded recovery projection",
+            ),))
+
+        async def build_context(self, request, budget, signal=None):
+            del request, budget, signal
+            return ContextBundle()
+
+    plan = TaskPlan(
+        title="Resume",
+        task_spec=TaskSpec(
+            goal="resume",
+            target={"resume": True},
+        ),
+        steps=(TaskStep(
+            id="respond",
+            title="Respond",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            risk_level=ToolRiskLevel.READ,
+        ),),
+    )
+    core, request, options, repository, _model, _state = _core_fixture(
+        planner=StaticPlanner(plan),
+    )
+    provider = _TaskDemandProvider()
+    core._context_provider = provider
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    assert updates[-1].status is RunStatus.DONE, repository.traces
+    assert provider.task_demand_calls == 1
+    assert provider.allocated == 3_000
+    budget_event = next(
+        item for item in updates
+        if isinstance(item, AgentEvent)
+        and item.type == CoreEventType.CONTEXT_BUDGETED
+    )
+    assert budget_event.payload["contextAllocations"] == {
+        "base": 100,
+        "artifact": 3_000,
+    }
 
 
 @pytest.mark.asyncio
@@ -1038,6 +1464,91 @@ async def test_core_runs_context_optimization_after_actual_plan_and_tools():
     assert trace.outcome == "compacted"
 
 
+@pytest.mark.asyncio
+async def test_core_offers_compression_hook_at_planning_and_model_boundaries():
+    class _CaptureCompactor:
+        def __init__(self):
+            self.calls = []
+
+        async def prepare(
+            self,
+            request,
+            signal=None,
+            *,
+            on_compaction_started=None,
+            **budget,
+        ):
+            self.calls.append({
+                "messages": tuple(request.messages),
+                "budget": dict(budget),
+            })
+            if on_compaction_started is not None:
+                await on_compaction_started({"selectedTurnCount": 1})
+            return ConversationCompactionResult(
+                request=replace(
+                    request,
+                    metadata={
+                        **dict(request.metadata),
+                        "coreCompactionPass": len(self.calls),
+                    },
+                ),
+                outcome="compacted",
+                compacted_turn_count=1,
+                retained_raw_turn_count=4,
+                diagnostics={"decisionOwner": "agent_core"},
+            )
+
+    compactor = _CaptureCompactor()
+    core, request, options, _repository, _model, _state = _core_fixture()
+    core._conversation_compactor = compactor
+
+    updates = []
+    async for item in core.run(request, options=options):
+        updates.append(item)
+        if (
+            isinstance(item, AgentEvent)
+            and item.type == CoreEventType.APPROVAL_REQUESTED
+        ):
+            await core.resolve_approval(
+                item.run_id,
+                str(item.payload["approvalId"]),
+                ApprovalDecision.APPROVE,
+            )
+
+    assert updates[-1].status is RunStatus.DONE
+    assert len(compactor.calls) >= 3
+    preflight, post_planning, *model_calls = compactor.calls
+    assert preflight["messages"] == request.messages
+    assert post_planning["messages"] == request.messages
+    preflight_budget = preflight["budget"]["budget"]
+    post_planning_budget = post_planning["budget"]["budget"]
+    assert preflight_budget.provider_input_tokens > 0
+    assert preflight_budget.phase.value == "pre_planning"
+    assert preflight_budget.planned_step_count == 0
+    assert post_planning_budget.phase.value == "post_planning"
+    assert post_planning_budget.planned_step_count == 4
+    assert post_planning_budget.planned_tool_count == 3
+    assert all(
+        item["budget"]["budget"].phase.value == "model_call"
+        for item in model_calls
+    )
+    compaction_events = [
+        item
+        for item in updates
+        if isinstance(item, AgentEvent)
+        and item.type.startswith("conversation.compaction.")
+    ]
+    assert [item.payload["phase"] for item in compaction_events] == [
+        "pre_planning",
+        "pre_planning",
+        "post_planning",
+        "post_planning",
+    ]
+    assert all(
+        item.run_id == updates[-1].run_id for item in compaction_events
+    )
+
+
 def test_dependency_edge_waivers_require_available_tools_and_a_declared_edge():
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"catalog", "read", "write"}),
@@ -1094,6 +1605,33 @@ def test_dependency_edge_waivers_require_available_tools_and_a_declared_edge():
                 satisfied_tool_dependency_edges=frozenset({
                     ("read", "write"),
                 }),
+            ),
+        )
+
+
+def test_task_planning_constraints_can_add_but_not_remove_host_guards():
+    base = PlanningConstraints(
+        context_satisfied_tool_names=frozenset({"read"}),
+        planning_excluded_tool_names=frozenset({"delete"}),
+        satisfied_tool_dependency_edges=frozenset({("write", "read")}),
+    )
+    _validate_task_constraint_refinement(
+        base,
+        PlanningConstraints(
+            context_satisfied_tool_names=frozenset({"read", "catalog"}),
+            planning_excluded_tool_names=frozenset({"delete"}),
+            satisfied_tool_dependency_edges=frozenset({
+                ("write", "read"),
+                ("publish", "write"),
+            }),
+        ),
+    )
+    with pytest.raises(ContractViolationError, match="cannot weaken"):
+        _validate_task_constraint_refinement(
+            base,
+            PlanningConstraints(
+                planning_excluded_tool_names=frozenset({"delete"}),
+                satisfied_tool_dependency_edges=frozenset({("write", "read")}),
             ),
         )
 
@@ -1398,16 +1936,73 @@ async def test_planner_failure_still_has_a_traceable_failed_run_and_one_result()
     )
     updates = [item async for item in core.run(request, options=options)]
 
-    assert [
+    event_types = [
         item.type for item in updates if isinstance(item, AgentEvent)
-    ] == [CoreEventType.RUN_STARTED, CoreEventType.RUN_FAILED]
+    ]
+    assert event_types[0] == CoreEventType.RUN_STARTED
+    assert CoreEventType.RUN_FAILED not in event_types
+    assert event_types[-1] == CoreEventType.RUN_COMPLETED
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert result.error is None
+    assert repository.runs[result.run_id]["status"] is RunStatus.DONE
+    assert [tuple(item.tools) for item in model.invocations] == [()]
+    assert state.domain["handler_order"] == []
+    invalid_trace = next(
+        trace
+        for trace in repository.traces
+        if trace.stage == "planning" and trace.outcome == "invalid"
+    )
+    assert invalid_trace.details["reasonCode"] == "invalid_json"
+    assert invalid_trace.details["validationReason"] == (
+        "planner output is not valid JSON"
+    )
+    assert any(
+        trace.stage == "planning"
+        and trace.outcome == "fallback_model_only"
+        and trace.details["fallbackToolCount"] == 0
+        for trace in repository.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_can_deny_model_only_fallback_for_invalid_plan():
+    class FailClosedContextProvider(FixtureContextProvider):
+        async def build_context(self, request, budget, signal=None):
+            bundle = await super().build_context(request, budget, signal)
+            return ContextBundle(
+                blocks=bundle.blocks,
+                diagnostics={
+                    "hostPlanningFacts": {
+                        "modelOnlyPlanningFallbackAllowed": False,
+                    },
+                },
+            )
+
+    core, request, options, repository, model, state = _core_fixture(
+        invalid_plan=True,
+        context_provider=FailClosedContextProvider(),
+    )
+
+    updates = [item async for item in core.run(request, options=options)]
+
+    event_types = [
+        item.type for item in updates if isinstance(item, AgentEvent)
+    ]
+    assert CoreEventType.RUN_FAILED in event_types
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
     assert result.status is RunStatus.FAILED
     assert result.error == "planning_invalid"
-    assert repository.runs[result.run_id]["status"] is RunStatus.FAILED
     assert model.invocations == []
     assert state.domain["handler_order"] == []
+    assert any(
+        trace.stage == "planning"
+        and trace.outcome == "fallback_denied"
+        and trace.details["hostPolicy"] == "deny_model_only_fallback"
+        for trace in repository.traces
+    )
 
 
 @pytest.mark.asyncio
@@ -1423,9 +2018,9 @@ async def test_default_planner_tool_limit_tracks_runtime_round_capacity():
     assert len(model.completions) == 2
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
-    assert result.status is RunStatus.FAILED
-    assert result.error == "planning_invalid"
-    assert model.invocations == []
+    assert result.status is RunStatus.DONE
+    assert result.error is None
+    assert [tuple(item.tools) for item in model.invocations] == [()]
 
 
 @pytest.mark.asyncio

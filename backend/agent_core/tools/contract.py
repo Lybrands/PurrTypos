@@ -7,7 +7,11 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
-from agent_core.contracts import ToolPolicy
+from agent_core.contracts import (
+    ToolDataContract,
+    ToolPayloadMode,
+    ToolPolicy,
+)
 from agent_core.errors import ContractViolationError
 from agent_core.json_values import thaw_json_mapping
 from agent_core.ports import ToolRegistration
@@ -78,6 +82,36 @@ def inspect_tool_contract(
                 f"({type(error).__name__})"
             )
 
+        data_contract = registration.data_contract
+        if not isinstance(data_contract, ToolDataContract):
+            violations.append(f"{label}: explicit tool data contract is invalid")
+        else:
+            for path in data_contract.model_owned_paths:
+                if not _schema_declares_path(parameters, path):
+                    violations.append(
+                        f"{label}: model-owned path is absent from the "
+                        f"model-visible schema: {path}"
+                    )
+            for path in (
+                *data_contract.host_bound_paths,
+                *data_contract.host_derived_paths,
+            ):
+                if _schema_declares_path(parameters, path):
+                    violations.append(
+                        f"{label}: host-owned path is exposed in the "
+                        f"model-visible schema: {path}"
+                    )
+            if _is_audited_data_contract(data_contract):
+                for path in _schema_leaf_paths(parameters):
+                    if not any(
+                        _owned_path_covers_schema_path(owned, path)
+                        for owned in data_contract.model_owned_paths
+                    ):
+                        violations.append(
+                            f"{label}: model-visible path has no declared "
+                            f"owner: {path}"
+                        )
+
         if not _is_async_callable(registration.handler):
             violations.append(f"{label}: handler must be async callable")
         if (
@@ -134,6 +168,74 @@ def validate_tool_contract(
 def _is_async_callable(value: object) -> bool:
     return inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(
         getattr(value, "__call__", None)
+    )
+
+
+def _schema_declares_path(parameters: dict, path: str) -> bool:
+    current: object = parameters
+    for raw_segment in str(path or "").split("."):
+        array_item = raw_segment.endswith("[]")
+        segment = raw_segment[:-2] if array_item else raw_segment
+        if not isinstance(current, dict):
+            return False
+        properties = current.get("properties")
+        if not isinstance(properties, dict) or segment not in properties:
+            return False
+        current = properties[segment]
+        if array_item:
+            if not isinstance(current, dict) or current.get("type") != "array":
+                return False
+            current = current.get("items")
+    return True
+
+
+def _is_audited_data_contract(contract: ToolDataContract) -> bool:
+    return bool(
+        contract.model_owned_paths
+        or contract.host_bound_paths
+        or contract.host_derived_paths
+        or contract.payload_mode is not ToolPayloadMode.INLINE
+    )
+
+
+def _schema_leaf_paths(schema: dict, prefix: str = "") -> tuple[str, ...]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return (prefix,) if prefix else ()
+    leaves: list[str] = []
+    for raw_name, child in properties.items():
+        name = str(raw_name)
+        if not isinstance(child, dict):
+            leaves.append(_join_schema_path(prefix, name))
+            continue
+        if child.get("type") == "array":
+            array_path = _join_schema_path(prefix, f"{name}[]")
+            items = child.get("items")
+            if isinstance(items, dict) and isinstance(
+                items.get("properties"),
+                dict,
+            ):
+                leaves.extend(_schema_leaf_paths(items, array_path))
+            else:
+                leaves.append(array_path)
+            continue
+        child_path = _join_schema_path(prefix, name)
+        if isinstance(child.get("properties"), dict):
+            leaves.extend(_schema_leaf_paths(child, child_path))
+        else:
+            leaves.append(child_path)
+    return tuple(leaves)
+
+
+def _join_schema_path(prefix: str, segment: str) -> str:
+    return f"{prefix}.{segment}" if prefix else segment
+
+
+def _owned_path_covers_schema_path(owned: str, schema_path: str) -> bool:
+    return bool(
+        schema_path == owned
+        or schema_path.startswith(f"{owned}.")
+        or schema_path.startswith(f"{owned}[]")
     )
 
 

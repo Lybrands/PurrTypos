@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any
@@ -11,12 +12,14 @@ from agent_core.contracts import (
     AgentRunRequest,
     DomainEffect,
     ExecutionState,
+    ToolEffectState,
     ToolHandlerResult,
+    ToolStepDisposition,
 )
+from agent_core.artifacts.errors import ArtifactError
 from agent_core.ports import CancellationSignal, ToolRegistration
 from agent_core.tools import InMemoryToolCatalog
 from database.crud.screenplay_source_refs import record_source_refs
-from domains.screenplay.adaptation_brief import normalize_creative_brief
 from domains.screenplay.source_scope import (
     is_restricted_source_scope,
     parse_source_scope,
@@ -25,30 +28,36 @@ from domains.screenplay.source_scope import (
     source_scope_summary,
 )
 from domains.screenplay.scene_trace import normalize_scene_trace
+from domains.screenplay.stage_tasks import select_draft_scenes
+from domains.screenplay.scene_order import ordered_scene_mappings
 from domains.screenplay.scene_execution import (
     normalize_scene_execution,
     validate_scene_execution_history,
 )
-from domains.screenplay.review_trace import (
-    build_revision_trace,
-    normalize_review_issues,
-    normalize_review_verifications,
-)
+from domains.screenplay.proposal_rendering import render_screenplay_proposal
 from domains.screenplay.source_coverage import (
     build_source_coverage_plan,
     read_source_coverage_batch,
 )
-from domains.screenplay.structure_trace import normalize_structure_trace
 from domains.screenplay.contracts import (
     SCREENPLAY_DOMAIN_NAMESPACE,
     ScreenplayDomainContext,
 )
+from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
 from domains.screenplay.tool_contracts import (
     SCREENPLAY_TOOL_CONTEXT_CONTRACTS,
+    SCREENPLAY_TOOL_DATA_CONTRACTS,
     SCREENPLAY_TOOL_POLICIES,
     SCREENPLAY_TOOL_SCHEMAS,
 )
+from infrastructure.screenplay.artifact_tools import (
+    ScreenplayArtifactInputError,
+    ScreenplayArtifactToolService,
+)
 from utils.text import extract_text_from_lexical
+
+
+logger = logging.getLogger(__name__)
 
 
 _SOURCE_TOOL_NAMES = frozenset({
@@ -68,15 +77,52 @@ _VALID_SOURCE_TYPES = frozenset({
     "background",
 })
 _PROPOSAL_STAGES = {
-    "proposeSourceAnalysis": frozenset({"orientation", "brief"}),
-    "proposeCreativeBrief": frozenset({"orientation", "brief"}),
-    "proposeBeatSheet": frozenset({"structure"}),
-    "proposeEpisodeOutline": frozenset({"structure"}),
-    "proposeSceneList": frozenset({"scenes"}),
+    "beginSourceAnalysisArtifact": frozenset({"orientation", "brief"}),
+    "appendSourceAnalysisBatch": frozenset({"orientation", "brief"}),
+    "finalizeSourceAnalysisProposal": frozenset({"orientation", "brief"}),
+    "beginCreativeBriefArtifact": frozenset({"orientation", "brief"}),
+    "appendCreativeBriefBatch": frozenset({"orientation", "brief"}),
+    "finalizeCreativeBriefProposal": frozenset({"orientation", "brief"}),
+    "beginScreenplayStructureArtifact": frozenset({"structure"}),
+    "appendScreenplayStructureBatch": frozenset({"structure"}),
+    "finalizeScreenplayStructureProposal": frozenset({"structure"}),
+    "beginSceneListArtifact": frozenset({"scenes"}),
+    "appendSceneListBatch": frozenset({"scenes"}),
+    "finalizeSceneListProposal": frozenset({"scenes"}),
     "proposeSceneDraft": frozenset({"draft"}),
-    "proposeScreenplayReview": frozenset({"review"}),
-    "proposeScreenplayRevision": frozenset({"review"}),
+    "beginScreenplayReviewArtifact": frozenset({"review"}),
+    "appendScreenplayReviewBatch": frozenset({"review"}),
+    "finalizeScreenplayReviewProposal": frozenset({"review"}),
+    "beginScreenplayRevisionArtifact": frozenset({"review"}),
+    "appendScreenplayRevisionBatch": frozenset({"review"}),
+    "appendScreenplayRevisionResolutionBatch": frozenset({"review"}),
+    "finalizeScreenplayRevisionProposal": frozenset({"review"}),
 }
+_ARTIFACT_TOOL_NAMES = frozenset({
+    "beginSourceAnalysisArtifact",
+    "appendSourceAnalysisBatch",
+    "finalizeSourceAnalysisProposal",
+    "beginCreativeBriefArtifact",
+    "appendCreativeBriefBatch",
+    "finalizeCreativeBriefProposal",
+    "beginScreenplayStructureArtifact",
+    "appendScreenplayStructureBatch",
+    "finalizeScreenplayStructureProposal",
+    "beginSceneListArtifact",
+    "appendSceneListBatch",
+    "finalizeSceneListProposal",
+    "beginScreenplayReviewArtifact",
+    "appendScreenplayReviewBatch",
+    "finalizeScreenplayReviewProposal",
+    "beginScreenplayRevisionArtifact",
+    "appendScreenplayRevisionBatch",
+    "appendScreenplayRevisionResolutionBatch",
+    "finalizeScreenplayRevisionProposal",
+})
+_ARTIFACT_APPEND_TOOL_NAMES = frozenset({
+    name for name in _ARTIFACT_TOOL_NAMES if name.startswith("append")
+})
+_STATEFUL_TOOL_NAMES = frozenset({"proposeSceneDraft"})
 _SERIES_FORMATS = frozenset({"连续剧", "竖屏短剧"})
 _GLOBAL_SOURCE_TOOL_NAMES = frozenset({
     "getSourceCharacters",
@@ -85,6 +131,7 @@ _GLOBAL_SOURCE_TOOL_NAMES = frozenset({
 
 
 def build_screenplay_tool_catalog(db) -> InMemoryToolCatalog:
+    artifact_tools = ScreenplayArtifactToolService(db)
     handlers = {
         "getScreenplayProject": _get_screenplay_project,
         "getScreenplayDocument": _get_screenplay_document,
@@ -95,14 +142,34 @@ def build_screenplay_tool_catalog(db) -> InMemoryToolCatalog:
         "readSourcePassages": _read_source_passages,
         "getSourceCharacters": _get_source_characters,
         "getSourceWorldSettings": _get_source_world_settings,
-        "proposeSourceAnalysis": _propose_source_analysis,
-        "proposeCreativeBrief": _propose_creative_brief,
-        "proposeBeatSheet": _propose_beat_sheet,
-        "proposeEpisodeOutline": _propose_episode_outline,
-        "proposeSceneList": _propose_scene_list,
+        "beginSourceAnalysisArtifact": artifact_tools.begin_source_analysis,
+        "appendSourceAnalysisBatch": artifact_tools.append_source_analysis,
+        "finalizeSourceAnalysisProposal": (
+            artifact_tools.finalize_source_analysis
+        ),
+        "beginCreativeBriefArtifact": artifact_tools.begin_creative_brief,
+        "appendCreativeBriefBatch": artifact_tools.append_creative_brief,
+        "finalizeCreativeBriefProposal": (
+            artifact_tools.finalize_creative_brief
+        ),
+        "beginScreenplayStructureArtifact": artifact_tools.begin_structure,
+        "appendScreenplayStructureBatch": artifact_tools.append_structure,
+        "finalizeScreenplayStructureProposal": (
+            artifact_tools.finalize_structure
+        ),
+        "beginSceneListArtifact": artifact_tools.begin_scene_list,
+        "appendSceneListBatch": artifact_tools.append_scene_list,
+        "finalizeSceneListProposal": artifact_tools.finalize_scene_list,
         "proposeSceneDraft": _propose_scene_draft,
-        "proposeScreenplayReview": _propose_screenplay_review,
-        "proposeScreenplayRevision": _propose_screenplay_revision,
+        "beginScreenplayReviewArtifact": artifact_tools.begin_review,
+        "appendScreenplayReviewBatch": artifact_tools.append_review,
+        "finalizeScreenplayReviewProposal": artifact_tools.finalize_review,
+        "beginScreenplayRevisionArtifact": artifact_tools.begin_revision,
+        "appendScreenplayRevisionBatch": artifact_tools.append_revision,
+        "appendScreenplayRevisionResolutionBatch": (
+            artifact_tools.append_revision_resolutions
+        ),
+        "finalizeScreenplayRevisionProposal": artifact_tools.finalize_revision,
     }
     registrations = tuple(
         ToolRegistration(
@@ -111,6 +178,9 @@ def build_screenplay_tool_catalog(db) -> InMemoryToolCatalog:
             policy=SCREENPLAY_TOOL_POLICIES[schema.name],
             scope_validator=_scope_validator(db, schema.name),
             context_contract=SCREENPLAY_TOOL_CONTEXT_CONTRACTS[schema.name],
+            data_contract=SCREENPLAY_TOOL_DATA_CONTRACTS[schema.name],
+            cancellation_linearizable=(schema.name in _ARTIFACT_TOOL_NAMES),
+            host_managed_durability=(schema.name in _ARTIFACT_TOOL_NAMES),
         )
         for schema in SCREENPLAY_TOOL_SCHEMAS
     )
@@ -133,27 +203,60 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
     enabled = set(project_tools)
     if context.requested_source_book_id:
         enabled.update(_SOURCE_TOOL_NAMES)
+        if context.source_scope_restricted:
+            # Do not advertise capabilities that the authoritative execution
+            # scope must reject. The scope validator remains defense in depth.
+            enabled.difference_update(_GLOBAL_SOURCE_TOOL_NAMES)
     if (
         context.requested_stage == "orientation"
         and context.requested_source_book_id
     ):
-        enabled.add("proposeSourceAnalysis")
+        enabled.update({
+            "beginSourceAnalysisArtifact",
+            "appendSourceAnalysisBatch",
+            "finalizeSourceAnalysisProposal",
+        })
     elif context.requested_stage == "brief":
-        enabled.add("proposeCreativeBrief")
+        enabled.update({
+            "beginCreativeBriefArtifact",
+            "appendCreativeBriefBatch",
+            "finalizeCreativeBriefProposal",
+        })
         if context.requested_source_book_id:
-            enabled.add("proposeSourceAnalysis")
+            enabled.update({
+                "beginSourceAnalysisArtifact",
+                "appendSourceAnalysisBatch",
+                "finalizeSourceAnalysisProposal",
+            })
     elif context.requested_stage == "orientation":
-        enabled.add("proposeCreativeBrief")
+        enabled.update({
+            "beginCreativeBriefArtifact",
+            "appendCreativeBriefBatch",
+            "finalizeCreativeBriefProposal",
+        })
     elif context.requested_stage == "structure":
-        enabled.update({"proposeBeatSheet", "proposeEpisodeOutline"})
+        enabled.update({
+            "beginScreenplayStructureArtifact",
+            "appendScreenplayStructureBatch",
+            "finalizeScreenplayStructureProposal",
+        })
     elif context.requested_stage == "scenes":
-        enabled.add("proposeSceneList")
+        enabled.update({
+            "beginSceneListArtifact",
+            "appendSceneListBatch",
+            "finalizeSceneListProposal",
+        })
     elif context.requested_stage == "draft":
         enabled.add("proposeSceneDraft")
     elif context.requested_stage == "review":
         enabled.update({
-            "proposeScreenplayReview",
-            "proposeScreenplayRevision",
+            "beginScreenplayReviewArtifact",
+            "appendScreenplayReviewBatch",
+            "finalizeScreenplayReviewProposal",
+            "beginScreenplayRevisionArtifact",
+            "appendScreenplayRevisionBatch",
+            "appendScreenplayRevisionResolutionBatch",
+            "finalizeScreenplayRevisionProposal",
         })
     return frozenset(enabled)
 
@@ -168,10 +271,12 @@ def _bind_handler(db, tool_name: str, operation):
             return _error("工具执行已取消")
         try:
             project = await _load_project_scope(db, state)
-            operation_result = await operation(
-                db,
-                project,
-                dict(arguments),
+            operation_result = (
+                await operation(project, dict(arguments), state)
+                if tool_name in _ARTIFACT_TOOL_NAMES
+                else await operation(db, project, dict(arguments), state)
+                if tool_name in _STATEFUL_TOOL_NAMES
+                else await operation(db, project, dict(arguments))
             )
             payload, refs = operation_result[:2]
             effects = (
@@ -194,11 +299,30 @@ def _bind_handler(db, tool_name: str, operation):
                     separators=(",", ":"),
                 ),
                 effects=effects,
+                step_disposition=(
+                    ToolStepDisposition.CONTINUE
+                    if tool_name in _ARTIFACT_APPEND_TOOL_NAMES
+                    and str(payload.get("nextAction") or "") == "append_batch"
+                    else ToolStepDisposition.COMPLETE
+                ),
             )
-        except _ToolInputError as error:
-            return _error(str(error))
-        except Exception as error:
-            return _error(str(error))
+        except (
+            _ToolInputError,
+            ScreenplayArtifactInputError,
+        ) as error:
+            return _error(
+                str(error),
+                error_code="tool_input_invalid",
+                effect_state=ToolEffectState.NOT_STARTED,
+            )
+        except ArtifactError as error:
+            return _error(str(error), error_code="tool_input_invalid")
+        except Exception:
+            logger.exception("Screenplay tool %s failed internally", tool_name)
+            return _error(
+                "The screenplay tool failed internally.",
+                error_code="tool_internal_error",
+            )
 
     return _handler
 
@@ -237,34 +361,21 @@ def _scope_validator(db, tool_name: str):
             if project.get("status") != "active":
                 return "Archived screenplay projects cannot receive proposals."
             if (
-                tool_name == "proposeSourceAnalysis"
+                tool_name in {
+                    "beginSourceAnalysisArtifact",
+                    "appendSourceAnalysisBatch",
+                    "finalizeSourceAnalysisProposal",
+                }
                 and not project.get("source_book_id")
             ):
                 return (
-                    "proposeSourceAnalysis requires an available source book."
+                    f"{tool_name} requires an available source book."
                 )
             stage = str(project.get("active_stage") or "")
             if stage not in _PROPOSAL_STAGES[tool_name]:
                 return (
                     f"{tool_name} is unavailable during screenplay stage "
                     f"{stage or 'unknown'}."
-                )
-            screenplay_format = str(project.get("format") or "")
-            if (
-                tool_name == "proposeBeatSheet"
-                and screenplay_format in _SERIES_FORMATS
-            ):
-                return (
-                    "Series projects require proposeEpisodeOutline during "
-                    "the structure stage."
-                )
-            if (
-                tool_name == "proposeEpisodeOutline"
-                and screenplay_format not in _SERIES_FORMATS
-            ):
-                return (
-                    "Non-series projects require proposeBeatSheet during "
-                    "the structure stage."
                 )
         return None
 
@@ -354,310 +465,15 @@ async def _get_screenplay_document(db, project, arguments):
     return {"document": row}, []
 
 
-async def _propose_source_analysis(db, project, arguments):
-    analysis = arguments.get("analysis")
-    if not isinstance(analysis, Mapping):
-        raise _ToolInputError("analysis must be an object.")
-    if not str(analysis.get("rangeSummary") or "").strip():
-        raise _ToolInputError("analysis requires rangeSummary.")
-    if not str(analysis.get("narrativeSummary") or "").strip():
-        raise _ToolInputError("analysis requires narrativeSummary.")
-    coverage = analysis.get("coverage")
-    if not isinstance(coverage, Mapping):
-        raise _ToolInputError("analysis requires coverage.")
-    try:
-        selected_chapter_count = int(coverage.get("selectedChapterCount"))
-    except (TypeError, ValueError):
-        raise _ToolInputError(
-            "coverage requires a non-negative selectedChapterCount."
-        ) from None
-    if selected_chapter_count < 0:
-        raise _ToolInputError(
-            "coverage requires a non-negative selectedChapterCount."
-        )
-    raw_read_chapter_ids = coverage.get("readChapterIds")
-    raw_sampled_chapter_ids = coverage.get("sampledChapterIds")
-    raw_limitations = coverage.get("limitations")
-    if not isinstance(raw_read_chapter_ids, list):
-        raise _ToolInputError("coverage readChapterIds must be an array.")
-    if not isinstance(raw_sampled_chapter_ids, list):
-        raise _ToolInputError("coverage sampledChapterIds must be an array.")
-    if not isinstance(raw_limitations, list):
-        raise _ToolInputError("coverage limitations must be an array.")
-    read_chapter_ids = list(dict.fromkeys(
-        str(item).strip()
-        for item in raw_read_chapter_ids
-        if str(item).strip()
-    ))
-    sampled_chapter_ids = [
-        chapter_id
-        for chapter_id in dict.fromkeys(
-            str(item).strip()
-            for item in raw_sampled_chapter_ids
-            if str(item).strip()
-        )
-        if chapter_id not in set(read_chapter_ids)
-    ]
-    limitations = [
-        str(item).strip()
-        for item in raw_limitations
-        if str(item).strip()
-    ]
-    covered_chapter_count = len(read_chapter_ids) + len(sampled_chapter_ids)
-    if covered_chapter_count > selected_chapter_count:
-        raise _ToolInputError(
-            "coverage cannot include more chapters than the selected range."
-        )
-    if (
-        (sampled_chapter_ids or selected_chapter_count > covered_chapter_count)
-        and not limitations
-    ):
-        raise _ToolInputError(
-            "Sampled or partial coverage must disclose at least one limitation."
-        )
-    plot_events = analysis.get("plotEvents")
-    if not isinstance(plot_events, list) or not plot_events:
-        raise _ToolInputError(
-            "analysis requires at least one plot event."
-        )
-    event_orders: list[int] = []
-    for event in plot_events:
-        if not isinstance(event, Mapping):
-            raise _ToolInputError("Every plot event must be an object.")
-        try:
-            order = int(event.get("order"))
-        except (TypeError, ValueError):
-            raise _ToolInputError(
-                "Every plot event requires a positive integer order."
-            ) from None
-        if order < 1:
-            raise _ToolInputError(
-                "Every plot event requires a positive integer order."
-            )
-        if not str(event.get("event") or "").strip():
-            raise _ToolInputError("Every plot event requires event text.")
-        event_orders.append(order)
-    if event_orders != list(range(1, len(event_orders) + 1)):
-        raise _ToolInputError(
-            "Plot event order must start at 1 and increase continuously."
-        )
-    evidence = analysis.get("evidence")
-    if not isinstance(evidence, list) or not evidence:
-        raise _ToolInputError(
-            "analysis requires at least one source evidence item."
-        )
-    normalized_evidence: list[dict[str, str]] = []
-    seen_evidence: set[tuple[str, str]] = set()
-    for item in evidence:
-        if not isinstance(item, Mapping):
-            raise _ToolInputError("Every evidence item must be an object.")
-        source_type = str(item.get("sourceType") or "").strip()
-        source_id = str(item.get("sourceId") or "").strip()
-        claim = str(item.get("claim") or "").strip()
-        if (
-            source_type not in {*_VALID_SOURCE_TYPES, "book"}
-            or not source_id
-            or not claim
-        ):
-            raise _ToolInputError(
-                "Every evidence item requires a valid sourceType, "
-                "sourceId, and claim."
-            )
-        key = (source_type, source_id)
-        if key in seen_evidence:
-            continue
-        seen_evidence.add(key)
-        normalized_evidence.append({
-            "sourceType": source_type,
-            "sourceId": source_id,
-            "claim": claim,
-        })
-    normalized_analysis = dict(analysis)
-    normalized_analysis["coverage"] = {
-        "selectedChapterCount": selected_chapter_count,
-        "readChapterIds": read_chapter_ids,
-        "sampledChapterIds": sampled_chapter_ids,
-        "limitations": limitations,
-    }
-    normalized_analysis["evidence"] = normalized_evidence
-    content_text = _proposal_text(arguments, 300_000)
-    accepted_analysis = await db.fetch_one(
-        "SELECT id FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'source_analysis' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
-    )
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind=(
-            "source_analysis" if accepted_analysis is not None else None
-        ),
-    )
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "source_analysis",
-        "analysis": normalized_analysis,
-    }
-    return _proposal_result(
-        kind="source_analysis",
-        title=_proposal_title(arguments, "Agent 原作范围分析"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
-async def _propose_creative_brief(db, project, arguments):
-    brief = arguments.get("brief")
-    if not isinstance(brief, Mapping):
-        raise _ToolInputError("brief must be an object.")
-    content_text = _proposal_text(arguments, 100_000)
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind=(
-            "source_analysis"
-            if project.get("source_book_id")
-            else None
-        ),
-    )
-    source_analysis_id = None
-    source_analysis_content = None
-    if project.get("source_book_id"):
-        source_analysis = await db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'source_analysis' "
-            "AND status = 'accepted' "
-            "ORDER BY version DESC LIMIT 1",
-            [project["id"]],
-        )
-        if source_analysis is None:
-            raise _ToolInputError(
-                "An accepted source analysis is required before this proposal."
-            )
-        source_analysis_id = str(source_analysis["id"])
-        parsed = _json_value(source_analysis.get("content_json"), {})
-        source_analysis_content = (
-            parsed if isinstance(parsed, Mapping) else {}
-        )
-    try:
-        normalized_brief = normalize_creative_brief(
-            brief,
-            project_format=str(project.get("format") or ""),
-            source_analysis=source_analysis_content,
-        )
-    except ValueError as error:
-        raise _ToolInputError(str(error)) from error
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "creative_brief",
-        "brief": normalized_brief,
-    }
-    if source_analysis_id is not None:
-        content_json["sourceAnalysisId"] = source_analysis_id
-    return _proposal_result(
-        kind="creative_brief",
-        title=_proposal_title(arguments, "Agent 创作简报提案"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
-async def _propose_beat_sheet(db, project, arguments):
-    content_text = _proposal_text(arguments, 200_000)
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind="creative_brief",
-    )
-    creative_brief = await _current_accepted_creative_brief(
-        db,
-        str(project["id"]),
-    )
-    try:
-        beats, decision_coverage = normalize_structure_trace(
-            kind="beat_sheet",
-            units=arguments.get("beats"),
-            decision_coverage=arguments.get("decisionCoverage"),
-            creative_brief=creative_brief["content"],
-            require_adaptation_decisions=bool(project.get("source_book_id")),
-        )
-    except ValueError as error:
-        raise _ToolInputError(str(error)) from error
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "beat_sheet",
-        "creativeBriefId": creative_brief["id"],
-        "beats": beats,
-        "decisionCoverage": decision_coverage,
-    }
-    return _proposal_result(
-        kind="beat_sheet",
-        title=_proposal_title(arguments, "Agent 节拍表提案"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
-async def _propose_episode_outline(db, project, arguments):
-    content_text = _proposal_text(arguments, 300_000)
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind="creative_brief",
-    )
-    creative_brief = await _current_accepted_creative_brief(
-        db,
-        str(project["id"]),
-    )
-    try:
-        episodes, decision_coverage = normalize_structure_trace(
-            kind="episode_outline",
-            units=arguments.get("episodes"),
-            decision_coverage=arguments.get("decisionCoverage"),
-            creative_brief=creative_brief["content"],
-            require_adaptation_decisions=bool(project.get("source_book_id")),
-        )
-    except ValueError as error:
-        raise _ToolInputError(str(error)) from error
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "episode_outline",
-        "creativeBriefId": creative_brief["id"],
-        "episodes": episodes,
-        "decisionCoverage": decision_coverage,
-    }
-    return _proposal_result(
-        kind="episode_outline",
-        title=_proposal_title(arguments, "Agent 分集结构提案"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
 async def _propose_scene_list(db, project, arguments):
     required_kind = (
         "episode_outline"
         if str(project.get("format") or "") in _SERIES_FORMATS
         else "beat_sheet"
     )
-    content_text = _proposal_text(arguments, 500_000)
     derived_from_ids = await _proposal_parent_ids(
         db,
         project,
-        arguments,
         required_accepted_kind=required_kind,
     )
     structure = await db.fetch_one(
@@ -694,12 +510,12 @@ async def _propose_scene_list(db, project, arguments):
         kind="scene_list",
         title=_proposal_title(arguments, "Agent 场景表提案"),
         content_json=content_json,
-        content_text=content_text,
+        content_text=None,
         derived_from_ids=derived_from_ids,
     )
 
 
-async def _propose_scene_draft(db, project, arguments):
+async def _propose_scene_draft(db, project, arguments, state):
     accepted_scene_list = await db.fetch_one(
         "SELECT id, content_json FROM screenplay_documents "
         "WHERE project_id = ? AND kind = 'scene_list' "
@@ -723,69 +539,21 @@ async def _propose_scene_draft(db, project, arguments):
         raise _ToolInputError(
             "The accepted scene list has no structured scenes."
         )
-    ordered_scenes = sorted(
-        (
-            scene for scene in scenes
-            if isinstance(scene, Mapping)
-        ),
-        key=lambda scene: _bounded_int(
-            scene.get("order"),
-            1_000_000,
-            1,
-            1_000_000,
-        ),
-    )
+    ordered_scenes = list(ordered_scene_mappings(scene_list_json))
     ordered_scene_ids = [
         str(scene.get("id") or "").strip()
         for scene in ordered_scenes
         if str(scene.get("id") or "").strip()
     ]
-    scenes_by_id = {
-        str(scene.get("id") or "").strip(): scene
-        for scene in ordered_scenes
-        if str(scene.get("id") or "").strip()
-    }
-    scene_id = str(arguments.get("sceneId") or "").strip()
-    if scene_id not in ordered_scene_ids:
-        raise _ToolInputError(
-            "sceneId must reference the accepted scene list."
-        )
-    completed = arguments.get("completedSceneIds")
-    if not isinstance(completed, list) or not completed:
-        raise _ToolInputError(
-            "completedSceneIds must contain at least the current scene."
-        )
-    completed_ids = list(dict.fromkeys(
-        str(item).strip()
-        for item in completed
-        if str(item).strip()
-    ))
-    if scene_id not in completed_ids:
-        raise _ToolInputError(
-            "completedSceneIds must include the current sceneId."
-        )
-    if not set(completed_ids).issubset(set(ordered_scene_ids)):
-        raise _ToolInputError(
-            "completedSceneIds must belong to the accepted scene list."
-        )
-    expected_prefix = ordered_scene_ids[:len(completed_ids)]
-    if completed_ids != expected_prefix:
-        raise _ToolInputError(
-            "Scenes must be completed in the accepted scene-list order."
-        )
-    if completed_ids[-1] != scene_id:
-        raise _ToolInputError(
-            "sceneId must be the newly completed final scene."
-        )
-
     latest_draft = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
+        "SELECT id, content_json, content_text FROM screenplay_documents "
         "WHERE project_id = ? AND kind = 'scene_draft' "
         "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
         [project["id"]],
     )
     previous_completed: list[str] = []
     previous_executions: list[dict[str, Any]] = []
+    previous_content_text = ""
     if latest_draft is not None:
         previous_json = _json_value(latest_draft.get("content_json"), {})
         if (
@@ -814,351 +582,146 @@ async def _propose_scene_draft(db, project, arguments):
                 dict(item) for item in raw_executions
                 if isinstance(item, Mapping)
             ]
-    if completed_ids != [*previous_completed, scene_id]:
+        previous_content_text = str(
+            latest_draft.get("content_text") or ""
+        ).strip()
+    expected_previous = ordered_scene_ids[:len(previous_completed)]
+    if previous_completed != expected_previous:
         raise _ToolInputError(
-            "Each rolling draft must preserve prior scenes and append exactly "
-            "the next scene."
+            "The accepted draft does not preserve scene-list order."
         )
-
-    all_scenes_complete = (
-        set(completed_ids) == set(ordered_scene_ids)
+    if len(previous_completed) >= len(ordered_scene_ids):
+        raise _ToolInputError(
+            "Every scene in the accepted scene list is already complete."
+        )
+    requested_count = _bounded_int(
+        state.domain.get("screenplayDraftSceneCount"),
+        1,
+        1,
+        20,
     )
-    requested_complete = arguments.get("isComplete") is True
-    if requested_complete != all_scenes_complete:
-        raise _ToolInputError(
-            "isComplete must match whether every accepted scene-list id "
-            "appears in completedSceneIds."
+    remaining_scenes = ordered_scenes[len(previous_completed):]
+    draft_scope = str(
+        state.domain.get("screenplayDraftScope") or "planner"
+    ).strip()
+    selected_scene_ids = [
+        str(scene.get("id") or "").strip()
+        for scene in select_draft_scenes(
+            remaining_scenes,
+            scope=draft_scope,
+            fallback_count=requested_count,
         )
-    planned_scene = scenes_by_id[scene_id]
-    scene_heading = str(arguments.get("sceneHeading") or "").strip()
-    if scene_heading != str(planned_scene.get("heading") or "").strip():
+        if str(scene.get("id") or "").strip()
+    ]
+    additional_scenes = arguments.get("additionalScenes", [])
+    if additional_scenes is None:
+        additional_scenes = []
+    if not isinstance(additional_scenes, list) or any(
+        not isinstance(item, Mapping) for item in additional_scenes
+    ):
+        raise _ToolInputError("additionalScenes must be an array of scene drafts.")
+    draft_inputs = [arguments, *additional_scenes]
+    if len(draft_inputs) != len(selected_scene_ids):
         raise _ToolInputError(
-            "sceneHeading must match the accepted scene-list heading."
+            "The scene draft batch must contain exactly "
+            f"{len(selected_scene_ids)} scene(s) selected by the host."
         )
+    completed_ids = [*previous_completed, *selected_scene_ids]
+    all_scenes_complete = len(completed_ids) == len(ordered_scene_ids)
+    scenes_by_id = {
+        str(scene.get("id") or "").strip(): scene
+        for scene in ordered_scenes
+        if str(scene.get("id") or "").strip()
+    }
+    selected_scenes = [scenes_by_id[scene_id] for scene_id in selected_scene_ids]
+    scene_headings = [
+        str(scene.get("heading") or "").strip()
+        for scene in selected_scenes
+    ]
     try:
-        current_execution = normalize_scene_execution(
-            scene=planned_scene,
-            execution=arguments.get("execution"),
-        )
+        current_executions = [
+            normalize_scene_execution(
+                scene=scene,
+                execution=draft_input.get("execution"),
+            )
+            for scene, draft_input in zip(
+                selected_scenes,
+                draft_inputs,
+                strict=True,
+            )
+        ]
         scene_executions = validate_scene_execution_history(
             scene_list_content=scene_list_json,
             completed_scene_ids=completed_ids,
             scene_executions=[
                 *previous_executions,
-                current_execution,
+                *current_executions,
             ],
             previous_executions=previous_executions,
         )
     except ValueError as error:
         raise _ToolInputError(str(error)) from error
 
-    supplied = arguments.get("derivedFromIds") or []
     derived_from_ids = await _proposal_parent_ids(
         db,
         project,
-        arguments,
         required_accepted_kind="scene_list",
     )
     if latest_draft is not None:
         latest_draft_id = str(latest_draft["id"])
-        if supplied and latest_draft_id not in derived_from_ids:
-            raise _ToolInputError(
-                "The next rolling draft must derive from the latest "
-                "accepted scene draft."
-            )
         if latest_draft_id not in derived_from_ids:
             derived_from_ids.append(latest_draft_id)
 
-    content_text = _proposal_text(arguments, 2_000_000)
+    scene_texts = [
+        _required_model_text(
+            draft_input,
+            "sceneText",
+            SCENE_DRAFT_PAYLOAD_LIMITS.scene_text_chars,
+        )
+        for draft_input in draft_inputs
+    ]
+    notes = str(arguments.get("notes") or "").strip()
+    if len(notes) > SCENE_DRAFT_PAYLOAD_LIMITS.draft_notes_chars:
+        raise _ToolInputError(
+            "notes exceeds "
+            f"{SCENE_DRAFT_PAYLOAD_LIMITS.draft_notes_chars} characters."
+        )
+    content_text = "\n\n".join(
+        item
+        for item in (previous_content_text, *scene_texts)
+        if item
+    )
     content_json = {
         "schemaVersion": 1,
         "generatedBy": "screenplay-agent",
         "documentKind": "scene_draft",
         "sceneListId": str(accepted_scene_list["id"]),
-        "sceneId": scene_id,
-        "sceneHeading": scene_heading,
+        "sceneId": selected_scene_ids[0],
+        "sceneHeading": scene_headings[0],
+        "newSceneIds": selected_scene_ids,
+        "newSceneHeadings": scene_headings,
         "completedSceneIds": completed_ids,
         "sceneExecutions": scene_executions,
         "isComplete": all_scenes_complete,
-        "notes": str(arguments.get("notes") or "").strip(),
+        "notes": notes,
     }
     return _proposal_result(
         kind="scene_draft",
         title=_proposal_title(
             arguments,
-            f"Agent 场景正文 · {content_json['sceneHeading'] or scene_id}",
+            (
+                f"Agent 场景正文 · {scene_headings[0] or selected_scene_ids[0]}"
+                if len(selected_scene_ids) == 1
+                else (
+                    "Agent 场景正文 · "
+                    f"{selected_scene_ids[0]}–{selected_scene_ids[-1]}"
+                )
+            ),
         ),
         content_json=content_json,
         content_text=content_text,
         derived_from_ids=derived_from_ids,
     )
-
-
-async def _propose_screenplay_review(db, project, arguments):
-    accepted_draft = await _accepted_complete_draft(db, project)
-    draft_json = accepted_draft["content_json"]
-    try:
-        issues = normalize_review_issues(
-            issues=arguments.get("issues"),
-            completed_scene_ids=draft_json.get("completedSceneIds"),
-            scene_executions=draft_json.get("sceneExecutions"),
-        )
-    except ValueError as error:
-        raise _ToolInputError(str(error)) from error
-    strengths = arguments.get("strengths")
-    if not isinstance(strengths, list):
-        raise _ToolInputError("strengths must be an array.")
-    verification_results: list[dict[str, Any]] = []
-    verification_review_id = ""
-    previous_review_id = str(draft_json.get("reviewId") or "").strip()
-    revision_of = str(draft_json.get("revisionOf") or "").strip()
-    if previous_review_id or revision_of:
-        if not previous_review_id or not revision_of:
-            raise _ToolInputError(
-                "The current revision has incomplete review provenance."
-            )
-        previous_review = await db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE id = ? AND project_id = ? AND kind = 'review'",
-            [previous_review_id, project["id"]],
-        )
-        previous_review_json = _json_value(
-            (previous_review or {}).get("content_json"),
-            {},
-        )
-        if (
-            previous_review is None
-            or not isinstance(previous_review_json, Mapping)
-            or str(previous_review_json.get("reviewedDraftId") or "")
-            != revision_of
-        ):
-            raise _ToolInputError(
-                "The current revision cannot be traced to its prior review."
-            )
-        try:
-            verification_results = normalize_review_verifications(
-                previous_review_issues=previous_review_json.get("issues"),
-                issue_resolutions=draft_json.get("issueResolutions"),
-                verification_results=arguments.get("verificationResults"),
-            )
-        except ValueError as error:
-            raise _ToolInputError(str(error)) from error
-        verification_review_id = previous_review_id
-        previous_issue_ids = {
-            item["issueId"] for item in verification_results
-        }
-        current_issue_ids = {str(item["id"]) for item in issues}
-        failed_verification_ids = {
-            item["issueId"]
-            for item in verification_results
-            if item["status"] != "verified"
-        }
-        verified_issue_ids = previous_issue_ids - failed_verification_ids
-        if not failed_verification_ids.issubset(current_issue_ids):
-            raise _ToolInputError(
-                "Every failed verification must remain in the current issues."
-            )
-        if verified_issue_ids & current_issue_ids:
-            raise _ToolInputError(
-                "Verified prior issues cannot remain open in the current review."
-            )
-    elif arguments.get("verificationResults"):
-        raise _ToolInputError(
-            "verificationResults are only valid when reviewing a revision."
-        )
-    verdict = str(arguments.get("verdict") or "").strip()
-    if verdict == "ready" and issues:
-        raise _ToolInputError("A ready review cannot contain open issues.")
-    if verdict in {"revise", "major_rework"} and not issues:
-        raise _ToolInputError("A revision verdict requires at least one issue.")
-    if (
-        verdict == "ready"
-        and any(item["status"] != "verified" for item in verification_results)
-    ):
-        raise _ToolInputError(
-            "A ready rereview requires every prior issue to be verified."
-        )
-    content_text = _proposal_text(arguments, 300_000)
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind="scene_draft",
-    )
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "review",
-        "reviewedDraftId": str(accepted_draft["id"]),
-        "summary": str(arguments.get("summary") or "").strip(),
-        "strengths": strengths,
-        "issues": issues,
-        "verdict": verdict,
-    }
-    if verification_review_id:
-        content_json.update({
-            "verificationOfReviewId": verification_review_id,
-            "verificationResults": verification_results,
-            "verifiedIssueIds": [
-                item["issueId"]
-                for item in verification_results
-                if item["status"] == "verified"
-            ],
-            "failedVerificationIssueIds": [
-                item["issueId"]
-                for item in verification_results
-                if item["status"] != "verified"
-            ],
-        })
-    return _proposal_result(
-        kind="review",
-        title=_proposal_title(arguments, "Agent 剧本审阅报告"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
-async def _propose_screenplay_revision(db, project, arguments):
-    accepted_draft = await _accepted_complete_draft(db, project)
-    accepted_review = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'review' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
-    )
-    if accepted_review is None:
-        raise _ToolInputError(
-            "An accepted screenplay review is required before revision."
-        )
-    review_json = _json_value(accepted_review.get("content_json"), {})
-    if (
-        not isinstance(review_json, Mapping)
-        or str(review_json.get("reviewedDraftId") or "")
-        != str(accepted_draft["id"])
-        or str(review_json.get("verdict") or "") == "ready"
-    ):
-        raise _ToolInputError(
-            "The accepted screenplay review does not apply to the current draft."
-        )
-    raw_issues = review_json.get("issues")
-    supplied = arguments.get("derivedFromIds") or []
-    derived_from_ids = await _proposal_parent_ids(
-        db,
-        project,
-        arguments,
-        required_accepted_kind="scene_draft",
-    )
-    review_id = str(accepted_review["id"])
-    if supplied and review_id not in derived_from_ids:
-        raise _ToolInputError(
-            "The revision must derive from the accepted review."
-        )
-    if review_id not in derived_from_ids:
-        derived_from_ids.append(review_id)
-    draft_json = accepted_draft.get("content_json")
-    completed_scene_ids = (
-        draft_json.get("completedSceneIds")
-        if isinstance(draft_json, Mapping)
-        else []
-    )
-    accepted_scene_list = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'scene_list' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
-    )
-    scene_list_json = _json_value(
-        (accepted_scene_list or {}).get("content_json"),
-        {},
-    )
-    if (
-        accepted_scene_list is None
-        or not isinstance(scene_list_json, Mapping)
-        or str(draft_json.get("sceneListId") or "")
-        != str(accepted_scene_list["id"])
-    ):
-        raise _ToolInputError(
-            "The current draft is not bound to the accepted scene list."
-        )
-    try:
-        (
-            issue_resolutions,
-            scene_executions,
-            reassessed_scene_ids,
-        ) = build_revision_trace(
-            scene_list_content=scene_list_json,
-            completed_scene_ids=completed_scene_ids,
-            previous_executions=draft_json.get("sceneExecutions"),
-            review_issues=raw_issues,
-            issue_resolutions=arguments.get("issueResolutions"),
-            execution_updates=arguments.get("executionUpdates"),
-        )
-    except ValueError as error:
-        raise _ToolInputError(str(error)) from error
-    resolved_issue_ids = [
-        item["issueId"]
-        for item in issue_resolutions
-        if item["status"] == "resolved"
-    ]
-    partially_resolved_issue_ids = [
-        item["issueId"]
-        for item in issue_resolutions
-        if item["status"] == "partially_resolved"
-    ]
-    content_text = _proposal_text(arguments, 2_000_000)
-    content_json = {
-        "schemaVersion": 1,
-        "generatedBy": "screenplay-agent",
-        "documentKind": "scene_draft",
-        "isComplete": True,
-        "sceneListId": str(draft_json.get("sceneListId") or ""),
-        "completedSceneIds": (
-            completed_scene_ids
-            if isinstance(completed_scene_ids, list)
-            else []
-        ),
-        "sceneExecutions": scene_executions,
-        "revisionOf": str(accepted_draft["id"]),
-        "reviewId": review_id,
-        "issueResolutions": issue_resolutions,
-        "reassessedSceneIds": reassessed_scene_ids,
-        "resolvedIssueIds": resolved_issue_ids,
-        "partiallyResolvedIssueIds": partially_resolved_issue_ids,
-        "revisionSummary": str(
-            arguments.get("revisionSummary") or ""
-        ).strip(),
-    }
-    return _proposal_result(
-        kind="scene_draft",
-        title=_proposal_title(arguments, "Agent 完整剧本修订稿"),
-        content_json=content_json,
-        content_text=content_text,
-        derived_from_ids=derived_from_ids,
-    )
-
-
-async def _accepted_complete_draft(db, project) -> dict[str, Any]:
-    accepted_draft = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'scene_draft' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
-    )
-    if accepted_draft is None:
-        raise _ToolInputError(
-            "An accepted complete scene draft is required for review."
-        )
-    content_json = _json_value(accepted_draft.get("content_json"), {})
-    if (
-        not isinstance(content_json, Mapping)
-        or content_json.get("isComplete") is not True
-    ):
-        raise _ToolInputError(
-            "The accepted scene draft is not marked complete."
-        )
-    accepted_draft["content_json"] = content_json
-    return accepted_draft
 
 
 def _proposal_result(
@@ -1166,14 +729,23 @@ def _proposal_result(
     kind: str,
     title: str,
     content_json: Mapping[str, Any],
-    content_text: str,
+    content_text: str | None,
     derived_from_ids: list[str],
 ):
+    rendered_text = (
+        str(content_text).strip()
+        if content_text is not None
+        else render_screenplay_proposal(
+            kind=kind,
+            title=title,
+            content=content_json,
+        )
+    )
     proposal = {
         "kind": kind,
         "title": title,
         "contentJson": dict(content_json),
-        "contentText": content_text,
+        "contentText": rendered_text,
         "derivedFromIds": derived_from_ids,
     }
     return (
@@ -1196,31 +768,13 @@ def _proposal_result(
 async def _proposal_parent_ids(
     db,
     project: Mapping[str, Any],
-    arguments: Mapping[str, Any],
     *,
     required_accepted_kind: str | None,
 ) -> list[str]:
-    supplied = arguments.get("derivedFromIds") or []
-    if not isinstance(supplied, list):
-        raise _ToolInputError("derivedFromIds must be an array.")
-    parent_ids = list(dict.fromkeys(
-        str(item).strip()
-        for item in supplied
-        if str(item).strip()
-    ))
-    rows = []
-    if parent_ids:
-        placeholders = ",".join("?" for _ in parent_ids)
-        rows = await db.fetch_all(
-            "SELECT id, kind, status FROM screenplay_documents "
-            f"WHERE project_id = ? AND id IN ({placeholders})",
-            [project["id"], *parent_ids],
-        )
-        if len(rows) != len(parent_ids):
-            raise _ToolInputError(
-                "Every derivedFromId must belong to the bound screenplay "
-                "project."
-            )
+    # Document provenance is host-owned state. Model-facing tools produce
+    # creative content, but they must never select persistence identities or
+    # mix book/chapter/coverage-plan ids into the screenplay document graph.
+    parent_ids: list[str] = []
     if required_accepted_kind:
         accepted = await db.fetch_one(
             "SELECT id FROM screenplay_documents "
@@ -1240,20 +794,8 @@ async def _proposal_parent_ids(
                 f"An accepted {label} is required before this proposal."
             )
         accepted_id = str(accepted["id"])
-        if parent_ids and accepted_id not in parent_ids:
-            label = (
-                "source analysis"
-                if required_accepted_kind == "source_analysis"
-                else "creative brief"
-                if required_accepted_kind == "creative_brief"
-                else required_accepted_kind.replace("_", " ")
-            )
-            raise _ToolInputError(
-                f"The proposal must derive from the accepted {label}."
-            )
-        if not parent_ids:
-            parent_ids = [accepted_id]
-    elif not parent_ids:
+        parent_ids = [accepted_id]
+    else:
         latest = await db.fetch_one(
             "SELECT id FROM screenplay_documents "
             "WHERE project_id = ? AND kind = 'creative_brief' "
@@ -1265,27 +807,6 @@ async def _proposal_parent_ids(
     return parent_ids
 
 
-async def _current_accepted_creative_brief(
-    db,
-    project_id: str,
-) -> dict[str, Any]:
-    row = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'creative_brief' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project_id],
-    )
-    if row is None:
-        raise _ToolInputError(
-            "An accepted creative brief is required before this proposal."
-        )
-    parsed = _json_value(row.get("content_json"), {})
-    return {
-        "id": str(row["id"]),
-        "content": parsed if isinstance(parsed, Mapping) else {},
-    }
-
-
 def _proposal_text(arguments: Mapping[str, Any], maximum: int) -> str:
     content_text = str(arguments.get("contentText") or "").strip()
     if not content_text:
@@ -1293,6 +814,19 @@ def _proposal_text(arguments: Mapping[str, Any], maximum: int) -> str:
     if len(content_text) > maximum:
         raise _ToolInputError(f"contentText exceeds {maximum} characters.")
     return content_text
+
+
+def _required_model_text(
+    arguments: Mapping[str, Any],
+    field: str,
+    maximum: int,
+) -> str:
+    text = str(arguments.get(field) or "").strip()
+    if not text:
+        raise _ToolInputError(f"{field} is required.")
+    if len(text) > maximum:
+        raise _ToolInputError(f"{field} exceeds {maximum} characters.")
+    return text
 
 
 def _proposal_title(arguments: Mapping[str, Any], fallback: str) -> str:
@@ -1373,6 +907,7 @@ async def _get_source_book_overview(db, project, arguments):
             str(row["id"]),
             row,
             str(row.get("title") or ""),
+            coverage_mode="catalog",
         )
         for row in chapters[:200]
     )
@@ -1413,6 +948,7 @@ async def _read_source_coverage_batch(db, project, arguments):
             str(item["sourceId"]),
             item["revisionText"],
             str(item.get("excerpt") or ""),
+            coverage_mode=str(item.get("coverageMode") or "sampled"),
         )
         for item in coverage_refs
     ]
@@ -1487,6 +1023,7 @@ async def _search_source_material(db, project, arguments):
                 and record["sourceId"] == hit["sourceId"]
             ),
             hit["excerpt"],
+            coverage_mode="search",
         )
         for hit in hits
     ]
@@ -1585,6 +1122,11 @@ async def _read_source_passages(db, project, arguments):
             source_id,
             content,
             visible[:1000],
+            coverage_mode=(
+                "full"
+                if source_type == "chapter" and len(visible) == len(content)
+                else "passage"
+            ),
         ))
     return {"passages": passages}, refs
 
@@ -1862,6 +1404,8 @@ def _source_ref(
     source_id: str,
     revision_value: Any,
     excerpt: str,
+    *,
+    coverage_mode: str = "referenced",
 ) -> dict[str, str]:
     encoded = json.dumps(
         revision_value,
@@ -1874,6 +1418,7 @@ def _source_ref(
         "sourceType": source_type,
         "sourceId": str(source_id),
         "sourceRevision": sha256(encoded).hexdigest(),
+        "coverageMode": str(coverage_mode or "referenced"),
         "excerpt": str(excerpt or "")[:1000],
     }
 
@@ -1887,13 +1432,19 @@ def _require_source_book(project: Mapping[str, Any]) -> str:
     return book_id
 
 
-def _error(message: str) -> ToolHandlerResult:
+def _error(
+    message: str,
+    *,
+    error_code: str = "tool_execution_failed",
+    effect_state: ToolEffectState = ToolEffectState.UNKNOWN,
+) -> ToolHandlerResult:
     return ToolHandlerResult(
         content=json.dumps(
             {"success": False, "error": str(message)},
             ensure_ascii=False,
         ),
-        error_code="tool_execution_failed",
+        error_code=error_code,
+        effect_state=effect_state,
     )
 
 

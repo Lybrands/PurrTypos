@@ -248,11 +248,13 @@ class RunStateMachine:
             return _unchanged(state)
         normalized_outcome = ToolBatchOutcome(outcome)
         if normalized_outcome not in {
+            ToolBatchOutcome.PROGRESSED,
             ToolBatchOutcome.COMPLETED,
             ToolBatchOutcome.DECLINED,
         }:
             raise ContractViolationError(
-                "only completed or declined tool rounds may advance todo state"
+                "only progressed, completed, or declined tool rounds may "
+                "advance todo state"
             )
         tool_index = next(
             (
@@ -278,6 +280,13 @@ class RunStateMachine:
             # later tool grant; the following model round may still provide the
             # protocol-compatible final explanation to the user.
             return _with_step_changes(state, ((tool_index, declined),))
+
+        if normalized_outcome is ToolBatchOutcome.PROGRESSED:
+            # The host committed a valid bounded portion of this operation,
+            # but explicitly did not satisfy the Planner step. Keep the same
+            # transition running; ordinary batch progress follows the existing
+            # plan and does not itself justify another Planner model call.
+            return _unchanged(state)
 
         completed = replace(
             state.steps[tool_index],
@@ -363,6 +372,37 @@ class RunStateMachine:
             state,
             tuple(changes),
             status=(RunStatus.BLOCKED if has_incomplete_non_model else RunStatus.DONE),
+            final_response=final_response,
+        )
+
+    @staticmethod
+    def complete_durable_execution(
+        state: RunSnapshot,
+        final_response: str = "",
+    ) -> RunTransition:
+        """Complete a root run after its durable execution has finished."""
+
+        if state.terminal:
+            return _unchanged(state)
+        changes = tuple(
+            (
+                index,
+                replace(
+                    step,
+                    status=StepStatus.DONE,
+                    result_summary=(
+                        step.result_summary
+                        or "Durable execution completed this planned step."
+                    ),
+                ),
+            )
+            for index, step in enumerate(state.steps)
+            if step.status in {StepStatus.PENDING, StepStatus.RUNNING}
+        )
+        return _with_step_changes(
+            state,
+            changes,
+            status=RunStatus.DONE,
             final_response=final_response,
         )
 

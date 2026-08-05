@@ -6,17 +6,28 @@ const path = require('node:path')
 const { loadTypeScriptModule } = require('../../../../scripts/load-typescript-module.cjs')
 
 const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, 'streamOptions.ts'))
-const { handleDelta, handleThinkingDelta } = loadTypeScriptModule(
+const {
+  handleDelta,
+  handleThinkingDelta,
+  handleThinkingSnapshot,
+} = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/streaming.ts'),
 )
 const { handleToolCallsInProgress } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/toolStart.ts'),
 )
-const { handleAgentDelegation } = loadTypeScriptModule(
+const {
+  handleAgentDelegation,
+  handleAgentRunTerminal,
+  handleLongTaskDispatched,
+} = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/agentRun.ts'),
 )
 const { handleContextBudget, handleContextCompaction } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/context.ts'),
+)
+const { handleAgentSubRunEvent } = loadTypeScriptModule(
+  path.join(__dirname, 'chunkHandlers/subAgent.ts'),
 )
 const {
   EMPTY_RESPONSE_MESSAGE,
@@ -58,6 +69,7 @@ const {
 )
 const {
   getActiveTaskPlan,
+  getTaskPlanProgress,
   getVisibleTaskPlanSteps,
   shouldShowTaskPlan,
 } = loadTypeScriptModule(
@@ -66,6 +78,38 @@ const {
 const { isSynthesizedToolOnlyResponse } = loadTypeScriptModule(
   path.join(__dirname, 'chatHistory.ts'),
 )
+const {
+  KNOWN_TOOL_CALL_LABELS,
+  resolveLocalizedToolDisplayName,
+  toolCallDisplayRow,
+} = loadTypeScriptModule(path.join(__dirname, 'toolCallLabels.ts'))
+
+test('legacy tool label fallback remains localized for persisted sessions', () => {
+  for (const name of Object.keys(KNOWN_TOOL_CALL_LABELS)) {
+    const row = toolCallDisplayRow(name, {}, [], [])
+    assert.notEqual(row.label, name)
+    assert.match(row.label, /[\u3400-\u9fff]/)
+  }
+})
+
+test('backend display names resolve by locale and override legacy fallback', () => {
+  const displayNames = {
+    'zh-CN': '读取原作人物',
+    'en-US': 'Read Source Characters',
+  }
+  assert.equal(
+    resolveLocalizedToolDisplayName(displayNames, 'zh-Hans-CN'),
+    '读取原作人物',
+  )
+  assert.equal(
+    resolveLocalizedToolDisplayName(displayNames, 'en-GB'),
+    'Read Source Characters',
+  )
+  assert.equal(
+    toolCallDisplayRow('newBackendTool', {}, [], [], '新的后端工具').label,
+    '新的后端工具',
+  )
+})
 
 test('built-in selection sends its model profile while custom models stay generic', () => {
   const builtIn = buildStreamOptions({
@@ -81,12 +125,12 @@ test('built-in selection sends its model profile while custom models stay generi
       customizeTemperature: false,
       contextWindow: '256k',
     },
-    modelConfigs: { minimax: { max_tokens: 4096 } },
     selectedModel: 'minimax',
   })
   assert.equal(builtIn.options.model_profile, 'minimax:MiniMax-M3')
   assert.deepEqual(builtIn.options.thinking, { type: 'enabled' })
   assert.equal(builtIn.options.context_window, '256k')
+  assert.equal(builtIn.options.max_tokens, 16_384)
 
   const custom = buildStreamOptions({
     cfg: {
@@ -99,10 +143,28 @@ test('built-in selection sends its model profile while custom models stay generi
       thinkingEnabled: false,
       customizeTemperature: false,
     },
-    modelConfigs: {},
     selectedModel: 'custom',
   })
   assert.equal(Object.hasOwn(custom.options, 'model_profile'), false)
+  assert.equal(custom.options.max_tokens, 16_000)
+})
+
+test('stream output budget is model-owned and clamps configured values to a known provider limit', () => {
+  const configured = buildStreamOptions({
+    cfg: {
+      id: 'mimo',
+      presetId: 'mimo:mimo-v2.5-pro',
+      name: 'mimo-v2.5-pro',
+      apiKey: 'secret',
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      supportsThinking: true,
+      thinkingOnly: false,
+      outputTokenBudget: 999_999,
+    },
+    selectedModel: 'mimo',
+  })
+
+  assert.equal(configured.options.max_tokens, 131_072)
 })
 
 test('thinking SSE deltas become visible thinking blocks before answer text', () => {
@@ -129,6 +191,28 @@ test('thinking SSE deltas become visible thinking blocks before answer text', ()
   handleDelta({ delta: '最终答案' }, ctx)
   assert.equal(conversations[0].content, '最终答案')
   assert.deepEqual(conversations[0].thinkingBlocks, ['模型思考内容'])
+})
+
+test('a replay snapshot replaces live thinking instead of duplicating it', () => {
+  let conversations = [{ role: 'assistant', content: '', thinking: '部分思考' }]
+  const acc = {
+    thinking: '部分思考',
+    response: '',
+    thinkingBlocks: [],
+    thinkingDurationsMs: [],
+  }
+  const ctx = {
+    acc,
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  handleThinkingSnapshot({ thinkingSnapshot: '完整思考内容' }, ctx)
+
+  assert.equal(acc.thinking, '完整思考内容')
+  assert.equal(conversations[0].thinking, '完整思考内容')
 })
 
 test('thinking and tool calls keep their actual interleaved order', () => {
@@ -247,6 +331,76 @@ test('delegation lifecycle chunks update the visible assistant work log', () => 
   assert.equal(acc.delegations[0].agentTitle, '资料核验 Agent')
   assert.equal(conversations[0].delegations.length, 1)
   assert.equal(conversations[0].delegations[0].resultSummary, 'three verified facts')
+})
+
+test('interleaved child run deltas stay isolated by delegation', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {
+    response: '',
+    thinking: '',
+    sessionId: 1,
+    needsTitle: false,
+    userText: 'coordinate',
+    model: 'test-model',
+    turnStartedAt: performance.now(),
+  }
+  const setConversations = (next) => {
+    conversations = typeof next === 'function' ? next(conversations) : next
+  }
+  const ctx = {
+    acc,
+    sessionId: 1,
+    cfg: {},
+    apiModelName: 'test-model',
+    writingChapters: [],
+    availableOutlines: [],
+    setConversations,
+    scheduleCommit: setConversations,
+    flushCommits: () => {},
+    setLoading: () => {},
+    setSessions: () => {},
+    appMessage: {},
+    isVisibleSession: () => true,
+    cleanup: () => {},
+  }
+  const dispatchNested = (chunk, childCtx) => {
+    handleDelta(chunk, childCtx)
+  }
+  const emit = (delegationId, childRunId, delta) => {
+    handleAgentSubRunEvent({
+      agentSubRunEvent: {
+        runId: 'parent-1',
+        parentRunId: 'parent-1',
+        rootRunId: 'parent-1',
+        delegationId,
+        childRunId,
+        agentRole: 'screenplay-writer',
+        agentTitle: `Writer ${delegationId}`,
+        objective: `write ${delegationId}`,
+        chunk: { delta },
+      },
+    }, ctx, dispatchNested)
+  }
+
+  emit('a', 'child-a', 'A1')
+  emit('b', 'child-b', 'B1')
+  emit('a', 'child-a', 'A2')
+
+  const activities = conversations[0].subAgentActivities
+  assert.equal(activities.length, 2)
+  assert.equal(
+    activities.find((item) => item.delegationId === 'a').message.content,
+    'A1A2',
+  )
+  assert.equal(
+    activities.find((item) => item.delegationId === 'b').message.content,
+    'B1',
+  )
+  assert.equal(
+    acc.subAgentActivities.find((item) => item.delegationId === 'a').message.content,
+    'A1A2',
+  )
+  assert.equal(acc.response, '')
 })
 
 test('context lifecycle chunks update the visible assistant work log', () => {
@@ -471,6 +625,26 @@ test('task header does not reuse a completed plan from the previous turn', () =>
   assert.equal(getActiveTaskPlan(conversations, true), undefined)
 })
 
+test('task progress distinguishes active step number from completed count', () => {
+  const progress = getTaskPlanProgress({
+    title: 'execute plan',
+    status: 'running',
+    steps: [
+      { id: 'one', title: 'one', type: 'read', status: 'done' },
+      { id: 'two', title: 'two', type: 'analyze', status: 'done' },
+      { id: 'three', title: 'three', type: 'write', status: 'running' },
+      { id: 'four', title: 'four', type: 'review', status: 'pending' },
+      { id: 'respond', title: 'Respond', type: 'review', status: 'pending' },
+    ],
+  })
+
+  assert.equal(progress.completed, 2)
+  assert.equal(progress.total, 4)
+  assert.equal(progress.currentStep.id, 'three')
+  assert.equal(progress.currentStepNumber, 3)
+  assert.equal(progress.percent, 50)
+})
+
 test('manual abort replaces an empty response with an explicit notice', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   let loading = true
@@ -510,6 +684,39 @@ test('manual abort replaces an empty response with an explicit notice', () => {
   assert.equal(acc.response, MANUAL_ABORT_MESSAGE)
   assert.equal(loading, false)
   assert.equal(cleanedUp, true)
+})
+
+test('manual abort preserves partial output and exposes a separate terminal status', () => {
+  let conversations = [{ role: 'assistant', content: '已经完成一部分' }]
+  const acc = {
+    response: '已经完成一部分',
+    thinking: '',
+    bookId: 1,
+    sessionId: 0,
+    chapterId: 1,
+    needsTitle: false,
+    userText: 'stop this response',
+    model: '',
+    turnStartedAt: performance.now(),
+    thinkingBlocks: [],
+    thinkingDurationsMs: [],
+  }
+  const ctx = {
+    acc,
+    cfg: {},
+    apiModelName: 'test-model',
+    isVisibleSession: () => true,
+    flushCommits: () => {},
+    setConversations: (updater) => {
+      conversations = updater(conversations)
+    },
+    setLoading: () => {},
+    cleanup: () => {},
+  }
+
+  assert.equal(handleDone({ done: true, aborted: true }, ctx), true)
+  assert.equal(conversations[0].content, '已经完成一部分')
+  assert.equal(conversations[0].termination, MANUAL_ABORT_MESSAGE)
 })
 
 test('completed stream without visible model content becomes an explicit failure', () => {
@@ -561,6 +768,102 @@ test('completed stream without visible model content becomes an explicit failure
   assert.equal(acc.response, EMPTY_RESPONSE_MESSAGE)
   assert.equal(loading, false)
   assert.equal(outcome, 'failed')
+})
+
+test('deterministic run completion text becomes the visible assistant answer', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {
+    response: '',
+    thinking: '',
+    bookId: 1,
+    sessionId: 0,
+    chapterId: 1,
+    needsTitle: false,
+    userText: 'continue screenplay',
+    model: '',
+    turnStartedAt: performance.now(),
+    thinkingBlocks: [],
+    thinkingDurationsMs: [],
+  }
+  const ctx = {
+    acc,
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  handleAgentRunTerminal({
+    agentRunCompleted: {
+      runId: 'run-host-result',
+      status: 'done',
+      finalResponse: '当前阶段已经变化，请刷新后重试。',
+    },
+  }, ctx)
+
+  assert.equal(acc.response, '当前阶段已经变化，请刷新后重试。')
+  assert.equal(conversations[0].content, '当前阶段已经变化，请刷新后重试。')
+})
+
+test('durable root terminal uses the same final-answer path as an ordinary run', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  let outcome
+  const acc = {
+    response: '',
+    thinking: '',
+    bookId: 1,
+    sessionId: 0,
+    chapterId: 1,
+    needsTitle: false,
+    userText: 'write all remaining scenes',
+    model: '',
+    turnStartedAt: performance.now(),
+    thinkingBlocks: [],
+    thinkingDurationsMs: [],
+  }
+  const ctx = {
+    acc,
+    cfg: {},
+    apiModelName: 'test-model',
+    isVisibleSession: () => true,
+    flushCommits: () => {},
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+    setConversations: (updater) => {
+      conversations = updater(conversations)
+    },
+    setLoading: () => {},
+    cleanup: (nextOutcome) => {
+      outcome = nextOutcome
+    },
+  }
+
+  handleLongTaskDispatched({
+    longTaskDispatched: {
+      runId: 'run-1',
+      taskId: 'task-1',
+      status: 'pending',
+      totalUnits: 3,
+      completedUnits: 0,
+    },
+  }, ctx)
+  handleAgentRunTerminal({
+    agentRunCompleted: {
+      runId: 'run-1',
+      status: 'done',
+      finalResponse: '已恢复原有长篇正文任务，将从上次检查点继续。',
+    },
+  }, ctx)
+  assert.equal(handleDone({ done: true }, ctx), true)
+  assert.equal(acc.longTaskId, 'task-1')
+  assert.equal(conversations[0].longTaskId, 'task-1')
+  assert.equal(
+    conversations[0].content,
+    '已恢复原有长篇正文任务，将从上次检查点继续。',
+  )
+  assert.equal(conversations[0].isError, undefined)
+  assert.equal(outcome, 'completed')
 })
 
 test('persisted tool-only placeholder is distinguishable from a real answer', () => {

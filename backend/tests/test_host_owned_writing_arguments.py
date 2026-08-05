@@ -19,7 +19,6 @@ from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.tools.host_arguments import (
     CURRENT_CHAPTER_DEFAULT_TOOLS,
     bind_host_writing_arguments,
-    validate_host_chapter_reference,
 )
 from domains.writing.tools.contracts import ToolResult
 from domains.writing.tools.scope import resolve_chapter_id_strict
@@ -130,16 +129,11 @@ def test_all_writing_schemas_hide_book_id_without_mutating_source():
     assert "chapterIds" in core_by_name["batchGetChapterContents"]["properties"]
 
 
-def test_only_single_chapter_default_tools_resolve_current_aliases():
+def test_only_single_chapter_default_tools_bind_omitted_chapter_id():
     context = {"bookId": "book-a", "chapterId": "chapter-current"}
 
     for name in CURRENT_CHAPTER_DEFAULT_TOOLS:
         omitted = bind_host_writing_arguments(context, name, {})
-        aliased = bind_host_writing_arguments(
-            context,
-            name,
-            {"chapterId": "当前章节"},
-        )
         explicit_other = bind_host_writing_arguments(
             context,
             name,
@@ -152,7 +146,6 @@ def test_only_single_chapter_default_tools_resolve_current_aliases():
         )
 
         assert omitted["chapterId"] == "chapter-current"
-        assert aliased["chapterId"] == "chapter-current"
         assert explicit_other["chapterId"] == "chapter-other"
         assert current_title["chapterId"] == "第一章"
 
@@ -206,19 +199,6 @@ def test_explicit_chapter_ids_remain_subject_to_catalog_resolution():
         ) == {"ok": False, "reason": "chapter_not_in_catalog"}
 
 
-def test_current_alias_without_host_chapter_fails_closed():
-    assert validate_host_chapter_reference(
-        {"bookId": "book-a"},
-        "getChapterContent",
-        {"chapterId": "当前章节"},
-    ) == "The current chapter is unavailable in the current Agent Run scope."
-    assert validate_host_chapter_reference(
-        {"bookId": "book-a"},
-        "batchGetChapterContents",
-        {"chapterIds": ["当前章节"]},
-    ) is None
-
-
 @pytest.mark.asyncio
 async def test_core_scope_rejects_conflict_before_approval_then_binds_host_for_handler():
     calls: list[dict] = []
@@ -255,7 +235,7 @@ async def test_core_scope_rejects_conflict_before_approval_then_binds_host_for_h
 
 
 @pytest.mark.asyncio
-async def test_core_current_alias_binds_but_explicit_other_chapter_survives():
+async def test_core_omitted_chapter_binds_but_explicit_chapter_survives():
     calls: list[dict] = []
 
     async def _handler(ctx, args, send_chunk):
@@ -271,7 +251,6 @@ async def test_core_current_alias_binds_but_explicit_other_chapter_survives():
     }
     for arguments in (
         {},
-        {"chapterId": "本章"},
         {"chapterId": "chapter-other"},
     ):
         completed = await executor.execute_batch(
@@ -286,21 +265,20 @@ async def test_core_current_alias_binds_but_explicit_other_chapter_survives():
 
     assert [call["chapterId"] for call in calls] == [
         "chapter-current",
-        "chapter-current",
         "chapter-other",
     ]
 
-    rejected = await executor.execute_batch(
+    explicit_label = await executor.execute_batch(
         _core_request(
-            {"chapterId": "当前章节"},
+            {"chapterId": "display-label"},
             name="getChapterContent",
             domain={"bookId": "book-a"},
         ),
         _RecordingSink(),
     )
-    assert rejected.outcome is ToolBatchOutcome.REJECTED
-    assert rejected.error == "tool_scope_violation"
+    assert explicit_label.outcome is ToolBatchOutcome.COMPLETED
     assert len(calls) == 3
+    assert calls[-1]["chapterId"] == "display-label"
 
 
 @pytest.mark.asyncio

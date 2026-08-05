@@ -6,8 +6,11 @@ from agent_core.evaluation import (
     TRACE_EVENT_TYPE,
     AgentRuntimeRegressionCase,
     build_canonical_run_observation,
+    classify_agent_run_failures,
     evaluate_agent_run,
     evaluate_agent_run_performance,
+    evaluate_agent_run_recovery,
+    evaluate_agent_run_stability,
     get_core_security_redteam_cases,
     run_runtime_regression_suite,
     run_security_redteam_cases,
@@ -191,6 +194,230 @@ def test_core_diagnostics_counts_marked_canceled_attempt_once():
     )
 
     assert report["metrics"]["modelRounds"] == 1
+
+
+def test_recovery_report_keeps_only_control_metadata_and_safety_denials():
+    report = evaluate_agent_run_recovery([
+        _trace("recovery_decision", "allowed", details={
+            "round": 2,
+            "cause": "tool_input_invalid",
+            "action": "retry_model",
+            "allowed": True,
+            "reasonCode": "allowed",
+            "attempt": 1,
+            "maxAttempts": 1,
+            "remainingModelRounds": 4,
+            "effectState": "not_started",
+            "mayRepeatSideEffect": True,
+            "rawArguments": {"contentText": "must not escape"},
+        }),
+        _trace("recovery_decision", "denied", details={
+            "round": 3,
+            "cause": "tool_input_invalid",
+            "action": "retry_model",
+            "allowed": False,
+            "reasonCode": "side_effect_state_unknown",
+            "attempt": 1,
+            "maxAttempts": 1,
+            "remainingModelRounds": 3,
+            "effectState": "unknown",
+            "mayRepeatSideEffect": True,
+            "modelText": "must not escape",
+        }),
+    ])
+
+    assert report["summary"] == {
+        "decisionCount": 2,
+        "allowedCount": 1,
+        "deniedCount": 1,
+        "safetyProtectedCount": 1,
+        "causes": {"tool_input_invalid": 2},
+        "allowedActions": {"retry_model": 1},
+        "deniedReasons": {"side_effect_state_unknown": 1},
+    }
+    assert report["decisions"][1]["reasonCode"] == (
+        "side_effect_state_unknown"
+    )
+    assert "rawArguments" not in str(report)
+    assert "modelText" not in str(report)
+
+
+def test_stability_report_correlates_tool_protocol_and_compaction_failures():
+    report = evaluate_agent_run_stability([
+        _core_event(
+            "tool.calls_started",
+            calls=[
+                {"id": "call-ok", "name": "readA"},
+                {"id": "call-bad", "name": "writeB"},
+            ],
+        ),
+        _core_event(
+            "tool.call_completed",
+            toolCallId="call-ok",
+            toolName="readA",
+            outcome="completed",
+        ),
+        _core_event(
+            "tool.results",
+            results=[
+                {
+                    "tool_call_id": "call-ok",
+                    "tool_name": "readA",
+                    "error": None,
+                },
+                {
+                    "tool_call_id": "call-bad",
+                    "tool_name": "writeB",
+                    "error": "invalid_tool_arguments_schema",
+                },
+            ],
+        ),
+        _trace(
+            "conversation_compaction",
+            "compacted_fallback",
+            details={"compactedTurnCount": 12},
+        ),
+        _trace("context_budget", "overflow_after_planning"),
+        _trace(
+            "stream",
+            "interrupted_retry",
+            details={"providerAttemptTerminal": True},
+        ),
+    ])
+
+    assert report["verdict"] == "fail"
+    assert report["metrics"] == {
+        "toolCalls": 2,
+        "completedToolCalls": 1,
+        "failedToolCalls": 1,
+        "incompleteToolCalls": 0,
+        "toolSuccessRate": 0.5,
+        "toolProtocolFailures": 1,
+        "toolErrorCodes": {"invalid_tool_arguments_schema": 1},
+        "modelAttempts": 1,
+        "interruptedModelAttempts": 1,
+        "retryAttempts": 1,
+        "contextOverflows": 1,
+        "maxDroppedMessages": 0,
+        "compactionPasses": 1,
+        "compactedTurns": 12,
+        "compactionFallbacks": 1,
+        "compactionFailures": 0,
+        "compactionOutcomes": {"compacted_fallback": 1},
+    }
+    assert _check(report, "toolProtocol")["status"] == "fail"
+    assert _check(report, "contextCompaction")["status"] == "warn"
+
+
+def test_stability_report_is_content_free_and_healthy_without_failures():
+    report = evaluate_agent_run_stability([
+        _core_event(
+            "tool.calls_started",
+            calls=[{"id": "call-1", "name": "readA", "arguments_json": "secret"}],
+        ),
+        _core_event(
+            "tool.results",
+            results=[{
+                "tool_call_id": "call-1",
+                "tool_name": "readA",
+                "content": "private content",
+            }],
+        ),
+        _trace(
+            "conversation_compaction",
+            "compacted",
+            details={"compactedTurnCount": 20},
+        ),
+        _trace(
+            "context_budget",
+            "within_budget",
+            details={"droppedMessages": 2},
+        ),
+        _trace("model_round", "stop"),
+    ])
+
+    assert report["verdict"] == "pass"
+    assert report["metrics"]["toolSuccessRate"] == 1.0
+    assert report["metrics"]["compactedTurns"] == 20
+    assert report["metrics"]["maxDroppedMessages"] == 2
+    assert "secret" not in str(report)
+    assert "private content" not in str(report)
+
+
+def test_stability_report_marks_started_tool_without_result_as_incomplete():
+    report = evaluate_agent_run_stability([
+        _core_event(
+            "tool.calls_started",
+            calls=[{"id": "call-lost", "name": "persistArtifactBatch"}],
+        ),
+    ])
+
+    assert report["verdict"] == "fail"
+    assert report["metrics"]["toolCalls"] == 1
+    assert report["metrics"]["completedToolCalls"] == 0
+    assert report["metrics"]["failedToolCalls"] == 0
+    assert report["metrics"]["incompleteToolCalls"] == 1
+    assert _check(report, "toolExecution") == {
+        "name": "toolExecution",
+        "status": "fail",
+        "detail": {
+            "failedCalls": 0,
+            "incompleteCalls": 1,
+            "totalCalls": 1,
+        },
+    }
+
+
+def test_failure_classification_prioritizes_explicit_protocol_evidence():
+    report = classify_agent_run_failures(
+        {"id": "run-classified", "status": "failed", "prompt": "secret"},
+        [
+            _core_event(
+                "tool.calls_started",
+                calls=[{
+                    "id": "call-json",
+                    "name": "persistArtifactBatch",
+                    "arguments_json": "private arguments",
+                }],
+            ),
+            _core_event(
+                "tool.results",
+                results=[{
+                    "tool_call_id": "call-json",
+                    "tool_name": "persistArtifactBatch",
+                    "error": "invalid_tool_arguments_json",
+                    "content": "private result",
+                }],
+            ),
+            _trace("context_budget", "overflow_after_planning"),
+        ],
+    )
+
+    assert report["verdict"] == "fail"
+    assert report["primaryFinding"]["code"] == "tool.protocol_invalid_arguments"
+    assert [finding["code"] for finding in report["findings"]] == [
+        "tool.protocol_invalid_arguments",
+        "context.overflow",
+    ]
+    assert "secret" not in str(report)
+    assert "private arguments" not in str(report)
+    assert "private result" not in str(report)
+
+
+def test_failure_classification_marks_missing_evidence_without_guessing_a_cause():
+    report = classify_agent_run_failures(
+        {"id": "run-unknown", "status": "failed"},
+        [],
+    )
+
+    assert report["primaryFinding"] == {
+        "code": "run.failed_without_specific_cause",
+        "category": "observability",
+        "severity": "fail",
+        "confidence": "low",
+        "evidence": {"runStatus": "failed", "traceCount": 0},
+        "remediation": "inspect_terminal_error_and_trace_coverage",
+    }
 
 
 def test_core_regression_framework_uses_caller_owned_content_free_cases():

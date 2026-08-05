@@ -161,6 +161,7 @@ async def read_source_coverage_batch(
             "sourceId": chapter_id,
             "revisionText": full_text,
             "excerpt": sample,
+            "coverageMode": "full" if fully_read else "sampled",
         })
     fully_read_count = sum(
         item["coverage"] == "full" for item in chapter_payloads

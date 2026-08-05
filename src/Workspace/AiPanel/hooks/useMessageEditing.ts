@@ -1,5 +1,5 @@
 import React from "react";
-import type { TextAreaRef } from "../../../ui";
+import type { PurrTextAreaRef } from '@/purr-components';
 
 /**
  * 用户消息「就地编辑」的 textarea 机制：
@@ -14,7 +14,7 @@ export function useMessageEditing() {
   const [editingMessageIndex, setEditingMessageIndex] = React.useState<
     number | null
   >(null);
-  const editTextareaRef = React.useRef<TextAreaRef | null>(null);
+  const editTextareaRef = React.useRef<PurrTextAreaRef | null>(null);
   const editingMessageDraftRef = React.useRef("");
 
   const getEditTextareaValue = React.useCallback(() => {

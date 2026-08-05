@@ -112,9 +112,14 @@ export const handleAgentRunTodoUpdated: ChunkHandler = (chunk, ctx) => {
 };
 
 export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
+  const completed = chunk.agentRunCompleted;
   const terminal =
-    chunk.agentRunCompleted || chunk.agentRunFailed || chunk.agentRunBlocked || chunk.agentRunCanceled;
+    completed || chunk.agentRunFailed || chunk.agentRunBlocked || chunk.agentRunCanceled;
   if (!terminal?.runId) return;
+  const terminalResponse = completed?.finalResponse?.trim() || "";
+  if (terminalResponse && !ctx.acc.response.trim()) {
+    ctx.acc.response = terminalResponse;
+  }
   const status = normalizePlanStatus(terminal.status);
   ctx.acc.agentRunId = terminal.runId;
   if (ctx.acc.taskPlan) {
@@ -123,13 +128,35 @@ export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
   updateLastAssistant(ctx, (message) => ({
     ...message,
     agentRunId: terminal.runId,
+    content: terminalResponse && !message.content.trim()
+      ? terminalResponse
+      : message.content,
     taskPlan: message.taskPlan ? { ...message.taskPlan, status } : message.taskPlan,
+  }));
+};
+
+export const handleLongTaskDispatched: ChunkHandler = (chunk, ctx) => {
+  const dispatched = chunk.longTaskDispatched;
+  if (!dispatched?.taskId) return;
+  ctx.acc.longTaskId = dispatched.taskId;
+  ctx.acc.agentRunId = dispatched.runId || ctx.acc.agentRunId;
+  updateLastAssistant(ctx, (message) => ({
+    ...message,
+    agentRunId: dispatched.runId || message.agentRunId,
+    longTaskId: dispatched.taskId,
+    taskPlan: message.taskPlan
+      ? { ...message.taskPlan, status: "running" }
+      : message.taskPlan,
   }));
 };
 
 function normalizeDelegation(payload: unknown): AiAgentDelegation | null {
   if (!payload || typeof payload !== "object") return null;
   const raw = payload as Partial<AiAgentDelegation>;
+  const input = (payload as { input?: unknown }).input;
+  const inputRecord = input && typeof input === "object"
+    ? input as Record<string, unknown>
+    : {};
   const delegationId = String(raw.delegationId || "").trim();
   const agentRole = String(raw.agentRole || "").trim();
   if (!delegationId || !agentRole) return null;
@@ -141,6 +168,10 @@ function normalizeDelegation(payload: unknown): AiAgentDelegation | null {
     agentRole,
     agentTitle: raw.agentTitle || null,
     objective: String(raw.objective || ""),
+    unitId: String(raw.unitId || inputRecord.unitId || "").trim() || null,
+    attempt: Number(raw.attempt ?? inputRecord.attempt) > 0
+      ? Number(raw.attempt ?? inputRecord.attempt)
+      : null,
     status: raw.status || "queued",
     required: raw.required !== false,
     priority: Number(raw.priority || 0),
@@ -175,5 +206,14 @@ export const handleAgentDelegation: ChunkHandler = (chunk, ctx) => {
     ...message,
     agentRunId: runId || message.agentRunId,
     delegations: upsertDelegation(message.delegations, delegation),
+    subAgentActivities: message.subAgentActivities?.map((activity) =>
+      activity.delegationId === delegation.delegationId
+        ? {
+            ...activity,
+            childRunId: delegation.childRunId || activity.childRunId,
+            status: delegation.status,
+          }
+        : activity,
+    ),
   }));
 };
