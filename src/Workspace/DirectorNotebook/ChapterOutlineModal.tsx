@@ -1,8 +1,8 @@
 import { services } from '@/services'
 import React from 'react'
-import { Alert, Button } from '../../ui'
-import { Spin, useToast } from '../../ui'
-import { FileAddOutlined, ExportOutlined } from '../../ui'
+import { PurrAlert, PurrButton } from '@/purr-components'
+import { PurrSpin, usePurrToast } from '@/purr-components'
+import { FileAddIcon, ExportIcon } from '@/purr-components'
 import type { Chapter, EntityId, Outline } from '../../types'
 import OutlineMarkdownPane, { type OutlineMarkdownPaneRef } from '../OutlinePanel/OutlineMarkdownPane'
 import './ChapterOutlineModal.scss'
@@ -39,7 +39,7 @@ export default function ChapterOutlinePanel({
   bookId,
   onChanged,
 }: ChapterOutlinePanelProps) {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const [loading, setLoading] = React.useState(false)
   const [outline, setOutline] = React.useState<Outline | null>(null)
   const [error, setError] = React.useState<string>('')
@@ -153,7 +153,7 @@ export default function ChapterOutlinePanel({
   const content = (
     <div className="chapter-outline-modal-body">
         {error && (
-          <Alert
+          <PurrAlert
             type="error"
             message={error}
             showIcon
@@ -165,45 +165,45 @@ export default function ChapterOutlinePanel({
 
         {loading ? (
           <div className="chapter-outline-modal-center">
-            <Spin tip="加载中…" />
+            <PurrSpin tip="加载中…" />
           </div>
         ) : !outline ? (
           <div className="chapter-outline-modal-empty">
-            <FileAddOutlined className="chapter-outline-modal-empty-icon" />
+            <FileAddIcon className="chapter-outline-modal-empty-icon" />
             <p className="chapter-outline-modal-empty-title">
               {mode === 'global' ? '暂无总纲' : mode === 'volume' ? '该卷暂无大纲' : '该章节暂无大纲'}
             </p>
             <p className="chapter-outline-modal-empty-desc">
               新建后即可在此编辑文本大纲；如需 XMind 思维导图大纲，可上传 .xmind 文件。
             </p>
-            <Button
+            <PurrButton
               type="primary"
-              icon={<FileAddOutlined />}
+              icon={<FileAddIcon />}
               loading={creating}
               onClick={() => void handleCreateOutline()}
             >
               新建文本大纲
-            </Button>
+            </PurrButton>
           </div>
         ) : (
           <>
             {outline.file_path && (
-              <Alert
+              <PurrAlert
                 type="info"
                 showIcon
                 className="chapter-outline-modal-alert"
                 message={
                   <span>
                     该大纲有 XMind 思维导图文件，当前面板只能编辑文本部分。
-                    <Button
+                    <PurrButton
                       type="link"
                       size="small"
-                      icon={<ExportOutlined />}
+                      icon={<ExportIcon />}
                       loading={openingSource}
                       onClick={handleOpenSource}
                     >
                       打开源文件
-                    </Button>
+                    </PurrButton>
                   </span>
                 }
               />

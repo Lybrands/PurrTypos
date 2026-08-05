@@ -10,6 +10,9 @@ from agent_core.evaluation.diagnostics import (
     build_canonical_run_observation,
     evaluate_agent_run,
 )
+from agent_core.evaluation.failure_classification import (
+    classify_agent_run_failures,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +28,7 @@ class AgentRuntimeRegressionCase:
     expected_terminal_status: str
     expected_tool_sequence: tuple[str, ...] = ()
     expected_check_statuses: Mapping[str, str] = field(default_factory=dict)
+    expected_failure_codes: tuple[str, ...] | None = None
 
 
 def evaluate_runtime_regression_case(
@@ -48,6 +52,11 @@ def evaluate_runtime_regression_case(
         str(check.get("name")): str(check.get("status"))
         for check in report.get("checks") or []
     }
+    failure_classification = classify_agent_run_failures(case.run, case.events)
+    actual_failure_codes = tuple(
+        str(finding.get("code") or "")
+        for finding in failure_classification["findings"]
+    )
 
     checks: list[dict[str, Any]] = [
         {
@@ -106,6 +115,19 @@ def evaluate_runtime_regression_case(
             "status": "pass" if actual == expected else "fail",
             "detail": {"expected": expected, "actual": actual},
         })
+    if case.expected_failure_codes is not None:
+        checks.append({
+            "name": "failureClassification",
+            "status": (
+                "pass"
+                if actual_failure_codes == case.expected_failure_codes
+                else "fail"
+            ),
+            "detail": {
+                "expected": list(case.expected_failure_codes),
+                "actual": list(actual_failure_codes),
+            },
+        })
 
     return {
         "caseId": case.case_id,
@@ -117,6 +139,7 @@ def evaluate_runtime_regression_case(
         ),
         "checks": checks,
         "operationalReport": report,
+        "failureClassification": failure_classification,
     }
 
 

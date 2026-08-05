@@ -1,5 +1,5 @@
 /**
- * 编辑器选中文字 → 浮出 Inline Edit 工具条 → 打开 Popover 输入改写指令 → AI 流式生成 → 替换/追加/取消。
+ * 编辑器选中文字 → 浮出 Inline Edit 工具条 → 打开 PurrPopover 输入改写指令 → AI 流式生成 → 替换/追加/取消。
  *
  * 架构：
  * - `InlineEditLayer` 对外唯一导出。EditorPanel 通过 props 传入 Lexical ref + 模型配置 + 上下文。
@@ -10,7 +10,7 @@
  *
  * 上下文集成：
  * - Layer 持有「关联章节/大纲」「记忆/伏笔」选区，与主 AI 面板通过 localStorage 共享同一份默认勾选；
- * - Popover 顶部嵌入 `AiContextBar`：关联（章节/大纲）/ 注入（设定/伏笔）/ 提示词模板；
+ * - PurrPopover 顶部嵌入 `AiContextBar`：关联（章节/大纲）/ 注入（设定/伏笔）/ 提示词模板；
  * - 提交时关联章节/大纲全文与记忆/伏笔条目会作为 [参考资料] 拼入 user prompt（见 inlineEditContext）。
  *
  * 拆分：`SelectionBubble`、`InlineEditPopover`、参考资料拼装 `buildInjectedContext` 各自成文件，

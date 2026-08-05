@@ -1,5 +1,5 @@
 import type { AiModelConfig } from '../../types'
-import { normalizeBaseUrl, normalizePresetContextWindow } from '../shared'
+import { normalizeBaseUrl, normalizePresetContextWindow, normalizePresetOutputTokenBudget } from '../shared'
 import type { BuiltinModelProfile } from '../types'
 
 const provider = {
@@ -18,6 +18,7 @@ const preset = {
   summary: '来自当前自定义配置',
   contextWindowOptions: ['32k', '128k', '256k'],
   contextWindow: '256k',
+  defaultOutputTokens: 16_384,
   supportsThinking: true,
   thinkingOnly: false,
   thinkingEnabled: true,
@@ -47,6 +48,7 @@ export const kimiK2_6Profile: BuiltinModelProfile = {
       thinkingOnly: preset.thinkingOnly,
       thinkingEnabled: config.thinkingEnabled ?? preset.thinkingEnabled,
       contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
+      outputTokenBudget: normalizePresetOutputTokenBudget(config.outputTokenBudget, preset),
     }
   },
 }

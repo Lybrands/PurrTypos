@@ -1,4 +1,4 @@
-import { Empty } from "../../../../ui";
+import { PurrEmpty } from '@/purr-components';
 
 interface ChatEmptyStateProps {
   hasBook: boolean;
@@ -15,5 +15,5 @@ export default function ChatEmptyState({
       ? "开始与 AI 对话"
       : "开始与 AI 对话，请从上方 + 新建对话";
 
-  return <Empty image={false} description={description} className="chat-empty" />;
+  return <PurrEmpty image={false} description={description} className="chat-empty" />;
 }

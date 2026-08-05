@@ -1,6 +1,6 @@
 import React from 'react'
-import { Checkbox } from '../../../../ui'
-import { Empty, Spin } from '../../../../ui'
+import { PurrCheckbox } from '@/purr-components'
+import { PurrEmpty, PurrSpin } from '@/purr-components'
 import type { MemoryModalController } from './useMemoryModal'
 import SparkIdeaMeta from './SparkIdeaMeta'
 
@@ -25,14 +25,14 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
   if (loading) {
     return (
       <div style={{ textAlign: 'center', padding: 24 }}>
-        <Spin />
+        <PurrSpin />
       </div>
     )
   }
 
   if (sparkIdeas.length === 0 && foreshadowing.length === 0) {
     return (
-      <Empty
+      <PurrEmpty
         image={false}
         description="暂无可强制注入的旧设定/伏笔，可在导演笔记本的「记忆 / 伏笔」中管理长期记忆"
       />
@@ -49,7 +49,7 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
               const checked = checkedIds.includes(memory.id)
               return (
                 <div key={memory.id} className="memory-select-item">
-                  <Checkbox
+                  <PurrCheckbox
                     checked={checked}
                     onChange={(event) => handleToggle(memory.id, event.target.checked)}
                   />
@@ -82,7 +82,7 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
             const checked = checkedForeshadowingIds.includes(item.id)
             return (
               <div key={`f-${item.id}`} className="memory-select-item">
-                <Checkbox
+                <PurrCheckbox
                   checked={checked}
                   onChange={(event) =>
                     handleToggleForeshadowing(item.id, event.target.checked)

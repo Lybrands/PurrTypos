@@ -2,8 +2,8 @@ import { services } from '@/services'
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, Empty, List, Modal, Spin, Tooltip } from '../../../../ui'
-import { DeleteOutlined } from '../../../../ui'
+import { PurrButton, PurrEmpty, PurrList, PurrModal, PurrSpin, PurrTooltip } from '@/purr-components'
+import { DeleteIcon } from '@/purr-components'
 import type { AiFavorite } from '../../../../types'
 import { formatFavoriteTime } from './formatFavoriteTime'
 import './index.scss'
@@ -36,7 +36,7 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
 
   return (
     <>
-      <Modal
+      <PurrModal
         title="收藏列表"
         open={open}
         onCancel={onCancel}
@@ -47,11 +47,11 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
         styles={{ body: { maxHeight: '60vh' } }}
       >
         {loading ? (
-          <div className="favorites-modal-loading"><Spin /></div>
+          <div className="favorites-modal-loading"><PurrSpin /></div>
         ) : list.length === 0 ? (
-          <Empty image={false} description="暂无收藏" />
+          <PurrEmpty image={false} description="暂无收藏" />
         ) : (
-          <List
+          <PurrList
             className="favorites-list"
             dataSource={list}
             renderItem={(item) => {
@@ -61,7 +61,7 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
                 ? `问：${promptText} 答：${answerText}`
                 : answerText ? `答：${answerText}` : '—'
               return (
-                <List.Item className="favorites-list-item">
+                <PurrList.Item className="favorites-list-item">
                   <div
                     className="favorites-item-main"
                     role="button"
@@ -72,26 +72,26 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
                     <div className="favorites-item-head">
                       <span className="favorites-item-title">{item.session_title}</span>
                       <span className="favorites-item-time">{formatFavoriteTime(item.create_time)}</span>
-                      <Tooltip title="删除">
-                        <Button
+                      <PurrTooltip title="删除">
+                        <PurrButton
                           type="text"
                           size="small"
-                          icon={<DeleteOutlined />}
+                          icon={<DeleteIcon />}
                           className="favorites-item-delete"
                           onClick={(e) => { e.stopPropagation(); handleDelete(item.id) }}
                         />
-                      </Tooltip>
+                      </PurrTooltip>
                     </div>
                     <div className="favorites-item-preview">{preview || '—'}</div>
                   </div>
-                </List.Item>
+                </PurrList.Item>
               )
             }}
           />
         )}
-      </Modal>
+      </PurrModal>
 
-      <Modal
+      <PurrModal
         title="收藏详情"
         open={detail != null}
         onCancel={() => setDetail(null)}
@@ -115,7 +115,7 @@ export default function FavoritesModal({ open, onCancel }: FavoritesModalProps) 
             </div>
           </div>
         )}
-      </Modal>
+      </PurrModal>
     </>
   )
 }

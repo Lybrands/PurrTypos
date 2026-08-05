@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 
@@ -17,16 +17,12 @@ from agent_core.contracts import (
     RunProvenance,
     ToolExecutionMode,
 )
-from agent_core.events import AgentEvent
-from agent_core.ports import CancellationSignal
+from agent_core.events import AgentEvent, CoreEventType
+from agent_core.ports import CancellationSignal, ResponseValidator
 from application.agent_composition import AgentComposition
 from application.agent_delegation_service import AgentDelegationService
 from application.agent_delegation_tool import (
     build_delegation_tool_registration,
-)
-from application.conversation_compaction import (
-    ConversationCompactionService,
-    PostPlanningConversationContextOptimizer,
 )
 from application.request_mapping import (
     agent_context_claims,
@@ -35,7 +31,6 @@ from application.request_mapping import (
 )
 from application.run_provenance import build_chat_run_provenance
 from infrastructure.models.capabilities import normalize_thinking_enabled
-from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from schemas.ai import ChatStreamRequest
 
 
@@ -66,110 +61,15 @@ class AgentRunService:
         enable_delegation: bool = True,
         allowed_tool_modes: frozenset[ToolExecutionMode] | None = None,
         host_system_instruction: str | None = None,
+        response_validators: Sequence[ResponseValidator] = (),
     ) -> AsyncIterator[AgentRunUpdate]:
         composition = self._composition
         provider_capabilities = composition.provider_capabilities
         request = to_agent_request(body, provider_options)
-        uncompacted_request = request
-        if request.session_id is not None:
-            # Conversation compaction is an optimization boundary: persistence
-            # or summarization failures must never prevent the Agent Run.
-            compaction_started = asyncio.Event()
-            compaction_started_payload: dict = {}
-
-            async def notify_compaction_started(payload) -> None:
-                compaction_started_payload.update(dict(payload))
-                compaction_started.set()
-
-            compaction_task = asyncio.create_task(
-                ConversationCompactionService(
-                    composition.conversation_compaction_repository,
-                    ProviderModelGateway(api_key),
-                ).prepare(
-                    request,
-                    signal,
-                    on_compaction_started=notify_compaction_started,
-                    anticipated_context_tokens=sum(
-                        claim.desired_tokens
-                        for claim in agent_context_claims(request)
-                    ),
-                    output_reserve_tokens=_positive_token_value(
-                        provider_options.get("max_tokens"),
-                        8_192,
-                    ),
-                )
-            )
-            started_wait = asyncio.create_task(compaction_started.wait())
-            try:
-                done, _pending = await asyncio.wait(
-                    (compaction_task, started_wait),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if compaction_started.is_set():
-                    yield AgentEvent(
-                        type="conversation.compaction.started",
-                        payload={
-                            "status": "running",
-                            **compaction_started_payload,
-                        },
-                    )
-                compaction = await compaction_task
-                request = compaction.request
-                if "conversationCompaction" not in request.metadata:
-                    metadata = dict(request.metadata)
-                    metadata["conversationCompaction"] = {
-                        "outcome": compaction.outcome,
-                        "compactedTurnCount": compaction.compacted_turn_count,
-                        "retainedRawTurnCount": compaction.retained_raw_turn_count,
-                        **dict(compaction.diagnostics),
-                    }
-                    request = replace(request, metadata=metadata)
-                if compaction_started.is_set():
-                    yield AgentEvent(
-                        type="conversation.compaction.completed",
-                        payload={
-                            "status": (
-                                "completed"
-                                if compaction.outcome.startswith("compacted")
-                                else "failed"
-                            ),
-                            "outcome": compaction.outcome,
-                            "compactedTurnCount": (
-                                compaction.compacted_turn_count
-                            ),
-                            "retainedRawTurnCount": (
-                                compaction.retained_raw_turn_count
-                            ),
-                            "summaryVersion": (
-                                compaction.summary.version
-                                if compaction.summary is not None
-                                else None
-                            ),
-                        },
-                    )
-            except Exception:
-                metadata = dict(request.metadata)
-                metadata["conversationCompaction"] = {
-                    "outcome": "failed_open",
-                }
-                request = replace(request, metadata=metadata)
-                if compaction_started.is_set():
-                    yield AgentEvent(
-                        type="conversation.compaction.completed",
-                        payload={
-                            "status": "failed",
-                            "outcome": "failed_open",
-                        },
-                    )
-            finally:
-                if not started_wait.done():
-                    started_wait.cancel()
-                if not compaction_task.done():
-                    compaction_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await started_wait
-                with suppress(asyncio.CancelledError, Exception):
-                    await compaction_task
+        prepare_request = getattr(composition, "prepare_request", None)
+        if callable(prepare_request):
+            request = await prepare_request(request)
+        static_context_claims = agent_context_claims(request)
         trusted_instruction = str(host_system_instruction or "").strip()
         if trusted_instruction:
             trusted_message = AgentMessage(
@@ -182,13 +82,6 @@ class AgentRunService:
                 messages=(
                     trusted_message,
                     *request.messages,
-                ),
-            )
-            uncompacted_request = replace(
-                uncompacted_request,
-                messages=(
-                    trusted_message,
-                    *uncompacted_request.messages,
                 ),
             )
         run_provenance = provenance or build_chat_run_provenance(body)
@@ -210,6 +103,14 @@ class AgentRunService:
             provenance=run_provenance,
             lineage=lineage,
             response_judges=response_judges,
+        )
+        options = replace(
+            options,
+            context_claims=static_context_claims,
+            response_validators=(
+                *options.response_validators,
+                *tuple(response_validators),
+            ),
         )
 
         queue: asyncio.Queue[AgentRunUpdate | _PumpFailure | object] = asyncio.Queue()
@@ -273,19 +174,60 @@ class AgentRunService:
                 )
                 try:
                     async for child_update in child_stream:
-                        if (
-                            isinstance(child_update, AgentEvent)
-                            and child_update.type == "run.started"
-                        ):
-                            await publish(AgentEvent(
-                                type="delegation.claimed",
+                        if isinstance(child_update, AgentEvent):
+                            if child_update.type == "run.started":
+                                await publish(AgentEvent(
+                                    type="delegation.claimed",
+                                    run_id=child_lineage.parent_run_id,
+                                    payload={
+                                        **view,
+                                        "childRunId": child_update.run_id,
+                                        "status": "running",
+                                    },
+                                ))
+                            # A child Run uses the same canonical Core events as
+                            # its parent.  Preserve that event verbatim inside a
+                            # delegation envelope instead of discarding its
+                            # model/tool activity or inventing a second stream
+                            # protocol for multi-Agent UI consumers.
+                            delegation_event = AgentEvent(
+                                type="delegation.event",
                                 run_id=child_lineage.parent_run_id,
                                 payload={
                                     **view,
-                                    "childRunId": child_update.run_id,
-                                    "status": "running",
+                                    "childRunId": (
+                                        child_update.run_id
+                                        or view.get("childRunId")
+                                    ),
+                                    "event": {
+                                        "type": str(child_update.type),
+                                        "runId": str(
+                                            child_update.run_id or ""
+                                        ),
+                                        "payload": dict(
+                                            child_update.payload
+                                        ),
+                                    },
                                 },
-                            ))
+                            )
+                            # The live queue is only a transport.  Persist the
+                            # same canonical envelope on the parent Run so a
+                            # reconnect/replay sees the exact child lifecycle,
+                            # tool and terminal events that the live UI saw.
+                            # Raw token deltas intentionally remain transport-
+                            # only, matching the persistence policy of an
+                            # ordinary (non-delegated) Run; run.completed owns
+                            # the durable final response snapshot.
+                            if child_update.type not in {
+                                CoreEventType.MODEL_DELTA,
+                                CoreEventType.MODEL_THINKING_DELTA,
+                            }:
+                                await composition.append_run_event(
+                                    str(child_lineage.parent_run_id),
+                                    CoreEventType.DELEGATION_EVENT,
+                                    dict(delegation_event.payload),
+                                )
+                            await publish(delegation_event)
                         if isinstance(child_update, AgentRunResult):
                             child_result = child_update
                 finally:
@@ -309,16 +251,23 @@ class AgentRunService:
                 )
             ),
         }
-        if request.session_id is not None:
-            create_core_kwargs["post_planning_context_optimizer"] = (
-                PostPlanningConversationContextOptimizer(
-                    ConversationCompactionService(
-                        composition.conversation_compaction_repository,
-                        ProviderModelGateway(api_key),
-                    ),
-                    uncompacted_request,
+        if hasattr(composition, "execute_screenplay_long_task"):
+            async def execute_long_task(
+                task_id,
+                parent_run_id,
+                observer,
+                long_task_signal,
+            ):
+                return await composition.execute_screenplay_long_task(
+                    task_id,
+                    parent_run_id=parent_run_id,
+                    observer=observer,
+                    body=body,
+                    api_key=api_key,
+                    provider_options=provider_options,
+                    signal=long_task_signal,
                 )
-            )
+            create_core_kwargs["long_task_executor"] = execute_long_task
         if can_delegate or allowed_tool_modes is not None:
             create_core_kwargs.update({
                 "extra_tool_registrations": extra_registrations,
@@ -385,11 +334,3 @@ class AgentRunService:
                 pump_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pump_task
-
-
-def _positive_token_value(value, default: int) -> int:
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
-        return int(default)
-    return normalized if normalized > 0 else int(default)

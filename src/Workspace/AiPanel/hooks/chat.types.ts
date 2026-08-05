@@ -2,8 +2,10 @@ import type {
   AiModelConfig,
   Outline,
   AiSession,
+  AiErrorReport,
   EntityId,
   SettingDiffCardState,
+  ScreenplayDocumentProposal,
   ToolApprovalRequest,
   AiAgentDelegation,
   AiContextBudgetState,
@@ -81,11 +83,21 @@ export interface ToolCallSegment {
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** 用户消息的发送时间；历史记录来自数据库，实时消息在发送时写入。 */
+  sentAt?: string;
   /** 已落库的 ai_conversations.id，仅 assistant 消息有值。 */
   conversationId?: number;
   /** 本轮 Agent Run id，用于 To-dos 状态与落库回填。 */
   agentRunId?: string;
+  /** 本轮创建或关联的持久任务；其生命周期独立于调度 Run。 */
+  longTaskId?: string;
   isError?: boolean;
+  /** 流式过程已产生可检查内容时，保留过程并在末尾单独显示的终止原因。 */
+  error?: string;
+  /** 用户主动终止等非错误终态，作为独立状态展示，不混入回答正文。 */
+  termination?: string;
+  /** 自动创建的本地脱敏错误记录。 */
+  errorReport?: AiErrorReport;
   model?: string;
   /** 本轮开始时间（performance.now），仅实时 UI 使用。 */
   turnStartedAt?: number;
@@ -110,10 +122,27 @@ export interface ChatMessage {
   taskPlan?: AiTaskPlan;
   /** 当前主 Run 调用的子 Agent 生命周期状态。 */
   delegations?: AiAgentDelegation[];
+  /** 子 Run 通过根 Run 统一事件流产生的独立消息/工具活动。 */
+  subAgentActivities?: AiSubAgentActivity[];
   /** 本轮会话压缩的实时/最终状态。 */
   contextCompaction?: AiContextCompactionState;
   /** 后端对本轮完整模型输入的实际预算。 */
   contextBudget?: AiContextBudgetState;
+  /** 剧本 Agent 本轮生成、尚待用户处理的正式文档提案。 */
+  screenplayProposal?: ScreenplayDocumentProposal;
+}
+
+export interface AiSubAgentActivity {
+  delegationId: string;
+  parentRunId: string;
+  rootRunId: string;
+  childRunId?: string | null;
+  agentRole: string;
+  agentTitle?: string | null;
+  objective?: string;
+  status: AiAgentDelegation["status"];
+  /** Reuses the ordinary assistant reducer without merging concurrent tokens. */
+  message: ChatMessage;
 }
 
 export interface UseChatSubmitParams {
@@ -138,8 +167,6 @@ export interface UseChatSubmitParams {
   currentChapterTitle?: string;
   selectedModel: string;
   agentEnabled: boolean;
-  /** 用于 max_tokens 等；temperature 由选中模型的 AiModelConfig 与思考开关决定 */
-  modelConfigs: Record<string, { label?: string; max_tokens?: number }>;
   selectedMemoryIds?: (number | string)[];
   selectedForeshadowingIds?: (number | string)[];
   /**

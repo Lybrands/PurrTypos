@@ -76,19 +76,14 @@
 
 .work-log__body {
   min-height: 0;
-  max-height: 430px;
-  overflow: hidden auto;
+  overflow: hidden;
   padding: 0 2px;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
 }
 
 .work-log--open .work-log__body {
   padding-top: 9px;
   padding-bottom: 5px;
+  overflow: visible;
 }
 
 .work-log__commentary {
@@ -260,6 +255,23 @@
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.work-log__subagent-response {
+  margin-top: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-subtle, rgba(120, 94, 94, 0.14));
+  border-radius: 8px;
+  background: var(--surface-subtle, rgba(120, 94, 94, 0.045));
+  color: var(--text-secondary);
+}
+
+.work-log__subagent-response > :first-child {
+  margin-top: 0;
+}
+
+.work-log__subagent-response > :last-child {
+  margin-bottom: 0;
 }
 
 .work-log__subagent-error {

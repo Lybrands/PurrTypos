@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -18,10 +19,14 @@ from agent_core.contracts import (
     ToolCallResult,
     ToolExecutionLimits,
     ToolExecutionMode,
+    ToolEffectState,
     ToolHandlerResult,
+    ToolPlanningDisposition,
+    ToolStepDisposition,
 )
 from agent_core.errors import ContractViolationError
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.json_values import thaw_json_mapping
 from agent_core.ports import (
     ApprovalGateway,
     CancellationSignal,
@@ -40,11 +45,13 @@ from agent_core.tools.policy import (
 from agent_core.tools.security import (
     ParsedToolCall,
     normalize_error_code,
+    normalize_tool_arguments_to_schema,
     preflight_tool_calls,
     safe_error_content,
     sanitize_error_message,
     sanitize_tool_result,
     summarize_tool_arguments,
+    validate_tool_arguments_schema,
 )
 
 
@@ -80,13 +87,22 @@ class CoreToolExecutor:
                 error="tool_execution_canceled",
             )
 
-        parsed_calls, failure = preflight_tool_calls(request.calls, self._limits)
+        parsed_calls, failure = preflight_tool_calls(
+            request.calls,
+            self._limits,
+            argument_limits={
+                name: registration.max_argument_chars
+                for name, registration in self._registrations.items()
+                if registration.max_argument_chars is not None
+            },
+        )
         if failure is not None:
             return _whole_batch_failure(
                 request.calls,
                 outcome=ToolBatchOutcome.FAILED,
                 code=failure.code,
                 message=failure.message,
+                diagnostics=failure.diagnostics,
             )
 
         requested_names = frozenset(item.call.name for item in parsed_calls)
@@ -112,10 +128,17 @@ class CoreToolExecutor:
                 code="tool_not_authorized",
                 message="The requested tool is outside the current execution scope.",
             )
-        if len(parsed_calls) > 1 and any(
-            self._registrations[item.call.name].policy.mode
-            is not ToolExecutionMode.READ
-            for item in parsed_calls
+        if (
+            len(parsed_calls) > 1
+            and any(
+                self._registrations[item.call.name].policy.mode
+                is not ToolExecutionMode.READ
+                for item in parsed_calls
+            )
+            and not _is_recoverable_artifact_batch(
+                parsed_calls,
+                self._registrations,
+            )
         ):
             return _whole_batch_failure(
                 request.calls,
@@ -123,9 +146,45 @@ class CoreToolExecutor:
                 code="multi_call_batch_requires_read_only_tools",
                 message=(
                     "A batch with multiple tool calls is allowed only when every "
-                    "tool has read-only policy mode."
+                    "tool is read-only, or when every call targets the same "
+                    "host-durable recoverable artifact batch tool."
                 ),
             )
+
+        normalized_calls: list[ParsedToolCall] = []
+        for parsed in parsed_calls:
+            normalized, normalization_failure = normalize_tool_arguments_to_schema(
+                parsed,
+                self._registrations[parsed.call.name].schema.parameters,
+            )
+            if normalization_failure is not None:
+                return _whole_batch_failure(
+                    request.calls,
+                    outcome=ToolBatchOutcome.FAILED,
+                    code=normalization_failure.code,
+                    message=normalization_failure.message,
+                    diagnostics=normalization_failure.diagnostics,
+                )
+            if normalized is None:
+                raise ContractViolationError(
+                    "tool argument normalization returned no result"
+                )
+            normalized_calls.append(normalized)
+        parsed_calls = tuple(normalized_calls)
+
+        for parsed in parsed_calls:
+            schema_failure = validate_tool_arguments_schema(
+                parsed,
+                self._registrations[parsed.call.name].schema.parameters,
+            )
+            if schema_failure is not None:
+                return _whole_batch_failure(
+                    request.calls,
+                    outcome=ToolBatchOutcome.FAILED,
+                    code=schema_failure.code,
+                    message=schema_failure.message,
+                    diagnostics=schema_failure.diagnostics,
+                )
 
         results: list[ToolCallResult] = []
         outcomes: list[ToolBatchOutcome] = []
@@ -168,12 +227,20 @@ class CoreToolExecutor:
                 )
                 results.append(result)
                 cache_hits.append(False)
-                await _emit_completed(event_sink, request, index, result, outcome)
+                await _emit_completed(
+                    event_sink,
+                    request,
+                    index,
+                    result,
+                    outcome,
+                    normalized_argument_paths=parsed.normalized_argument_paths,
+                )
                 return ToolBatchResult(
                     results=tuple(results),
                     outcome=outcome,
                     error=code,
                     cache_hits=tuple(cache_hits),
+                    effect_state=ToolEffectState.NOT_STARTED,
                 )
 
             # Defense in depth: authorization never comes from mutable state.
@@ -186,13 +253,19 @@ class CoreToolExecutor:
                 results.append(result)
                 cache_hits.append(False)
                 await _emit_completed(
-                    event_sink, request, index, result, ToolBatchOutcome.REJECTED
+                    event_sink,
+                    request,
+                    index,
+                    result,
+                    ToolBatchOutcome.REJECTED,
+                    normalized_argument_paths=parsed.normalized_argument_paths,
                 )
                 return ToolBatchResult(
                     results=tuple(results),
                     outcome=ToolBatchOutcome.REJECTED,
                     error="tool_not_authorized",
                     cache_hits=tuple(cache_hits),
+                    effect_state=ToolEffectState.NOT_STARTED,
                 )
 
             policy = registration.policy
@@ -225,6 +298,7 @@ class CoreToolExecutor:
                         index,
                         result,
                         approval_batch_outcome,
+                        normalized_argument_paths=parsed.normalized_argument_paths,
                     )
                     if approval_batch_outcome in {
                         ToolBatchOutcome.CANCELED,
@@ -235,14 +309,20 @@ class CoreToolExecutor:
                             outcome=approval_batch_outcome,
                             error=code,
                             cache_hits=tuple(cache_hits),
+                            effect_state=ToolEffectState.NOT_STARTED,
                         )
                     continue
 
             try:
                 async def execute_handler() -> ToolHandlerResult:
+                    # Core keeps model-generated arguments recursively immutable
+                    # while applying scope, approval, and idempotency policy. Domain
+                    # handlers are an adapter boundary, however, and expect ordinary
+                    # Python JSON containers (dict/list). Give each invocation a
+                    # detached mutable copy without weakening Core's trusted snapshot.
                     return await registration.handler(
                         request.state,
-                        parsed.arguments,
+                        thaw_json_mapping(parsed.arguments),
                         signal,
                     )
 
@@ -276,7 +356,7 @@ class CoreToolExecutor:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 result = _failure_result(
                     parsed.call,
                     "tool_execution_failed",
@@ -285,13 +365,24 @@ class CoreToolExecutor:
                 )
                 results.append(result)
                 await _emit_completed(
-                    event_sink, request, index, result, ToolBatchOutcome.FAILED
+                    event_sink,
+                    request,
+                    index,
+                    result,
+                    ToolBatchOutcome.FAILED,
+                    exception_type=type(error).__name__,
+                    normalized_argument_paths=parsed.normalized_argument_paths,
                 )
                 return ToolBatchResult(
                     results=tuple(results),
                     outcome=ToolBatchOutcome.FAILED,
                     error="tool_execution_failed",
                     cache_hits=tuple(cache_hits),
+                    effect_state=(
+                        ToolEffectState.NOT_STARTED
+                        if policy.mode is ToolExecutionMode.READ
+                        else ToolEffectState.UNKNOWN
+                    ),
                 )
 
             if not isinstance(handler_result, ToolHandlerResult):
@@ -303,13 +394,23 @@ class CoreToolExecutor:
                 )
                 results.append(result)
                 await _emit_completed(
-                    event_sink, request, index, result, ToolBatchOutcome.FAILED
+                    event_sink,
+                    request,
+                    index,
+                    result,
+                    ToolBatchOutcome.FAILED,
+                    normalized_argument_paths=parsed.normalized_argument_paths,
                 )
                 return ToolBatchResult(
                     results=tuple(results),
                     outcome=ToolBatchOutcome.FAILED,
                     error="invalid_tool_result",
                     cache_hits=tuple(cache_hits),
+                    effect_state=(
+                        ToolEffectState.NOT_STARTED
+                        if policy.mode is ToolExecutionMode.READ
+                        else ToolEffectState.UNKNOWN
+                    ),
                 )
 
             handler_error = (
@@ -333,24 +434,53 @@ class CoreToolExecutor:
                 approval_status=approval_status,
                 error=handler_error,
                 effects=effects,
+                step_disposition=handler_result.step_disposition,
+                planning_disposition=(
+                    handler_result.planning_disposition
+                    if not handler_error
+                    else ToolPlanningDisposition.KEEP_PLAN
+                ),
             )
             results.append(result)
 
             if handler_error:
                 await _emit_completed(
-                    event_sink, request, index, result, ToolBatchOutcome.FAILED
+                    event_sink,
+                    request,
+                    index,
+                    result,
+                    ToolBatchOutcome.FAILED,
+                    normalized_argument_paths=parsed.normalized_argument_paths,
                 )
                 return ToolBatchResult(
                     results=tuple(results),
                     outcome=ToolBatchOutcome.FAILED,
                     error=handler_error,
                     cache_hits=tuple(cache_hits),
+                    effect_state=(
+                        ToolEffectState.NOT_STARTED
+                        if policy.mode is ToolExecutionMode.READ
+                        else ToolEffectState.COMMITTED
+                        if outcomes
+                        else handler_result.effect_state
+                    ),
                 )
 
             await _emit_effects(event_sink, request, effects)
-            outcomes.append(ToolBatchOutcome.COMPLETED)
+            call_outcome = (
+                ToolBatchOutcome.PROGRESSED
+                if handler_result.step_disposition
+                is ToolStepDisposition.CONTINUE
+                else ToolBatchOutcome.COMPLETED
+            )
+            outcomes.append(call_outcome)
             await _emit_completed(
-                event_sink, request, index, result, ToolBatchOutcome.COMPLETED
+                event_sink,
+                request,
+                index,
+                result,
+                call_outcome,
+                normalized_argument_paths=parsed.normalized_argument_paths,
             )
 
         outcome = aggregate_outcomes(outcomes)
@@ -442,7 +572,12 @@ class CoreToolExecutor:
         if len(cache_hits) < len(results):
             cache_hits.append(False)
         await _emit_completed(
-            event_sink, request, index, result, ToolBatchOutcome.CANCELED
+            event_sink,
+            request,
+            index,
+            result,
+            ToolBatchOutcome.CANCELED,
+            normalized_argument_paths=parsed.normalized_argument_paths,
         )
         return ToolBatchResult(
             results=tuple(results),
@@ -463,6 +598,22 @@ def _probe_cache(
         return bool(registration.cache_probe.will_hit(request.state, parsed.arguments))
     except Exception:
         return False
+
+
+def _is_recoverable_artifact_batch(
+    calls: Sequence[ParsedToolCall],
+    registrations: Mapping[str, ToolRegistration],
+) -> bool:
+    names = {item.call.name for item in calls}
+    if len(names) != 1:
+        return False
+    registration = registrations[next(iter(names))]
+    return bool(
+        registration.policy.mode is ToolExecutionMode.PROPOSE
+        and registration.data_contract.payload_mode.value == "batch"
+        and registration.cancellation_linearizable
+        and registration.host_managed_durability
+    )
 
 
 async def _emit_effects(
@@ -497,6 +648,9 @@ async def _emit_completed(
     index: int,
     result: ToolCallResult,
     outcome: ToolBatchOutcome,
+    *,
+    exception_type: str | None = None,
+    normalized_argument_paths: tuple[str, ...] = (),
 ) -> None:
     payload: dict[str, Any] = {
         "index": index,
@@ -509,6 +663,10 @@ async def _emit_completed(
         payload["errorCode"] = result.error
     if result.approval_status is not None:
         payload["approvalStatus"] = result.approval_status.value
+    if exception_type:
+        payload["exceptionType"] = exception_type
+    if normalized_argument_paths:
+        payload["normalizedArgumentPaths"] = list(normalized_argument_paths)
     await event_sink.emit(AgentEvent(
         type=CoreEventType.TOOL_CALL_COMPLETED,
         run_id=request.run_id,
@@ -522,16 +680,23 @@ def _whole_batch_failure(
     outcome: ToolBatchOutcome,
     code: str,
     message: str,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> ToolBatchResult:
     normalized = normalize_error_code(code)
     return ToolBatchResult(
         results=tuple(
-            _failure_result(call, normalized, message)
+            _failure_result(
+                call,
+                normalized,
+                message,
+                diagnostics=diagnostics,
+            )
             for call in calls
         ),
         outcome=outcome,
         error=normalized,
         cache_hits=tuple(False for _ in calls),
+        effect_state=ToolEffectState.NOT_STARTED,
     )
 
 
@@ -541,12 +706,17 @@ def _failure_result(
     message: str,
     *,
     approval_status: ApprovalStatus | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> ToolCallResult:
     normalized = normalize_error_code(code)
     return ToolCallResult(
         tool_call_id=call.id,
         tool_name=call.name,
-        content=safe_error_content(normalized, message),
+        content=safe_error_content(
+            normalized,
+            message,
+            diagnostics=diagnostics,
+        ),
         approval_status=approval_status,
         error=normalized,
     )

@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { ReloadOutlined } from '../../ui'
-import { Button, Empty, Spin, Tag, Tooltip } from '../../ui'
+import { RefreshIcon } from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrSpin, PurrTag, PurrTooltip } from '@/purr-components'
 import type { EntityId, StoryHealthData } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { formatWords } from './dashboardFormatters'
@@ -29,9 +29,9 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
   React.useEffect(() => { reload() }, [reload])
 
   if (loading && !data) {
-    return <div className="dashboard-loading"><Spin /></div>
+    return <div className="dashboard-loading"><PurrSpin /></div>
   }
-  if (!data) return <Empty description="暂无数据" />
+  if (!data) return <PurrEmpty description="暂无数据" />
 
   const fs = data.foreshadowing
 
@@ -40,16 +40,16 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
       <div className="dashboard-summary">
         <div className="dashboard-summary-header">
           <span>统计概览</span>
-          <Tooltip title="重新统计">
-            <Button
+          <PurrTooltip title="重新统计">
+            <PurrButton
               type="text"
               size="small"
-              icon={<ReloadOutlined />}
+              icon={<RefreshIcon />}
               onClick={reload}
               loading={loading}
               className="dashboard-refresh-btn"
             />
-          </Tooltip>
+          </PurrTooltip>
         </div>
         <div className="dashboard-summary-row">
           <div className="dashboard-stat-card">
@@ -88,11 +88,11 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
               <div key={f.id} className="dashboard-foreshadow-item">
                 <div className="dashboard-foreshadow-head">
                   {f.overdue ? (
-                    <Tag color="error">已逾期</Tag>
+                    <PurrTag color="error">已逾期</PurrTag>
                   ) : f.dueSoon ? (
-                    <Tag color="warning">临近回收</Tag>
+                    <PurrTag color="warning">临近回收</PurrTag>
                   ) : (
-                    <Tag>{f.type || '悬念'}</Tag>
+                    <PurrTag>{f.type || '悬念'}</PurrTag>
                   )}
                   <span className="dashboard-foreshadow-content">{f.content}</span>
                 </div>
@@ -141,8 +141,8 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
                       </>
                     ) : '尚未出场'}
                   </span>
-                  {gapWarn ? <Tag color="warning">久未出场</Tag> : null}
-                  {c.appearChapters === 0 ? <Tag>未出场</Tag> : null}
+                  {gapWarn ? <PurrTag color="warning">久未出场</PurrTag> : null}
+                  {c.appearChapters === 0 ? <PurrTag>未出场</PurrTag> : null}
                 </div>
               )
             })}

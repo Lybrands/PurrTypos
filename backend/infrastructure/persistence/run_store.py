@@ -177,6 +177,23 @@ async def get_run(
     )
 
 
+async def get_latest_run_for_session(
+    db: "DatabaseConnection",
+    session_id: int,
+) -> dict[str, Any] | None:
+    return await db.fetch_one(
+        "SELECT id, session_id, conversation_id, status, mode, prompt, "
+        "model_provider, model_name, context_window, endpoint_digest, "
+        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
+        "final_response, create_time, update_time "
+        "FROM ai_agent_runs WHERE session_id = ? "
+        "ORDER BY create_time DESC LIMIT 1",
+        [int(session_id)],
+    )
+
+
 async def get_run_events(
     db: "DatabaseConnection",
     run_id: str,

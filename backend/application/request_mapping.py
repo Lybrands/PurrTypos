@@ -101,8 +101,6 @@ def to_writing_agent_request(
         book_id=body.bookId,
         chapter_id=body.chapterId,
         current_chapter_title=body.currentChapterTitle,
-        writing_chapters=tuple(_mappings(body.writingChapters)),
-        available_outlines=tuple(_mappings(body.availableOutlines)),
         associated_chapter_ids=tuple(body.associatedChapterIds or ()),
         associated_outline_ids=tuple(body.associatedOutlineIds or ()),
         selected_memory_ids=tuple(body.selectedMemoryIds or ()),
@@ -126,6 +124,7 @@ def to_writing_agent_request(
         mode=body.chatAgentMode,
         context_window=context_window_tokens(window_label),
         tools_enabled=bool(body.enableAgentTools and body.bookId),
+        metadata={"locale": body.locale},
     )
 
 
@@ -159,6 +158,9 @@ def to_screenplay_agent_request(
         active_document_id=body.activeDocumentId,
         requested_stage=body.activeStage,
         context_window_label=str(window_label) if window_label else None,
+        task_intent=body.screenplayTaskIntent,
+        draft_scene_count=body.screenplayDraftSceneCount,
+        draft_scope=body.screenplayDraftScope,
     )
     return AgentRunRequest(
         messages=tuple(
@@ -177,6 +179,7 @@ def to_screenplay_agent_request(
         mode=body.chatAgentMode,
         context_window=context_window_tokens(window_label),
         tools_enabled=bool(body.enableAgentTools),
+        metadata={"locale": body.locale},
     )
 
 
@@ -276,10 +279,6 @@ def agent_run_options(
         lineage=lineage,
         response_judges=tuple(response_judges),
     )
-
-
-def _mappings(values: list[Any] | None) -> list[dict[str, Any]]:
-    return [dict(value) for value in (values or ()) if isinstance(value, Mapping)]
 
 
 def _has_caller_tool_definitions(value: Any) -> bool:

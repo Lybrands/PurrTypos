@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { PlusOutlined, UserOutlined, DeleteOutlined, EditOutlined, SettingOutlined, HistoryOutlined, CommentOutlined } from '../../ui'
-import { Button, Empty, Input, Modal, Select, Tag, Tooltip } from '../../ui'
+import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
 import { useEditor, EditorContent } from '@tiptap/react'
@@ -249,7 +249,7 @@ export default function CharacterTab({
   if (bookId == null) {
     return (
       <div className="character-tab character-tab-empty">
-        <Empty description="请先选择书籍" />
+        <PurrEmpty description="请先选择书籍" />
       </div>
     )
   }
@@ -259,30 +259,30 @@ export default function CharacterTab({
       <div className="character-tab-header">
         {!hideHeader && <span className="character-tab-title">人物列表</span>}
         <div style={{ display: 'flex', gap: 2, marginLeft: hideHeader ? 'auto' : undefined }}>
-          <Tooltip title="配置标签选项">
-            <Button
+          <PurrTooltip title="配置标签选项">
+            <PurrButton
               type="text"
               size="small"
-              icon={<SettingOutlined style={{ fontSize: 14 }} />}
+              icon={<SettingsIcon />}
               onClick={() => setConfigOpen(true)}
               className="character-add-btn"
             />
-          </Tooltip>
-          <Tooltip title="新建人物">
-            <Button
+          </PurrTooltip>
+          <PurrTooltip title="新建人物">
+            <PurrButton
               type="text"
               size="small"
-              icon={<PlusOutlined style={{ fontSize: 14 }} />}
+              icon={<PlusIcon style={{ fontSize: 14 }} />}
               onClick={openCreate}
               className="character-add-btn"
             />
-          </Tooltip>
+          </PurrTooltip>
         </div>
       </div>
       <div className="character-tab-list">
         {characters.length === 0 ? (
           <div className="character-tab-empty-card">
-            <UserOutlined className="character-tab-empty-icon" />
+            <UserIcon className="character-tab-empty-icon" />
             <p>暂无人物</p>
             <small>点击「新建人物」添加角色</small>
           </div>
@@ -301,12 +301,12 @@ export default function CharacterTab({
                   <div className="character-card-name-row">
                     <span className="character-card-index">{index + 1}.</span>
                     {preview ? (
-                      <Tooltip
+                      <PurrTooltip
                         zIndex={1301}
                         title={<div className="character-info-tooltip">{preview}</div>}
                       >
                         <span className="character-card-name">{c.name}</span>
-                      </Tooltip>
+                      </PurrTooltip>
                     ) : (
                       <span className="character-card-name">{c.name}</span>
                     )}
@@ -314,38 +314,38 @@ export default function CharacterTab({
                   {c.tags && (
                     <div className="character-card-tags">
                       {splitToArray(c.tags).map((t, i) => (
-                        <Tag key={i} variant="filled" color="default">{t}</Tag>
+                        <PurrTag key={i} variant="filled" color="default">{t}</PurrTag>
                       ))}
                     </div>
                   )}
                 </div>
                 <div className="character-card-actions">
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<EditOutlined />}
+                    icon={<EditIcon />}
                     onClick={() => openEdit(c)}
                     title={hasDiff ? '审阅 diff 中，暂不可编辑' : '编辑'}
                     disabled={hasDiff}
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<CommentOutlined />}
+                    icon={<AiChatIcon />}
                     onClick={() => openAiChat(c)}
                     title="与 AI 讨论此人物"
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<HistoryOutlined />}
+                    icon={<HistoryIcon />}
                     onClick={() => { setHistoryCharacter(c); setHistoryOpen(true) }}
                     title="历史"
                   />
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<DeleteOutlined />}
+                    icon={<DeleteIcon />}
                     onClick={() => setDeleteTarget(c)}
                     title="删除"
                     className="character-add-btn"
@@ -373,7 +373,7 @@ export default function CharacterTab({
         onRestored={loadCharacters}
       />
 
-      <Modal
+      <PurrModal
         title={editTarget ? '编辑人物' : '新建人物'}
         open={editModalOpen}
         onOk={handleSave}
@@ -386,14 +386,14 @@ export default function CharacterTab({
         className="character-edit-modal"
       >
         <div className="character-edit-meta">
-          <Input
+          <PurrInput
             placeholder="人物姓名（必填）"
             value={draftName}
             onChange={(e) => setDraftName(e.target.value)}
             maxLength={50}
             className="character-edit-name"
           />
-          <Select
+          <PurrSelect
             mode="tags"
             placeholder="标签：选择或输入，回车确认"
             value={draftTags}
@@ -406,7 +406,7 @@ export default function CharacterTab({
         <div className="character-edit-profile story-background-tiptap-wrap">
           <EditorContent editor={editor} className="story-background-tiptap-container" />
         </div>
-      </Modal>
+      </PurrModal>
 
       <CharacterOptionsModal
         open={configOpen}
@@ -414,7 +414,7 @@ export default function CharacterTab({
         onOptionsChange={loadOptions}
       />
 
-      <Modal
+      <PurrModal
         title="删除人物"
         open={!!deleteTarget}
         onOk={handleDelete}
@@ -424,7 +424,7 @@ export default function CharacterTab({
         cancelText="取消"
       >
         <p>确认删除人物「{deleteTarget?.name}」？此操作不可恢复。</p>
-      </Modal>
+      </PurrModal>
     </div>
   )
 }

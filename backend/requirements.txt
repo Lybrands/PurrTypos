@@ -6,6 +6,7 @@ pydantic>=2.9.0
 httpx>=0.27.0
 openai>=1.50.0
 anthropic>=0.39.0
+zai-sdk>=0.2.3
 python-frontmatter>=1.1.0
 pyyaml>=6.0.0
 reportlab>=4.2.0

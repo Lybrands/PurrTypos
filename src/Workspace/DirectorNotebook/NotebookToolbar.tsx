@@ -1,10 +1,10 @@
 import React from 'react'
-import { Button, Tooltip } from '../../ui'
+import { PurrButton, PurrTooltip } from '@/purr-components'
 import {
-  BookOutlined,
-  BulbOutlined,
-  HighlightOutlined,
-} from '../../ui'
+  HighlightIcon,
+  MasterOutlineIcon,
+  StoryMemoryIcon,
+} from '@/purr-components'
 import { useWorkspace } from '../WorkspaceContext'
 import {
   GLOBAL_OUTLINE_TAB,
@@ -20,9 +20,9 @@ interface ToolDef {
 }
 
 const TOOLS: ToolDef[] = [
-  { tab: GLOBAL_OUTLINE_TAB, icon: <BookOutlined /> },
-  { tab: MEMORY_TAB, icon: <BulbOutlined /> },
-  { tab: STYLE_TAB, icon: <HighlightOutlined /> },
+  { tab: GLOBAL_OUTLINE_TAB, icon: <MasterOutlineIcon /> },
+  { tab: MEMORY_TAB, icon: <StoryMemoryIcon /> },
+  { tab: STYLE_TAB, icon: <HighlightIcon /> },
 ]
 
 /** 工作台顶部的全书级工具入口；内容统一在右侧组合面板中以标签打开。 */
@@ -34,8 +34,8 @@ export default function NotebookToolbar() {
       {TOOLS.map(({ tab, icon }) => {
         const active = utilityPanelOpen && activeUtilityTabKey === tab.key
         return (
-          <Tooltip key={tab.key} title={tab.title} placement="bottom">
-            <Button
+          <PurrTooltip key={tab.key} title={tab.title} placement="bottom">
+            <PurrButton
               type="text"
               size="small"
               icon={icon}
@@ -44,7 +44,7 @@ export default function NotebookToolbar() {
               aria-pressed={active}
               aria-label={tab.title}
             />
-          </Tooltip>
+          </PurrTooltip>
         )
       })}
     </div>

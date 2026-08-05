@@ -21,6 +21,19 @@ def _env_positive_float(key: str, default: float) -> float:
     return value
 
 
+def _env_optional_non_negative_float(key: str) -> float | None:
+    raw = _env(key).strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{key} must be a non-negative number") from error
+    if value < 0:
+        raise ValueError(f"{key} must be a non-negative number")
+    return value
+
+
 # Paths
 DATA_DIR: Path = Path(_env("PURRTYPOS_DATA_DIR", ""))
 SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
@@ -34,6 +47,19 @@ PORT: int = int(_env("PURRTYPOS_PORT", "18321"))
 AGENT_APPROVAL_TIMEOUT_SECONDS: float = _env_positive_float(
     "PURRTYPOS_AGENT_APPROVAL_TIMEOUT_SECONDS",
     300.0,
+)
+
+# Artifact claims are transient and reaped continuously. Durable terminal
+# content is retained indefinitely unless an operator explicitly configures a
+# retention duration. Open recovery state is never removed by retention GC.
+AGENT_ARTIFACT_MAINTENANCE_INTERVAL_SECONDS: float = _env_positive_float(
+    "PURRTYPOS_AGENT_ARTIFACT_MAINTENANCE_INTERVAL_SECONDS",
+    30.0,
+)
+AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS: float | None = (
+    _env_optional_non_negative_float(
+        "PURRTYPOS_AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS"
+    )
 )
 
 # 注：曾有 Ollama / mem0 / 工具路由意图模型相关配置（OLLAMA_HOST、MEM0_*、

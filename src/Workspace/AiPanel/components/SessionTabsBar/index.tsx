@@ -1,6 +1,6 @@
 import React from "react";
-import { PlusOutlined } from "../../../../ui";
-import { Button, Input, Tabs, Tooltip } from "../../../../ui";
+import { PlusIcon } from '@/purr-components';
+import { PurrButton, PurrInput, PurrTabs, PurrTooltip } from '@/purr-components';
 import type { AiSession, EntityId } from "../../../../types";
 import SessionHistoryPopover from "../SessionHistoryPopover";
 
@@ -53,7 +53,7 @@ export default function SessionTabsBar({
   const hasBlankSession = sessions.length > 0 && isCurrentSessionEmpty;
 
   return (
-    <Tabs
+    <PurrTabs
       className="session-tabs-bar"
       activeKey={activeSessionId ? String(activeSessionId) : undefined}
       onChange={(key) => {
@@ -76,20 +76,20 @@ export default function SessionTabsBar({
         ) : undefined,
         right: (
           <div className="session-tab-actions">
-            <Tooltip
+            <PurrTooltip
               title={
                 hasBlankSession ? "当前对话尚未开始" : "新建对话"
               }
             >
-              <Button
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<PlusOutlined style={{ fontSize: 13 }} />}
+                icon={<PlusIcon style={{ fontSize: 13 }} />}
                 onClick={onNewSession}
                 disabled={loading || hasBlankSession}
                 className="session-new-btn"
               />
-            </Tooltip>
+            </PurrTooltip>
             <SessionHistoryPopover
               bookId={bookId}
               chapterId={chapterId}
@@ -105,7 +105,7 @@ export default function SessionTabsBar({
         key: String(s.id),
         label:
           editingTabId === s.id ? (
-            <Input
+            <PurrInput
               size="small"
               value={editingTitle}
               onChange={(e) => onEditingTitleChange(e.target.value)}
@@ -118,7 +118,7 @@ export default function SessionTabsBar({
               autoFocus
             />
           ) : (
-            <Tooltip
+            <PurrTooltip
               title={s.title}
               placement="bottom"
               mouseEnterDelay={0.6}
@@ -140,7 +140,7 @@ export default function SessionTabsBar({
               >
                 {s.title}
               </span>
-            </Tooltip>
+            </PurrTooltip>
           ),
         closable: true,
       }))}

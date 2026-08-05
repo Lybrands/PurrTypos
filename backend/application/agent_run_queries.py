@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from agent_core.contracts import AgentDelegation, DelegationAggregation
+from agent_core.events import AgentEvent
 from agent_core.ports import CheckpointStore
 from agent_core.json_values import thaw_json_mapping
+from application.sse_mapping import core_event_to_sse_chunk
 from domains.agent_roles import AgentRoleRegistry
 
 
@@ -50,17 +52,29 @@ class AgentRunQueryService:
         if checkpoint is None:
             return None
 
-        envelopes = [
-            {
+        envelopes = []
+        for event in checkpoint.events:
+            event_type = str(event.get("eventType") or "")
+            payload = thaw_json_mapping(event.get("payload") or {})
+            mapped_chunk = core_event_to_sse_chunk(AgentEvent(
+                type=event_type,
+                run_id=normalized_run_id,
+                payload=payload,
+            ))
+            envelope = {
                 "version": RUN_SNAPSHOT_VERSION,
                 "cursor": int(event.get("id") or 0),
-                "type": str(event.get("eventType") or ""),
+                "type": event_type,
                 "runId": normalized_run_id,
-                "payload": thaw_json_mapping(event.get("payload") or {}),
+                "payload": payload,
                 "createdAt": event.get("createTime"),
             }
-            for event in checkpoint.events
-        ]
+            if mapped_chunk is not None:
+                # Live delivery and history recovery are both produced by the
+                # one canonical Core-event -> public-chunk mapper.  Consumers
+                # never need to maintain a second replay-only converter.
+                envelope["chunk"] = mapped_chunk
+            envelopes.append(envelope)
         aggregation = _aggregate_delegations(
             checkpoint.delegations,
             self._role_registry,

@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from schemas.ai import GenerateTitleRequest, ListModelsRequest
+
+
+class _Dumpable:
+    def __init__(self, value):
+        self._value = value
+
+    def model_dump(self):
+        return self._value
+
+
+class _SyncStream:
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self.close_calls = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._chunks)
+
+    def close(self):
+        self.close_calls += 1
+
+
+class _FakeClient:
+    def __init__(self, response):
+        self.response = response
+        self.create_calls: list[dict] = []
+        self.close_calls = 0
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+        self.models = SimpleNamespace(list=self._list_models)
+
+    def _create(self, **kwargs):
+        self.create_calls.append(dict(kwargs))
+        return self.response
+
+    def _list_models(self):
+        return self.response
+
+    def close(self):
+        self.close_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import zai_chat
+
+    client = _FakeClient(_Dumpable({
+        "model": "glm-5.2",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "完成",
+                "reasoning_content": "先分析",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{}"},
+                }],
+            },
+        }],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "total_tokens": 19,
+        },
+    }))
+    monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: client)
+
+    result = await zai_chat.chat_no_stream(
+        "secret",
+        [{"role": "user", "content": "继续"}],
+        {
+            "model": "glm-5.2",
+            "model_profile": "zai:glm-5.2",
+            "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
+            "thinking": {"type": "enabled"},
+            "temperature": 1.0,
+            "max_tokens": 4096,
+            "tools": [{"type": "function", "function": {"name": "read"}}],
+            "tool_choice": "required",
+        },
+    )
+
+    assert client.create_calls == [{
+        "model": "glm-5.2",
+        "messages": [{"role": "user", "content": "继续"}],
+        "stream": False,
+        "thinking": {"type": "enabled"},
+        "temperature": 1.0,
+        "max_tokens": 4096,
+        "tools": [{"type": "function", "function": {"name": "read"}}],
+        "tool_choice": "required",
+    }]
+    assert result == {
+        "message": {
+            "role": "assistant",
+            "content": "完成",
+            "reasoning_content": "先分析",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read", "arguments": "{}"},
+            }],
+        },
+        "model": "glm-5.2",
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "total_tokens": 19,
+        },
+    }
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import zai_chat
+
+    raw_stream = _SyncStream([
+        _Dumpable({
+            "model": "glm-5.2",
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "分析",
+                    "content": "答",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{"},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+        _Dumpable({
+            "model": "glm-5.2",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": "}"},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "total_tokens": 8,
+            },
+        }),
+    ])
+    client = _FakeClient(raw_stream)
+    monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: client)
+
+    result = await zai_chat.chat_stream(
+        "secret",
+        [{"role": "user", "content": "读取"}],
+        {
+            "model": "glm-5.2",
+            "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
+            "thinking": {"type": "disabled"},
+        },
+    )
+    chunks = [chunk async for chunk in result["stream"]]
+
+    assert client.create_calls == [{
+        "model": "glm-5.2",
+        "messages": [{"role": "user", "content": "读取"}],
+        "stream": True,
+        "thinking": {"type": "disabled"},
+    }]
+    assert chunks[0]["choices"][0]["delta"]["reasoning_content"] == "分析"
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"] == {
+        "name": "read",
+        "arguments": "{",
+    }
+    assert chunks[1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert chunks[1]["usage"]["total_tokens"] == 8
+    assert raw_stream.close_calls == 1
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_zai_stream_honors_pre_start_cancellation_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import zai_chat
+
+    raw_stream = _SyncStream([_Dumpable({"choices": []})])
+    client = _FakeClient(raw_stream)
+    monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: client)
+    signal = asyncio.Event()
+    signal.set()
+
+    result = await zai_chat.chat_stream(
+        "secret",
+        [{"role": "user", "content": "取消"}],
+        {"model": "glm-5.2", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
+        signal,
+    )
+    assert [chunk async for chunk in result["stream"]] == []
+    assert raw_stream.close_calls == 1
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_zai_title_and_model_listing_use_the_sdk(monkeypatch: pytest.MonkeyPatch):
+    from infrastructure.models import zai_chat
+
+    title_client = _FakeClient(_Dumpable({
+        "model": "glm-5.2",
+        "choices": [{"message": {"role": "assistant", "content": "「春日写作」"}}],
+    }))
+    monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: title_client)
+    title = await zai_chat.generate_title(
+        "secret",
+        "写一段春天的故事",
+        {"model": "glm-5.2", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
+    )
+    assert title == "春日写作"
+    assert title_client.create_calls[0]["thinking"] == {"type": "disabled"}
+    assert title_client.close_calls == 1
+
+    models_client = _FakeClient(None)
+    monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: models_client)
+    assert await zai_chat.list_models(
+        "secret",
+        "https://open.bigmodel.cn/api/paas/v4/",
+    ) == ["glm-5.2"]
+    assert models_client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_router_selects_zai_adapter(monkeypatch: pytest.MonkeyPatch):
+    from infrastructure.models import provider_router, zai_chat
+
+    async def fake_stream(*_args):
+        return {"stream": "zai-stream", "model": "glm-5.2"}
+
+    async def fake_complete(*_args):
+        return {"message": {"content": "zai"}, "model": "glm-5.2"}
+
+    monkeypatch.setattr(zai_chat, "chat_stream", fake_stream)
+    monkeypatch.setattr(zai_chat, "chat_no_stream", fake_complete)
+
+    assert (await provider_router.create_chat_stream(
+        "secret", [], {"model": "glm-5.2"}, "zai",
+    ))["stream"] == "zai-stream"
+    assert (await provider_router.create_chat_no_stream(
+        "secret", [], {"model": "glm-5.2"}, "zai",
+    ))["message"]["content"] == "zai"
+
+
+@pytest.mark.asyncio
+async def test_ai_routes_select_zai_for_models_and_titles(monkeypatch: pytest.MonkeyPatch):
+    from infrastructure.models import zai_chat
+    from routers.ai import generate_title, list_models
+
+    async def fake_models(api_key, base_url):
+        assert api_key == "secret"
+        assert base_url == "https://open.bigmodel.cn/api/paas/v4"
+        return ["glm-5.2"]
+
+    async def fake_title(api_key, prompt, options):
+        assert api_key == "secret"
+        assert prompt == "春天"
+        assert options["model"] == "glm-5.2"
+        return "春日"
+
+    monkeypatch.setattr(zai_chat, "list_models", fake_models)
+    monkeypatch.setattr(zai_chat, "generate_title", fake_title)
+
+    models_response = await list_models(ListModelsRequest(
+        apiKey="secret",
+        baseURL="https://open.bigmodel.cn/api/paas/v4/",
+        apiProvider="zai",
+    ))
+    assert models_response == {"success": True, "data": ["glm-5.2"]}
+
+    title_response = await generate_title(GenerateTitleRequest(
+        apiKey="secret",
+        baseURL="https://open.bigmodel.cn/api/paas/v4/",
+        apiProvider="zai",
+        model="glm-5.2",
+        prompt="春天",
+    ))
+    assert title_response == {"success": True, "data": "春日"}

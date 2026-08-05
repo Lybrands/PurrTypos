@@ -11,23 +11,94 @@ import anyio
 from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 
-from agent_core.contracts import RunProvenance
+from agent_core.contracts import AgentRunResult, RunProvenance
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
 )
 from schemas.ai import (
+    CaptureAiErrorReportRequest,
     ChatStreamRequest,
     CreateAgentDelegationRequest,
     GenerateTitleRequest,
     ListModelsRequest,
     ResolveToolApprovalRequest,
+    SubmitAiErrorReportRequest,
 )
 from utils.session_title import normalize_session_title
 from utils.url import normalize_base_url
 
 router = APIRouter(tags=["ai"])
 logger = logging.getLogger(__name__)
+
+_ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
+    "agentMode",
+    "agentProfile",
+    "associatedChapterCount",
+    "associatedOutlineCount",
+    "contextWindow",
+    "messageCount",
+    "provider",
+    "selectedForeshadowingCount",
+    "selectedMemoryCount",
+    "thinkingEnabled",
+    "taskType",
+    "toolsEnabled",
+})
+
+
+def _long_task_payload(task, units, *, include_results: bool = True) -> dict[str, Any]:
+    from agent_core.json_values import thaw_json_mapping
+
+    return {
+        "id": task.id,
+        "workItemId": task.work_item_id,
+        "namespace": task.namespace,
+        "kind": task.kind,
+        "ownerId": task.owner_id,
+        "parentRunId": task.created_by_run_id,
+        "status": task.status.value,
+        "revision": task.revision,
+        "totalUnits": task.total_units,
+        "completedUnits": task.completed_units,
+        "failedUnits": task.failed_units,
+        "maxParallelism": task.max_parallelism,
+        "createTime": getattr(task, "create_time", None),
+        "updateTime": getattr(task, "update_time", None),
+        "metadata": thaw_json_mapping(task.metadata),
+        "units": [{
+            "id": unit.id,
+            "position": unit.position,
+            "status": unit.status.value,
+            "attempt": unit.attempt,
+            "maxAttempts": unit.max_attempts,
+            "runId": unit.run_id,
+            "inputRef": unit.input_ref,
+            "outputRef": unit.output_ref,
+            "errorCode": unit.error_code,
+            "createTime": getattr(unit, "create_time", None),
+            "updateTime": getattr(unit, "update_time", None),
+            "metadata": (
+                {
+                    key: value
+                    for key, value in thaw_json_mapping(unit.metadata).items()
+                    if key != "liveConversation"
+                }
+                if include_results
+                else {
+                    key: value
+                    for key, value in thaw_json_mapping(unit.metadata).items()
+                    if key not in {
+                        "scenes",
+                        "proposal",
+                        "continuitySummary",
+                        "liveConversation",
+                        "assistantResponse",
+                    }
+                }
+            ),
+        } for unit in units],
+    }
 
 
 class _AgentClientDisconnected(Exception):
@@ -72,9 +143,6 @@ class _AgentEventSourceResponse(EventSourceResponse):
                             logger.exception(
                                 "Agent stream cleanup failed after send disconnect"
                             )
-                if not self._agent_cleanup_complete.is_set():
-                    with anyio.move_on_after(5, shield=True):
-                        await self._agent_cleanup_complete.wait()
                 raise _AgentClientDisconnected from error
 
         try:
@@ -96,6 +164,94 @@ class _AgentEventSourceResponse(EventSourceResponse):
             # The peer is gone, so there is no response body left to finish.
             # Treat this as the transport's normal disconnect completion.
             return
+
+
+@router.post("/ai/error-reports")
+async def capture_ai_error_report(body: CaptureAiErrorReportRequest):
+    """Persist a content-free local index over an AI stream failure."""
+
+    from dependencies import get_db
+    from infrastructure.persistence.error_report_store import (
+        capture_error_report,
+    )
+
+    diagnostics = {
+        key: value
+        for key, value in body.diagnostics.items()
+        if key in _ERROR_REPORT_DIAGNOSTIC_KEYS
+        and isinstance(value, (str, int, float, bool))
+    }
+    report = await capture_error_report(
+        get_db(),
+        stream_id=body.streamId,
+        agent_run_id=body.agentRunId,
+        session_id=body.sessionId,
+        conversation_id=body.conversationId,
+        book_id=body.bookId,
+        chapter_id=body.chapterId,
+        source=body.source[:80] or "ai_chat_stream",
+        error_code=(body.errorCode or "")[:160] or None,
+        error_message=body.errorMessage[:2000],
+        model_name=(body.model or "")[:200] or None,
+        diagnostics=diagnostics,
+    )
+    return {"success": True, "data": report}
+
+
+@router.get("/ai/error-reports")
+async def list_ai_error_reports(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    from dependencies import get_db
+    from infrastructure.persistence.error_report_store import (
+        ERROR_REPORT_STATUSES,
+        list_error_reports,
+    )
+
+    normalized_status = str(status or "").strip() or None
+    if normalized_status and normalized_status not in ERROR_REPORT_STATUSES:
+        return {"success": False, "error": "错误报告状态无效"}
+    reports = await list_error_reports(
+        get_db(),
+        status=normalized_status,
+        limit=limit,
+    )
+    return {"success": True, "data": reports}
+
+
+@router.get("/ai/error-reports/{report_id}")
+async def get_ai_error_report(report_id: str):
+    from dependencies import get_db
+    from infrastructure.persistence.error_report_store import get_error_report
+
+    report = await get_error_report(get_db(), report_id)
+    if report is None:
+        return {"success": False, "error": "错误报告不存在"}
+    return {"success": True, "data": report}
+
+
+@router.post("/ai/error-reports/{report_id}/submit")
+async def submit_ai_error_report(
+    report_id: str,
+    body: SubmitAiErrorReportRequest,
+):
+    """Mark a captured local report as ready for developer review."""
+
+    from dependencies import get_db
+    from infrastructure.persistence.error_report_store import (
+        submit_error_report,
+    )
+
+    user_note = str(body.userNote or "").strip() or None
+    report = await submit_error_report(
+        get_db(),
+        report_id,
+        user_note=user_note,
+    )
+    if report is None:
+        return {"success": False, "error": "错误报告不存在"}
+    return {"success": True, "data": report}
 
 
 @router.post("/ai/tool-approvals/{approval_id}")
@@ -127,21 +283,197 @@ async def resolve_pending_tool_approval(
 
 @router.get("/ai/agent-runs/{run_id}/diagnostics")
 async def get_agent_run_diagnostics(run_id: str):
-    """Return persisted host traces plus deterministic operational checks."""
+    """Return diagnostics for one Run or its durable workflow tree."""
     from agent_core.evaluation import (
+        classify_agent_run_failures,
         evaluate_agent_run,
         evaluate_agent_run_performance,
+        evaluate_agent_run_recovery,
+        evaluate_agent_run_stability,
     )
     from dependencies import get_db
+    from application.artifact_maintenance import (
+        artifact_maintenance_snapshot_view,
+    )
     from infrastructure.persistence.run_store import get_run, get_run_events
+    from infrastructure.persistence.sqlite_artifact_maintenance_repository import (
+        SqliteArtifactMaintenanceRepository,
+    )
+    from infrastructure.persistence.sqlite_artifact_repository import (
+        get_run_artifact_metrics,
+    )
 
     db = get_db()
     run = await get_run(db, run_id)
     if run is None:
         return {"success": False, "error": "Agent Run 不存在"}
-    events = await get_run_events(db, run_id)
-    report = evaluate_agent_run(run, events)
+    root_events = await get_run_events(db, run_id)
+    dispatched = any(
+        str(event.get("eventType") or "") == "long_task.dispatched"
+        for event in root_events
+    )
+    child_runs: list[dict[str, Any]] = []
+    long_tasks: list[dict[str, Any]] = []
+    events = [dict(event, runId=run_id) for event in root_events]
+    if dispatched:
+        child_runs, long_tasks = await asyncio.gather(
+            db.fetch_all(
+                "SELECT id, status, parent_run_id, root_run_id, agent_role, "
+                "run_depth, model_provider, model_name, create_time, update_time "
+                "FROM ai_agent_runs WHERE root_run_id = ? AND id <> ? "
+                "ORDER BY create_time ASC, id ASC",
+                [run_id, run_id],
+            ),
+            db.fetch_all(
+                "SELECT id, kind, status, total_units, completed_units, "
+                "failed_units, create_time, update_time "
+                "FROM ai_agent_long_tasks WHERE created_by_run_id = ? "
+                "ORDER BY create_time ASC, id ASC",
+                [run_id],
+            ),
+        )
+        child_event_groups = await asyncio.gather(*(
+            get_run_events(db, str(child["id"]))
+            for child in child_runs
+        ))
+        for child, child_events in zip(child_runs, child_event_groups):
+            child_run_id = str(child["id"])
+            events.extend(
+                dict(event, runId=child_run_id) for event in child_events
+            )
+        events.sort(key=lambda event: int(event.get("id") or 0))
+    workflow_status = None
+    if dispatched:
+        workflow_status = next((
+            str(task.get("status") or "")
+            for task in long_tasks
+            if str(task.get("status") or "") in {"running", "pending"}
+        ), None) or next((
+            str(task.get("status") or "")
+            for task in long_tasks
+            if str(task.get("status") or "") == "paused"
+        ), None) or (
+            str(long_tasks[-1].get("status") or "done")
+            if long_tasks else "done"
+        )
+    evaluation_run = dict(run)
+    if workflow_status is not None:
+        evaluation_run["status"] = (
+            "done" if workflow_status == "completed" else workflow_status
+        )
+    report = evaluate_agent_run(evaluation_run, events)
     report["performance"] = evaluate_agent_run_performance(events)
+    report["stability"] = evaluate_agent_run_stability(events)
+    report["recovery"] = evaluate_agent_run_recovery(events)
+    report["failureClassification"] = classify_agent_run_failures(
+        evaluation_run,
+        events,
+    )
+    artifact_metrics, maintenance = await asyncio.gather(
+        get_run_artifact_metrics(db, run_id),
+        SqliteArtifactMaintenanceRepository(db).inspect(run_id=run_id),
+    )
+    report["artifacts"] = artifact_metrics
+    report["artifactMaintenance"] = artifact_maintenance_snapshot_view(
+        maintenance
+    )
+    if dispatched:
+        report["workflow"] = {
+            "kind": "durable_long_task",
+            "rootRunId": run_id,
+            "status": workflow_status or "done",
+            "runCount": 1 + len(child_runs),
+            "childRunCount": len(child_runs),
+            "activeChildRunIds": [
+                str(child["id"])
+                for child in child_runs
+                if str(child.get("status") or "") == "running"
+            ],
+            "childRuns": [{
+                "runId": str(child["id"]),
+                "status": child.get("status"),
+                "parentRunId": child.get("parent_run_id"),
+                "agentRole": child.get("agent_role"),
+                "depth": child.get("run_depth"),
+                "modelProvider": child.get("model_provider"),
+                "modelName": child.get("model_name"),
+                "createTime": child.get("create_time"),
+                "updateTime": child.get("update_time"),
+            } for child in child_runs],
+            "longTasks": [{
+                "taskId": str(task["id"]),
+                "kind": task.get("kind"),
+                "status": task.get("status"),
+                "totalUnits": task.get("total_units"),
+                "completedUnits": task.get("completed_units"),
+                "failedUnits": task.get("failed_units"),
+                "createTime": task.get("create_time"),
+                "updateTime": task.get("update_time"),
+            } for task in long_tasks],
+        }
+    return {"success": True, "data": report}
+
+
+@router.post("/ai/artifacts/maintenance")
+async def maintain_agent_artifacts():
+    """Safely reap invalid leases without enabling content retention GC."""
+
+    from agent_core.artifacts import ArtifactMaintenancePolicy
+    from application.artifact_maintenance import (
+        artifact_maintenance_report_view,
+        artifact_maintenance_snapshot_view,
+        run_artifact_maintenance,
+    )
+    from dependencies import get_db
+    from infrastructure.persistence.sqlite_artifact_maintenance_repository import (
+        SqliteArtifactMaintenanceRepository,
+    )
+
+    repository = SqliteArtifactMaintenanceRepository(get_db())
+    report = await run_artifact_maintenance(
+        repository,
+        ArtifactMaintenancePolicy(),
+    )
+    snapshot = await repository.inspect()
+    return {
+        "success": True,
+        "data": {
+            "report": artifact_maintenance_report_view(report),
+            "snapshot": artifact_maintenance_snapshot_view(snapshot),
+        },
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/stability-trend")
+async def get_agent_run_stability_trend(
+    run_id: str,
+    scope: str = Query(
+        default="auto",
+        pattern="^(auto|session|book|screenplay_project|global)$",
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return bounded, content-free stability trends for a Run's scope."""
+
+    from application.agent_stability_service import (
+        get_scoped_agent_stability_trend,
+    )
+    from dependencies import get_db
+    from infrastructure.persistence.stability_query import (
+        SqliteStabilityEvidenceGateway,
+    )
+
+    try:
+        report = await get_scoped_agent_stability_trend(
+            SqliteStabilityEvidenceGateway(get_db()),
+            run_id,
+            scope=scope,  # type: ignore[arg-type]
+            limit=limit,
+        )
+    except ValueError as error:
+        return {"success": False, "error": str(error)}
+    if report is None:
+        return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": report}
 
 
@@ -151,6 +483,10 @@ async def cancel_agent_run(run_id: str):
 
     from application.agent_delegation_service import AgentDelegationService
     from application.agent_composition import get_agent_composition
+    from dependencies import get_db
+    from infrastructure.persistence.run_execution_store import (
+        terminalize_orphaned_run,
+    )
 
     composition = get_agent_composition()
     children_canceled = await AgentDelegationService(
@@ -160,6 +496,31 @@ async def cancel_agent_run(run_id: str):
     state = await composition.execution_lease_store.get(run_id)
     if state is None:
         return {"success": False, "error": "Agent Run 不存在"}
+    terminalized = await terminalize_orphaned_run(
+        get_db(),
+        run_id,
+        reason="cancellation_requested_without_live_executor",
+    )
+    if terminalized:
+        return {
+            "success": True,
+            "data": {
+                "status": "canceled",
+                "newlyRequested": requested,
+                "childrenCanceled": children_canceled,
+                "terminalized": True,
+            },
+        }
+    if state.status.value == "canceled":
+        return {
+            "success": True,
+            "data": {
+                "status": "canceled",
+                "newlyRequested": False,
+                "childrenCanceled": children_canceled,
+                "terminalized": False,
+            },
+        }
     if state.status.value != "running":
         return {"success": False, "error": "Agent Run 已结束"}
     return {
@@ -168,6 +529,7 @@ async def cancel_agent_run(run_id: str):
             "status": "cancel_requested",
             "newlyRequested": requested,
             "childrenCanceled": children_canceled,
+            "terminalized": False,
         },
     }
 
@@ -198,6 +560,38 @@ async def create_agent_delegation(
     return {"success": True, "data": delegation}
 
 
+@router.get("/ai/session-runs/latest")
+async def get_latest_session_agent_run(
+    session_id: int = Query(alias="sessionId", ge=1),
+):
+    """Return the latest session-owned Run for page recovery."""
+
+    from application.agent_composition import get_agent_composition
+    from application.agent_run_queries import AgentRunQueryService
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import (
+        get_latest_run_for_session,
+    )
+
+    composition = get_agent_composition()
+    run = await get_latest_run_for_session(get_db(), session_id)
+    if run is None:
+        return {"success": True, "data": None}
+    snapshot = await AgentRunQueryService(
+        composition.checkpoint_store,
+        role_registry=getattr(composition, "agent_role_registry", None),
+    ).get_snapshot(str(run["id"]), limit=500)
+    if snapshot is None:
+        return {"success": True, "data": None}
+    return {
+        "success": True,
+        "data": {
+            "prompt": str(run.get("prompt") or ""),
+            "snapshot": snapshot,
+        },
+    }
+
+
 @router.get("/ai/agent-runs/{run_id}")
 async def get_agent_run_snapshot(
     run_id: str,
@@ -223,6 +617,121 @@ async def get_agent_run_snapshot(
     return {"success": True, "data": snapshot}
 
 
+@router.get("/ai/long-tasks/{task_id}")
+async def get_long_task(task_id: str):
+    from application.agent_composition import get_agent_composition
+
+    repository = get_agent_composition().long_task_repository
+    task = await repository.load(task_id)
+    if task is None:
+        return {"success": False, "error": "长任务不存在"}
+    units = await repository.list_units(task.id)
+    return {"success": True, "data": _long_task_payload(task, units)}
+
+
+@router.get("/ai/long-tasks/{task_id}/conversation/stream")
+async def stream_long_task_conversation(
+    task_id: str,
+    session_id: int | None = Query(default=None, alias="sessionId", ge=1),
+    after: int = Query(default=0, ge=0),
+):
+    """Replay and follow canonical child-Run events for one conversation."""
+
+    from application.agent_composition import get_agent_composition
+    from application.screenplay_long_task_conversation import (
+        ScreenplayLongTaskConversationStream,
+    )
+
+    composition = get_agent_composition()
+    conversation = ScreenplayLongTaskConversationStream(
+        long_tasks=composition.long_task_repository,
+        checkpoint_store=composition.checkpoint_store,
+        role_registry=getattr(composition, "agent_role_registry", None),
+        live_events=composition.screenplay_long_task_conversation_hub,
+    )
+
+    async def _events():
+        try:
+            async for event in conversation.stream(
+                task_id,
+                session_id=session_id,
+                after_event_id=after,
+            ):
+                yield json.dumps(event, ensure_ascii=False)
+        except LookupError:
+            yield json.dumps({
+                "type": "stream.error",
+                "taskId": task_id,
+                "error": "长任务不存在",
+            }, ensure_ascii=False)
+        except PermissionError:
+            yield json.dumps({
+                "type": "stream.error",
+                "taskId": task_id,
+                "error": "长任务不属于当前对话",
+            }, ensure_ascii=False)
+        except Exception:
+            logger.exception("[ai/long-tasks] conversation stream failed")
+            yield json.dumps({
+                "type": "stream.error",
+                "taskId": task_id,
+                "error": "长任务对话流异常中断",
+            }, ensure_ascii=False)
+
+    return EventSourceResponse(_events(), media_type="text/event-stream")
+
+
+@router.get("/ai/screenplay-projects/{project_id}/long-tasks")
+async def list_screenplay_long_tasks(
+    project_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    from application.agent_composition import get_agent_composition
+    from domains.screenplay.contracts import SCREENPLAY_DOMAIN_NAMESPACE
+
+    repository = get_agent_composition().long_task_repository
+    tasks = await repository.list_for_owner(
+        namespace=SCREENPLAY_DOMAIN_NAMESPACE,
+        owner_id=project_id,
+        limit=limit,
+    )
+    return {
+        "success": True,
+        "data": [
+            _long_task_payload(
+                task,
+                await repository.list_units(task.id),
+                include_results=False,
+            )
+            for task in tasks
+        ],
+    }
+
+
+@router.post("/ai/long-tasks/{task_id}/pause")
+async def pause_long_task(task_id: str):
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    try:
+        task = await composition.pause_screenplay_long_task(task_id)
+    except (LookupError, ValueError) as error:
+        return {"success": False, "error": str(error)}
+    return {"success": True, "data": _long_task_payload(task, ())}
+
+
+@router.post("/ai/long-tasks/{task_id}/cancel")
+async def cancel_long_task(task_id: str):
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    try:
+        task = await composition.cancel_screenplay_long_task(task_id)
+    except (LookupError, ValueError) as error:
+        return {"success": False, "error": str(error)}
+    return {"success": True, "data": _long_task_payload(task, ())}
+
+
 @router.get("/ai/agent-runtime-regressions")
 async def get_agent_runtime_regressions():
     """Run content-free operational incidents against the current evaluator."""
@@ -241,6 +750,17 @@ async def get_agent_security_redteam():
     )
 
     return {"success": True, "data": run_agent_security_redteam_suite()}
+
+
+@router.get("/ai/agent-stability-quality-gate")
+async def get_agent_stability_quality_gate():
+    """Run promoted failure-classification incidents as a release gate."""
+
+    from application.operations.deterministic_checks import (
+        run_agent_stability_quality_gate,
+    )
+
+    return {"success": True, "data": run_agent_stability_quality_gate()}
 
 
 # ── POST /ai/models ─────────────────────────────────────────────
@@ -262,6 +782,15 @@ async def list_models(body: ListModelsRequest):
             async for m in client.models.list():
                 if m and getattr(m, "id", None):
                     ids.append(m.id)
+            return {"success": True, "data": ids}
+        except Exception as e:
+            return {"success": False, "error": str(e), "data": []}
+
+    if body.apiProvider == "zai":
+        try:
+            from infrastructure.models.zai_chat import list_models as zai_models
+
+            ids = await zai_models(key, base_url)
             return {"success": True, "data": ids}
         except Exception as e:
             return {"success": False, "error": str(e), "data": []}
@@ -333,6 +862,24 @@ async def generate_title(body: GenerateTitleRequest):
             logger.info("[ai-generate-title] 生成标题: %s", title)
             return {"success": True, "data": title}
 
+        if body.apiProvider == "zai":
+            from infrastructure.models.zai_chat import generate_title as zai_title
+
+            title = await zai_title(
+                key,
+                body.prompt,
+                {"model": model, "baseURL": base_url},
+            )
+            title = (title or "").strip()
+            if not title:
+                title = _fallback_session_title_from_prompt(body.prompt)
+                if title:
+                    logger.info("[ai-generate-title] zai used prompt fallback")
+            if not title:
+                return {"success": False, "error": "标题生成结果为空"}
+            logger.info("[ai-generate-title] 生成标题: %s", title)
+            return {"success": True, "data": title}
+
         from infrastructure.models.openai_chat import generate_title as openai_title
 
         title = await openai_title(key, body.prompt, {"model": model, "baseURL": base_url})
@@ -357,7 +904,7 @@ async def _stream_composed_agent(
     signal: asyncio.Event,
     provenance: RunProvenance | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Map application-owned Agent updates onto the desktop SSE contract."""
+    """Run independently and map live updates while an SSE peer is attached."""
 
     from application.agent_composition import get_agent_composition
     from application.agent_run_service import AgentRunService
@@ -372,19 +919,56 @@ async def _stream_composed_agent(
         provenance=provenance,
     )
     model = str(provider_options.get("model") or "")
-    try:
-        async for update in service_stream:
-            chunk = core_update_to_sse_chunk(update, model=model)
-            if chunk is not None:
-                yield chunk
-    finally:
-        # sse-starlette cancels its streaming task from an AnyIO cancel scope
-        # when ASGI receives ``http.disconnect``.  Shield the inner generator
-        # close so AgentCore can durably commit consumer_disconnected before
-        # the response task exits; otherwise only the in-memory approval map
-        # is cleared and the persisted Run can remain stuck at running.
-        with anyio.CancelScope(shield=True):
+    queue: asyncio.Queue[dict[str, Any] | Exception | object] = asyncio.Queue()
+    stream_end = object()
+    subscriber_attached = True
+
+    async def _execute_run() -> None:
+        nonlocal subscriber_attached
+        try:
+            async for update in service_stream:
+                if isinstance(update, AgentRunResult) and update.run_id:
+                    from infrastructure.persistence.run_conversation_store import (
+                        ensure_terminal_run_conversation,
+                    )
+
+                    database = getattr(composition, "database", None)
+                    if database is not None:
+                        await ensure_terminal_run_conversation(
+                            database,
+                            update.run_id,
+                        )
+                chunk = core_update_to_sse_chunk(update, model=model)
+                if subscriber_attached and chunk is not None:
+                    await queue.put(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if subscriber_attached:
+                await queue.put(error)
+            else:
+                logger.exception("Detached composed Agent failed")
+        finally:
             await service_stream.aclose()
+            if subscriber_attached:
+                await queue.put(stream_end)
+
+    execution_task = asyncio.create_task(_execute_run())
+    track_background_run = getattr(composition, "track_background_run", None)
+    if callable(track_background_run):
+        track_background_run(execution_task)
+    try:
+        while True:
+            item = await queue.get()
+            if item is stream_end:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        # Closing the response only detaches this subscriber. The composition
+        # owns execution_task until the durable Run reaches a terminal state.
+        subscriber_attached = False
 
 
 @router.post("/ai/chat/stream")
@@ -412,23 +996,21 @@ async def chat_stream(body: ChatStreamRequest):
         temperature,
     )
 
-    # EventSourceResponse is the sole ASGI ``receive`` owner. Its disconnect
-    # callback translates the transport event into the cancellation signal
-    # shared by planner, model, and tool operations.
-    abort = asyncio.Event()
+    # EventSourceResponse is the sole ASGI ``receive`` owner. Transport close
+    # only detaches delivery; explicit control-plane cancellation owns the Run.
+    transport_closed = asyncio.Event()
+    run_signal = asyncio.Event()
     stream_cleanup_complete = asyncio.Event()
 
     async def _on_client_disconnect(_message: dict[str, Any]) -> None:
-        abort.set()
-        with anyio.move_on_after(5, shield=True):
-            await stream_cleanup_complete.wait()
+        transport_closed.set()
 
     async def _event_generator():
         composed_stream = _stream_composed_agent(
             body=body,
             api_key=key,
             provider_options=request_params,
-            signal=abort,
+            signal=run_signal,
         )
         try:
             async for composed_chunk in composed_stream:
@@ -451,7 +1033,7 @@ async def chat_stream(body: ChatStreamRequest):
                 try:
                     await composed_stream.aclose()
                 finally:
-                    abort.set()
+                    transport_closed.set()
                     stream_cleanup_complete.set()
 
     async def _transport_event_generator():
@@ -460,7 +1042,7 @@ async def chat_stream(body: ChatStreamRequest):
         source = _event_generator()
         try:
             async for payload in source:
-                if not abort.is_set():
+                if not transport_closed.is_set():
                     yield payload
         finally:
             with anyio.CancelScope(shield=True):
@@ -468,7 +1050,7 @@ async def chat_stream(body: ChatStreamRequest):
 
     return _AgentEventSourceResponse(
         _transport_event_generator(),
-        abort=abort,
+        abort=transport_closed,
         cleanup_complete=stream_cleanup_complete,
         media_type="text/event-stream",
         client_close_handler_callable=_on_client_disconnect,

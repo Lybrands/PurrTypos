@@ -16,4 +16,6 @@ class ScreenplayExecutionStateFactory:
             "activeDocumentId": context.active_document_id,
             "chatAgentMode": request.mode or "",
             "contextWindow": context.context_window_label,
+            "screenplayDraftSceneCount": context.draft_scene_count,
+            "screenplayDraftScope": context.draft_scope,
         })

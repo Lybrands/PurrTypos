@@ -13,7 +13,6 @@ from application.agent_composition import (
     set_agent_composition,
 )
 from application.request_mapping import (
-    agent_context_claims,
     agent_run_options,
     to_agent_request,
 )
@@ -57,7 +56,6 @@ def _body(**updates) -> ChatStreamRequest:
 
 
 def _context_budget(request) -> ContextBudget:
-    claim = agent_context_claims(request)[0]
     return ContextBudget(
         window_tokens=128_000,
         output_reserve_tokens=8_192,
@@ -65,7 +63,7 @@ def _context_budget(request) -> ContextBudget:
         runtime_reserve_tokens=4_096,
         minimum_message_tokens=128,
         provider_input_tokens=111_616,
-        context_allocations={claim.name: claim.desired_tokens},
+        context_allocations={SCREENPLAY_PROJECT_CONTEXT: 64_000},
     )
 
 
@@ -91,6 +89,9 @@ def test_screenplay_request_mapping_uses_opaque_domain_context():
             sourceBookId="book-1",
             activeDocumentId="doc-1",
             contextWindow="128k",
+            screenplayTaskIntent="stage_deliverable",
+            screenplayDraftSceneCount=3,
+            screenplayDraftScope="next_episode",
         ),
         {"model": "model"},
     )
@@ -102,6 +103,9 @@ def test_screenplay_request_mapping_uses_opaque_domain_context():
     assert context.project_id == "project-1"
     assert context.requested_source_book_id == "book-1"
     assert context.active_document_id == "doc-1"
+    assert context.task_intent == "stage_deliverable"
+    assert context.draft_scene_count == 3
+    assert context.draft_scope == "next_episode"
     assert request.context_window == 128_000
     assert request.tools_enabled is False
 
@@ -127,19 +131,9 @@ async def test_screenplay_context_uses_persisted_project_scope(screenplay_db):
     composition = AgentComposition(screenplay_db)
     registration = composition._profile_registry.for_request(request)
     provider = registration.adapter.context_provider
-    claim = agent_context_claims(request)[0]
-    bundle = await provider.build_context(
-        request,
-        ContextBudget(
-            window_tokens=128_000,
-            output_reserve_tokens=8_192,
-            safety_reserve_tokens=4_096,
-            runtime_reserve_tokens=4_096,
-            minimum_message_tokens=128,
-            provider_input_tokens=111_616,
-            context_allocations={claim.name: claim.desired_tokens},
-        ),
-    )
+    demands = await provider.describe_context_demands(request)
+    application_demands = await composition.resolve_context_claims(request)
+    bundle = await provider.build_context(request, _context_budget(request))
 
     blocks = {block.name: block for block in bundle.blocks}
     assert set(blocks) == {
@@ -152,6 +146,10 @@ async def test_screenplay_context_uses_persisted_project_scope(screenplay_db):
     assert "不得声称已经保存" in blocks[SCREENPLAY_POLICY_CONTEXT].content
     assert bundle.diagnostics["screenplayProjectId"] == project["id"]
     assert bundle.diagnostics["screenplayDocumentCount"] == 1
+    assert demands[0].desired_tokens == bundle.diagnostics[
+        "screenplayProjectDesiredTokens"
+    ]
+    assert application_demands == demands
 
 
 @pytest.mark.asyncio
@@ -189,21 +187,8 @@ async def test_screenplay_context_rejects_caller_source_override(screenplay_db):
     provider = composition._profile_registry.for_request(
         request
     ).adapter.context_provider
-    claim = agent_context_claims(request)[0]
-
     with pytest.raises(ValueError, match="source book scope"):
-        await provider.build_context(
-            request,
-            ContextBudget(
-                window_tokens=128_000,
-                output_reserve_tokens=8_192,
-                safety_reserve_tokens=4_096,
-                runtime_reserve_tokens=4_096,
-                minimum_message_tokens=128,
-                provider_input_tokens=111_616,
-                context_allocations={claim.name: claim.desired_tokens},
-            ),
-        )
+        await provider.build_context(request, _context_budget(request))
 
 
 @pytest.mark.asyncio
@@ -256,12 +241,71 @@ async def test_screenplay_context_declares_restricted_adaptation_scope(
     assert "只改编原作中的限定章节/卷" in (
         blocks[SCREENPLAY_POLICY_CONTEXT].content
     )
-    assert "proposeSourceAnalysis" in (
+    assert "先调用 getSourceCoveragePlan" not in (
         blocks[SCREENPLAY_POLICY_CONTEXT].content
     )
     assert "此阶段不得直接形成创作简报" in (
         blocks[SCREENPLAY_POLICY_CONTEXT].content
     )
+    facts = bundle.diagnostics["hostPlanningFacts"]
+    assert facts["screenplayStage"] == "orientation"
+    assert facts["planningMode"] == "dynamic-within-stage"
+    assert facts["deliverable"] == "A reviewable source-range analysis."
+    assert facts["sourceAvailable"] is True
+    assert "Do not create the adaptation creative brief" in " ".join(
+        facts["boundaries"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_restricted_scope_hides_book_global_tools_before_planning(
+    screenplay_db,
+):
+    await screenplay_db.execute(
+        "INSERT INTO books (id, title) VALUES ('restricted-book', '限定原作')"
+    )
+    await screenplay_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES ('restricted-writing', '写作目录', 'writing', 'restricted-book')"
+    )
+    await screenplay_db.execute(
+        "INSERT INTO outline_chapters (id, outline_id, title, sort) "
+        "VALUES ('restricted-chapter', 'restricted-writing', '第一章', 1)"
+    )
+    created = await screenplay_crud.create_project(
+        screenplay_db,
+        title="限定范围项目",
+        source_kind="book",
+        source_book_id="restricted-book",
+        screenplay_format="短片",
+        approach="截取改编",
+        premise="",
+        source_scope={"mode": "first_chapters", "count": 1},
+    )
+    request = to_agent_request(
+        _body(
+            screenplayProjectId=created["project"]["id"],
+            sourceBookId="restricted-book",
+            enableAgentTools=True,
+        ),
+        {"model": "model"},
+    )
+    composition = AgentComposition(screenplay_db)
+    try:
+        prepared = await composition.prepare_request(request)
+        context = ScreenplayDomainContext.from_core_context(
+            prepared.domain_context
+        )
+        core = composition.create_core_for_request(prepared, "key")
+        enabled = core._tool_catalog.enabled_names(prepared)
+    finally:
+        await composition.shutdown()
+
+    assert context.source_scope_restricted is True
+    assert "getSourceCoveragePlan" in enabled
+    assert "readSourcePassages" in enabled
+    assert "getSourceCharacters" not in enabled
+    assert "getSourceWorldSettings" not in enabled
 
 
 @pytest.mark.asyncio
@@ -342,6 +386,7 @@ async def test_composition_registry_selects_screenplay_adapter(screenplay_db):
     assert core._context_provider.__class__.__name__ == (
         "ScreenplayContextProvider"
     )
+    assert core._runtime_limits.max_model_rounds == 12
     assert core._tool_catalog.names == frozenset({
         "getScreenplayProject",
         "getScreenplayDocument",
@@ -352,17 +397,29 @@ async def test_composition_registry_selects_screenplay_adapter(screenplay_db):
         "readSourcePassages",
         "getSourceCharacters",
         "getSourceWorldSettings",
-        "proposeSourceAnalysis",
-        "proposeCreativeBrief",
-        "proposeBeatSheet",
-        "proposeEpisodeOutline",
-        "proposeSceneList",
+        "beginSourceAnalysisArtifact",
+        "appendSourceAnalysisBatch",
+        "finalizeSourceAnalysisProposal",
+        "beginCreativeBriefArtifact",
+        "appendCreativeBriefBatch",
+        "finalizeCreativeBriefProposal",
+        "beginScreenplayStructureArtifact",
+        "appendScreenplayStructureBatch",
+        "finalizeScreenplayStructureProposal",
+        "beginSceneListArtifact",
+        "appendSceneListBatch",
+        "finalizeSceneListProposal",
         "proposeSceneDraft",
-        "proposeScreenplayReview",
-        "proposeScreenplayRevision",
+        "beginScreenplayReviewArtifact",
+        "appendScreenplayReviewBatch",
+        "finalizeScreenplayReviewProposal",
+        "beginScreenplayRevisionArtifact",
+        "appendScreenplayRevisionBatch",
+        "appendScreenplayRevisionResolutionBatch",
+        "finalizeScreenplayRevisionProposal",
     })
     assert core._tool_catalog.enabled_names(request) == frozenset()
-    assert options.context_claims[0].name == SCREENPLAY_PROJECT_CONTEXT
+    assert options.context_claims == ()
     assert options.response_validators == ()
 
 

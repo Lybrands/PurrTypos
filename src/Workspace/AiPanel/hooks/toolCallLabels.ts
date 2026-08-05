@@ -1,6 +1,119 @@
 import type { Outline, EntityId } from "../../../types";
 import type { ToolCallLabelOutcome } from "./chat.types";
 
+/** 旧会话和旧后端事件的兼容文案；新事件优先使用 ToolSchema.display_names。 */
+export const KNOWN_TOOL_CALL_LABELS = {
+  addForeshadowing: "添加伏笔",
+  addSparkIdea: "添加设定",
+  archiveMemory: "归档长期记忆",
+  batchGetChapterContents: "查看多章内容",
+  beginSceneListArtifact: "开始整理场景表",
+  beginSourceAnalysisArtifact: "开始整理原作分析",
+  beginCreativeBriefArtifact: "开始整理创作简报",
+  beginScreenplayReviewArtifact: "开始整理剧本审阅",
+  beginScreenplayStructureArtifact: "开始整理剧本结构",
+  beginScreenplayRevisionArtifact: "开始整理剧本修订",
+  createCharacter: "创建人物",
+  createMemory: "创建长期记忆",
+  createSettingEntity: "创建世界设定",
+  createWritingChapter: "创建章节",
+  delegateToAgents: "委派子 Agent 协作",
+  deleteCharacter: "删除人物",
+  deleteSettingEntity: "删除世界设定条目",
+  deleteSparkIdea: "删除设定",
+  editChapterContent: "编辑章节内容",
+  editGlobalOutline: "编辑总纲",
+  editStoryBackground: "编辑小说背景",
+  finalizeSceneListProposal: "完成场景表提案",
+  finalizeSourceAnalysisProposal: "完成原作范围分析",
+  finalizeCreativeBriefProposal: "完成创作简报提案",
+  finalizeScreenplayReviewProposal: "完成剧本审阅报告",
+  finalizeScreenplayStructureProposal: "完成剧本结构提案",
+  finalizeScreenplayRevisionProposal: "完成剧本修订提案",
+  getBookCharacters: "查看人物信息",
+  getBookStyle: "查看风格基调",
+  getChapterContent: "查看章节内容",
+  getGlobalOutline: "查看总纲",
+  getScreenplayDocument: "读取剧本文档",
+  getScreenplayProject: "读取剧本项目",
+  getSettingEntities: "查看世界设定详情",
+  getSourceBookOverview: "读取原作概览",
+  getSourceCharacters: "读取原作人物",
+  getSourceCoveragePlan: "规划原作阅读范围",
+  getSourceWorldSettings: "读取原作世界设定",
+  getStoryBackground: "查看小说背景",
+  getStoryHealthDashboard: "查看故事健康度仪表盘",
+  getWritingStatsDashboard: "查看写作统计仪表盘",
+  linkMemories: "关联长期记忆",
+  listBookCharacters: "查看人物列表",
+  listOutlines: "查看大纲列表",
+  listSettingEntities: "查看世界设定列表",
+  listWritingChapters: "查看章节目录",
+  proposeBeatSheet: "形成故事节拍",
+  proposeCreativeBrief: "形成创作简报",
+  proposeEpisodeOutline: "形成分集结构",
+  proposeSceneDraft: "创作剧本正文",
+  proposeSceneList: "形成场景表",
+  proposeScreenplayReview: "审阅完整剧本",
+  proposeScreenplayRevision: "修订完整剧本",
+  proposeSourceAnalysis: "整理原作范围分析",
+  queryOutline: "查看大纲详情",
+  readSourceCoverageBatch: "阅读原作范围",
+  readSourcePassages: "精读关键原文",
+  resolveForeshadowing: "回收伏笔",
+  searchMemories: "检索长期记忆",
+  searchSourceMaterial: "检索原作素材",
+  searchSparkIdeas: "检索设定",
+  updateCharacter: "更新人物设定",
+  updateMemory: "更新长期记忆",
+  updateOutline: "更新大纲",
+  updateSettingEntity: "更新世界设定",
+  updateSparkIdea: "更新设定",
+  appendSceneListBatch: "追加场景表批次",
+  appendSourceAnalysisBatch: "追加原作分析条目",
+  appendCreativeBriefBatch: "追加创作简报条目",
+  appendScreenplayReviewBatch: "追加剧本审阅条目",
+  appendScreenplayStructureBatch: "追加剧本结构条目",
+  appendScreenplayRevisionBatch: "追加剧本修订场景",
+  appendScreenplayRevisionResolutionBatch: "追加审阅问题回写",
+  // 兼容旧会话中已经持久化的历史工具名。
+  listScreenplayDocuments: "查看项目文档",
+} as const satisfies Record<string, string>;
+
+export function resolveLocalizedToolDisplayName(
+  displayNames: Record<string, string> | undefined,
+  locale = typeof document === "undefined"
+    ? "zh-CN"
+    : document.documentElement.lang || "zh-CN",
+): string | undefined {
+  if (!displayNames) return undefined;
+  const entries = Object.entries(displayNames)
+    .map(([tag, value]) => [
+      tag.replace(/_/g, "-").toLowerCase(),
+      value.trim(),
+    ] as const)
+    .filter((entry) => entry[1]);
+  if (entries.length === 0) return undefined;
+  const normalized = String(locale || "zh-CN").replace(/_/g, "-").toLowerCase();
+  const language = normalized.split("-", 1)[0];
+  const candidates = [normalized, language, "zh-cn", "zh", "en-us", "en"];
+  for (const candidate of candidates) {
+    const exact = entries.find(([tag]) => tag === candidate);
+    if (exact) return exact[1];
+    const languageMatch = entries.find(
+      ([tag]) => tag.split("-", 1)[0] === candidate,
+    );
+    if (languageMatch) return languageMatch[1];
+  }
+  return entries[0][1];
+}
+
+function staticToolCallLabel(name: string, displayName?: string): string {
+  if (displayName) return displayName;
+  return KNOWN_TOOL_CALL_LABELS[name as keyof typeof KNOWN_TOOL_CALL_LABELS]
+    || "执行 Agent 工具操作";
+}
+
 function resolveChapterTitleInCatalog(
   chapterId: EntityId | undefined,
   writingChapters: { id: EntityId; title: string }[],
@@ -40,6 +153,7 @@ export function toolCallDisplayRow(
   args: Record<string, unknown>,
   writingChapters: { id: EntityId; title: string }[],
   availableOutlines: Outline[],
+  displayName?: string,
 ): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
@@ -215,10 +329,78 @@ export function toolCallDisplayRow(
         return { label: "检索设定", outcome: "ok" };
       case "addForeshadowing":
         return { label: "添加伏笔", outcome: "ok" };
+      case "getScreenplayProject":
+        return { label: "读取剧本项目", outcome: "ok" };
+      case "listScreenplayDocuments":
+        return { label: "查看项目文档", outcome: "ok" };
+      case "getScreenplayDocument":
+        return { label: "读取剧本文档", outcome: "ok" };
+      case "getSourceCoveragePlan":
+        return { label: "规划原作阅读范围", outcome: "ok" };
+      case "readSourceCoverageBatch":
+        return { label: "阅读原作范围", outcome: "ok" };
+      case "searchSourceMaterial":
+        return { label: "检索原作素材", outcome: "ok" };
+      case "readSourcePassages":
+        return { label: "精读关键原文", outcome: "ok" };
+      case "proposeSourceAnalysis":
+        return { label: "整理原作范围分析", outcome: "ok" };
+      case "beginSourceAnalysisArtifact":
+        return { label: "开始整理原作分析", outcome: "ok" };
+      case "appendSourceAnalysisBatch":
+        return { label: "追加原作分析条目", outcome: "ok" };
+      case "finalizeSourceAnalysisProposal":
+        return { label: "完成原作范围分析", outcome: "ok" };
+      case "beginCreativeBriefArtifact":
+        return { label: "开始整理创作简报", outcome: "ok" };
+      case "appendCreativeBriefBatch":
+        return { label: "追加创作简报条目", outcome: "ok" };
+      case "finalizeCreativeBriefProposal":
+        return { label: "完成创作简报提案", outcome: "ok" };
+      case "proposeCreativeBrief":
+        return { label: "形成创作简报", outcome: "ok" };
+      case "beginScreenplayStructureArtifact":
+        return { label: "开始整理剧本结构", outcome: "ok" };
+      case "appendScreenplayStructureBatch":
+        return { label: "追加剧本结构条目", outcome: "ok" };
+      case "finalizeScreenplayStructureProposal":
+        return { label: "完成剧本结构提案", outcome: "ok" };
+      case "proposeBeatSheet":
+        return { label: "形成故事节拍", outcome: "ok" };
+      case "proposeEpisodeOutline":
+        return { label: "形成分集结构", outcome: "ok" };
+      case "beginSceneListArtifact":
+        return { label: "开始整理场景表", outcome: "ok" };
+      case "appendSceneListBatch":
+        return { label: "追加场景表批次", outcome: "ok" };
+      case "finalizeSceneListProposal":
+        return { label: "完成场景表提案", outcome: "ok" };
+      case "proposeSceneList":
+        return { label: "形成场景表", outcome: "ok" };
+      case "proposeSceneDraft":
+        return { label: "创作剧本正文", outcome: "ok" };
+      case "proposeScreenplayReview":
+        return { label: "审阅完整剧本", outcome: "ok" };
+      case "beginScreenplayReviewArtifact":
+        return { label: "开始整理剧本审阅", outcome: "ok" };
+      case "appendScreenplayReviewBatch":
+        return { label: "追加剧本审阅条目", outcome: "ok" };
+      case "finalizeScreenplayReviewProposal":
+        return { label: "完成剧本审阅报告", outcome: "ok" };
+      case "beginScreenplayRevisionArtifact":
+        return { label: "开始整理剧本修订", outcome: "ok" };
+      case "appendScreenplayRevisionBatch":
+        return { label: "追加剧本修订场景", outcome: "ok" };
+      case "appendScreenplayRevisionResolutionBatch":
+        return { label: "追加审阅问题回写", outcome: "ok" };
+      case "finalizeScreenplayRevisionProposal":
+        return { label: "完成剧本修订提案", outcome: "ok" };
+      case "proposeScreenplayRevision":
+        return { label: "修订完整剧本", outcome: "ok" };
       default:
-        return { label: name, outcome: "ok" };
+        return { label: staticToolCallLabel(name, displayName), outcome: "ok" };
     }
   } catch {
-    return { label: name, outcome: "ok" };
+    return { label: staticToolCallLabel(name, displayName), outcome: "ok" };
   }
 }

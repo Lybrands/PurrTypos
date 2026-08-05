@@ -9,10 +9,11 @@ from agent_core.contracts import ApprovalStatus, ToolBatchOutcome
 
 _OUTCOME_PRECEDENCE = {
     ToolBatchOutcome.COMPLETED: 0,
-    ToolBatchOutcome.DECLINED: 1,
-    ToolBatchOutcome.REJECTED: 2,
-    ToolBatchOutcome.FAILED: 3,
-    ToolBatchOutcome.CANCELED: 4,
+    ToolBatchOutcome.PROGRESSED: 1,
+    ToolBatchOutcome.DECLINED: 2,
+    ToolBatchOutcome.REJECTED: 3,
+    ToolBatchOutcome.FAILED: 4,
+    ToolBatchOutcome.CANCELED: 5,
 }
 
 
@@ -20,6 +21,19 @@ def aggregate_outcomes(outcomes: Iterable[ToolBatchOutcome]) -> ToolBatchOutcome
     values = tuple(ToolBatchOutcome(item) for item in outcomes)
     if not values:
         return ToolBatchOutcome.COMPLETED
+    # Successful calls in one batch execute in order.  The final call owns the
+    # resulting step disposition: an earlier partial append may be followed by
+    # the batch that reaches the declared total.  Terminal policy outcomes
+    # still dominate the whole batch.
+    terminal = tuple(
+        item for item in values
+        if item not in {
+            ToolBatchOutcome.COMPLETED,
+            ToolBatchOutcome.PROGRESSED,
+        }
+    )
+    if not terminal:
+        return values[-1]
     return max(values, key=_OUTCOME_PRECEDENCE.__getitem__)
 
 

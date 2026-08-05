@@ -1,0 +1,13 @@
+.agent-user-message__content {
+  width: fit-content;
+  max-width: min(78%, 680px);
+  padding: 9px 13px;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  border: none;
+  border-radius: 15px 15px 4px 15px;
+  background: var(--accent-dim);
+  font-size: var(--font-size);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}

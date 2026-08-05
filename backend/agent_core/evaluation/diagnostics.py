@@ -21,6 +21,7 @@ _CORE_TERMINAL_OUTCOMES = {
     CoreEventType.RUN_CANCELED.value: "canceled",
 }
 _PLANNER_PASS_OUTCOMES = {
+    "host_plan",
     "model_plan",
     "skipped",
     "planned",

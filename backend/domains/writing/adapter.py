@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_core.contracts import RuntimeLimits
 from agent_core.ports import ContextProvider, ToolCatalog
+from agent_core.recovery import RecoveryPolicy
 from domains.agent_roles import AgentRoleRegistry
 from domains.writing.agent_roles import build_writing_agent_role_registry
 from domains.writing.execution_state import WritingExecutionStateFactory
@@ -20,6 +22,8 @@ class WritingDomainAdapter:
     tool_catalog: ToolCatalog
     agent_role_registry: AgentRoleRegistry
     context_provider: ContextProvider | None = None
+    runtime_limits: RuntimeLimits = RuntimeLimits()
+    recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
     @classmethod
     def build(

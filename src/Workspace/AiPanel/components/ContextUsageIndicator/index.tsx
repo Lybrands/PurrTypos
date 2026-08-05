@@ -1,5 +1,5 @@
 import React from "react";
-import { Tooltip } from "../../../../ui";
+import { PurrTooltip } from '@/purr-components';
 import type { AiModelConfig } from "../../../../types";
 import { contextWindowTokens } from "../../../../models/shared";
 import { getDefaultModelContextWindow } from "../../../../models/runtime";
@@ -43,7 +43,7 @@ export default function ContextUsageIndicator({
   );
 
   return (
-    <Tooltip title={tooltip} placement="top">
+    <PurrTooltip title={tooltip} placement="top">
       <span
         className="context-usage"
         aria-label={`最近一次模型实际输入 ${formattedUsage}`}
@@ -54,6 +54,6 @@ export default function ContextUsageIndicator({
         />
         <span className="context-usage__value">{formattedUsage}</span>
       </span>
-    </Tooltip>
+    </PurrTooltip>
   );
 }

@@ -10,6 +10,7 @@ class ChatStreamRequest(BaseModel):
     apiKey: str
     baseURL: Optional[str] = None
     apiProvider: str = "openai"
+    locale: str = Field(default="zh-CN", max_length=64)
     options: Optional[Dict[str, Any]] = None
     # Reserved only so unsupported caller-owned tool contracts can be rejected
     # explicitly by the application mapper instead of being silently ignored.
@@ -20,8 +21,7 @@ class ChatStreamRequest(BaseModel):
     bookId: Optional[str] = None
     chapterId: Optional[str] = None
     currentChapterTitle: Optional[str] = None
-    writingChapters: Optional[List[Any]] = None
-    availableOutlines: Optional[List[Any]] = None
+    # 章节与大纲目录由后端根据 bookId 加载，不接受渲染进程快照。
     associatedChapterIds: Optional[List[str]] = None
     associatedOutlineIds: Optional[List[str]] = None
     # 用户在 AiContextBar 勾选的设定/伏笔 id：后端前置 fetch 后注入 system，
@@ -45,6 +45,32 @@ class ChatStreamRequest(BaseModel):
             "completed",
         ]
     ] = None
+    screenplayTaskIntent: Literal[
+        "chat",
+        "stage_deliverable",
+    ] = "chat"
+    screenplayDraftSceneCount: int = Field(default=1, ge=1, le=100)
+    screenplayDraftScope: Literal[
+        "planner",
+        "next_scene",
+        "next_episode",
+        "next_3_episodes",
+        "next_5_episodes",
+        "all_remaining",
+        "count",
+    ] = "planner"
+
+    @field_validator("locale")
+    @classmethod
+    def normalize_locale(cls, value: str) -> str:
+        parts = [
+            part
+            for part in str(value or "").strip().replace("_", "-").split("-")
+            if part
+        ]
+        if not parts or any(not part.isalnum() for part in parts):
+            raise ValueError("locale must be a valid language tag")
+        return "-".join(parts)
 
     @field_validator("bookId")
     @classmethod
@@ -105,3 +131,29 @@ class CreateAgentDelegationRequest(BaseModel):
         if not normalized:
             raise ValueError("value must not be empty")
         return normalized
+
+
+class CaptureAiErrorReportRequest(BaseModel):
+    streamId: str
+    agentRunId: Optional[str] = None
+    sessionId: Optional[int] = None
+    conversationId: Optional[int] = None
+    bookId: Optional[str] = None
+    chapterId: Optional[str] = None
+    source: str = "ai_chat_stream"
+    errorCode: Optional[str] = None
+    errorMessage: str
+    model: Optional[str] = None
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("streamId", "errorMessage")
+    @classmethod
+    def require_error_report_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be empty")
+        return normalized
+
+
+class SubmitAiErrorReportRequest(BaseModel):
+    userNote: Optional[str] = Field(default=None, max_length=2000)

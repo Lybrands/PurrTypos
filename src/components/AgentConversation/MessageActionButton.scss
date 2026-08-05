@@ -1,0 +1,17 @@
+.agent-message-action-button.purr-button {
+  width: 24px;
+  min-width: 24px;
+  max-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  max-height: 24px;
+  padding: 0;
+  flex: 0 0 24px;
+  color: var(--text-muted);
+  border-radius: 6px;
+
+  &:hover:not(:disabled),
+  &.is-copied {
+    color: var(--accent);
+  }
+}

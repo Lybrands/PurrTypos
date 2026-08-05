@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any, AsyncIterator, Mapping, Sequence
 
@@ -23,6 +23,10 @@ from agent_core.context_budget import (
     estimate_agent_messages_tokens,
     estimate_tool_schema_tokens,
     trim_agent_messages_by_turn,
+)
+from agent_core.context_orchestration.ledger import (
+    ContextCompactionBudget,
+    ContextCompactionPhase,
 )
 from agent_core.contracts import (
     AgentMessage,
@@ -47,6 +51,7 @@ from agent_core.contracts import (
     ToolCallResult,
     ToolChoiceMode,
     ToolContextContract,
+    ToolPlanningDisposition,
     ToolSchema,
     TraceRecord,
 )
@@ -57,9 +62,22 @@ from agent_core.errors import (
 )
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.evidence import RunEvidenceStore
+from agent_core.model_call_parameters import describe_model_call
+from agent_core.model_protocol import classify_model_termination
 from agent_core.runtime_context import project_intermediate_tool_context
+from agent_core.recovery import (
+    RecoveryAction,
+    RecoveryCause,
+    RecoveryDecision,
+    RecoveryEffectState,
+    RecoveryLedger,
+    RecoveryPolicy,
+    RecoveryReason,
+    RecoveryRequest,
+)
 from agent_core.ports import (
     CancellationSignal,
+    ConversationCompactor,
     EventSink,
     ModelGateway,
     ResponseJudge,
@@ -87,12 +105,57 @@ _TEXTUAL_TOOL_CALL_RETRY_GUIDANCE = (
     "one concise plain-language response in the user's language. Do not call, "
     "retry, or imitate any tool."
 )
+_FAILED_TOOL_OUTPUT_RETRY_GUIDANCE = (
+    "The preceding recovery response imitated a tool call or dumped tool "
+    "arguments as plain text. It was withheld because plain text cannot "
+    "execute the failed tool. Give one concise plain-language summary in the "
+    "user's language. State that the tool did not complete and do not emit, "
+    "retry, or imitate a tool call or its JSON arguments."
+)
 _MISSING_REQUIRED_TOOL_CALL_RETRY_GUIDANCE = (
     "The preceding model round did not return the structured tool call required "
     "by the current approved plan step. That text was discarded and no tool was "
     "executed. Retry this step now by returning exactly one valid structured call "
     "to one of the tools currently exposed by the host. Do not describe, imitate, "
     "or wrap the call in ordinary text."
+)
+_MISSING_REQUIRED_TOOL_CALL_REPLAN_GUIDANCE = (
+    "The model still omitted the required structured tool call after one retry. "
+    "Treat the current tool step as failed and revise the remaining plan from "
+    "the evidence already collected. Do not claim that the omitted tool ran, "
+    "invent its result, or repeat an equivalent completed read step."
+)
+_UNAUTHORIZED_TOOL_REPLAN_GUIDANCE = (
+    "The current plan step could not be completed because the model repeatedly "
+    "selected a tool outside the host-authorized set. Replan this unexecuted "
+    "step without weakening tool authorization."
+)
+_TOOL_INPUT_RETRY_GUIDANCE = (
+    "The preceding tool call was rejected because its input did not satisfy "
+    "the tool contract. The tool did not complete and produced no successful "
+    "evidence. Correct the arguments from the structured error result and retry "
+    "the same currently exposed tool exactly once. Return a real structured "
+    "tool call, not a textual imitation, and do not invent a successful result."
+)
+_MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
+    "The preceding structured tool-call envelope was malformed and was rejected "
+    "before any tool handler ran. Retry the current step exactly once using the "
+    "provider's native structured tool-call protocol. Include one stable call id, "
+    "one currently exposed tool name, and one complete JSON object for arguments. "
+    "Do not emit XML-like tool markup or an argument dump as ordinary text."
+)
+_TRUNCATED_TOOL_CALL_RETRY_GUIDANCE = (
+    "The preceding model output reached its output limit while constructing a "
+    "tool call. Core discarded the entire partial call and no tool was executed. "
+    "Retry the current step once with a bounded structured payload. Return only "
+    "the fields required for the current tool, do not duplicate the same result "
+    "as explanatory prose, and use a host-provided batch or append capability if "
+    "one is exposed."
+)
+_TRUNCATED_MODEL_OUTPUT_RETRY_GUIDANCE = (
+    "The preceding model output reached its output limit and was discarded as "
+    "incomplete. Retry the current step once with a bounded complete response. "
+    "Do not repeat project state or other content that the host already supplied."
 )
 _EMPTY_RESPONSE_RETRY_GUIDANCE = (
     "Your preceding model round ended after internal reasoning without any "
@@ -101,11 +164,43 @@ _EMPTY_RESPONSE_RETRY_GUIDANCE = (
     "otherwise provide a complete visible answer in the user's language. Do not "
     "return reasoning alone."
 )
-_MAX_EMPTY_RESPONSE_RETRIES = 2
+_DEFERRED_ACTION_RETRY_GUIDANCE = (
+    "Your preceding response only announced work you intended to do later and "
+    "did not deliver the result requested by the user. That incomplete response "
+    "was withheld. Continue the task now: use an exposed tool through a valid "
+    "structured call if evidence is still required, otherwise provide the "
+    "complete answer in the user's language. Do not repeat a process "
+    "announcement or promise a later response."
+)
+_DEFERRED_PREFIX_HOLD_LIMIT = 240
+_RECOVERABLE_TOOL_INPUT_ERROR_CODES = frozenset({
+    "duplicate_tool_call_id",
+    "invalid_tool_arguments_json",
+    "invalid_tool_arguments_schema",
+    "invalid_tool_arguments_shape",
+    "invalid_tool_arguments_type",
+    "invalid_tool_arguments_value",
+    "invalid_tool_call_id",
+    "invalid_tool_name",
+    "too_many_tool_calls",
+    "tool_arguments_too_large",
+    # Compatibility for gateways that already normalize preflight failures.
+    # They must explicitly report NOT_STARTED before policy permits recovery.
+    "tool_input_invalid",
+})
 _DECLINED_FINAL_RESPONSE_ZH = "您已拒绝审批；操作未执行，相关数据仍保留。"
 _DECLINED_FINAL_RESPONSE_EN = (
     "You rejected the approval. The operation was not executed, and the "
     "related data remains unchanged."
+)
+_FAILED_TOOL_FINAL_RESPONSE_ZH = (
+    "工具步骤未能完成，本轮没有生成可应用的正式结果。已完成的前序结果仍会保留，"
+    "请重试；系统没有把未执行的工具文本或参数 JSON 当作成功结果。"
+)
+_FAILED_TOOL_FINAL_RESPONSE_EN = (
+    "The tool step did not complete, so this run produced no applicable formal "
+    "result. Earlier completed work remains available; please retry. Plain-text "
+    "tool markup or argument JSON was not treated as a successful result."
 )
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _TEXTUAL_TOOL_PROTOCOL_MARKER = re.compile(
@@ -116,9 +211,59 @@ _TEXTUAL_TOOL_PROTOCOL_MARKER = re.compile(
     r")",
     re.IGNORECASE,
 )
+_TOOL_ARGUMENT_DUMP_KEYS = frozenset({
+    "analysis",
+    "beats",
+    "brief",
+    "contentJson",
+    "contentText",
+    "episodes",
+    "executionUpdates",
+    "issueResolutions",
+    "scenes",
+    "title",
+})
 _TOP_LEVEL_NUMBERED_ITEM = re.compile(
     r"^(?P<number>[1-9][0-9]*)[.\u3001\uff0e)]\s+\S",
     re.MULTILINE,
+)
+_DEFERRED_RESPONSE_STARTERS = (
+    "好的，让我",
+    "好的,让我",
+    "好，让我",
+    "好,让我",
+    "让我",
+    "我先",
+    "我会先",
+    "我将先",
+    "接下来我",
+    "首先我",
+    "let me",
+    "i'll first",
+    "i will first",
+)
+_DEFERRED_ACTION_ZH = re.compile(
+    r"^(?:好的?[，,。.!！]?)?"
+    r"(?:让我|我(?:会|将)?(?:先|现在|马上|接下来)|接下来我|首先我)"
+    r"[^：:\n]{0,100}"
+    r"(?:查看|检查|读取|了解|分析|梳理|确认|搜索|查询|获取)"
+)
+_DEFERRED_DELIVERY_ZH = re.compile(
+    r"(?:然后|再|随后|之后|稍后|马上)"
+    r"[^：:\n]{0,100}"
+    r"(?:(?:给|为|向)(?:你|您)?[^：:\n]{0,12})?"
+    r"(?:提供|给出|提出|生成|制定|整理|反馈|回复|回答)"
+)
+_DEFERRED_ACTION_EN = re.compile(
+    r"^(?:okay[,!.]?\s*)?"
+    r"(?:let me|i(?:'ll| will)?\s+(?:first|now)|first[, ]+i(?:'ll| will))"
+    r"[^:\n]{0,140}"
+    r"(?:check|inspect|read|review|analy[sz]e|look up|search|retrieve)"
+    r"[^:\n]{0,140}"
+    r"(?:then|after that|afterwards|later)"
+    r"[^:\n]{0,100}"
+    r"(?:provide|give|prepare|create|draft|reply|answer)",
+    re.IGNORECASE,
 )
 
 
@@ -143,12 +288,16 @@ class AgentRuntime:
         model_gateway: ModelGateway,
         tool_execution_gateway: ToolExecutionGateway | None = None,
         observer: RuntimeObserver | None = None,
+        context_compressor: ConversationCompactor | None = None,
         limits: RuntimeLimits = RuntimeLimits(),
+        recovery_policy: RecoveryPolicy = RecoveryPolicy(),
     ):
         self._model_gateway = model_gateway
         self._tool_execution_gateway = tool_execution_gateway
         self._observer = observer
+        self._context_compressor = context_compressor
         self._limits = limits
+        self._recovery_policy = recovery_policy
 
     async def run(
         self,
@@ -195,6 +344,11 @@ class AgentRuntime:
             )
         context_contracts = dict(tool_context_contracts or {})
         configured_tools = tuple(tools) if request.tools_enabled else ()
+        tool_display_names = {
+            schema.name: dict(schema.display_names)
+            for schema in configured_tools
+            if schema.display_names
+        }
         used_model = request.model.model
         # A provider-level REQUIRED hint can never weaken the host guard.
         # ``require_tool_call=True`` also keeps that guard when the provider
@@ -203,18 +357,15 @@ class AgentRuntime:
             force_tool_choice or require_tool_call
         )
         provider_required_tool_choice_enabled = bool(force_tool_choice)
-        missing_required_call_retry_used = False
-        future_step_retry_used = False
+        recovery_ledger = RecoveryLedger(self._recovery_policy)
         declined_response_pending = False
-        textual_tool_call_retry_used = False
-        response_repair_phases_used: set[str] = set()
         response_repair_pending = False
-        empty_response_retry_count = 0
-        provider_interruption_retry_used = False
         pending_provider_attempt: _PendingProviderAttempt | None = None
         logical_round_number = 0
         dynamic_replan_pending = False
         last_tool_outcome = ToolBatchOutcome.COMPLETED
+        pending_recovery_error_code: str | None = None
+        failed_tool_recovery_error_code: str | None = None
         budget_contract_error = _context_budget_contract_error(
             request,
             context_budget,
@@ -240,9 +391,27 @@ class AgentRuntime:
             if context_budget is not None
             else None
         )
+        round_limit = self._limits.max_model_rounds
+        progress_rounds = 0
 
-        for round_index in range(self._limits.max_model_rounds):
+        def remaining_model_rounds(completed_rounds: int) -> int:
+            return max(0, round_limit - int(completed_rounds))
+
+        absolute_round_limit = (
+            self._limits.max_model_rounds
+            + self._limits.max_progress_rounds
+        )
+        for round_index in range(absolute_round_limit):
             round_number = round_index + 1
+            if round_index >= round_limit:
+                yield _runtime_result(
+                    run_id,
+                    RuntimeOutcome.FAILED,
+                    used_model,
+                    round_index,
+                    error_code="max_model_rounds",
+                )
+                return
             if _is_canceled(signal):
                 yield _runtime_result(
                     run_id,
@@ -263,8 +432,8 @@ class AgentRuntime:
                         revised_guidance = await planning_hook.replan_after_tool(
                             evidence_store.project_messages_for_planning(messages),
                             round_number=round_number,
-                            remaining_model_rounds=(
-                                self._limits.max_model_rounds - round_index
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_index
                             ),
                             outcome=last_tool_outcome,
                             signal=signal,
@@ -290,6 +459,7 @@ class AgentRuntime:
                         )
                         return
                     except Exception as error:
+                        primary_error_code = pending_recovery_error_code
                         await self._trace(
                             "planning",
                             "failed",
@@ -297,6 +467,8 @@ class AgentRuntime:
                                 "dynamic": True,
                                 "round": round_number,
                                 "errorType": _root_error_type(error),
+                                "primaryErrorCode": primary_error_code,
+                                "recoveryErrorCode": "dynamic_planning_failed",
                             },
                             duration_ms=_duration_ms(replanning_started),
                         )
@@ -305,10 +477,14 @@ class AgentRuntime:
                             RuntimeOutcome.FAILED,
                             used_model,
                             round_index,
-                            error_code="dynamic_planning_failed",
+                            error_code=(
+                                primary_error_code
+                                or "dynamic_planning_failed"
+                            ),
                         )
                         return
                     dynamic_replan_pending = False
+                    pending_recovery_error_code = None
                 initial_logical_round = logical_round_number == 0
                 active_token_budget = (
                     (
@@ -348,6 +524,7 @@ class AgentRuntime:
                 buffer_model_content = bool(
                     require_tool
                     or declined_response_pending
+                    or failed_tool_recovery_error_code is not None
                     or response_constraints.exact_top_level_item_count is not None
                     or validators
                     or judges
@@ -367,7 +544,57 @@ class AgentRuntime:
                 projected_tokens = estimate_agent_messages_tokens(
                     projection.messages
                 )
-                if active_token_budget is not None:
+                compression_outcome: str | None = None
+                compression_strategy: str | None = None
+                if (
+                    active_token_budget is not None
+                    and self._context_compressor is not None
+                ):
+                    runtime_request = replace(
+                        request,
+                        messages=tuple(projection.messages),
+                        metadata={
+                            **dict(request.metadata),
+                            "contextCompressionScope": "runtime",
+                            "runtimeLogicalRound": logical_round_number + 1,
+                        },
+                    )
+                    compressed = await await_with_cancellation(
+                        self._context_compressor.prepare(
+                            runtime_request,
+                            signal,
+                            budget=ContextCompactionBudget(
+                                phase=ContextCompactionPhase.MODEL_CALL,
+                                provider_input_tokens=active_token_budget,
+                                context_tokens=0,
+                                context_tokens_are_resolved=True,
+                                output_reserve_tokens=(
+                                    context_budget.output_reserve_tokens
+                                    if context_budget is not None
+                                    else 1
+                                ),
+                            ),
+                        ),
+                        signal,
+                    )
+                    round_context_messages = compressed.request.messages
+                    sent_tokens = estimate_agent_messages_tokens(
+                        round_context_messages
+                    )
+                    dropped_messages = max(
+                        0,
+                        len(projection.messages)
+                        - len(round_context_messages),
+                    )
+                    overflow_tokens = max(
+                        0,
+                        sent_tokens - active_token_budget,
+                    )
+                    compression_outcome = compressed.outcome
+                    compression_strategy = str(
+                        compressed.diagnostics.get("strategy") or ""
+                    )
+                elif active_token_budget is not None:
                     trimmed = trim_agent_messages_by_turn(
                         projection.messages,
                         active_token_budget,
@@ -436,6 +663,8 @@ class AgentRuntime:
                         ),
                         "projectionMode": projection.mode,
                         "projectionSavedTokens": projection.saved_tokens,
+                        "compressionOutcome": compression_outcome,
+                        "compressionStrategy": compression_strategy,
                         "droppedMessages": dropped_messages,
                         "overflowTokens": overflow_tokens,
                         "completeEvidenceTokens": evidence_store.token_estimate,
@@ -518,6 +747,27 @@ class AgentRuntime:
             accumulator = _ModelRoundAccumulator()
             received_chunk_count = 0
             emitted_delta_count = 0
+            direct_content_released = False
+            yield AgentEvent(
+                type=CoreEventType.MODEL_CALL_RECORDED,
+                run_id=run_id,
+                payload={
+                    "phase": "generation",
+                    "count": 1,
+                    "toolNames": [
+                        schema.name for schema in invocation.tools
+                    ],
+                    "toolChoice": invocation.tool_choice.value,
+                    "round": round_number,
+                    "logicalRound": provider_attempt.logical_round,
+                    "attempt": provider_attempt.attempt,
+                    "parameters": describe_model_call(
+                        self._model_gateway,
+                        round_messages,
+                        invocation,
+                    ),
+                },
+            )
             try:
                 stream = await await_with_cancellation(
                     self._model_gateway.stream(
@@ -576,9 +826,25 @@ class AgentRuntime:
                         error_code="request_canceled",
                     )
                     return
+                fallback_decision: RecoveryDecision | None = None
+                if invocation.tool_choice is ToolChoiceMode.REQUIRED:
+                    fallback_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=(
+                                RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED
+                            ),
+                            action=RecoveryAction.FALLBACK_PROVIDER_MODE,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                        ),
+                        round_number=round_number,
+                    )
                 can_fallback = bool(
-                    invocation.tool_choice is ToolChoiceMode.REQUIRED
-                    and round_index < self._limits.max_model_rounds - 1
+                    fallback_decision is not None
+                    and fallback_decision.allowed
                 )
                 if invocation.tool_choice is ToolChoiceMode.REQUIRED:
                     provider_required_tool_choice_enabled = False
@@ -595,6 +861,7 @@ class AgentRuntime:
                         "providerAttemptTerminal": True,
                         "batchExecuted": False,
                         "errorType": _root_error_type(error),
+                        "errorChainTypes": _error_chain_types(error),
                     },
                     duration_ms=_duration_ms(model_started),
                 )
@@ -666,12 +933,22 @@ class AgentRuntime:
                     if isinstance(error, ModelGatewayError)
                     else "model_gateway_error"
                 )
-                retry_scheduled = bool(
-                    _is_retryable_stream_interruption(error)
-                    and not provider_interruption_retry_used
-                    and not _is_canceled(signal)
-                    and round_index < self._limits.max_model_rounds - 1
-                )
+                retry_scheduled = False
+                if _is_retryable_stream_interruption(error):
+                    retry_scheduled = (
+                        await self._decide_recovery(
+                            recovery_ledger,
+                            RecoveryRequest(
+                                cause=RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
+                                action=RecoveryAction.RETRY_MODEL,
+                                remaining_model_rounds=remaining_model_rounds(
+                                    round_number
+                                ),
+                                cancellation_requested=_is_canceled(signal),
+                            ),
+                            round_number=round_number,
+                        )
+                    ).allowed
                 interrupted = error_code == "upstream_stream_interrupted"
                 await self._trace(
                     "stream" if interrupted else "model_round",
@@ -694,11 +971,11 @@ class AgentRuntime:
                         "providerAttemptTerminal": True,
                         "batchExecuted": False,
                         "errorType": _root_error_type(error),
+                        "errorChainTypes": _error_chain_types(error),
                     },
                     duration_ms=_duration_ms(model_started),
                 )
                 if retry_scheduled:
-                    provider_interruption_retry_used = True
                     pending_provider_attempt = _PendingProviderAttempt(
                         messages=round_messages,
                         invocation=invocation,
@@ -743,14 +1020,25 @@ class AgentRuntime:
                         and not require_tool
                         and not buffer_model_content
                     ):
-                        if self._observer is not None:
-                            await self._observer.on_model_delta()
-                        emitted_delta_count += 1
-                        yield AgentEvent(
-                            type=CoreEventType.MODEL_DELTA,
-                            run_id=run_id,
-                            payload={"delta": chunk.content_delta},
+                        should_hold = bool(
+                            not direct_content_released
+                            and _should_hold_potential_deferred_response(
+                                accumulator.content
+                            )
                         )
+                        if not should_hold:
+                            visible_delta = chunk.content_delta
+                            if not direct_content_released:
+                                visible_delta = accumulator.content
+                                direct_content_released = True
+                            if self._observer is not None:
+                                await self._observer.on_model_delta()
+                            emitted_delta_count += 1
+                            yield AgentEvent(
+                                type=CoreEventType.MODEL_DELTA,
+                                run_id=run_id,
+                                payload={"delta": visible_delta},
+                            )
                     if chunk.finish_reason is not None:
                         break
             except OperationCanceled:
@@ -798,14 +1086,26 @@ class AgentRuntime:
                     if isinstance(stream_error, ModelGatewayError)
                     else "model_stream_error"
                 )
-                retry_scheduled = bool(
-                    _is_retryable_stream_interruption(stream_error)
-                    and not provider_interruption_retry_used
-                    and emitted_delta_count == 0
-                    and accumulator.finish_reason is None
-                    and not _is_canceled(signal)
-                    and round_index < self._limits.max_model_rounds - 1
-                )
+                retry_scheduled = False
+                if _is_retryable_stream_interruption(stream_error):
+                    retry_scheduled = (
+                        await self._decide_recovery(
+                            recovery_ledger,
+                            RecoveryRequest(
+                                cause=RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
+                                action=RecoveryAction.RETRY_MODEL,
+                                remaining_model_rounds=remaining_model_rounds(
+                                    round_number
+                                ),
+                                retryable=(
+                                    accumulator.finish_reason is None
+                                ),
+                                cancellation_requested=_is_canceled(signal),
+                                visible_output_emitted=direct_content_released,
+                            ),
+                            round_number=round_number,
+                        )
+                    ).allowed
                 interrupted = error_code == "upstream_stream_interrupted"
                 await self._trace(
                     "stream" if interrupted else "model_round",
@@ -828,11 +1128,11 @@ class AgentRuntime:
                         "providerAttemptTerminal": True,
                         "batchExecuted": False,
                         "errorType": _root_error_type(stream_error),
+                        "errorChainTypes": _error_chain_types(stream_error),
                     },
                     duration_ms=_duration_ms(model_started),
                 )
                 if retry_scheduled:
-                    provider_interruption_retry_used = True
                     pending_provider_attempt = _PendingProviderAttempt(
                         messages=round_messages,
                         invocation=invocation,
@@ -921,16 +1221,119 @@ class AgentRuntime:
                 duration_ms=_duration_ms(model_started),
             )
 
+            # A provider-declared output limit is never a commit boundary.  It
+            # may arrive after ids, names, and syntactically valid-looking
+            # argument fragments, but the provider has explicitly declared the
+            # generation incomplete.  Classify this before malformed-call or
+            # tool-input handling so truncation remains the primary cause and
+            # no partial assistant/tool continuation can pollute the next round.
+            if finish_reason is None:  # Defensive; stream handling rejects this.
+                yield _runtime_result(
+                    run_id,
+                    RuntimeOutcome.FAILED,
+                    used_model,
+                    round_number,
+                    error_code="upstream_stream_interrupted",
+                )
+                return
+            termination = classify_model_termination(
+                finish_reason,
+                tool_call_count=accumulator.tool_call_count,
+            )
+            if termination.incomplete:
+                truncation_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.MODEL_OUTPUT_TRUNCATED,
+                        action=RecoveryAction.RETRY_MODEL,
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        retryable=termination.retryable,
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    ),
+                    round_number=round_number,
+                )
+                can_retry = truncation_decision.allowed
+                error_code = termination.error_code or "model_output_truncated"
+                await self._trace(
+                    "model_output",
+                    "truncated_retry" if can_retry else "truncated",
+                    details={
+                        "round": round_number,
+                        "finishReason": finish_reason.value,
+                        "errorCode": error_code,
+                        "retryScheduled": can_retry,
+                        "retryUsed": (
+                            truncation_decision.attempt > 1
+                            or truncation_decision.reason_code
+                            is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
+                        ),
+                        "batchExecuted": False,
+                        "toolCallCount": accumulator.tool_call_count,
+                        "toolNames": list(accumulator.tool_call_names),
+                        "toolArgumentCharacters": (
+                            accumulator.tool_argument_characters
+                        ),
+                        "contentCharacters": len(accumulator.content),
+                        "emittedDeltaCount": emitted_delta_count,
+                    },
+                )
+                if can_retry:
+                    messages.append(AgentMessage(
+                        role=MessageRole.DEVELOPER,
+                        content=(
+                            _TRUNCATED_TOOL_CALL_RETRY_GUIDANCE
+                            if accumulator.tool_call_count
+                            else _TRUNCATED_MODEL_OUTPUT_RETRY_GUIDANCE
+                        ),
+                    ))
+                    continue
+                yield _runtime_result(
+                    run_id,
+                    RuntimeOutcome.FAILED,
+                    used_model,
+                    round_number,
+                    error_code=error_code,
+                )
+                return
+
             if malformed_call_error is not None:
+                malformed_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.MALFORMED_TOOL_CALL_BATCH,
+                        action=RecoveryAction.RETRY_MODEL,
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    ),
+                    round_number=round_number,
+                    details={"protocolReason": malformed_call_error},
+                )
                 await self._trace(
                     "tool_authorization",
-                    "malformed_batch",
+                    (
+                        "malformed_batch_retry"
+                        if malformed_decision.allowed
+                        else "malformed_batch"
+                    ),
                     details={
                         "round": round_number,
                         "callCount": accumulator.tool_call_count,
                         "reason": malformed_call_error,
+                        "retryScheduled": malformed_decision.allowed,
                     },
                 )
+                if malformed_decision.allowed:
+                    messages.append(AgentMessage(
+                        role=MessageRole.DEVELOPER,
+                        content=_MALFORMED_TOOL_CALL_RETRY_GUIDANCE,
+                    ))
+                    continue
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
@@ -940,37 +1343,99 @@ class AgentRuntime:
                 )
                 return
 
-            tool_finish = finish_reason is ModelFinishReason.TOOL_CALLS or (
-                finish_reason in {ModelFinishReason.STOP, ModelFinishReason.LENGTH}
-                and bool(calls)
-            )
+            tool_finish = termination.authorizes_tool_calls
             if require_tool and not calls:
-                can_retry = (
-                    not missing_required_call_retry_used
-                    and round_index < self._limits.max_model_rounds - 2
+                retry_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.MISSING_REQUIRED_TOOL_CALL,
+                        action=RecoveryAction.RETRY_MODEL,
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        minimum_remaining_rounds=2,
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    ),
+                    round_number=round_number,
+                )
+                can_retry = retry_decision.allowed
+                replan_decision: RecoveryDecision | None = None
+                if not can_retry and planning_hook is not None:
+                    replan_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=(
+                                RecoveryCause.MISSING_REQUIRED_TOOL_CALL_REPLAN
+                            ),
+                            action=RecoveryAction.REPLAN,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
+                    )
+                can_replan = bool(
+                    replan_decision is not None and replan_decision.allowed
                 )
                 await self._trace(
                     "tool_round",
                     (
                         "missing_required_call_retry"
                         if can_retry
-                        else "missing_required_call"
+                        else (
+                            "missing_required_call_replan"
+                            if can_replan
+                            else "missing_required_call"
+                        )
                     ),
                     details={
                         "round": round_number,
-                        "retryUsed": missing_required_call_retry_used,
-                        "retryAttempt": 1 if can_retry else 0,
-                        "roundsRemaining": (
-                            self._limits.max_model_rounds - round_number
+                        "retryUsed": (
+                            retry_decision.attempt > 1
+                            or (
+                                not retry_decision.allowed
+                                and retry_decision.attempt > 0
+                            )
+                        ),
+                        "retryAttempt": (
+                            retry_decision.attempt if can_retry else 0
+                        ),
+                        "replanUsed": bool(
+                            replan_decision is not None
+                            and (
+                                replan_decision.attempt > 1
+                                or (
+                                    not replan_decision.allowed
+                                    and replan_decision.attempt > 0
+                                )
+                            )
+                        ),
+                        "replanScheduled": can_replan,
+                        "roundsRemaining": remaining_model_rounds(
+                            round_number
                         ),
                         "batchExecuted": False,
                     },
                 )
                 if can_retry:
-                    missing_required_call_retry_used = True
                     messages.append(AgentMessage(
                         role=MessageRole.DEVELOPER,
                         content=_MISSING_REQUIRED_TOOL_CALL_RETRY_GUIDANCE,
+                    ))
+                    continue
+                if can_replan:
+                    last_tool_outcome = ToolBatchOutcome.FAILED
+                    pending_recovery_error_code = "missing_required_tool_call"
+                    failed_tool_recovery_error_code = (
+                        "missing_required_tool_call"
+                    )
+                    dynamic_replan_pending = True
+                    messages.append(AgentMessage(
+                        role=MessageRole.DEVELOPER,
+                        content=_MISSING_REQUIRED_TOOL_CALL_REPLAN_GUIDANCE,
                     ))
                     continue
                 yield _runtime_result(
@@ -1044,10 +1509,20 @@ class AgentRuntime:
                     declined_response_pending
                     and _is_textual_tool_call(accumulator.content)
                 ):
-                    can_retry = (
-                        not textual_tool_call_retry_used
-                        and round_index < self._limits.max_model_rounds - 1
+                    textual_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=RecoveryCause.UNSTRUCTURED_TOOL_PROTOCOL,
+                            action=RecoveryAction.RETRY_MODEL,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
                     )
+                    can_retry = textual_decision.allowed
                     await self._trace(
                         "model_output",
                         (
@@ -1057,11 +1532,14 @@ class AgentRuntime:
                         ),
                         details={
                             "round": round_number,
-                            "retryUsed": textual_tool_call_retry_used,
+                            "retryUsed": (
+                                textual_decision.attempt > 1
+                                or textual_decision.reason_code
+                                is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
+                            ),
                         },
                     )
                     if can_retry:
-                        textual_tool_call_retry_used = True
                         messages.append(AgentMessage(
                             role=MessageRole.DEVELOPER,
                             content=_TEXTUAL_TOOL_CALL_RETRY_GUIDANCE,
@@ -1077,14 +1555,88 @@ class AgentRuntime:
                     return
 
                 if (
+                    failed_tool_recovery_error_code is not None
+                    and _is_unstructured_tool_output(accumulator.content)
+                ):
+                    textual_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=RecoveryCause.UNSTRUCTURED_TOOL_PROTOCOL,
+                            action=RecoveryAction.RETRY_MODEL,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
+                    )
+                    can_retry = textual_decision.allowed
+                    await self._trace(
+                        "model_output",
+                        (
+                            "unstructured_tool_output_retry"
+                            if can_retry
+                            else "unstructured_tool_output_replaced"
+                        ),
+                        details={
+                            "round": round_number,
+                            "retryUsed": (
+                                textual_decision.attempt > 1
+                                or textual_decision.reason_code
+                                is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
+                            ),
+                            "primaryErrorCode": (
+                                failed_tool_recovery_error_code
+                            ),
+                        },
+                    )
+                    if can_retry:
+                        messages.append(AgentMessage(
+                            role=MessageRole.DEVELOPER,
+                            content=_FAILED_TOOL_OUTPUT_RETRY_GUIDANCE,
+                        ))
+                        continue
+                    final_response = _failed_tool_final_response(
+                        request.messages
+                    )
+                    if self._observer is not None:
+                        await self._observer.on_model_delta()
+                    yield AgentEvent(
+                        type=CoreEventType.MODEL_DELTA,
+                        run_id=run_id,
+                        payload={"delta": final_response},
+                    )
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.COMPLETED,
+                        used_model,
+                        round_number,
+                        final_response=final_response,
+                    )
+                    return
+
+                if (
                     not declined_response_pending
                     and not accumulator.content.strip()
                 ):
-                    can_retry = bool(
-                        empty_response_retry_count
-                        < _MAX_EMPTY_RESPONSE_RETRIES
-                        and round_index < self._limits.max_model_rounds - 1
+                    empty_retry_count = recovery_ledger.attempts(
+                        RecoveryCause.EMPTY_MODEL_RESPONSE
                     )
+                    empty_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=RecoveryCause.EMPTY_MODEL_RESPONSE,
+                            action=RecoveryAction.RETRY_MODEL,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
+                    )
+                    can_retry = empty_decision.allowed
                     await self._trace(
                         "model_output",
                         (
@@ -1094,7 +1646,7 @@ class AgentRuntime:
                         ),
                         details={
                             "round": round_number,
-                            "retryCount": empty_response_retry_count,
+                            "retryCount": empty_retry_count,
                             "retryScheduled": can_retry,
                             "thinkingCharacters": len(
                                 accumulator.thinking or ""
@@ -1102,7 +1654,6 @@ class AgentRuntime:
                         },
                     )
                     if can_retry:
-                        empty_response_retry_count += 1
                         messages.extend((
                             AgentMessage(
                                 role=MessageRole.ASSISTANT,
@@ -1121,6 +1672,63 @@ class AgentRuntime:
                         used_model,
                         round_number,
                         error_code="empty_model_response",
+                    )
+                    return
+
+                if (
+                    not declined_response_pending
+                    and _is_deferred_action_only_response(accumulator.content)
+                ):
+                    deferred_retry_count = recovery_ledger.attempts(
+                        RecoveryCause.DEFERRED_MODEL_RESPONSE
+                    )
+                    deferred_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=RecoveryCause.DEFERRED_MODEL_RESPONSE,
+                            action=RecoveryAction.RETRY_MODEL,
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
+                    )
+                    can_retry = deferred_decision.allowed
+                    await self._trace(
+                        "model_output",
+                        (
+                            "deferred_action_retry"
+                            if can_retry
+                            else "deferred_action_rejected"
+                        ),
+                        details={
+                            "round": round_number,
+                            "retryCount": deferred_retry_count,
+                            "retryScheduled": can_retry,
+                            "responseCharacters": len(accumulator.content),
+                        },
+                    )
+                    if can_retry:
+                        messages.extend((
+                            AgentMessage(
+                                role=MessageRole.ASSISTANT,
+                                content=accumulator.content,
+                                thinking=accumulator.thinking or None,
+                            ),
+                            AgentMessage(
+                                role=MessageRole.DEVELOPER,
+                                content=_DEFERRED_ACTION_RETRY_GUIDANCE,
+                            ),
+                        ))
+                        continue
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.FAILED,
+                        used_model,
+                        round_number,
+                        error_code="incomplete_model_response",
                     )
                     return
 
@@ -1202,6 +1810,18 @@ class AgentRuntime:
                     if not violation_codes:
                         for judge_index, judge in enumerate(judges):
                             judge_started = perf_counter()
+                            yield AgentEvent(
+                                type=CoreEventType.MODEL_CALL_RECORDED,
+                                run_id=run_id,
+                                payload={
+                                    "phase": "response_judge",
+                                    "count": 1,
+                                    "toolNames": [],
+                                    "toolChoice": "none",
+                                    "round": round_number,
+                                    "judgeIndex": judge_index,
+                                },
+                            )
                             try:
                                 result = await await_with_cancellation(
                                     judge.judge(
@@ -1329,23 +1949,50 @@ class AgentRuntime:
                             )
                             else "deterministic"
                         )
+                        repair_cause = (
+                            RecoveryCause.RESPONSE_CONSTRAINT_SEMANTIC
+                            if repair_phase == "semantic"
+                            else RecoveryCause.RESPONSE_CONSTRAINT_DETERMINISTIC
+                        )
+                        repair_phases_used = tuple(
+                            phase
+                            for phase, cause in (
+                                (
+                                    "deterministic",
+                                    RecoveryCause.RESPONSE_CONSTRAINT_DETERMINISTIC,
+                                ),
+                                (
+                                    "semantic",
+                                    RecoveryCause.RESPONSE_CONSTRAINT_SEMANTIC,
+                                ),
+                            )
+                            if recovery_ledger.attempts(cause) > 0
+                        )
                         phase_retry_used = (
-                            repair_phase in response_repair_phases_used
+                            recovery_ledger.attempts(repair_cause) > 0
                         )
-                        can_retry = (
-                            not phase_retry_used
-                            and len(response_repair_phases_used) < 2
-                            and round_index < self._limits.max_model_rounds - 1
+                        repair_decision = await self._decide_recovery(
+                            recovery_ledger,
+                            RecoveryRequest(
+                                cause=repair_cause,
+                                action=RecoveryAction.RETRY_MODEL,
+                                remaining_model_rounds=remaining_model_rounds(
+                                    round_number
+                                ),
+                                retryable=len(repair_phases_used) < 2,
+                                cancellation_requested=_is_canceled(signal),
+                                visible_output_emitted=direct_content_released,
+                            ),
+                            round_number=round_number,
                         )
+                        can_retry = repair_decision.allowed
                         trace_details: dict[str, Any] = {
                             "round": round_number,
                             "violationCodes": violation_codes,
                             "retryUsed": phase_retry_used,
                             "repairPhase": repair_phase,
-                            "repairAttempts": len(response_repair_phases_used),
-                            "repairPhasesUsed": sorted(
-                                response_repair_phases_used
-                            ),
+                            "repairAttempts": len(repair_phases_used),
+                            "repairPhasesUsed": sorted(repair_phases_used),
                         }
                         if exact_item_count is not None:
                             trace_details.update({
@@ -1364,7 +2011,6 @@ class AgentRuntime:
                             details=trace_details,
                         )
                         if can_retry:
-                            response_repair_phases_used.add(repair_phase)
                             response_repair_pending = True
                             messages.extend((
                                 AgentMessage(
@@ -1402,6 +2048,14 @@ class AgentRuntime:
                         run_id=run_id,
                         payload={"delta": final_response},
                     )
+                elif not direct_content_released and final_response:
+                    if self._observer is not None:
+                        await self._observer.on_model_delta()
+                    yield AgentEvent(
+                        type=CoreEventType.MODEL_DELTA,
+                        run_id=run_id,
+                        payload={"delta": final_response},
+                    )
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.COMPLETED,
@@ -1422,13 +2076,27 @@ class AgentRuntime:
             )
 
             if future_batch:
-                can_retry = (
-                    not future_step_retry_used
-                    and len(allowed_names) == 1
-                    and round_index < self._limits.max_model_rounds - 2
+                future_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.FUTURE_TOOL_STEP,
+                        action=RecoveryAction.RETRY_MODEL,
+                        # A later plan step gets its own correction budget.
+                        # Repeating the same out-of-order jump while the same
+                        # current tool set is authorized still fails closed.
+                        scope=_tool_authorization_recovery_scope(allowed_names),
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        minimum_remaining_rounds=2,
+                        retryable=bool(allowed_names),
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    ),
+                    round_number=round_number,
                 )
+                can_retry = future_decision.allowed
                 if can_retry:
-                    future_step_retry_used = True
                     await self._trace(
                         "tool_authorization",
                         "future_step_retry",
@@ -1458,9 +2126,12 @@ class AgentRuntime:
                         "requestedTools": sorted(requested_names),
                         "currentTools": sorted(allowed_names),
                         "futureTools": sorted(future_names),
-                        "retryAlreadyUsed": future_step_retry_used,
+                        "retryAlreadyUsed": (
+                            future_decision.attempt > 0
+                            and not future_decision.allowed
+                        ),
                         "roundsAvailable": (
-                            round_index < self._limits.max_model_rounds - 2
+                            future_decision.remaining_model_rounds >= 2
                         ),
                     },
                 )
@@ -1474,6 +2145,103 @@ class AgentRuntime:
                 return
 
             if not current_authorized:
+                unauthorized_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.UNAUTHORIZED_TOOL,
+                        action=RecoveryAction.RETRY_MODEL,
+                        # One model correction is allowed for each distinct
+                        # host-authorized tool step. A correction consumed by
+                        # an earlier step must not make a later, still
+                        # side-effect-free step unrecoverable. Repeating an
+                        # invalid name against the same authorization set
+                        # remains fail-closed.
+                        scope=_tool_authorization_recovery_scope(allowed_names),
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        minimum_remaining_rounds=2,
+                        retryable=(require_tool and bool(allowed_names)),
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    ),
+                    round_number=round_number,
+                )
+                can_retry = unauthorized_decision.allowed
+                if can_retry:
+                    await self._trace(
+                        "tool_authorization",
+                        "unauthorized_tool_retry",
+                        details={
+                            "round": round_number,
+                            "requestedTools": sorted(requested_names),
+                            "currentTools": sorted(allowed_names),
+                            "futureTools": sorted(future_names),
+                            "callCount": len(calls),
+                            "batchExecuted": False,
+                            "executed": False,
+                        },
+                    )
+                    messages.extend(_unauthorized_tool_retry_messages(
+                        current_allowed=allowed_names,
+                    ))
+                    continue
+
+                # An unauthorized batch has zero side effects. If a focused
+                # correction still leaves the model stuck on a stale tool,
+                # give the dynamic planner one bounded chance to replace the
+                # failed step instead of terminating the whole run. The host
+                # authorization set remains authoritative throughout.
+                unauthorized_replan_decision: RecoveryDecision | None = None
+                if (
+                    planning_hook is not None
+                    and unauthorized_decision.reason_code
+                    is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
+                ):
+                    unauthorized_replan_decision = await self._decide_recovery(
+                        recovery_ledger,
+                        RecoveryRequest(
+                            cause=RecoveryCause.UNAUTHORIZED_TOOL_REPLAN,
+                            action=RecoveryAction.REPLAN,
+                            scope=_tool_authorization_recovery_scope(
+                                allowed_names
+                            ),
+                            remaining_model_rounds=remaining_model_rounds(
+                                round_number
+                            ),
+                            minimum_remaining_rounds=2,
+                            retryable=(require_tool and bool(allowed_names)),
+                            cancellation_requested=_is_canceled(signal),
+                            visible_output_emitted=direct_content_released,
+                        ),
+                        round_number=round_number,
+                    )
+                if (
+                    unauthorized_replan_decision is not None
+                    and unauthorized_replan_decision.allowed
+                ):
+                    await self._trace(
+                        "tool_authorization",
+                        "unauthorized_tool_replan",
+                        details={
+                            "round": round_number,
+                            "requestedTools": sorted(requested_names),
+                            "currentTools": sorted(allowed_names),
+                            "futureTools": sorted(future_names),
+                            "batchExecuted": False,
+                            "executed": False,
+                        },
+                    )
+                    last_tool_outcome = ToolBatchOutcome.FAILED
+                    pending_recovery_error_code = "tool_not_authorized"
+                    failed_tool_recovery_error_code = "tool_not_authorized"
+                    dynamic_replan_pending = True
+                    messages.append(AgentMessage(
+                        role=MessageRole.DEVELOPER,
+                        content=_UNAUTHORIZED_TOOL_REPLAN_GUIDANCE,
+                    ))
+                    continue
+
                 await self._trace(
                     "tool_authorization",
                     "rejected",
@@ -1482,6 +2250,10 @@ class AgentRuntime:
                         "requestedTools": sorted(requested_names),
                         "currentTools": sorted(allowed_names),
                         "futureTools": sorted(future_names),
+                        "retryAlreadyUsed": (
+                            unauthorized_decision.attempt > 0
+                            and not unauthorized_decision.allowed
+                        ),
                     },
                 )
                 yield _runtime_result(
@@ -1493,7 +2265,7 @@ class AgentRuntime:
                 )
                 return
 
-            if round_index >= self._limits.max_model_rounds - 1:
+            if round_index >= round_limit - 1:
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
@@ -1509,7 +2281,13 @@ class AgentRuntime:
                 type=CoreEventType.TOOL_CALLS_STARTED,
                 run_id=run_id,
                 payload={
-                    "calls": [_tool_call_payload(call) for call in calls],
+                    "calls": [
+                        _tool_call_payload(
+                            call,
+                            display_names=tool_display_names.get(call.name),
+                        )
+                        for call in calls
+                    ],
                     "in_progress": True,
                     "partial_content": (
                         ""
@@ -1634,6 +2412,26 @@ class AgentRuntime:
                 },
                 duration_ms=_duration_ms(tool_started),
             )
+            if (
+                outcome is ToolBatchOutcome.PROGRESSED
+                and progress_rounds < self._limits.max_progress_rounds
+            ):
+                previous_limit = round_limit
+                progress_rounds += 1
+                round_limit += 1
+                await self._trace(
+                    "runtime_round_budget",
+                    "progress_extended",
+                    details={
+                        "round": round_number,
+                        "previousRoundLimit": previous_limit,
+                        "roundLimit": round_limit,
+                        "progressRoundsUsed": progress_rounds,
+                        "maxProgressRounds": (
+                            self._limits.max_progress_rounds
+                        ),
+                    },
+                )
             if outcome is ToolBatchOutcome.CANCELED:
                 yield _runtime_result(
                     run_id,
@@ -1662,15 +2460,6 @@ class AgentRuntime:
                     error_code="invalid_tool_results",
                 )
                 return
-            if outcome is ToolBatchOutcome.FAILED and planning_hook is None:
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code=batch_result.error or "tool_execution_failed",
-                )
-                return
             if scope_tools_to_observer and self._observer is not None:
                 if outcome is not ToolBatchOutcome.FAILED:
                     await self._observer.on_tool_round_completed(outcome)
@@ -1691,12 +2480,129 @@ class AgentRuntime:
                 content="" if require_tool else accumulator.content,
                 thinking=accumulator.thinking,
             ))
-            if outcome in {
-                ToolBatchOutcome.COMPLETED,
-                ToolBatchOutcome.FAILED,
-            } and planning_hook is not None:
+            tool_input_decision: RecoveryDecision | None = None
+            if (
+                outcome is ToolBatchOutcome.FAILED
+                and _is_recoverable_tool_input_error(batch_result.error)
+            ):
+                tool_input_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.TOOL_INPUT_INVALID,
+                        action=RecoveryAction.RETRY_MODEL,
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        cancellation_requested=_is_canceled(signal),
+                        effect_state=RecoveryEffectState(
+                            batch_result.effect_state.value
+                        ),
+                        may_repeat_side_effect=True,
+                    ),
+                    round_number=round_number,
+                    details={"sourceErrorCode": batch_result.error},
+                )
+            retry_tool_input = bool(
+                tool_input_decision is not None
+                and tool_input_decision.allowed
+            )
+            if retry_tool_input:
+                messages.append(AgentMessage(
+                    role=MessageRole.DEVELOPER,
+                    content=_TOOL_INPUT_RETRY_GUIDANCE,
+                ))
+                await self._trace(
+                    "tool_recovery",
+                    "input_retry_scheduled",
+                    details={
+                        "round": round_number,
+                        "errorCode": batch_result.error,
+                        "retryAttempt": tool_input_decision.attempt,
+                        "requestedTools": sorted(requested_names),
+                        "effectState": batch_result.effect_state.value,
+                    },
+                )
+                continue
+            if outcome is ToolBatchOutcome.FAILED and planning_hook is None:
+                yield _runtime_result(
+                    run_id,
+                    RuntimeOutcome.FAILED,
+                    used_model,
+                    round_number,
+                    error_code=batch_result.error or "tool_execution_failed",
+                )
+                return
+            if outcome is ToolBatchOutcome.FAILED and planning_hook is not None:
+                failed_replan_decision = await self._decide_recovery(
+                    recovery_ledger,
+                    RecoveryRequest(
+                        cause=RecoveryCause.TOOL_EXECUTION_FAILED_REPLAN,
+                        action=RecoveryAction.REPLAN,
+                        scope=f"tool-round:{round_number}",
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        cancellation_requested=_is_canceled(signal),
+                        effect_state=RecoveryEffectState(
+                            batch_result.effect_state.value
+                        ),
+                        may_repeat_side_effect=True,
+                    ),
+                    round_number=round_number,
+                    details={"sourceErrorCode": batch_result.error},
+                )
+                if not failed_replan_decision.allowed:
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.FAILED,
+                        used_model,
+                        round_number,
+                        error_code=(
+                            batch_result.error or "tool_execution_failed"
+                        ),
+                    )
+                    return
+            successful_replan_requested = bool(
+                outcome in {
+                    ToolBatchOutcome.PROGRESSED,
+                    ToolBatchOutcome.COMPLETED,
+                }
+                and batch_result.replan_requested
+            )
+            if (
+                planning_hook is not None
+                and (
+                    outcome is ToolBatchOutcome.FAILED
+                    or successful_replan_requested
+                )
+            ):
                 last_tool_outcome = outcome
+                pending_recovery_error_code = (
+                    batch_result.error
+                    if outcome is ToolBatchOutcome.FAILED
+                    else None
+                )
+                failed_tool_recovery_error_code = (
+                    batch_result.error or "tool_execution_failed"
+                    if outcome is ToolBatchOutcome.FAILED
+                    else None
+                )
                 dynamic_replan_pending = True
+                if successful_replan_requested:
+                    await self._trace(
+                        "planning",
+                        "replan_requested",
+                        details={
+                            "round": round_number,
+                            "outcome": outcome.value,
+                            "requestedByTools": sorted({
+                                result.tool_name
+                                for result in batch_result.results
+                                if result.planning_disposition
+                                is ToolPlanningDisposition.REPLAN
+                            }),
+                        },
+                    )
             if outcome is ToolBatchOutcome.DECLINED:
                 declined_response_pending = True
                 messages.append(AgentMessage(
@@ -1708,7 +2614,7 @@ class AgentRuntime:
             run_id,
             RuntimeOutcome.FAILED,
             used_model,
-            self._limits.max_model_rounds,
+            round_limit,
             error_code="max_model_rounds",
         )
 
@@ -1735,6 +2641,28 @@ class AgentRuntime:
             return frozenset()
         all_names = frozenset(schema.name for schema in tools)
         return frozenset(self._observer.future_allowed_tool_names()) & all_names
+
+    async def _decide_recovery(
+        self,
+        ledger: RecoveryLedger,
+        request: RecoveryRequest,
+        *,
+        round_number: int,
+        details: Mapping[str, object] | None = None,
+    ) -> RecoveryDecision:
+        decision = ledger.decide(request)
+        trace_details = {
+            "round": int(round_number),
+            **decision.to_trace_details(),
+        }
+        if details:
+            trace_details.update(details)
+        await self._trace(
+            "recovery_decision",
+            "allowed" if decision.allowed else "denied",
+            details=trace_details,
+        )
+        return decision
 
     async def _trace(
         self,
@@ -1773,6 +2701,18 @@ class _ModelRoundAccumulator:
     @property
     def tool_call_count(self) -> int:
         return len(self._calls)
+
+    @property
+    def tool_argument_characters(self) -> int:
+        return sum(len(parts.arguments) for parts in self._calls.values())
+
+    @property
+    def tool_call_names(self) -> tuple[str, ...]:
+        return tuple(
+            parts.name
+            for _, parts in sorted(self._calls.items())
+            if parts.name
+        )
 
     def add(self, chunk) -> None:
         self.content += chunk.content_delta
@@ -2023,6 +2963,30 @@ def _is_textual_tool_call(content: str) -> bool:
     return bool(_TEXTUAL_TOOL_PROTOCOL_MARKER.search(str(content or "")))
 
 
+def _is_unstructured_tool_output(content: str) -> bool:
+    """Reject inert protocol markup and JSON-shaped tool arguments.
+
+    This guard is activated only while recovering from a failed required tool
+    step. Normal JSON answers remain valid outside that state.
+    """
+
+    normalized = str(content or "").strip()
+    if _is_textual_tool_call(normalized):
+        return True
+    if normalized.startswith("```") and normalized.endswith("```"):
+        lines = normalized.splitlines()
+        if len(lines) >= 3:
+            normalized = "\n".join(lines[1:-1]).strip()
+    try:
+        value = json.loads(normalized)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(value, dict)
+        and len(_TOOL_ARGUMENT_DUMP_KEYS.intersection(value)) >= 2
+    )
+
+
 def _top_level_numbered_items(content: str) -> tuple[int, ...]:
     """Return column-zero Arabic list markers from one buffered response."""
 
@@ -2061,6 +3025,39 @@ def _response_constraint_repair_guidance(
     )
 
 
+def _should_hold_potential_deferred_response(content: str) -> bool:
+    """Delay only suspicious opening phrases until completion can be checked."""
+
+    normalized = " ".join(str(content or "").strip().lower().split())
+    if not normalized or len(normalized) > _DEFERRED_PREFIX_HOLD_LIMIT:
+        return False
+    return any(
+        starter.startswith(normalized) or normalized.startswith(starter)
+        for starter in _DEFERRED_RESPONSE_STARTERS
+    )
+
+
+def _is_deferred_action_only_response(content: str) -> bool:
+    """Recognize short promises of future work with no delivered result."""
+
+    normalized = str(content or "").strip()
+    if (
+        not normalized
+        or len(normalized) > _DEFERRED_PREFIX_HOLD_LIMIT
+        or "\n" in normalized
+        or ":" in normalized
+        or "：" in normalized
+    ):
+        return False
+    return bool(
+        (
+            _DEFERRED_ACTION_ZH.search(normalized)
+            and _DEFERRED_DELIVERY_ZH.search(normalized)
+        )
+        or _DEFERRED_ACTION_EN.search(normalized)
+    )
+
+
 def _declined_final_response(messages: Sequence[AgentMessage]) -> str:
     user_text = next(
         (
@@ -2073,6 +3070,20 @@ def _declined_final_response(messages: Sequence[AgentMessage]) -> str:
     if _CJK_CHARACTER.search(user_text):
         return _DECLINED_FINAL_RESPONSE_ZH
     return _DECLINED_FINAL_RESPONSE_EN
+
+
+def _failed_tool_final_response(messages: Sequence[AgentMessage]) -> str:
+    user_text = next(
+        (
+            str(message.content or "")
+            for message in reversed(messages)
+            if message.role is MessageRole.USER
+        ),
+        "",
+    )
+    if _CJK_CHARACTER.search(user_text):
+        return _FAILED_TOOL_FINAL_RESPONSE_ZH
+    return _FAILED_TOOL_FINAL_RESPONSE_EN
 
 
 def _future_step_retry_messages(
@@ -2116,19 +3127,60 @@ def _future_step_retry_messages(
         role=MessageRole.DEVELOPER,
         content=(
             "The preceding tool-call batch had zero execution. In the next "
-            "round, the actual tool schema supplied with the invocation is the "
-            "only authorized tool. Do not call a tool whose schema is absent."
+            "round, the tool schemas supplied with the invocation are the "
+            "complete authorized set. Do not call a tool whose schema is "
+            "absent."
         ),
     ))
     return messages
 
 
-def _tool_call_payload(call: ToolCall) -> dict:
-    return {
+def _unauthorized_tool_retry_messages(
+    *,
+    current_allowed: frozenset[str],
+) -> list[AgentMessage]:
+    # Do not echo a rejected tool call into the next model round. Although a
+    # synthetic tool error keeps the transcript protocol-shaped, it also puts
+    # the stale method name immediately before the retry and can cause some
+    # providers to repeat it. Nothing executed, so a clean developer repair is
+    # both truthful and less likely to anchor the model on the invalid call.
+    authorized = ", ".join(sorted(current_allowed))
+    selection = (
+        f"this host-authorized tool: {authorized}"
+        if len(current_allowed) == 1
+        else f"one of these host-authorized tools: {authorized}"
+    )
+    return [AgentMessage(
+        role=MessageRole.DEVELOPER,
+        content=(
+            "The preceding tool-call batch was rejected with zero execution "
+            "and has been removed from the retry context. Retry the current "
+            f"plan step by calling {selection}. Do not call or imitate "
+            "any other tool, including tools remembered from prior rounds or "
+            "conversations."
+        ),
+    )]
+
+
+def _tool_authorization_recovery_scope(
+    current_allowed: frozenset[str],
+) -> str:
+    return "tool-authorization:" + ",".join(sorted(current_allowed))
+
+
+def _tool_call_payload(
+    call: ToolCall,
+    *,
+    display_names: Mapping[str, str] | None = None,
+) -> dict:
+    payload = {
         "id": call.id,
         "name": call.name,
         "arguments_json": call.arguments_json,
     }
+    if display_names:
+        payload["display_names"] = dict(display_names)
+    return payload
 
 
 def _tool_result_payload(result: ToolCallResult) -> dict:
@@ -2137,6 +3189,7 @@ def _tool_result_payload(result: ToolCallResult) -> dict:
         "tool_name": result.tool_name,
         "content": result.content,
         "from_cache": result.from_cache,
+        "planning_disposition": result.planning_disposition.value,
     }
     if result.approval_status is not None:
         payload["approval_status"] = result.approval_status.value
@@ -2206,6 +3259,25 @@ def _is_retryable_stream_interruption(error: Exception) -> bool:
     )
 
 
+def _is_recoverable_tool_input_error(error_code: str | None) -> bool:
+    return str(error_code or "").strip() in _RECOVERABLE_TOOL_INPUT_ERROR_CODES
+
+
 def _root_error_type(error: Exception) -> str:
     cause = error.__cause__
     return type(cause if isinstance(cause, Exception) else error).__name__
+
+
+def _error_chain_types(error: BaseException, *, limit: int = 8) -> list[str]:
+    types: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and len(types) < max(1, int(limit)):
+        identity = id(current)
+        if identity in seen:
+            break
+        seen.add(identity)
+        types.append(type(current).__name__)
+        cause = current.__cause__
+        current = cause if cause is not None else current.__context__
+    return types

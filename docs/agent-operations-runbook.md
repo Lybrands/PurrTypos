@@ -88,7 +88,15 @@ POST /api/ai/tool-approvals/{approval_id}
 GET /api/ai/agent-runs/{run_id}/diagnostics
 ```
 
-诊断包含 Run 终态、Trace 覆盖、工具治理和性能信息，不包含人工 Pilot 评分。
+诊断包含 Run 终态、Trace 覆盖、工具治理、受控恢复决策、性能信息以及 Artifact/Work Item 运维快照，不包含人工 Pilot 评分。`recovery.decisions` 会说明每次重试、兼容降级或重规划为何被允许/拒绝；`artifactMaintenance` 会区分有效、过期、失联和目标状态失效的 writer claim，并报告结构一致性。两者都只保存控制元数据，不包含工具 JSON、Artifact 正文或 claim token。
+
+调试面板的“安全维护 Artifact”调用：
+
+```text
+POST /api/ai/artifacts/maintenance
+```
+
+该入口没有保留期参数，只回收可以确定失效的 writer claim，不删除 Artifact、批次或 Work Item。终态内容清理仍只能通过宿主环境变量显式配置，不能由调试面板触发。
 
 确定性检查：
 

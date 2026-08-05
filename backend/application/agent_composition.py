@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Callable, Collection, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,21 +13,39 @@ from agent_core.contracts import (
     AgentRunRequest,
     ApprovalDecision,
     ApprovalStatus,
+    ContextBudgetClaim,
     ToolExecutionLimits,
     ToolExecutionMode,
 )
+from agent_core.context_budget import resolve_context_budget_claims
+from agent_core.context_orchestration.compaction import (
+    ContextCompressionCoordinator,
+)
+from agent_core.context_orchestration.contracts import ContextCompressionSettings
 from agent_core.engine import AgentCore
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.ports import (
     ApprovalGateway,
     CheckpointStore,
+    ContextCompressionHook,
+    ConversationCompactor,
     DelegationRepository,
     ExecutionLeaseStore,
     PostPlanningContextOptimizer,
     ToolRegistration,
 )
 from agent_core.tools import InMemoryToolCatalog
+from agent_core.work_items import WorkItemLifecycle
 from application.response_judging import ModelBackedResponseJudge
+from application.conversation_compaction import ConversationCompactionService
+from application.artifact_continuity import ArtifactContinuityCoordinator
+from application.screenplay_long_tasks import ScreenplayLongTaskDispatcher
+from application.screenplay_long_task_execution import (
+    ScreenplayLongTaskExecution,
+)
+from application.screenplay_long_task_conversation import (
+    ScreenplayLongTaskConversationHub,
+)
 from application.agent_profile_registry import (
     AgentProfileRegistration,
     AgentProfileRegistry,
@@ -36,9 +57,20 @@ from domains.writing.context import WritingContextProvider
 from domains.writing.context_source import RepositoryWritingContextSource
 from domains.writing.response import writing_atomic_continuity_judge_policy
 from domains.screenplay.adapter import ScreenplayDomainAdapter
-from domains.screenplay.contracts import SCREENPLAY_DOMAIN_NAMESPACE
-from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
+from domains.screenplay.contracts import (
+    SCREENPLAY_DOMAIN_NAMESPACE,
+    ScreenplayDomainContext,
+)
+from domains.screenplay.source_scope import is_restricted_source_scope
+from domains.screenplay.task_admission import ScreenplayTaskAdmissionEvaluator
+from domains.writing.contracts import (
+    WRITING_DOMAIN_NAMESPACE,
+    WritingDomainContext,
+)
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
+from infrastructure.models.model_conversation_summarizer import (
+    ModelBackedConversationSummarizer,
+)
 from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.run_execution_store import (
@@ -56,12 +88,25 @@ from infrastructure.persistence.sqlite_conversation_compaction_repository import
 from infrastructure.persistence.sqlite_tool_idempotency_gateway import (
     SqliteToolIdempotencyGateway,
 )
+from infrastructure.persistence.sqlite_artifact_claim_repository import (
+    SqliteArtifactClaimRepository,
+)
+from infrastructure.persistence.sqlite_artifact_continuity_query import (
+    SqliteArtifactContinuityQuery,
+)
+from infrastructure.persistence.sqlite_work_item_repository import (
+    SqliteWorkItemRepository,
+)
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
 from infrastructure.persistence import approval_store
 from infrastructure.persistence.sqlite_approval_gateway import SqliteApprovalGateway
 from infrastructure.persistence.writing import (
     SqliteAssociatedContextRepository,
     SqliteMemoryRecallRepository,
     SqliteStoryMemoryRecallRepository,
+    SqliteWritingCatalogRepository,
     SqliteWritingToolMemoryRepository,
 )
 from infrastructure.writing import (
@@ -74,6 +119,9 @@ from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 from domains.agent_roles import AgentRoleRegistry
 
 
+logger = logging.getLogger(__name__)
+
+
 class AgentComposition:
     """Own process-scoped adapters and create request-scoped model runtimes."""
 
@@ -81,6 +129,7 @@ class AgentComposition:
         self,
         db,
         *,
+        execution_db=None,
         skills_dir: Path | None = None,
         writing: WritingDomainAdapter | None = None,
         screenplay: ScreenplayDomainAdapter | None = None,
@@ -89,7 +138,11 @@ class AgentComposition:
         tool_execution_limits: ToolExecutionLimits | None = None,
     ):
         self._db = db
-        self._execution_lease_store = SqliteExecutionLeaseStore(db)
+        self._execution_db = execution_db or db
+        self._writing_catalog_repository = SqliteWritingCatalogRepository(db)
+        self._execution_lease_store = SqliteExecutionLeaseStore(
+            self._execution_db
+        )
         self._delegation_repository = SqliteDelegationRepository(db)
         self._checkpoint_store = SqliteCheckpointStore(db)
         self._conversation_compaction_repository = (
@@ -103,6 +156,18 @@ class AgentComposition:
             db,
             owner_id=self._repository.owner_id,
         )
+        self._artifact_claim_repository = SqliteArtifactClaimRepository(db)
+        self._work_item_repository = SqliteWorkItemRepository(db)
+        self._long_task_repository = SqliteLongTaskRepository(db)
+        self._screenplay_long_task_conversation_hub = (
+            ScreenplayLongTaskConversationHub()
+        )
+        self._artifact_continuity = ArtifactContinuityCoordinator(
+            query=SqliteArtifactContinuityQuery(db),
+            work_items=self._work_item_repository,
+            claims=self._artifact_claim_repository,
+        )
+        self._screenplay_task_admission = ScreenplayTaskAdmissionEvaluator(db)
         self._provider_capabilities = (
             provider_capabilities or ProviderCapabilityCache()
         )
@@ -135,6 +200,7 @@ class AgentComposition:
         self._screenplay = screenplay or ScreenplayDomainAdapter.build(
             db,
             tool_catalog=build_screenplay_tool_catalog(db),
+            artifact_continuity=self._artifact_continuity,
         )
         self._profile_registry = AgentProfileRegistry((
             AgentProfileRegistration(
@@ -153,11 +219,18 @@ class AgentComposition:
             approval_timeout_seconds=AGENT_APPROVAL_TIMEOUT_SECONDS,
         )
         self._approval_runs: dict[str, str] = {}
+        self._background_run_tasks: set[asyncio.Task[None]] = set()
+        self._active_long_task_parent_runs: dict[str, str] = {}
+        self._active_long_task_lock = asyncio.Lock()
         self._closed = False
 
     @property
     def writing(self) -> WritingDomainAdapter:
         return self._writing
+
+    @property
+    def database(self):
+        return self._db
 
     @property
     def skill_catalog(self) -> WritingSkillCatalog | None:
@@ -192,10 +265,98 @@ class AgentComposition:
         return self._checkpoint_store
 
     @property
+    def long_task_repository(self) -> SqliteLongTaskRepository:
+        return self._long_task_repository
+
+    @property
+    def screenplay_long_task_conversation_hub(
+        self,
+    ) -> ScreenplayLongTaskConversationHub:
+        return self._screenplay_long_task_conversation_hub
+
+    @property
     def conversation_compaction_repository(
         self,
     ) -> SqliteConversationCompactionRepository:
         return self._conversation_compaction_repository
+
+    async def prepare_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunRequest:
+        """Hydrate renderer-independent, authoritative domain catalogs."""
+
+        if request.domain_context.namespace == SCREENPLAY_DOMAIN_NAMESPACE:
+            context = ScreenplayDomainContext.from_core_context(
+                request.domain_context
+            )
+            project = await self._db.fetch_one(
+                "SELECT source_scope_json FROM screenplay_projects WHERE id = ?",
+                [context.project_id],
+            )
+            if project is None:
+                return request
+            hydrated = replace(
+                context,
+                source_scope_restricted=is_restricted_source_scope(project),
+            )
+            return replace(
+                request,
+                domain_context=hydrated.to_core_context(),
+            )
+        if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
+            return request
+        context = WritingDomainContext.from_core_context(
+            request.domain_context
+        )
+        book_id = str(context.book_id or "").strip()
+        if not book_id:
+            hydrated = replace(
+                context,
+                writing_chapters=(),
+                available_outlines=(),
+            )
+        else:
+            writing_chapters = (
+                await self._writing_catalog_repository.load_writing_chapters(
+                    book_id
+                )
+            )
+            available_outlines = (
+                await self._writing_catalog_repository.load_available_outlines(
+                    book_id
+                )
+            )
+            hydrated = replace(
+                context,
+                writing_chapters=writing_chapters,
+                available_outlines=available_outlines,
+            )
+        return replace(
+            request,
+            domain_context=hydrated.to_core_context(),
+        )
+
+    async def resolve_context_claims(
+        self,
+        request: AgentRunRequest,
+        *,
+        fallback: Sequence[ContextBudgetClaim] = (),
+        signal=None,
+    ) -> tuple[ContextBudgetClaim, ...]:
+        """Use Core's demand protocol with the request's domain provider."""
+
+        provider = self._profile_registry.for_request(
+            request
+        ).adapter.context_provider
+        if provider is None:
+            return tuple(fallback)
+        return await resolve_context_budget_claims(
+            provider,
+            request,
+            fallback,
+            signal,
+        )
 
     def create_core(
         self,
@@ -208,6 +369,12 @@ class AgentComposition:
         post_planning_context_optimizer: (
             PostPlanningContextOptimizer | None
         ) = None,
+        context_compression_hook: ContextCompressionHook | None = None,
+        context_compression_settings: ContextCompressionSettings = (
+            ContextCompressionSettings()
+        ),
+        conversation_compactor: ConversationCompactor | None = None,
+        long_task_executor=None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -233,6 +400,16 @@ class AgentComposition:
             raise RuntimeError(
                 f"{agent_profile} ContextProvider is not configured"
             )
+        resolved_compactor = conversation_compactor or (
+            ContextCompressionCoordinator(
+                context_compression_hook
+                or ConversationCompactionService(
+                    self._conversation_compaction_repository,
+                    ModelBackedConversationSummarizer(model_gateway),
+                ),
+                context_compression_settings,
+            )
+        )
         base_catalog = adapter.tool_catalog
         extras = tuple(extra_tool_registrations)
         tool_catalog = base_catalog
@@ -270,11 +447,28 @@ class AgentComposition:
             run_repository=self._repository,
             planning_policy=adapter.planning_policy,
             context_provider=context_provider,
+            conversation_compactor=resolved_compactor,
             execution_state_factory=adapter.execution_state_factory,
             tool_catalog=tool_catalog,
             post_planning_context_optimizer=post_planning_context_optimizer,
+            task_admission_evaluator=(
+                self._screenplay_task_admission
+                if agent_profile == "screenplay"
+                else None
+            ),
+            long_task_dispatcher=(
+                ScreenplayLongTaskDispatcher(
+                    work_items=WorkItemLifecycle(self._work_item_repository),
+                    long_tasks=self._long_task_repository,
+                    executor=long_task_executor,
+                )
+                if agent_profile == "screenplay"
+                else None
+            ),
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
+            runtime_limits=adapter.runtime_limits,
+            recovery_policy=adapter.recovery_policy,
             tool_execution_limits=self._tool_execution_limits,
         )
 
@@ -389,6 +583,7 @@ class AgentComposition:
         if not normalized:
             return
         await self._approval_gateway.cancel_pending(normalized)
+        await self._artifact_claim_repository.release_for_run(normalized)
         stale = [
             approval_id
             for approval_id, pending_run_id in self._approval_runs.items()
@@ -397,10 +592,128 @@ class AgentComposition:
         for approval_id in stale:
             self._approval_runs.pop(approval_id, None)
 
+    def track_background_run(self, task: asyncio.Task[None]) -> None:
+        """Keep a detached Run alive until completion or app shutdown."""
+
+        if self._closed:
+            task.cancel()
+            return
+        self._background_run_tasks.add(task)
+
+        def _discard(completed: asyncio.Task[None]) -> None:
+            self._background_run_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception:
+                logger.exception("Detached Agent Run failed")
+
+        task.add_done_callback(_discard)
+
+    async def execute_screenplay_long_task(
+        self,
+        task_id: str,
+        *,
+        parent_run_id: str,
+        observer,
+        body,
+        api_key: str,
+        provider_options: dict,
+        signal,
+    ):
+        """Execute durable units as children of one still-active root Run."""
+        normalized = str(task_id or "").strip()
+        normalized_parent = str(parent_run_id or "").strip()
+        async with self._active_long_task_lock:
+            active_parent = self._active_long_task_parent_runs.get(normalized)
+            if active_parent and active_parent != normalized_parent:
+                raise RuntimeError("screenplay_long_task_already_has_active_root")
+            self._active_long_task_parent_runs[normalized] = normalized_parent
+        try:
+            execution = ScreenplayLongTaskExecution(
+                composition=self,
+                repository=self._long_task_repository,
+                work_items=WorkItemLifecycle(self._work_item_repository),
+                body=body,
+                api_key=api_key,
+                provider_options=provider_options,
+                signal=signal,
+                observer=observer,
+                parent_run_id=normalized_parent,
+            )
+            return await execution.run(normalized)
+        finally:
+            async with self._active_long_task_lock:
+                if self._active_long_task_parent_runs.get(normalized) == normalized_parent:
+                    self._active_long_task_parent_runs.pop(normalized, None)
+
+    async def pause_screenplay_long_task(self, task_id: str):
+        """Checkpoint the task and stop the root/child execution tree."""
+
+        normalized = str(task_id or "").strip()
+        task = await self._long_task_repository.pause(normalized)
+        await self._request_long_task_execution_stop(normalized)
+        return task
+
+    async def cancel_screenplay_long_task(self, task_id: str):
+        """Cancel the durable task and its currently bound child Run."""
+
+        normalized = str(task_id or "").strip()
+        units = await self._long_task_repository.list_units(normalized)
+        active_run_ids = tuple(dict.fromkeys(
+            str(unit.run_id or "").strip()
+            for unit in units
+            if str(unit.status.value) in {"claimed", "running"}
+            and str(unit.run_id or "").strip()
+        ))
+        task = await self._long_task_repository.cancel(normalized)
+        await self._request_long_task_execution_stop(
+            normalized,
+            child_run_ids=active_run_ids,
+        )
+        return task
+
+    async def _request_long_task_execution_stop(
+        self,
+        task_id: str,
+        *,
+        child_run_ids: Sequence[str] = (),
+    ) -> None:
+        parent_run_id = self._active_long_task_parent_runs.get(task_id)
+        run_ids = tuple(dict.fromkeys((
+            *(str(item or "").strip() for item in child_run_ids),
+            str(parent_run_id or "").strip(),
+        )))
+        await asyncio.gather(*(
+            self._execution_lease_store.request_cancellation(run_id)
+            for run_id in run_ids
+            if run_id
+        ))
+
+    async def append_run_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict,
+    ) -> None:
+        await self._repository.append_event(
+            run_id,
+            AgentEvent(type=event_type, run_id=run_id, payload=payload),
+        )
+
     async def shutdown(self) -> None:
         """Fail closed and release all lifespan-owned live approval state."""
 
         self._closed = True
+        background_tasks = tuple(self._background_run_tasks)
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_run_tasks.clear()
+        self._active_long_task_parent_runs.clear()
         close = getattr(self._approval_gateway, "close", None)
         if close is not None:
             await close()

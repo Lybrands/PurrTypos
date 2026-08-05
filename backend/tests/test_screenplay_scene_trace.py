@@ -75,6 +75,43 @@ def test_series_scene_episode_number_must_match_mapping():
         )
 
 
+def test_series_scene_episode_number_is_derived_from_mapping_when_omitted():
+    normalized = normalize_scene_trace(
+        scenes=[_scene(structureUnitIds=["episode-2"])],
+        structure_kind="episode_outline",
+        structure_content={"episodes": [
+            {"id": "episode-2", "number": 2},
+        ]},
+    )
+
+    assert normalized[0]["episodeNumber"] == 2
+
+
+def test_series_scenes_cannot_return_to_an_earlier_episode():
+    with pytest.raises(ValueError, match="分集顺序"):
+        normalize_scene_trace(
+            scenes=[
+                _scene(
+                    id="scene-2",
+                    order=1,
+                    episodeNumber=2,
+                    structureUnitIds=["episode-2"],
+                ),
+                _scene(
+                    id="scene-1",
+                    order=2,
+                    episodeNumber=1,
+                    structureUnitIds=["episode-1"],
+                ),
+            ],
+            structure_kind="episode_outline",
+            structure_content={"episodes": [
+                {"id": "episode-1", "number": 1},
+                {"id": "episode-2", "number": 2},
+            ]},
+        )
+
+
 def test_legacy_structure_without_ids_requires_revision():
     with pytest.raises(ValueError, match="新版结构"):
         normalize_scene_trace(

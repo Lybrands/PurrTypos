@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Tooltip } from '../ui'
-import { CloseOutlined } from '../ui'
+import { PurrButton, PurrTooltip } from '@/purr-components'
+import { CloseIcon } from '@/purr-components'
 import './FloatingPanel.scss'
 
 /**
@@ -182,15 +182,15 @@ export default function FloatingPanel({
       <div className="floating-panel-header" onMouseDown={startDrag('move')}>
         <span className="floating-panel-title">{title}</span>
         <div className="floating-panel-actions" onMouseDown={(e) => e.stopPropagation()}>
-          <Tooltip title="关闭">
-            <Button
+          <PurrTooltip title="关闭">
+            <PurrButton
               type="text"
               size="small"
-              icon={<CloseOutlined style={{ fontSize: 14 }} />}
+              icon={<CloseIcon style={{ fontSize: 14 }} />}
               onClick={onClose}
               className="floating-panel-action"
             />
-          </Tooltip>
+          </PurrTooltip>
         </div>
       </div>
 

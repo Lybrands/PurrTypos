@@ -21,7 +21,11 @@ from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
 )
-from utils.async_stream import OwnedAsyncIterator, openai_chunk_is_terminal
+from utils.async_stream import (
+    OwnedAsyncIterator,
+    close_async_resource,
+    openai_chunk_is_terminal,
+)
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)
@@ -77,17 +81,20 @@ async def chat_no_stream(
         except (TypeError, ValueError):
             pass
 
-    res = await client.chat.completions.create(**params)
-    choice = res.choices[0] if res.choices else None
-    message = profile.normalize_openai_message(
-        choice.message.model_dump() if choice and choice.message else {}
-    )
-    usage = res.usage.model_dump() if getattr(res, "usage", None) else None
-    return {
-        "message": message,
-        "model": res.model or model,
-        "usage": usage,
-    }
+    try:
+        res = await client.chat.completions.create(**params)
+        choice = res.choices[0] if res.choices else None
+        message = profile.normalize_openai_message(
+            choice.message.model_dump() if choice and choice.message else {}
+        )
+        usage = res.usage.model_dump() if getattr(res, "usage", None) else None
+        return {
+            "message": message,
+            "model": res.model or model,
+            "usage": usage,
+        }
+    finally:
+        await close_async_resource(client)
 
 
 # ── Streaming chat ──────────────────────────────────────────────
@@ -147,13 +154,17 @@ async def chat_stream(
     params["stream_options"] = {"include_usage": True}
     usage_tail_expected = True
     try:
-        raw_stream = await client.chat.completions.create(**params)
-    except Exception as error:
-        if not _is_stream_usage_option_error(error):
-            raise
-        params.pop("stream_options", None)
-        usage_tail_expected = False
-        raw_stream = await client.chat.completions.create(**params)
+        try:
+            raw_stream = await client.chat.completions.create(**params)
+        except Exception as error:
+            if not _is_stream_usage_option_error(error):
+                raise
+            params.pop("stream_options", None)
+            usage_tail_expected = False
+            raw_stream = await client.chat.completions.create(**params)
+    except BaseException:
+        await close_async_resource(client)
+        raise
 
     async def _generate() -> AsyncIterator[dict]:
         async for chunk in raw_stream:
@@ -191,6 +202,7 @@ async def chat_stream(
         "stream": OwnedAsyncIterator(
             _generate(),
             raw_stream,
+            client,
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
@@ -233,16 +245,23 @@ async def generate_title(
 
     client = _create_client(api_key, base_url)
 
-    res = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
-            {"role": "user", "content": str(text or "").strip()},
-        ],
-        max_tokens=32,
-        extra_body=profile.build_openai_extra_body(False),
-        stream=False,
-    )
-    raw = (res.choices[0].message.content if res.choices and res.choices[0].message else "") or ""
-    logger.info("[ai-generate-title][openai] 模型返回原文: %s", raw)
-    return normalize_session_title(raw)
+    try:
+        res = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
+                {"role": "user", "content": str(text or "").strip()},
+            ],
+            max_tokens=32,
+            extra_body=profile.build_openai_extra_body(False),
+            stream=False,
+        )
+        raw = (
+            res.choices[0].message.content
+            if res.choices and res.choices[0].message
+            else ""
+        ) or ""
+        logger.info("[ai-generate-title][openai] 模型返回原文: %s", raw)
+        return normalize_session_title(raw)
+    finally:
+        await close_async_resource(client)

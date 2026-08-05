@@ -324,7 +324,6 @@ def build_writing_session_binding(
             f"当前写作章节：《{chapter_name}》。"
             "宿主已为当前会话绑定作品上下文并自动注入 bookId。"
             "getChapterContent/editChapterContent 操作当前章时省略 chapterId；"
-            "兼容精确别名“当前章节”/“当前章”/“本章”，宿主会将其绑定到当前章。"
             "若需操作**非当前**章节或大纲，只能先读取列表中的真实 id，再传"
             " **chapterId** / **chapterIds** / **outlineId(outlineIds)**。"
             "不支持 chapterTitle/chapterIndex/outlineTitle/outlineIndex。勿猜测数据库 id。"

@@ -1,6 +1,6 @@
 import { services } from '@/services'
 import React from "react";
-import { useToast } from "../../../ui";
+import { usePurrToast } from '@/purr-components';
 import type { AiSession, EntityId } from "../../../types";
 import type { ChatMessage } from "./chat.types";
 
@@ -29,7 +29,7 @@ export function useAiSessions({
   setConversations,
   setLoading,
 }: UseAiSessionsParams) {
-  const appMessage = useToast();
+  const appMessage = usePurrToast();
   const [sessions, setSessions] = React.useState<AiSession[]>([]);
   const [activeSessionId, setActiveSessionIdState] = React.useState<
     number | null

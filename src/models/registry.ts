@@ -1,4 +1,5 @@
 import type { AiBuiltinProviderId, AiModelConfig } from '../types'
+import { glm5_2Profile } from './profiles/glm5_2'
 import { kimiK3Profile } from './profiles/kimiK3'
 import { kimiK2_6Profile } from './profiles/kimiK2_6'
 import { minimaxM3Profile } from './profiles/minimaxM3'
@@ -7,6 +8,7 @@ import { hasSameModelFields } from './shared'
 import type { BuiltinModelProfile } from './types'
 
 export const AI_BUILTIN_MODEL_PROFILES: readonly BuiltinModelProfile[] = [
+  glm5_2Profile,
   kimiK3Profile,
   kimiK2_6Profile,
   minimaxM3Profile,
@@ -63,6 +65,7 @@ export function migrateKnownModelConfigs(configs: readonly AiModelConfig[]) {
       thinkingOnly: profile.preset.thinkingOnly,
       thinkingEnabled: profile.preset.thinkingEnabled,
       contextWindow: profile.preset.contextWindow,
+      outputTokenBudget: profile.preset.defaultOutputTokens,
       customizeTemperature: profile.preset.customizeTemperature,
       temperatureThinking: profile.preset.temperatureThinking,
       temperatureNonThinking: profile.preset.temperatureNonThinking,

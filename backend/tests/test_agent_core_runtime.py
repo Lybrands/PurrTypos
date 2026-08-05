@@ -37,13 +37,24 @@ from agent_core.contracts import (
     ToolCallDelta,
     ToolCallResult,
     ToolChoiceMode,
+    ToolEffectState,
+    ToolHandlerResult,
+    ToolPlanningDisposition,
+    ToolPolicy,
     ToolSchema,
     TraceRecord,
 )
 from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
 from agent_core.events import AgentEvent, CoreEventType
-from agent_core.ports import ModelGateway, RuntimeObserver, ToolExecutionGateway
+from agent_core.ports import (
+    ModelGateway,
+    RuntimeObserver,
+    ToolExecutionGateway,
+    ToolRegistration,
+)
 from agent_core.runtime import AgentRuntime
+from agent_core.tools import InMemoryToolCatalog
+from agent_core.tools.executor import CoreToolExecutor
 
 
 class ScriptedModelGateway:
@@ -158,6 +169,32 @@ class RecoveryPlanningHook:
         )
 
 
+class ProgressPlanningHook:
+    def __init__(self):
+        self.calls = []
+
+    async def replan_after_tool(
+        self,
+        messages,
+        *,
+        round_number,
+        remaining_model_rounds,
+        outcome,
+        signal=None,
+    ):
+        del signal
+        self.calls.append({
+            "messages": tuple(messages),
+            "round": round_number,
+            "remaining": remaining_model_rounds,
+            "outcome": outcome,
+        })
+        return AgentMessage(
+            role=MessageRole.DEVELOPER,
+            content="Continue from the latest bounded tool progress.",
+        )
+
+
 def _request(
     *,
     user_text: str = "work",
@@ -173,11 +210,16 @@ def _request(
     )
 
 
-def _schema(name: str) -> ToolSchema:
+def _schema(
+    name: str,
+    *,
+    display_names: dict[str, str] | None = None,
+) -> ToolSchema:
     return ToolSchema(
         name=name,
         description=f"Tool {name}",
         parameters={"type": "object", "properties": {}},
+        display_names=display_names or {},
     )
 
 
@@ -236,6 +278,10 @@ def _batch(
     content: str = '{"success":true}',
     error: str | None = None,
     approval_status: ApprovalStatus | None = None,
+    effect_state: ToolEffectState = ToolEffectState.NOT_STARTED,
+    planning_disposition: ToolPlanningDisposition = (
+        ToolPlanningDisposition.KEEP_PLAN
+    ),
 ) -> ToolBatchResult:
     return ToolBatchResult(
         results=(ToolCallResult(
@@ -244,9 +290,11 @@ def _batch(
             content=content,
             error=error,
             approval_status=approval_status,
+            planning_disposition=planning_disposition,
         ),),
         outcome=outcome,
         error=error,
+        effect_state=effect_state,
     )
 
 
@@ -276,6 +324,7 @@ async def test_runtime_streams_provider_neutral_deltas_and_completes_without_too
 
     assert isinstance(model, ModelGateway)
     assert [update.type for update in updates if isinstance(update, AgentEvent)] == [
+        CoreEventType.MODEL_CALL_RECORDED,
         CoreEventType.MODEL_THINKING_DELTA,
         CoreEventType.MODEL_DELTA,
     ]
@@ -346,6 +395,77 @@ async def test_runtime_rejects_repeated_reasoning_only_responses():
     assert _result(updates).outcome is RuntimeOutcome.FAILED
     assert _result(updates).error_code == "empty_model_response"
     assert len(model.invocations) == 3
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_deferred_action_only_response_before_completion():
+    deferred = (
+        "好的，让我先查看一下当前章节中场景部分的具体内容，"
+        "然后给你提供针对性的优化方案。"
+    )
+    answer = "可以从声场、光线和人物动线三个层次深化场景氛围。"
+    model = ScriptedModelGateway([
+        _answer(deferred),
+        _answer(answer),
+    ])
+    observer = RecordingObserver()
+
+    updates = await _collect(AgentRuntime(
+        model_gateway=model,
+        observer=observer,
+    ))
+
+    visible = [
+        update.payload["delta"]
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_DELTA
+    ]
+    assert visible == [answer]
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == answer
+    assert "only announced work" in model.message_rounds[1][-1].content
+    assert any(
+        trace.stage == "model_output"
+        and trace.outcome == "deferred_action_retry"
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_repeated_deferred_action_only_responses():
+    deferred = "让我先读取当前章节，然后为您提供完整的分析方案。"
+    model = ScriptedModelGateway([
+        _answer(deferred),
+        _answer(deferred),
+    ])
+
+    updates = await _collect(AgentRuntime(model_gateway=model))
+
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_DELTA
+        for update in updates
+    )
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "incomplete_model_response"
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_short_explanation_that_starts_with_let_me():
+    answer = "让我先说明结论：这是缓存失效导致的。"
+    model = ScriptedModelGateway([_answer(answer)])
+
+    updates = await _collect(AgentRuntime(model_gateway=model))
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == answer
+    assert [
+        update.payload["delta"]
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_DELTA
+    ] == [answer]
 
 
 @pytest.mark.asyncio
@@ -789,6 +909,486 @@ async def test_runtime_allows_dynamic_planner_to_recover_from_tool_failure():
 
 
 @pytest.mark.asyncio
+async def test_runtime_keeps_plan_for_successful_progress_and_completion():
+    model = ScriptedModelGateway([
+        _tool_call("call-partial", "appendBatch"),
+        _tool_call("call-complete", "appendBatch"),
+        _answer("finalized after all batches"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-partial",
+            "appendBatch",
+            outcome=ToolBatchOutcome.PROGRESSED,
+            content='{"remaining":68}',
+        ),
+        _batch(
+            "call-complete",
+            "appendBatch",
+            outcome=ToolBatchOutcome.COMPLETED,
+            content='{"remaining":0}',
+        ),
+    ])
+
+    class _ProgressObserver(RecordingObserver):
+        async def on_tool_round_completed(
+            self,
+            outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+        ) -> None:
+            self.completed_tool_rounds += 1
+            normalized = ToolBatchOutcome(outcome)
+            self.completed_tool_outcomes.append(normalized)
+            if normalized is not ToolBatchOutcome.PROGRESSED:
+                self.scope_index += 1
+
+    observer = _ProgressObserver([{"appendBatch"}, set()])
+    hook = ProgressPlanningHook()
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("appendBatch"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    assert [request.calls[0].name for request in tools.requests] == [
+        "appendBatch",
+        "appendBatch",
+    ]
+    assert observer.completed_tool_outcomes == [
+        ToolBatchOutcome.PROGRESSED,
+        ToolBatchOutcome.COMPLETED,
+    ]
+    assert hook.calls == []
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "finalized after all batches"
+
+
+@pytest.mark.asyncio
+async def test_runtime_replans_when_successful_tool_explicitly_changes_path():
+    model = ScriptedModelGateway([
+        _tool_call("call-branch", "readA"),
+        _answer("answered from the selected branch"),
+    ])
+    tools = ScriptedToolGateway([_batch(
+        "call-branch",
+        "readA",
+        planning_disposition=ToolPlanningDisposition.REPLAN,
+    )])
+    observer = RecordingObserver([{"readA"}, set()])
+    hook = ProgressPlanningHook()
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    assert len(hook.calls) == 1
+    assert hook.calls[0]["outcome"] is ToolBatchOutcome.COMPLETED
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert any(
+        trace.stage == "planning"
+        and trace.outcome == "replan_requested"
+        and trace.details["requestedByTools"] == ["readA"]
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_progress_unlocks_bounded_rounds_for_completion():
+    model = ScriptedModelGateway([
+        _tool_call("call-partial", "appendBatch"),
+        _tool_call("call-complete", "appendBatch"),
+        _answer("completed after bounded progress"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-partial",
+            "appendBatch",
+            outcome=ToolBatchOutcome.PROGRESSED,
+            content='{"remaining":1}',
+        ),
+        _batch(
+            "call-complete",
+            "appendBatch",
+            outcome=ToolBatchOutcome.COMPLETED,
+            content='{"remaining":0}',
+        ),
+    ])
+
+    class _ProgressObserver(RecordingObserver):
+        async def on_tool_round_completed(
+            self,
+            outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+        ) -> None:
+            normalized = ToolBatchOutcome(outcome)
+            self.completed_tool_rounds += 1
+            self.completed_tool_outcomes.append(normalized)
+            if normalized is not ToolBatchOutcome.PROGRESSED:
+                self.scope_index += 1
+
+    observer = _ProgressObserver([{"appendBatch"}, set()])
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+            limits=RuntimeLimits(
+                max_model_rounds=2,
+                max_progress_rounds=1,
+            ),
+        ),
+        tools=(_schema("appendBatch"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=ProgressPlanningHook(),
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).round_count == 3
+    assert _result(updates).final_response == (
+        "completed after bounded progress"
+    )
+    assert any(
+        trace.stage == "runtime_round_budget"
+        and trace.outcome == "progress_extended"
+        and trace.details["previousRoundLimit"] == 2
+        and trace.details["roundLimit"] == 3
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_progress_cannot_exceed_progress_round_cap():
+    model = ScriptedModelGateway([
+        _tool_call("call-partial", "appendBatch"),
+        _tool_call("call-not-executed", "appendBatch"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-partial",
+            "appendBatch",
+            outcome=ToolBatchOutcome.PROGRESSED,
+            content='{"remaining":1}',
+        ),
+    ])
+    class _ProgressObserver(RecordingObserver):
+        async def on_tool_round_completed(
+            self,
+            outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED,
+        ) -> None:
+            normalized = ToolBatchOutcome(outcome)
+            self.completed_tool_rounds += 1
+            self.completed_tool_outcomes.append(normalized)
+            if normalized is not ToolBatchOutcome.PROGRESSED:
+                self.scope_index += 1
+
+    observer = _ProgressObserver([{"appendBatch"}, set()])
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+            limits=RuntimeLimits(
+                max_model_rounds=2,
+                max_progress_rounds=0,
+            ),
+        ),
+        tools=(_schema("appendBatch"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=ProgressPlanningHook(),
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "max_model_rounds"
+    assert len(tools.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_recovery", [
+    (
+        "<tool_call>\n<function=proposeSourceAnalysis>\n"
+        "<parameter=title>原作范围分析</parameter>\n"
+        "<parameter=contentText>正文</parameter>\n"
+        "</function>\n</tool_call>"
+    ),
+    json.dumps({
+        "title": "原作范围分析",
+        "contentText": "正文",
+        "analysis": {"characters": []},
+    }, ensure_ascii=False),
+])
+async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
+    unsafe_recovery,
+):
+    model = ScriptedModelGateway([
+        _tool_call("call-proposal", "proposeSourceAnalysis"),
+        _answer(unsafe_recovery),
+    ])
+    tools = ScriptedToolGateway([_batch(
+        "call-proposal",
+        "proposeSourceAnalysis",
+        outcome=ToolBatchOutcome.FAILED,
+        content='{"success":false,"errorCode":"tool_execution_failed"}',
+        error="tool_execution_failed",
+    )])
+    observer = RecordingObserver([{"proposeSourceAnalysis"}, set()])
+    hook = RecoveryPlanningHook(observer)
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+            limits=RuntimeLimits(max_model_rounds=2),
+        ),
+        request=_request(user_text="分析原作并生成正式提案"),
+        tools=(_schema("proposeSourceAnalysis"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    result = _result(updates)
+    deltas = [
+        str(update.payload["delta"])
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_DELTA
+    ]
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.final_response == deltas[0]
+    assert "工具步骤未能完成" in result.final_response
+    assert "<tool_call>" not in "".join(deltas)
+    assert "contentText" not in "".join(deltas)
+    assert observer.model_delta_count == 1
+    assert any(
+        trace.stage == "model_output"
+        and trace.outcome == "unstructured_tool_output_replaced"
+        and trace.details["primaryErrorCode"] == "tool_execution_failed"
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_primary_tool_error_when_replanning_fails():
+    class FailingPlanningHook:
+        async def replan_after_tool(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("replanning adapter failed")
+
+    model = ScriptedModelGateway([
+        _tool_call("call-a", "readA"),
+        _tool_call("call-b", "readA"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-a",
+            "readA",
+            outcome=ToolBatchOutcome.FAILED,
+            content='{"success":false,"error":"invalid input"}',
+            error="tool_input_invalid",
+        ),
+        _batch(
+            "call-b",
+            "readA",
+            outcome=ToolBatchOutcome.FAILED,
+            content='{"success":false,"error":"still invalid"}',
+            error="tool_input_invalid",
+        ),
+    ])
+    observer = RecordingObserver([{"readA"}])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=FailingPlanningHook(),
+    )
+
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code == "tool_input_invalid"
+    planning_failure = next(
+        trace
+        for trace in observer.traces
+        if trace.stage == "planning" and trace.outcome == "failed"
+    )
+    assert planning_failure.details["primaryErrorCode"] == "tool_input_invalid"
+    assert planning_failure.details["recoveryErrorCode"] == (
+        "dynamic_planning_failed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_correctable_tool_input_without_replanning():
+    model = ScriptedModelGateway([
+        _tool_call("call-invalid", "readA"),
+        _tool_call("call-corrected", "readA"),
+        _answer("Recovered after correcting the tool input."),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-invalid",
+            "readA",
+            outcome=ToolBatchOutcome.FAILED,
+            content='{"success":false,"error":"analysis must be an object"}',
+            error="tool_input_invalid",
+        ),
+        _batch("call-corrected", "readA"),
+    ])
+    observer = RecordingObserver([{"readA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.final_response == "Recovered after correcting the tool input."
+    assert len(tools.requests) == 2
+    assert observer.completed_tool_rounds == 1
+    assert [
+        trace.outcome
+        for trace in observer.traces
+        if trace.stage == "tool_recovery"
+    ] == ["input_retry_scheduled"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_repairs_invalid_json_only_before_tool_handler_starts():
+    invalid = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="call-invalid-json",
+            type="function",
+            name="readA",
+            arguments_fragment='{"value":',
+        ),),
+        finish_reason=ModelFinishReason.TOOL_CALLS,
+    )]
+    valid = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="call-valid-json",
+            type="function",
+            name="readA",
+            arguments_fragment='{"value":"ok"}',
+        ),),
+        finish_reason=ModelFinishReason.TOOL_CALLS,
+    )]
+    model = ScriptedModelGateway([invalid, valid, _answer("done")])
+    handler_calls = []
+
+    async def handler(state, arguments, signal=None):
+        del state, signal
+        handler_calls.append(dict(arguments))
+        return ToolHandlerResult('{"success":true}')
+
+    registration = ToolRegistration(
+        schema=ToolSchema(
+            name="readA",
+            description="read",
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        ),
+        handler=handler,
+        policy=ToolPolicy(mode="read", title="read"),
+    )
+    observer = RecordingObserver([{"readA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=CoreToolExecutor(
+                InMemoryToolCatalog((registration,))
+            ),
+            observer=observer,
+        ),
+        tools=(registration.schema,),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "done"
+    assert handler_calls == [{"value": "ok"}]
+    decision = next(
+        trace
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details["cause"] == "tool_input_invalid"
+    )
+    assert decision.outcome == "allowed"
+    assert decision.details["sourceErrorCode"] == (
+        "invalid_tool_arguments_json"
+    )
+    assert decision.details["effectState"] == "not_started"
+
+
+@pytest.mark.asyncio
+async def test_runtime_denies_tool_input_recovery_when_effect_state_is_unknown():
+    model = ScriptedModelGateway([_tool_call("call-a", "readA")])
+    tools = ScriptedToolGateway([_batch(
+        "call-a",
+        "readA",
+        outcome=ToolBatchOutcome.FAILED,
+        error="tool_input_invalid",
+        effect_state=ToolEffectState.UNKNOWN,
+    )])
+    observer = RecordingObserver([{"readA"}])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert _result(updates).error_code == "tool_input_invalid"
+    assert len(model.invocations) == 1
+    decision = next(
+        trace
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details["cause"] == "tool_input_invalid"
+    )
+    assert decision.outcome == "denied"
+    assert decision.details["reasonCode"] == "side_effect_state_unknown"
+
+
+@pytest.mark.asyncio
 async def test_runtime_required_tool_choice_falls_back_once_but_stays_fail_closed():
     model = ScriptedModelGateway([
         UnsupportedModelFeatureError("unsupported"),
@@ -910,6 +1510,7 @@ async def test_runtime_stops_consuming_model_stream_after_terminal_chunk():
     assert not resumed_after_finish.is_set()
     assert stream_closed.is_set()
     assert [update.type for update in updates if isinstance(update, AgentEvent)] == [
+        CoreEventType.MODEL_CALL_RECORDED,
         CoreEventType.MODEL_THINKING_DELTA,
         CoreEventType.MODEL_DELTA,
     ]
@@ -1129,6 +1730,39 @@ async def test_runtime_never_retries_non_retryable_stream_error():
 
 
 @pytest.mark.asyncio
+async def test_runtime_trace_records_sanitized_model_error_chain_types():
+    class APIConnectionError(Exception):
+        pass
+
+    socket_error = OSError("private socket detail")
+    provider_error = APIConnectionError("private provider detail")
+    provider_error.__cause__ = socket_error
+    gateway_error = ModelGatewayError("public gateway error")
+    gateway_error.__cause__ = provider_error
+    observer = RecordingObserver()
+
+    updates = await _collect(AgentRuntime(
+        model_gateway=ScriptedModelGateway([gateway_error]),
+        observer=observer,
+    ))
+
+    trace = next(
+        item
+        for item in observer.traces
+        if item.stage == "model_round" and item.outcome == "exception"
+    )
+    assert trace.details["errorChainTypes"] == [
+        "ModelGatewayError",
+        "APIConnectionError",
+        "OSError",
+    ]
+    serialized = repr(trace.details)
+    assert "private socket detail" not in serialized
+    assert "private provider detail" not in serialized
+    assert _result(updates).error_code == "model_gateway_error"
+
+
+@pytest.mark.asyncio
 async def test_runtime_does_not_retry_interruption_without_an_outer_round_slot():
     model = ScriptedModelGateway([ModelGatewayError(
         "interrupted",
@@ -1309,6 +1943,51 @@ async def test_runtime_fails_when_required_model_does_not_call_a_tool():
 
 
 @pytest.mark.asyncio
+async def test_runtime_replans_after_required_tool_call_retry_is_omitted():
+    model = ScriptedModelGateway([
+        _answer("fake textual call"),
+        _answer("still not a structured call"),
+        _answer("Recovered from the evidence already collected."),
+    ])
+    observer = RecordingObserver([{"readA"}, set()])
+    hook = RecoveryPlanningHook(observer)
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.final_response == (
+        "Recovered from the evidence already collected."
+    )
+    assert len(hook.calls) == 1
+    assert hook.calls[0]["outcome"] is ToolBatchOutcome.FAILED
+    assert [
+        trace.outcome
+        for trace in observer.traces
+        if trace.stage == "tool_round"
+    ] == [
+        "missing_required_call_retry",
+        "missing_required_call_replan",
+    ]
+    assert model.invocations[-1].tools == ()
+    assert model.invocations[-1].tool_choice is ToolChoiceMode.NONE
+    assert any(
+        message.role is MessageRole.DEVELOPER
+        and "Treat the current tool step as failed" in message.content
+        for message in hook.calls[0]["messages"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_runtime_keeps_logical_required_guard_after_provider_fallback():
     missing_round = [ModelStreamChunk(
         thinking_delta="private reasoning",
@@ -1397,7 +2076,13 @@ async def test_runtime_streams_required_tool_round_thinking_to_work_log():
             tool_execution_gateway=tools,
             observer=observer,
         ),
-        tools=(_schema("readA"),),
+        tools=(_schema(
+            "readA",
+            display_names={
+                "zh-CN": "读取资料",
+                "en-US": "Read Material",
+            },
+        ),),
         scope_tools_to_observer=True,
         force_tool_choice=True,
         require_tool_call=True,
@@ -1417,6 +2102,11 @@ async def test_runtime_streams_required_tool_round_thinking_to_work_log():
         and update.type == CoreEventType.TOOL_CALLS_STARTED
     )
     assert started.payload["partial_thinking"] == ""
+    assert started.payload["calls"][0]["name"] == "readA"
+    assert started.payload["calls"][0]["display_names"] == {
+        "zh-CN": "读取资料",
+        "en-US": "Read Material",
+    }
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
 
 
@@ -1455,10 +2145,14 @@ async def test_runtime_repairs_one_missing_required_call_before_execution():
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_the_whole_unauthorized_batch_before_gateway_execution():
-    model = ScriptedModelGateway([_tool_call("call-b", "readB")])
-    tools = ScriptedToolGateway([])
-    observer = RecordingObserver([{"readA"}])
+async def test_runtime_repairs_one_unauthorized_batch_with_zero_execution():
+    model = ScriptedModelGateway([
+        _tool_call("call-b", "readB"),
+        _tool_call("call-a", "readA"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([_batch("call-a", "readA")])
+    observer = RecordingObserver([{"readA"}, set()])
     runtime = AgentRuntime(
         model_gateway=model,
         tool_execution_gateway=tools,
@@ -1472,12 +2166,120 @@ async def test_runtime_rejects_the_whole_unauthorized_batch_before_gateway_execu
         force_tool_choice=True,
     )
 
-    assert tools.requests == []
-    assert observer.started_tools == []
-    assert CoreEventType.TOOL_RESULTS not in [
-        update.type for update in updates if isinstance(update, AgentEvent)
+    assert [request.calls[0].name for request in tools.requests] == ["readA"]
+    assert observer.started_tools == [("readA",)]
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "done"
+    assert any(
+        trace.stage == "tool_authorization"
+        and trace.outcome == "unauthorized_tool_retry"
+        and trace.details["batchExecuted"] is False
+        for trace in observer.traces
+    )
+    retry_messages = model.message_rounds[1]
+    assert retry_messages[-1].role is MessageRole.DEVELOPER
+    assert "readA" in str(retry_messages[-1].content)
+    assert not any(
+        call.name == "readB"
+        for message in retry_messages
+        for call in message.tool_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_replans_after_repeated_unauthorized_tool_selection():
+    model = ScriptedModelGateway([
+        _tool_call("stale-1", "readLegacy"),
+        _tool_call("stale-2", "readLegacy"),
+        _tool_call("call-b", "readB"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([_batch("call-b", "readB")])
+    observer = RecordingObserver([
+        {"readA", "readAlternative"},
+        {"readB"},
+        set(),
+    ])
+    planning_hook = RecoveryPlanningHook(observer)
+    runtime = AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    )
+
+    updates = await _collect(
+        runtime,
+        tools=(
+            _schema("readA"),
+            _schema("readAlternative"),
+            _schema("readB"),
+        ),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=planning_hook,
+    )
+
+    assert [request.calls[0].name for request in tools.requests] == ["readB"]
+    assert planning_hook.calls[0]["outcome"] is ToolBatchOutcome.FAILED
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "done"
+    assert any(
+        trace.stage == "tool_authorization"
+        and trace.outcome == "unauthorized_tool_replan"
+        and trace.details["batchExecuted"] is False
+        for trace in observer.traces
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_repairs_one_unauthorized_batch_per_distinct_tool_step():
+    model = ScriptedModelGateway([
+        _tool_call("legacy-a", "readLegacyA"),
+        _tool_call("call-a", "readA"),
+        _tool_call("legacy-b", "readLegacyB"),
+        _tool_call("call-b", "readB"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch("call-a", "readA"),
+        _batch("call-b", "readB"),
+    ])
+    observer = RecordingObserver([{"readA"}, {"readB"}, set()])
+    runtime = AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    )
+
+    updates = await _collect(
+        runtime,
+        tools=(_schema("readA"), _schema("readB")),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert [request.calls[0].name for request in tools.requests] == [
+        "readA",
+        "readB",
     ]
-    assert _result(updates).error_code == "tool_not_authorized"
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    retry_traces = [
+        trace
+        for trace in observer.traces
+        if trace.stage == "tool_authorization"
+        and trace.outcome == "unauthorized_tool_retry"
+    ]
+    assert len(retry_traces) == 2
+    recovery_scopes = {
+        trace.details["scope"]
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details.get("cause") == "unauthorized_tool"
+    }
+    assert recovery_scopes == {
+        "tool-authorization:readA",
+        "tool-authorization:readB",
+    }
 
 
 @pytest.mark.asyncio
@@ -1560,7 +2362,70 @@ async def test_runtime_retries_one_current_and_future_batch_with_zero_execution(
         assert error["retryable"] is True
         assert error["currentAllowed"] == ["readA"]
     assert retry_tail[3].role.value == "developer"
-    assert "only authorized tool" in retry_tail[3].content
+    assert "schema is absent" in retry_tail[3].content
+
+
+@pytest.mark.asyncio
+async def test_runtime_repairs_one_future_step_jump_per_distinct_current_step():
+    model = ScriptedModelGateway([
+        _tool_call("early-b", "readB"),
+        _tool_call("call-a", "readA"),
+        _tool_call("early-c", "readC"),
+        _tool_call("call-b", "readB"),
+        _tool_call("call-c", "readC"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([
+        _batch("call-a", "readA"),
+        _batch("call-b", "readB"),
+        _batch("call-c", "readC"),
+    ])
+    observer = RecordingObserver([
+        {"readA"},
+        {"readB"},
+        {"readC"},
+        set(),
+    ])
+    runtime = AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    )
+
+    updates = await _collect(
+        runtime,
+        tools=(
+            _schema("readA"),
+            _schema("readB"),
+            _schema("readC"),
+        ),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert [request.calls[0].name for request in tools.requests] == [
+        "readA",
+        "readB",
+        "readC",
+    ]
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    retry_traces = [
+        trace
+        for trace in observer.traces
+        if trace.stage == "tool_authorization"
+        and trace.outcome == "future_step_retry"
+    ]
+    assert len(retry_traces) == 2
+    recovery_scopes = {
+        trace.details["scope"]
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details.get("cause") == "future_tool_step"
+    }
+    assert recovery_scopes == {
+        "tool-authorization:readA",
+        "tool-authorization:readB",
+    }
 
 
 @pytest.mark.asyncio
@@ -1570,7 +2435,11 @@ async def test_runtime_rejects_a_second_future_step_batch_without_advancing():
         _tool_call("early-2", "readB"),
     ])
     tools = ScriptedToolGateway([])
-    observer = RecordingObserver([{"readA"}, {"readB"}, set()])
+    observer = RecordingObserver([
+        {"readA", "readAlternative"},
+        {"readB"},
+        set(),
+    ])
     runtime = AgentRuntime(
         model_gateway=model,
         tool_execution_gateway=tools,
@@ -1579,7 +2448,11 @@ async def test_runtime_rejects_a_second_future_step_batch_without_advancing():
 
     updates = await _collect(
         runtime,
-        tools=(_schema("readA"), _schema("readB")),
+        tools=(
+            _schema("readA"),
+            _schema("readAlternative"),
+            _schema("readB"),
+        ),
         scope_tools_to_observer=True,
         force_tool_choice=True,
     )
@@ -1603,8 +2476,11 @@ async def test_runtime_rejects_a_second_future_step_batch_without_advancing():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("requested", ["unknown", "readA"])
-async def test_runtime_rejects_unknown_or_past_tools_without_retry(requested):
-    model = ScriptedModelGateway([_tool_call("bad", requested)])
+async def test_runtime_rejects_repeated_unknown_or_past_tools(requested):
+    model = ScriptedModelGateway([
+        _tool_call("bad-1", requested),
+        _tool_call("bad-2", requested),
+    ])
     tools = ScriptedToolGateway([])
     observer = RecordingObserver([{"readA"}, {"readB"}, set()])
     if requested == "readA":
@@ -1622,11 +2498,14 @@ async def test_runtime_rejects_unknown_or_past_tools_without_retry(requested):
         force_tool_choice=True,
     )
 
-    assert len(model.invocations) == 1
+    assert len(model.invocations) == 2
     assert tools.requests == []
     assert observer.started_tools == []
     assert observer.completed_tool_rounds == 0
     assert _result(updates).error_code == "tool_not_authorized"
+    assert [trace.outcome for trace in observer.traces].count(
+        "unauthorized_tool_retry"
+    ) == 1
     assert not any(trace.outcome == "future_step_retry" for trace in observer.traces)
 
 
@@ -1657,6 +2536,7 @@ async def test_runtime_rejects_partial_raw_tool_batch_before_executing_valid_cal
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
+        limits=RuntimeLimits(max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -1681,6 +2561,48 @@ async def test_runtime_rejects_partial_raw_tool_batch_before_executing_valid_cal
         and update.type == CoreEventType.TOOL_CALLS_STARTED
         for update in updates
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_repairs_malformed_tool_call_envelope_once_before_execution():
+    malformed = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            type="function",
+            name="readA",
+            arguments_fragment="{}",
+        ),),
+        finish_reason=ModelFinishReason.TOOL_CALLS,
+    )]
+    model = ScriptedModelGateway([
+        malformed,
+        _tool_call("call-valid", "readA"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([_batch("call-valid", "readA")])
+    observer = RecordingObserver([{"readA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert len(tools.requests) == 1
+    decision = next(
+        trace
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details["cause"] == "malformed_tool_call_batch"
+    )
+    assert decision.outcome == "allowed"
+    assert decision.details["protocolReason"] == "missing_tool_call_id"
 
 
 @pytest.mark.asyncio
@@ -1736,6 +2658,7 @@ async def test_runtime_rejects_conflicting_or_duplicate_call_ids(malformed_round
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
+        limits=RuntimeLimits(max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -1749,6 +2672,185 @@ async def test_runtime_rejects_conflicting_or_duplicate_call_ids(malformed_round
     assert observer.started_tools == []
     assert observer.completed_tool_rounds == 0
     assert _result(updates).error_code == "malformed_tool_call_batch"
+
+
+@pytest.mark.asyncio
+async def test_runtime_discards_truncated_tool_call_and_retries_without_execution():
+    truncated = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="partial-call",
+            type="function",
+            name="readA",
+            arguments_fragment='{"query":"unfinished',
+        ),),
+        finish_reason=ModelFinishReason.LENGTH,
+    )]
+    model = ScriptedModelGateway([
+        truncated,
+        _tool_call("complete-call", "readA"),
+        _answer("done"),
+    ])
+    tools = ScriptedToolGateway([_batch("complete-call", "readA")])
+    observer = RecordingObserver([{"readA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == "done"
+    assert [request.calls[0].id for request in tools.requests] == [
+        "complete-call"
+    ]
+    retry_messages = model.message_rounds[1]
+    assert retry_messages[-1].role is MessageRole.DEVELOPER
+    assert "discarded the entire partial call" in retry_messages[-1].content
+    assert not any(
+        message.role in {MessageRole.ASSISTANT, MessageRole.TOOL}
+        and (
+            any(call.id == "partial-call" for call in message.tool_calls)
+            or message.tool_call_id == "partial-call"
+        )
+        for message in retry_messages
+    )
+    trace = next(
+        item
+        for item in observer.traces
+        if item.stage == "model_output"
+        and item.outcome == "truncated_retry"
+    )
+    assert trace.details["errorCode"] == "tool_call_truncated"
+    assert trace.details["batchExecuted"] is False
+    assert trace.details["toolArgumentCharacters"] == len(
+        '{"query":"unfinished'
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_never_executes_complete_looking_call_finished_by_length():
+    length_finished = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="unsafe-call",
+            type="function",
+            name="readA",
+            arguments_fragment="{}",
+        ),),
+        finish_reason=ModelFinishReason.LENGTH,
+    )]
+    tools = ScriptedToolGateway([])
+    observer = RecordingObserver([{"readA"}])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=ScriptedModelGateway([length_finished]),
+            tool_execution_gateway=tools,
+            observer=observer,
+            limits=RuntimeLimits(max_model_rounds=1),
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert tools.requests == []
+    assert observer.started_tools == []
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "tool_call_truncated"
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type in {
+            CoreEventType.TOOL_CALLS_STARTED,
+            CoreEventType.TOOL_RESULTS,
+            CoreEventType.TOOL_ROUND_COMPLETED,
+        }
+        for update in updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_truncation_keeps_primary_error_and_skips_replanning():
+    truncated = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="partial-call",
+            type="function",
+            name="readA",
+            arguments_fragment="{",
+        ),),
+        finish_reason=ModelFinishReason.LENGTH,
+    )]
+    model = ScriptedModelGateway([truncated, truncated])
+    tools = ScriptedToolGateway([])
+    observer = RecordingObserver([{"readA"}])
+    hook = RecoveryPlanningHook(observer)
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        planning_hook=hook,
+    )
+
+    assert tools.requests == []
+    assert hook.calls == []
+    assert _result(updates).error_code == "tool_call_truncated"
+    truncation_traces = [
+        item
+        for item in observer.traces
+        if item.stage == "model_output"
+        and item.outcome in {"truncated_retry", "truncated"}
+    ]
+    assert [item.outcome for item in truncation_traces] == [
+        "truncated_retry",
+        "truncated",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_error"),
+    [
+        (ModelFinishReason.FILTERED, "model_output_filtered"),
+        (ModelFinishReason.OTHER, "unsupported_model_finish_reason"),
+    ],
+)
+async def test_runtime_fails_closed_for_non_committable_finish_reasons(
+    finish_reason,
+    expected_error,
+):
+    model = ScriptedModelGateway([[
+        ModelStreamChunk(
+            content_delta="partial answer",
+            finish_reason=finish_reason,
+        ),
+    ]])
+    tools = ScriptedToolGateway([])
+    observer = RecordingObserver()
+
+    updates = await _collect(AgentRuntime(
+        model_gateway=model,
+        tool_execution_gateway=tools,
+        observer=observer,
+    ))
+
+    assert len(model.invocations) == 1
+    assert tools.requests == []
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == expected_error
 
 
 @pytest.mark.asyncio

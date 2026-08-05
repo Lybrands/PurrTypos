@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
-from agent_core.contracts import ConversationSummary, ConversationTurn
+from application.conversation_compaction_contracts import (
+    ConversationSummary,
+    ConversationTurn,
+)
 
 
 class SqliteConversationCompactionRepository:

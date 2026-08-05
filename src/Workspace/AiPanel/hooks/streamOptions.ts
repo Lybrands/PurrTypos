@@ -1,5 +1,9 @@
 import type { AiContextWindow, AiModelConfig } from "../../../types";
-import { getDefaultModelContextWindow, isModelThinkingEnabled } from "../../../modelCatalog";
+import {
+  getDefaultModelContextWindow,
+  getDefaultModelOutputTokens,
+  isModelThinkingEnabled,
+} from "../../../modelCatalog";
 
 export interface StreamRequestOptions {
   model: string;
@@ -25,11 +29,9 @@ export interface BuiltStream {
  */
 export function buildStreamOptions(params: {
   cfg: AiModelConfig | null;
-  modelConfigs: Record<string, { max_tokens?: number }>;
   selectedModel: string;
 }): BuiltStream {
-  const { cfg, modelConfigs, selectedModel } = params;
-  const modelConfig = modelConfigs[selectedModel];
+  const { cfg, selectedModel } = params;
 
   const effectiveThinking = isModelThinkingEnabled(cfg);
   const contextWindow = getDefaultModelContextWindow(cfg);
@@ -50,7 +52,7 @@ export function buildStreamOptions(params: {
       : {}),
     thinking: { type: effectiveThinking ? "enabled" : "disabled" },
     context_window: contextWindow,
-    max_tokens: modelConfig?.max_tokens ?? 8192,
+    max_tokens: getDefaultModelOutputTokens(cfg),
   };
 
   return { options, effectiveThinking, apiModelName };

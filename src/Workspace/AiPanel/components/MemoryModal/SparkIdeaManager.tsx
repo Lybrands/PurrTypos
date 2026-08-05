@@ -1,7 +1,7 @@
 import React from 'react'
-import { Button, Input, Popconfirm, Select } from '../../../../ui'
-import { Empty, Spin } from '../../../../ui'
-import { CheckOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from '../../../../ui'
+import { PurrButton, PurrInput, PurrPopconfirm, PurrSelect } from '@/purr-components'
+import { PurrEmpty, PurrSpin } from '@/purr-components'
+import { CheckIcon, CloseIcon, DeleteIcon, EditIcon } from '@/purr-components'
 import {
   SPARK_IDEA_LAYER_FOUR_VALUES,
   SPARK_IDEA_LAYER_LABELS,
@@ -65,7 +65,7 @@ export default function SparkIdeaManager({
       <div className="memory-add-card">
         <div className="memory-add-form memory-add-form--layer">
           <div className="memory-add-form-row memory-add-form-row--controls">
-            <Select
+            <PurrSelect
               size="small"
               value={addLayer}
               onChange={handleAddLayerChange}
@@ -85,7 +85,7 @@ export default function SparkIdeaManager({
             />
           </div>
           <div className="memory-add-form-row memory-add-form-row--content">
-            <Input.TextArea
+            <PurrInput.TextArea
               placeholder="设定内容"
               value={addContent}
               onChange={(event) => setAddContent(event.target.value)}
@@ -93,7 +93,7 @@ export default function SparkIdeaManager({
               autoSize={{ minRows: 1, maxRows: 4 }}
               className="memory-add-content-input"
             />
-            <Button
+            <PurrButton
               type="primary"
               size="small"
               loading={adding}
@@ -101,17 +101,17 @@ export default function SparkIdeaManager({
               disabled={!addContent.trim()}
             >
               添加
-            </Button>
+            </PurrButton>
           </div>
         </div>
       </div>
 
       {loading ? (
         <div className="memory-manage-loading">
-          <Spin />
+          <PurrSpin />
         </div>
       ) : sparkIdeas.length === 0 ? (
-        <Empty image={false} description="暂无四层设定" className="memory-manage-empty" />
+        <PurrEmpty image={false} description="暂无四层设定" className="memory-manage-empty" />
       ) : (
         <div className="memory-manage-list">
           {sparkIdeasByLayer.map(({ layer, list }) =>
@@ -125,7 +125,7 @@ export default function SparkIdeaManager({
                       className="memory-manage-item memory-manage-item--editing"
                     >
                       <div className="memory-manage-edit-form">
-                        <Input.TextArea
+                        <PurrInput.TextArea
                           autoFocus
                           value={editingContent}
                           onChange={(event) => setEditingContent(event.target.value)}
@@ -139,7 +139,7 @@ export default function SparkIdeaManager({
                           }}
                         />
                         <div className="memory-manage-edit-actions">
-                          <Select
+                          <PurrSelect
                             size="small"
                             value={editingLayer}
                             onChange={handleEditLayerChange}
@@ -156,25 +156,25 @@ export default function SparkIdeaManager({
                             characters={characters}
                             className="memory-manage-edit-relation-select"
                           />
-                          <Button
+                          <PurrButton
                             type="primary"
                             size="small"
-                            icon={<CheckOutlined />}
+                            icon={<CheckIcon />}
                             loading={editSaving}
                             onClick={handleEditSave}
                             disabled={!editingContent.trim()}
                           >
                             保存
-                          </Button>
-                          <Button
+                          </PurrButton>
+                          <PurrButton
                             type="text"
                             size="small"
-                            icon={<CloseOutlined />}
+                            icon={<CloseIcon />}
                             onClick={handleEditCancel}
                             disabled={editSaving}
                           >
                             取消
-                          </Button>
+                          </PurrButton>
                         </div>
                       </div>
                     </div>
@@ -191,15 +191,15 @@ export default function SparkIdeaManager({
                         />
                       </div>
                       <div className="memory-manage-item-actions">
-                        <Button
+                        <PurrButton
                           type="text"
                           size="small"
-                          icon={<EditOutlined />}
+                          icon={<EditIcon />}
                           className="memory-manage-edit-btn"
                           onClick={() => handleEditStart(memory)}
                           title="编辑"
                         />
-                        <Popconfirm
+                        <PurrPopconfirm
                           title="删除这条本书设定？"
                           description="删除后不可恢复，引用此设定的提示词将失效。"
                           okText="删除"
@@ -208,13 +208,13 @@ export default function SparkIdeaManager({
                           placement="topRight"
                           onConfirm={() => handleDelete(memory.id)}
                         >
-                          <Button
+                          <PurrButton
                             type="text"
                             size="small"
-                            icon={<DeleteOutlined />}
+                            icon={<DeleteIcon />}
                             className="memory-manage-delete-btn"
                           />
-                        </Popconfirm>
+                        </PurrPopconfirm>
                       </div>
                     </div>
                   )

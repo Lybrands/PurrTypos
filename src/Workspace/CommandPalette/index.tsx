@@ -7,7 +7,7 @@
  */
 
 import React from 'react'
-import { Input, type InputRef } from '../../ui'
+import { PurrInput, type PurrInputRef } from '@/purr-components'
 import './CommandPalette.scss'
 
 export interface CommandItem {
@@ -35,7 +35,7 @@ export default function CommandPalette({
 }: CommandPaletteProps) {
   const [query, setQuery] = React.useState('')
   const [activeIndex, setActiveIndex] = React.useState(0)
-  const inputRef = React.useRef<InputRef>(null)
+  const inputRef = React.useRef<PurrInputRef>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
@@ -130,7 +130,7 @@ export default function CommandPalette({
         onKeyDown={handleKeyDown}
       >
         <div className="cmdk-input-wrap">
-          <Input
+          <PurrInput
             ref={inputRef}
             className="cmdk-input"
             variant="borderless"

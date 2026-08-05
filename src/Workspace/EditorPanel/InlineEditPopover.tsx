@@ -1,17 +1,18 @@
 import { services } from '@/services'
 import React from 'react'
-import { Button } from '../../ui'
-import { CloseOutlined, CheckOutlined, RedoOutlined } from '../../ui'
+import { PurrButton } from '@/purr-components'
+import { CloseIcon, CheckIcon, RedoIcon } from '@/purr-components'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import StopCircleIcon from '../../icons/StopCircleIcon'
+import { StopCircleIcon } from '@/purr-components'
 import type { AiModelConfig, EntityId, Outline } from '../../types'
 import AiContextBar from '../AiPanel/components/AiContextBar'
 import type { PromptTemplateContext } from '../AiPanel/promptTemplates'
 import ModelPicker from '../AiPanel/components/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
-import { isModelThinkingEnabled } from '../../modelCatalog'
+import { normalizeApiProvider } from '../../modelCatalog'
 import { createAiStreamId } from '../../utils/aiStream'
+import { buildStreamOptions } from '../AiPanel/hooks/streamOptions'
 
 export interface InlineCapture {
   text: string
@@ -184,11 +185,11 @@ export default function InlineEditPopover({
       }, streamId)
       chunkUnsubRef.current = unsubscribe
 
-      const useConfiguredTemperature =
-        model.customizeTemperature === undefined || model.customizeTemperature === true
-
-      const useThinking = isModelThinkingEnabled(model)
-      const contextWindow = model.contextWindow ?? '128k'
+      const { options: streamOptions } = buildStreamOptions({
+        cfg: model,
+        selectedModel: model.id,
+      })
+      const contextWindow = streamOptions.context_window
 
       const systemPrompt = [
         '你是一位专业中文写作助手，负责对用户选中的文段进行改写。',
@@ -231,31 +232,16 @@ export default function InlineEditPopover({
         streamId,
         apiKey: model.apiKey,
         baseURL: model.baseUrl || undefined,
-        apiProvider: model.apiProvider === 'anthropic' ? 'anthropic' : 'openai',
+        apiProvider: normalizeApiProvider(model.apiProvider),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        options: {
-          model: model.name,
-          ...(model.presetId ? { model_profile: model.presetId } : {}),
-          ...(useConfiguredTemperature
-            ? {
-                temperature: useThinking
-                  ? model.temperatureThinking ?? 0.6
-                  : model.temperatureNonThinking ?? 0.6,
-              }
-            : {}),
-          thinking: { type: useThinking ? 'enabled' : 'disabled' },
-          context_window: contextWindow,
-          max_tokens: 8192,
-        },
+        options: streamOptions,
         enableAgentTools: false,
         bookId: bookId ?? undefined,
         chapterId: chapterId ?? undefined,
         currentChapterTitle: chapterTitle || undefined,
-        writingChapters: [],
-        availableOutlines: [],
         chatAgentMode: 'ask',
         contextWindow,
       })
@@ -324,10 +310,10 @@ export default function InlineEditPopover({
     >
       <div className="inline-edit-popover-header">
         <span>Inline 改写</span>
-        <Button
+        <PurrButton
           type="text"
           size="small"
-          icon={<CloseOutlined style={{ fontSize: 14 }} />}
+          icon={<CloseIcon style={{ fontSize: 14 }} />}
           onClick={onClose}
         />
       </div>
@@ -401,45 +387,45 @@ export default function InlineEditPopover({
         </div>
         <div className="inline-edit-popover-footer-right">
           {loading ? (
-            <Button
+            <PurrButton
               type="text"
               icon={<StopCircleIcon size={16} />}
               onClick={handleAbort}
               className="inline-edit-popover-stop"
             >
               停止
-            </Button>
+            </PurrButton>
           ) : (
             <>
               {result && !error && (
                 <>
-                  <Button
+                  <PurrButton
                     type="text"
                     size="small"
-                    icon={<RedoOutlined />}
+                    icon={<RedoIcon />}
                     onClick={handleRegenerate}
                   >
                     重新生成
-                  </Button>
-                  <Button
+                  </PurrButton>
+                  <PurrButton
                     type="primary"
                     size="small"
-                    icon={<CheckOutlined />}
+                    icon={<CheckIcon />}
                     onClick={handleAccept}
                   >
                     替换选中
-                  </Button>
+                  </PurrButton>
                 </>
               )}
               {!result && (
-                <Button
+                <PurrButton
                   type="primary"
                   size="small"
                   onClick={() => submit(instruction)}
                   disabled={!instruction.trim() || !model}
                 >
                   生成
-                </Button>
+                </PurrButton>
               )}
             </>
           )}

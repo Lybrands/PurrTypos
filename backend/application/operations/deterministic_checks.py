@@ -40,9 +40,25 @@ def run_agent_security_redteam_suite() -> dict[str, Any]:
     )
 
 
+def run_agent_stability_quality_gate() -> dict[str, Any]:
+    """Fail closed when a promoted runtime incident stops being recognized."""
+
+    runtime_regressions = run_runtime_regression_suite()
+    failed = int(runtime_regressions["summary"]["failed"])
+    return {
+        "verdict": "pass" if failed == 0 else "fail",
+        "summary": {
+            "promotedIncidents": int(runtime_regressions["summary"]["total"]),
+            "failedIncidents": failed,
+        },
+        "runtimeRegressions": runtime_regressions,
+    }
+
+
 __all__ = [
     "AgentRuntimeRegressionCase",
     "evaluate_runtime_regression_case",
     "run_agent_security_redteam_suite",
+    "run_agent_stability_quality_gate",
     "run_runtime_regression_suite",
 ]

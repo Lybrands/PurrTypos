@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from time import time
 from typing import Any
 
 from agent_core.contracts import RunExecutionLease
+from agent_core.events import CoreEventType
+
+
+_ORPHANED_STEP_SUMMARY = "Run stopped because its execution owner was no longer active."
 
 
 def now_ms() -> int:
@@ -125,6 +130,114 @@ async def request_cancellation(
         )
         changed = await db.fetch_one("SELECT changes() AS count")
     return int((changed or {}).get("count") or 0) == 1
+
+
+async def terminalize_orphaned_run(
+    db,
+    run_id: str,
+    *,
+    timestamp_ms: int | None = None,
+    reason: str = "execution_owner_unavailable",
+) -> bool:
+    """Cancel one running Run only when no live execution lease can own it."""
+
+    normalized_run = _required_text(run_id, "run id")
+    checked_at = now_ms() if timestamp_ms is None else int(timestamp_ms)
+    async with db.transaction(cancellation_linearizable=True):
+        row = await db.fetch_one(
+            "SELECT id FROM ai_agent_runs WHERE id = ? AND status = 'running' "
+            "AND (execution_owner_id IS NULL OR lease_expires_at_ms IS NULL "
+            "OR lease_expires_at_ms <= ?)",
+            [normalized_run, checked_at],
+        )
+        if row is None:
+            return False
+        await _terminalize_canceled_run(db, normalized_run, reason=reason)
+    return True
+
+
+async def recover_orphaned_runs(
+    db,
+    *,
+    timestamp_ms: int | None = None,
+    after_restart: bool = False,
+) -> tuple[str, ...]:
+    """Atomically terminalize abandoned running Runs.
+
+    At process startup no executor from the previous lifespan can still be
+    valid, so every persisted ``running`` Run is abandoned. During normal
+    operation only unowned or expired leases are eligible.
+    """
+
+    checked_at = now_ms() if timestamp_ms is None else int(timestamp_ms)
+    reason = (
+        "execution_recovery_after_restart"
+        if after_restart
+        else "execution_lease_expired"
+    )
+    async with db.transaction(cancellation_linearizable=True):
+        if after_restart:
+            rows = await db.fetch_all(
+                "SELECT id FROM ai_agent_runs WHERE status = 'running' "
+                "ORDER BY create_time ASC, id ASC"
+            )
+        else:
+            rows = await db.fetch_all(
+                "SELECT id FROM ai_agent_runs WHERE status = 'running' "
+                "AND (execution_owner_id IS NULL OR lease_expires_at_ms IS NULL "
+                "OR lease_expires_at_ms <= ?) ORDER BY create_time ASC, id ASC",
+                [checked_at],
+            )
+        recovered: list[str] = []
+        for row in rows:
+            orphaned_run_id = str(row.get("id") or "").strip()
+            if not orphaned_run_id:
+                continue
+            await _terminalize_canceled_run(
+                db,
+                orphaned_run_id,
+                reason=reason,
+            )
+            recovered.append(orphaned_run_id)
+    return tuple(recovered)
+
+
+async def _terminalize_canceled_run(db, run_id: str, *, reason: str) -> None:
+    """Write Run, unfinished todos, and terminal event in one transaction."""
+
+    await db.execute(
+        "UPDATE ai_agent_run_todos SET status = 'blocked', "
+        "result_summary = COALESCE(result_summary, ?), "
+        "update_time = CURRENT_TIMESTAMP WHERE run_id = ? "
+        "AND status IN ('pending', 'running')",
+        [_ORPHANED_STEP_SUMMARY, run_id],
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET status = 'canceled', "
+        "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
+        "update_time = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'",
+        [run_id],
+    )
+    # Artifact writer leases belong to execution ownership, not durable task
+    # identity. Releasing them in the same transaction prevents a crashed Run
+    # from blocking the next continuation until the claim's wall-clock expiry.
+    await db.execute(
+        "DELETE FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json) VALUES (?, ?, ?)",
+        [
+            run_id,
+            CoreEventType.RUN_CANCELED.value,
+            json.dumps(
+                {"status": "canceled", "reason": str(reason)},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ],
+    )
 
 
 async def get_execution_state(db, run_id: str) -> dict[str, Any] | None:

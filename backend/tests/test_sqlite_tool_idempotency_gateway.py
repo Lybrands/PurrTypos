@@ -6,7 +6,15 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import RunCreateParams, ToolCall, ToolHandlerResult
+from agent_core.contracts import (
+    DomainEffect,
+    RunCreateParams,
+    ToolCall,
+    ToolEffectState,
+    ToolHandlerResult,
+    ToolPlanningDisposition,
+    ToolStepDisposition,
+)
 from agent_core.errors import ContractViolationError
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
@@ -59,6 +67,129 @@ async def test_side_effect_and_receipt_commit_once_under_concurrent_replay(db):
     assert counter is not None and counter["value"] == 1
     assert len(receipts) == 1
     assert sorted((first.from_cache, second.from_cache)) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_nested_domain_effect_is_serialized_and_replayed(db):
+    repository = SqliteRunRepository(db, owner_id="worker-a")
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="propose",
+        mode="agent",
+    ))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(
+        id="call-proposal",
+        name="proposeSourceAnalysis",
+        arguments_json='{"title":"分析"}',
+    )
+    proposal = {
+        "kind": "source_analysis",
+        "contentJson": {
+            "analysis": {
+                "characters": [
+                    {"name": "林岚", "traits": ["冷静", "敏锐"]},
+                ],
+            },
+        },
+        "contentText": "正式分析",
+        "derivedFromIds": ["source-1"],
+    }
+    calls = 0
+
+    async def operation() -> ToolHandlerResult:
+        nonlocal calls
+        calls += 1
+        return ToolHandlerResult(
+            '{"proposed":true}',
+            effects=(DomainEffect(
+                type="screenplay.document_proposal",
+                payload=proposal,
+            ),),
+        )
+
+    first = await gateway.execute_once(run_id, call, operation)
+    replay = await gateway.execute_once(run_id, call, operation)
+
+    assert calls == 1
+    assert first.from_cache is False
+    assert replay.from_cache is True
+    assert len(replay.effects) == 1
+    assert replay.effects[0].type == "screenplay.document_proposal"
+    assert replay.effects[0].payload == proposal
+
+
+@pytest.mark.asyncio
+async def test_partial_step_disposition_survives_idempotent_replay(db):
+    repository = SqliteRunRepository(db, owner_id="worker-a")
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="append",
+        mode="agent",
+    ))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(id="call-partial", name="appendBatch", arguments_json="{}")
+
+    async def operation() -> ToolHandlerResult:
+        return ToolHandlerResult(
+            '{"remaining":1}',
+            step_disposition=ToolStepDisposition.CONTINUE,
+        )
+
+    await gateway.execute_once(run_id, call, operation)
+    replay = await gateway.execute_once(run_id, call, operation)
+
+    assert replay.from_cache is True
+    assert replay.step_disposition is ToolStepDisposition.CONTINUE
+
+
+@pytest.mark.asyncio
+async def test_planning_disposition_survives_idempotent_replay(db):
+    repository = SqliteRunRepository(db, owner_id="worker-a")
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="select branch",
+        mode="agent",
+    ))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(id="call-branch", name="selectBranch", arguments_json="{}")
+
+    async def operation() -> ToolHandlerResult:
+        return ToolHandlerResult(
+            '{"branch":"selected"}',
+            planning_disposition=ToolPlanningDisposition.REPLAN,
+        )
+
+    await gateway.execute_once(run_id, call, operation)
+    replay = await gateway.execute_once(run_id, call, operation)
+
+    assert replay.from_cache is True
+    assert replay.planning_disposition is ToolPlanningDisposition.REPLAN
+
+
+@pytest.mark.asyncio
+async def test_failure_effect_state_survives_idempotent_replay(db):
+    repository = SqliteRunRepository(db, owner_id="worker-a")
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="validate",
+        mode="agent",
+    ))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(id="call-invalid", name="propose", arguments_json="{}")
+
+    async def operation() -> ToolHandlerResult:
+        return ToolHandlerResult(
+            '{"success":false}',
+            error_code="tool_input_invalid",
+            effect_state=ToolEffectState.NOT_STARTED,
+        )
+
+    await gateway.execute_once(run_id, call, operation)
+    replay = await gateway.execute_once(run_id, call, operation)
+
+    assert replay.from_cache is True
+    assert replay.effect_state is ToolEffectState.NOT_STARTED
 
 
 @pytest.mark.asyncio

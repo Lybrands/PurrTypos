@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from 'react'
-import { PlusOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '../ui'
-import { Button, Checkbox, Input, Modal, Tooltip } from '../ui'
+import { PlusIcon, ArrowLeftIcon, DeleteIcon, EditIcon, ExportIcon } from '@/purr-components'
+import { PurrButton, PurrCheckbox, PurrInput, PurrModal, PurrTooltip } from '@/purr-components'
 import { Book, type EntityId } from '../types'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 import AppHeader from '../components/AppHeader'
@@ -158,25 +158,25 @@ export default function BookshelfPage({
       <AppHeader
         title="我的书架"
         left={
-          <Tooltip title="返回首页">
-            <Button
+          <PurrTooltip title="返回首页">
+            <PurrButton
               type="text"
               size="small"
-              icon={<ArrowLeftOutlined style={{ fontSize: 14 }} />}
+              icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
               onClick={onBack}
             />
-          </Tooltip>
+          </PurrTooltip>
         }
         right={
-          <Tooltip title="导出书籍">
-            <Button
+          <PurrTooltip title="导出书籍">
+            <PurrButton
               type="text"
               size="small"
-              icon={<ExportOutlined style={{ fontSize: 16 }} />}
+              icon={<ExportIcon style={{ fontSize: 16 }} />}
               onClick={openExport}
               className="app-header-action-btn"
             />
-          </Tooltip>
+          </PurrTooltip>
         }
         showActions
       />
@@ -213,24 +213,24 @@ export default function BookshelfPage({
                   </span>
                 </button>
                 <div className="book-actions">
-                  <Tooltip title="重命名">
+                  <PurrTooltip title="重命名">
                     <button type="button" aria-label={`重命名《${book.title}》`} className="book-action-btn" onClick={(e) => openRename(e, book)}>
-                      <EditOutlined />
+                      <EditIcon />
                     </button>
-                  </Tooltip>
-                  <Tooltip title="删除书籍">
+                  </PurrTooltip>
+                  <PurrTooltip title="删除书籍">
                     <button type="button" aria-label={`删除《${book.title}》`} className="book-action-btn danger" onClick={(e) => openDelete(e, book)}>
-                      <DeleteOutlined />
+                      <DeleteIcon />
                     </button>
-                  </Tooltip>
+                  </PurrTooltip>
                 </div>
               </div>
             )
           })}
 
           <button type="button" className="book-card book-card-add" onClick={() => setCreateModalOpen(true)}>
-            <span className="book-card-add-inner">
-              <span className="book-add-icon"><PlusOutlined /></span>
+            <span className="book-card-add-inner purr-entry-surface">
+              <span className="book-add-icon"><PlusIcon /></span>
               <strong>新建书籍</strong>
               <small>让一个新故事从这里开始</small>
             </span>
@@ -239,7 +239,7 @@ export default function BookshelfPage({
       </section>
 
       {/* 新建书籍 */}
-      <Modal
+      <PurrModal
         title="新建书籍"
         open={createModalOpen}
         onOk={handleCreate}
@@ -247,7 +247,7 @@ export default function BookshelfPage({
         okText="创建"
         cancelText="取消"
       >
-        <Input
+        <PurrInput
           placeholder="请输入书名"
           value={createTitle}
           onChange={(e) => setCreateTitle(e.target.value)}
@@ -256,16 +256,16 @@ export default function BookshelfPage({
           autoFocus
           style={{ marginBottom: 12 }}
         />
-        <Checkbox
+        <PurrCheckbox
           checked={createEnableVolume}
           onChange={(e) => setCreateEnableVolume(e.target.checked)}
         >
           文章分「卷」（创建后不可修改）
-        </Checkbox>
-      </Modal>
+        </PurrCheckbox>
+      </PurrModal>
 
       {/* 重命名 */}
-      <Modal
+      <PurrModal
         title="重命名书籍"
         open={renameModalOpen}
         onOk={handleRename}
@@ -273,7 +273,7 @@ export default function BookshelfPage({
         okText="保存"
         cancelText="取消"
       >
-        <Input
+        <PurrInput
           placeholder="请输入新书名"
           value={renameTitle}
           onChange={(e) => setRenameTitle(e.target.value)}
@@ -281,10 +281,10 @@ export default function BookshelfPage({
           maxLength={50}
           autoFocus
         />
-      </Modal>
+      </PurrModal>
 
       {/* 删除确认 */}
-      <Modal
+      <PurrModal
         title="删除书籍"
         open={!!deleteTarget}
         onOk={handleDeleteConfirm}
@@ -296,7 +296,7 @@ export default function BookshelfPage({
         <p>
           确认删除《{deleteTarget?.title}》？此操作将删除该书的所有章节和大纲，且不可恢复。
         </p>
-      </Modal>
+      </PurrModal>
 
       <ExportModal
         title="导出书籍"

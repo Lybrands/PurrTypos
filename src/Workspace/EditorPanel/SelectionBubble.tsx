@@ -1,6 +1,6 @@
 import React from 'react'
-import { Button, Tooltip } from '../../ui'
-import { BulbOutlined } from '../../ui'
+import { PurrButton, PurrTooltip } from '@/purr-components'
+import { BulbIcon } from '@/purr-components'
 
 // ── 预设改写指令 ──────────────────────────────────────────────────
 export const PRESETS: { id: string; label: string; prompt: string }[] = [
@@ -57,29 +57,29 @@ export default function SelectionBubble({
       }}
     >
       {PRESETS.map((p) => (
-        <Tooltip key={p.id} title={p.prompt}>
-          <Button
+        <PurrTooltip key={p.id} title={p.prompt}>
+          <PurrButton
             type="text"
             size="small"
             className="inline-edit-toolbar-btn"
             onClick={() => onPreset(p)}
           >
             {p.label}
-          </Button>
-        </Tooltip>
+          </PurrButton>
+        </PurrTooltip>
       ))}
       <div className="inline-edit-toolbar-sep" />
-      <Tooltip title="自定义指令改写">
-        <Button
+      <PurrTooltip title="自定义指令改写">
+        <PurrButton
           type="text"
           size="small"
           className="inline-edit-toolbar-btn"
-          icon={<BulbOutlined />}
+          icon={<BulbIcon />}
           onClick={onCustom}
         >
           自定义
-        </Button>
-      </Tooltip>
+        </PurrButton>
+      </PurrTooltip>
     </div>
   )
 }

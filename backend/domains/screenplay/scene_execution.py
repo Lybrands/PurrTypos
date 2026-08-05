@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
+
 
 def normalize_scene_execution(
     *,
@@ -23,12 +25,30 @@ def normalize_scene_execution(
         "continuityState",
     )
     normalized_fields = {
-        key: str(execution.get(key) or "").strip()
+        key: _required_bounded_text(
+            execution.get(key),
+            field=key,
+            maximum=SCENE_DRAFT_PAYLOAD_LIMITS.execution_result_chars,
+        )
         for key in fields
     }
-    if any(not value for value in normalized_fields.values()):
-        raise ValueError("场景执行记录必须说明目标、冲突、转折和场尾连续性")
-    unresolved_notes = _string_list(execution.get("unresolvedNotes"))
+    raw_unresolved_notes = execution.get("unresolvedNotes")
+    if not _is_list(raw_unresolved_notes):
+        raise ValueError("场景执行记录 unresolvedNotes 必须是数组")
+    if len(raw_unresolved_notes) > SCENE_DRAFT_PAYLOAD_LIMITS.unresolved_notes:
+        raise ValueError(
+            "场景执行记录 unresolvedNotes 不能超过 "
+            f"{SCENE_DRAFT_PAYLOAD_LIMITS.unresolved_notes} 条"
+        )
+    unresolved_notes = [
+        _required_bounded_text(
+            item,
+            field="unresolvedNotes[]",
+            maximum=SCENE_DRAFT_PAYLOAD_LIMITS.unresolved_note_chars,
+        )
+        for item in raw_unresolved_notes
+    ]
+    unresolved_notes = list(dict.fromkeys(unresolved_notes))
     structure_unit_ids = _string_list(scene.get("structureUnitIds"))
     return {
         "sceneId": scene_id,
@@ -109,3 +129,21 @@ def _string_list(value: object) -> list[str]:
 
 def _is_list(value: object) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _required_bounded_text(
+    value: object,
+    *,
+    field: str,
+    maximum: int,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"场景执行记录 {field} 必须是文本")
+    text = value.strip()
+    if not text:
+        raise ValueError("场景执行记录必须说明目标、冲突、转折和场尾连续性")
+    if len(text) > maximum:
+        raise ValueError(
+            f"场景执行记录 {field} 不能超过 {maximum} 个字符"
+        )
+    return text

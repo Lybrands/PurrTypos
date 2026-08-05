@@ -1,21 +1,21 @@
 import { services } from '@/services'
 import React from "react";
-import { useToast } from "../../../ui";
+import { usePurrToast } from '@/purr-components';
 import {
   type ChatMessage,
   type ToolCallLabelOutcome,
   type ToolCallSegment,
   type UseChatSubmitParams,
 } from "./chat.types";
-import { buildHistoryConverter } from "./chatHistory";
-import { buildStreamOptions } from "./streamOptions";
-import { isModelThinkingEnabled } from "../../../modelCatalog";
 import {
+  buildHistoryConverter,
+  createCommitScheduler,
   dispatchChunk,
   type AccState,
   type ChunkCtx,
-} from "./chunkHandlers";
-import { createCommitScheduler } from "./chunkHandlers/commitScheduler";
+} from "../../../agent-runtime";
+import { buildStreamOptions } from "./streamOptions";
+import { isModelThinkingEnabled, normalizeApiProvider } from "../../../modelCatalog";
 import {
   countQueuedForSession,
   getSettledSessionActivity,
@@ -74,13 +74,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     currentChapterTitle,
     selectedModel,
     agentEnabled,
-    modelConfigs,
     selectedMemoryIds,
     selectedForeshadowingIds,
     sessionScope = "chapter",
   } = params;
 
-  const appMessage = useToast();
+  const appMessage = usePurrToast();
   const runtimeVersion = React.useSyncExternalStore(
     subscribeChatRuntime,
     getChatRuntimeVersion,
@@ -154,6 +153,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.agentEnabled ?? agentEnabled;
       const expectThinking = isModelThinkingEnabled(cfg);
       const turnStartedAt = performance.now();
+      const userSentAt = new Date().toISOString();
       const assistantPlaceholder = {
         role: "assistant" as const,
         content: "",
@@ -169,7 +169,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         if (isResend) {
           setConversations((prev) => [
             ...prev.slice(0, submitOverride.editIndex!),
-            { role: "user", content: submitOverride.content.trim() },
+            { role: "user", content: submitOverride.content.trim(), sentAt: userSentAt },
             {
               role: "assistant",
               content: "请先在设置中添加模型并填写 API Key",
@@ -179,7 +179,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         } else {
           setConversations((prev) => [
             ...prev,
-            { role: "user", content: userText },
+            { role: "user", content: userText, sentAt: userSentAt },
             {
               role: "assistant",
               content: "请先在设置中添加模型并填写 API Key",
@@ -240,14 +240,14 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     if (isResend) {
       nextConversations = [
         ...baseConversations.slice(0, submitOverride.editIndex!),
-        { role: "user" as const, content: submitOverride.content.trim() },
+        { role: "user" as const, content: submitOverride.content.trim(), sentAt: userSentAt },
         assistantPlaceholder,
       ];
       if (!submitOverride?.preservePrompt) setPrompt("");
     } else {
       nextConversations = [
         ...baseConversations,
-        { role: "user", content: userText },
+        { role: "user", content: userText, sentAt: userSentAt },
         assistantPlaceholder,
       ];
       if (!submitOverride?.preservePrompt) setPrompt("");
@@ -317,7 +317,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     };
     const { options: streamOptions, apiModelName } = buildStreamOptions({
       cfg,
-      modelConfigs,
       selectedModel: requestSelectedModel,
     });
 
@@ -410,8 +409,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       streamId,
       apiKey: cfg.apiKey,
       baseURL: cfg.baseUrl || undefined,
-      apiProvider:
-        cfg.apiProvider === "anthropic" ? "anthropic" : "openai",
+      apiProvider: normalizeApiProvider(cfg.apiProvider),
+      locale: document.documentElement.lang || "zh-CN",
       sessionId,
       messages: newMessages,
       options: streamOptions,
@@ -419,8 +418,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       bookId: bookId ?? undefined,
       chapterId: chapterId ?? undefined,
       currentChapterTitle: currentChapterTitle ?? undefined,
-      writingChapters,
-      availableOutlines,
       associatedChapterIds:
         requestAssociatedChapterIds.length > 0
           ? requestAssociatedChapterIds
@@ -458,7 +455,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     sessions,
     selectedModel,
     agentEnabled,
-    modelConfigs,
     setPrompt,
     setLoading,
     setConversations,

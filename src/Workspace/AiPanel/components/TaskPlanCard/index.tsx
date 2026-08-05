@@ -1,14 +1,17 @@
 import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  CloseCircleOutlined,
-  LoadingOutlined,
-  PauseCircleOutlined,
-  RightOutlined,
-} from "../../../../ui";
+  CheckCircleIcon,
+  ClockIcon,
+  CloseCircleIcon,
+  LoadingIcon,
+  PauseCircleIcon,
+  ChevronRightIcon,
+} from '@/purr-components';
 import React from "react";
 import type { AiTaskPlan, AiTaskStep } from "../../hooks/chat.types";
-import { getVisibleTaskPlanSteps } from "../../taskPlanSelection";
+import {
+  getTaskPlanProgress,
+  getVisibleTaskPlanSteps,
+} from "../../taskPlanSelection";
 import "./index.scss";
 
 export interface TaskPlanCardProps {
@@ -32,24 +35,6 @@ export function isTaskPlanTerminal(plan: AiTaskPlan): boolean {
   );
 }
 
-export function getTaskPlanProgress(plan: AiTaskPlan) {
-  const steps = getVisibleTaskPlanSteps(plan);
-  const total = steps.length;
-  const completed = steps.filter((step) => step.status === "done").length;
-  const currentStep =
-    steps.find((step) => step.status === "running") ||
-    steps.find(
-      (step) => step.status === "blocked" || step.status === "failed",
-    ) ||
-    steps.find((step) => step.status === "pending");
-  return {
-    total,
-    completed,
-    currentStep,
-    percent: total > 0 ? Math.round((completed / total) * 100) : 0,
-  };
-}
-
 export function getTaskPlanLabel(plan: AiTaskPlan): string {
   if (plan.status === "done") return "已完成任务";
   if (plan.status === "blocked") return "任务受阻";
@@ -61,18 +46,18 @@ export function getTaskPlanLabel(plan: AiTaskPlan): string {
 
 function TaskStepIcon({ status }: { status: AiTaskStep["status"] }) {
   if (status === "done") {
-    return <CheckCircleOutlined className="task-plan-step__icon" />;
+    return <CheckCircleIcon className="task-plan-step__icon" />;
   }
   if (status === "running") {
-    return <LoadingOutlined spin className="task-plan-step__icon" />;
+    return <LoadingIcon spin className="task-plan-step__icon" />;
   }
   if (status === "blocked") {
-    return <PauseCircleOutlined className="task-plan-step__icon" />;
+    return <PauseCircleIcon className="task-plan-step__icon" />;
   }
   if (status === "failed") {
-    return <CloseCircleOutlined className="task-plan-step__icon" />;
+    return <CloseCircleIcon className="task-plan-step__icon" />;
   }
-  return <ClockCircleOutlined className="task-plan-step__icon" />;
+  return <ClockIcon className="task-plan-step__icon" />;
 }
 
 function TaskStepItem({ step }: { step: AiTaskStep }) {
@@ -104,7 +89,13 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   );
   const manuallySetRef = React.useRef(storedState?.manuallySet ?? false);
   const previousTerminalRef = React.useRef(terminal);
-  const { total, completed, currentStep, percent } = getTaskPlanProgress(plan);
+  const {
+    total,
+    completed,
+    currentStep,
+    currentStepNumber,
+    percent,
+  } = getTaskPlanProgress(plan);
 
   React.useEffect(() => {
     const stored = openStateStore.get(stateKey);
@@ -139,10 +130,12 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
         onClick={toggleExpanded}
         aria-expanded={expanded}
       >
-        <RightOutlined className="task-plan-card__chevron" />
+        <ChevronRightIcon className="task-plan-card__chevron" />
         <span className="task-plan-card__label">{getTaskPlanLabel(plan)}</span>
         <span className="task-plan-card__count">
-          {completed}/{total}
+          {!terminal && currentStepNumber != null
+            ? `第 ${currentStepNumber}/${total} 步`
+            : `已完成 ${completed}/${total}`}
         </span>
         {currentStep && !terminal ? (
           <span className="task-plan-card__current">· {currentStep.title}</span>

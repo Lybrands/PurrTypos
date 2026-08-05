@@ -8,12 +8,14 @@ from typing import Any
 
 from domains.screenplay.adaptation_brief import normalize_creative_brief
 from domains.screenplay.delivery_manifest import build_delivery_manifest
+from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
 from domains.screenplay.review_trace import (
     build_revision_trace,
     normalize_review_issues,
     normalize_review_verifications,
 )
 from domains.screenplay.scene_execution import validate_scene_execution_history
+from domains.screenplay.scene_order import ordered_scene_mappings
 from domains.screenplay.scene_trace import normalize_scene_trace
 from domains.screenplay.structure_trace import normalize_structure_trace
 from exceptions import AppError, NotFoundError
@@ -242,7 +244,51 @@ async def delete_project(db, project_id: str) -> bool:
                 session_ids,
             )
         await db.execute(
+            "DELETE FROM screenplay_document_source_refs WHERE source_ref_id IN ("
+            "SELECT id FROM screenplay_source_refs WHERE project_id = ?)",
+            [project_id],
+        )
+        await db.execute(
             "DELETE FROM screenplay_source_refs WHERE project_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_artifact_claims WHERE artifact_id IN ("
+            "SELECT id FROM ai_agent_artifacts "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_artifact_batches WHERE artifact_id IN ("
+            "SELECT id FROM ai_agent_artifacts "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_artifacts "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_long_task_units WHERE task_id IN ("
+            "SELECT id FROM ai_agent_long_tasks "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_long_tasks "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_work_item_runs WHERE work_item_id IN ("
+            "SELECT id FROM ai_agent_work_items "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM ai_agent_work_items "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
             [project_id],
         )
         await db.execute(
@@ -290,6 +336,45 @@ async def get_or_create_agent_session(
     return session
 
 
+async def list_agent_sessions(
+    db,
+    project_id: str,
+    *,
+    include_closed: bool = False,
+) -> list[dict[str, Any]]:
+    if await get_project(db, project_id) is None:
+        raise NotFoundError("剧本项目不存在")
+    closed_clause = "" if include_closed else "AND closed = 0 "
+    return await db.fetch_all(
+        "SELECT * FROM ai_sessions "
+        "WHERE screenplay_project_id = ? AND scope = 'screenplay' "
+        f"{closed_clause}ORDER BY create_time ASC, id ASC",
+        [project_id],
+    )
+
+
+async def create_agent_session(
+    db,
+    project_id: str,
+) -> dict[str, Any]:
+    project = await get_project(db, project_id)
+    if project is None:
+        raise NotFoundError("剧本项目不存在")
+    session_id = await db.execute_and_get_id(
+        "INSERT INTO ai_sessions "
+        "(title, scope, screenplay_project_id, book_id, chapter_id) "
+        "VALUES ('新对话', 'screenplay', ?, ?, NULL)",
+        [project_id, project.get("source_book_id")],
+    )
+    session = await db.fetch_one(
+        "SELECT * FROM ai_sessions WHERE id = ?",
+        [session_id],
+    )
+    if session is None:
+        raise RuntimeError("剧本 Agent 会话创建后无法读取")
+    return session
+
+
 async def list_documents(
     db,
     project_id: str,
@@ -323,6 +408,51 @@ async def get_document(db, document_id: str) -> dict[str, Any] | None:
     ))
 
 
+async def require_agent_document_proposal(
+    db,
+    *,
+    project_id: str,
+    source_run_id: str,
+    kind: str,
+    title: str,
+    content_json: Mapping[str, Any],
+    content_text: str,
+    derived_from_ids: Sequence[str],
+) -> None:
+    """Verify that an Agent-attributed document came from a real effect.
+
+    Conversation text is not an executable tool result.  A caller that claims
+    ``source_run_id`` provenance may persist only the exact proposal emitted by
+    that Run for this screenplay project.
+    """
+
+    rows = await db.fetch_all(
+        "SELECT e.payload_json FROM ai_agent_run_events AS e "
+        "JOIN ai_agent_runs AS r ON r.id = e.run_id "
+        "JOIN ai_sessions AS s ON s.id = r.session_id "
+        "WHERE e.run_id = ? "
+        "AND e.event_type = 'screenplay.document_proposal' "
+        "AND s.screenplay_project_id = ? "
+        "ORDER BY e.id DESC",
+        [source_run_id, project_id],
+    )
+    expected = {
+        "kind": str(kind),
+        "title": title.strip(),
+        "contentJson": dict(content_json),
+        "contentText": content_text,
+        "derivedFromIds": list(derived_from_ids),
+    }
+    for row in rows:
+        proposal = _json_object(row.get("payload_json"))
+        if proposal == expected:
+            return
+    raise AppError(
+        "该 Agent 运行没有产生与当前内容一致的正式提案，请重新生成提案后再保存",
+        409,
+    )
+
+
 async def create_document(
     db,
     *,
@@ -345,7 +475,6 @@ async def create_document(
         )
         if not row or int(row["c"]) != len(set(normalized_parents)):
             raise AppError("上游文档不属于当前剧本项目")
-
     document_id = short_id8()
     async with db.transaction():
         latest = await db.fetch_one(
@@ -381,6 +510,16 @@ async def create_document(
                 document_id=document_id,
                 agent_run_id=source_run_id,
             )
+        from database.crud.screenplay_source_refs import (
+            attach_artifact_refs_to_document,
+        )
+
+        await attach_artifact_refs_to_document(
+            db,
+            project_id=project_id,
+            document_id=document_id,
+            artifact_ref=str(content_json.get("artifactRef") or ""),
+        )
         await db.execute(
             "UPDATE screenplay_projects SET update_time = CURRENT_TIMESTAMP WHERE id = ?",
             [project_id],
@@ -471,6 +610,25 @@ async def accept_document(db, document_id: str) -> dict[str, Any]:
         project = await get_project(db, existing["project_id"])
         if project is None:
             raise NotFoundError("剧本项目不存在")
+        # A finalized proposal may have been emitted by a continuation Run
+        # while its source-read receipts belong to the Artifact's creator.
+        # Reconcile that durable provenance here as well so drafts saved by an
+        # older client remain applicable after an upgrade.
+        from database.crud.screenplay_source_refs import (
+            attach_artifact_refs_to_document,
+        )
+
+        content = existing.get("content_json")
+        await attach_artifact_refs_to_document(
+            db,
+            project_id=str(existing["project_id"]),
+            document_id=document_id,
+            artifact_ref=(
+                str(content.get("artifactRef") or "")
+                if isinstance(content, Mapping)
+                else ""
+            ),
+        )
         next_stage, retire_review = await _validate_document_acceptance(
             db,
             project,
@@ -597,11 +755,17 @@ async def _build_completion_delivery_manifest(
     ]
     placeholders = ",".join("?" for _ in document_ids)
     ref_rows = await db.fetch_all(
-        "SELECT document_id, COUNT(*) AS count "
+        "SELECT document_id, COUNT(DISTINCT source_ref_id) AS count FROM ("
+        "SELECT document_id, id AS source_ref_id "
         "FROM screenplay_source_refs "
         f"WHERE project_id = ? AND document_id IN ({placeholders}) "
-        "GROUP BY document_id",
-        [project_id, *document_ids],
+        "UNION "
+        "SELECT dsr.document_id, dsr.source_ref_id "
+        "FROM screenplay_document_source_refs AS dsr "
+        "JOIN screenplay_source_refs AS sr ON sr.id = dsr.source_ref_id "
+        f"WHERE sr.project_id = ? AND dsr.document_id IN ({placeholders})"
+        ") GROUP BY document_id",
+        [project_id, *document_ids, project_id, *document_ids],
     )
     source_ref_counts = {
         str(row["document_id"]): int(row["count"])
@@ -631,6 +795,44 @@ async def _build_completion_delivery_manifest(
 def _require_parent(document: Mapping[str, Any], parent_id: object, message: str) -> None:
     if str(parent_id or "") not in set(document.get("derived_from_ids") or []):
         raise AppError(message, 409)
+
+
+async def _validate_artifact_link(
+    db,
+    *,
+    project_id: str,
+    content: Mapping[str, Any],
+    expected_kind: str,
+    artifact_id_field: str | None = None,
+) -> None:
+    resource_ref = str(content.get("artifactRef") or "").strip()
+    explicit_id = (
+        str(content.get(artifact_id_field) or "").strip()
+        if artifact_id_field
+        else ""
+    )
+    if not resource_ref and not explicit_id:
+        # Compatibility for documents accepted before artifact migration.
+        return
+    if not resource_ref:
+        raise AppError("Artifact 引用不完整", 409)
+    artifact_id = resource_ref.rsplit("/", 1)[-1].strip()
+    if not artifact_id or (explicit_id and explicit_id != artifact_id):
+        raise AppError("Artifact 引用与文档标识不一致", 409)
+    artifact = await db.fetch_one(
+        "SELECT id, namespace, kind, owner_id, status, resource_ref "
+        "FROM ai_agent_artifacts WHERE id = ?",
+        [artifact_id],
+    )
+    if (
+        artifact is None
+        or str(artifact.get("namespace") or "") != "purrtypos.screenplay"
+        or str(artifact.get("kind") or "") != expected_kind
+        or str(artifact.get("owner_id") or "") != project_id
+        or str(artifact.get("status") or "") != "finalized"
+        or str(artifact.get("resource_ref") or "") != resource_ref
+    ):
+        raise AppError("Artifact 引用不存在、未完成或不属于当前剧本项目", 409)
 
 
 async def _validate_document_acceptance(
@@ -663,6 +865,13 @@ async def _validate_document_acceptance(
             or not project.get("source_book_id")
         ):
             raise AppError("当前阶段或原作状态不允许接受范围分析", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="source_analysis_entries",
+            artifact_id_field="sourceAnalysisArtifactId",
+        )
         if stage == "brief":
             previous_analysis = await _latest_accepted(
                 db, project_id, ("source_analysis",)
@@ -751,9 +960,13 @@ async def _validate_document_acceptance(
         if not isinstance(evidence, list) or not evidence:
             raise AppError("原作范围分析必须包含来源证据", 409)
         refs = await db.fetch_all(
-            "SELECT source_type, source_id FROM screenplay_source_refs "
-            "WHERE project_id = ? AND document_id = ?",
-            [project_id, document["id"]],
+            "SELECT DISTINCT sr.source_type, sr.source_id "
+            "FROM screenplay_source_refs AS sr "
+            "LEFT JOIN screenplay_document_source_refs AS dsr "
+            "ON dsr.source_ref_id = sr.id AND dsr.document_id = ? "
+            "WHERE sr.project_id = ? "
+            "AND (sr.document_id = ? OR dsr.document_id IS NOT NULL)",
+            [document["id"], project_id, document["id"]],
         )
         attached = {
             (str(row.get("source_type") or ""), str(row.get("source_id") or ""))
@@ -793,6 +1006,13 @@ async def _validate_document_acceptance(
         )
         if stage not in allowed_stages:
             raise AppError("当前阶段不能接受创作简报", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="creative_brief_entries",
+            artifact_id_field="creativeBriefArtifactId",
+        )
         source_analysis = None
         if is_book_adaptation:
             source_analysis = await _latest_accepted(
@@ -850,6 +1070,13 @@ async def _validate_document_acceptance(
         _require_parent(document, brief["id"], "结构版本必须继承当前创作简报")
         if str(content.get("creativeBriefId") or "") != str(brief["id"]):
             raise AppError("结构版本与当前创作简报版本不匹配", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="screenplay_structure_units",
+            artifact_id_field="structureArtifactId",
+        )
         units_key = "beats" if kind == "beat_sheet" else "episodes"
         try:
             normalize_structure_trace(
@@ -878,6 +1105,12 @@ async def _validate_document_acceptance(
         _require_parent(document, structure["id"], "场景表必须继承当前结构版本")
         if str(content.get("structureId") or "") != str(structure["id"]):
             raise AppError("场景表与当前结构版本不匹配", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="scene_list_batches",
+        )
         try:
             normalize_scene_trace(
                 scenes=content.get("scenes"),
@@ -898,11 +1131,12 @@ async def _validate_document_acceptance(
         if str(content.get("sceneListId") or "") != str(scene_list["id"]):
             raise AppError("正文与当前场景表版本不匹配", 409)
         scene_json = _json_object(scene_list.get("content_json"))
-        scene_rows = [
-            item
-            for item in scene_json.get("scenes", [])
-            if isinstance(item, Mapping)
-        ]
+        # Draft planning/execution already repairs legacy accepted scene lists
+        # whose late provider batch appended a scene after later episodes.  The
+        # acceptance boundary must use that same canonical order; otherwise a
+        # valid long-task draft is generated successfully and then rejected
+        # solely because the historical document's raw array is interleaved.
+        scene_rows = list(ordered_scene_mappings(scene_json))
         scene_ids = [
             str(item.get("id") or "").strip()
             for item in scene_rows
@@ -913,27 +1147,10 @@ async def _validate_document_acceptance(
         completed_ids = [str(item) for item in completed]
         if completed_ids != scene_ids[:len(completed_ids)]:
             raise AppError("正文完成场景必须严格遵循场景表顺序", 409)
-        if (
-            not completed_ids
-            or str(content.get("sceneId") or "") != completed_ids[-1]
-        ):
-            raise AppError("正文 sceneId 必须是本次新增完成的场景", 409)
-        current_scene = next(
-            (
-                scene for scene in scene_rows
-                if str(scene.get("id") or "") == completed_ids[-1]
-            ),
-            None,
-        )
-        if (
-            current_scene is None
-            or str(content.get("sceneHeading") or "").strip()
-            != str(current_scene.get("heading") or "").strip()
-        ):
-            raise AppError("正文 sceneHeading 必须与场景表一致", 409)
         latest_draft = await _latest_accepted(db, project_id, ("scene_draft",))
         previous_completed: list[str] = []
         previous_executions: list[Any] = []
+        previous_text = ""
         if latest_draft is not None:
             _require_parent(document, latest_draft["id"], "滚动正文必须继承当前已接受正文")
             previous_json = _json_object(latest_draft.get("content_json"))
@@ -949,8 +1166,51 @@ async def _validate_document_acceptance(
                 if isinstance(previous_json.get("sceneExecutions"), list)
                 else []
             )
-        if completed_ids != [*previous_completed, completed_ids[-1]]:
-            raise AppError("滚动正文每次必须严格追加一个新场景", 409)
+            previous_text = str(latest_draft.get("content_text") or "").strip()
+        raw_new_scene_ids = content.get("newSceneIds")
+        if isinstance(raw_new_scene_ids, list):
+            new_scene_ids = [str(item).strip() for item in raw_new_scene_ids]
+            if (
+                not new_scene_ids
+                or any(not item for item in new_scene_ids)
+                or len(set(new_scene_ids)) != len(new_scene_ids)
+            ):
+                raise AppError("正文 newSceneIds 必须列出本批新增场景", 409)
+        else:
+            legacy_scene_id = str(content.get("sceneId") or "").strip()
+            new_scene_ids = [legacy_scene_id] if legacy_scene_id else []
+        if completed_ids != [*previous_completed, *new_scene_ids]:
+            raise AppError("滚动正文必须严格追加一批连续的新场景", 409)
+        if str(content.get("sceneId") or "").strip() != new_scene_ids[0]:
+            raise AppError("正文 sceneId 必须是本批第一个新增场景", 409)
+        new_scenes = [
+            next(
+                (
+                    scene for scene in scene_rows
+                    if str(scene.get("id") or "") == scene_id
+                ),
+                None,
+            )
+            for scene_id in new_scene_ids
+        ]
+        if any(scene is None for scene in new_scenes):
+            raise AppError("正文新增场景必须属于当前场景表", 409)
+        expected_headings = [
+            str(scene.get("heading") or "").strip()
+            for scene in new_scenes
+            if scene is not None
+        ]
+        scene_heading = str(content.get("sceneHeading") or "").strip()
+        if scene_heading and scene_heading != expected_headings[0]:
+            raise AppError("正文 sceneHeading 必须与本批首场一致", 409)
+        raw_new_headings = content.get("newSceneHeadings")
+        if raw_new_headings is not None:
+            if (
+                not isinstance(raw_new_headings, list)
+                or [str(item).strip() for item in raw_new_headings]
+                != expected_headings
+            ):
+                raise AppError("正文 newSceneHeadings 必须与本批场景一致", 409)
         try:
             validate_scene_execution_history(
                 scene_list_content=scene_json,
@@ -962,6 +1222,34 @@ async def _validate_document_acceptance(
             raise AppError(str(error), 409) from error
         if not text:
             raise AppError("剧本正文不能为空", 409)
+        if previous_text and not text.startswith(previous_text):
+            raise AppError("滚动正文不能改写或删除既有场景正文", 409)
+        appended_scene_text = (
+            text[len(previous_text):].lstrip()
+            if previous_text
+            else text
+        )
+        if not appended_scene_text.strip():
+            raise AppError("滚动正文必须追加当前场景正文", 409)
+        batch_text_limit = (
+            SCENE_DRAFT_PAYLOAD_LIMITS.scene_text_chars * len(new_scene_ids)
+            + 2 * max(0, len(new_scene_ids) - 1)
+        )
+        if len(appended_scene_text) > batch_text_limit:
+            raise AppError(
+                "本批正文不能超过 "
+                f"{batch_text_limit} 个字符",
+                409,
+            )
+        notes = content.get("notes", "")
+        if not isinstance(notes, str):
+            raise AppError("正文 notes 必须是文本", 409)
+        if len(notes.strip()) > SCENE_DRAFT_PAYLOAD_LIMITS.draft_notes_chars:
+            raise AppError(
+                "正文 notes 不能超过 "
+                f"{SCENE_DRAFT_PAYLOAD_LIMITS.draft_notes_chars} 个字符",
+                409,
+            )
         is_complete = content.get("isComplete") is True
         if is_complete != (completed_ids == scene_ids):
             raise AppError("isComplete 必须与场景完成情况一致", 409)
@@ -971,6 +1259,13 @@ async def _validate_document_acceptance(
         draft = await _latest_accepted(db, project_id, ("scene_draft",))
         if draft is None or _json_object(draft.get("content_json")).get("isComplete") is not True:
             raise AppError("审阅报告必须针对当前完整剧本", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="screenplay_review_entries",
+            artifact_id_field="reviewArtifactId",
+        )
         draft_json = _json_object(draft.get("content_json"))
         if str(content.get("reviewedDraftId") or "") != str(draft["id"]):
             raise AppError("审阅报告与当前完整剧本版本不匹配", 409)
@@ -1076,6 +1371,13 @@ async def _validate_document_acceptance(
             or content.get("isComplete") is not True
         ):
             raise AppError("修订稿必须明确绑定当前正文和审阅报告", 409)
+        await _validate_artifact_link(
+            db,
+            project_id=project_id,
+            content=content,
+            expected_kind="screenplay_revision_changes",
+            artifact_id_field="revisionArtifactId",
+        )
         draft_json = _json_object(draft.get("content_json"))
         if (
             str(content.get("sceneListId") or "")
@@ -1154,7 +1456,12 @@ async def delete_document(db, document_id: str) -> bool:
         raise AppError("只有草稿文档可以删除", 409)
     async with db.transaction():
         await db.execute(
-            "DELETE FROM screenplay_source_refs WHERE document_id = ?",
+            "DELETE FROM screenplay_document_source_refs WHERE document_id = ?",
+            [document_id],
+        )
+        await db.execute(
+            "UPDATE screenplay_source_refs SET document_id = NULL "
+            "WHERE document_id = ?",
             [document_id],
         )
         await db.execute(
@@ -1185,26 +1492,17 @@ async def restore_document(db, document_id: str) -> dict[str, Any]:
             derived_from_ids=[existing["id"]],
         )
         refs = await db.fetch_all(
-            "SELECT agent_run_id, tool_name, source_type, source_id, "
-            "source_revision, excerpt FROM screenplay_source_refs "
-            "WHERE document_id = ? ORDER BY id ASC",
-            [existing["id"]],
+            "SELECT DISTINCT sr.id FROM screenplay_source_refs AS sr "
+            "LEFT JOIN screenplay_document_source_refs AS dsr "
+            "ON dsr.source_ref_id = sr.id AND dsr.document_id = ? "
+            "WHERE sr.document_id = ? OR dsr.document_id IS NOT NULL "
+            "ORDER BY sr.id ASC",
+            [existing["id"], existing["id"]],
         )
         for ref in refs:
             await db.execute(
-                "INSERT INTO screenplay_source_refs "
-                "(project_id, document_id, agent_run_id, tool_name, "
-                "source_type, source_id, source_revision, excerpt) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    existing["project_id"],
-                    restored["id"],
-                    f"restore:{restored['id']}:{ref['agent_run_id']}",
-                    ref["tool_name"],
-                    ref["source_type"],
-                    ref["source_id"],
-                    ref["source_revision"],
-                    ref["excerpt"],
-                ],
+                "INSERT OR IGNORE INTO screenplay_document_source_refs "
+                "(document_id, source_ref_id) VALUES (?, ?)",
+                [restored["id"], ref["id"]],
             )
     return restored

@@ -1,11 +1,11 @@
 import { services } from '@/services'
 import React from 'react'
-import { Input, Select, Spin, Tooltip, useToast } from '../../ui'
-import { ThunderboltOutlined } from '../../ui'
+import { PurrInput, PurrSelect, PurrSpin, PurrTooltip, usePurrToast } from '@/purr-components'
+import { BoltIcon } from '@/purr-components'
 import { useWorkspace } from '../WorkspaceContext'
 import type { BookStyle } from '../../types'
 
-const { TextArea } = Input
+const { TextArea } = PurrInput
 
 const POV_PRESETS = [
   '第一人称',
@@ -94,10 +94,10 @@ export interface StyleFormProps {
 
 /**
  * 风格基调表单：自带「加载 / 防抖保存 / 远端状态」三件套，
- * 由外层（如 Modal）决定布局与是否展示。
+ * 由外层（如 PurrModal）决定布局与是否展示。
  */
 export default function StyleForm({ onStatusChange }: StyleFormProps) {
-  const appMessage = useToast()
+  const appMessage = usePurrToast()
   const { bookId, writingChapters } = useWorkspace()
   const [form, setForm] = React.useState<StyleFormState>(EMPTY_FORM)
   const [loading, setLoading] = React.useState(false)
@@ -223,7 +223,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
   if (loading) {
     return (
       <div className="notebook-placeholder">
-        <Spin size="small" />
+        <PurrSpin size="small" />
       </div>
     )
   }
@@ -232,7 +232,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
     <div className="style-form">
       <div className="style-form-row">
         <label className="style-form-label">视角</label>
-        <Select
+        <PurrSelect
           size="small"
           allowClear
           showSearch
@@ -248,7 +248,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
 
       <div className="style-form-row">
         <label className="style-form-label">语调</label>
-        <Select
+        <PurrSelect
           size="small"
           allowClear
           showSearch
@@ -264,7 +264,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
 
       <div className="style-form-row">
         <label className="style-form-label">节奏</label>
-        <Select
+        <PurrSelect
           size="small"
           allowClear
           showSearch
@@ -297,7 +297,7 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
           参考章节
           <span className="style-form-hint">AI 会以这些章节的语感为模板</span>
         </label>
-        <Select
+        <PurrSelect
           size="small"
           mode="multiple"
           allowClear
@@ -324,11 +324,11 @@ export default function StyleForm({ onStatusChange }: StyleFormProps) {
         />
       </div>
 
-      <Tooltip title="所有非空字段都会作为「强制规则」自动拼入 AI 智能体的 system prompt（无需勾选）">
+      <PurrTooltip title="所有非空字段都会作为「强制规则」自动拼入 AI 智能体的 system prompt（无需勾选）">
         <div className="style-form-footer">
-          <ThunderboltOutlined /> 已自动强制注入 AI 智能体
+          <BoltIcon /> 已自动强制注入 AI 智能体
         </div>
-      </Tooltip>
+      </PurrTooltip>
     </div>
   )
 }

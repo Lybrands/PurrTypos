@@ -124,10 +124,16 @@ async def init_schema(db: DatabaseConnection) -> None:
         source_type TEXT NOT NULL,
         source_id TEXT NOT NULL,
         source_revision TEXT NOT NULL,
+        coverage_mode TEXT NOT NULL DEFAULT 'referenced',
         excerpt TEXT NOT NULL DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(agent_run_id, source_type, source_id)
     )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE screenplay_source_refs ADD COLUMN coverage_mode TEXT "
+        "NOT NULL DEFAULT 'referenced'",
+    )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_project "
         "ON screenplay_source_refs(project_id, create_time DESC)"
@@ -139,6 +145,20 @@ async def init_schema(db: DatabaseConnection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_run "
         "ON screenplay_source_refs(agent_run_id, create_time ASC)"
+    )
+    # Source reads are immutable Run receipts.  A proposal Artifact may be
+    # resumed/finalized by another Run and the same proposal may be saved as
+    # more than one document version, so document provenance is many-to-many
+    # rather than ownership of ``screenplay_source_refs.document_id``.
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_document_source_refs (
+        document_id TEXT NOT NULL,
+        source_ref_id INTEGER NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(document_id, source_ref_id)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_document_source_refs_ref "
+        "ON screenplay_document_source_refs(source_ref_id, document_id)"
     )
 
     # ── outlines ─────────────────────────────────────────────────
@@ -213,6 +233,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_ai_sessions_screenplay_project "
         "ON ai_sessions(screenplay_project_id, id DESC)"
     )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_sessions_book "
+        "ON ai_sessions(book_id, id DESC)"
+    )
 
     # ── ai_conversations ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_conversations (
@@ -233,6 +257,8 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_compaction TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_budget TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN screenplay_proposal TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN agent_process TEXT DEFAULT NULL")
 
     # ── ai_conversation_summaries ────────────────────────────────
     # Raw turns remain authoritative in ai_conversations. This table stores
@@ -330,6 +356,14 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_runs_parent
         ON ai_agent_runs(parent_run_id, create_time)
     """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_terminal_time
+        ON ai_agent_runs(status, update_time DESC)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_session_time
+        ON ai_agent_runs(session_id, update_time DESC)
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -363,6 +397,41 @@ async def init_schema(db: DatabaseConnection) -> None:
         payload_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_run_events_run_type
+        ON ai_agent_run_events(run_id, event_type, id)
+    """)
+    # ── ai_error_reports ─────────────────────────────────────────
+    # Error reports are compact indexes over existing Run/event evidence.
+    # They intentionally do not duplicate prompts, chapter text or model output.
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_error_reports (
+        id TEXT PRIMARY KEY NOT NULL,
+        stream_id TEXT NOT NULL UNIQUE,
+        agent_run_id TEXT DEFAULT NULL,
+        session_id INTEGER DEFAULT NULL,
+        conversation_id INTEGER DEFAULT NULL,
+        book_id TEXT DEFAULT NULL,
+        chapter_id TEXT DEFAULT NULL,
+        source TEXT NOT NULL DEFAULT 'ai_chat_stream',
+        status TEXT NOT NULL DEFAULT 'captured',
+        error_code TEXT DEFAULT NULL,
+        error_message TEXT NOT NULL,
+        model_name TEXT DEFAULT NULL,
+        diagnostic_json TEXT NOT NULL DEFAULT '{}',
+        user_note TEXT DEFAULT NULL,
+        submitted_at DATETIME DEFAULT NULL,
+        resolved_at DATETIME DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_error_reports_status_time
+        ON ai_error_reports(status, create_time DESC)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_error_reports_agent_run
+        ON ai_error_reports(agent_run_id, create_time DESC)
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_approvals (
         id TEXT PRIMARY KEY NOT NULL,
         run_id TEXT NOT NULL,
@@ -389,9 +458,229 @@ async def init_schema(db: DatabaseConnection) -> None:
         content TEXT NOT NULL DEFAULT '',
         effects_json TEXT NOT NULL DEFAULT '[]',
         error_code TEXT DEFAULT NULL,
+        step_disposition TEXT NOT NULL DEFAULT 'complete',
+        planning_disposition TEXT NOT NULL DEFAULT 'keep_plan',
+        effect_state TEXT NOT NULL DEFAULT 'unknown',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (run_id, tool_call_id)
     )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_tool_receipts ADD COLUMN "
+        "step_disposition TEXT NOT NULL DEFAULT 'complete'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_tool_receipts ADD COLUMN "
+        "effect_state TEXT NOT NULL DEFAULT 'unknown'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_tool_receipts ADD COLUMN "
+        "planning_disposition TEXT NOT NULL DEFAULT 'keep_plan'",
+    )
+    # ── durable Agent Work Items / recoverable artifacts ─────────
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_work_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        namespace TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        created_by_run_id TEXT DEFAULT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        revision INTEGER NOT NULL DEFAULT 1,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_work_items_owner_status
+        ON ai_agent_work_items(namespace, owner_id, kind, status, update_time DESC)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_work_item_runs (
+        work_item_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        work_item_revision INTEGER NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (work_item_id, run_id)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_work_item_runs_run
+        ON ai_agent_work_item_runs(run_id, create_time DESC)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_tasks (
+        id TEXT PRIMARY KEY NOT NULL,
+        work_item_id TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        created_by_run_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        revision INTEGER NOT NULL DEFAULT 1,
+        total_units INTEGER NOT NULL,
+        completed_units INTEGER NOT NULL DEFAULT 0,
+        failed_units INTEGER NOT NULL DEFAULT 0,
+        max_parallelism INTEGER NOT NULL DEFAULT 1,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_long_tasks_owner_status
+        ON ai_agent_long_tasks(namespace, owner_id, kind, status, update_time DESC)
+    """)
+    # A durable workflow belongs to the conversation that created it.  The
+    # earlier project-wide index caused a brand-new conversation to inherit
+    # and even resume another conversation's task.  Keep race protection, but
+    # scope it by the persisted originating session.
+    await db.execute(
+        "DROP INDEX IF EXISTS idx_ai_agent_long_tasks_one_active_owner_kind"
+    )
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_long_tasks_one_active_owner_kind_session
+        ON ai_agent_long_tasks(
+            namespace,
+            owner_id,
+            kind,
+            COALESCE(CAST(json_extract(metadata_json, '$.sessionId') AS TEXT), '')
+        )
+        WHERE status IN ('pending', 'running', 'paused')
+    """)
+    # Repair conversations written by the earlier SSE mapping, which copied a
+    # long-task dispatch receipt into ai_conversations.response.  Those rows
+    # are orchestration receipts, never model answers.
+    await db.execute(
+        "UPDATE ai_conversations SET response = '' WHERE id IN ("
+        "  SELECT r.conversation_id FROM ai_agent_runs AS r "
+        "  JOIN ai_agent_run_events AS e ON e.run_id = r.id "
+        "  WHERE r.conversation_id IS NOT NULL "
+        "    AND e.event_type = 'long_task.dispatched'"
+        ") AND response <> ''"
+    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_units (
+        task_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        dependencies_json TEXT NOT NULL DEFAULT '[]',
+        input_ref TEXT DEFAULT NULL,
+        output_ref TEXT DEFAULT NULL,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        worker_id TEXT DEFAULT NULL,
+        lease_expires_at_ms INTEGER DEFAULT NULL,
+        run_id TEXT DEFAULT NULL,
+        error_code TEXT DEFAULT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (task_id, unit_id),
+        UNIQUE (task_id, position)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_long_task_units_ready
+        ON ai_agent_long_task_units(task_id, status, position)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifacts (
+        id TEXT PRIMARY KEY NOT NULL,
+        namespace TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        run_id TEXT DEFAULT NULL,
+        artifact_scope TEXT NOT NULL DEFAULT 'run',
+        work_item_id TEXT DEFAULT NULL,
+        created_by_run_id TEXT DEFAULT NULL,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'open',
+        revision INTEGER NOT NULL DEFAULT 1,
+        next_sequence INTEGER NOT NULL DEFAULT 1,
+        committed_item_count INTEGER NOT NULL DEFAULT 0,
+        expected_item_count INTEGER DEFAULT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        resource_ref TEXT DEFAULT NULL,
+        coverage_digest TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    for column in (
+        "artifact_scope TEXT NOT NULL DEFAULT 'run'",
+        "work_item_id TEXT DEFAULT NULL",
+        "created_by_run_id TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_artifacts ADD COLUMN {column}",
+        )
+    # Legacy artifacts were all Run-scoped. Preserve their original Run as
+    # immutable creator provenance while making the new scope explicit.
+    await db.execute(
+        "UPDATE ai_agent_artifacts SET artifact_scope = 'run' "
+        "WHERE artifact_scope IS NULL OR artifact_scope = ''"
+    )
+    await db.execute(
+        "UPDATE ai_agent_artifacts SET created_by_run_id = run_id "
+        "WHERE created_by_run_id IS NULL AND run_id IS NOT NULL"
+    )
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifacts_owner_status
+        ON ai_agent_artifacts(namespace, owner_id, kind, status, update_time DESC)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifacts_run
+        ON ai_agent_artifacts(run_id, update_time DESC)
+    """)
+    # The legacy index did not understand Work Item scope. Recreate it with a
+    # scope predicate so creator provenance cannot make a Work Item artifact
+    # collide with a Run-owned artifact.
+    await db.execute("DROP INDEX IF EXISTS idx_ai_agent_artifacts_run_kind_unique")
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_artifacts_run_scope_unique
+        ON ai_agent_artifacts(namespace, owner_id, kind, run_id)
+        WHERE artifact_scope = 'run' AND run_id IS NOT NULL
+    """)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_artifacts_work_item_kind_unique
+        ON ai_agent_artifacts(namespace, owner_id, kind, work_item_id)
+        WHERE artifact_scope = 'work_item' AND work_item_id IS NOT NULL
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifact_batches (
+        artifact_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        committed_revision INTEGER NOT NULL,
+        next_sequence INTEGER NOT NULL,
+        item_count INTEGER NOT NULL,
+        items_json TEXT NOT NULL,
+        coverage_keys_json TEXT NOT NULL DEFAULT '[]',
+        content_digest TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (artifact_id, batch_id),
+        UNIQUE(artifact_id, idempotency_key),
+        UNIQUE(artifact_id, sequence)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifact_batches_sequence
+        ON ai_agent_artifact_batches(artifact_id, sequence)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifact_claims (
+        artifact_id TEXT PRIMARY KEY NOT NULL,
+        work_item_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        claim_token TEXT NOT NULL,
+        acquired_revision INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifact_claims_run
+        ON ai_agent_artifact_claims(run_id, expires_at_ms)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifact_claims_expiry
+        ON ai_agent_artifact_claims(expires_at_ms)
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
         id TEXT PRIMARY KEY NOT NULL,
         parent_run_id TEXT NOT NULL,

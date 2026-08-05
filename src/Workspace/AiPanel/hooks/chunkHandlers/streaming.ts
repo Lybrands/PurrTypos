@@ -48,6 +48,31 @@ export const handleThinkingDelta: ChunkHandler = (chunk, ctx) => {
   });
 };
 
+/**
+ * Recovery/replay counterpart of thinkingDelta. Ordinary live streams keep
+ * using deltas; a durable Run may additionally provide one final snapshot so
+ * reconnecting a page does not depend on every historic transport frame.
+ */
+export const handleThinkingSnapshot: ChunkHandler = (chunk, ctx) => {
+  if (chunk.thinkingSnapshot == null) return;
+  const thinkingStartedAt = ensureThinkingBlockStarted(ctx);
+  ctx.acc.thinking = chunk.thinkingSnapshot;
+  if (!ctx.isVisibleSession()) return;
+  const snapshot = chunk.thinkingSnapshot;
+  ctx.scheduleCommit((prev) => {
+    const next = [...prev];
+    const last = next[next.length - 1];
+    if (!last || last.role !== "assistant") return prev;
+    next[next.length - 1] = {
+      ...last,
+      thinking: snapshot,
+      thinkingStartedAt,
+      toolCalling: false,
+    };
+    return next;
+  });
+};
+
 export const handleDelta: ChunkHandler = (chunk, ctx) => {
   if (!chunk.delta) return;
   const delta = chunk.delta;

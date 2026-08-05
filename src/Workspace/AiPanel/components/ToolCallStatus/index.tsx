@@ -1,13 +1,13 @@
 import React from "react";
-import { Button } from "../../../../ui";
+import { PurrButton } from '@/purr-components';
 import {
-  EditOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  FileSearchOutlined,
-  ClockCircleOutlined,
-  RightOutlined,
-} from "../../../../ui";
+  EditIcon,
+  CheckCircleIcon,
+  CloseCircleIcon,
+  FileSearchIcon,
+  ClockIcon,
+  ChevronRightIcon,
+} from '@/purr-components';
 import "./index.scss";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";
@@ -63,7 +63,7 @@ function renderToolRow(row: ToolRow) {
         key={idx}
         className="bubble-tool-call-line bubble-tool-call-line--error"
       >
-        <CloseCircleOutlined className="bubble-tool-call-icon" />
+        <CloseCircleIcon className="bubble-tool-call-icon" />
         <span>
           失败：{label}
           — 信息有误（当前书籍章节目录中无对应章节或工具参数无效）
@@ -87,15 +87,15 @@ function renderToolRow(row: ToolRow) {
       className={`bubble-tool-call-line ${flicker ? "a-flicker-opacity" : ""} bubble-tool-call-line--${phase}`}
     >
       {phase === "done" ? (
-        <CheckCircleOutlined className="bubble-tool-call-icon" />
+        <CheckCircleIcon className="bubble-tool-call-icon" />
       ) : phase === "running" ? (
         isEditing ? (
-          <EditOutlined className="bubble-tool-call-icon" />
+          <EditIcon className="bubble-tool-call-icon" />
         ) : (
-          <FileSearchOutlined className="bubble-tool-call-icon" />
+          <FileSearchIcon className="bubble-tool-call-icon" />
         )
       ) : (
-        <ClockCircleOutlined className="bubble-tool-call-icon bubble-tool-call-icon--pending" />
+        <ClockIcon className="bubble-tool-call-icon bubble-tool-call-icon--pending" />
       )}
       <span>{statusText}</span>
     </div>
@@ -157,12 +157,12 @@ export default function ToolCallStatus({
 
   return (
     <div className="bubble-tool-calls">
-      <Button
+      <PurrButton
         type="text"
         size="small"
         className="bubble-tool-call-summary"
         icon={
-          <RightOutlined
+          <ChevronRightIcon
             className={`bubble-tool-call-chevron ${expanded ? "bubble-tool-call-chevron--open" : ""}`}
           />
         }
@@ -170,7 +170,7 @@ export default function ToolCallStatus({
       >
         <span>{getSummaryText(rows, done, n)}</span>
         {elapsed != null && <span className="bubble-tool-call-duration">{formatDuration(elapsed)}</span>}
-      </Button>
+      </PurrButton>
       {expanded ? (
         <div className="bubble-tool-call-details">
           {rows.map((row) => renderToolRow(row))}

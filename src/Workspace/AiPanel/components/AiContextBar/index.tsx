@@ -1,7 +1,7 @@
 import React from "react";
-import { Button, Popover, Tooltip } from "../../../../ui";
+import { PurrButton, PurrPopover, PurrTooltip } from '@/purr-components';
 import "./index.scss";
-import { BulbOutlined, LinkOutlined } from "../../../../ui";
+import { LinkIcon, StoryContextIcon } from '@/purr-components';
 import AssociatedChapterSelect from "./AssociatedChapterSelect";
 import AssociatedOutlineSelect from "./AssociatedOutlineSelect";
 import PromptTemplatePicker from "../PromptTemplatePicker";
@@ -64,9 +64,9 @@ export default function AiContextBar({
   if (bookId == null) return null;
   return (
     <div className="ai-context-bar">
-      <Tooltip title="关联章节与大纲">
+      <PurrTooltip title="关联章节与大纲">
         <span className="purr-popup-trigger">
-          <Popover
+          <PurrPopover
             trigger="click"
             open={contextPopoverOpen}
             onOpenChange={onContextPopoverOpenChange}
@@ -98,31 +98,26 @@ export default function AiContextBar({
               </div>
             }
           >
-          <Button
+          <PurrButton
             type="text"
             size="small"
-            icon={<LinkOutlined style={{ fontSize: 14 }} />}
+            icon={<LinkIcon style={{ fontSize: 14 }} />}
             className="ai-context-icon-btn"
             aria-label="关联章节与大纲"
           />
-          </Popover>
+          </PurrPopover>
         </span>
-      </Tooltip>
-      <Tooltip
-        title={
-          selectedMemoryIds.length || selectedForeshadowingIds.length
-            ? `已选 ${selectedMemoryIds.length} 条本书设定、${selectedForeshadowingIds.length} 条伏笔，发送时将注入`
-            : "选用本书设定注入"
-        }
-      >
-        <Button
+      </PurrTooltip>
+      <PurrTooltip title="注入设定">
+        <PurrButton
           type="text"
           size="small"
-          icon={<BulbOutlined style={{ fontSize: 14 }} />}
+          icon={<StoryContextIcon />}
+          aria-label="注入设定"
           onClick={onOpenMemoryModal}
           className={`ai-context-icon-btn ${selectedMemoryIds.length || selectedForeshadowingIds.length ? "ai-memory-btn--has-selection" : ""}`}
         />
-      </Tooltip>
+      </PurrTooltip>
       {onInsertPrompt ? (
         <PromptTemplatePicker
           currentPrompt={currentPrompt ?? ""}

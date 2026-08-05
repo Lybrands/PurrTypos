@@ -1,8 +1,8 @@
 import { services } from '@/services'
 import React, { forwardRef, useImperativeHandle } from 'react'
-import { EditOutlined, HistoryOutlined, ImportOutlined, UserOutlined } from '../../ui'
-import { Button, Empty, Tooltip, useToast } from '../../ui'
-import FloatingPanel from '../../components/FloatingPanel'
+import { EditIcon, HistoryIcon, ImportIcon, UserIcon } from '@/purr-components'
+import { PurrButton, PurrEmpty, PurrTooltip, usePurrToast } from '@/purr-components'
+import { PurrFloatingPanel } from '@/purr-components'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import OutlineHistoryDrawer from './OutlineHistoryDrawer'
 import { useWorkspace } from '../WorkspaceContext'
@@ -33,7 +33,7 @@ interface OutlineMarkdownPaneProps {
 
 const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPaneProps>(
   function OutlineMarkdownPane({ outlineId, markdownContent, onSaved }, ref) {
-    const appMessage = useToast()
+    const appMessage = usePurrToast()
     const { bookId, workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
 
     React.useEffect(() => {
@@ -190,8 +190,8 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       if (!content.trim()) {
         return (
           <div className="outline-markdown-pane outline-markdown-pane--empty">
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            <PurrEmpty
+              image={PurrEmpty.PRESENTED_IMAGE_SIMPLE}
               className="outline-markdown-empty"
               description={
                 <div className="outline-markdown-empty-text">
@@ -202,10 +202,10 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
                 </div>
               }
             >
-              <Button type="primary" size="small" onClick={handleEdit}>
+              <PurrButton type="primary" size="small" onClick={handleEdit}>
                 开始编写
-              </Button>
-            </Empty>
+              </PurrButton>
+            </PurrEmpty>
           </div>
         )
       }
@@ -213,11 +213,11 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
         <div className="outline-markdown-pane outline-markdown-pane--view story-background-view">
           <div className="story-background-view-header">
             <div className="story-background-toolbar story-background-toolbar-top">
-              <Tooltip title="人物">
-                <Button
+              <PurrTooltip title="人物">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<UserOutlined />}
+                  icon={<UserIcon />}
                   onClick={(e) => {
                     if (!characterPanelOpen) {
                       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -229,25 +229,25 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
                     setCharacterPanelOpen((v) => !v)
                   }}
                 />
-              </Tooltip>
-              <Tooltip title="历史">
-                <Button
+              </PurrTooltip>
+              <PurrTooltip title="历史">
+                <PurrButton
                   type="text"
                   size="small"
-                  icon={<HistoryOutlined />}
+                  icon={<HistoryIcon />}
                   onClick={() => setHistoryOpen(true)}
                 />
-              </Tooltip>
-              <Tooltip title="编辑">
-                <Button type="text" size="small" icon={<EditOutlined />} onClick={handleEdit} />
-              </Tooltip>
+              </PurrTooltip>
+              <PurrTooltip title="编辑">
+                <PurrButton type="text" size="small" icon={<EditIcon />} onClick={handleEdit} />
+              </PurrTooltip>
             </div>
           </div>
           <div className="story-background-content story-background-markdown">
             <MarkdownWithSearch content={content} searchQuery={workspaceSearchQuery} />
           </div>
           {characterPanelOpen && (
-            <FloatingPanel
+            <PurrFloatingPanel
               title="人物列表"
               width={400}
               open={characterPanelOpen}
@@ -261,7 +261,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
               <div className="outline-character-panel-body">
                 <CharacterTab bookId={bookId} hideHeader onActionActiveChange={handleCharacterActionActiveChange} />
               </div>
-            </FloatingPanel>
+            </PurrFloatingPanel>
           )}
           <OutlineHistoryDrawer
             outlineId={outlineId}
@@ -277,11 +277,11 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       <div className="outline-markdown-pane outline-markdown-pane--editing story-background-editing">
         <div className="story-background-editing-header">
           <div className="story-background-toolbar story-background-toolbar-top">
-            <Tooltip title="人物">
-              <Button
+            <PurrTooltip title="人物">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<UserOutlined />}
+                icon={<UserIcon />}
                 onClick={(e) => {
                   if (!characterPanelOpen) {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -293,33 +293,33 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
                   setCharacterPanelOpen((v) => !v)
                 }}
               />
-            </Tooltip>
-            <Tooltip title="历史">
-              <Button
+            </PurrTooltip>
+            <PurrTooltip title="历史">
+              <PurrButton
                 type="text"
                 size="small"
-                icon={<HistoryOutlined />}
+                icon={<HistoryIcon />}
                 onClick={() => setHistoryOpen(true)}
               />
-            </Tooltip>
-            <Tooltip title="导入文件">
-              <Button type="text" size="small" icon={<ImportOutlined />} onClick={handleImportFile} />
-            </Tooltip>
+            </PurrTooltip>
+            <PurrTooltip title="导入文件">
+              <PurrButton type="text" size="small" icon={<ImportIcon />} onClick={handleImportFile} />
+            </PurrTooltip>
           </div>
         </div>
         <div className="story-background-editor-wrap story-background-tiptap-wrap">
           <EditorContent editor={editor} className="story-background-tiptap-container" />
         </div>
         <div className="story-background-toolbar story-background-toolbar-bottom">
-          <Button type="primary" size="small" onClick={handleSave}>
+          <PurrButton type="primary" size="small" onClick={handleSave}>
             保存
-          </Button>
-          <Button size="small" onClick={handleCancel}>
+          </PurrButton>
+          <PurrButton size="small" onClick={handleCancel}>
             取消
-          </Button>
+          </PurrButton>
         </div>
         {characterPanelOpen && (
-          <FloatingPanel
+          <PurrFloatingPanel
             title="人物列表"
             width={400}
             open={characterPanelOpen}
@@ -333,7 +333,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
             <div className="outline-character-panel-body">
               <CharacterTab bookId={bookId} hideHeader onActionActiveChange={handleCharacterActionActiveChange} />
             </div>
-          </FloatingPanel>
+          </PurrFloatingPanel>
         )}
         <OutlineHistoryDrawer
           outlineId={outlineId}

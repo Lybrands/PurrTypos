@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from exceptions import AppError, NotFoundError
 from routers.books import delete_book
 from routers.screenplay import (
     accept_screenplay_document,
+    create_screenplay_agent_session,
     create_screenplay_document,
     create_screenplay_project,
     delete_screenplay_project,
@@ -19,6 +21,7 @@ from routers.screenplay import (
     get_screenplay_project,
     get_or_create_screenplay_agent_session,
     list_screenplay_documents,
+    list_screenplay_agent_sessions,
     list_screenplay_projects,
     list_screenplay_source_refs,
     restore_screenplay_document,
@@ -90,6 +93,28 @@ async def _create_original_project(title: str = "原创剧本"):
         approach="先找人物",
         premise="一个关于选择的故事",
     ))
+
+
+async def _record_agent_proposal(
+    db: DatabaseConnection,
+    *,
+    project_id: str,
+    run_id: str,
+    proposal: dict,
+) -> None:
+    session = (
+        await get_or_create_screenplay_agent_session(project_id)
+    )["data"]
+    await db.execute(
+        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
+        "VALUES (?, ?, 'done', '生成正式提案')",
+        [run_id, session["id"]],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_run_events (run_id, event_type, payload_json) "
+        "VALUES (?, 'screenplay.document_proposal', ?)",
+        [run_id, json.dumps(proposal, ensure_ascii=False)],
+    )
 
 
 def _original_beat_structure(brief_id: str) -> dict:
@@ -209,10 +234,15 @@ async def test_schema_creates_screenplay_tables(temp_db: DatabaseConnection):
         "SELECT name FROM sqlite_master WHERE type = 'table' "
         "AND name = 'screenplay_source_refs'"
     )
+    document_source_refs_table = await temp_db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'screenplay_document_source_refs'"
+    )
 
     assert project_table is not None
     assert document_table is not None
     assert source_refs_table is not None
+    assert document_source_refs_table is not None
 
 
 async def test_create_original_project_atomically_creates_initial_brief(
@@ -751,6 +781,33 @@ async def test_screenplay_agent_session_is_stable_and_deleted_with_project(
     ) is None
 
 
+async def test_screenplay_agent_sessions_can_be_created_and_listed(
+    temp_db: DatabaseConnection,
+):
+    created = await _create_original_project("多会话项目")
+    project_id = created["data"]["project"]["id"]
+    first = await get_or_create_screenplay_agent_session(project_id)
+    second = await create_screenplay_agent_session(project_id)
+
+    sessions = (await list_screenplay_agent_sessions(project_id))["data"]
+    assert [session["id"] for session in sessions] == [
+        first["data"]["id"],
+        second["data"]["id"],
+    ]
+    assert second["data"]["title"] == "新对话"
+
+    await temp_db.execute(
+        "UPDATE ai_sessions SET closed = 1 WHERE id = ?",
+        [first["data"]["id"]],
+    )
+    open_sessions = (await list_screenplay_agent_sessions(project_id))["data"]
+    all_sessions = (
+        await list_screenplay_agent_sessions(project_id, includeClosed=True)
+    )["data"]
+    assert [session["id"] for session in open_sessions] == [second["data"]["id"]]
+    assert len(all_sessions) == 2
+
+
 async def test_derived_document_must_belong_to_same_project(
     temp_db: DatabaseConnection,
 ):
@@ -846,14 +903,28 @@ async def test_document_creation_attaches_and_lists_agent_source_refs(
             "excerpt": "核心冲突",
         }],
     )
+    proposal = {
+        "kind": "creative_brief",
+        "title": "带来源简报",
+        "contentJson": {},
+        "contentText": "新版简报",
+        "derivedFromIds": [initial_id],
+    }
+    await _record_agent_proposal(
+        temp_db,
+        project_id=project_id,
+        run_id="run-route",
+        proposal=proposal,
+    )
 
     response = await create_screenplay_document(
         project_id,
         CreateScreenplayDocumentRequest(
-            kind="creative_brief",
-            title="带来源简报",
-            contentText="新版简报",
-            derivedFromIds=[initial_id],
+            kind=proposal["kind"],
+            title=proposal["title"],
+            contentJson=proposal["contentJson"],
+            contentText=proposal["contentText"],
+            derivedFromIds=proposal["derivedFromIds"],
             sourceRunId="run-route",
         ),
     )
@@ -869,6 +940,120 @@ async def test_document_creation_attaches_and_lists_agent_source_refs(
     assert len(refs) == 1
     assert refs[0]["document_id"] == document_id
     assert refs[0]["agent_run_id"] == "run-route"
+
+
+async def test_document_creation_follows_artifact_source_run_across_continuation(
+    temp_db: DatabaseConnection,
+):
+    created = await _create_original_project()
+    project_id = created["data"]["project"]["id"]
+    initial_id = created["data"]["initialDocument"]["id"]
+    artifact_id = "artifact-cross-run"
+    artifact_ref = (
+        "artifact://purrtypos.screenplay/creative_brief_entries/"
+        f"{artifact_id}"
+    )
+    await record_source_refs(
+        temp_db,
+        project_id=project_id,
+        agent_run_id="run-source-reader",
+        tool_name="readSourcePassages",
+        refs=[{
+            "sourceType": "chapter",
+            "sourceId": "chapter-cross-run",
+            "sourceRevision": "c" * 64,
+            "coverageMode": "full",
+            "excerpt": "跨 Run 素材凭证",
+        }],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, run_id, created_by_run_id, "
+        "status, resource_ref) VALUES (?, 'purrtypos.screenplay', "
+        "'creative_brief_entries', ?, ?, ?, 'finalized', ?)",
+        [
+            artifact_id,
+            project_id,
+            "run-source-reader",
+            "run-source-reader",
+            artifact_ref,
+        ],
+    )
+    proposal = {
+        "kind": "creative_brief",
+        "title": "跨 Run 提案",
+        "contentJson": {"artifactRef": artifact_ref},
+        "contentText": "最终提案由恢复后的 Run 收口。",
+        "derivedFromIds": [initial_id],
+    }
+    await _record_agent_proposal(
+        temp_db,
+        project_id=project_id,
+        run_id="run-finalizer",
+        proposal=proposal,
+    )
+
+    response = await create_screenplay_document(
+        project_id,
+        CreateScreenplayDocumentRequest(
+            kind=proposal["kind"],
+            title=proposal["title"],
+            contentJson=proposal["contentJson"],
+            contentText=proposal["contentText"],
+            derivedFromIds=proposal["derivedFromIds"],
+            sourceRunId="run-finalizer",
+        ),
+    )
+    refs = (
+        await list_screenplay_source_refs(
+            project_id,
+            document_id=response["data"]["id"],
+            agent_run_id=None,
+        )
+    )["data"]
+
+    assert len(refs) == 1
+    assert refs[0]["document_id"] == response["data"]["id"]
+    assert refs[0]["agent_run_id"] == "run-source-reader"
+
+
+async def test_document_creation_rejects_agent_text_without_proposal_effect(
+    temp_db: DatabaseConnection,
+):
+    created = await _create_original_project()
+    project_id = created["data"]["project"]["id"]
+    initial_id = created["data"]["initialDocument"]["id"]
+    session = (
+        await get_or_create_screenplay_agent_session(project_id)
+    )["data"]
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, final_response) "
+        "VALUES ('run-text-only', ?, 'done', '生成提案', ?)",
+        [
+            session["id"],
+            (
+                "<tool_call><function=proposeSourceAnalysis>"
+                "<parameter=contentText>伪提案</parameter>"
+                "</function></tool_call>"
+            ),
+        ],
+    )
+
+    with pytest.raises(AppError, match="没有产生与当前内容一致的正式提案"):
+        await create_screenplay_document(
+            project_id,
+            CreateScreenplayDocumentRequest(
+                kind="creative_brief",
+                title="不应保存的文本",
+                contentText="伪提案",
+                derivedFromIds=[initial_id],
+                sourceRunId="run-text-only",
+            ),
+        )
+
+    documents = await list_screenplay_documents(project_id)
+    assert len(documents["data"]) == 1
 
 
 async def test_restore_document_creates_new_draft_and_copies_source_refs(
@@ -889,14 +1074,27 @@ async def test_restore_document_creates_new_draft_and_copies_source_refs(
             "excerpt": "被恢复版本的来源",
         }],
     )
+    proposal = {
+        "kind": "creative_brief",
+        "title": "可恢复简报",
+        "contentJson": {"theme": "重逢"},
+        "contentText": "旧版本内容",
+        "derivedFromIds": [initial_id],
+    }
+    await _record_agent_proposal(
+        temp_db,
+        project_id=project_id,
+        run_id="run-restore",
+        proposal=proposal,
+    )
     historical = await create_screenplay_document(
         project_id,
         CreateScreenplayDocumentRequest(
-            kind="creative_brief",
-            title="可恢复简报",
-            contentJson={"theme": "重逢"},
-            contentText="旧版本内容",
-            derivedFromIds=[initial_id],
+            kind=proposal["kind"],
+            title=proposal["title"],
+            contentJson=proposal["contentJson"],
+            contentText=proposal["contentText"],
+            derivedFromIds=proposal["derivedFromIds"],
             sourceRunId="run-restore",
         ),
     )
@@ -927,9 +1125,7 @@ async def test_restore_document_creates_new_draft_and_copies_source_refs(
     assert len(copied_refs) == 1
     assert copied_refs[0]["source_id"] == "outline-restore"
     assert copied_refs[0]["source_revision"] == "b" * 64
-    assert copied_refs[0]["agent_run_id"].startswith(
-        f"restore:{restored['id']}:",
-    )
+    assert copied_refs[0]["agent_run_id"] == "run-restore"
 
 
 async def test_archived_project_is_read_only_until_restored(

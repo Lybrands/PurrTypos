@@ -50,22 +50,22 @@
 }
 
 .thinking-region__body {
-  max-height: 0;
+  display: grid;
   overflow: hidden;
+  grid-template-rows: 0fr;
   transition:
-    max-height 0.22s ease,
+    grid-template-rows 0.22s ease,
     border-color 0.15s ease;
   border-top: 1px solid transparent;
 }
 
 .thinking-region--open .thinking-region__body {
-  max-height: 320px;
+  grid-template-rows: 1fr;
 }
 
 .thinking-region__content {
-  max-height: 280px;
-  overflow-y: auto;
-  scrollbar-width: none;
+  min-height: 0;
+  overflow: hidden;
   padding: 7px 8px 5px 16px;
   margin-top: 4px;
   border-left: 1px dashed var(--border-light);
@@ -95,9 +95,10 @@
     overflow-x: auto;
   }
 
-  &::-webkit-scrollbar {
-    display: none;
-  }
+}
+
+.thinking-region--open .thinking-region__content {
+  overflow: visible;
 }
 
 .thinking-region:not(.thinking-region--open) .thinking-region__content {

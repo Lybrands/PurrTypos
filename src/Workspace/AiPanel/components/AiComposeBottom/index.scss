@@ -41,7 +41,7 @@
   white-space: nowrap;
 }
 
-/* Agent/Ask 模式下拉：胶囊形 + 彩色边框 + 同色柔光（参考图） */
+/* Agent/Ask 模式下拉：用边框与轻背景区分状态，避免浅色主题出现刺眼外发光。 */
 .ai-agent-select.purr-select {
   width: auto;
   min-width: 0;
@@ -52,42 +52,36 @@
   border: 1.5px solid var(--success);
   background: var(--bg-surface);
   color: var(--success);
-  box-shadow: 0 0 4px var(--success), 0 0 12px var(--success);
+  box-shadow: none;
   padding-inline: 12px;
   min-height: 28px;
 
-  /* Ask 模式：绿色边框 + 绿色柔光 + 绿色文字 */
+  /* Ask 模式：绿色边框与文字。 */
   &:not(.ai-agent-select--on) {
     border-color: var(--success);
     color: var(--success);
-    box-shadow:
-      0 0 4px var(--success),
-      0 0 12px var(--success);
+    box-shadow: none;
   }
 
   &:not(.ai-agent-select--on):hover {
     border-color: var(--success);
-    box-shadow:
-      0 0 6px var(--success),
-      0 0 16px var(--success);
+    background: color-mix(in srgb, var(--success) 7%, var(--bg-surface));
+    box-shadow: none;
   }
 
-  /* Agent 模式：蓝色边框 + 蓝色柔光 + 蓝色文字 */
+  /* Agent 模式：主题色边框与轻背景。 */
   &.ai-agent-select--on {
     border-color: var(--accent);
     background: var(--accent-dim);
     color: var(--accent);
-    box-shadow:
-      0 0 4px var(--accent),
-      0 0 12px var(--accent);
+    box-shadow: none;
   }
 
   &.ai-agent-select--on:hover {
     border-color: var(--accent-hover);
     color: var(--accent-hover);
-    box-shadow:
-      0 0 6px var(--accent-hover),
-      0 0 16px var(--accent-hover);
+    background: color-mix(in srgb, var(--accent-dim) 76%, var(--bg-surface));
+    box-shadow: none;
   }
 
 }

@@ -1,7 +1,7 @@
 import { services } from '@/services'
 import React from "react";
-import { FileTextOutlined, SettingOutlined } from "../../../../ui";
-import { Button, Empty, Popover, Tooltip, useConfirm, useToast } from "../../../../ui";
+import { FileTextIcon, SettingsIcon } from '@/purr-components';
+import { PurrButton, PurrEmpty, PurrPopover, PurrTooltip, usePurrConfirm, usePurrToast } from '@/purr-components';
 import {
   BUILTIN_PROMPT_TEMPLATES,
   PROMPT_PLACEHOLDERS,
@@ -30,8 +30,8 @@ export default function PromptTemplatePicker({
   context,
   disabled,
 }: PromptTemplatePickerProps) {
-  const appMessage = useToast();
-  const confirm = useConfirm();
+  const appMessage = usePurrToast();
+  const confirm = usePurrConfirm();
   const [open, setOpen] = React.useState(false);
   const [managerOpen, setManagerOpen] = React.useState(false);
   const [userTemplates, setUserTemplates] = React.useState<AiPromptTemplate[]>(
@@ -106,23 +106,23 @@ export default function PromptTemplatePicker({
     <div className="prompt-template-popover-content">
       <div className="prompt-template-popover-header">
         <span className="prompt-template-popover-title">提示词模版</span>
-        <Tooltip title="管理我的模版">
-          <Button
+        <PurrTooltip title="管理我的模版">
+          <PurrButton
             type="text"
             size="small"
-            icon={<SettingOutlined style={{ fontSize: 13 }} />}
+            icon={<SettingsIcon />}
             onClick={() => {
               setOpen(false);
               setManagerOpen(true);
             }}
           />
-        </Tooltip>
+        </PurrTooltip>
       </div>
 
       {loading && userTemplates.length === 0 ? (
         <div className="prompt-template-loading">加载中…</div>
       ) : allTemplates.length === 0 ? (
-        <Empty
+        <PurrEmpty
           image={false}
           description="暂无模版，点击右上设置图标新增"
           className="prompt-template-empty"
@@ -134,7 +134,7 @@ export default function PromptTemplatePicker({
             <ul className="prompt-template-list">
               {BUILTIN_PROMPT_TEMPLATES.map((t) => (
                 <li key={`b-${t.id}`}>
-                  <Tooltip
+                  <PurrTooltip
                     placement="left"
                     mouseEnterDelay={0.5}
                     title={
@@ -151,7 +151,7 @@ export default function PromptTemplatePicker({
                         {t.title}
                       </span>
                     </button>
-                  </Tooltip>
+                  </PurrTooltip>
                 </li>
               ))}
             </ul>
@@ -163,7 +163,7 @@ export default function PromptTemplatePicker({
               <ul className="prompt-template-list">
                 {userTemplates.map((t) => (
                   <li key={`u-${t.id}`}>
-                    <Tooltip
+                    <PurrTooltip
                       placement="left"
                       mouseEnterDelay={0.5}
                       title={
@@ -190,7 +190,7 @@ export default function PromptTemplatePicker({
                           {t.title}
                         </span>
                       </button>
-                    </Tooltip>
+                    </PurrTooltip>
                   </li>
                 ))}
               </ul>
@@ -204,9 +204,9 @@ export default function PromptTemplatePicker({
         {PROMPT_PLACEHOLDERS.map((p, i) => (
           <React.Fragment key={p.token}>
             {i > 0 ? " " : null}
-            <Tooltip title={p.description}>
+            <PurrTooltip title={p.description}>
               <code>{p.token}</code>
-            </Tooltip>
+            </PurrTooltip>
           </React.Fragment>
         ))}
       </div>
@@ -215,9 +215,9 @@ export default function PromptTemplatePicker({
 
   return (
     <>
-      <Tooltip title="插入提示词模版">
+      <PurrTooltip title="插入提示词模版">
         <span className="purr-popup-trigger">
-          <Popover
+          <PurrPopover
             open={open}
             onOpenChange={setOpen}
             arrow={false}
@@ -225,17 +225,17 @@ export default function PromptTemplatePicker({
             overlayClassName="prompt-template-popover"
             content={content}
           >
-          <Button
+          <PurrButton
             type="text"
             size="small"
-            icon={<FileTextOutlined style={{ fontSize: 14 }} />}
+            icon={<FileTextIcon style={{ fontSize: 14 }} />}
             className="ai-context-icon-btn"
             disabled={disabled}
             aria-label="插入提示词模版"
           />
-          </Popover>
+          </PurrPopover>
         </span>
-      </Tooltip>
+      </PurrTooltip>
       <PromptTemplateManagerModal
         open={managerOpen}
         onClose={() => {

@@ -5,6 +5,7 @@ Launched as a child process by Electron.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -19,7 +20,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from config import HOST, PORT, DATA_DIR
+from config import (
+    AGENT_ARTIFACT_MAINTENANCE_INTERVAL_SECONDS,
+    AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS,
+    DATA_DIR,
+    HOST,
+    PORT,
+)
 from exceptions import AppError, app_error_handler, generic_error_handler
 
 logging.basicConfig(
@@ -50,12 +57,19 @@ async def lifespan(application: FastAPI):
     _lifespan_owner = owner
 
     db: DatabaseConnection | None = None
+    execution_db: DatabaseConnection | None = None
     composition: AgentComposition | None = None
+    orphan_monitor: asyncio.Task[None] | None = None
+    artifact_monitor: asyncio.Task[None] | None = None
+    orphan_monitor_stop: asyncio.Event | None = None
+    artifact_monitor_stop: asyncio.Event | None = None
     try:
         data_dir = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else None
         db = DatabaseConnection(data_dir)
         await db.init()
         set_db(db)
+        execution_db = DatabaseConnection(data_dir)
+        await execution_db.init()
 
         from infrastructure.persistence.approval_store import (
             recover_pending_approvals,
@@ -67,6 +81,59 @@ async def lifespan(application: FastAPI):
                 "Recovered %s pending Agent approval(s) after restart",
                 recovered_approvals,
             )
+
+        from infrastructure.persistence.run_execution_store import (
+            recover_orphaned_runs,
+        )
+
+        recovered_runs = await recover_orphaned_runs(
+            execution_db,
+            after_restart=True,
+        )
+        if recovered_runs:
+            logging.getLogger(__name__).warning(
+                "Recovered %s abandoned Agent Run(s) after restart: %s",
+                len(recovered_runs),
+                ", ".join(recovered_runs),
+            )
+
+        from infrastructure.persistence.sqlite_long_task_repository import (
+            SqliteLongTaskRepository,
+        )
+
+        recovered_long_tasks = await SqliteLongTaskRepository(
+            db
+        ).recover_after_restart()
+        if recovered_long_tasks:
+            logging.getLogger(__name__).warning(
+                "Checkpointed %s abandoned long task(s) after restart: %s",
+                len(recovered_long_tasks),
+                ", ".join(recovered_long_tasks),
+            )
+
+        from agent_core.artifacts import ArtifactMaintenancePolicy
+        from application.artifact_maintenance import (
+            monitor_artifact_maintenance,
+            run_artifact_maintenance,
+        )
+        from infrastructure.persistence import (
+            sqlite_artifact_maintenance_repository as artifact_maintenance,
+        )
+
+        artifact_maintenance_repository = (
+            artifact_maintenance.SqliteArtifactMaintenanceRepository(db)
+        )
+        artifact_maintenance_policy = ArtifactMaintenancePolicy(
+            terminal_retention_ms=(
+                int(AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS * 1_000)
+                if AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS is not None
+                else None
+            ),
+        )
+        await run_artifact_maintenance(
+            artifact_maintenance_repository,
+            artifact_maintenance_policy,
+        )
 
         from infrastructure.persistence.delegation_store import (
             recover_delegations,
@@ -86,8 +153,35 @@ async def lifespan(application: FastAPI):
             if SKILLS_DIR and SKILLS_DIR != Path("")
             else Path(__file__).parent / "skills"
         )
-        composition = AgentComposition(db, skills_dir=skills_dir)
+        composition = AgentComposition(
+            db,
+            execution_db=execution_db,
+            skills_dir=skills_dir,
+        )
         set_agent_composition(composition)
+
+        from infrastructure.persistence.orphan_run_monitor import (
+            monitor_orphaned_runs,
+        )
+
+        orphan_monitor_stop = asyncio.Event()
+        artifact_monitor_stop = asyncio.Event()
+        orphan_monitor = asyncio.create_task(
+            monitor_orphaned_runs(
+                execution_db,
+                stop_event=orphan_monitor_stop,
+            )
+        )
+        artifact_monitor = asyncio.create_task(
+            monitor_artifact_maintenance(
+                artifact_maintenance_repository,
+                artifact_maintenance_policy,
+                poll_interval_seconds=(
+                    AGENT_ARTIFACT_MAINTENANCE_INTERVAL_SECONDS
+                ),
+                stop_event=artifact_monitor_stop,
+            )
+        )
 
         from routers import (
             ai,
@@ -138,17 +232,31 @@ async def lifespan(application: FastAPI):
         yield
     finally:
         try:
-            if composition is not None:
-                await composition.shutdown()
-                clear_agent_composition(composition)
+            if artifact_monitor_stop is not None:
+                artifact_monitor_stop.set()
+            if orphan_monitor_stop is not None:
+                orphan_monitor_stop.set()
+            if artifact_monitor is not None:
+                await artifact_monitor
+            if orphan_monitor is not None:
+                await orphan_monitor
         finally:
             try:
-                if db is not None:
-                    clear_db(db)
-                    await db.close()
+                if composition is not None:
+                    await composition.shutdown()
+                    clear_agent_composition(composition)
             finally:
-                if _lifespan_owner is owner:
-                    _lifespan_owner = None
+                try:
+                    if db is not None:
+                        clear_db(db)
+                        await db.close()
+                finally:
+                    try:
+                        if execution_db is not None:
+                            await execution_db.close()
+                    finally:
+                        if _lifespan_owner is owner:
+                            _lifespan_owner = None
 
 
 app = FastAPI(title="PurrTypos Backend", version="0.5.2", lifespan=lifespan)

@@ -7,7 +7,7 @@ import type { ChatMessage } from "./chat.types";
  *
  * 收纳原先散落在 AiPanel 里的几块相互关联的视图逻辑：
  * - Virtuoso 流式贴底跟随（用户未主动上滑时）；
- * - 发送新一轮后把本轮用户消息钉到顶部（pinNewTurnToTop）；
+ * - 发送新一轮后先定位本轮用户消息，再随首个流式增量贴底；
  * - 「回到底部」；
  *
  * 纯 UI 状态，不涉及业务数据。`combinedData` 由调用方合并历史+当前会话后传入。
@@ -57,8 +57,8 @@ export function useChatScroll({
     if (!pinNewTurnToTopRef.current) return;
     const total = combinedData.length;
     if (total < 2) return;
-    // 发送后优先展示本轮用户消息顶部，避免被流式自动贴底立即覆盖
-    setScrolledUpByReason(true, "pin-new-turn-top");
+    // 这次定位不是用户主动上滚，不能关闭随后思考/正文增量的自动跟随。
+    setScrolledUpByReason(false, "pin-new-turn-before-stream");
     requestAnimationFrame(() => {
       virtuosoRef.current?.scrollToIndex({
         index: total - 2,

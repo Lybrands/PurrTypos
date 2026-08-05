@@ -4,6 +4,18 @@ from infrastructure.models.profiles.registry import resolve_model_profile
 
 
 def test_registry_resolves_each_builtin_profile_and_generic_fallback():
+    glm = resolve_model_profile(
+        "zai:glm-5.2",
+        "glm-5.2",
+        "https://open.bigmodel.cn/api/paas/v4/",
+    )
+    assert glm.profile_id == "zai:glm-5.2"
+    assert glm.build_openai_extra_body(True) == {
+        "thinking": {"type": "enabled"},
+    }
+    assert glm.build_openai_extra_body(False) == {
+        "thinking": {"type": "disabled"},
+    }
     assert resolve_model_profile(
         "moonshot:kimi-k3",
         "kimi-k3",

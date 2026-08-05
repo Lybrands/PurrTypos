@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from agent_core.contracts import (
     RunCreateParams,
+    RunLineage,
     RunProvenance,
     RunStatus,
     StepExecutor,
@@ -131,6 +132,32 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "test.progress",
         "agentRunTrace",
     ]
+
+
+@pytest.mark.asyncio
+async def test_host_child_lineage_does_not_require_a_delegation_claim(run_db):
+    repository = SqliteRunRepository(run_db)
+
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="durable batch child",
+        mode="agent",
+        lineage=RunLineage(
+            parent_run_id="run-parent",
+            root_run_id="run-root",
+            delegation_id=None,
+            agent_role="screenplay_draft_batch_worker",
+            depth=1,
+        ),
+    ))
+
+    run = await get_run(run_db, run_id)
+    assert run is not None
+    assert run["parent_run_id"] == "run-parent"
+    assert run["root_run_id"] == "run-root"
+    assert run["delegation_id"] is None
+    assert run["agent_role"] == "screenplay_draft_batch_worker"
+    assert run["run_depth"] == 1
 
 
 @pytest.mark.asyncio
