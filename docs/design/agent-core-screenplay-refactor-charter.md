@@ -212,6 +212,20 @@ POST /api/screenplay/v2/operations/{operationId}/cancel
 
 完成状态：通用 `AgentComposition` 的 screenplay 引用已经归零，产品 Profile、Projector、Admission、Long Task 和上下文准备通过宿主 factory 注入。剧本 Operation 归属只认不可变 `RunBinding`，通用 Run、Work Item、Long Task、Artifact 的 `operation_id` 列和读写路径已直接删除，不迁移旧值。Artifact 是否已经投影由通用 projection receipt 表表示。旧产品请求模型、旧表和迁移审计设施均已删除；Core 包级 re-export 继续作为 Core 公共 API 存在，不承载剧本数据或业务语义。完整验证与故障注入结果见 [`agent-core-screenplay-phase5-verification.md`](agent-core-screenplay-phase5-verification.md)。
 
+### 对话质量重写：native 链路二次收口
+
+Phase 0–5 删除了旧 Writing Chat 双轨，但第一版 native Conversation 仍存在运行语义与对话质量问题。二次收口增加以下硬规则：
+
+- `ScreenplayAgentRunRequest` 是独立产品输入，不继承 `ChatStreamRequest`；通用 Run Service 只依赖结构化 `AgentRunInput`；
+- 咨询 Turn 启用项目与来源的 `READ` 工具，但绝不暴露 `PROPOSE`；正式 Operation 才同时拥有 `READ` 与 `PROPOSE`；
+- 咨询对话使用简洁的剧作顾问规则，正式 Operation 才注入 Artifact/阶段提交协议；
+- 同一 Session 同时最多一个 queued/running Turn，不再依赖渲染进程的临时发送队列；
+- 失败或取消 Turn 不进入后续模型历史；恢复会清除旧半截回答和旧 Run/Revision 引用，并递增 Turn attempt；
+- Conversation event 只做 Snapshot 失效通知，永不复制 `screenplay.document_proposal` 全文；
+- 页面以 SSE cursor 通知触发 Snapshot 刷新，低频轮询只作为订阅断线的恢复路径。
+
+此前 native Conversation 表缺少 attempt，且无法安全表达新恢复语义。测试阶段启动时只定向删除这一个不兼容的旧 Conversation/Events 数据集；Project、Operation、Revision、Head、Artifact 与来源数据保持不变。
+
 ## 8. 每阶段验收门槛
 
 每个阶段都必须满足：

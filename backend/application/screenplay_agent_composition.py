@@ -9,7 +9,6 @@ from dataclasses import replace
 from application.agent_profile_registry import AgentProfileRegistration
 from application.screenplay_long_task_execution import ScreenplayLongTaskExecution
 from application.screenplay_long_tasks import ScreenplayLongTaskDispatcher
-from application.screenplay_sse_mapping import screenplay_event_to_sse_chunk
 from application.screenplay_v2_proposal_projector import (
     ScreenplayV2ProposalProjector,
 )
@@ -61,7 +60,6 @@ class ScreenplayAgentComposition:
             id=self.profile_id,
             domain_namespace=self.namespace,
             adapter=self.adapter,
-            event_mapper=screenplay_event_to_sse_chunk,
         )
 
     async def prepare_request(self, request):

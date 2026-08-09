@@ -27,11 +27,12 @@ class InMemoryToolCatalog:
         self._by_name = MappingProxyType(
             {registration.schema.name: registration for registration in snapshot}
         )
+        self._names = frozenset(self._by_name)
         self._enablement = enablement
 
     @property
     def names(self) -> frozenset[str]:
-        return frozenset(self._by_name)
+        return self._names
 
     def registrations(self) -> tuple[ToolRegistration, ...]:
         return self._registrations

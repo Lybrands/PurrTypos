@@ -93,6 +93,29 @@ async def test_long_task_runs_dependency_order_and_retries_one_unit(long_task_db
     ]
 
 
+def test_long_task_contract_rejects_dependency_cycles():
+    with pytest.raises(ValueError, match="cycle"):
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-1",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(
+                    id="batch-1",
+                    position=0,
+                    dependencies=("batch-2",),
+                ),
+                LongTaskUnitSpec(
+                    id="batch-2",
+                    position=1,
+                    dependencies=("batch-1",),
+                ),
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_long_task_runs_independent_planner_branches_concurrently(
     long_task_db,

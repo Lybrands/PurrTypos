@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from agent_core.contracts.normalization import non_negative_int, required_text
+
 
 class RecoveryAction(StrEnum):
     RETRY_MODEL = "retry_model"
@@ -75,19 +77,17 @@ class RecoveryRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "cause", RecoveryCause(self.cause))
         object.__setattr__(self, "action", RecoveryAction(self.action))
-        scope = str(self.scope or "").strip()
-        if not scope:
-            raise ValueError("recovery scope is required")
-        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "scope", required_text(
+            self.scope, "recovery scope"
+        ))
         object.__setattr__(
             self,
             "remaining_model_rounds",
             max(0, int(self.remaining_model_rounds)),
         )
-        minimum = int(self.minimum_remaining_rounds)
-        if minimum < 0:
-            raise ValueError("minimum remaining rounds must be non-negative")
-        object.__setattr__(self, "minimum_remaining_rounds", minimum)
+        object.__setattr__(self, "minimum_remaining_rounds", non_negative_int(
+            self.minimum_remaining_rounds, "minimum remaining rounds"
+        ))
         object.__setattr__(self, "retryable", bool(self.retryable))
         object.__setattr__(
             self,

@@ -87,6 +87,10 @@ def project_intermediate_tool_context(
     }
     selected: list[AgentMessage] = []
     compacted: list[str] = []
+    receipts = {
+        receipt.tool_call_id: receipt
+        for receipt in evidence_store.tool_result_receipts()
+    } if evidence_store is not None else {}
     for message in selected_context:
         if (
             evidence_store is None
@@ -95,14 +99,7 @@ def project_intermediate_tool_context(
         ):
             selected.append(message)
             continue
-        receipt = next(
-            (
-                item
-                for item in evidence_store.tool_result_receipts()
-                if item.tool_call_id == message.tool_call_id
-            ),
-            None,
-        )
+        receipt = receipts.get(message.tool_call_id)
         producer_contract = (
             contracts.get(receipt.tool_name)
             if receipt is not None

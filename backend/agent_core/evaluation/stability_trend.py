@@ -7,6 +7,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    non_negative_integer as _non_negative_integer,
+)
 
 _UNHEALTHY_RUN_STATUSES = frozenset({"blocked", "failed"})
 _CHECK_NOT_APPLICABLE = "not_applicable"
@@ -355,19 +359,6 @@ def _streak_check(
 
 def _rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _non_negative_integer(value: Any) -> int:
-    if value is None or isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
 __all__ = [

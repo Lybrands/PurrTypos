@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
+from agent_core.contracts.normalization import (
+    optional_text,
+    positive_int,
+    required_text,
+)
 from agent_core.json_values import freeze_json_mapping
 
 
@@ -46,15 +51,8 @@ class WorkItemCreateCommand:
 
     def __post_init__(self) -> None:
         for name in ("namespace", "kind", "owner_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"work item {name} is required")
-            object.__setattr__(self, name, value)
-        object.__setattr__(
-            self,
-            "created_by_run_id",
-            str(self.created_by_run_id or "").strip() or None,
-        )
+            object.__setattr__(self, name, required_text(getattr(self, name), f"work item {name}"))
+        object.__setattr__(self, "created_by_run_id", optional_text(self.created_by_run_id))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -71,20 +69,10 @@ class WorkItemRecord:
 
     def __post_init__(self) -> None:
         for name in ("id", "namespace", "kind", "owner_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"work item {name} is required")
-            object.__setattr__(self, name, value)
-        object.__setattr__(
-            self,
-            "created_by_run_id",
-            str(self.created_by_run_id or "").strip() or None,
-        )
+            object.__setattr__(self, name, required_text(getattr(self, name), f"work item {name}"))
+        object.__setattr__(self, "created_by_run_id", optional_text(self.created_by_run_id))
         object.__setattr__(self, "status", WorkItemStatus(self.status))
-        revision = int(self.revision)
-        if revision <= 0:
-            raise ValueError("work item revision must be positive")
-        object.__setattr__(self, "revision", revision)
+        object.__setattr__(self, "revision", positive_int(self.revision, "work item revision"))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -94,14 +82,8 @@ class WorkItemTransitionCommand:
     expected_revision: int
 
     def __post_init__(self) -> None:
-        work_item_id = str(self.work_item_id or "").strip()
-        if not work_item_id:
-            raise ValueError("work_item_id is required")
-        object.__setattr__(self, "work_item_id", work_item_id)
-        revision = int(self.expected_revision)
-        if revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        object.__setattr__(self, "expected_revision", revision)
+        object.__setattr__(self, "work_item_id", required_text(self.work_item_id, "work_item_id"))
+        object.__setattr__(self, "expected_revision", positive_int(self.expected_revision, "expected_revision"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,15 +95,9 @@ class WorkItemRunLinkCommand:
 
     def __post_init__(self) -> None:
         for name in ("work_item_id", "run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"work item Run link {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(getattr(self, name), f"work item Run link {name}"))
         object.__setattr__(self, "relation", WorkItemRunRelation(self.relation))
-        revision = int(self.expected_revision)
-        if revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        object.__setattr__(self, "expected_revision", revision)
+        object.__setattr__(self, "expected_revision", positive_int(self.expected_revision, "expected_revision"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,15 +109,9 @@ class WorkItemRunLink:
 
     def __post_init__(self) -> None:
         for name in ("work_item_id", "run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"work item Run link {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(getattr(self, name), f"work item Run link {name}"))
         object.__setattr__(self, "relation", WorkItemRunRelation(self.relation))
-        revision = int(self.work_item_revision)
-        if revision <= 0:
-            raise ValueError("work_item_revision must be positive")
-        object.__setattr__(self, "work_item_revision", revision)
+        object.__setattr__(self, "work_item_revision", positive_int(self.work_item_revision, "work_item_revision"))
 
 
 __all__ = [

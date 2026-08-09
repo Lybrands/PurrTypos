@@ -277,10 +277,7 @@ function toolResultFailure(value: unknown): {
   };
 }
 
-function sourceLabel(streamId: string, request: AiStreamRequest): string {
-  if (request.agentProfile === "screenplay" || streamId.startsWith("screenplay-")) {
-    return "剧本 Agent";
-  }
+function sourceLabel(streamId: string): string {
   if (streamId.startsWith("chat-")) return "主对话";
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器改写";
@@ -288,25 +285,7 @@ function sourceLabel(streamId: string, request: AiStreamRequest): string {
   return "AI 对话";
 }
 
-const SCREENPLAY_STAGE_LABELS: Record<string, string> = {
-  orientation: "原作分析",
-  brief: "创作简报",
-  structure: "剧本结构",
-  scenes: "场景表",
-  draft: "场景正文",
-  review: "剧本审阅",
-  completed: "已完成项目",
-};
-
 function initialTaskType(streamId: string, request: AiStreamRequest): string {
-  if (request.agentProfile === "screenplay") {
-    if (request.screenplayTaskIntent === "stage_deliverable") {
-      const stage = SCREENPLAY_STAGE_LABELS[String(request.activeStage || "")]
-        || String(request.activeStage || "当前阶段");
-      return `剧本阶段交付 · ${stage}`;
-    }
-    return "剧本自由对话";
-  }
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器选区改写";
   if (streamId.startsWith("ghost-completion-")) return "幽灵补全";
@@ -736,7 +715,7 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
   const run: AiDebugRun = {
     id: streamId,
     sessionId: request.sessionId,
-    source: sourceLabel(streamId, request),
+    source: sourceLabel(streamId),
     taskType: initialTaskType(streamId, request),
     status: "starting",
     startedAt: now,
@@ -751,7 +730,7 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
       id: ++eventSequence,
       at: now,
       type: "request",
-      label: `开始 ${sourceLabel(streamId, request)}`,
+      label: `开始 ${sourceLabel(streamId)}`,
       payload: { messages, ...sanitized },
     }],
     eventCount: 1,

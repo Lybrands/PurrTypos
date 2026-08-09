@@ -26,6 +26,7 @@ from agent_core.contracts import (
     ToolSchema,
     TraceRecord,
 )
+from agent_core.contracts.normalization import optional_positive_int
 from agent_core.events import AgentEvent
 from agent_core.json_values import freeze_json_mapping
 from agent_core.ports.model import CancellationSignal
@@ -71,7 +72,6 @@ class ToolRegistration:
     # Long-running host workflows may own durable state transitions outside
     # Core's single tool-receipt transaction.
     host_managed_durability: bool = False
-    planning_dependencies: tuple[str, ...] = ()
     context_contract: ToolContextContract = ToolContextContract()
     data_contract: ToolDataContract = ToolDataContract()
     max_argument_chars: int | None = None
@@ -81,15 +81,6 @@ class ToolRegistration:
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
-            "planning_dependencies",
-            tuple(dict.fromkeys(
-                str(name).strip()
-                for name in self.planning_dependencies
-                if str(name).strip()
-            )),
-        )
-        object.__setattr__(
-            self,
             "host_managed_durability",
             bool(self.host_managed_durability),
         )
@@ -97,11 +88,9 @@ class ToolRegistration:
             raise TypeError("tool context_contract must be ToolContextContract")
         if not isinstance(self.data_contract, ToolDataContract):
             raise TypeError("tool data_contract must be ToolDataContract")
-        if self.max_argument_chars is not None:
-            limit = int(self.max_argument_chars)
-            if limit <= 0:
-                raise ValueError("tool max_argument_chars must be positive")
-            object.__setattr__(self, "max_argument_chars", limit)
+        object.__setattr__(self, "max_argument_chars", optional_positive_int(
+            self.max_argument_chars, "tool max_argument_chars"
+        ))
         if (
             self.planning_capability is not None
             and not isinstance(self.planning_capability, ToolSchema)
@@ -122,11 +111,7 @@ class ToolRegistration:
 
     @property
     def prerequisite_tools(self) -> tuple[str, ...]:
-        """Return the host-owned prerequisites with legacy compatibility."""
-
-        if self.context_contract.prerequisite_tools:
-            return self.context_contract.prerequisite_tools
-        return self.planning_dependencies
+        return self.context_contract.prerequisite_tools
 
 
 @runtime_checkable

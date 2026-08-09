@@ -7,6 +7,14 @@ from enum import StrEnum
 
 from agent_core.artifacts.contracts import ArtifactStatus
 from agent_core.artifacts.scope import ArtifactScope
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_non_negative_int,
+    optional_positive_int,
+    optional_text,
+    positive_int,
+    required_text,
+)
 from agent_core.work_items.contracts import WorkItemRunRelation, WorkItemStatus
 
 
@@ -44,10 +52,9 @@ class ArtifactScopeBinding:
     def __post_init__(self) -> None:
         object.__setattr__(self, "scope", ArtifactScope(self.scope))
         for name in ("scope_id", "created_by_run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact scope binding {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact scope binding {name}"
+            ))
         if (
             self.scope is ArtifactScope.RUN
             and self.scope_id != self.created_by_run_id
@@ -82,30 +89,26 @@ class ArtifactResumeCandidate:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "namespace", "kind", "owner_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact candidate {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact candidate {name}"
+            ))
         if not isinstance(self.binding, ArtifactScopeBinding):
             raise TypeError("artifact candidate binding is invalid")
         object.__setattr__(self, "status", ArtifactStatus(self.status))
-        revision = int(self.revision)
-        if revision <= 0:
-            raise ValueError("artifact candidate revision must be positive")
-        object.__setattr__(self, "revision", revision)
-        committed = int(self.committed_item_count)
-        if committed < 0:
-            raise ValueError("committed_item_count must be non-negative")
-        object.__setattr__(self, "committed_item_count", committed)
+        object.__setattr__(self, "revision", positive_int(
+            self.revision, "artifact candidate revision"
+        ))
+        object.__setattr__(self, "committed_item_count", non_negative_int(
+            self.committed_item_count, "committed_item_count"
+        ))
+        object.__setattr__(self, "expected_item_count", optional_non_negative_int(
+            self.expected_item_count, "expected_item_count"
+        ))
         if self.expected_item_count is not None:
-            expected = int(self.expected_item_count)
-            if expected < 0:
-                raise ValueError("expected_item_count must be non-negative")
-            if committed > expected:
+            if self.committed_item_count > self.expected_item_count:
                 raise ValueError(
                     "committed_item_count cannot exceed expected_item_count"
                 )
-            object.__setattr__(self, "expected_item_count", expected)
         if self.binding.scope is ArtifactScope.WORK_ITEM:
             if self.work_item_status is None:
                 raise ValueError(
@@ -133,20 +136,14 @@ class ArtifactAccessRequest:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact access {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact access {name}"
+            ))
         object.__setattr__(self, "mode", ArtifactAccessMode(self.mode))
-        revision = int(self.expected_revision)
-        if revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        object.__setattr__(self, "expected_revision", revision)
-        object.__setattr__(
-            self,
-            "work_item_id",
-            str(self.work_item_id or "").strip() or None,
-        )
+        object.__setattr__(self, "expected_revision", positive_int(
+            self.expected_revision, "expected_revision"
+        ))
+        object.__setattr__(self, "work_item_id", optional_text(self.work_item_id))
         if self.work_item_run_relation is not None:
             object.__setattr__(
                 self,
@@ -167,10 +164,9 @@ class ArtifactAccessDecision:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact decision {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact decision {name}"
+            ))
         object.__setattr__(self, "mode", ArtifactAccessMode(self.mode))
         object.__setattr__(self, "allowed", bool(self.allowed))
         object.__setattr__(self, "reason", ArtifactAccessReason(self.reason))
@@ -178,10 +174,9 @@ class ArtifactAccessDecision:
             raise ValueError(
                 "artifact access decision reason does not match its verdict"
             )
-        revision = int(self.artifact_revision)
-        if revision <= 0:
-            raise ValueError("artifact_revision must be positive")
-        object.__setattr__(self, "artifact_revision", revision)
+        object.__setattr__(self, "artifact_revision", positive_int(
+            self.artifact_revision, "artifact_revision"
+        ))
         requires_claim = bool(self.requires_write_claim)
         if requires_claim and (
             not self.allowed or self.mode is not ArtifactAccessMode.WRITE
@@ -202,18 +197,15 @@ class ArtifactWriteClaimCommand:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "work_item_id", "run_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact claim {name} is required")
-            object.__setattr__(self, name, value)
-        revision = int(self.expected_revision)
-        if revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        object.__setattr__(self, "expected_revision", revision)
-        duration = int(self.lease_duration_ms)
-        if duration <= 0:
-            raise ValueError("lease_duration_ms must be positive")
-        object.__setattr__(self, "lease_duration_ms", duration)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact claim {name}"
+            ))
+        object.__setattr__(self, "expected_revision", positive_int(
+            self.expected_revision, "expected_revision"
+        ))
+        object.__setattr__(self, "lease_duration_ms", positive_int(
+            self.lease_duration_ms, "lease_duration_ms"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,18 +224,15 @@ class ArtifactWriteClaim:
             "run_id",
             "claim_token",
         ):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact write claim {name} is required")
-            object.__setattr__(self, name, value)
-        revision = int(self.acquired_revision)
-        if revision <= 0:
-            raise ValueError("acquired_revision must be positive")
-        object.__setattr__(self, "acquired_revision", revision)
-        expires_at = int(self.expires_at_ms)
-        if expires_at <= 0:
-            raise ValueError("expires_at_ms must be positive")
-        object.__setattr__(self, "expires_at_ms", expires_at)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact write claim {name}"
+            ))
+        object.__setattr__(self, "acquired_revision", positive_int(
+            self.acquired_revision, "acquired_revision"
+        ))
+        object.__setattr__(self, "expires_at_ms", positive_int(
+            self.expires_at_ms, "expires_at_ms"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,15 +244,12 @@ class ArtifactClaimLeaseCommand:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "run_id", "claim_token"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact claim lease {name} is required")
-            object.__setattr__(self, name, value)
-        if self.lease_duration_ms is not None:
-            duration = int(self.lease_duration_ms)
-            if duration <= 0:
-                raise ValueError("lease_duration_ms must be positive")
-            object.__setattr__(self, "lease_duration_ms", duration)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"artifact claim lease {name}"
+            ))
+        object.__setattr__(self, "lease_duration_ms", optional_positive_int(
+            self.lease_duration_ms, "lease_duration_ms"
+        ))
 
 
 @dataclass(frozen=True, slots=True)

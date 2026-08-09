@@ -58,6 +58,23 @@ def test_resolver_reports_the_boundary_that_reduces_the_request():
     assert model_limited.limiting_factor is OutputBudgetLimit.MODEL_CAPABILITY
 
 
+def test_resolver_preserves_limit_precedence_when_values_tie():
+    budget = resolve_output_budget(
+        policy=OutputBudgetPolicy(
+            key="tie",
+            base_tokens=30_000,
+            per_work_unit_tokens=0,
+            safety_factor=1,
+            hard_cap_tokens=20_000,
+        ),
+        capabilities=ModelOutputCapabilities(max_output_tokens=20_000),
+        context_window_tokens=256_000,
+    )
+
+    assert budget.effective_tokens == 20_000
+    assert budget.limiting_factor is OutputBudgetLimit.TASK_HARD_CAP
+
+
 def test_screenplay_writer_budget_scales_with_assigned_scene_count():
     request = AgentRunRequest(
         messages=(),

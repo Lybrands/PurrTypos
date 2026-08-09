@@ -6,6 +6,11 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    as_sequence as _sequence,
+    non_negative_integer as _non_negative_integer,
+)
 from agent_core.evaluation.diagnostics import (
     TRACE_EVENT_TYPE,
     build_canonical_run_observation,
@@ -279,23 +284,6 @@ def _tool_call_observations(
                 "errorCode": error_code or current.get("errorCode") or "",
             })
     return observations
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _sequence(value: Any) -> tuple[Any, ...]:
-    return tuple(value) if isinstance(value, (list, tuple)) else ()
-
-
-def _non_negative_integer(value: Any) -> int:
-    if value is None or isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
 __all__ = ["evaluate_agent_run_stability"]

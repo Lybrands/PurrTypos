@@ -101,7 +101,10 @@ import {
   screenplaySourceToV2,
 } from './operationWorkflow'
 import { ScreenplayConversationClient } from './conversationClient'
-import type { ScreenplayConversationState } from './conversationState'
+import {
+  isScreenplayTurnTerminal,
+  type ScreenplayConversationState,
+} from './conversationState'
 import RevisionLibraryModal from './RevisionLibraryModal'
 import {
   documentEpisodesFromRevision,
@@ -138,15 +141,6 @@ interface ScreenplayAgentPageProps {
   onOpenBookshelf: () => void
   onOpenSettings: () => void
   onBack: () => void
-}
-
-interface QueuedScreenplaySubmission {
-  sessionId: number
-  prompt: string
-  taskIntent: 'chat' | 'stage_deliverable'
-  modelId: string
-  draftSceneCount: number
-  draftScope: ScreenplayDraftScope
 }
 
 interface ScreenplayConversationDisplayMessage {
@@ -621,6 +615,7 @@ export default function ScreenplayAgentPage({
     getStoredScreenplayAgentModelId,
   )
   const [agentPrompt, setAgentPrompt] = React.useState('')
+  const [agentSubmitting, setAgentSubmitting] = React.useState(false)
   const [agentConversationState, setAgentConversationState] = React.useState<
     ScreenplayConversationState | null
   >(null)
@@ -628,9 +623,6 @@ export default function ScreenplayAgentPage({
   const [agentProposal, setAgentProposal] = React.useState<ScreenplayDocumentProposal | null>(null)
   const [agentRevisionRef, setAgentRevisionRef] = React.useState<ScreenplayRevisionRef | null>(null)
   const [agentOperationId, setAgentOperationId] = React.useState<string | null>(null)
-  const [agentQueuedSubmissions, setAgentQueuedSubmissions] = React.useState<
-    QueuedScreenplaySubmission[]
-  >([])
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
@@ -665,7 +657,6 @@ export default function ScreenplayAgentPage({
       ? operationRevision.id
       : null
   const hydratedAgentRevisionIdRef = React.useRef<string | null>(null)
-  const agentQueuedSubmissionsRef = React.useRef<QueuedScreenplaySubmission[]>([])
   const activeAgentSessionRef = React.useRef<number | null>(null)
   const agentConversationStateRef = React.useRef<ScreenplayConversationState | null>(null)
   const conversationPollErrorRef = React.useRef('')
@@ -699,13 +690,8 @@ export default function ScreenplayAgentPage({
   ), [agentConversationState])
   const latestConversationTurn = agentConversationState?.turns.at(-1) ?? null
   const agentRunning = activeConversationTurn != null
-  const agentConversationLoading = agentRunning
   const agentRunId = latestConversationTurn?.runId || ''
   const agentResponse = latestConversationTurn?.assistantContent || ''
-
-  React.useEffect(() => {
-    agentQueuedSubmissionsRef.current = agentQueuedSubmissions
-  }, [agentQueuedSubmissions])
 
   React.useEffect(() => {
     activeAgentSessionRef.current = agentSessionId
@@ -1545,7 +1531,6 @@ export default function ScreenplayAgentPage({
     setAgentRevisionRef(null)
     hydratedAgentRevisionIdRef.current = null
     setAgentOperationId(null)
-    setAgentQueuedSubmissions([])
     setProjectLoading(true)
     setStage('project')
     try {
@@ -1602,10 +1587,36 @@ export default function ScreenplayAgentPage({
   React.useEffect(() => {
     if (!openedProject || agentSessionId == null) return undefined
     let stopped = false
-    let timer: ReturnType<typeof setTimeout> | null = null
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null
+    let wakeTimer: ReturnType<typeof setTimeout> | null = null
+    let stopWatching: (() => void) | null = null
+    let polling = false
+    let rerun = false
     let lastReconciled = ''
 
+    const wake = () => {
+      if (stopped) return
+      if (polling) {
+        rerun = true
+        return
+      }
+      if (wakeTimer) return
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer)
+        fallbackTimer = null
+      }
+      wakeTimer = setTimeout(() => {
+        wakeTimer = null
+        void poll()
+      }, 80)
+    }
+
     const poll = async () => {
+      if (polling) {
+        rerun = true
+        return
+      }
+      polling = true
       try {
         const current = agentConversationStateRef.current
         const next = current && current.sessionId === agentSessionId
@@ -1617,6 +1628,9 @@ export default function ScreenplayAgentPage({
           agentConversationStateRef.current = next
           setAgentConversationState(next)
         }
+        if (!stopWatching) {
+          stopWatching = conversationClient.watch(next, wake)
+        }
         const latestOperation = [...next.turns].reverse().find(
           (turn) => turn.operationId,
         )
@@ -1625,7 +1639,7 @@ export default function ScreenplayAgentPage({
         }
         for (const turnId of [...resumingTurnIdsRef.current]) {
           const turn = next.turns.find((item) => item.id === turnId)
-          if (!turn || turn.status === 'running' || ['completed', 'failed', 'canceled'].includes(turn.status)) {
+          if (turn?.status !== 'queued') {
             resumingTurnIdsRef.current.delete(turnId)
           }
         }
@@ -1656,7 +1670,7 @@ export default function ScreenplayAgentPage({
         if (
           latest
           && reconciliationKey !== lastReconciled
-          && ['completed', 'failed', 'canceled'].includes(latest.status)
+          && isScreenplayTurnTerminal(latest)
         ) {
           lastReconciled = reconciliationKey
           void Promise.all([
@@ -1676,18 +1690,29 @@ export default function ScreenplayAgentPage({
           }
         }
       } finally {
+        polling = false
         if (!stopped) {
-          const active = agentConversationStateRef.current?.turns.some(
-            (turn) => turn.status === 'queued' || turn.status === 'running',
-          )
-          timer = setTimeout(poll, active ? 300 : 1200)
+          if (rerun) {
+            rerun = false
+            wake()
+          } else {
+            const active = agentConversationStateRef.current?.turns.some(
+              (turn) => turn.status === 'queued' || turn.status === 'running',
+            )
+            fallbackTimer = setTimeout(
+              () => void poll(),
+              active ? 2000 : 10000,
+            )
+          }
         }
       }
     }
     void poll()
     return () => {
       stopped = true
-      if (timer) clearTimeout(timer)
+      stopWatching?.()
+      if (fallbackTimer) clearTimeout(fallbackTimer)
+      if (wakeTimer) clearTimeout(wakeTimer)
     }
   }, [
     agentSessionId,
@@ -1750,9 +1775,6 @@ export default function ScreenplayAgentPage({
         message.error(result.error || '关闭对话失败')
         return
       }
-      setAgentQueuedSubmissions((current) => current.filter(
-        (submission) => submission.sessionId !== session.id,
-      ))
       const remaining = agentSessions.filter((item) => item.id !== session.id)
       setAgentSessions(remaining)
       if (session.id !== agentSessionId) return
@@ -1871,25 +1893,13 @@ export default function ScreenplayAgentPage({
       onOpenSettings()
       return
     }
-    if (agentConversationLoading) {
-      const nextQueue = [
-        ...agentQueuedSubmissionsRef.current,
-        {
-          sessionId: agentSessionId,
-          prompt,
-          taskIntent,
-          modelId: requestedModelId,
-          draftSceneCount: resolvedDraftSceneCount,
-          draftScope: resolvedDraftScope,
-        },
-      ]
-      agentQueuedSubmissionsRef.current = nextQueue
-      setAgentQueuedSubmissions(nextQueue)
-      setAgentPrompt('')
-      message.info(`已加入发送队列 · ${nextQueue.length} 条等待中`)
+    if (agentRunning) {
+      message.info('当前对话仍在执行，请等待完成或先停止本轮')
       return
     }
+    if (agentSubmitting) return
 
+    setAgentSubmitting(true)
     try {
       let operation: Parameters<
         typeof services.screenplay.submitScreenplayConversationTurn
@@ -1927,10 +1937,6 @@ export default function ScreenplayAgentPage({
           }),
         }
       }
-      setAgentPrompt('')
-      setAgentProposal(null)
-      setAgentRevisionRef(null)
-      hydratedAgentRevisionIdRef.current = null
       const turn = await conversationClient.submit({
         commandId: createScreenplayCommandId('submit-turn'),
         projectId: openedProject.id,
@@ -1939,19 +1945,26 @@ export default function ScreenplayAgentPage({
         ...(operation ? { operation } : {}),
         runtime: runtimeForModel(model),
       })
+      if (activeAgentSessionRef.current !== agentSessionId) return
+      setAgentPrompt('')
+      setAgentProposal(null)
+      setAgentRevisionRef(null)
+      hydratedAgentRevisionIdRef.current = null
       setAgentOperationId(turn.operationId)
       const next = await conversationClient.load(openedProject.id, agentSessionId)
-      if (activeAgentSessionRef.current === agentSessionId) {
-        agentConversationStateRef.current = next
-        setAgentConversationState(next)
-      }
+      if (activeAgentSessionRef.current !== agentSessionId) return
+      agentConversationStateRef.current = next
+      setAgentConversationState(next)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '提交剧本对话失败')
+    } finally {
+      setAgentSubmitting(false)
     }
   }, [
-    agentConversationLoading,
+    agentRunning,
     agentPrompt,
     agentSessionId,
+    agentSubmitting,
     conversationClient,
     documentEpisodes,
     draftEpisodes,
@@ -1964,38 +1977,6 @@ export default function ScreenplayAgentPage({
     projectWorkspace,
     runtimeForModel,
     selectedModelId,
-  ])
-
-  const runAgentRef = React.useRef(runAgent)
-  runAgentRef.current = runAgent
-
-  React.useEffect(() => {
-    if (agentConversationLoading || agentSessionLoading || agentSessionId == null) return
-    const nextIndex = agentQueuedSubmissions.findIndex(
-      (submission) => submission.sessionId === agentSessionId,
-    )
-    if (nextIndex < 0) return
-    const nextSubmission = agentQueuedSubmissions[nextIndex]
-    const nextQueue = agentQueuedSubmissions.filter(
-      (_submission, index) => index !== nextIndex,
-    )
-    agentQueuedSubmissionsRef.current = nextQueue
-    setAgentQueuedSubmissions(nextQueue)
-    queueMicrotask(() => {
-      void runAgentRef.current(
-        nextSubmission.prompt,
-        nextSubmission.taskIntent,
-        undefined,
-        nextSubmission.modelId,
-        nextSubmission.draftSceneCount,
-        nextSubmission.draftScope,
-      )
-    })
-  }, [
-    agentQueuedSubmissions,
-    agentConversationLoading,
-    agentSessionId,
-    agentSessionLoading,
   ])
 
   const saveAgentProposal = React.useCallback(async (): Promise<EntityId | null> => {
@@ -2363,12 +2344,6 @@ export default function ScreenplayAgentPage({
       : '确定故事最先从哪个方向开始探索',
   }
   const milestone = openedProject ? nextMilestone(openedProject) : null
-  const activeAgentQueuedSubmissions = React.useMemo(
-    () => agentQueuedSubmissions.filter(
-      (submission) => submission.sessionId === agentSessionId,
-    ),
-    [agentQueuedSubmissions, agentSessionId],
-  )
   const selectedAgentModelConfig = React.useMemo(
     () => modelConfigs.find((model) => model.id === selectedModelId) ?? null,
     [modelConfigs, selectedModelId],
@@ -2376,19 +2351,16 @@ export default function ScreenplayAgentPage({
   const agentConversationCapabilities = {
     inputDisabled: openedProject?.status === 'archived' || agentSessionLoading,
     sessionNavigationDisabled: agentSessionLoading,
-    submitMode: agentRunning ? 'queue' as const : 'send' as const,
   }
   const agentSessionActivities = React.useMemo(() => {
     if (agentSessionId == null || !latestConversationTurn) return {}
     return {
       [agentSessionId]: {
         state: latestConversationTurn.status,
-        queuedCount: agentQueuedSubmissions.filter(
-          (submission) => submission.sessionId === agentSessionId,
-        ).length,
+        queuedCount: latestConversationTurn.status === 'queued' ? 1 : 0,
       },
     }
-  }, [agentQueuedSubmissions, agentSessionId, latestConversationTurn])
+  }, [agentSessionId, latestConversationTurn])
   const openedProjectStageIndex = openedProject
     ? Math.max(0, SCREENPLAY_STAGE_ORDER.indexOf(openedProject.active_stage))
     : 0
@@ -3842,7 +3814,7 @@ export default function ScreenplayAgentPage({
                   <div className="screenplay-agent-studio__chat">
                 <AgentConversation
                   messages={agentMessages}
-                  loading={agentConversationLoading}
+                  loading={agentRunning}
                   emptyTitle="从当前任务开始"
                   emptyDescription="发送后会实时展示思考过程、素材读取和执行结果。"
                   afterMessagesHostRef={setAgentResultHost}
@@ -3866,31 +3838,11 @@ export default function ScreenplayAgentPage({
                     !agentPrompt.trim()
                     || openedProject.status === 'archived'
                     || !selectedModelId
+                    || agentRunning
+                    || agentSubmitting
                   }
                   placeholder="输入希望 Agent 完成的任务"
                   ariaLabel="输入希望剧本 Agent 完成的任务"
-                  supplementaryContent={(
-                    <>
-                      {activeAgentQueuedSubmissions.length > 0 ? (
-                        <div className="screenplay-agent-queued" aria-label="待发送消息">
-                          {activeAgentQueuedSubmissions.slice(0, 3).map((submission, index) => (
-                            <div
-                              className="screenplay-agent-queued__item"
-                              key={`${submission.sessionId}-${index}-${submission.prompt}`}
-                            >
-                              <span>待发送 {index + 1}</span>
-                              <span title={submission.prompt}>{submission.prompt}</span>
-                            </div>
-                          ))}
-                          {activeAgentQueuedSubmissions.length > 3 ? (
-                            <div className="screenplay-agent-queued__more">
-                              另有 {activeAgentQueuedSubmissions.length - 3} 条消息排队
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </>
-                  )}
                   footer={(
                     <div className="screenplay-agent-studio__actions">
                       <div className="screenplay-agent-studio__compose-left">
@@ -3924,17 +3876,12 @@ export default function ScreenplayAgentPage({
                         ) : null}
                       </div>
                       <div className="screenplay-agent-studio__compose-right">
-                        {activeAgentQueuedSubmissions.length > 0 ? (
-                          <span className="screenplay-agent-queue-count" role="status">
-                            排队 {activeAgentQueuedSubmissions.length}
-                          </span>
-                        ) : null}
                         <ContextUsageIndicator
                           conversations={agentMessages}
                           selectedModelConfig={selectedAgentModelConfig}
                           draft={agentPrompt}
                         />
-                        {agentConversationLoading ? (
+                        {agentRunning ? (
                           <PurrTooltip title="停止生成">
                             <PurrButton
                               type="text"
@@ -3946,8 +3893,8 @@ export default function ScreenplayAgentPage({
                             />
                           </PurrTooltip>
                         ) : null}
-                        <PurrTooltip title={agentConversationCapabilities.submitMode === 'queue'
-                          ? '加入发送队列 (Enter)'
+                        <PurrTooltip title={agentRunning
+                          ? '请等待当前对话完成'
                           : '发送 (Enter)'}>
                           <PurrButton
                             type="primary"
@@ -3958,11 +3905,11 @@ export default function ScreenplayAgentPage({
                               !agentPrompt.trim()
                               || openedProject.status === 'archived'
                               || !selectedModelId
+                              || agentRunning
+                              || agentSubmitting
                             }
                             onClick={() => runAgent()}
-                            aria-label={agentConversationCapabilities.submitMode === 'queue'
-                              ? '加入发送队列'
-                              : '发送'}
+                            aria-label="发送"
                           />
                         </PurrTooltip>
                       </div>

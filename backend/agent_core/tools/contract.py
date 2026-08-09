@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections import Counter
 from dataclasses import dataclass
+from graphlib import CycleError, TopologicalSorter
 from typing import Iterable
 
 from agent_core.contracts import (
@@ -50,7 +52,7 @@ def inspect_tool_contract(
     items = tuple(registrations)
     names = tuple(str(item.schema.name or "").strip() for item in items)
     duplicate_names = frozenset(
-        name for name in names if name and names.count(name) > 1
+        name for name, count in Counter(names).items() if name and count > 1
     )
     violations: list[str] = []
     planning_capabilities = {}
@@ -258,26 +260,8 @@ def _owned_path_covers_schema_path(owned: str, schema_path: str) -> bool:
 def _dependency_cycle(
     dependency_map: dict[str, tuple[str, ...]],
 ) -> tuple[str, ...]:
-    visited: set[str] = set()
-    active: list[str] = []
-
-    def visit(name: str) -> tuple[str, ...]:
-        if name in active:
-            index = active.index(name)
-            return tuple((*active[index:], name))
-        if name in visited:
-            return ()
-        active.append(name)
-        for dependency in dependency_map.get(name, ()):
-            cycle = visit(dependency)
-            if cycle:
-                return cycle
-        active.pop()
-        visited.add(name)
-        return ()
-
-    for name in dependency_map:
-        cycle = visit(name)
-        if cycle:
-            return cycle
+    try:
+        tuple(TopologicalSorter(dependency_map).static_order())
+    except CycleError as error:
+        return tuple(str(name) for name in error.args[1])
     return ()

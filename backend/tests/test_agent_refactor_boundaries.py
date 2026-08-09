@@ -214,7 +214,9 @@ def test_generic_frontend_screenplay_debt_can_only_shrink():
 
 
 def test_phase_three_native_screenplay_conversation_routes_are_complete():
-    routes = _router_paths(BACKEND_DIR / "routers" / "screenplay_v2.py")
+    routes = _router_paths(
+        BACKEND_DIR / "routers" / "screenplay_conversations.py"
+    )
     required = {
         "/projects/{project_id}/conversation/turns",
         "/projects/{project_id}/conversation/snapshot",
@@ -293,6 +295,60 @@ def test_phase_four_generic_conversation_contract_has_no_screenplay_fields():
         if "screenplay" in path.read_text(encoding="utf-8").casefold()
     ]
     assert not violations, "Generic conversation owns screenplay state: " + ", ".join(
+        violations
+    )
+
+
+def test_phase_four_generic_ai_stream_has_no_screenplay_request_shape():
+    types_source = (ROOT_DIR / "src" / "types.ts").read_text(encoding="utf-8")
+    stream_contract = types_source.split("aiChatStream:", 1)[1].split(
+        "abortAiStream:",
+        1,
+    )[0]
+    forbidden_fields = {
+        "agentProfile",
+        "screenplayProjectId",
+        "screenplayOperationId",
+        "sourceBookId",
+        "activeDocumentId",
+        "activeStage",
+        "screenplayTaskIntent",
+        "screenplayDraftSceneCount",
+        "screenplayDraftScope",
+    }
+    violations = sorted(
+        field for field in forbidden_fields if field in stream_contract
+    )
+    assert not violations, "Legacy screenplay AI stream fields returned: " + ", ".join(
+        violations
+    )
+
+    live_runtime_paths = (
+        ROOT_DIR / "src" / "services" / "backendApi.ts",
+        ROOT_DIR / "src" / "components" / "AiDevInspector" / "store.ts",
+    )
+    leaked_branches = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in live_runtime_paths
+        if ".agentProfile" in path.read_text(encoding="utf-8")
+    ]
+    assert not leaked_branches, "Legacy screenplay live diagnostics returned: " + ", ".join(
+        leaked_branches
+    )
+
+
+def test_screenplay_domain_events_never_return_to_generic_ai_wire():
+    removed_mapper = BACKEND_DIR / "application" / "screenplay_sse_mapping.py"
+    assert not removed_mapper.exists(), "Legacy screenplay SSE mapper returned"
+    paths = (ROOT_DIR / "src" / "types.ts",)
+    forbidden = {"proposedScreenplayDocument", "screenplayRevisionReady"}
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
+        for path in paths
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8")
+    ]
+    assert not violations, "Legacy screenplay AI wire returned: " + ", ".join(
         violations
     )
 

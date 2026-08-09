@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from agent_core.recovery import (
     RecoveryAction,
     RecoveryCause,
@@ -83,3 +85,21 @@ def test_recovery_policy_is_profile_configurable_and_missing_rules_fail_closed()
 
     assert decision.allowed is False
     assert decision.reason_code == "policy_disabled"
+
+
+def test_recovery_policy_stores_one_immutable_attempt_mapping():
+    policy = RecoveryPolicy()
+    limits = policy.attempt_limits
+
+    assert policy.attempt_limits is limits
+    with pytest.raises(TypeError):
+        limits[RecoveryCause.PROVIDER_STREAM_INTERRUPTED] = 0  # type: ignore[index]
+
+    overridden = policy.with_overrides({
+        RecoveryCause.PROVIDER_STREAM_INTERRUPTED: 0,
+    })
+    assert policy.max_attempts(RecoveryCause.PROVIDER_STREAM_INTERRUPTED) == 1
+    assert overridden.max_attempts(RecoveryCause.PROVIDER_STREAM_INTERRUPTED) == 0
+
+    with pytest.raises(ValueError, match="non-negative"):
+        policy.with_overrides({RecoveryCause.PROVIDER_STREAM_INTERRUPTED: -1})

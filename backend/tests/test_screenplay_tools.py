@@ -330,9 +330,7 @@ def _request(
     return to_screenplay_agent_request(
         ScreenplayAgentRunRequest(
             messages=[{"role": "user", "content": "检索原作并完善简报"}],
-            apiKey="key",
             options={"model": "model"},
-            agentProfile="screenplay",
             screenplayProjectId=project_id,
             sourceBookId=source_book_id,
             activeStage=active_stage,

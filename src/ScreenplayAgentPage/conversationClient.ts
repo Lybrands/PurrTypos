@@ -4,7 +4,6 @@ import type {
   ScreenplayConversationTurn,
 } from '../types'
 import {
-  conversationPageRequiresSnapshot,
   stateFromScreenplayConversationSnapshot,
   type ScreenplayConversationState,
 } from './conversationState.ts'
@@ -13,6 +12,7 @@ type NativeConversationApi = Pick<ElectronAPI,
   | 'submitScreenplayConversationTurn'
   | 'getScreenplayConversationSnapshot'
   | 'listScreenplayConversationEvents'
+  | 'watchScreenplayConversationEvents'
   | 'cancelScreenplayConversationTurn'
   | 'resumeScreenplayConversationTurn'
 >
@@ -67,7 +67,6 @@ export class ScreenplayConversationClient {
     state: ScreenplayConversationState,
   ): Promise<ScreenplayConversationState> {
     let after = state.cursor
-    let changed = false
     while (true) {
       const page = dataOrThrow(
         await this.api.listScreenplayConversationEvents({
@@ -78,14 +77,32 @@ export class ScreenplayConversationClient {
         }),
         '读取剧本对话事件失败',
       )
-      changed ||= conversationPageRequiresSnapshot(state, page)
       if (page.hasMore && page.nextCursor <= after) {
         throw new Error('剧本对话事件游标没有前进')
       }
       after = page.nextCursor
       if (!page.hasMore) break
     }
-    return changed ? this.load(state.projectId, state.sessionId) : state
+    return after > state.cursor
+      ? this.load(state.projectId, state.sessionId)
+      : state
+  }
+
+  watch(
+    state: ScreenplayConversationState,
+    onInvalidate: () => void,
+  ): () => void {
+    let cursor = state.cursor
+    return this.api.watchScreenplayConversationEvents({
+      projectId: state.projectId,
+      sessionId: state.sessionId,
+      after: cursor,
+      onEvent: (event) => {
+        if (event.cursor <= cursor) return
+        cursor = event.cursor
+        onInvalidate()
+      },
+    })
   }
 
   async cancel(commandId: string, turnId: string): Promise<ScreenplayConversationTurn> {

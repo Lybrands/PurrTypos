@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
 from agent_core.artifacts.scope import ArtifactScope
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_non_negative_int,
+    optional_text,
+    positive_int,
+    required_text,
+    text_tuple,
+    unique_text_tuple,
+)
 from agent_core.json_values import (
+    canonical_json_digest,
     freeze_json_mapping,
     thaw_json_mapping,
 )
@@ -29,9 +37,9 @@ def _normalize_scope(
     created_by_run_id: str | None,
 ) -> tuple[ArtifactScope, str | None, str | None, str | None]:
     normalized_scope = ArtifactScope(scope)
-    normalized_run = str(run_id or "").strip() or None
-    normalized_work_item = str(work_item_id or "").strip() or None
-    normalized_creator = str(created_by_run_id or "").strip() or None
+    normalized_run = optional_text(run_id)
+    normalized_work_item = optional_text(work_item_id)
+    normalized_creator = optional_text(created_by_run_id)
     if normalized_scope is ArtifactScope.RUN:
         if normalized_work_item is not None:
             raise ValueError("Run-scoped artifact cannot have work_item_id")
@@ -74,10 +82,11 @@ class ArtifactCreateCommand:
 
     def __post_init__(self) -> None:
         for name in ("namespace", "kind", "owner_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"artifact {name}"),
+            )
         scope, run_id, work_item_id, created_by_run_id = _normalize_scope(
             scope=self.scope,
             run_id=self.run_id,
@@ -88,14 +97,18 @@ class ArtifactCreateCommand:
         object.__setattr__(self, "run_id", run_id)
         object.__setattr__(self, "work_item_id", work_item_id)
         object.__setattr__(self, "created_by_run_id", created_by_run_id)
-        version = int(self.schema_version)
-        if version <= 0:
-            raise ValueError("artifact schema_version must be positive")
-        object.__setattr__(self, "schema_version", version)
+        object.__setattr__(
+            self,
+            "schema_version",
+            positive_int(self.schema_version, "artifact schema_version"),
+        )
         object.__setattr__(
             self,
             "expected_item_count",
-            _optional_non_negative(self.expected_item_count, "expected_item_count"),
+            optional_non_negative_int(
+                self.expected_item_count,
+                "artifact expected_item_count",
+            ),
         )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
@@ -122,10 +135,11 @@ class ArtifactRecord:
 
     def __post_init__(self) -> None:
         for name in ("id", "namespace", "kind", "owner_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"artifact {name}"),
+            )
         scope, run_id, work_item_id, created_by_run_id = _normalize_scope(
             scope=self.scope,
             run_id=self.run_id,
@@ -138,29 +152,37 @@ class ArtifactRecord:
         object.__setattr__(self, "created_by_run_id", created_by_run_id)
         object.__setattr__(self, "status", ArtifactStatus(self.status))
         for name in ("schema_version", "revision", "next_sequence"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"artifact {name} must be positive")
-            object.__setattr__(self, name, value)
-        count = int(self.committed_item_count)
-        if count < 0:
-            raise ValueError("committed_item_count must be non-negative")
-        object.__setattr__(self, "committed_item_count", count)
+            object.__setattr__(
+                self,
+                name,
+                positive_int(getattr(self, name), f"artifact {name}"),
+            )
+        object.__setattr__(
+            self,
+            "committed_item_count",
+            non_negative_int(
+                self.committed_item_count,
+                "committed_item_count",
+            ),
+        )
         object.__setattr__(
             self,
             "expected_item_count",
-            _optional_non_negative(self.expected_item_count, "expected_item_count"),
+            optional_non_negative_int(
+                self.expected_item_count,
+                "artifact expected_item_count",
+            ),
         )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
         object.__setattr__(
             self,
             "resource_ref",
-            str(self.resource_ref or "").strip() or None,
+            optional_text(self.resource_ref),
         )
         object.__setattr__(
             self,
             "coverage_digest",
-            str(self.coverage_digest or "").strip() or None,
+            optional_text(self.coverage_digest),
         )
 
     @property
@@ -185,14 +207,22 @@ class ArtifactMutationLease:
 
     def __post_init__(self) -> None:
         for name in ("run_id", "claim_token"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact mutation lease {name} is required")
-            object.__setattr__(self, name, value)
-        duration = int(self.lease_duration_ms)
-        if duration <= 0:
-            raise ValueError("artifact mutation lease duration must be positive")
-        object.__setattr__(self, "lease_duration_ms", duration)
+            object.__setattr__(
+                self,
+                name,
+                required_text(
+                    getattr(self, name),
+                    f"artifact mutation lease {name}",
+                ),
+            )
+        object.__setattr__(
+            self,
+            "lease_duration_ms",
+            positive_int(
+                self.lease_duration_ms,
+                "artifact mutation lease duration",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,23 +238,23 @@ class ArtifactAppendCommand:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "batch_id", "idempotency_key"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact batch {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"artifact batch {name}"),
+            )
         for name in ("expected_revision", "sequence"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"artifact batch {name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                positive_int(getattr(self, name), f"artifact batch {name}"),
+            )
         items = tuple(freeze_json_mapping(item) for item in self.items)
         if not items:
             raise ValueError("artifact batch must contain at least one item")
         object.__setattr__(self, "items", items)
-        coverage = tuple(
-            str(value or "").strip()
-            for value in self.coverage_keys
-            if str(value or "").strip()
+        coverage = text_tuple(
+            str(value or "").strip() for value in self.coverage_keys
         )
         object.__setattr__(self, "coverage_keys", coverage)
         if self.write_lease is not None and not isinstance(
@@ -242,13 +272,7 @@ class ArtifactAppendCommand:
             "items": [thaw_json_mapping(item) for item in self.items],
             "coverageKeys": list(self.coverage_keys),
         }
-        return hashlib.sha256(json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")).hexdigest()
+        return canonical_json_digest(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,25 +288,31 @@ class ArtifactBatch:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "batch_id", "idempotency_key"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact batch {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"artifact batch {name}"),
+            )
         for name in ("sequence", "committed_revision"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"artifact batch {name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                positive_int(getattr(self, name), f"artifact batch {name}"),
+            )
         object.__setattr__(
             self,
             "items",
             tuple(freeze_json_mapping(item) for item in self.items),
         )
         object.__setattr__(self, "coverage_keys", tuple(self.coverage_keys))
-        digest = str(self.content_digest or "").strip()
-        if not digest:
-            raise ValueError("artifact batch content_digest is required")
-        object.__setattr__(self, "content_digest", digest)
+        object.__setattr__(
+            self,
+            "content_digest",
+            required_text(
+                self.content_digest,
+                "artifact batch content_digest",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,19 +327,25 @@ class ArtifactBatchReceipt:
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "batch_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"artifact receipt {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"artifact receipt {name}"),
+            )
         for name in ("sequence", "committed_revision", "next_sequence"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"artifact receipt {name} must be positive")
-            object.__setattr__(self, name, value)
-        count = int(self.accepted_count)
-        if count < 0:
-            raise ValueError("artifact accepted_count must be non-negative")
-        object.__setattr__(self, "accepted_count", count)
+            object.__setattr__(
+                self,
+                name,
+                positive_int(getattr(self, name), f"artifact receipt {name}"),
+            )
+        object.__setattr__(
+            self,
+            "accepted_count",
+            non_negative_int(
+                self.accepted_count,
+                "artifact accepted_count",
+            ),
+        )
         object.__setattr__(self, "replayed", bool(self.replayed))
 
 
@@ -324,28 +360,36 @@ class ArtifactFinalizeCommand:
     complete_work_item: bool = False
 
     def __post_init__(self) -> None:
-        artifact_id = str(self.artifact_id or "").strip()
-        if not artifact_id:
-            raise ValueError("artifact_id is required")
-        object.__setattr__(self, "artifact_id", artifact_id)
-        revision = int(self.expected_revision)
-        if revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        object.__setattr__(self, "expected_revision", revision)
+        object.__setattr__(
+            self,
+            "artifact_id",
+            required_text(self.artifact_id, "artifact_id"),
+        )
+        object.__setattr__(
+            self,
+            "expected_revision",
+            positive_int(self.expected_revision, "expected_revision"),
+        )
         object.__setattr__(
             self,
             "expected_item_count",
-            _optional_non_negative(self.expected_item_count, "expected_item_count"),
+            optional_non_negative_int(
+                self.expected_item_count,
+                "artifact expected_item_count",
+            ),
         )
-        object.__setattr__(self, "expected_coverage_keys", tuple(dict.fromkeys(
-            str(value or "").strip()
-            for value in self.expected_coverage_keys
-            if str(value or "").strip()
-        )))
+        object.__setattr__(
+            self,
+            "expected_coverage_keys",
+            unique_text_tuple(
+                str(value or "").strip()
+                for value in self.expected_coverage_keys
+            ),
+        )
         object.__setattr__(
             self,
             "resource_ref",
-            str(self.resource_ref or "").strip() or None,
+            optional_text(self.resource_ref),
         )
         if self.write_lease is not None and not isinstance(
             self.write_lease,
@@ -367,7 +411,7 @@ class ArtifactValidationResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "accepted", bool(self.accepted))
-        code = str(self.code or "").strip() or None
+        code = optional_text(self.code)
         if not self.accepted and not code:
             raise ValueError("rejected artifact validation requires a code")
         object.__setattr__(self, "code", code)
@@ -375,21 +419,7 @@ class ArtifactValidationResult:
 
 
 def coverage_digest(keys: tuple[str, ...]) -> str:
-    canonical = json.dumps(
-        sorted(set(keys)),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _optional_non_negative(value: int | None, name: str) -> int | None:
-    if value is None:
-        return None
-    normalized = int(value)
-    if normalized < 0:
-        raise ValueError(f"artifact {name} must be non-negative")
-    return normalized
+    return canonical_json_digest(sorted(set(keys)))
 
 
 __all__ = [

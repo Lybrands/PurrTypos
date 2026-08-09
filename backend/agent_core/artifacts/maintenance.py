@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_non_negative_int,
+    optional_text,
+    positive_int,
+)
 
 @dataclass(frozen=True, slots=True)
 class ArtifactMaintenancePolicy:
@@ -20,16 +26,11 @@ class ArtifactMaintenancePolicy:
     max_purge_run_artifacts: int = 100
 
     def __post_init__(self) -> None:
-        if self.terminal_retention_ms is not None:
-            retention = int(self.terminal_retention_ms)
-            if retention < 0:
-                raise ValueError("terminal_retention_ms must be non-negative")
-            object.__setattr__(self, "terminal_retention_ms", retention)
+        object.__setattr__(self, "terminal_retention_ms", optional_non_negative_int(
+            self.terminal_retention_ms, "terminal_retention_ms"
+        ))
         for name in ("max_purge_work_items", "max_purge_run_artifacts"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, positive_int(getattr(self, name), name))
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,10 +53,7 @@ class ArtifactMaintenanceReport:
             "purged_artifacts",
             "consistency_issues",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(getattr(self, name), name))
 
     @property
     def released_claims(self) -> int:
@@ -95,15 +93,10 @@ class ArtifactMaintenanceSnapshot:
     consistency_issues: int = 0
 
     def __post_init__(self) -> None:
-        checked_at = int(self.checked_at_ms)
-        if checked_at < 0:
-            raise ValueError("checked_at_ms must be non-negative")
-        object.__setattr__(self, "checked_at_ms", checked_at)
-        object.__setattr__(
-            self,
-            "scope_run_id",
-            str(self.scope_run_id or "").strip() or None,
-        )
+        object.__setattr__(self, "checked_at_ms", non_negative_int(
+            self.checked_at_ms, "checked_at_ms"
+        ))
+        object.__setattr__(self, "scope_run_id", optional_text(self.scope_run_id))
         for name in (
             "open_work_items",
             "completed_work_items",
@@ -119,10 +112,7 @@ class ArtifactMaintenanceSnapshot:
             "invalid_target_claims",
             "consistency_issues",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(getattr(self, name), name))
 
     @property
     def work_item_count(self) -> int:

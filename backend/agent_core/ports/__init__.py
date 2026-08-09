@@ -9,7 +9,6 @@ from agent_core.ports.context import (
     ContextDemandProvider,
     ContextProvider,
     ConversationCompactor,
-    PostPlanningContextOptimizer,
     StagedContextProvider,
     TaskContextDemandProvider,
 )

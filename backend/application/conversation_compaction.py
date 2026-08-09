@@ -14,9 +14,6 @@ from agent_core.context_budget import (
     estimate_json_tokens,
     trim_agent_messages_by_turn,
 )
-from agent_core.context_orchestration.compaction import (
-    PostPlanningConversationContextOptimizer,
-)
 from agent_core.context_orchestration.contracts import (
     ContextCompressionRequest,
     ConversationCompactionResult,
@@ -881,14 +878,8 @@ def _compression_state_version(request: AgentRunRequest) -> int | None:
     return version or None
 
 
-# Compatibility name; the policy now lives in Application, not Agent Core.
-ConversationCompactionPolicy = ConversationSummaryCompressionPolicy
-
-
 __all__ = [
-    "ConversationCompactionPolicy",
     "ConversationCompactionResult",
     "ConversationCompactionService",
     "ConversationSummaryCompressionPolicy",
-    "PostPlanningConversationContextOptimizer",
 ]

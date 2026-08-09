@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    non_negative_integer as _non_negative_integer,
+)
 
 _RATE_METRICS = (
     "runFailureRate",
@@ -198,10 +202,6 @@ def evaluate_stability_regression_gate(
     }
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
 def _optional_rate(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -210,15 +210,6 @@ def _optional_rate(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return normalized if 0 <= normalized <= 1 else None
-
-
-def _non_negative_integer(value: Any) -> int:
-    if value is None or isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
 __all__ = [

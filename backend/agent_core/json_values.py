@@ -8,10 +8,12 @@ call :func:`thaw_json_value` before handing values to a JSON encoder/provider.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 
 class FrozenDict(Mapping[str, Any]):
@@ -159,10 +161,7 @@ def freeze_json_value(value: Any, *, _active: set[int] | None = None) -> Any:
 
 
 def freeze_json_mapping(value: Mapping[str, Any] | None = None) -> FrozenDict:
-    frozen = freeze_json_value(dict(value or {}))
-    if not isinstance(frozen, FrozenDict):  # defensive; input is always a mapping
-        raise TypeError("expected a JSON mapping")
-    return frozen
+    return cast(FrozenDict, freeze_json_value({} if value is None else value))
 
 
 def thaw_json_value(value: Any) -> Any:
@@ -176,7 +175,15 @@ def thaw_json_value(value: Any) -> Any:
 
 
 def thaw_json_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
-    thawed = thaw_json_value(value)
-    if not isinstance(thawed, dict):  # defensive; input is always a mapping
-        raise TypeError("expected a JSON mapping")
-    return thawed
+    return {str(key): thaw_json_value(item) for key, item in value.items()}
+
+
+def canonical_json_digest(value: Any) -> str:
+    encoded = json.dumps(
+        thaw_json_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

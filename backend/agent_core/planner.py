@@ -30,6 +30,10 @@ from agent_core.contracts import (
     ToolChoiceMode,
     ToolRiskLevel,
 )
+from agent_core.contracts.normalization import (
+    optional_text as _optional_text,
+    unique_text_tuple,
+)
 from agent_core.errors import (
     InvalidPlannerOutputError,
     RepairablePlannerOutputError,
@@ -889,9 +893,7 @@ def normalize_task_plan(
         raw_tools = raw.get("expectedTools", raw.get("suggestedTools", []))
         if not isinstance(raw_tools, list):
             raise InvalidPlannerOutputError("planner step tools must be a list")
-        suggested = tuple(dict.fromkeys(
-            str(name).strip() for name in raw_tools if str(name).strip()
-        ))
+        suggested = unique_text_tuple(raw_tools)
         raw_agent_role = _optional_text(raw.get("agentRole"))
         raw_assignment = raw.get("assignment")
         if raw_assignment is None:
@@ -1251,8 +1253,3 @@ def _clean_id(value: Any, limit: int) -> str:
 def _clean_text(value: Any, limit: int) -> str | None:
     text = str(value or "").strip()
     return text[:limit] or None
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None

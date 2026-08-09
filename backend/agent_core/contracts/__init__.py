@@ -1,8 +1,4 @@
-"""Compatibility facade for Agent Core data contracts.
-
-Phase 1 keeps the historical import path stable while contract families move
-into focused modules in this package.
-"""
+"""Public provider-neutral data contracts owned by Agent Core."""
 
 from __future__ import annotations
 
@@ -50,13 +46,17 @@ from agent_core.contracts.host import (
     ExecutionRecipeStep,
     RunBinding,
 )
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_non_negative_int,
+    optional_positive_int,
+    optional_text as _optional_text,
+    positive_int,
+    required_text,
+    text_frozenset,
+    unique_text_tuple,
+)
 from agent_core.contracts.tool_paths import tool_data_path as _tool_data_path
-
-
-def _frozen_mapping(value: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
-    """Return a detached recursively immutable JSON mapping."""
-
-    return freeze_json_mapping(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,11 +85,11 @@ class AgentMessage:
         object.__setattr__(self, "origin", MessageOrigin(self.origin))
         if role is MessageRole.TOOL and not self.tool_call_id:
             raise ValueError("tool message requires tool_call_id")
-        object.__setattr__(self, "attributes", _frozen_mapping(self.attributes))
+        object.__setattr__(self, "attributes", freeze_json_mapping(self.attributes))
         object.__setattr__(
             self,
             "host_metadata",
-            _frozen_mapping(self.host_metadata),
+            freeze_json_mapping(self.host_metadata),
         )
 
     @classmethod
@@ -144,11 +144,10 @@ class DomainContext:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        namespace = str(self.namespace or "").strip()
-        if not namespace:
-            raise ValueError("domain context namespace is required")
-        object.__setattr__(self, "namespace", namespace)
-        object.__setattr__(self, "payload", _frozen_mapping(self.payload))
+        object.__setattr__(self, "namespace", required_text(
+            self.namespace, "domain context namespace"
+        ))
+        object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,20 +159,18 @@ class ModelRequest:
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        provider = str(self.provider or "").strip().lower()
-        model = str(self.model or "").strip()
-        if not provider:
-            raise ValueError("model provider is required")
-        if not model:
-            raise ValueError("model name is required")
-        object.__setattr__(self, "provider", provider)
-        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "provider", required_text(
+            self.provider, "model provider"
+        ).lower())
+        object.__setattr__(self, "model", required_text(
+            self.model, "model name"
+        ))
         object.__setattr__(self, "profile_id", _optional_text(self.profile_id))
         if not isinstance(self.output_capabilities, ModelOutputCapabilities):
             raise TypeError(
                 "model output capabilities must be ModelOutputCapabilities"
             )
-        object.__setattr__(self, "options", _frozen_mapping(self.options))
+        object.__setattr__(self, "options", freeze_json_mapping(self.options))
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,11 +199,9 @@ class ModelInvocation:
                 raise ValueError(
                     "max output tokens must match the resolved output budget"
                 )
-        if self.max_output_tokens is not None:
-            maximum = int(self.max_output_tokens)
-            if maximum <= 0:
-                raise ValueError("max output tokens must be positive")
-            object.__setattr__(self, "max_output_tokens", maximum)
+        object.__setattr__(self, "max_output_tokens", optional_positive_int(
+            self.max_output_tokens, "max output tokens"
+        ))
         if not self.tools and self.tool_choice is ToolChoiceMode.REQUIRED:
             raise ValueError("required tool choice needs at least one tool")
 
@@ -220,10 +215,9 @@ class ToolCallDelta:
     arguments_fragment: str = ""
 
     def __post_init__(self) -> None:
-        index = int(self.index)
-        if index < 0:
-            raise ValueError("tool call delta index must be non-negative")
-        object.__setattr__(self, "index", index)
+        object.__setattr__(self, "index", non_negative_int(
+            self.index, "tool call delta index"
+        ))
         object.__setattr__(self, "id", _optional_text(self.id))
         object.__setattr__(self, "type", _optional_text(self.type))
         object.__setattr__(self, "name", _optional_text(self.name))
@@ -255,10 +249,9 @@ class ModelTokenUsage:
             "cached_input_tokens",
             "reasoning_output_tokens",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(
+                getattr(self, name), name
+            ))
         if self.total_tokens is None:
             object.__setattr__(
                 self,
@@ -266,10 +259,9 @@ class ModelTokenUsage:
                 self.input_tokens + self.output_tokens,
             )
         else:
-            total = int(self.total_tokens)
-            if total < 0:
-                raise ValueError("total_tokens must be non-negative")
-            object.__setattr__(self, "total_tokens", total)
+            object.__setattr__(self, "total_tokens", non_negative_int(
+                self.total_tokens, "total_tokens"
+            ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,11 +294,8 @@ class ModelStream:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        model = str(self.model or "").strip()
-        if not model:
-            raise ValueError("model stream requires a model name")
-        self.model = model
-        self.metadata = _frozen_mapping(self.metadata)
+        self.model = required_text(self.model, "model stream model name")
+        self.metadata = freeze_json_mapping(self.metadata)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,16 +306,15 @@ class ModelCompletion:
     usage: ModelTokenUsage | None = None
 
     def __post_init__(self) -> None:
-        model = str(self.model or "").strip()
-        if not model:
-            raise ValueError("model completion requires a model name")
-        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "model", required_text(
+            self.model, "model completion model name"
+        ))
         if self.usage is not None and not isinstance(
             self.usage,
             ModelTokenUsage,
         ):
             raise TypeError("model completion usage must be ModelTokenUsage")
-        object.__setattr__(self, "metadata", _frozen_mapping(self.metadata))
+        object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,53 +339,16 @@ class AgentRunRequest:
         object.__setattr__(self, "messages", messages)
         object.__setattr__(self, "mode", _optional_text(self.mode))
         object.__setattr__(self, "tools_enabled", bool(self.tools_enabled))
-        object.__setattr__(self, "metadata", _frozen_mapping(self.metadata))
-        if self.context_window is not None:
-            window = int(self.context_window)
-            if window <= 0:
-                raise ValueError("context window must be positive")
-            object.__setattr__(self, "context_window", window)
+        object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+        object.__setattr__(self, "context_window", optional_positive_int(
+            self.context_window, "context window"
+        ))
 
     def latest_user_text(self) -> str:
         for message in reversed(self.messages):
             if message.role == "user":
                 return str(message.content or "")
         return ""
-
-
-@dataclass(frozen=True, slots=True)
-class PostPlanningContextOptimizationResult:
-    """Application-owned conversation optimization returned to Agent Core."""
-
-    request: AgentRunRequest
-    outcome: str
-    compacted_turn_count: int = 0
-    retained_raw_turn_count: int = 0
-    summary_version: int | None = None
-    diagnostics: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.request, AgentRunRequest):
-            raise TypeError("context optimization requires an AgentRunRequest")
-        outcome = str(self.outcome or "").strip()
-        if not outcome:
-            raise ValueError("context optimization outcome is required")
-        object.__setattr__(self, "outcome", outcome)
-        for name in ("compacted_turn_count", "retained_raw_turn_count"):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
-        if self.summary_version is not None:
-            version = int(self.summary_version)
-            if version <= 0:
-                raise ValueError("summary_version must be positive")
-            object.__setattr__(self, "summary_version", version)
-        object.__setattr__(
-            self,
-            "diagnostics",
-            _frozen_mapping(self.diagnostics),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,18 +367,16 @@ class AgentAssignmentCoverage:
     root_only: bool = False
 
     def __post_init__(self) -> None:
-        role = str(self.agent_role or "").strip()
-        field_name = str(self.assignment_field or "").strip()
+        role = required_text(
+            self.agent_role, "Agent assignment coverage role"
+        )
+        field_name = required_text(
+            self.assignment_field, "Agent assignment coverage field"
+        )
         values = tuple(
             str(value or "").strip()
             for value in self.required_values
         )
-        if not role:
-            raise ValueError("Agent assignment coverage role is required")
-        if not field_name:
-            raise ValueError(
-                "Agent assignment coverage field is required"
-            )
         if not values or any(not value for value in values):
             raise ValueError(
                 "Agent assignment coverage values must be non-empty"
@@ -492,60 +441,19 @@ class PlanningConstraints:
     allow_model_only_fallback: bool = True
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
+        for field_name in (
             "context_satisfied_tool_names",
-            frozenset(
-                str(name).strip()
-                for name in self.context_satisfied_tool_names
-                if str(name).strip()
-            ),
-        )
-        object.__setattr__(
-            self,
             "planning_excluded_tool_names",
-            frozenset(
-                str(name).strip()
-                for name in self.planning_excluded_tool_names
-                if str(name).strip()
-            ),
-        )
-        object.__setattr__(
-            self,
             "required_any_tool_names",
-            frozenset(
-                str(name).strip()
-                for name in self.required_any_tool_names
-                if str(name).strip()
-            ),
-        )
-        object.__setattr__(
-            self,
             "execution_satisfied_tool_names",
-            frozenset(
-                str(name).strip()
-                for name in self.execution_satisfied_tool_names
-                if str(name).strip()
-            ),
-        )
-        object.__setattr__(
-            self,
             "planning_excluded_agent_roles",
-            frozenset(
-                str(name).strip()
-                for name in self.planning_excluded_agent_roles
-                if str(name).strip()
-            ),
-        )
-        object.__setattr__(
-            self,
             "required_any_agent_roles",
-            frozenset(
-                str(name).strip()
-                for name in self.required_any_agent_roles
-                if str(name).strip()
-            ),
-        )
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                text_frozenset(getattr(self, field_name)),
+            )
         minimum_frontier = self.minimum_root_agent_count
         if isinstance(minimum_frontier, bool) or not isinstance(
             minimum_frontier,
@@ -650,8 +558,8 @@ class ResponseValidationResult:
     details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        code = str(self.violation_code or "").strip() or None
-        guidance = str(self.repair_guidance or "").strip() or None
+        code = _optional_text(self.violation_code)
+        guidance = _optional_text(self.repair_guidance)
         if (code is None) != (guidance is None):
             raise ValueError(
                 "response validation rejection requires both a violation "
@@ -659,7 +567,7 @@ class ResponseValidationResult:
             )
         object.__setattr__(self, "violation_code", code)
         object.__setattr__(self, "repair_guidance", guidance)
-        object.__setattr__(self, "details", _frozen_mapping(self.details))
+        object.__setattr__(self, "details", freeze_json_mapping(self.details))
 
     @property
     def accepted(self) -> bool:
@@ -681,40 +589,33 @@ class PlanningCapabilities:
         object.__setattr__(
             self,
             "available_tool_names",
-            frozenset(str(name).strip() for name in self.available_tool_names if str(name).strip()),
+            text_frozenset(self.available_tool_names),
         )
         object.__setattr__(
             self,
             "available_agent_roles",
-            frozenset(
-                str(name).strip()
-                for name in self.available_agent_roles
-                if str(name).strip()
-            ),
+            text_frozenset(self.available_agent_roles),
         )
         object.__setattr__(self, "model_supports_tools", bool(self.model_supports_tools))
         object.__setattr__(
             self,
             "host_planning_facts",
-            _frozen_mapping(self.host_planning_facts),
+            freeze_json_mapping(self.host_planning_facts),
         )
         object.__setattr__(
             self,
             "tool_guidance",
-            _frozen_mapping(self.tool_guidance),
+            freeze_json_mapping(self.tool_guidance),
         )
         object.__setattr__(
             self,
             "agent_role_guidance",
-            _frozen_mapping(self.agent_role_guidance),
+            freeze_json_mapping(self.agent_role_guidance),
         )
-        max_parallel_agents = int(self.max_parallel_agents)
-        if max_parallel_agents <= 0:
-            raise ValueError("max_parallel_agents must be positive")
         object.__setattr__(
             self,
             "max_parallel_agents",
-            max_parallel_agents,
+            positive_int(self.max_parallel_agents, "max_parallel_agents"),
         )
         if not isinstance(self.constraints, PlanningConstraints):
             raise TypeError("planning constraints must be PlanningConstraints")
@@ -738,30 +639,23 @@ class TaskSpec:
     deliverable: str | None = None
 
     def __post_init__(self) -> None:
-        goal = str(self.goal or "").strip()
-        if not goal:
-            raise ValueError("task spec goal is required")
-        object.__setattr__(self, "goal", goal)
-        object.__setattr__(self, "target", _frozen_mapping(self.target))
+        object.__setattr__(
+            self,
+            "goal",
+            required_text(self.goal, "task spec goal"),
+        )
+        object.__setattr__(self, "target", freeze_json_mapping(self.target))
         object.__setattr__(self, "operation", _optional_text(self.operation))
         object.__setattr__(self, "instruction", _optional_text(self.instruction))
         object.__setattr__(
             self,
             "constraints",
-            tuple(dict.fromkeys(
-                str(value).strip()
-                for value in self.constraints
-                if str(value).strip()
-            )),
+            unique_text_tuple(self.constraints),
         )
         object.__setattr__(
             self,
             "preserve",
-            tuple(dict.fromkeys(
-                str(value).strip()
-                for value in self.preserve
-                if str(value).strip()
-            )),
+            unique_text_tuple(self.preserve),
         )
         object.__setattr__(self, "deliverable", _optional_text(self.deliverable))
 
@@ -800,14 +694,12 @@ class TaskStep:
     planning_capability: str | None = None
 
     def __post_init__(self) -> None:
-        step_id = str(self.id or "").strip()
-        title = str(self.title or "").strip()
-        if not step_id:
-            raise ValueError("task step id is required")
-        if not title:
-            raise ValueError("task step title is required")
-        object.__setattr__(self, "id", step_id)
-        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "id", required_text(self.id, "task step id"))
+        object.__setattr__(
+            self,
+            "title",
+            required_text(self.title, "task step title"),
+        )
         object.__setattr__(self, "type", StepType(self.type))
         object.__setattr__(self, "executor", StepExecutor(self.executor))
         object.__setattr__(self, "status", StepStatus(self.status))
@@ -819,22 +711,14 @@ class TaskStep:
         object.__setattr__(
             self,
             "suggested_tools",
-            tuple(dict.fromkeys(
-                str(name).strip()
-                for name in self.suggested_tools
-                if str(name).strip()
-            )),
+            unique_text_tuple(self.suggested_tools),
         )
         object.__setattr__(self, "agent_role", _optional_text(self.agent_role))
-        object.__setattr__(self, "assignment", _frozen_mapping(self.assignment))
+        object.__setattr__(self, "assignment", freeze_json_mapping(self.assignment))
         object.__setattr__(
             self,
             "depends_on",
-            tuple(dict.fromkeys(
-                str(step_id).strip()
-                for step_id in self.depends_on
-                if str(step_id).strip()
-            )),
+            unique_text_tuple(self.depends_on),
         )
         if self.executor is StepExecutor.AGENT:
             if self.agent_role is None:
@@ -874,10 +758,8 @@ class TaskPlan:
     task_spec: TaskSpec | None = None
 
     def __post_init__(self) -> None:
-        title = str(self.title or "").strip()
+        title = required_text(self.title, "task plan title")
         steps = tuple(self.steps)
-        if not title:
-            raise ValueError("task plan title is required")
         if not steps:
             raise ValueError("task plan requires at least one step")
         step_ids = [step.id for step in steps]
@@ -918,18 +800,16 @@ class PlannerLimits:
             "max_title_chars",
             "max_goal_chars",
         ):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, positive_int(
+                getattr(self, name), name
+            ))
         max_tool_steps = int(self.max_tool_steps)
         if max_tool_steps < 0 or max_tool_steps > self.max_steps:
             raise ValueError("max_tool_steps must be between zero and max_steps")
         object.__setattr__(self, "max_tool_steps", max_tool_steps)
-        max_output_tokens = int(self.max_output_tokens)
-        if max_output_tokens <= 0:
-            raise ValueError("max_output_tokens must be positive")
-        object.__setattr__(self, "max_output_tokens", max_output_tokens)
+        object.__setattr__(self, "max_output_tokens", positive_int(
+            self.max_output_tokens, "max_output_tokens"
+        ))
         max_repair_attempts = int(self.max_repair_attempts)
         if max_repair_attempts < 0 or max_repair_attempts > 3:
             raise ValueError(
@@ -955,11 +835,11 @@ class PlanningResult:
         object.__setattr__(self, "kind", PlanningKind(self.kind))
         object.__setattr__(self, "reason", _optional_text(self.reason))
         object.__setattr__(self, "model", _optional_text(self.model))
-        call_count = int(self.model_call_count)
-        if call_count < 0:
-            raise ValueError("planning model call count cannot be negative")
+        call_count = non_negative_int(
+            self.model_call_count, "planning model call count"
+        )
         parameters = tuple(
-            _frozen_mapping(item)
+            freeze_json_mapping(item)
             for item in self.model_call_parameters
         )
         if parameters:
@@ -986,18 +866,15 @@ class PlanningTurn:
     last_tool_outcome: ToolBatchOutcome = ToolBatchOutcome.COMPLETED
 
     def __post_init__(self) -> None:
-        revision = int(self.revision)
-        round_number = int(self.round_number)
-        remaining = int(self.remaining_model_rounds)
-        if revision <= 0:
-            raise ValueError("planning turn revision must be positive")
-        if round_number <= 0:
-            raise ValueError("planning turn round number must be positive")
-        if remaining < 0:
-            raise ValueError("remaining model rounds must be non-negative")
-        object.__setattr__(self, "revision", revision)
-        object.__setattr__(self, "round_number", round_number)
-        object.__setattr__(self, "remaining_model_rounds", remaining)
+        object.__setattr__(self, "revision", positive_int(
+            self.revision, "planning turn revision"
+        ))
+        object.__setattr__(self, "round_number", positive_int(
+            self.round_number, "planning turn round number"
+        ))
+        object.__setattr__(self, "remaining_model_rounds", non_negative_int(
+            self.remaining_model_rounds, "remaining model rounds"
+        ))
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "completed_steps", tuple(self.completed_steps))
         object.__setattr__(
@@ -1029,20 +906,18 @@ class ContextBudget:
             "minimum_message_tokens",
         )
         for name in numeric_fields:
-            value = int(getattr(self, name))
-            if value < 0 or (name == "window_tokens" and value <= 0):
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            normalizer = positive_int if name == "window_tokens" else non_negative_int
+            object.__setattr__(self, name, normalizer(getattr(self, name), name))
         allocations: dict[str, int] = {}
         for raw_name, raw_tokens in self.context_allocations.items():
-            name = str(raw_name or "").strip()
-            tokens = int(raw_tokens)
-            if not name:
-                raise ValueError("context allocation name is required")
-            if tokens < 0:
-                raise ValueError("context allocation tokens must be non-negative")
+            name = required_text(raw_name, "context allocation name")
+            tokens = non_negative_int(raw_tokens, "context allocation tokens")
             allocations[name] = tokens
-        object.__setattr__(self, "context_allocations", _frozen_mapping(allocations))
+        object.__setattr__(
+            self,
+            "context_allocations",
+            freeze_json_mapping(allocations),
+        )
         fixed_total = (
             self.output_reserve_tokens
             + self.safety_reserve_tokens
@@ -1086,19 +961,22 @@ class ContextBudgetClaim:
     priority: int = 0
 
     def __post_init__(self) -> None:
-        name = str(self.name or "").strip()
-        desired = int(self.desired_tokens)
-        minimum = int(self.minimum_tokens)
+        name = required_text(self.name, "context budget claim name")
+        desired = non_negative_int(
+            self.desired_tokens, "context budget claim desired tokens"
+        )
+        minimum = non_negative_int(
+            self.minimum_tokens, "context budget claim minimum tokens"
+        )
         maximum = (
             desired
             if self.maximum_tokens is None
-            else int(self.maximum_tokens)
+            else non_negative_int(
+                self.maximum_tokens,
+                "context budget claim maximum tokens",
+            )
         )
         priority = int(self.priority)
-        if not name:
-            raise ValueError("context budget claim name is required")
-        if min(minimum, desired, maximum) < 0:
-            raise ValueError("context budget claim tokens must be non-negative")
         if minimum > desired:
             raise ValueError("context budget claim minimum exceeds desired")
         if desired > maximum:
@@ -1119,20 +997,18 @@ class ContextBlock:
     host_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        name = str(self.name or "").strip()
-        if not name:
-            raise ValueError("context block name is required")
-        token_count = int(self.token_count)
-        if token_count < 0:
-            raise ValueError("context block token count must be non-negative")
-        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "name", required_text(
+            self.name, "context block name"
+        ))
         object.__setattr__(self, "content", str(self.content or ""))
-        object.__setattr__(self, "token_count", token_count)
+        object.__setattr__(self, "token_count", non_negative_int(
+            self.token_count, "context block token count"
+        ))
         object.__setattr__(self, "untrusted", bool(self.untrusted))
         object.__setattr__(
             self,
             "host_metadata",
-            _frozen_mapping(self.host_metadata),
+            freeze_json_mapping(self.host_metadata),
         )
 
 
@@ -1147,7 +1023,11 @@ class ContextBundle:
         if len(names) != len(set(names)):
             raise ValueError("context block names must be unique")
         object.__setattr__(self, "blocks", blocks)
-        object.__setattr__(self, "diagnostics", _frozen_mapping(self.diagnostics))
+        object.__setattr__(
+            self,
+            "diagnostics",
+            freeze_json_mapping(self.diagnostics),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1176,11 +1056,11 @@ class TaskContextRequest:
             "required_context_blocks",
             "evidence_kinds",
         ):
-            object.__setattr__(self, name, tuple(dict.fromkeys(
-                str(value).strip()
-                for value in getattr(self, name)
-                if str(value).strip()
-            )))
+            object.__setattr__(
+                self,
+                name,
+                unique_text_tuple(getattr(self, name)),
+            )
         object.__setattr__(
             self,
             "include_response_context",
@@ -1200,14 +1080,10 @@ class ToolCall:
     arguments_json: str
 
     def __post_init__(self) -> None:
-        call_id = str(self.id or "").strip()
-        name = str(self.name or "").strip()
-        if not call_id:
-            raise ValueError("tool call id is required")
-        if not name:
-            raise ValueError("tool call name is required")
-        object.__setattr__(self, "id", call_id)
-        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "id", required_text(self.id, "tool call id"))
+        object.__setattr__(self, "name", required_text(
+            self.name, "tool call name"
+        ))
         object.__setattr__(self, "arguments_json", str(self.arguments_json or ""))
 
 
@@ -1219,9 +1095,7 @@ class ToolSchema:
     display_names: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        name = str(self.name or "").strip()
-        if not name:
-            raise ValueError("tool schema name is required")
+        name = required_text(self.name, "tool schema name")
         display_names: dict[str, str] = {}
         for raw_locale, raw_display_name in self.display_names.items():
             locale = normalize_locale_tag(raw_locale)
@@ -1237,11 +1111,15 @@ class ToolSchema:
             display_names[locale] = display_name
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", str(self.description or ""))
-        object.__setattr__(self, "parameters", _frozen_mapping(self.parameters))
+        object.__setattr__(
+            self,
+            "parameters",
+            freeze_json_mapping(self.parameters),
+        )
         object.__setattr__(
             self,
             "display_names",
-            _frozen_mapping(display_names),
+            freeze_json_mapping(display_names),
         )
 
 
@@ -1327,11 +1205,10 @@ class ToolPolicy:
     risk_level: ToolRiskLevel = ToolRiskLevel.READ
 
     def __post_init__(self) -> None:
-        title = str(self.title or "").strip()
-        if not title:
-            raise ValueError("tool policy title is required")
         object.__setattr__(self, "mode", ToolExecutionMode(self.mode))
-        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "title", required_text(
+            self.title, "tool policy title"
+        ))
         object.__setattr__(self, "risk_level", ToolRiskLevel(self.risk_level))
 
     @property
@@ -1374,11 +1251,7 @@ class ToolContextContract:
             object.__setattr__(
                 self,
                 field_name,
-                tuple(dict.fromkeys(
-                    str(value).strip()
-                    for value in getattr(self, field_name)
-                    if str(value).strip()
-                )),
+                unique_text_tuple(getattr(self, field_name)),
             )
         object.__setattr__(
             self,
@@ -1400,11 +1273,10 @@ class DomainEffect:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        effect_type = str(self.type or "").strip()
-        if not effect_type:
-            raise ValueError("domain effect type is required")
-        object.__setattr__(self, "type", effect_type)
-        object.__setattr__(self, "payload", _frozen_mapping(self.payload))
+        object.__setattr__(self, "type", required_text(
+            self.type, "domain effect type"
+        ))
+        object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1460,10 +1332,9 @@ class ToolExecutionLimits:
             "max_result_chars",
             "approval_summary_chars",
         ):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, positive_int(
+                getattr(self, name), name
+            ))
         timeout = float(self.approval_timeout_seconds)
         if timeout <= 0:
             raise ValueError("approval_timeout_seconds must be positive")
@@ -1496,11 +1367,7 @@ class ToolBatchRequest:
         object.__setattr__(
             self,
             "allowed_tool_names",
-            frozenset(
-                str(name).strip()
-                for name in self.allowed_tool_names
-                if str(name).strip()
-            ),
+            text_frozenset(self.allowed_tool_names),
         )
         if not self.calls:
             raise ValueError("tool batch requires at least one call")
@@ -1521,14 +1388,12 @@ class ToolCallResult:
     )
 
     def __post_init__(self) -> None:
-        call_id = str(self.tool_call_id or "").strip()
-        tool_name = str(self.tool_name or "").strip()
-        if not call_id:
-            raise ValueError("tool result call id is required")
-        if not tool_name:
-            raise ValueError("tool result name is required")
-        object.__setattr__(self, "tool_call_id", call_id)
-        object.__setattr__(self, "tool_name", tool_name)
+        object.__setattr__(self, "tool_call_id", required_text(
+            self.tool_call_id, "tool result call id"
+        ))
+        object.__setattr__(self, "tool_name", required_text(
+            self.tool_name, "tool result name"
+        ))
         object.__setattr__(self, "content", str(self.content or ""))
         if self.approval_status is not None:
             object.__setattr__(
@@ -1588,9 +1453,7 @@ class ApprovalRequest:
     timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
-        title = str(self.title or "").strip()
-        if not title:
-            raise ValueError("approval title is required")
+        title = required_text(self.title, "approval title")
         timeout = float(self.timeout_seconds)
         if timeout <= 0:
             raise ValueError("approval timeout must be positive")
@@ -1628,14 +1491,12 @@ class RunProvenance:
 
     def __post_init__(self) -> None:
         for name in ("model_provider", "model_name"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"run provenance {name} is required")
-            object.__setattr__(self, name, value)
-        context_window = int(self.context_window)
-        if context_window <= 0:
-            raise ValueError("run provenance context_window must be positive")
-        object.__setattr__(self, "context_window", context_window)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"run provenance {name}"
+            ))
+        object.__setattr__(self, "context_window", positive_int(
+            self.context_window, "run provenance context_window"
+        ))
         for name in ("endpoint_digest", "request_profile_digest"):
             value = str(getattr(self, name) or "").strip().lower()
             if len(value) != 64 or any(
@@ -1668,19 +1529,15 @@ class RunLineage:
             "root_run_id",
             "agent_role",
         ):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"run lineage {name} is required")
-            object.__setattr__(self, name, value)
-        object.__setattr__(
-            self,
-            "delegation_id",
-            str(self.delegation_id or "").strip() or None,
-        )
-        depth = int(self.depth)
-        if depth < 1:
-            raise ValueError("child run depth must be positive")
-        object.__setattr__(self, "depth", depth)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"run lineage {name}"
+            ))
+        object.__setattr__(self, "delegation_id", _optional_text(
+            self.delegation_id
+        ))
+        object.__setattr__(self, "depth", positive_int(
+            self.depth, "child run depth"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1694,10 +1551,9 @@ class RunExecutionLease:
     cancellation_requested_at_ms: int | None = None
 
     def __post_init__(self) -> None:
-        run_id = str(self.run_id or "").strip()
-        if not run_id:
-            raise ValueError("execution lease requires a run id")
-        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "run_id", required_text(
+            self.run_id, "execution lease run id"
+        ))
         object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "owner_id", _optional_text(self.owner_id))
         object.__setattr__(self, "attempt", max(0, int(self.attempt)))
@@ -1723,12 +1579,15 @@ class AgentDelegation:
 
     def __post_init__(self) -> None:
         for name in ("id", "parent_run_id", "root_run_id", "agent_role", "objective"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"delegation {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"delegation {name}"
+            ))
         object.__setattr__(self, "status", DelegationStatus(self.status))
-        object.__setattr__(self, "input_payload", _frozen_mapping(self.input_payload))
+        object.__setattr__(
+            self,
+            "input_payload",
+            freeze_json_mapping(self.input_payload),
+        )
         object.__setattr__(self, "child_run_id", _optional_text(self.child_run_id))
         object.__setattr__(self, "required", bool(self.required))
         object.__setattr__(self, "priority", int(self.priority))
@@ -1757,12 +1616,12 @@ class DelegationAggregation:
     def __post_init__(self) -> None:
         if self.state not in {"pending", "ready", "blocked"}:
             raise ValueError("invalid delegation aggregate state")
-        object.__setattr__(self, "counts", _frozen_mapping(self.counts))
+        object.__setattr__(self, "counts", freeze_json_mapping(self.counts))
         object.__setattr__(self, "required_failures", tuple(self.required_failures))
         object.__setattr__(
             self,
             "results",
-            tuple(_frozen_mapping(item) for item in self.results),
+            tuple(freeze_json_mapping(item) for item in self.results),
         )
 
 
@@ -1778,16 +1637,16 @@ class RunCheckpoint:
     has_more: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "run", _frozen_mapping(self.run))
+        object.__setattr__(self, "run", freeze_json_mapping(self.run))
         object.__setattr__(
             self,
             "steps",
-            tuple(_frozen_mapping(item) for item in self.steps),
+            tuple(freeze_json_mapping(item) for item in self.steps),
         )
         object.__setattr__(
             self,
             "events",
-            tuple(_frozen_mapping(item) for item in self.events),
+            tuple(freeze_json_mapping(item) for item in self.events),
         )
         object.__setattr__(self, "delegations", tuple(self.delegations))
         object.__setattr__(self, "next_cursor", max(0, int(self.next_cursor)))
@@ -1825,10 +1684,9 @@ class TaskStepUpdate:
     error: str | None = None
 
     def __post_init__(self) -> None:
-        step_id = str(self.step_id or "").strip()
-        if not step_id:
-            raise ValueError("task step update id is required")
-        object.__setattr__(self, "step_id", step_id)
+        object.__setattr__(self, "step_id", required_text(
+            self.step_id, "task step update id"
+        ))
         object.__setattr__(self, "status", StepStatus(self.status))
 
 
@@ -1840,18 +1698,16 @@ class TraceRecord:
     duration_ms: int | None = None
 
     def __post_init__(self) -> None:
-        stage = str(self.stage or "").strip()
-        outcome = str(self.outcome or "").strip()
-        if not stage or not outcome:
-            raise ValueError("trace stage and outcome are required")
-        object.__setattr__(self, "stage", stage)
-        object.__setattr__(self, "outcome", outcome)
-        object.__setattr__(self, "details", _frozen_mapping(self.details))
-        if self.duration_ms is not None:
-            duration = int(self.duration_ms)
-            if duration < 0:
-                raise ValueError("trace duration must be non-negative")
-            object.__setattr__(self, "duration_ms", duration)
+        object.__setattr__(self, "stage", required_text(
+            self.stage, "trace stage"
+        ))
+        object.__setattr__(self, "outcome", required_text(
+            self.outcome, "trace outcome"
+        ))
+        object.__setattr__(self, "details", freeze_json_mapping(self.details))
+        object.__setattr__(self, "duration_ms", optional_non_negative_int(
+            self.duration_ms, "trace duration"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1863,10 +1719,8 @@ class AgentRunResult:
     model: str | None = None
 
     def __post_init__(self) -> None:
-        run_id = str(self.run_id or "").strip()
+        run_id = required_text(self.run_id, "agent run result run id")
         status = RunStatus(self.status)
-        if not run_id:
-            raise ValueError("agent run result requires a run id")
         if status is RunStatus.RUNNING:
             raise ValueError("agent run result must be terminal")
         object.__setattr__(self, "run_id", run_id)
@@ -1891,15 +1745,13 @@ class RuntimeLimits:
     max_progress_rounds: int = 32
 
     def __post_init__(self) -> None:
-        if int(self.max_model_rounds) <= 0:
-            raise ValueError("max model rounds must be positive")
-        if int(self.max_progress_rounds) < 0:
-            raise ValueError("max progress rounds must be non-negative")
-        object.__setattr__(self, "max_model_rounds", int(self.max_model_rounds))
+        object.__setattr__(self, "max_model_rounds", positive_int(
+            self.max_model_rounds, "max model rounds"
+        ))
         object.__setattr__(
             self,
             "max_progress_rounds",
-            int(self.max_progress_rounds),
+            non_negative_int(self.max_progress_rounds, "max progress rounds"),
         )
 
 
@@ -1918,13 +1770,6 @@ class AgentRuntimeResult:
         object.__setattr__(self, "model", str(self.model or ""))
         object.__setattr__(self, "round_count", max(0, int(self.round_count)))
         object.__setattr__(self, "error_code", _optional_text(self.error_code))
-
-
-def _optional_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _tool_call_from_mapping(value: Mapping[str, Any]) -> ToolCall:

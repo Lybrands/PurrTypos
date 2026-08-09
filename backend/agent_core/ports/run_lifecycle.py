@@ -16,6 +16,7 @@ from agent_core.contracts import (
     TraceRecord,
 )
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.contracts.normalization import required_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,9 +27,7 @@ class RunBeginResult:
     event: AgentEvent
 
     def __post_init__(self) -> None:
-        run_id = str(self.run_id or "").strip()
-        if not run_id:
-            raise ValueError("run begin result requires a run id")
+        run_id = required_text(self.run_id, "run begin result run id")
         if self.event.run_id != run_id:
             raise ValueError("run begin event must be bound to the created run")
         object.__setattr__(self, "run_id", run_id)

@@ -15,6 +15,10 @@ from agent_core.contracts import (
     TaskStepUpdate,
     ToolBatchOutcome,
 )
+from agent_core.contracts.normalization import (
+    optional_text as _optional_text,
+    required_text,
+)
 from agent_core.errors import ContractViolationError
 
 
@@ -44,14 +48,10 @@ class RunSnapshot:
     error: str | None = None
 
     def __post_init__(self) -> None:
-        run_id = str(self.run_id or "").strip()
-        title = str(self.title or "").strip()
+        run_id = required_text(self.run_id, "run snapshot run id")
+        title = required_text(self.title, "run snapshot title")
         steps = tuple(self.steps)
         status = RunStatus(self.status)
-        if not run_id:
-            raise ValueError("run snapshot requires a run id")
-        if not title:
-            raise ValueError("run snapshot requires a title")
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("run snapshot step ids must be unique")
         running_count = sum(step.status is StepStatus.RUNNING for step in steps)
@@ -718,13 +718,6 @@ def _replace_at(
 
 def _unchanged(state: RunSnapshot) -> RunTransition:
     return RunTransition(before=state, after=state)
-
-
-def _optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _unique_step_id(base: str, used: frozenset[str]) -> str:

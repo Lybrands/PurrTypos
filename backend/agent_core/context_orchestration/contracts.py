@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, Mapping
 
 from agent_core.context_orchestration.ledger import ContextCompactionBudget
 from agent_core.contracts import AgentRunRequest
+from agent_core.json_values import freeze_json_mapping
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_positive_int,
+    positive_int,
+    required_text,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,15 +31,15 @@ class ContextCompressionSettings:
 
     def __post_init__(self) -> None:
         trigger = float(self.trigger_ratio)
-        keep = int(self.default_keep_recent_messages)
         if not 0 < trigger <= 1:
             raise ValueError(
                 "trigger_ratio must be greater than zero and at most one"
             )
-        if keep <= 0:
-            raise ValueError("default_keep_recent_messages must be positive")
         object.__setattr__(self, "trigger_ratio", trigger)
-        object.__setattr__(self, "default_keep_recent_messages", keep)
+        object.__setattr__(self, "default_keep_recent_messages", positive_int(
+            self.default_keep_recent_messages,
+            "default_keep_recent_messages",
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +65,9 @@ class ContextCompressionRequest:
             "projected_input_tokens",
             "available_message_tokens",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(
+                getattr(self, name), name
+            ))
         pressure = float(self.pressure_ratio)
         if pressure < 0:
             raise ValueError("pressure_ratio must be non-negative")
@@ -72,10 +77,9 @@ class ContextCompressionRequest:
             "compression_required",
             bool(self.compression_required),
         )
-        reason = str(self.trigger_reason or "").strip()
-        if not reason:
-            raise ValueError("trigger_reason is required")
-        object.__setattr__(self, "trigger_reason", reason)
+        object.__setattr__(self, "trigger_reason", required_text(
+            self.trigger_reason, "trigger_reason"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,30 +96,25 @@ class ConversationCompactionResult:
     def __post_init__(self) -> None:
         if not isinstance(self.request, AgentRunRequest):
             raise TypeError("compaction request must be an AgentRunRequest")
-        outcome = str(self.outcome or "").strip()
-        if not outcome:
-            raise ValueError("compaction outcome is required")
-        object.__setattr__(self, "outcome", outcome)
-        if self.compression_state_version is not None:
-            state_version = int(self.compression_state_version)
-            if state_version <= 0:
-                raise ValueError(
-                    "compression_state_version must be positive"
-                )
-            object.__setattr__(
-                self,
+        object.__setattr__(self, "outcome", required_text(
+            self.outcome, "compaction outcome"
+        ))
+        object.__setattr__(
+            self,
+            "compression_state_version",
+            optional_positive_int(
+                self.compression_state_version,
                 "compression_state_version",
-                state_version,
-            )
+            ),
+        )
         for name in ("compacted_turn_count", "retained_raw_turn_count"):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(
+                getattr(self, name), name
+            ))
         object.__setattr__(
             self,
             "diagnostics",
-            MappingProxyType(dict(self.diagnostics)),
+            freeze_json_mapping(self.diagnostics),
         )
 
 
