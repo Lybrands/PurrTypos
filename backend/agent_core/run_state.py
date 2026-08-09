@@ -55,8 +55,25 @@ class RunSnapshot:
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("run snapshot step ids must be unique")
         running_count = sum(step.status is StepStatus.RUNNING for step in steps)
-        if running_count > 1:
-            raise ValueError("run snapshot may have at most one running step")
+        if running_count > 1 and any(
+            step.status is StepStatus.RUNNING
+            and step.executor is not StepExecutor.AGENT
+            for step in steps
+        ):
+            raise ValueError(
+                "only dependency-independent Agent steps may run in parallel"
+            )
+        status_by_id = {step.id: step.status for step in steps}
+        for step in steps:
+            if step.status is not StepStatus.RUNNING or not step.depends_on:
+                continue
+            if any(
+                status_by_id.get(dependency) is not StepStatus.DONE
+                for dependency in step.depends_on
+            ):
+                raise ValueError(
+                    "a running step requires all Planner dependencies to be done"
+                )
         if status in _TERMINAL_STATUSES and running_count:
             raise ValueError("terminal run snapshot cannot have a running step")
         object.__setattr__(self, "run_id", run_id)
@@ -92,7 +109,7 @@ class RunTransition:
 
 
 class RunStateMachine:
-    """Stateless reducer for sequential model/tool todo plans."""
+    """Stateless reducer for sequential work and Planner-authored Agent DAGs."""
 
     @staticmethod
     def initialize(
@@ -112,6 +129,13 @@ class RunStateMachine:
         steps = tuple(_initial_step(step) for step in plan.steps)
         for step in steps:
             _validate_step_execution_contract(step)
+        root_agent_indexes = tuple(
+            index
+            for index, step in enumerate(steps)
+            if step.executor is StepExecutor.AGENT
+            and not step.depends_on
+            and step.status is not StepStatus.DONE
+        )
         first_runnable = next(
             (
                 index
@@ -121,7 +145,14 @@ class RunStateMachine:
             ),
             -1,
         )
-        if first_runnable >= 0:
+        if root_agent_indexes:
+            for index in root_agent_indexes:
+                steps = _replace_at(
+                    steps,
+                    index,
+                    replace(steps[index], status=StepStatus.RUNNING),
+                )
+        elif first_runnable >= 0:
             steps = _replace_at(
                 steps,
                 first_runnable,
@@ -379,11 +410,19 @@ class RunStateMachine:
     def complete_durable_execution(
         state: RunSnapshot,
         final_response: str = "",
+        *,
+        covered_step_ids: tuple[str, ...],
     ) -> RunTransition:
         """Complete a root run after its durable execution has finished."""
 
         if state.terminal:
             return _unchanged(state)
+        covered = frozenset(covered_step_ids)
+        planned = frozenset(step.id for step in state.steps)
+        if planned != covered:
+            raise RuntimeError(
+                "durable completion must match the admitted plan steps"
+            )
         changes = tuple(
             (
                 index,
@@ -392,12 +431,12 @@ class RunStateMachine:
                     status=StepStatus.DONE,
                     result_summary=(
                         step.result_summary
-                        or "Durable execution completed this planned step."
+                        or "Durable execution fulfilled this admitted step."
                     ),
                 ),
             )
             for index, step in enumerate(state.steps)
-            if step.status in {StepStatus.PENDING, StepStatus.RUNNING}
+            if step.id in covered and step.status is not StepStatus.DONE
         )
         return _with_step_changes(
             state,
@@ -405,6 +444,50 @@ class RunStateMachine:
             status=RunStatus.DONE,
             final_response=final_response,
         )
+
+    @staticmethod
+    def sync_durable_execution(
+        state: RunSnapshot,
+        statuses: dict[str, StepStatus],
+    ) -> RunTransition:
+        """Project durable unit states onto their Planner-authored steps."""
+
+        if state.terminal:
+            return _unchanged(state)
+        by_id = {step.id: index for index, step in enumerate(state.steps)}
+        unknown = set(statuses) - set(by_id)
+        if unknown:
+            raise ContractViolationError(
+                "durable progress names unknown plan steps: "
+                + ", ".join(sorted(unknown))
+            )
+        changes: list[tuple[int, TaskStep]] = []
+        for step_id, raw_status in statuses.items():
+            index = by_id[step_id]
+            step = state.steps[index]
+            status = StepStatus(raw_status)
+            if step.status is status:
+                continue
+            if step.status is StepStatus.DONE and status is not StepStatus.DONE:
+                continue
+            changes.append((
+                index,
+                replace(
+                    step,
+                    status=status,
+                    result_summary=(
+                        "Durable execution completed this Planner step."
+                        if status is StepStatus.DONE
+                        else step.result_summary
+                    ),
+                    error=(
+                        "durable_execution_failed"
+                        if status is StepStatus.FAILED
+                        else None
+                    ),
+                ),
+            ))
+        return _with_step_changes(state, tuple(changes))
 
     @staticmethod
     def fail(state: RunSnapshot, error: str) -> RunTransition:

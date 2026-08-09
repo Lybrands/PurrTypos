@@ -8,6 +8,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from application.agent_run_queries import AgentRunQueryService
+from application.screenplay_sse_mapping import screenplay_event_to_sse_chunk
 from application.agent_composition import set_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -57,6 +58,7 @@ def _queries(db: DatabaseConnection) -> AgentRunQueryService:
     return AgentRunQueryService(
         SqliteCheckpointStore(db),
         role_registry=build_writing_agent_role_registry(),
+        domain_event_mapper=screenplay_event_to_sse_chunk,
     )
 
 

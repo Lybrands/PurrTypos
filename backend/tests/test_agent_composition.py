@@ -33,6 +33,8 @@ from application.request_mapping import (
     writing_run_options,
 )
 from application.sse_mapping import core_update_to_sse_chunk
+from application.screenplay_sse_mapping import screenplay_update_to_sse_chunk
+from application.screenplay_agent_composition import ScreenplayAgentComposition
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.contracts import WritingDomainContext
@@ -86,15 +88,15 @@ async def test_cancel_screenplay_long_task_stops_worker_and_bound_child_run():
     class _Composition:
         _long_task_repository = _Repository()
         _execution_lease_store = _LeaseStore()
-        _active_long_task_parent_runs = {"task-1": "run-parent"}
+        _active_parent_runs = {"task-1": "run-parent"}
 
-        _request_long_task_execution_stop = (
-            AgentComposition._request_long_task_execution_stop
+        _request_execution_stop = (
+            ScreenplayAgentComposition._request_execution_stop
         )
 
     composition = _Composition()
 
-    result = await AgentComposition.cancel_screenplay_long_task(
+    result = await ScreenplayAgentComposition.cancel_long_task(
         composition,
         "task-1",
     )
@@ -166,7 +168,10 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)
-    assert options.output_reserve_tokens == 2048
+    assert "max_tokens" not in request.model.options
+    assert options.output_reserve_tokens == 7_500
+    assert options.output_budget is not None
+    assert options.output_budget.policy_key == "conversation"
     assert options.context_claims[0].name == "writing_retrieval"
 
 
@@ -559,7 +564,7 @@ def test_request_mapping_does_not_silently_drop_invalid_caller_tool_shapes(
         )
 
 
-def test_anthropic_thinking_output_reserve_matches_provider_adjustment():
+def test_caller_output_limit_cannot_override_host_task_policy():
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
@@ -577,7 +582,10 @@ def test_anthropic_thinking_output_reserve_matches_provider_adjustment():
 
     options = writing_run_options(request, provider_options)
 
-    assert options.output_reserve_tokens == 3_072
+    assert "max_tokens" not in request.model.options
+    assert options.output_reserve_tokens == 7_500
+    assert options.output_budget is not None
+    assert options.output_budget.policy_key == "conversation"
 
 
 def test_sse_mapping_preserves_public_run_and_domain_event_names():
@@ -597,11 +605,26 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
-    screenplay_effect = core_update_to_sse_chunk(
+    screenplay_effect = screenplay_update_to_sse_chunk(
         AgentEvent(
             type="screenplay.document_proposal",
             run_id="run-1",
             payload={"kind": "creative_brief", "title": "创作简报"},
+        ),
+        model="model",
+    )
+    screenplay_revision = screenplay_update_to_sse_chunk(
+        AgentEvent(
+            type="screenplay.revision_ready",
+            run_id="run-1",
+            payload={
+                "schemaVersion": 1,
+                "projectId": "project-1",
+                "operationId": "operation-1",
+                "revisionId": "revision-1",
+                "role": "creativeBrief",
+                "revisionNo": 1,
+            },
         ),
         model="model",
     )
@@ -726,6 +749,18 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         "proposedScreenplayDocument": {
             "kind": "creative_brief",
             "title": "创作简报",
+            "sourceRunId": "run-1",
+        },
+    }
+    assert screenplay_revision == {
+        "screenplayRevisionReady": {
+            "schemaVersion": 1,
+            "projectId": "project-1",
+            "operationId": "operation-1",
+            "revisionId": "revision-1",
+            "role": "creativeBrief",
+            "revisionNo": 1,
+            "sourceRunId": "run-1",
         },
     }
     assert done == {"done": True, "model": "provider-resolved-model"}

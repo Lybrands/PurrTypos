@@ -130,7 +130,7 @@ test('built-in selection sends its model profile while custom models stay generi
   assert.equal(builtIn.options.model_profile, 'minimax:MiniMax-M3')
   assert.deepEqual(builtIn.options.thinking, { type: 'enabled' })
   assert.equal(builtIn.options.context_window, '256k')
-  assert.equal(builtIn.options.max_tokens, 16_384)
+  assert.equal(Object.hasOwn(builtIn.options, 'max_tokens'), false)
 
   const custom = buildStreamOptions({
     cfg: {
@@ -146,10 +146,10 @@ test('built-in selection sends its model profile while custom models stay generi
     selectedModel: 'custom',
   })
   assert.equal(Object.hasOwn(custom.options, 'model_profile'), false)
-  assert.equal(custom.options.max_tokens, 16_000)
+  assert.equal(Object.hasOwn(custom.options, 'max_tokens'), false)
 })
 
-test('stream output budget is model-owned and clamps configured values to a known provider limit', () => {
+test('renderer never sends its legacy output budget to Agent Core', () => {
   const configured = buildStreamOptions({
     cfg: {
       id: 'mimo',
@@ -164,7 +164,7 @@ test('stream output budget is model-owned and clamps configured values to a know
     selectedModel: 'mimo',
   })
 
-  assert.equal(configured.options.max_tokens, 131_072)
+  assert.equal(Object.hasOwn(configured.options, 'max_tokens'), false)
 })
 
 test('thinking SSE deltas become visible thinking blocks before answer text', () => {
@@ -408,6 +408,8 @@ test('context lifecycle chunks update the visible assistant work log', () => {
   const acc = {}
   const ctx = {
     acc,
+    cfg: { id: 'model-test' },
+    apiModelName: 'test-model',
     isVisibleSession: () => true,
     scheduleCommit: (updater) => {
       conversations = updater(conversations)
@@ -448,49 +450,113 @@ test('context lifecycle chunks update the visible assistant work log', () => {
   assert.equal(acc.contextBudget.estimatedInputTokens, 12000)
   assert.equal(acc.contextBudget.actualInputTokens, 12500)
   assert.equal(acc.contextBudget.windowTokens, 200000)
+  assert.equal(acc.contextBudget.modelConfigId, 'model-test')
+  assert.equal(acc.contextBudget.modelName, 'test-model')
   assert.equal(conversations[0].contextBudget.toolSchemaTokens, 1000)
 })
 
-test('context indicator hides backend estimates when actual usage is unavailable', () => {
+test('a newly prepared request clears the previous provider usage snapshot', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {}
+  const ctx = {
+    acc,
+    cfg: { id: 'model-test' },
+    apiModelName: 'test-model',
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  const preparedBudget = (estimatedInputTokens) => ({
+    windowTokens: 200000,
+    estimatedInputTokens,
+    toolSchemaTokens: 1000,
+    outputReserveTokens: 8000,
+    safetyReserveTokens: 1000,
+    runtimeReserveTokens: 1000,
+    droppedMessages: 0,
+    projectedTotalTokens: estimatedInputTokens + 11000,
+    overflowTokens: 0,
+  })
+
+  handleContextBudget({
+    contextBudget: preparedBudget(12000),
+  }, ctx)
+  handleContextBudget({
+    contextBudget: {
+      actualInputTokens: 12500,
+      actualOutputTokens: 500,
+      actualTotalTokens: 13000,
+      actualUsageRound: 1,
+      usageSource: 'provider',
+    },
+  }, ctx)
+  handleContextBudget({
+    contextBudget: preparedBudget(18000),
+  }, ctx)
+
+  assert.equal(acc.contextBudget.estimatedInputTokens, 18000)
+  assert.equal(acc.contextBudget.actualInputTokens, undefined)
+  assert.equal(conversations[0].contextBudget.actualInputTokens, undefined)
+})
+
+test('context indicator uses the final prepared input estimate including tool schemas', () => {
   const usage = calculateContextUsage({
     messages: [{
       role: 'assistant',
-      content: 'last answer',
+      content: '',
+      model: 'test-model',
       contextBudget: {
         windowTokens: 200000,
         estimatedInputTokens: 12000,
         toolSchemaTokens: 1000,
+        outputReserveTokens: 8000,
       },
     }],
     windowTokens: 200000,
+    modelName: 'test-model',
   })
 
-  assert.equal(usage, null)
+  assert.deepEqual(usage, {
+    usedTokens: 13000,
+    windowTokens: 200000,
+    inputCapacityTokens: 192000,
+    outputReserveTokens: 8000,
+    ratio: 13000 / 200000,
+    source: 'estimate',
+  })
 })
 
-test('context indicator uses provider input exactly and excludes local text', () => {
+test('context indicator uses provider input as the current-context baseline', () => {
   const usage = calculateContextUsage({
     messages: [{
       role: 'assistant',
-      content: 'last answer',
+      content: '',
+      model: 'test-model',
       contextBudget: {
         windowTokens: 200000,
         estimatedInputTokens: 12000,
         toolSchemaTokens: 1000,
         actualInputTokens: 1234,
+        outputReserveTokens: 8000,
       },
     }],
     windowTokens: 200000,
+    modelName: 'test-model',
   })
 
   assert.equal(usage.usedTokens, 1234)
+  assert.equal(usage.inputCapacityTokens, 192000)
+  assert.equal(usage.source, 'provider')
 })
 
-test('context indicator keeps the latest actual value until a new one arrives', () => {
+test('a newly prepared request replaces the previous provider usage', () => {
   const usage = calculateContextUsage({
     messages: [{
       role: 'assistant',
       content: 'previous answer',
+      model: 'test-model',
       contextBudget: {
         windowTokens: 200000,
         estimatedInputTokens: 12000,
@@ -502,36 +568,97 @@ test('context indicator keeps the latest actual value until a new one arrives', 
     {
       role: 'assistant',
       content: '',
+      model: 'test-model',
       contextBudget: {
         windowTokens: 200000,
         estimatedInputTokens: 50000,
         toolSchemaTokens: 10000,
+        outputReserveTokens: 8000,
       },
     }],
     windowTokens: 200000,
+    modelName: 'test-model',
   })
 
-  assert.equal(usage.usedTokens, 1234)
+  assert.equal(usage.usedTokens, 60000)
+  assert.equal(usage.source, 'estimate')
 })
 
-test('first request stays hidden until provider usage is available', () => {
+test('first request exposes its prepared input estimate before provider usage', () => {
   const usage = calculateContextUsage({
     messages: [
       { role: 'user', content: 'first question' },
       {
         role: 'assistant',
         content: '',
+        model: 'test-model',
         contextBudget: {
           windowTokens: 200000,
           estimatedInputTokens: 50000,
           toolSchemaTokens: 10000,
+          outputReserveTokens: 8000,
         },
       },
     ],
     windowTokens: 200000,
+    modelName: 'test-model',
   })
 
-  assert.equal(usage, null)
+  assert.deepEqual(usage, {
+    usedTokens: 60000,
+    windowTokens: 200000,
+    inputCapacityTokens: 192000,
+    outputReserveTokens: 8000,
+    ratio: 60000 / 200000,
+    source: 'estimate',
+  })
+})
+
+test('switching to a different model window keeps the current conversation estimate', () => {
+  const usage = calculateContextUsage({
+    messages: [{
+      role: 'assistant',
+      content: 'previous answer',
+      model: 'previous-model',
+      contextBudget: {
+        windowTokens: 256000,
+        actualInputTokens: 18921,
+      },
+    }],
+    windowTokens: 1000000,
+    modelName: 'deepseek-v4-pro',
+  })
+
+  assert.ok(usage.usedTokens > 18921)
+  assert.equal(usage.windowTokens, 1000000)
+  assert.equal(usage.inputCapacityTokens, 1000000)
+  assert.equal(usage.outputReserveTokens, 0)
+  assert.equal(usage.source, 'estimate')
+})
+
+test('models with the same window keep usage but do not claim provider calibration', () => {
+  const usage = calculateContextUsage({
+    messages: [{
+      role: 'assistant',
+      content: 'previous answer',
+      model: 'glm-5.2',
+      contextBudget: {
+        windowTokens: 1000000,
+        estimatedInputTokens: 20000,
+        toolSchemaTokens: 5000,
+        actualInputTokens: 24000,
+      },
+    }],
+    windowTokens: 1000000,
+    modelConfigId: 'builtin_deepseek_deepseek_v4_pro',
+    modelName: 'deepseek-v4-pro',
+  })
+
+  assert.ok(usage.usedTokens > 24000)
+  assert.equal(usage.windowTokens, 1000000)
+  assert.equal(usage.inputCapacityTokens, 1000000)
+  assert.equal(usage.outputReserveTokens, 0)
+  assert.equal(usage.source, 'estimate')
 })
 
 test('active request switches to actual usage once the provider reports it', () => {
@@ -541,18 +668,41 @@ test('active request switches to actual usage once the provider reports it', () 
       {
         role: 'assistant',
         content: 'partial answer',
+        model: 'test-model',
         contextBudget: {
           windowTokens: 200000,
           estimatedInputTokens: 50000,
           toolSchemaTokens: 10000,
           actualInputTokens: 1234,
+          outputReserveTokens: 8000,
         },
       },
     ],
     windowTokens: 200000,
+    modelName: 'test-model',
   })
 
-  assert.equal(usage.usedTokens, 1234)
+  assert.ok(usage.usedTokens > 1234)
+  assert.equal(usage.source, 'provider')
+})
+
+test('current input draft is included before the request is sent', () => {
+  const baseParams = {
+    messages: [
+      { role: 'user', content: '已有问题' },
+      { role: 'assistant', content: '已有回答' },
+    ],
+    windowTokens: 1000000,
+    modelName: 'deepseek-v4-pro',
+  }
+  const withoutDraft = calculateContextUsage(baseParams)
+  const withDraft = calculateContextUsage({
+    ...baseParams,
+    draft: '这是输入框里尚未发送的新问题',
+  })
+
+  assert.ok(withDraft.usedTokens > withoutDraft.usedTokens)
+  assert.equal(withDraft.source, 'estimate')
 })
 
 test('task header does not reuse a completed plan from the previous turn', () => {
@@ -577,6 +727,14 @@ test('task header does not reuse a completed plan from the previous turn', () =>
     title: 'current task',
     status: 'running',
     steps: [
+      {
+        id: 'private-begin',
+        title: 'begin private artifact',
+        type: 'write',
+        executor: 'tool',
+        status: 'done',
+        protocolPrivate: true,
+      },
       {
         id: 'read',
         title: 'read context',
@@ -617,7 +775,7 @@ test('task header does not reuse a completed plan from the previous turn', () =>
 
   const shortPlan = {
     ...currentPlan,
-    steps: currentPlan.steps.slice(1),
+    steps: currentPlan.steps.slice(2),
   }
   conversations[3] = { ...conversations[3], taskPlan: shortPlan }
   assert.equal(getVisibleTaskPlanSteps(shortPlan).length, 2)
@@ -642,7 +800,29 @@ test('task progress distinguishes active step number from completed count', () =
   assert.equal(progress.total, 4)
   assert.equal(progress.currentStep.id, 'three')
   assert.equal(progress.currentStepNumber, 3)
+  assert.deepEqual(progress.runningSteps.map((step) => step.id), ['three'])
   assert.equal(progress.percent, 50)
+})
+
+test('task progress exposes concurrent Planner Agent steps as one frontier', () => {
+  const progress = getTaskPlanProgress({
+    title: 'parallel plan',
+    status: 'running',
+    steps: [
+      { id: 'write-5', title: 'write 5', type: 'write', executor: 'agent', status: 'running' },
+      { id: 'write-6', title: 'write 6', type: 'write', executor: 'agent', status: 'running' },
+      { id: 'write-7', title: 'write 7', type: 'write', executor: 'agent', status: 'running' },
+      { id: 'submit', title: 'submit', type: 'write', executor: 'tool', status: 'pending' },
+    ],
+  })
+
+  assert.deepEqual(
+    progress.runningSteps.map((step) => step.id),
+    ['write-5', 'write-6', 'write-7'],
+  )
+  assert.equal(progress.currentStep.id, 'write-5')
+  assert.equal(progress.completed, 0)
+  assert.equal(progress.total, 4)
 })
 
 test('manual abort replaces an empty response with an explicit notice', () => {
@@ -943,7 +1123,7 @@ test('queued chat activity stays pending until the final queued turn completes',
 test('assistant processing label follows the actual runtime phase', () => {
   assert.equal(
     getAssistantProcessingLabel({ role: 'assistant', content: '' }),
-    '正在理解请求并准备处理',
+    '理解请求',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -951,7 +1131,7 @@ test('assistant processing label follows the actual runtime phase', () => {
       content: '',
       contextCompaction: { status: 'running' },
     }),
-    '正在整理对话上下文',
+    '整理上下文',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -959,7 +1139,7 @@ test('assistant processing label follows the actual runtime phase', () => {
       content: '',
       thinking: 'reasoning',
     }),
-    '正在推演处理方案',
+    '推演方案',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -976,7 +1156,7 @@ test('assistant processing label follows the actual runtime phase', () => {
         }],
       },
     }),
-    '正在推进任务步骤',
+    '推进任务',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -984,7 +1164,7 @@ test('assistant processing label follows the actual runtime phase', () => {
       content: 'tool commentary',
       toolCalling: true,
     }),
-    '正在执行必要操作',
+    '执行操作',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -992,7 +1172,47 @@ test('assistant processing label follows the actual runtime phase', () => {
       content: 'draft',
       contentAfterToolCalls: 'final answer',
     }),
-    '正在组织回复内容',
+    '组织回复',
+  )
+  assert.equal(
+    getAssistantProcessingLabel({
+      role: 'assistant',
+      content: '',
+      toolApprovals: [{ status: 'pending' }],
+    }),
+    '等待确认',
+  )
+  assert.equal(
+    getAssistantProcessingLabel({
+      role: 'assistant',
+      content: '',
+      delegations: [{ status: 'running' }],
+    }),
+    '协调任务',
+  )
+  assert.equal(
+    getAssistantProcessingLabel({
+      role: 'assistant',
+      content: '',
+      taskPlan: { title: 'plan', status: 'planned', steps: [] },
+    }),
+    '拆解任务',
+  )
+  assert.equal(
+    getAssistantProcessingLabel({
+      role: 'assistant',
+      content: '',
+      toolCallSegments: [{ labels: ['tool'], textBefore: '' }],
+    }),
+    '核对结果',
+  )
+  assert.equal(
+    getAssistantProcessingLabel({
+      role: 'assistant',
+      content: '',
+      contextBudget: {},
+    }),
+    '准备上下文',
   )
 })
 

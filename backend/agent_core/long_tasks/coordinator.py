@@ -110,12 +110,18 @@ class LongTaskCoordinator:
                 return current
             if signal is not None and signal.is_set():
                 return await self._checkpoint_interrupted(task.id, unit.id)
+            classifier = getattr(runner, "is_retryable_unit_error", None)
+            retryable = (
+                bool(classifier(error))
+                if callable(classifier)
+                else True
+            )
             settled = await self._repository.fail_unit(
                 task.id,
                 unit.id,
                 worker_id=self._worker_id,
                 error_code=(str(error) or type(error).__name__)[:240],
-                retryable=True,
+                retryable=retryable,
             )
             await self._notify_settled(runner, task.id)
             return settled

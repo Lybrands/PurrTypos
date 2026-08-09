@@ -1,13 +1,12 @@
 .context-usage {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 26px;
-  padding: 0 7px;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  padding: 0;
   color: var(--text-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
   border-radius: 7px;
   cursor: default;
   transition: color 0.15s ease, background-color 0.15s ease;
@@ -19,8 +18,8 @@
 }
 
 .context-usage__gauge {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: conic-gradient(
@@ -31,12 +30,18 @@
 }
 
 .context-usage-tooltip {
-  max-width: 260px;
-  line-height: 1.5;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 3px 14px;
+  min-width: 132px;
+  line-height: 1.45;
 }
 
-.context-usage-tooltip__hint {
-  margin-top: 3px;
+.context-usage-tooltip__label {
   opacity: 0.72;
-  font-size: 12px;
+}
+
+.context-usage-tooltip__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }

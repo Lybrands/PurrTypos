@@ -76,28 +76,16 @@ async def ensure_terminal_run_conversation(db, run_id: str) -> int | None:
         if isinstance(goal, str) and goal.strip():
             task_plan["goal"] = goal.strip()
 
-        proposal_row = await db.fetch_one(
-            "SELECT payload_json FROM ai_agent_run_events "
-            "WHERE run_id = ? AND event_type = 'screenplay.document_proposal' "
-            "ORDER BY id DESC LIMIT 1",
-            [normalized_run_id],
-        )
-        proposal_json = (
-            str(proposal_row.get("payload_json") or "")
-            if proposal_row is not None
-            else None
-        )
         conversation_id = await db.execute_and_get_id(
             "INSERT INTO ai_conversations "
-            "(session_id, chapter_id, prompt, response, model, task_plan, "
-            "screenplay_proposal) VALUES (?, NULL, ?, ?, ?, ?, ?)",
+            "(session_id, chapter_id, prompt, response, model, task_plan) "
+            "VALUES (?, NULL, ?, ?, ?, ?)",
             [
                 int(run["session_id"]),
                 str(run.get("prompt") or ""),
                 response,
                 run.get("model_name"),
                 json.dumps(task_plan, ensure_ascii=False),
-                proposal_json,
             ],
         )
         if conversation_id is None:

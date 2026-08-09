@@ -23,6 +23,7 @@ from agent_core.ports import (
     RunBeginResult,
     RunCommit,
     DelegationRepository,
+    DomainEventProjector,
     validate_run_commit_lifecycle,
 )
 from infrastructure.persistence import run_store
@@ -43,6 +44,7 @@ class SqliteRunRepository:
         owner_id: str | None = None,
         lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
         delegation_repository: DelegationRepository | None = None,
+        event_projector: DomainEventProjector | None = None,
     ):
         self._db = db
         self._write_lock = asyncio.Lock()
@@ -51,6 +53,7 @@ class SqliteRunRepository:
         self._delegations = (
             delegation_repository or SqliteDelegationRepository(db)
         )
+        self._event_projector = event_projector
         if self._lease_duration_ms <= 0:
             raise ValueError("lease duration must be positive")
 
@@ -137,9 +140,15 @@ class SqliteRunRepository:
                         final_response=commit.final_response,
                         error=commit.error,
                     )
+                persisted_events = []
                 for event in commit.events:
-                    await self._append_event_unchecked(normalized_run_id, event)
-        return commit.events
+                    persisted_events.append(
+                        await self._append_event_unchecked(
+                            normalized_run_id,
+                            event,
+                        )
+                    )
+        return tuple(persisted_events)
 
     async def create(self, params: RunCreateParams) -> RunId:
         created_at = now_ms()
@@ -151,6 +160,7 @@ class SqliteRunRepository:
                 prompt=params.prompt,
                 mode=params.mode,
                 provenance=params.provenance,
+                binding=params.binding,
                 execution_owner_id=self._owner_id,
                 heartbeat_at_ms=created_at,
                 lease_expires_at_ms=created_at + self._lease_duration_ms,
@@ -240,21 +250,33 @@ class SqliteRunRepository:
             raise ContractViolationError(
                 f"event type {event.type!r} is owned by AgentRunController"
             )
-        await self._append_event_unchecked(run_id, event)
+        async with self._write_lock:
+            async with self._db.transaction():
+                await self._append_event_unchecked(run_id, event)
 
     async def _append_event_unchecked(
         self,
         run_id: RunId,
         event: AgentEvent,
-    ) -> None:
+    ) -> AgentEvent:
         if event.run_id is not None and event.run_id != run_id:
             raise ContractViolationError("event run_id does not match repository run_id")
+        persisted_event = event
+        if self._event_projector is not None:
+            projected_event = await self._event_projector.project(run_id, event)
+            if projected_event is not None:
+                if projected_event.run_id != run_id:
+                    raise ContractViolationError(
+                        "projected event run_id does not match repository run_id"
+                    )
+                persisted_event = projected_event
         await run_store.append_event(
             self._db,
             run_id,
-            event.type,
-            thaw_json_mapping(event.payload),
+            persisted_event.type,
+            thaw_json_mapping(persisted_event.payload),
         )
+        return persisted_event
 
     async def append_trace(self, run_id: RunId, trace: TraceRecord) -> None:
         await run_store.append_trace(
@@ -276,9 +298,14 @@ def _storage_step(step: TaskStep) -> dict:
         "executor": step.executor.value,
         "riskLevel": step.risk_level.value if step.risk_level else None,
         "suggestedTools": list(step.suggested_tools),
+        "agentRole": step.agent_role,
+        "assignment": thaw_json_mapping(step.assignment),
+        "dependsOn": list(step.depends_on),
         "description": step.description,
         "resultSummary": step.result_summary,
         "error": step.error,
+        "protocolPrivate": step.protocol_private,
+        "planningCapability": step.planning_capability,
     }
 
 

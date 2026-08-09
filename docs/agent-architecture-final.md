@@ -1,5 +1,7 @@
 # PurrTypos Agent 最终架构
 
+> 历史状态：本文记录上一轮 Writing Agent 三层架构的完成状态，不再是 2026-08 Agent Core/剧本对话重构的权威目标。当前层级所有权、迁移门槛与断线语义以 [`docs/design/agent-core-screenplay-refactor-charter.md`](design/agent-core-screenplay-refactor-charter.md) 为准。
+
 ## 1. 架构目标
 
 Agent 的核心不是“让模型可以调用工具”，而是让不确定的模型输出进入一个可约束、可观察、可恢复、可评测的宿主执行系统。

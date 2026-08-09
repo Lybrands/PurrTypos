@@ -137,6 +137,43 @@ def test_pack_counts_the_security_preamble_inside_the_allocation():
     assert fitted.included_document_ids == demand.selected_document_ids
 
 
+def test_episode_manifest_never_reinjects_hydrated_episode_payloads():
+    document = _document(
+        "scene-list",
+        "scene_list",
+        1,
+        "accepted",
+        content_json={
+            "schemaVersion": 2,
+            "storageMode": "episode_documents",
+            "episodeCount": 2,
+            "episodeDocuments": [
+                {"episodeNumber": 1, "itemIds": ["s1"]},
+                {"episodeNumber": 2, "itemIds": ["s2"]},
+            ],
+            # Context state may hydrate these for host planning. The model pack
+            # must still expose only the manifest and use the episode read tool.
+            "scenes": [
+                {"id": "s1", "synopsis": "SHOULD_NOT_ENTER_MODEL_CONTEXT"},
+                {"id": "s2", "synopsis": "SHOULD_NOT_ENTER_MODEL_CONTEXT"},
+            ],
+        },
+    )
+
+    pack = pack_screenplay_project_context(
+        project=_project(),
+        active_document_id=None,
+        documents=(document,),
+        stage="draft",
+    )
+
+    assert "SHOULD_NOT_ENTER_MODEL_CONTEXT" not in pack.content
+    payload = json.loads(pack.content.removeprefix(SCREENPLAY_PROJECT_PREAMBLE))
+    manifest = payload["documents"][0]["content"]
+    assert manifest["episodeCount"] == 2
+    assert "scenes" not in manifest
+
+
 def test_pack_fails_when_even_the_minimum_complete_unit_cannot_fit():
     document = _document(
         "outline",

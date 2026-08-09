@@ -9,14 +9,7 @@ from typing import Any
 def ordered_scene_mappings(
     scene_list_content: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], ...]:
-    """Return scenes in narrative order, tolerating legacy interleaving.
-
-    Current scene-list validation requires a continuous ``order`` field, but
-    older accepted lists may contain a later-appended scene whose episode is
-    earlier than its array/order position. For episodic lists, episodeNumber is
-    the authoritative structure mapping; ``order`` remains the tie-breaker
-    within an episode. Non-episodic lists continue to use ``order``.
-    """
+    """Return scenes in their authoritative episode and local order."""
 
     raw_scenes = scene_list_content.get("scenes")
     if not isinstance(raw_scenes, Sequence) or isinstance(

@@ -25,23 +25,42 @@ from agent_core.work_items import (
     WorkItemTransitionCommand,
 )
 from application.agent_delegation_service import AgentDelegationService
-from application.screenplay_long_task_conversation import (
-    SCREENPLAY_LONG_TASK_RESPONSE_EVENT,
-    SCREENPLAY_LONG_TASK_THINKING_SNAPSHOT_EVENT,
-    SCREENPLAY_LONG_TASK_VALIDATION_FAILED_EVENT,
+from application.screenplay_agent_request_mapping import (
+    screenplay_run_options,
+    to_screenplay_agent_request,
+)
+from database.crud.screenplay_drafts import (
+    latest_accepted_draft_document,
+    list_episode_rows,
+)
+from database.crud.screenplay_head_projection import get_current_document
+from database.crud.screenplay_episode_documents import (
+    list_episode_rows as list_structured_episode_rows,
 )
 from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
 from domains.screenplay.agent_roles import build_screenplay_agent_role_registry
 from domains.screenplay.long_task_response import (
     ScreenplayDraftBatchResponseValidator,
+    ScreenplayReviewReportValidator,
 )
 from domains.screenplay.scene_execution import (
     normalize_scene_execution,
     validate_scene_execution_history,
 )
+from domains.screenplay.draft_episodes import build_episode_draft_batches
 from domains.screenplay.scene_order import ordered_scene_mappings
 from domains.screenplay.task_admission import (
     SCREENPLAY_DRAFT_LONG_TASK_KIND,
+)
+from schemas.screenplay_agent_run import ScreenplayAgentRunRequest
+
+
+SCREENPLAY_LONG_TASK_RESPONSE_EVENT = "screenplay.long_task.response"
+SCREENPLAY_LONG_TASK_THINKING_SNAPSHOT_EVENT = (
+    "screenplay.long_task.thinking_snapshot"
+)
+SCREENPLAY_LONG_TASK_VALIDATION_FAILED_EVENT = (
+    "screenplay.long_task.validation_failed"
 )
 
 
@@ -87,6 +106,13 @@ class ScreenplayLongTaskExecution:
             retry_backoff_ms=(5_000, 20_000),
         )
         task = await coordinator.run(task_id, self, self._signal)
+        if (
+            task.status in {LongTaskStatus.FAILED, LongTaskStatus.CANCELED}
+            and self._delegation_service is not None
+        ):
+            await self._delegation_service.cancel_children(
+                self._parent_run_id or task.created_by_run_id
+            )
         units = await self._repository.list_units(task.id)
         finalize = next((
             unit for unit in units
@@ -132,10 +158,18 @@ class ScreenplayLongTaskExecution:
     async def run_unit(self, task, unit, signal=None):
         if task.kind != SCREENPLAY_DRAFT_LONG_TASK_KIND:
             raise RuntimeError("unsupported_screenplay_long_task_kind")
+        await self._emit_progress(task.id, task=task)
         unit_kind = str(unit.metadata.get("unitKind") or "scene_generation")
         if unit_kind == "finalize":
             return await self._finalize(task)
-        agent_role = _agent_role_for_unit(unit_kind)
+        if unit_kind == "scene_revision":
+            passthrough = await self._passthrough_revision_if_clean(task, unit)
+            if passthrough is not None:
+                return passthrough
+        agent_role = _agent_role_for_unit(
+            unit_kind,
+            declared_role=str(unit.metadata.get("agentRole") or ""),
+        )
         prepared = await self._prepare_batch(task, unit)
         if self._delegation_service is None:
             raise RuntimeError("screenplay child delegation service is unavailable")
@@ -184,12 +218,33 @@ class ScreenplayLongTaskExecution:
             "messages": [{"role": "user", "content": prepared.prompt}],
             "sessionId": None,
             "enableAgentTools": False,
-            "chatAgentMode": "agent",
+            "chatAgentMode": "ask",
             "screenplayTaskIntent": "chat",
+            # The durable parent owns the project operation. Child Runs are
+            # evidence-producing units and must not bind or settle that root
+            # operation independently.
+            "screenplayOperationId": None,
             "screenplayDraftSceneCount": 1,
             "screenplayDraftScope": "planner",
         })
         from application.agent_run_service import AgentRunService
+
+        child_request = None
+        child_options = None
+        if isinstance(child_body, ScreenplayAgentRunRequest):
+            child_request = to_screenplay_agent_request(
+                child_body,
+                self._provider_options,
+            )
+            child_options = screenplay_run_options(
+                child_request,
+                lineage=child_lineage,
+                agent_role=agent_role,
+                output_work_units=max(
+                    1,
+                    len(tuple(unit.metadata.get("sceneIds", ()))),
+                ),
+            )
 
         result: AgentRunResult | None = None
         bound = False
@@ -203,14 +258,38 @@ class ScreenplayLongTaskExecution:
             signal=cancellation_signal,
             lineage=child_lineage,
             enable_delegation=False,
+            # The host prompt is complete. An explicit empty mode set keeps
+            # the child tool catalog empty even if a future caller regresses
+            # the request-level tools flag.
+            allowed_tool_modes=frozenset(),
+            domain_context_overrides={
+                "bound_draft_scene_ids": list(
+                    unit.metadata.get("sceneIds", [])
+                ),
+            },
             host_system_instruction=(
                 build_screenplay_agent_role_registry()
                 .require(agent_role)
                 .instruction
             ),
             response_validators=(
-                ScreenplayDraftBatchResponseValidator(prepared.scenes),
+                (
+                    ScreenplayReviewReportValidator(tuple(
+                        str(scene.get("id") or "")
+                        for scene in prepared.scenes
+                    ))
+                    if unit_kind == "continuity_review"
+                    else ScreenplayDraftBatchResponseValidator(prepared.scenes)
+                ),
             ),
+            agent_role=agent_role,
+            output_work_units=max(
+                1,
+                len(tuple(unit.metadata.get("sceneIds", ()))),
+            ),
+            host_context_only=True,
+            mapped_request=child_request,
+            base_options=child_options,
         )
         try:
             async for update in stream:
@@ -252,12 +331,6 @@ class ScreenplayLongTaskExecution:
                     delta = str(update.payload.get("delta") or "")
                     if delta:
                         thinking_parts.append(delta)
-                        self._publish_thinking_delta(
-                            task,
-                            unit,
-                            run_id=str(update.run_id or child_run_id or ""),
-                            delta=delta,
-                        )
                 if isinstance(update, AgentRunResult):
                     result = update
         finally:
@@ -307,11 +380,30 @@ class ScreenplayLongTaskExecution:
                 or "long_task_child_run_failed"
             )
         try:
-            scenes, assistant_response = await self._validate_batch_result(
-                task,
-                unit,
-                result.final_response,
-            )
+            if unit_kind == "continuity_review":
+                review_report, assistant_response = (
+                    await self._validate_review_result(
+                        unit,
+                        result.final_response,
+                    )
+                )
+                result_metadata = {
+                    "sceneIds": list(unit.metadata.get("sceneIds", [])),
+                    "reviewReport": review_report,
+                    "assistantResponse": assistant_response,
+                }
+            else:
+                scenes, assistant_response = await self._validate_batch_result(
+                    task,
+                    unit,
+                    result.final_response,
+                )
+                result_metadata = {
+                    "sceneIds": [scene["sceneId"] for scene in scenes],
+                    "scenes": scenes,
+                    "continuitySummary": _continuity_summary_from_scenes(scenes),
+                    "assistantResponse": assistant_response,
+                }
         except Exception as error:
             if result.run_id:
                 await self._composition.append_run_event(
@@ -385,16 +477,31 @@ class ScreenplayLongTaskExecution:
         return LongTaskUnitResult(
             output_ref=f"longtask://{task.id}/{unit.id}",
             run_id=result.run_id,
-            metadata={
-                "sceneIds": [scene["sceneId"] for scene in scenes],
-                "scenes": scenes,
-                "continuitySummary": _continuity_summary_from_scenes(scenes),
-                "assistantResponse": assistant_response,
-            },
+            metadata=result_metadata,
         )
 
     async def on_unit_settled(self, task_id: str) -> None:
-        task = await self._repository.load(task_id)
+        await self._emit_progress(task_id)
+
+    @staticmethod
+    def is_retryable_unit_error(error: Exception) -> bool:
+        """Retry only failures that can plausibly succeed unchanged."""
+
+        code = str(error or "").strip().lower()
+        return any(marker in code for marker in (
+            "model_stream_interrupted",
+            "upstream_stream_interrupted",
+            "provider_timeout",
+            "provider_rate_limited",
+            "provider_unavailable",
+            "temporarily_unavailable",
+            "connection_reset",
+            "connection_closed",
+        ))
+
+    async def _emit_progress(self, task_id: str, *, task=None) -> None:
+        if task is None:
+            task = await self._repository.load(task_id)
         if task is None:
             return
         units = await self._repository.list_units(task_id)
@@ -412,6 +519,9 @@ class ScreenplayLongTaskExecution:
                 "units": [
                     {
                         "id": item.id,
+                        "plannerStepId": str(
+                            item.metadata.get("plannerStepId") or item.id
+                        ),
                         "position": item.position,
                         "status": item.status.value,
                         "attempt": item.attempt,
@@ -425,34 +535,6 @@ class ScreenplayLongTaskExecution:
                 ],
             },
         ))
-
-    def _publish_thinking_delta(
-        self,
-        task,
-        unit,
-        *,
-        run_id: str,
-        delta: str,
-    ) -> None:
-        if not run_id or not delta:
-            return
-        hub = getattr(
-            self._composition,
-            "screenplay_long_task_conversation_hub",
-            None,
-        )
-        publish = getattr(hub, "publish", None)
-        if not callable(publish):
-            return
-        publish(task.id, {
-            "type": "turn.thinking.delta",
-            "taskId": task.id,
-            "unitId": unit.id,
-            "attempt": max(1, int(unit.attempt or 1)),
-            "runId": run_id,
-            "title": _unit_stream_title(unit),
-            "delta": delta,
-        })
 
     async def _emit(
         self,
@@ -557,6 +639,67 @@ class ScreenplayLongTaskExecution:
     async def _build_batch_prompt(self, task, unit) -> str:
         return (await self._prepare_batch(task, unit)).prompt
 
+    async def _passthrough_revision_if_clean(self, task, unit):
+        """Complete a revision unit without a model call when review is clean."""
+
+        requested_ids = tuple(
+            str(item or "").strip()
+            for item in unit.metadata.get("sceneIds", [])
+            if str(item or "").strip()
+        )
+        if len(requested_ids) != 1:
+            raise RuntimeError("long_task_revision_scope_invalid")
+        all_units = tuple(await self._repository.list_units(task.id))
+        units_by_id = {item.id: item for item in all_units}
+        dependency_ids = _dependency_ancestor_ids(unit, units_by_id)
+        dependencies = [
+            units_by_id[item_id]
+            for item_id in dependency_ids
+            if item_id in units_by_id
+            and units_by_id[item_id].status.value == "completed"
+        ]
+        reports = [
+            thaw_json_mapping(item.metadata.get("reviewReport"))
+            for item in dependencies
+            if item.metadata.get("reviewReport") is not None
+        ]
+        if not reports:
+            raise RuntimeError("long_task_revision_review_missing")
+        relevant_issues = [
+            thaw_json_mapping(issue)
+            for report in reports
+            for issue in report.get("issues", [])
+            if isinstance(issue, Mapping)
+            and any(
+                str(scene_id or "").strip() in requested_ids
+                for scene_id in issue.get("sceneIds", [])
+            )
+        ]
+        if relevant_issues:
+            return None
+        original = next((
+            thaw_json_value(scene)
+            for dependency in reversed(dependencies)
+            for scene in reversed(tuple(dependency.metadata.get("scenes", [])))
+            if isinstance(scene, Mapping)
+            and str(scene.get("sceneId") or "").strip() == requested_ids[0]
+        ), None)
+        if not isinstance(original, Mapping):
+            raise RuntimeError("long_task_revision_source_missing")
+        normalized = dict(original)
+        return LongTaskUnitResult(
+            output_ref=f"longtask://{task.id}/{unit.id}",
+            metadata={
+                "sceneIds": list(requested_ids),
+                "scenes": [normalized],
+                "continuitySummary": _continuity_summary_from_scenes(
+                    [normalized]
+                ),
+                "assistantResponse": "连续性审阅未发现需要修改的问题，已沿用原场景。",
+                "skippedModelCall": True,
+            },
+        )
+
     async def _prepare_batch(self, task, unit) -> "_PreparedBatch":
         task_metadata = thaw_json_mapping(task.metadata)
         scene_list = await self._load_scene_list(task_metadata)
@@ -604,8 +747,9 @@ class ScreenplayLongTaskExecution:
             if str(previous.metadata.get("continuitySummary") or "").strip()
         ), "")
         accepted = await self._load_accepted_draft(task.owner_id)
-        accepted_tail = str((accepted or {}).get("content_text") or "")[-12_000:]
-        output_contract = {
+        accepted_json = _mapping((accepted or {}).get("content_json"))
+        accepted_tail = await self._accepted_tail(task.owner_id)
+        scene_output_contract = {
             "assistantResponse": (
                 "本批完成后直接展示给用户的自然语言回答；说明实际完成的场景、"
                 "关键连续性变化和仍需注意的问题，不得说已转后台或仅报告任务状态"
@@ -624,16 +768,28 @@ class ScreenplayLongTaskExecution:
             }],
         }
         unit_kind = str(unit.metadata.get("unitKind") or "scene_generation")
+        task_name = {
+            "continuity_review": "review_screenplay_continuity",
+            "scene_revision": "revise_screenplay_scene",
+            "scene_generation": "write_screenplay_scene",
+        }.get(unit_kind)
+        if task_name is None:
+            raise RuntimeError("unsupported_screenplay_execution_unit_kind")
         payload = {
-            "task": (
-                "review_and_revise_screenplay_scene_batch"
-                if unit_kind == "continuity_review"
-                else "write_screenplay_scene_batch"
-            ),
+            "task": task_name,
             "requiredSceneIds": requested_ids,
             "scenes": selected,
+            "draftPosition": _draft_position_context(
+                ordered_scenes=ordered_scenes,
+                completed_scene_ids=[
+                    str(item)
+                    for item in accepted_json.get("completedSceneIds", [])
+                    if str(item).strip()
+                ],
+                requested_scene_ids=requested_ids,
+            ),
             "acceptedDraftTail": accepted_tail,
-            # Only Planner-declared ancestors may contribute generated prose.
+            # Only workflow-declared ancestors may contribute generated prose.
             # Independent branches receive stable scene-list boundaries
             # instead of racing on whichever sibling happened to finish first.
             "recentGeneratedScenes": recent_generated,
@@ -642,7 +798,6 @@ class ScreenplayLongTaskExecution:
                 ordered_scenes,
                 requested_ids,
             ),
-            "outputContract": output_contract,
         }
         if unit_kind == "continuity_review":
             draft_scenes = [
@@ -652,23 +807,65 @@ class ScreenplayLongTaskExecution:
             if any(scene is None for scene in draft_scenes):
                 raise RuntimeError("long_task_review_dependency_output_missing")
             payload["draftScenes"] = draft_scenes
+            payload["outputContract"] = {
+                "reviewedSceneIds": "must equal requiredSceneIds in order",
+                "issues": [{
+                    "id": "stable issue id",
+                    "sceneIds": ["one or more ids from requiredSceneIds"],
+                    "severity": "blocking | major | minor",
+                    "category": "timeline | character | prop | setup_payoff | format | boundary",
+                    "problem": "concise evidence-based problem",
+                    "instruction": "specific revision instruction",
+                }],
+                "summary": "compact cross-episode review summary",
+                "assistantResponse": "short user-facing review result",
+            }
             prompt_prefix = (
-                "你正在执行 Planner 安排的剧本连续性审阅节点。只审阅并修订 "
-                "requiredSceneIds，输入正文来自声明的依赖 Writer。保持场景目标与"
-                "顺序，修复时间线、人物状态、道具、伏笔回收、场景边界和 Fountain "
-                "格式问题；不得扩写其他场景。返回一个 JSON 对象，不要 Markdown，"
+                "你正在执行宿主编排的全局连续性审阅节点。审阅 draftScenes 的"
+                "跨集时间线、人物状态、道具、伏笔回收、场景边界和 Fountain 格式。"
+                "只返回紧凑的问题报告，不得复制、改写或返回任何 sceneText。"
+                "没有问题时 issues 返回空数组。返回一个 JSON 对象，不要 Markdown，"
+                "不要在 JSON 外解释。"
+            )
+        elif unit_kind == "scene_revision":
+            draft_scenes = [
+                latest_ancestor_by_scene.get(scene_id)
+                for scene_id in requested_ids
+            ]
+            if any(scene is None for scene in draft_scenes):
+                raise RuntimeError("long_task_revision_source_missing")
+            review_issues = [
+                thaw_json_mapping(issue)
+                for previous in previous_units
+                for report in (previous.metadata.get("reviewReport"),)
+                if isinstance(report, Mapping)
+                for issue in report.get("issues", [])
+                if isinstance(issue, Mapping)
+                and any(
+                    str(scene_id or "").strip() in set(requested_ids)
+                    for scene_id in issue.get("sceneIds", [])
+                )
+            ]
+            if not review_issues:
+                raise RuntimeError("long_task_revision_issues_missing")
+            payload["draftScenes"] = draft_scenes
+            payload["reviewIssues"] = review_issues
+            payload["outputContract"] = scene_output_contract
+            prompt_prefix = (
+                "你正在执行宿主编排的定向修订节点。仅根据 reviewIssues 修订"
+                " requiredSceneIds 中的单个场景，保留未被问题影响的内容和场景契约。"
+                "必须逐项解决问题，并返回一个完整 JSON 对象；不要 Markdown，"
                 "不要在 JSON 外解释。"
             )
         elif unit_kind == "scene_generation":
+            payload["outputContract"] = scene_output_contract
             prompt_prefix = (
-                "你正在执行 Planner 安排的长篇剧本正文创作节点。只创作 "
+                "你正在执行宿主编排的正文创作步骤。只创作 "
                 "requiredSceneIds 指定的场景，严格保持顺序，不得补写、跳过或重写"
                 "其他场景。返回一个 JSON 对象，不要 Markdown，不要在 JSON 外解释。"
                 "每场使用 Fountain 格式和 @人物名角色提示；continuitySummary 必须"
                 "压缩保留人物状态、时间线、关系变化、关键道具、伏笔和未解决冲突。"
             )
-        else:
-            raise RuntimeError("unsupported_screenplay_execution_unit_kind")
         prompt = (
             prompt_prefix
             + "\n"
@@ -730,6 +927,69 @@ class ScreenplayLongTaskExecution:
         assistant_response = assistant_response[:6_000]
         return normalized, assistant_response
 
+    async def _validate_review_result(self, unit, content: str):
+        try:
+            payload = parse_json_object(content)
+        except Exception as error:
+            raise RuntimeError("long_task_review_output_invalid_json") from error
+        if any(key in payload for key in ("scenes", "draftScenes", "sceneText")):
+            raise RuntimeError("long_task_review_prose_forbidden")
+        expected_ids = [str(item) for item in unit.metadata.get("sceneIds", [])]
+        reviewed_ids = payload.get("reviewedSceneIds")
+        if not isinstance(reviewed_ids, list) or [
+            str(item or "").strip() for item in reviewed_ids
+        ] != expected_ids:
+            raise RuntimeError("long_task_review_coverage_mismatch")
+        raw_issues = payload.get("issues")
+        if not isinstance(raw_issues, list) or len(raw_issues) > 64:
+            raise RuntimeError("long_task_review_issues_invalid")
+        allowed = set(expected_ids)
+        issues: list[dict[str, object]] = []
+        for index, raw_issue in enumerate(raw_issues):
+            if not isinstance(raw_issue, Mapping):
+                raise RuntimeError("long_task_review_issue_invalid")
+            scene_ids = [
+                str(item or "").strip()
+                for item in raw_issue.get("sceneIds", [])
+                if str(item or "").strip()
+            ]
+            severity = str(raw_issue.get("severity") or "").strip()
+            if (
+                not scene_ids
+                or any(scene_id not in allowed for scene_id in scene_ids)
+                or severity not in {"blocking", "major", "minor"}
+            ):
+                raise RuntimeError("long_task_review_issue_invalid")
+            issue = {
+                "id": str(raw_issue.get("id") or f"issue-{index + 1}"),
+                "sceneIds": list(dict.fromkeys(scene_ids)),
+                "severity": severity,
+                "category": str(raw_issue.get("category") or "").strip(),
+                "problem": str(raw_issue.get("problem") or "").strip(),
+                "instruction": str(raw_issue.get("instruction") or "").strip(),
+            }
+            if any(
+                not str(issue[field]) or len(str(issue[field])) > 4_000
+                for field in ("category", "problem", "instruction")
+            ):
+                raise RuntimeError("long_task_review_issue_invalid")
+            issues.append(issue)
+        summary = str(payload.get("summary") or "").strip()[:6_000]
+        report = {
+            "reviewedSceneIds": expected_ids,
+            "issues": issues,
+            "summary": summary,
+        }
+        assistant_response = str(
+            payload.get("assistantResponse") or ""
+        ).strip()[:6_000]
+        if not assistant_response:
+            assistant_response = (
+                f"已完成 {len(expected_ids)} 场跨集连续性审阅，"
+                f"发现 {len(issues)} 个需要处理的问题。"
+            )
+        return report, assistant_response
+
     async def _finalize(self, task):
         task_metadata = thaw_json_mapping(task.metadata)
         scene_list = await self._load_scene_list(task_metadata)
@@ -762,19 +1022,29 @@ class ScreenplayLongTaskExecution:
                 generated_by_id[scene_id] = scene
         if set(generated_by_id) != set(target_ids):
             raise RuntimeError("long_task_final_coverage_mismatch")
-        # Reviewer outputs are revisions of already-covered Writer scenes.
-        # Apply them in Planner order so parallel completion timing can never
-        # affect the final document.
-        reviewed_scene_ids: list[str] = []
-        review_units = sorted(
+        reviewed_scene_ids = [
+            str(scene_id)
+            for unit in units
+            if str(unit.metadata.get("unitKind") or "")
+            == "continuity_review"
+            for report in (unit.metadata.get("reviewReport"),)
+            if isinstance(report, Mapping)
+            for scene_id in report.get("reviewedSceneIds", [])
+            if str(scene_id).strip()
+        ]
+        # Conditional Rewriters either persist one revised scene or a
+        # deterministic passthrough of the Writer candidate. Apply those
+        # scene checkpoints in canonical workflow order.
+        revision_units = sorted(
             (
                 unit for unit in units
                 if str(unit.metadata.get("unitKind") or "")
-                == "continuity_review"
+                == "scene_revision"
             ),
             key=lambda item: item.position,
         )
-        for unit in review_units:
+        revised_scene_ids: set[str] = set()
+        for unit in revision_units:
             unit_scene_ids: set[str] = set()
             for scene in unit.metadata.get("scenes", []):
                 if not isinstance(scene, Mapping):
@@ -787,7 +1057,9 @@ class ScreenplayLongTaskExecution:
                     raise RuntimeError("long_task_review_coverage_mismatch")
                 unit_scene_ids.add(scene_id)
                 generated_by_id[scene_id] = scene
-                reviewed_scene_ids.append(scene_id)
+                revised_scene_ids.add(scene_id)
+        if revised_scene_ids != set(target_ids):
+            raise RuntimeError("long_task_review_coverage_mismatch")
         # Completion order is intentionally irrelevant.  The accepted scene
         # list range remains the single canonical assembly order.
         generated = [generated_by_id[scene_id] for scene_id in target_ids]
@@ -827,10 +1099,9 @@ class ScreenplayLongTaskExecution:
             for scene in ordered_scenes
             if str(scene.get("id") or "")
         ]
-        content_text = "\n\n".join(filter(None, [
-            str((accepted or {}).get("content_text") or "").strip(),
-            *(str(scene["sceneText"]).strip() for scene in generated),
-        ]))
+        content_text = "\n\n".join(
+            str(scene["sceneText"]).strip() for scene in generated
+        )
         scene_list_id = str(task_metadata.get("sceneListDocumentId") or "")
         target_headings = [
             str(scenes_by_id.get(scene_id, {}).get("heading") or "").strip()
@@ -852,12 +1123,15 @@ class ScreenplayLongTaskExecution:
                 "newSceneIds": target_ids,
                 "newSceneHeadings": target_headings,
                 "completedSceneIds": completed_ids,
-                "sceneExecutions": executions,
                 "isComplete": completed_ids == all_scene_ids,
                 "longTaskId": task.id,
                 "continuityReviewedSceneIds": list(dict.fromkeys(
                     reviewed_scene_ids
                 )),
+                "episodeDrafts": build_episode_draft_batches(
+                    scenes_by_id=scenes_by_id,
+                    generated_scenes=generated,
+                ),
             },
             "contentText": content_text,
             "derivedFromIds": list(dict.fromkeys(derived)),
@@ -881,21 +1155,51 @@ class ScreenplayLongTaskExecution:
         )
 
     async def _load_scene_list(self, metadata):
-        row = await self._composition.database.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents WHERE id = ? "
-            "AND project_id = ? AND kind = 'scene_list' AND status = 'accepted'",
-            [metadata.get("sceneListDocumentId"), metadata.get("projectId")],
+        row = await get_current_document(
+            self._composition.database,
+            str(metadata.get("projectId") or ""),
+            kind="scene_list",
         )
-        if row is None:
+        if (
+            row is None
+            or str(row.get("id") or "")
+            != str(metadata.get("sceneListDocumentId") or "")
+        ):
             raise RuntimeError("long_task_scene_list_changed")
-        return _mapping(row.get("content_json"))
+        episode_rows = await list_structured_episode_rows(
+            self._composition.database,
+            document_id=str(row.get("id") or ""),
+            include_content=True,
+        )
+        if not episode_rows:
+            return _mapping(row.get("content_json"))
+        return {
+            "scenes": [
+                dict(scene)
+                for episode in episode_rows
+                for scene in episode.get("content_json", {}).get("scenes", [])
+                if isinstance(scene, Mapping)
+            ],
+        }
 
     async def _load_accepted_draft(self, project_id: str):
-        return await self._composition.database.fetch_one(
-            "SELECT id, content_json, content_text FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'scene_draft' AND status = 'accepted' "
-            "ORDER BY version DESC LIMIT 1",
-            [project_id],
+        return await latest_accepted_draft_document(
+            self._composition.database,
+            project_id,
+            include_text=False,
+        )
+
+    async def _accepted_tail(self, project_id: str) -> str:
+        episodes = await list_episode_rows(
+            self._composition.database,
+            project_id=project_id,
+            status="accepted",
+            include_content=True,
+        )
+        return (
+            str(episodes[-1].get("content_text") or "")[-12_000:]
+            if episodes
+            else ""
         )
 
 
@@ -985,6 +1289,61 @@ def _scene_boundary_context(
     }
 
 
+def _draft_position_context(
+    *,
+    ordered_scenes: Sequence[Mapping[str, object]],
+    completed_scene_ids: Sequence[str],
+    requested_scene_ids: Sequence[str],
+) -> dict[str, object]:
+    completed = set(completed_scene_ids)
+    requested = set(requested_scene_ids)
+    episode_rows: dict[int, list[str]] = {}
+    requested_episodes: list[int] = []
+    for scene in ordered_scenes:
+        raw_episode = scene.get("episodeNumber")
+        if (
+            isinstance(raw_episode, bool)
+            or not isinstance(raw_episode, int)
+            or raw_episode <= 0
+        ):
+            continue
+        scene_id = str(scene.get("id") or "").strip()
+        if not scene_id:
+            continue
+        episode_rows.setdefault(raw_episode, []).append(scene_id)
+        if scene_id in requested and raw_episode not in requested_episodes:
+            requested_episodes.append(raw_episode)
+    completed_episodes = [
+        episode
+        for episode, scene_ids in episode_rows.items()
+        if scene_ids and all(scene_id in completed for scene_id in scene_ids)
+    ]
+    first_requested_episode = (
+        min(requested_episodes) if requested_episodes else None
+    )
+    preceding_episode = next(
+        (
+            episode
+            for episode in sorted(episode_rows, reverse=True)
+            if first_requested_episode is not None
+            and episode < first_requested_episode
+        ),
+        None,
+    )
+    return {
+        "completedSceneCount": len(completed_scene_ids),
+        "completedEpisodeNumbers": completed_episodes,
+        "assignedEpisodeNumbers": requested_episodes,
+        "assignedSceneIds": list(requested_scene_ids),
+        "precedingEpisodeNumber": preceding_episode,
+        "precedingEpisodeSceneIds": (
+            episode_rows.get(preceding_episode, [])
+            if preceding_episode is not None
+            else []
+        ),
+    }
+
+
 def _unit_stream_title(unit) -> str:
     label = str(unit.metadata.get("label") or "").strip()
     if label:
@@ -1000,28 +1359,33 @@ def _unit_stream_title(unit) -> str:
         )
         if str(item or "").strip()
     ]
-    action = (
-        "审阅"
-        if str(unit.metadata.get("unitKind") or "") == "continuity_review"
-        else "创作"
-    )
+    action = {
+        "continuity_review": "审阅",
+        "scene_revision": "修订",
+    }.get(str(unit.metadata.get("unitKind") or ""), "创作")
     return f"{action} {'、'.join(names)}" if names else unit.id
 
 
-def _agent_role_for_unit(unit_kind: str) -> str:
-    if unit_kind == "scene_generation":
-        return "screenplay_writer"
-    if unit_kind == "continuity_review":
-        return "screenplay_reviewer"
+def _agent_role_for_unit(
+    unit_kind: str,
+    *,
+    declared_role: str = "",
+) -> str:
+    expected = {
+        "scene_generation": "screenplay_writer",
+        "continuity_review": "screenplay_reviewer",
+        "scene_revision": "screenplay_rewriter",
+    }.get(unit_kind)
+    if expected is not None and (not declared_role or declared_role == expected):
+        return expected
     raise RuntimeError("unsupported_screenplay_execution_unit_kind")
 
 
 def _agent_title_for_unit(agent_role: str, unit) -> str:
-    role = (
-        "剧本 Reviewer"
-        if agent_role == "screenplay_reviewer"
-        else "剧本 Writer"
-    )
+    role = {
+        "screenplay_reviewer": "剧本 Reviewer",
+        "screenplay_rewriter": "剧本 Rewriter",
+    }.get(agent_role, "剧本 Writer")
     attempt = max(1, int(unit.attempt or 1))
     suffix = f" · {unit.id}"
     if attempt > 1:
@@ -1042,11 +1406,10 @@ def _derived_batch_response(unit, scenes: Sequence[Mapping]) -> str:
     ]
     labels = headings or scene_ids
     scope = "、".join(labels)
-    action = (
-        "连续性审阅与修订"
-        if str(unit.metadata.get("unitKind") or "") == "continuity_review"
-        else "正文创作"
-    )
+    action = {
+        "scene_revision": "定向修订",
+        "continuity_review": "连续性审阅",
+    }.get(str(unit.metadata.get("unitKind") or ""), "正文创作")
     return (
         f"已完成 {scope} 共 {len(scenes)} 场的{action}，"
         "并记录了各场的目标、冲突、转折和连续性状态。"

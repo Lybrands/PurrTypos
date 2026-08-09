@@ -51,7 +51,7 @@ export interface ChatMessageListProps {
   loading: boolean;
   userHasScrolledUp: boolean;
   isAtBottom: boolean;
-  setIsAtBottom: React.Dispatch<React.SetStateAction<boolean>>;
+  onAtBottomStateChange: (atBottom: boolean) => void;
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
   onScrollToBottom: () => void;
   bookId: EntityId | null | undefined;
@@ -79,7 +79,7 @@ export default function ChatMessageList({
   loading,
   userHasScrolledUp,
   isAtBottom,
-  setIsAtBottom,
+  onAtBottomStateChange,
   setScrolledUpByReason,
   onScrollToBottom,
   bookId,
@@ -163,11 +163,24 @@ export default function ChatMessageList({
           setScrolledUpByReason(true, "chat-scroller-keyboard-up");
         }
       };
+      const handleTouchMove = () => {
+        setScrolledUpByReason(true, "chat-scroller-touch");
+      };
+      const handlePointerDown = (event: PointerEvent) => {
+        const bounds = ref.getBoundingClientRect();
+        if (event.clientX >= bounds.right - 16) {
+          setScrolledUpByReason(true, "chat-scroller-scrollbar");
+        }
+      };
       ref.addEventListener("wheel", handleWheel, { passive: true });
       ref.addEventListener("keydown", handleKeyDown);
+      ref.addEventListener("touchmove", handleTouchMove, { passive: true });
+      ref.addEventListener("pointerdown", handlePointerDown);
       scrollerCleanupRef.current = () => {
         ref.removeEventListener("wheel", handleWheel);
         ref.removeEventListener("keydown", handleKeyDown);
+        ref.removeEventListener("touchmove", handleTouchMove);
+        ref.removeEventListener("pointerdown", handlePointerDown);
       };
     },
     [setScrolledUpByReason],
@@ -194,16 +207,11 @@ export default function ChatMessageList({
           align: "end",
         }}
         alignToBottom={!userHasScrolledUp}
-        followOutput="auto"
+        followOutput={userHasScrolledUp ? false : "auto"}
         scrollerRef={handleScrollerRef}
         rangeChanged={handleVisibleRangeChange}
         atBottomThreshold={40}
-        atBottomStateChange={(atBottom) => {
-          setIsAtBottom(atBottom);
-          if (atBottom) {
-            setScrolledUpByReason(false, "chat-scroller-returned-to-bottom");
-          }
-        }}
+        atBottomStateChange={onAtBottomStateChange}
         atTopStateChange={() => {
           /* 向上滚动加载历史：可在此接入分页 API */
         }}

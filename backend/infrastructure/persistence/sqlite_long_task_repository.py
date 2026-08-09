@@ -384,6 +384,18 @@ class SqliteLongTaskRepository:
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                     [task.id],
                 )
+                # A terminal branch failure closes the whole DAG. Settle every
+                # sibling in the same transaction so no UI or recovery worker
+                # can observe a failed task with claimed/running units.
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET status = 'canceled', "
+                    "worker_id = NULL, lease_expires_at_ms = NULL, "
+                    "error_code = COALESCE(error_code, 'task_failed_dependency'), "
+                    "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                    "AND unit_id <> ? AND status IN "
+                    "('pending', 'claimed', 'running')",
+                    [task.id, unit.id],
+                )
             return await self._require(task.id)
 
     async def interrupt_unit(
@@ -486,7 +498,8 @@ class SqliteLongTaskRepository:
                     "UPDATE ai_agent_long_task_units SET status = 'pending', "
                     "max_attempts = attempt + 3, worker_id = NULL, "
                     "lease_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
-                    "WHERE task_id = ? AND status = 'failed'",
+                    "WHERE task_id = ? AND status IN "
+                    "('failed', 'canceled', 'claimed', 'running')",
                     [task.id],
                 )
                 await self._db.execute(

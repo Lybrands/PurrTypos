@@ -1,19 +1,6 @@
 import type { ChunkHandler } from "./types";
 
 /**
- * Keep screenplay proposals on the same accumulator used by ordinary chat.
- * The terminal handler then attaches and persists the proposal with the
- * assistant turn; surfaces may additionally render it through the hook.
- */
-export const handleProposedScreenplayDocument: ChunkHandler = (chunk, ctx) => {
-  if (!chunk.proposedScreenplayDocument) return;
-  ctx.acc.screenplayProposal = chunk.proposedScreenplayDocument;
-  if (ctx.isVisibleSession()) {
-    ctx.setScreenplayProposal?.(chunk.proposedScreenplayDocument);
-  }
-};
-
-/**
  * AI 工具 editChapterContent 不再直接落库，改为推送 diff 提议给前端，
  * 由 DiffProvider 监听并 startDiff，最终用户在 overlay 接受后走 commitChapterDiff。
  */

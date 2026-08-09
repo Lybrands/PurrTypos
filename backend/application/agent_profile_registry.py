@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from agent_core.contracts import AgentRunRequest
+from agent_core.events import AgentEvent
+
+
+DomainEventMapper = Callable[[AgentEvent], dict[str, Any] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +18,7 @@ class AgentProfileRegistration:
     id: str
     domain_namespace: str
     adapter: Any
+    event_mapper: DomainEventMapper | None = None
 
     def __post_init__(self) -> None:
         profile_id = str(self.id or "").strip()
@@ -57,3 +63,12 @@ class AgentProfileRegistry:
                 f"{request.domain_context.namespace}"
             )
         return registration
+
+    def map_domain_event(self, event: AgentEvent) -> dict[str, Any] | None:
+        for registration in self._registrations:
+            mapper = registration.event_mapper
+            if callable(mapper):
+                mapped = mapper(event)
+                if mapped is not None:
+                    return mapped
+        return None

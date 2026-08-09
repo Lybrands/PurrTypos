@@ -20,6 +20,7 @@ import {
   type AssistantTimelinePart,
   type TimelineStepPart,
 } from "./assistantTimeline";
+import "./AssistantMessageBody.scss";
 
 export interface AssistantMessageBodyProps {
   index: number;
@@ -29,6 +30,56 @@ export interface AssistantMessageBodyProps {
   showPlaceholder: boolean;
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
   onStructuredAnswer?: (answer: string) => void;
+}
+
+const PROCESSING_STANDBY_DELAY_MS = 1000;
+
+function getTimelineActivityKey(
+  parts: AssistantTimelinePart[],
+  processingLabel: string,
+): string {
+  const activity = parts.map((part) => {
+    if (part.type === "thinking") return `thinking:${part.text.length}`;
+    if (part.type === "text") return `text:${part.md.length}`;
+    if (part.type === "commentary") return `commentary:${part.md.length}`;
+    if (part.type === "tools") {
+      return [
+        "tools",
+        part.segment.textBefore.length,
+        part.segment.labels.length,
+        part.segment.completedToolCount ?? 0,
+        part.segment.labelOutcomes?.join(",") ?? "",
+      ].join(":");
+    }
+    if (part.type === "delegations") {
+      return `delegations:${JSON.stringify(part.items).length}`;
+    }
+    return `context:${JSON.stringify(part.state).length}`;
+  });
+  return `${processingLabel}|${activity.join("|")}`;
+}
+
+function useProcessingStandby(
+  active: boolean,
+  activityKey: string,
+): boolean {
+  const [settledActivityKey, setSettledActivityKey] = React.useState<
+    string | null
+  >(null);
+
+  React.useEffect(() => {
+    if (!active) {
+      setSettledActivityKey(null);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setSettledActivityKey(activityKey),
+      PROCESSING_STANDBY_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [active, activityKey]);
+
+  return active && settledActivityKey === activityKey;
 }
 
 function isVisibleWorkLogPart(part: AssistantTimelinePart): boolean {
@@ -84,6 +135,14 @@ function AssistantMessageBodyInner({
   const hasAnswerContent = answerParts.length > 0;
   const hasWorkLog = workLogParts.length > 0;
   const processingLabel = getAssistantProcessingLabel(message);
+  const activityKey = React.useMemo(
+    () => getTimelineActivityKey(timeline, processingLabel),
+    [timeline, processingLabel],
+  );
+  const showProcessingStandby = useProcessingStandby(
+    isStreaming,
+    activityKey,
+  );
 
   const renderStepPart = (part: TimelineStepPart) => {
     if (part.type === "thinking") {
@@ -99,9 +158,6 @@ function AssistantMessageBodyInner({
           }}
         >
           <Markdown>{part.text}</Markdown>
-          {isActiveStream && !hasAnswerContent ? (
-            <span className="a-thinking-cursor" />
-          ) : null}
         </div>
       );
     }
@@ -130,7 +186,6 @@ function AssistantMessageBodyInner({
         <WorkLog
           logKey={message.agentRunId || `${index}-work-log`}
           active={isStreaming}
-          activeLabel={processingLabel}
           autoOpen={isStreaming && hasWorkLog && !hasAnswerContent}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
@@ -214,11 +269,15 @@ function AssistantMessageBodyInner({
           );
         })}
 
-      {!showPlaceholder && isLastAssistant && loading && hasAnswerContent && (
-        <div className="bubble-content bubble-content--waiting-dots">
-          <span className="a-blink-dots">...</span>
+      {showProcessingStandby ? (
+        <div
+          className="bubble-processing-standby"
+          role="status"
+          aria-live="polite"
+        >
+          <span>{processingLabel}</span>
         </div>
-      )}
+      ) : null}
       {message.error ? (
         <ErrorReportNotice
           message={`生成中断：${message.error}`}

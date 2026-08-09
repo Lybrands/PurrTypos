@@ -1,12 +1,204 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AiAgentRunSnapshot } from "../../types.ts";
 import {
   clearAiDebugRuns,
   getAiDebugSnapshot,
+  hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
   recordAiDebugRunContinuation,
   startAiDebugRun,
 } from "./store.ts";
+
+function persistedSnapshot(
+  events: AiAgentRunSnapshot['events'],
+  options: {
+    status?: AiAgentRunSnapshot['run']['status'];
+    nextCursor?: number;
+    hasMore?: boolean;
+  } = {},
+): AiAgentRunSnapshot {
+  const status = options.status ?? 'running';
+  return {
+    version: 1,
+    run: {
+      runId: 'run-recovered',
+      sessionId: 7,
+      conversationId: null,
+      status,
+      mode: 'agent',
+      lineage: {
+        parentRunId: null,
+        rootRunId: 'run-recovered',
+        delegationId: null,
+        agentRole: null,
+        agentTitle: null,
+        depth: 0,
+      },
+      finalResponse: '',
+      createdAt: '2026-08-05 17:00:00',
+      updatedAt: '2026-08-05 17:00:10',
+      execution: {
+        attempt: 1,
+        cancellationRequested: false,
+      },
+      provenance: {
+        modelProvider: 'openai',
+        modelName: 'mimo-v2.5-pro',
+      },
+    },
+    todos: [],
+    events,
+    delegations: {
+      items: [],
+      aggregate: {
+        state: 'ready',
+        counts: {},
+        requiredFailures: [],
+        results: [],
+      },
+    },
+    nextCursor: options.nextCursor ?? events.at(-1)?.cursor ?? 0,
+    hasMore: options.hasMore ?? false,
+  };
+}
+
+test('persisted recovery restores Planner calls without duplicating cursors', () => {
+  clearAiDebugRuns();
+  const initial = persistedSnapshot([
+    {
+      version: 1,
+      cursor: 1,
+      type: 'run.started',
+      runId: 'run-recovered',
+      payload: {},
+      chunk: { agentRunStarted: { runId: 'run-recovered', status: 'running' } },
+    },
+    {
+      version: 1,
+      cursor: 2,
+      type: 'model.call_recorded',
+      runId: 'run-recovered',
+      payload: {},
+      chunk: {
+        modelInvocation: {
+          phase: 'planning',
+          count: 1,
+          toolNames: [],
+          parameters: { messageCount: 2 },
+        },
+      },
+    },
+    {
+      version: 1,
+      cursor: 3,
+      type: 'model.call_recorded',
+      runId: 'run-recovered',
+      payload: {},
+      chunk: {
+        modelInvocation: {
+          phase: 'planning',
+          count: 1,
+          toolNames: [],
+          parameters: { messageCount: 4 },
+        },
+      },
+    },
+  ]);
+
+  hydrateAiDebugRunSnapshot({
+    snapshot: initial,
+    prompt: '继续创作三集',
+    source: '剧本 Agent',
+  });
+  hydrateAiDebugRunSnapshot({
+    snapshot: initial,
+    prompt: '继续创作三集',
+    source: '剧本 Agent',
+  });
+
+  let run = getAiDebugSnapshot().runs[0];
+  assert.equal(run.id, 'recovered:run-recovered');
+  assert.equal(run.agentRunId, 'run-recovered');
+  assert.equal(run.modelCalls.length, 2);
+  assert.deepEqual(
+    run.modelCalls.map((call) => call.parameters?.messageCount),
+    [2, 4],
+  );
+
+  hydrateAiDebugRunSnapshot({
+    snapshot: persistedSnapshot([{
+      version: 1,
+      cursor: 4,
+      type: 'long_task.dispatched',
+      runId: 'run-recovered',
+      payload: {},
+      chunk: {
+        longTaskDispatched: {
+          runId: 'run-recovered',
+          taskId: 'task-1',
+          kind: 'screenplay_draft_generation',
+          status: 'running',
+          totalUnits: 7,
+          completedUnits: 0,
+        },
+      },
+    }], { nextCursor: 4 }),
+    prompt: '继续创作三集',
+    source: '剧本 Agent',
+  });
+
+  run = getAiDebugSnapshot().runs[0];
+  assert.equal(run.status, 'dispatched');
+  assert.equal(run.taskType, '持久化长任务 · 剧本正文分批创作');
+  assert.equal(run.modelCalls.length, 2);
+});
+
+test('persisted recovery replaces a detached partial live diagnostic copy', () => {
+  clearAiDebugRuns();
+  startAiDebugRun('live-before-detach', {
+    apiKey: 'key',
+    messages: [{ role: 'user', content: '继续创作三集' }],
+    options: { model: 'model' },
+    agentProfile: 'screenplay',
+    screenplayProjectId: 'project-1',
+    enableAgentTools: true,
+  });
+  recordAiDebugChunk('live-before-detach', {
+    agentRunStarted: { runId: 'run-recovered', status: 'running' },
+  });
+  recordAiDebugChunk('live-before-detach', {
+    modelInvocation: {
+      phase: 'generation',
+      count: 1,
+      toolNames: [],
+    },
+  });
+
+  hydrateAiDebugRunSnapshot({
+    snapshot: persistedSnapshot([{
+      version: 1,
+      cursor: 1,
+      type: 'model.call_recorded',
+      runId: 'run-recovered',
+      payload: {},
+      chunk: {
+        modelInvocation: {
+          phase: 'planning',
+          count: 1,
+          toolNames: [],
+        },
+      },
+    }]),
+    prompt: '继续创作三集',
+    source: '剧本 Agent',
+  });
+
+  const runs = getAiDebugSnapshot().runs;
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].id, 'recovered:run-recovered');
+  assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['planning']);
+});
 
 test("debug store preserves a rejected tool's concrete failure", () => {
     clearAiDebugRuns();

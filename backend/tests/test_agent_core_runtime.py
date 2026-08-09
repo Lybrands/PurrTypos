@@ -46,6 +46,12 @@ from agent_core.contracts import (
 )
 from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.host_planned_tool_gateway import HostPlannedToolGateway
+from agent_core.output_budget import (
+    ModelOutputCapabilities,
+    OutputBudgetPolicy,
+    resolve_output_budget,
+)
 from agent_core.ports import (
     ModelGateway,
     RuntimeObserver,
@@ -298,6 +304,62 @@ def _batch(
     )
 
 
+@pytest.mark.asyncio
+async def test_host_planned_tool_executes_without_upstream_model_round():
+    class _HostToolGateway:
+        def __init__(self):
+            self.requests = []
+
+        async def execute_batch(self, request, event_sink, signal=None):
+            del event_sink, signal
+            self.requests.append(request)
+            call = request.calls[0]
+            return _batch(call.id, call.name)
+
+    upstream = ScriptedModelGateway([
+        _answer("Finalized from the persisted artifact."),
+    ])
+    tools = _HostToolGateway()
+    observer = RecordingObserver([{"finalizeA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=HostPlannedToolGateway(
+                upstream,
+                {"finalizeA": {}},
+            ),
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("finalizeA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+        require_tool_call=True,
+    )
+
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.final_response == "Finalized from the persisted artifact."
+    assert len(upstream.invocations) == 1
+    assert upstream.invocations[0].tools == ()
+    assert len(tools.requests) == 1
+    assert tools.requests[0].calls[0].name == "finalizeA"
+    assert tools.requests[0].calls[0].arguments_json == "{}"
+    event_types = [
+        update.type for update in updates if isinstance(update, AgentEvent)
+    ]
+    assert CoreEventType.HOST_PLANNED_TOOL_DISPATCHED in event_types
+    assert sum(
+        event_type == CoreEventType.MODEL_CALL_RECORDED
+        for event_type in event_types
+    ) == 1
+    assert any(
+        trace.stage == "tool_dispatch"
+        and trace.outcome == "host_planned_call"
+        for trace in observer.traces
+    )
+
+
 async def _collect(runtime: AgentRuntime, *, request=None, **kwargs):
     return [
         update
@@ -482,9 +544,21 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
         ),
     ]])
     observer = RecordingObserver()
+    output_budget = resolve_output_budget(
+        policy=OutputBudgetPolicy(
+            key="fixture",
+            base_tokens=4_000,
+            per_work_unit_tokens=0,
+            safety_factor=1,
+            hard_cap_tokens=8_000,
+        ),
+        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
+        context_window_tokens=128_000,
+    )
 
     updates = await _collect(
         AgentRuntime(model_gateway=model, observer=observer),
+        output_budget=output_budget,
     )
 
     usage_events = [
@@ -498,6 +572,9 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
     assert usage_events[0].payload["actualOutputTokens"] == 56
     assert usage_events[0].payload["cachedInputTokens"] == 200
     assert usage_events[0].payload["usageSource"] == "provider"
+    assert usage_events[0].payload["requestedOutputTokens"] == 4_000
+    assert usage_events[0].payload["finishReason"] == "stop"
+    assert usage_events[0].payload["outputBudget"]["policyKey"] == "fixture"
     usage_trace = next(
         trace for trace in observer.traces
         if trace.stage == "model_usage"
@@ -1125,9 +1202,9 @@ async def test_partial_progress_cannot_exceed_progress_round_cap():
         "</function>\n</tool_call>"
     ),
     json.dumps({
-        "title": "原作范围分析",
-        "contentText": "正文",
-        "analysis": {"characters": []},
+        "heading": "formal result",
+        "content": "body",
+        "payload": {"items": []},
     }, ensure_ascii=False),
 ])
 async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
@@ -1172,7 +1249,7 @@ async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
     assert result.final_response == deltas[0]
     assert "工具步骤未能完成" in result.final_response
     assert "<tool_call>" not in "".join(deltas)
-    assert "contentText" not in "".join(deltas)
+    assert "payload" not in "".join(deltas)
     assert observer.model_delta_count == 1
     assert any(
         trace.stage == "model_output"
@@ -1277,6 +1354,67 @@ async def test_runtime_retries_correctable_tool_input_without_replanning():
         for trace in observer.traces
         if trace.stage == "tool_recovery"
     ] == ["input_retry_scheduled"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_independent_tool_input_errors_after_progress():
+    model = ScriptedModelGateway([
+        _tool_call("call-invalid-a", "readA"),
+        _tool_call("call-corrected-a", "readA"),
+        _tool_call("call-invalid-b", "readA"),
+        _tool_call("call-corrected-b", "readA"),
+        _answer("Recovered both independent tool-input errors."),
+    ])
+    tools = ScriptedToolGateway([
+        _batch(
+            "call-invalid-a",
+            "readA",
+            outcome=ToolBatchOutcome.FAILED,
+            content='{"success":false,"error":"missing synopsis"}',
+            error="tool_input_invalid",
+        ),
+        _batch("call-corrected-a", "readA"),
+        _batch(
+            "call-invalid-b",
+            "readA",
+            outcome=ToolBatchOutcome.FAILED,
+            content='{"success":false,"error":"too many items"}',
+            error="tool_input_invalid",
+        ),
+        _batch("call-corrected-b", "readA"),
+    ])
+    observer = RecordingObserver([{"readA"}, {"readA"}, set()])
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.final_response == (
+        "Recovered both independent tool-input errors."
+    )
+    decisions = [
+        trace
+        for trace in observer.traces
+        if trace.stage == "recovery_decision"
+        and trace.details["cause"] == "tool_input_invalid"
+    ]
+    assert [decision.outcome for decision in decisions] == [
+        "allowed",
+        "allowed",
+    ]
+    assert [decision.details["scope"] for decision in decisions] == [
+        "tool-input-sequence:0",
+        "tool-input-sequence:1",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2732,6 +2870,51 @@ async def test_runtime_discards_truncated_tool_call_and_retries_without_executio
     assert trace.details["toolArgumentCharacters"] == len(
         '{"query":"unfinished'
     )
+
+
+@pytest.mark.asyncio
+async def test_resolved_task_budget_never_retries_the_same_truncated_allowance():
+    truncated = [ModelStreamChunk(
+        tool_call_deltas=(ToolCallDelta(
+            index=0,
+            id="partial-call",
+            type="function",
+            name="readA",
+            arguments_fragment="{",
+        ),),
+        finish_reason=ModelFinishReason.LENGTH,
+    )]
+    model = ScriptedModelGateway([truncated])
+    observer = RecordingObserver([{"readA"}])
+    output_budget = resolve_output_budget(
+        policy=OutputBudgetPolicy(
+            key="bounded-task",
+            base_tokens=4_000,
+            per_work_unit_tokens=0,
+            safety_factor=1,
+            hard_cap_tokens=4_000,
+        ),
+        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
+        context_window_tokens=128_000,
+    )
+
+    updates = await _collect(
+        AgentRuntime(model_gateway=model, observer=observer),
+        output_budget=output_budget,
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=True,
+        force_tool_choice=True,
+    )
+
+    assert len(model.invocations) == 1
+    assert _result(updates).error_code == "tool_call_truncated"
+    trace = next(
+        item
+        for item in observer.traces
+        if item.stage == "model_output"
+    )
+    assert trace.outcome == "truncated"
+    assert trace.details["outputBudget"]["policyKey"] == "bounded-task"
 
 
 @pytest.mark.asyncio

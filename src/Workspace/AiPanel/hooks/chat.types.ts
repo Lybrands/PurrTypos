@@ -5,7 +5,6 @@ import type {
   AiErrorReport,
   EntityId,
   SettingDiffCardState,
-  ScreenplayDocumentProposal,
   ToolApprovalRequest,
   AiAgentDelegation,
   AiContextBudgetState,
@@ -28,7 +27,7 @@ export type AiTaskStepStatus =
   | "blocked"
   | "failed";
 
-export type AiTaskStepExecutor = "model" | "tool";
+export type AiTaskStepExecutor = "model" | "tool" | "agent";
 
 export type AiTaskPlanStatus =
   | "planned"
@@ -48,6 +47,11 @@ export interface AiTaskStep {
   executor?: AiTaskStepExecutor;
   riskLevel?: "read" | "write" | "destructive";
   suggestedTools?: string[];
+  planningCapability?: string;
+  protocolPrivate?: boolean;
+  agentRole?: string;
+  assignment?: Record<string, unknown>;
+  dependsOn?: string[];
   resultSummary?: string;
   error?: string;
 }
@@ -128,8 +132,6 @@ export interface ChatMessage {
   contextCompaction?: AiContextCompactionState;
   /** 后端对本轮完整模型输入的实际预算。 */
   contextBudget?: AiContextBudgetState;
-  /** 剧本 Agent 本轮生成、尚待用户处理的正式文档提案。 */
-  screenplayProposal?: ScreenplayDocumentProposal;
 }
 
 export interface AiSubAgentActivity {

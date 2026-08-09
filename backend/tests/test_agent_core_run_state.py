@@ -32,6 +32,126 @@ def _step(
     )
 
 
+def _agent_step(
+    step_id: str,
+    *,
+    role: str,
+    scene_ids: tuple[str, ...],
+    depends_on: tuple[str, ...] = (),
+) -> TaskStep:
+    return TaskStep(
+        id=step_id,
+        title=step_id,
+        type=StepType.WRITE if role == "screenplay_writer" else StepType.REVIEW,
+        executor=StepExecutor.AGENT,
+        agent_role=role,
+        assignment={"sceneIds": scene_ids},
+        depends_on=depends_on,
+    )
+
+
+def test_durable_agent_dag_projects_parallel_progress_onto_visible_plan():
+    plan = TaskPlan(
+        title="Planner-authored screenplay graph",
+        steps=(
+            _agent_step(
+                "write-5",
+                role="screenplay_writer",
+                scene_ids=("s05-01",),
+            ),
+            _agent_step(
+                "write-6",
+                role="screenplay_writer",
+                scene_ids=("s06-01",),
+            ),
+            _agent_step(
+                "review-5",
+                role="screenplay_reviewer",
+                scene_ids=("s05-01",),
+                depends_on=("write-5",),
+            ),
+            _agent_step(
+                "review-6",
+                role="screenplay_reviewer",
+                scene_ids=("s06-01",),
+                depends_on=("write-6",),
+            ),
+            TaskStep(
+                id="submit",
+                title="submit",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                suggested_tools=("proposeSceneDraft",),
+                depends_on=("review-5", "review-6"),
+            ),
+        ),
+    )
+
+    state = RunStateMachine.initialize("run-agent-dag", plan)
+    assert [step.status for step in state.steps] == [
+        StepStatus.RUNNING,
+        StepStatus.RUNNING,
+        StepStatus.PENDING,
+        StepStatus.PENDING,
+        StepStatus.PENDING,
+    ]
+
+    reviewed = RunStateMachine.sync_durable_execution(
+        state,
+        {
+            "write-5": StepStatus.DONE,
+            "write-6": StepStatus.DONE,
+            "review-5": StepStatus.RUNNING,
+            "review-6": StepStatus.RUNNING,
+            "submit": StepStatus.PENDING,
+        },
+    ).after
+    assert [step.status for step in reviewed.steps] == [
+        StepStatus.DONE,
+        StepStatus.DONE,
+        StepStatus.RUNNING,
+        StepStatus.RUNNING,
+        StepStatus.PENDING,
+    ]
+
+    completed = RunStateMachine.complete_durable_execution(
+        reviewed,
+        "proposal ready",
+        covered_step_ids=tuple(step.id for step in plan.steps),
+    ).after
+    assert completed.status is RunStatus.DONE
+    assert completed.final_response == "proposal ready"
+    assert all(step.status is StepStatus.DONE for step in completed.steps)
+
+
+def test_durable_progress_cannot_start_agent_before_planner_dependencies():
+    state = RunStateMachine.initialize(
+        "run-invalid-agent-dag",
+        TaskPlan(
+            title="dependency guard",
+            steps=(
+                _agent_step(
+                    "write",
+                    role="screenplay_writer",
+                    scene_ids=("s05-01",),
+                ),
+                _agent_step(
+                    "review",
+                    role="screenplay_reviewer",
+                    scene_ids=("s05-01",),
+                    depends_on=("write",),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="dependencies"):
+        RunStateMachine.sync_durable_execution(
+            state,
+            {"review": StepStatus.RUNNING},
+        )
+
+
 def test_state_machine_advances_model_tool_model_and_scopes_current_tools():
     state = RunStateMachine.initialize(
         "run-1",

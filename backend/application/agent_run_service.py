@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 
 from agent_core.contracts import (
     AgentMessage,
+    AgentRunRequest,
     AgentRunResult,
+    ContextBundle,
+    DomainContext,
     MessageOrigin,
     MessageRole,
     RunLineage,
@@ -18,6 +21,8 @@ from agent_core.contracts import (
     ToolExecutionMode,
 )
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.json_values import thaw_json_mapping
+from agent_core.engine import AgentCoreRunOptions
 from agent_core.ports import CancellationSignal, ResponseValidator
 from application.agent_composition import AgentComposition
 from application.agent_delegation_service import AgentDelegationService
@@ -30,6 +35,7 @@ from application.request_mapping import (
     to_agent_request,
 )
 from application.run_provenance import build_chat_run_provenance
+from application.run_binding import RunBindingLifecycle
 from infrastructure.models.capabilities import normalize_thinking_enabled
 from schemas.ai import ChatStreamRequest
 
@@ -60,16 +66,46 @@ class AgentRunService:
         lineage: RunLineage | None = None,
         enable_delegation: bool = True,
         allowed_tool_modes: frozenset[ToolExecutionMode] | None = None,
+        required_tool_names: frozenset[str] | None = None,
+        domain_context_overrides: Mapping[str, object] | None = None,
         host_system_instruction: str | None = None,
         response_validators: Sequence[ResponseValidator] = (),
+        agent_role: str | None = None,
+        output_work_units: int = 1,
+        host_context_only: bool = False,
+        mapped_request: AgentRunRequest | None = None,
+        base_options: AgentCoreRunOptions | None = None,
+        run_binding_lifecycle: RunBindingLifecycle | None = None,
+        long_task_executor=None,
     ) -> AsyncIterator[AgentRunUpdate]:
         composition = self._composition
         provider_capabilities = composition.provider_capabilities
-        request = to_agent_request(body, provider_options)
+        request = mapped_request or to_agent_request(body, provider_options)
+        if run_binding_lifecycle is not None:
+            await run_binding_lifecycle.validate()
+        if domain_context_overrides:
+            request = replace(
+                request,
+                domain_context=DomainContext(
+                    namespace=request.domain_context.namespace,
+                    payload={
+                        **thaw_json_mapping(request.domain_context.payload),
+                        **dict(domain_context_overrides),
+                    },
+                ),
+            )
         prepare_request = getattr(composition, "prepare_request", None)
-        if callable(prepare_request):
+        if callable(prepare_request) and not host_context_only:
             request = await prepare_request(request)
-        static_context_claims = agent_context_claims(request)
+        static_context_claims = (
+            ()
+            if host_context_only
+            else (
+                base_options.context_claims
+                if base_options is not None
+                else agent_context_claims(request)
+            )
+        )
         trusted_instruction = str(host_system_instruction or "").strip()
         if trusted_instruction:
             trusted_message = AgentMessage(
@@ -92,17 +128,30 @@ class AgentRunService:
             thinking_enabled=normalize_thinking_enabled(provider_options),
         )
         response_judges = composition.create_response_judges(api_key, request)
-        options = agent_run_options(
-            request,
-            provider_options,
-            force_planned_tool_choice=(
-                not provider_capabilities.required_tool_choice_is_unsupported(
-                    capability_key
-                )
-            ),
-            provenance=run_provenance,
-            lineage=lineage,
-            response_judges=response_judges,
+        force_planned_tool_choice = (
+            not provider_capabilities.required_tool_choice_is_unsupported(
+                capability_key
+            )
+        )
+        options = (
+            replace(
+                base_options,
+                force_planned_tool_choice=force_planned_tool_choice,
+                provenance=run_provenance,
+                lineage=lineage,
+                response_judges=tuple(response_judges),
+            )
+            if base_options is not None
+            else agent_run_options(
+                request,
+                provider_options,
+                force_planned_tool_choice=force_planned_tool_choice,
+                provenance=run_provenance,
+                lineage=lineage,
+                response_judges=response_judges,
+                agent_role=agent_role,
+                output_work_units=output_work_units,
+            )
         )
         options = replace(
             options,
@@ -125,6 +174,7 @@ class AgentRunService:
             and hasattr(composition, "delegation_repository")
         )
         extra_registrations = ()
+        planner_agent_role_guidance: dict[str, dict[str, str]] = {}
         if can_delegate:
             registry_for_request = getattr(
                 composition,
@@ -140,6 +190,13 @@ class AgentRunService:
                 composition.delegation_repository,
                 role_registry=role_registry,
             )
+            planner_agent_role_guidance = {
+                definition.id: {
+                    "title": definition.title,
+                    "description": definition.delegation_description,
+                }
+                for definition in role_registry.definitions
+            }
 
             async def run_child(view: dict, child_lineage: RunLineage) -> AgentRunResult:
                 role = str(view["agentRole"])
@@ -160,17 +217,36 @@ class AgentRunService:
                     "sessionId": None,
                     "chatAgentMode": "agent",
                 })
+                child_request = replace(
+                    request,
+                    messages=tuple(
+                        AgentMessage.from_mapping(message)
+                        for message in child_body.messages
+                        if isinstance(message, Mapping)
+                    ),
+                    session_id=None,
+                    mode="agent",
+                )
+                child_options = replace(
+                    options,
+                    provenance=build_chat_run_provenance(child_body),
+                    lineage=child_lineage,
+                    binding=None,
+                )
                 child_result: AgentRunResult | None = None
                 child_stream = AgentRunService(composition).run(
                     body=child_body,
                     api_key=api_key,
                     provider_options=provider_options,
                     signal=signal,
-                    provenance=build_chat_run_provenance(child_body),
+                    provenance=child_options.provenance,
                     lineage=child_lineage,
                     enable_delegation=False,
                     allowed_tool_modes=role_definition.allowed_tool_modes,
                     host_system_instruction=role_definition.instruction,
+                    agent_role=role,
+                    mapped_request=child_request,
+                    base_options=child_options,
                 )
                 try:
                     async for child_update in child_stream:
@@ -251,27 +327,26 @@ class AgentRunService:
                 )
             ),
         }
-        if hasattr(composition, "execute_screenplay_long_task"):
-            async def execute_long_task(
-                task_id,
-                parent_run_id,
-                observer,
-                long_task_signal,
-            ):
-                return await composition.execute_screenplay_long_task(
-                    task_id,
-                    parent_run_id=parent_run_id,
-                    observer=observer,
-                    body=body,
-                    api_key=api_key,
-                    provider_options=provider_options,
-                    signal=long_task_signal,
-                )
-            create_core_kwargs["long_task_executor"] = execute_long_task
-        if can_delegate or allowed_tool_modes is not None:
+        if host_context_only:
+            create_core_kwargs["context_provider_override"] = (
+                _HostBoundContextProvider()
+            )
+        if planner_agent_role_guidance:
+            create_core_kwargs.update({
+                "agent_role_guidance": planner_agent_role_guidance,
+                "max_parallel_agents": 3,
+            })
+        if long_task_executor is not None:
+            create_core_kwargs["long_task_executor"] = long_task_executor
+        if (
+            can_delegate
+            or allowed_tool_modes is not None
+            or required_tool_names is not None
+        ):
             create_core_kwargs.update({
                 "extra_tool_registrations": extra_registrations,
                 "allowed_tool_modes": allowed_tool_modes,
+                "required_tool_names": required_tool_names,
             })
         core_for_request = getattr(
             composition,
@@ -292,16 +367,31 @@ class AgentRunService:
         )
         core_stream = core.run(request, options=options, signal=execution_signal)
         run_id: str | None = None
+        binding_notified = False
 
         async def pump_core() -> None:
-            nonlocal run_id
+            nonlocal binding_notified, run_id
             try:
                 async for update in core_stream:
                     if isinstance(update, AgentEvent):
                         composition.observe_event(update)
                     run_id = update.run_id or run_id
+                    if (
+                        run_binding_lifecycle is not None
+                        and run_id
+                        and not binding_notified
+                    ):
+                        await run_binding_lifecycle.on_run_started(run_id)
+                        binding_notified = True
                     if execution_session is not None and run_id:
                         await execution_session.bind(run_id)
+                    if (
+                        isinstance(update, AgentRunResult)
+                        and run_binding_lifecycle is not None
+                        and binding_notified
+                        and lineage is None
+                    ):
+                        await run_binding_lifecycle.on_run_finished(update)
                     await queue.put(update)
             except asyncio.CancelledError:
                 raise
@@ -334,3 +424,11 @@ class AgentRunService:
                 pump_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pump_task
+
+
+class _HostBoundContextProvider:
+    """Use only the trusted prompt assembled by the durable workflow."""
+
+    async def build_context(self, request, budget, signal=None) -> ContextBundle:
+        del request, budget, signal
+        return ContextBundle(diagnostics={"contextMode": "host_bound"})

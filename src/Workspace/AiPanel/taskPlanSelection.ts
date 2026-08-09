@@ -15,7 +15,9 @@ export function isImplicitRespondStep(step: AiTaskStep): boolean {
 }
 
 export function getVisibleTaskPlanSteps(plan: AiTaskPlan): AiTaskStep[] {
-  return plan.steps.filter((step) => !isImplicitRespondStep(step));
+  return plan.steps.filter(
+    (step) => !step.protocolPrivate && !isImplicitRespondStep(step),
+  );
 }
 
 /**
@@ -29,8 +31,9 @@ export function getTaskPlanProgress(plan: AiTaskPlan) {
   const steps = getVisibleTaskPlanSteps(plan);
   const total = steps.length;
   const completed = steps.filter((step) => step.status === "done").length;
+  const runningSteps = steps.filter((step) => step.status === "running");
   const currentStep =
-    steps.find((step) => step.status === "running") ||
+    runningSteps[0] ||
     steps.find(
       (step) => step.status === "blocked" || step.status === "failed",
     ) ||
@@ -39,6 +42,7 @@ export function getTaskPlanProgress(plan: AiTaskPlan) {
   return {
     total,
     completed,
+    runningSteps,
     currentStep,
     currentStepNumber: currentStepIndex >= 0 ? currentStepIndex + 1 : null,
     percent: total > 0 ? Math.round((completed / total) * 100) : 0,

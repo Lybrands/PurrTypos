@@ -445,6 +445,8 @@ def _review_item_schema() -> dict:
 SCREENPLAY_READ_TOOL_NAMES = (
     "getScreenplayProject",
     "getScreenplayDocument",
+    "getScreenplayEpisodeContext",
+    "getScreenplayDraftContext",
     "getSourceBookOverview",
     "getSourceCoveragePlan",
     "readSourceCoverageBatch",
@@ -453,6 +455,131 @@ SCREENPLAY_READ_TOOL_NAMES = (
     "getSourceCharacters",
     "getSourceWorldSettings",
 )
+
+# Planner-facing business capabilities.  These names intentionally describe
+# screenplay operations rather than the private Artifact staging protocol.
+SCREENPLAY_PLANNING_CAPABILITY_NAMES = (
+    "analyzeSourceMaterial",
+    "generateCreativeBrief",
+    "generateScreenplayStructure",
+    "generateSceneList",
+    "continueScreenplayDraft",
+    "reviewCurrentDraft",
+    "reviseCurrentDraft",
+)
+
+SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY = {
+    **{
+        name: "analyzeSourceMaterial"
+        for name in (
+            "beginSourceAnalysisArtifact",
+            "appendSourceAnalysisBatch",
+            "finalizeSourceAnalysisProposal",
+        )
+    },
+    **{
+        name: "generateCreativeBrief"
+        for name in (
+            "beginCreativeBriefArtifact",
+            "appendCreativeBriefBatch",
+            "finalizeCreativeBriefProposal",
+        )
+    },
+    **{
+        name: "generateScreenplayStructure"
+        for name in (
+            "beginScreenplayStructureArtifact",
+            "appendScreenplayStructureBatch",
+            "finalizeScreenplayStructureProposal",
+        )
+    },
+    **{
+        name: "generateSceneList"
+        for name in (
+            "beginSceneListArtifact",
+            "appendSceneListBatch",
+            "finalizeSceneListProposal",
+        )
+    },
+    "proposeSceneDraft": "continueScreenplayDraft",
+    **{
+        name: "reviewCurrentDraft"
+        for name in (
+            "beginScreenplayReviewArtifact",
+            "appendScreenplayReviewBatch",
+            "finalizeScreenplayReviewProposal",
+        )
+    },
+    **{
+        name: "reviseCurrentDraft"
+        for name in (
+            "beginScreenplayRevisionArtifact",
+            "appendScreenplayRevisionBatch",
+            "appendScreenplayRevisionResolutionBatch",
+            "finalizeScreenplayRevisionProposal",
+        )
+    },
+}
+
+SCREENPLAY_PLANNING_CAPABILITY_SCHEMAS = (
+    _tool_schema(
+        name="analyzeSourceMaterial",
+        description=(
+            "基于当前项目锁定的原作范围生成一份完整、可审阅且有证据追踪的"
+            "原作范围分析。分批写入、恢复与最终提交由宿主执行。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="generateCreativeBrief",
+        description=(
+            "根据当前项目和已接受的上游材料生成一份完整、可审阅的创作简报。"
+            "持久化与版本提交由宿主执行。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="generateScreenplayStructure",
+        description=(
+            "根据已接受创作简报生成当前项目形态所需的完整剧本结构。"
+            "宿主负责分批生成、校验与候选版本提交。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="generateSceneList",
+        description=(
+            "根据已接受剧本结构生成完整、可执行且可审阅的场景表。"
+            "宿主负责分批生成、校验与候选版本提交。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="continueScreenplayDraft",
+        description=(
+            "按宿主锁定的场景范围继续创作剧本正文，并提交一个可审阅的滚动正文候选。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="reviewCurrentDraft",
+        description=(
+            "对当前已接受剧本正文进行完整结构化审阅，并提交可审阅的审阅结果。"
+        ),
+        parameters=_object({}),
+    ),
+    _tool_schema(
+        name="reviseCurrentDraft",
+        description=(
+            "依据已接受审阅结果修订当前剧本正文，并提交完整、可审阅的修订候选。"
+        ),
+        parameters=_object({}),
+    ),
+)
+
+SCREENPLAY_PLANNING_CAPABILITY_SCHEMA_BY_NAME = {
+    schema.name: schema for schema in SCREENPLAY_PLANNING_CAPABILITY_SCHEMAS
+}
 
 SCREENPLAY_PROPOSAL_TOOL_NAMES = (
     "beginSourceAnalysisArtifact",
@@ -503,6 +630,48 @@ SCREENPLAY_TOOL_SCHEMAS = (
                 },
             },
             required=("documentId",),
+        ),
+    ),
+    _tool_schema(
+        name="getScreenplayEpisodeContext",
+        description=(
+            "按集读取已拆分的分集结构、场景表或审阅内容。返回完整分集索引，"
+            "但只加载指定集的详细数据，不返回累计大 JSON。"
+        ),
+        parameters=_object(
+            {
+                "documentId": {
+                    "type": "string",
+                    "description": "来自项目文档摘要的 document id",
+                },
+                "episodeNumbers": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {"type": "integer", "minimum": 1},
+                    "description": "可选；只加载这些集，省略时读取第一集。",
+                },
+            },
+            required=("documentId",),
+        ),
+    ),
+    _tool_schema(
+        name="getScreenplayDraftContext",
+        description=(
+            "读取当前剧本正文的分集创作索引和权威创作位置。返回已完成集、"
+            "下一集、指定集的场景契约、上一集连续性与可用分集正文；不会返回"
+            "整部累计正文。项目和当前版本由宿主绑定。"
+        ),
+        parameters=_object(
+            {
+                "episodeNumbers": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {"type": "integer", "minimum": 1},
+                    "description": (
+                        "可选；只读取这些集。省略时读取下一集或当前未完成集。"
+                    ),
+                },
+            },
         ),
     ),
     _tool_schema(
@@ -1210,6 +1379,8 @@ SCREENPLAY_TOOL_POLICIES = {
     for name, title in (
         ("getScreenplayProject", "读取剧本项目"),
         ("getScreenplayDocument", "读取剧本文档"),
+        ("getScreenplayEpisodeContext", "读取分集文档"),
+        ("getScreenplayDraftContext", "查看正文创作上下文"),
         ("getSourceBookOverview", "读取原作概览"),
         ("getSourceCoveragePlan", "规划长篇阅读批次"),
         ("readSourceCoverageBatch", "读取长篇覆盖批次"),
@@ -1480,7 +1651,7 @@ SCREENPLAY_TOOL_DATA_CONTRACTS.update({
             "newSceneIds",
             "newSceneHeadings",
             "completedSceneIds",
-            "sceneExecutions",
+            "episodeDrafts",
             "isComplete",
         ),
         payload_mode="delta",
@@ -1575,7 +1746,7 @@ SCREENPLAY_TOOL_DATA_CONTRACTS.update({
             "artifactRef",
             "revisionArtifactId",
             "completedSceneIds",
-            "sceneExecutions",
+            "episodeDrafts",
             "reassessedSceneIds",
             "isComplete",
         ),

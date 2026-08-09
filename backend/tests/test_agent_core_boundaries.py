@@ -39,6 +39,17 @@ BANNED_WRITING_TEXT_FRAGMENTS = {
     "人物",
     "伏笔",
 }
+BANNED_SCREENPLAY_TEXT_FRAGMENTS = {
+    "continuity_review",
+    "durableexecutionplan",
+    "episodes",
+    "proposescenedraft",
+    "scenes",
+    "scene_generation",
+    "screenplay",
+    "taskadmissionvocabulary",
+    "剧本",
+}
 
 
 def _source_files() -> list[Path]:
@@ -118,3 +129,16 @@ def test_agent_core_prompts_do_not_embed_writing_domain_language():
                 )
 
     assert not violations, "Agent Core writing-text leaks:\n" + "\n".join(violations)
+
+
+def test_agent_core_does_not_embed_screenplay_business_protocols():
+    violations: list[str] = []
+    for path in _source_files():
+        source = path.read_text(encoding="utf-8").casefold()
+        for fragment in sorted(BANNED_SCREENPLAY_TEXT_FRAGMENTS):
+            if fragment in source:
+                violations.append(
+                    f"{path.relative_to(BACKEND_DIR)} contains {fragment!r}"
+                )
+
+    assert not violations, "Agent Core screenplay leaks:\n" + "\n".join(violations)

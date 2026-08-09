@@ -1,9 +1,16 @@
 import type {
   AiErrorReport,
-  AiLongTaskConversationEvent,
   ElectronAPI,
 } from '../types'
-import { apiDelete, apiGet, apiPost, apiPut, backendBaseUrl } from './httpClient'
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiPut,
+  backendBaseUrl,
+  requestJson,
+} from './httpClient'
 import {
   markAiDebugAbortRequested,
   recordAiDebugConversationSaved,
@@ -36,6 +43,20 @@ type AiStreamRequest = Parameters<ElectronAPI['aiChatStream']>[0]
 let aiChunkListeners: Array<(chunk: AiChunk) => void> = []
 const aiAbortControllers = new Map<string, AbortController>()
 let latestAiStreamId: string | null = null
+
+const apiPostIdempotent = <T>(path: string, body: unknown, commandId: string) =>
+  requestJson<T>(`/api${path}`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': commandId },
+    body: JSON.stringify(body),
+  })
+
+const apiPatchIdempotent = <T>(path: string, body: unknown, commandId: string) =>
+  requestJson<T>(`/api${path}`, {
+    method: 'PATCH',
+    headers: { 'Idempotency-Key': commandId },
+    body: JSON.stringify(body),
+  })
 
 function aiErrorReportSource(streamId: string, data: AiStreamRequest): string {
   if (data.agentProfile === 'screenplay' || streamId.startsWith('screenplay-')) return 'screenplay_agent'
@@ -89,53 +110,156 @@ export const backendApi: BackendApi = {
   getBookWordCount: (data) => apiGet(`/books/${data.bookId}/word-count`),
 
   listScreenplayProjects: (data = {}) =>
-    apiGet(`/screenplay-projects${data.includeArchived ? '?includeArchived=true' : ''}`),
-  getScreenplayProject: (data) => apiGet(`/screenplay-projects/${data.projectId}`),
+    apiGet(`/screenplay/v2/projects${data.includeArchived ? '?includeArchived=true' : ''}`),
   getOrCreateScreenplaySession: (data) =>
-    apiPost(`/screenplay-projects/${data.projectId}/agent-session`, {}),
+    apiPut(`/screenplay/v2/projects/${data.projectId}/agent-sessions/current`, {}),
   listScreenplaySessions: (data) =>
-    apiGet(`/screenplay-projects/${data.projectId}/agent-sessions${data.includeClosed ? '?includeClosed=true' : ''}`),
-  createScreenplaySession: (data) =>
-    apiPost(`/screenplay-projects/${data.projectId}/agent-sessions`, {}),
-  createScreenplayProject: (data) => apiPost('/screenplay-projects', data),
-  updateScreenplayProject: (data) =>
-    apiPut(`/screenplay-projects/${data.projectId}`, data.patch || {}),
-  deleteScreenplayProject: (data) =>
-    apiDelete(`/screenplay-projects/${data.projectId}`),
-  listScreenplayDocuments: (data) => {
-    const params = new URLSearchParams()
-    if (data.kind) params.set('kind', data.kind)
-    if (data.status) params.set('status', data.status)
-    const query = params.toString()
-    return apiGet(`/screenplay-projects/${data.projectId}/documents${query ? `?${query}` : ''}`)
+    apiGet(`/screenplay/v2/projects/${data.projectId}/agent-sessions${data.includeClosed ? '?includeClosed=true' : ''}`),
+  createScreenplaySession: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/agent-sessions`,
+    {},
+    data.commandId,
+  ),
+  submitScreenplayConversationTurn: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/conversation/turns`,
+    {
+      sessionId: data.sessionId,
+      content: data.content,
+      ...(data.operation ? { operation: data.operation } : {}),
+      runtime: data.runtime,
+    },
+    data.commandId,
+  ),
+  getScreenplayConversationSnapshot: (data) => apiGet(
+    `/screenplay/v2/projects/${data.projectId}/conversation/snapshot?sessionId=${data.sessionId}`,
+  ),
+  listScreenplayConversationEvents: (data) => {
+    const params = new URLSearchParams({
+      sessionId: String(data.sessionId),
+      after: String(data.after ?? 0),
+      limit: String(data.limit ?? 100),
+      follow: 'false',
+    })
+    return apiGet(
+      `/screenplay/v2/projects/${data.projectId}/conversation/events?${params.toString()}`,
+    )
   },
-  getScreenplayDocument: (data) =>
-    apiGet(`/screenplay-documents/${data.documentId}`),
-  createScreenplayDocument: (data) =>
-    apiPost(`/screenplay-projects/${data.projectId}/documents`, {
-      kind: data.kind,
+  cancelScreenplayConversationTurn: (data) => apiPostIdempotent(
+    `/screenplay/v2/conversation/turns/${data.turnId}/cancel`,
+    {},
+    data.commandId,
+  ),
+  resumeScreenplayConversationTurn: (data) => apiPostIdempotent(
+    `/screenplay/v2/conversation/turns/${data.turnId}/resume`,
+    { runtime: data.runtime },
+    data.commandId,
+  ),
+  createScreenplayV2Project: (data) => apiPostIdempotent(
+    '/screenplay/v2/projects',
+    {
       title: data.title,
-      contentJson: data.contentJson || {},
-      contentText: data.contentText || '',
-      derivedFromIds: data.derivedFromIds || [],
-      sourceRunId: data.sourceRunId || null,
-    }),
-  listScreenplaySourceRefs: (data) => {
-    const params = new URLSearchParams()
-    if (data.documentId) params.set('documentId', data.documentId)
-    if (data.agentRunId) params.set('agentRunId', data.agentRunId)
-    const query = params.toString()
-    return apiGet(`/screenplay-projects/${data.projectId}/source-refs${query ? `?${query}` : ''}`)
+      format: data.format,
+      source: data.source,
+      brief: data.brief,
+    },
+    data.commandId,
+  ),
+  getScreenplayV2Workspace: (data) =>
+    apiGet(`/screenplay/v2/projects/${data.projectId}/workspace`),
+  getScreenplayV2Revision: (data) => {
+    const view = data.view || 'full'
+    return apiGet(`/screenplay/v2/revisions/${data.revisionId}?view=${view}`)
   },
-  updateScreenplayDocument: (data) =>
-    apiPut(`/screenplay-documents/${data.documentId}`, data.patch || {}),
-  acceptScreenplayDocument: (data) =>
-    apiPost(`/screenplay-documents/${data.documentId}/accept`, {}),
-  restoreScreenplayDocument: (data) =>
-    apiPost(`/screenplay-documents/${data.documentId}/restore`, {}),
-  deleteScreenplayDocument: (data) =>
-    apiDelete(`/screenplay-documents/${data.documentId}`),
-
+  listScreenplayV2RevisionHistory: (data) => {
+    const params = new URLSearchParams()
+    if (data.cursor) params.set('cursor', data.cursor)
+    if (data.limit) params.set('limit', String(data.limit))
+    const query = params.toString()
+    return apiGet(
+      `/screenplay/v2/projects/${data.projectId}/deliverables/${data.role}/revisions${query ? `?${query}` : ''}`,
+    )
+  },
+  createScreenplayV2WorkingCopyFromRevision: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/revisions/${data.revisionId}/working-copy`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      expectedWorkingCopyRevision: data.expectedWorkingCopyRevision,
+    },
+    data.commandId,
+  ),
+  updateScreenplayV2WorkingCopy: (data) => apiPatch(
+    `/screenplay/v2/working-copies/${data.workingCopyId}`,
+    {
+      expectedRevision: data.expectedRevision,
+      content: data.content,
+    },
+  ),
+  publishScreenplayV2WorkingCopy: (data) => apiPostIdempotent(
+    `/screenplay/v2/working-copies/${data.workingCopyId}/publish`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      expectedWorkingCopyRevision: data.expectedWorkingCopyRevision,
+    },
+    data.commandId,
+  ),
+  startScreenplayV2Operation: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/operations`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      targetRole: data.targetRole,
+      intent: data.intent,
+      conversation: data.conversation || {},
+    },
+    data.commandId,
+  ),
+  getScreenplayV2Operation: (data) =>
+    apiGet(`/screenplay/v2/operations/${data.operationId}`),
+  pauseScreenplayV2Operation: (data) => apiPostIdempotent(
+    `/screenplay/v2/operations/${data.operationId}/pause`,
+    {},
+    data.commandId,
+  ),
+  resumeScreenplayV2Operation: (data) => apiPostIdempotent(
+    `/screenplay/v2/operations/${data.operationId}/resume`,
+    {},
+    data.commandId,
+  ),
+  cancelScreenplayV2Operation: (data) => apiPostIdempotent(
+    `/screenplay/v2/operations/${data.operationId}/cancel`,
+    {},
+    data.commandId,
+  ),
+  acceptScreenplayV2Revision: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/revisions/${data.revisionId}/accept`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      confirmInvalidation: data.confirmInvalidation === true,
+    },
+    data.commandId,
+  ),
+  updateScreenplayV2Project: (data) => apiPatchIdempotent(
+    `/screenplay/v2/projects/${data.projectId}`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      title: data.title,
+    },
+    data.commandId,
+  ),
+  archiveScreenplayV2Project: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/archive`,
+    { expectedProjectRevision: data.expectedProjectRevision },
+    data.commandId,
+  ),
+  restoreScreenplayV2Project: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/restore`,
+    { expectedProjectRevision: data.expectedProjectRevision },
+    data.commandId,
+  ),
+  deleteScreenplayV2Project: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/delete`,
+    { expectedProjectRevision: data.expectedProjectRevision },
+    data.commandId,
+  ),
   getCharacters: (data) => apiGet(`/books/${data.bookId}/characters`),
   createCharacter: (data) => apiPost(`/books/${data.bookId}/characters`, { data: data.data }),
   updateCharacter: (data) => apiPut(`/characters/${data.id}`, { data: data.data }),
@@ -402,76 +526,6 @@ export const backendApi: BackendApi = {
     }),
   cancelAgentRun: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/cancel`, {}),
-  getLongTask: (data) =>
-    apiGet(`/ai/long-tasks/${encodeURIComponent(data.taskId)}`),
-  streamLongTaskConversation: (data, listener) => {
-    const controller = new AbortController()
-    const params = new URLSearchParams({ sessionId: String(data.sessionId) })
-    if (data.after != null) params.set('after', String(data.after))
-    const url = `${backendBaseUrl}/api/ai/long-tasks/${
-      encodeURIComponent(data.taskId)
-    }/conversation/stream?${params.toString()}`
-    void fetch(url, { signal: controller.signal }).then(async (response) => {
-      if (!response.ok || !response.body) {
-        throw new Error(`长任务对话流请求失败 (${response.status})`)
-      }
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let sawTerminal = false
-      const processLines = (lines: string[]) => {
-        lines.forEach((line) => {
-          if (!line.startsWith('data: ')) return
-          const payload = line.slice(6).trim()
-          if (!payload || payload === '[DONE]') return
-          try {
-            const event = JSON.parse(payload) as AiLongTaskConversationEvent
-            if (event.type === 'task.terminal' || event.type === 'stream.error') {
-              sawTerminal = true
-            }
-            listener(event)
-          } catch {
-            // A later complete SSE event can still be consumed.
-          }
-        })
-      }
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split(/\r?\n/)
-        buffer = lines.pop() || ''
-        processLines(lines)
-      }
-      buffer += decoder.decode()
-      if (buffer) processLines(buffer.split(/\r?\n/))
-      if (!controller.signal.aborted && !sawTerminal) {
-        listener({
-          type: 'stream.error',
-          taskId: data.taskId,
-          error: '长任务对话流意外结束',
-        })
-      }
-    }).catch((error) => {
-      if (controller.signal.aborted) return
-      listener({
-        type: 'stream.error',
-        taskId: data.taskId,
-        error: error instanceof Error ? error.message : '长任务对话流中断',
-      })
-    })
-    return () => controller.abort()
-  },
-  listScreenplayLongTasks: (data) => {
-    const params = new URLSearchParams()
-    if (data.limit != null) params.set('limit', String(data.limit))
-    const query = params.toString()
-    return apiGet(`/ai/screenplay-projects/${encodeURIComponent(data.projectId)}/long-tasks${query ? `?${query}` : ''}`)
-  },
-  pauseLongTask: (data) =>
-    apiPost(`/ai/long-tasks/${encodeURIComponent(data.taskId)}/pause`, {}),
-  cancelLongTask: (data) =>
-    apiPost(`/ai/long-tasks/${encodeURIComponent(data.taskId)}/cancel`, {}),
   createAgentDelegation: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/delegations`, {
       agentRole: data.agentRole,

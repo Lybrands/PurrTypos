@@ -35,6 +35,7 @@ from domains.screenplay.source_scope import (
     parse_source_scope,
     source_scope_summary,
 )
+from domains.screenplay.query_port import ScreenplayQueryPort
 from domains.screenplay.stage_tasks import build_screenplay_stage_planning_facts
 from exceptions import NotFoundError
 
@@ -80,8 +81,8 @@ _STAGE_ARTIFACT_KINDS = {
 
 
 class ScreenplayContextProvider:
-    def __init__(self, db, *, artifact_continuity=None):
-        self._db = db
+    def __init__(self, query: ScreenplayQueryPort, *, artifact_continuity=None):
+        self._query = query
         self._continuity = artifact_continuity
 
     async def build_context(
@@ -368,12 +369,10 @@ class ScreenplayContextProvider:
     ) -> "_ScreenplayContextState":
         del signal
         context = ScreenplayDomainContext.from_core_context(request.domain_context)
-        project = await self._db.fetch_one(
-            "SELECT * FROM screenplay_projects WHERE id = ?",
-            [context.project_id],
-        )
+        project = await self._query.get_project(context.project_id)
         if project is None:
             raise NotFoundError("剧本项目不存在")
+        project = dict(project)
 
         source_book_id = _optional_text(project.get("source_book_id"))
         source_scope = parse_source_scope(project.get("source_scope_json"))
@@ -383,36 +382,94 @@ class ScreenplayContextProvider:
 
         active_document = None
         if context.active_document_id:
-            active_document = await self._db.fetch_one(
-                "SELECT * FROM screenplay_documents "
-                "WHERE id = ? AND project_id = ?",
-                [context.active_document_id, context.project_id],
+            active_document = await self._query.get_document(
+                context.project_id,
+                context.active_document_id,
             )
             if active_document is None:
                 raise ValueError(
                     "active screenplay document does not belong to project"
                 )
 
-        documents = await self._db.fetch_all(
-            "SELECT id, kind, title, content_json, content_text, version, "
-            "status, derived_from_ids, update_time "
-            "FROM screenplay_documents WHERE project_id = ? "
-            "ORDER BY kind ASC, version DESC",
-            [context.project_id],
+        documents = list(
+            await self._query.list_current_documents(context.project_id)
         )
+        if (
+            active_document is not None
+            and all(
+                str(document.get("id") or "")
+                != str(active_document.get("id") or "")
+                for document in documents
+            )
+        ):
+            documents.append(active_document)
         stage = str(project.get("active_stage") or "orientation").strip()
         if stage not in _VALID_STAGES:
             stage = "orientation"
         if context.requested_stage != stage:
             raise ValueError("screenplay stage scope does not match project")
-        if request.session_id is not None:
-            session = await self._db.fetch_one(
-                "SELECT id FROM ai_sessions WHERE id = ? "
-                "AND screenplay_project_id = ? AND scope = 'screenplay' "
-                "AND closed = 0",
-                [request.session_id, context.project_id],
+        draft_scenes: tuple[Mapping[str, Any], ...] = ()
+        completed_scene_ids: tuple[str, ...] = ()
+        if stage == "draft":
+            scene_list = max(
+                (
+                    document for document in documents
+                    if str(document.get("kind") or "") == "scene_list"
+                    and str(document.get("status") or "") == "accepted"
+                ),
+                key=lambda document: int(document.get("version") or 0),
+                default=None,
             )
-            if session is None:
+            if scene_list is not None:
+                episode_rows = await self._query.list_episode_rows(
+                    str(scene_list.get("id") or ""),
+                    include_content=True,
+                )
+                if episode_rows:
+                    draft_scenes = tuple(
+                        dict(scene)
+                        for row in episode_rows
+                        for scene in row.get("content_json", {}).get("scenes", [])
+                        if isinstance(scene, Mapping)
+                    )
+                else:
+                    scene_content = _json_value(
+                        scene_list.get("content_json"),
+                        {},
+                    )
+                    draft_scenes = tuple(
+                        dict(scene)
+                        for scene in (
+                            scene_content.get("scenes", [])
+                            if isinstance(scene_content, Mapping)
+                            else []
+                        )
+                        if isinstance(scene, Mapping)
+                    )
+            draft = max(
+                (
+                    document for document in documents
+                    if str(document.get("kind") or "") == "scene_draft"
+                    and str(document.get("status") or "") == "accepted"
+                ),
+                key=lambda document: int(document.get("version") or 0),
+                default=None,
+            )
+            draft_content = _json_value(
+                (draft or {}).get("content_json"),
+                {},
+            )
+            if isinstance(draft_content, Mapping):
+                completed_scene_ids = tuple(
+                    str(item).strip()
+                    for item in draft_content.get("completedSceneIds", [])
+                    if str(item).strip()
+                )
+        if request.session_id is not None:
+            if not await self._query.has_open_session(
+                request.session_id,
+                context.project_id,
+            ):
                 raise ValueError(
                     "screenplay session does not belong to project"
                 )
@@ -425,6 +482,8 @@ class ScreenplayContextProvider:
                 str(active_document["id"]) if active_document else None
             ),
             documents=tuple(documents),
+            draft_scenes=draft_scenes,
+            completed_scene_ids=completed_scene_ids,
             stage=stage,
         )
 
@@ -446,6 +505,8 @@ class _ScreenplayContextState:
     source_scope: Mapping[str, Any]
     active_document_id: str | None
     documents: tuple[Mapping[str, Any], ...]
+    draft_scenes: tuple[Mapping[str, Any], ...]
+    completed_scene_ids: tuple[str, ...]
     stage: str
 
 
@@ -479,6 +540,9 @@ def _planning_facts(
         ),
         draft_scene_count=state.context.draft_scene_count,
         draft_scope=state.context.draft_scope,
+        bound_draft_scene_ids=state.context.bound_draft_scene_ids,
+        draft_scenes=state.draft_scenes,
+        completed_scene_ids=state.completed_scene_ids,
     )
     if candidates:
         facts["artifactContinuity"] = {

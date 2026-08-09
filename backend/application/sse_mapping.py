@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from agent_core.contracts import AgentRunResult, RunStatus
@@ -14,6 +14,7 @@ def core_update_to_sse_chunk(
     update: AgentEvent | AgentRunResult,
     *,
     model: str,
+    domain_event_mapper: Callable[[AgentEvent], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any] | None:
     if isinstance(update, AgentRunResult):
         if update.status is RunStatus.DONE:
@@ -23,10 +24,17 @@ def core_update_to_sse_chunk(
         if update.status is RunStatus.BLOCKED:
             return {"error": "Agent 未完成全部计划步骤，已安全停止。"}
         return {"error": _runtime_error_message(update.error)}
-    return core_event_to_sse_chunk(update)
+    return core_event_to_sse_chunk(
+        update,
+        domain_event_mapper=domain_event_mapper,
+    )
 
 
-def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
+def core_event_to_sse_chunk(
+    event: AgentEvent,
+    *,
+    domain_event_mapper: Callable[[AgentEvent], dict[str, Any] | None] | None = None,
+) -> dict[str, Any] | None:
     payload = thaw_json_mapping(event.payload)
     run_id = str(event.run_id or "")
 
@@ -44,6 +52,11 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         }}
     if event.type == CoreEventType.RUN_TODO_UPDATED:
         step = payload.get("step")
+        if (
+            isinstance(step, Mapping)
+            and bool(step.get("protocol_private"))
+        ):
+            return None
         return {"agentRunTodoUpdated": {
             "runId": run_id,
             "stepId": payload.get("step_id"),
@@ -137,11 +150,14 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         child_payload = child_event.get("payload")
         if not child_type or not isinstance(child_payload, Mapping):
             return None
-        child_chunk = core_event_to_sse_chunk(AgentEvent(
-            type=child_type,
-            run_id=child_run_id or None,
-            payload=child_payload,
-        ))
+        child_chunk = core_event_to_sse_chunk(
+            AgentEvent(
+                type=child_type,
+                run_id=child_run_id or None,
+                payload=child_payload,
+            ),
+            domain_event_mapper=domain_event_mapper,
+        )
         if child_chunk is None:
             return None
         envelope = {
@@ -182,27 +198,35 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         }
         if isinstance(diagnostics, Mapping):
             context_budget.update(dict(diagnostics))
+        if isinstance(payload.get("outputBudget"), Mapping):
+            context_budget["outputBudget"] = dict(payload["outputBudget"])
         return {"contextBudget": context_budget}
     if event.type == CoreEventType.CONTEXT_USAGE_RECORDED:
-        return {
-            "contextBudget": {
-                "actualInputTokens": payload.get("actualInputTokens"),
-                "actualOutputTokens": payload.get("actualOutputTokens"),
-                "actualTotalTokens": payload.get("actualTotalTokens"),
-                "cachedInputTokens": payload.get("cachedInputTokens"),
-                "reasoningOutputTokens": payload.get(
-                    "reasoningOutputTokens"
-                ),
-                "actualUsageRound": payload.get("actualUsageRound"),
-                "inputTokenEstimateAtUsage": payload.get(
-                    "inputTokenEstimateAtUsage"
-                ),
-                "usageSource": payload.get("usageSource"),
-            },
+        context_usage = {
+            "actualInputTokens": payload.get("actualInputTokens"),
+            "actualOutputTokens": payload.get("actualOutputTokens"),
+            "actualTotalTokens": payload.get("actualTotalTokens"),
+            "cachedInputTokens": payload.get("cachedInputTokens"),
+            "reasoningOutputTokens": payload.get(
+                "reasoningOutputTokens"
+            ),
+            "actualUsageRound": payload.get("actualUsageRound"),
+            "inputTokenEstimateAtUsage": payload.get(
+                "inputTokenEstimateAtUsage"
+            ),
+            "usageSource": payload.get("usageSource"),
         }
-    if event.type == "screenplay.long_task.response":
-        content = str(payload.get("content") or "").strip()
-        return {"delta": content} if content else None
+        if payload.get("requestedOutputTokens") is not None:
+            context_usage["requestedOutputTokens"] = payload.get(
+                "requestedOutputTokens"
+            )
+        if payload.get("finishReason") is not None:
+            context_usage["finishReason"] = payload.get("finishReason")
+        if isinstance(payload.get("outputBudget"), Mapping):
+            context_usage["outputBudget"] = dict(payload["outputBudget"])
+        return {
+            "contextBudget": context_usage,
+        }
     if event.type == CoreEventType.TASK_ADMISSION_DECIDED:
         return {"taskAdmission": {"runId": run_id, **payload}}
     if event.type == CoreEventType.LONG_TASK_DISPATCHED:
@@ -214,16 +238,17 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         return {"longTaskProgress": {"runId": run_id, **payload}}
 
     domain_names = {
-        "screenplay.document_proposal": "proposedScreenplayDocument",
         "writing.proposed_chapter_diff": "proposedChapterDiff",
         "writing.proposed_setting_diff": "proposedSettingDiff",
         "writing.setting_updated": "settingUpdated",
         "writing.chapter_created": "chapterCreated",
     }
     if event.type in domain_names:
-        return {domain_names[event.type]: payload}
+        return {domain_names[event.type]: dict(payload)}
     if event.type == "writing.progress":
         return payload
+    if domain_event_mapper is not None:
+        return domain_event_mapper(event)
     return None
 
 
@@ -234,23 +259,47 @@ def _plan_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             _step_payload(step)
             for step in payload.get("steps", [])
             if isinstance(step, Mapping)
+            and not bool(step.get("protocol_private"))
         ],
     }
 
 
 def _step_payload(step: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    planning_capability = str(
+        step.get("planning_capability") or ""
+    ).strip()
+    payload = {
         "id": step.get("id"),
         "title": step.get("title"),
         "type": step.get("type"),
         "executor": step.get("executor"),
         "status": step.get("status"),
         "riskLevel": step.get("risk_level"),
-        "suggestedTools": list(step.get("suggested_tools") or ()),
+        "suggestedTools": (
+            [planning_capability]
+            if planning_capability
+            else list(step.get("suggested_tools") or ())
+        ),
+        "planningCapability": planning_capability or None,
+        "protocolPrivate": bool(step.get("protocol_private")),
+        "agentRole": step.get("agent_role"),
+        "assignment": dict(step.get("assignment") or {}),
+        "dependsOn": list(step.get("depends_on") or ()),
         "description": step.get("description"),
         "resultSummary": step.get("result_summary"),
         "error": step.get("error"),
     }
+    if not payload["agentRole"]:
+        payload.pop("agentRole")
+    if not payload["assignment"]:
+        payload.pop("assignment")
+    if not payload["dependsOn"]:
+        payload.pop("dependsOn")
+    if not payload["planningCapability"]:
+        payload.pop("planningCapability")
+    if not payload["protocolPrivate"]:
+        payload.pop("protocolPrivate")
+    return payload
 
 
 def _runtime_error_message(error_code: str | None) -> str:

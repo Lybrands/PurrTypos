@@ -46,6 +46,14 @@ def build_model_call_parameters(
     }
     if invocation.request.profile_id is not None:
         result["profileId"] = invocation.request.profile_id
+    capabilities = invocation.request.output_capabilities
+    if (
+        capabilities.max_output_tokens is not None
+        or capabilities.thinking_token_accounting.value != "unknown"
+    ):
+        result["modelOutputCapabilities"] = capabilities.to_mapping()
+    if invocation.output_budget is not None:
+        result["outputBudget"] = invocation.output_budget.to_mapping()
     return result
 
 

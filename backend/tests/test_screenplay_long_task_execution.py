@@ -11,28 +11,174 @@ from agent_core.long_tasks import (
     LongTaskUnitRecord,
     LongTaskUnitStatus,
 )
-from agent_core.contracts import AgentRunResult, RunLineage, RunStatus
+from agent_core.contracts import (
+    AgentRunResult,
+    RunLineage,
+    RunStatus,
+)
 from agent_core.events import AgentEvent, CoreEventType
 from application.screenplay_long_task_execution import ScreenplayLongTaskExecution
 from domains.screenplay.long_task_response import (
     ScreenplayDraftBatchResponseValidator,
+    ScreenplayReviewReportValidator,
 )
 
 
 class _Database:
     async def fetch_one(self, query, params):
+        if "FROM screenplay_projects" in query:
+            return {
+                "id": "project-1",
+                "format": "series",
+                "source_snapshot_json": '{"type":"original"}',
+            }
+        if "FROM screenplay_revisions AS r" in query:
+            revision_id = str(params[0])
+            if revision_id == "scene-list-1":
+                return {
+                    "id": revision_id,
+                    "project_id": "project-1",
+                    "revision_no": 1,
+                    "role": "sceneList",
+                    "payload_json": {
+                        "schemaVersion": 2,
+                        "documentKind": "scene_list",
+                        "scenes": [
+                            {"id": "s05", "heading": "第五场", "episodeNumber": 1},
+                            {"id": "s06", "heading": "第六场", "episodeNumber": 1},
+                        ],
+                    },
+                    "document_payload": {
+                        "schemaVersion": 2,
+                        "documentKind": "scene_list",
+                        "scenes": [
+                            {"id": "s05", "heading": "第五场", "episodeNumber": 1},
+                            {"id": "s06", "heading": "第六场", "episodeNumber": 1},
+                        ],
+                    },
+                    "summary_json": {"title": "场景表"},
+                    "part_content_text": "",
+                    "is_head": 1,
+                }
+            if revision_id == "draft-1":
+                return {
+                    "id": revision_id,
+                    "project_id": "project-1",
+                    "revision_no": 1,
+                    "role": "screenplayDraft",
+                    "payload_json": {
+                        "schemaVersion": 2,
+                        "documentKind": "scene_draft",
+                    },
+                    "document_payload": {
+                        "schemaVersion": 2,
+                        "documentKind": "scene_draft",
+                    },
+                    "summary_json": {"title": "正文"},
+                    "part_content_text": "",
+                    "is_head": 1,
+                }
+            return None
+        if "SELECT project_id FROM screenplay_revisions" in query:
+            return {"project_id": "project-1"}
         if "kind = 'scene_list'" in query:
             return {
                 "id": "scene-list-1",
+                "kind": "scene_list",
                 "content_json": {
+                    "schemaVersion": 2,
+                    "documentKind": "scene_list_manifest",
+                    "storageMode": "episode_documents",
+                    "episodeCount": 1,
+                },
+            }
+        if "kind = 'scene_draft'" in query:
+            return {
+                "id": "draft-1",
+                "project_id": "project-1",
+                "kind": "scene_draft",
+                "content_json": {
+                    "schemaVersion": 2,
+                    "documentKind": "scene_draft_manifest",
+                },
+                "content_text": "",
+            }
+        raise AssertionError((query, params))
+
+    async def fetch_all(self, query, params):
+        if "FROM screenplay_project_heads AS h" in query:
+            return [{
+                "id": "scene-list-1",
+                "project_id": "project-1",
+                "deliverable_id": "scene-list-deliverable",
+                "role": "sceneList",
+                "revision_no": 1,
+                "payload_json": {
+                    "schemaVersion": 2,
+                    "documentKind": "scene_list",
                     "scenes": [
                         {"id": "s05", "heading": "第五场", "episodeNumber": 1},
                         {"id": "s06", "heading": "第六场", "episodeNumber": 1},
                     ],
                 },
-            }
-        if "kind = 'scene_draft'" in query:
-            return {"id": "draft-1", "content_json": {}, "content_text": "已接受正文"}
+                "summary_json": {"title": "场景表"},
+                "part_content_text": "",
+            }, {
+                "id": "draft-1",
+                "project_id": "project-1",
+                "deliverable_id": "draft-deliverable",
+                "role": "screenplayDraft",
+                "revision_no": 1,
+                "payload_json": {
+                    "schemaVersion": 2,
+                    "documentKind": "scene_draft",
+                },
+                "summary_json": {"title": "正文"},
+                "part_content_text": "",
+            }]
+        if "FROM screenplay_revision_inputs" in query:
+            return []
+        if (
+            "FROM screenplay_revision_parts" in query
+            and "part_type = 'episode'" in query
+        ):
+            revision_id = str(params[0])
+            if revision_id == "scene-list-1":
+                return [{
+                    "part_key": "1",
+                    "position": 1,
+                    "payload_json": {"episodeNumber": 1, "scenes": [
+                    {"id": "s05", "heading": "第五场", "episodeNumber": 1},
+                    {"id": "s06", "heading": "第六场", "episodeNumber": 1},
+                    ]},
+                    "content_text": "",
+                }]
+            if revision_id == "draft-1":
+                return [{
+                    "part_key": "1",
+                    "position": 1,
+                    "payload_json": {
+                        "episodeNumber": 1,
+                        "scenes": [],
+                        "sceneExecutions": [],
+                        "contentText": "已接受正文",
+                    },
+                    "content_text": "已接受正文",
+                }]
+            return []
+        if "screenplay_document_episodes" in query:
+            raise AssertionError("legacy episode table must not be queried")
+        if "screenplay_draft_episodes" in query:
+            raise AssertionError("legacy draft table must not be queried")
+        if "FROM screenplay_documents" in query:
+            raise AssertionError("legacy document table must not be queried")
+        if "FROM screenplay_revision_parts" in query:
+            return [{
+                "part_key": "1",
+                "position": 1,
+                "payload_json": {},
+                "content_text": "",
+            }]
         raise AssertionError((query, params))
 
 
@@ -211,7 +357,7 @@ async def test_reviewer_prompt_uses_only_planner_dependency_outputs():
     prompt = await execution._build_batch_prompt(task, current)
     payload = json.loads(prompt.split("\n", 1)[1])
 
-    assert payload["task"] == "review_and_revise_screenplay_scene_batch"
+    assert payload["task"] == "review_screenplay_continuity"
     assert [scene["sceneId"] for scene in payload["draftScenes"]] == ["s05"]
     assert "连续性审阅节点" in prompt
 
@@ -232,6 +378,54 @@ def _valid_batch_response(scene_id="s05"):
             "continuitySummary": "林月继续深入犬域。",
         }],
     }, ensure_ascii=False)
+
+
+def _review_and_revision_units(
+    scene,
+    *,
+    writer_id="writer",
+    writer_position=0,
+    revised_scene=None,
+    review_issues=None,
+):
+    scene_id = str(scene["sceneId"])
+    review_id = "review_draft_continuity"
+    return (
+        LongTaskUnitRecord(
+            task_id="task-1",
+            id=writer_id,
+            position=writer_position,
+            status=LongTaskUnitStatus.COMPLETED,
+            metadata={"unitKind": "scene_generation", "scenes": [scene]},
+        ),
+        LongTaskUnitRecord(
+            task_id="task-1",
+            id=review_id,
+            position=writer_position + 1,
+            status=LongTaskUnitStatus.COMPLETED,
+            dependencies=(writer_id,),
+            metadata={
+                "unitKind": "continuity_review",
+                "reviewReport": {
+                    "reviewedSceneIds": [scene_id],
+                    "issues": list(review_issues or []),
+                    "summary": "连续性检查完成",
+                },
+            },
+        ),
+        LongTaskUnitRecord(
+            task_id="task-1",
+            id=f"revise_{scene_id}",
+            position=writer_position + 2,
+            status=LongTaskUnitStatus.COMPLETED,
+            dependencies=(writer_id, review_id),
+            metadata={
+                "unitKind": "scene_revision",
+                "scenes": [revised_scene or scene],
+                "skippedModelCall": revised_scene is None,
+            },
+        ),
+    )
 
 
 def test_batch_response_contract_rejects_unclosed_json_before_run_success():
@@ -268,6 +462,94 @@ def test_batch_response_contract_does_not_retry_valid_scenes_for_missing_ui_summ
     )
 
     assert result.accepted is True
+
+
+def test_review_contract_is_compact_and_rejects_rewritten_scene_payloads():
+    validator = ScreenplayReviewReportValidator(("s05", "s06"))
+    report = {
+        "reviewedSceneIds": ["s05", "s06"],
+        "issues": [{
+            "id": "timeline-1",
+            "sceneIds": ["s06"],
+            "severity": "major",
+            "category": "timeline",
+            "problem": "时间状态与上一场冲突",
+            "instruction": "承接上一场的夜间时间",
+        }],
+        "summary": "发现一处跨场时间问题",
+    }
+
+    assert validator.validate(
+        content=json.dumps(report, ensure_ascii=False),
+        messages=(),
+    ).accepted is True
+    report["scenes"] = json.loads(_valid_batch_response())["scenes"]
+    assert validator.validate(
+        content=json.dumps(report, ensure_ascii=False),
+        messages=(),
+    ).accepted is False
+
+
+def test_screenplay_unit_retry_policy_never_repeats_truncated_output():
+    classifier = ScreenplayLongTaskExecution.is_retryable_unit_error
+
+    assert classifier(RuntimeError("model_output_truncated")) is False
+    assert classifier(RuntimeError("long_task_batch_output_invalid_json")) is False
+    assert classifier(RuntimeError("upstream_stream_interrupted")) is True
+    assert classifier(RuntimeError("provider_unavailable")) is True
+
+
+@pytest.mark.asyncio
+async def test_clean_review_revision_reuses_writer_checkpoint_without_model_call():
+    scene = json.loads(_valid_batch_response())["scenes"][0]
+    writer, review, _ = _review_and_revision_units(scene)
+    revision = LongTaskUnitRecord(
+        task_id="task-1",
+        id="revise_s05",
+        position=2,
+        status=LongTaskUnitStatus.CLAIMED,
+        dependencies=(writer.id, review.id),
+        metadata={"unitKind": "scene_revision", "sceneIds": ["s05"]},
+    )
+
+    class _RevisionRepository:
+        async def list_units(self, task_id):
+            assert task_id == "task-1"
+            return (writer, review, revision)
+
+    execution = ScreenplayLongTaskExecution(
+        composition=type("Composition", (), {"database": _Database()})(),
+        repository=_RevisionRepository(),
+        work_items=object(),
+        body=object(),
+        api_key="key",
+        provider_options={},
+        signal=asyncio.Event(),
+    )
+    task = LongTaskRecord(
+        id="task-1",
+        namespace="purrtypos.screenplay",
+        kind="screenplay_draft_generation",
+        owner_id="project-1",
+        work_item_id="work-1",
+        created_by_run_id="run-parent",
+        status=LongTaskStatus.RUNNING,
+        revision=2,
+        total_units=4,
+        completed_units=2,
+        failed_units=0,
+        max_parallelism=1,
+        metadata={
+            "projectId": "project-1",
+            "sceneListDocumentId": "scene-list-1",
+        },
+    )
+
+    result = await execution._passthrough_revision_if_clean(task, revision)
+
+    assert result is not None
+    assert result.metadata["skippedModelCall"] is True
+    assert result.metadata["scenes"][0]["sceneText"] == scene["sceneText"]
 
 
 @pytest.mark.asyncio
@@ -503,6 +785,15 @@ async def test_batch_child_run_receives_contract_and_parent_lineage(monkeypatch)
     assert captured["lineage"].parent_run_id == "run-parent"
     assert captured["lineage"].delegation_id == "delegation-writer-1"
     assert captured["lineage"].agent_role == "screenplay_writer"
+    assert captured["bodyUpdate"]["enableAgentTools"] is False
+    assert captured["bodyUpdate"]["chatAgentMode"] == "ask"
+    assert captured["bodyUpdate"]["screenplayOperationId"] is None
+    assert captured["allowed_tool_modes"] == frozenset()
+    assert "required_tool_names" not in captured
+    assert captured["domain_context_overrides"] == {
+        "bound_draft_scene_ids": ["s05"],
+    }
+    assert captured["host_context_only"] is True
     assert repository.binds == [
         ("task-1", "batch-0001", "worker-1", "run-child")
     ]
@@ -633,18 +924,12 @@ async def test_finalize_builds_scene_headings_and_publishes_proposal():
         "structureUnitIds": [],
         **scene["execution"],
     }
-    completed_unit = LongTaskUnitRecord(
-        task_id="task-1",
-        id="batch-0001",
-        position=0,
-        status=LongTaskUnitStatus.COMPLETED,
-        metadata={"unitKind": "scene_generation", "scenes": [scene]},
-    )
+    units = _review_and_revision_units(scene)
 
     class _FinalizeRepository:
         async def list_units(self, task_id):
             assert task_id == "task-1"
-            return (completed_unit,)
+            return units
 
     class _WorkItems:
         def __init__(self):
@@ -709,7 +994,127 @@ async def test_finalize_builds_scene_headings_and_publishes_proposal():
 
 
 @pytest.mark.asyncio
-async def test_finalize_deterministically_applies_planner_review_revision():
+async def test_finalize_reads_previous_execution_history_from_episode_rows():
+    previous_execution = {
+        "sceneId": "s04",
+        "structureUnitIds": [],
+        "objectiveResult": "完成上一场目标",
+        "conflictResult": "推进上一场冲突",
+        "turnResult": "完成上一场转折",
+        "continuityState": "人物进入第五场",
+        "unresolvedNotes": [],
+    }
+
+    class _EpisodeNativeDatabase(_Database):
+        async def fetch_all(self, query, params):
+            if (
+                "FROM screenplay_revision_parts" in query
+                and "part_type = 'episode'" in query
+                and str(params[0]) == "scene-list-1"
+            ):
+                return [{
+                    "part_key": "1",
+                    "position": 1,
+                    "payload_json": {"episodeNumber": 1, "scenes": [{
+                        "id": "s04",
+                        "heading": "第四场",
+                        "episodeNumber": 1,
+                    }, {
+                        "id": "s05",
+                        "heading": "第五场",
+                        "episodeNumber": 1,
+                    }]},
+                    "content_text": "",
+                }]
+            if (
+                "FROM screenplay_revision_parts" in query
+                and "part_type = 'episode'" in query
+                and str(params[0]) == "draft-1"
+            ):
+                return [{
+                    "part_key": "1",
+                    "position": 1,
+                        "payload_json": {
+                            "episodeNumber": 1,
+                            "sceneIds": ["s04"],
+                            "sceneTexts": [{
+                                "sceneId": "s04",
+                                "contentText": "第四场正文",
+                            }],
+                        "sceneExecutions": [previous_execution],
+                        "contentText": "第四场正文",
+                        "continuitySummary": "人物进入第五场",
+                    },
+                    "content_text": "第四场正文",
+                }]
+            return await super().fetch_all(query, params)
+
+    scene = json.loads(_valid_batch_response())["scenes"][0]
+    scene["execution"] = {
+        "sceneId": "s05",
+        "structureUnitIds": [],
+        **scene["execution"],
+    }
+    units = _review_and_revision_units(scene)
+
+    class _FinalizeRepository:
+        async def list_units(self, task_id):
+            assert task_id == "task-1"
+            return units
+
+    class _WorkItems:
+        async def get(self, work_item_id):
+            return type("WorkItem", (), {"id": work_item_id, "revision": 1})()
+
+        async def complete(self, command):
+            del command
+
+    composition = type(
+        "Composition",
+        (),
+        {"database": _EpisodeNativeDatabase()},
+    )()
+    execution = ScreenplayLongTaskExecution(
+        composition=composition,
+        repository=_FinalizeRepository(),
+        work_items=_WorkItems(),
+        body=object(),
+        api_key="key",
+        provider_options={},
+        signal=asyncio.Event(),
+    )
+    task = LongTaskRecord(
+        id="task-1",
+        namespace="purrtypos.screenplay",
+        kind="screenplay_draft_generation",
+        owner_id="project-1",
+        work_item_id="work-1",
+        created_by_run_id="run-parent",
+        status=LongTaskStatus.RUNNING,
+        revision=2,
+        total_units=2,
+        completed_units=1,
+        failed_units=0,
+        max_parallelism=1,
+        metadata={
+            "projectId": "project-1",
+            "sceneListDocumentId": "scene-list-1",
+            "scope": "count",
+            "targetSceneIds": ["s05"],
+        },
+    )
+
+    result = await execution._finalize(task)
+
+    proposal = result.metadata["proposal"]
+    assert proposal["contentJson"]["completedSceneIds"] == ["s04", "s05"]
+    assert proposal["contentJson"]["episodeDrafts"][0][
+        "sceneExecutions"
+    ][0]["sceneId"] == "s05"
+
+
+@pytest.mark.asyncio
+async def test_finalize_deterministically_applies_targeted_review_revision():
     writer_scene = json.loads(_valid_batch_response())["scenes"][0]
     writer_scene["execution"] = {
         "sceneId": "s05",
@@ -723,22 +1128,17 @@ async def test_finalize_deterministically_applies_planner_review_revision():
         "structureUnitIds": [],
         **reviewer_scene["execution"],
     }
-    units = (
-        LongTaskUnitRecord(
-            task_id="task-1",
-            id="writer",
-            position=0,
-            status=LongTaskUnitStatus.COMPLETED,
-            metadata={"unitKind": "scene_generation", "scenes": [writer_scene]},
-        ),
-        LongTaskUnitRecord(
-            task_id="task-1",
-            id="reviewer",
-            position=1,
-            status=LongTaskUnitStatus.COMPLETED,
-            dependencies=("writer",),
-            metadata={"unitKind": "continuity_review", "scenes": [reviewer_scene]},
-        ),
+    units = _review_and_revision_units(
+        writer_scene,
+        revised_scene=reviewer_scene,
+        review_issues=[{
+            "id": "continuity-1",
+            "sceneIds": ["s05"],
+            "severity": "major",
+            "category": "prop",
+            "problem": "上一场道具没有承接",
+            "instruction": "让林月接住上一场道具",
+        }],
     )
 
     class _FinalizeRepository:
@@ -794,17 +1194,11 @@ async def test_finalize_deterministically_applies_planner_review_revision():
 @pytest.mark.asyncio
 async def test_finalize_rejects_incomplete_episode_scope():
     scene = json.loads(_valid_batch_response())["scenes"][0]
-    completed_unit = LongTaskUnitRecord(
-        task_id="task-1",
-        id="batch-0001",
-        position=0,
-        status=LongTaskUnitStatus.COMPLETED,
-        metadata={"unitKind": "scene_generation", "scenes": [scene]},
-    )
+    units = _review_and_revision_units(scene)
 
     class _FinalizeRepository:
         async def list_units(self, task_id):
-            return (completed_unit,)
+            return units
 
     composition = type("Composition", (), {"database": _Database()})()
     execution = ScreenplayLongTaskExecution(

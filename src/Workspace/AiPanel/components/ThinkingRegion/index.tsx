@@ -9,7 +9,6 @@ interface ThinkingRegionProps {
   streaming: boolean;
   startedAt?: number;
   durationMs?: number;
-  showCursor?: boolean;
   onWheelUp?: () => void;
 }
 
@@ -55,7 +54,6 @@ export default function ThinkingRegion({
   streaming,
   startedAt,
   durationMs,
-  showCursor = false,
   onWheelUp,
 }: ThinkingRegionProps) {
   const [open, setOpen] = React.useState(
@@ -127,9 +125,6 @@ export default function ThinkingRegion({
           }}
         >
           <Markdown>{content}</Markdown>
-          {streaming && showCursor && open && (
-            <span className="a-thinking-cursor" />
-          )}
         </div>
       </div>
     </div>

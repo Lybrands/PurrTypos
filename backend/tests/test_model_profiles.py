@@ -16,6 +16,19 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
     assert glm.build_openai_extra_body(False) == {
         "thinking": {"type": "disabled"},
     }
+    assert glm.output_capabilities().max_output_tokens == 131_072
+    deepseek_pro = resolve_model_profile(
+        "deepseek:deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "https://api.deepseek.com",
+    )
+    assert deepseek_pro.profile_id == "deepseek:deepseek-v4-pro"
+    assert deepseek_pro.output_capabilities().max_output_tokens == 393_216
+    assert resolve_model_profile(
+        "deepseek:deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com/v1/",
+    ).profile_id == "deepseek:deepseek-v4-flash"
     assert resolve_model_profile(
         "moonshot:kimi-k3",
         "kimi-k3",
@@ -31,16 +44,20 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
         "MiniMax-M3",
         "https://api.minimaxi.com/v1",
     ).profile_id == "minimax:MiniMax-M3"
-    assert resolve_model_profile(
+    mimo = resolve_model_profile(
         "mimo:mimo-v2.5-pro",
         "mimo-v2.5-pro",
         "https://api.xiaomimimo.com/v1",
-    ).profile_id == "mimo:mimo-v2.5-pro"
-    assert resolve_model_profile(
+    )
+    assert mimo.profile_id == "mimo:mimo-v2.5-pro"
+    assert mimo.output_capabilities().max_output_tokens == 131_072
+    generic = resolve_model_profile(
         None,
         "custom-model",
         "https://proxy.example/v1",
-    ).profile_id == "generic"
+    )
+    assert generic.profile_id == "generic"
+    assert generic.output_capabilities().max_output_tokens is None
 
 
 def test_minimax_profile_owns_reasoning_request_and_response_normalization():

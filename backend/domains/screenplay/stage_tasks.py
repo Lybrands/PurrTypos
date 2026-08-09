@@ -22,6 +22,9 @@ def build_screenplay_stage_planning_facts(
     require_deliverable: bool = False,
     draft_scene_count: int = 1,
     draft_scope: str = "planner",
+    bound_draft_scene_ids: Sequence[str] = (),
+    draft_scenes: Sequence[Mapping[str, Any]] = (),
+    completed_scene_ids: Sequence[str] = (),
 ) -> dict[str, object]:
     """Describe the current outcome without prescribing a tool sequence."""
 
@@ -44,6 +47,9 @@ def build_screenplay_stage_planning_facts(
         documents=documents,
         draft_scene_count=draft_scene_count,
         draft_scope=draft_scope,
+        bound_draft_scene_ids=bound_draft_scene_ids,
+        draft_scenes=draft_scenes,
+        completed_scene_ids=completed_scene_ids,
     )
     facts.update(task)
     episode_scoped_draft = (
@@ -56,92 +62,50 @@ def build_screenplay_stage_planning_facts(
             planning_rules.append(
                 "For an episode-scoped request, identify the requested episode "
                 "range in user-visible plan copy and do not restate scene totals "
-                "in the plan title, goal, or step titles."
+                "in the plan title, goal, or step titles. Author independent "
+                "episode-creation steps that can execute in parallel, followed "
+                "by a continuity review or synthesis step; do not collapse the "
+                "AI-visible plan into one generic submission step."
             )
-    durable_draft_batch = (
-        stage == "draft"
-        and isinstance(task.get("requestedSceneCount"), int)
-        and int(task["requestedSceneCount"]) > 1
-    )
-    if (require_deliverable or durable_draft_batch) and stage != "completed":
-        completion_capabilities = _completion_capabilities(
+    if require_deliverable and stage != "completed":
+        facts["requestedOutcome"] = "complete_current_stage_deliverable"
+        completion_capability = _completion_capability(
             stage=stage,
             source_kind=source_kind,
-            screenplay_format=screenplay_format,
             documents=documents,
         )
-        facts["stageDeliverableRequired"] = True
-        facts["modelOnlyPlanningFallbackAllowed"] = False
-        facts["completionCapabilities"] = list(completion_capabilities)
-        if require_deliverable and stage in {
-            "orientation",
-            "brief",
-            "structure",
-            "scenes",
-        }:
-            facts["taskAdmissionVocabulary"] = {
-                "domainActions": ["generate_stage_deliverable"],
-                "requiredForTools": {
-                    capability: "generate_stage_deliverable"
-                    for capability in completion_capabilities
-                },
-                "scopes": ["current_stage"],
-            }
-        if durable_draft_batch:
-            current_scenes = task.get("currentScenes")
-            required_scene_ids = [
-                str(scene.get("id") or "").strip()
-                for scene in current_scenes
-                if isinstance(scene, Mapping)
-                and str(scene.get("id") or "").strip()
-            ] if isinstance(current_scenes, Sequence) else []
-            facts["durableExecutionPlan"] = {
-                "targetField": "taskSpec.target.executionUnits",
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": required_scene_ids,
-                "generationUnitKind": "scene_generation",
-                "reviewUnitKind": "continuity_review",
-                "terminalUnitKind": "finalize",
-                "rules": [
-                    "The Planner chooses the number, composition and dependencies of generation units; there is no host batch size.",
-                    "Generation itemIds must cover requiredItemIds exactly once and in order.",
-                    "Every generation unit declares dependsOn explicitly; use an edge only when the downstream prose truly needs the predecessor's generated continuity state.",
-                    "Independent branches should have no artificial cross-branch dependency and may execute concurrently from host-supplied accepted inputs and scene boundaries.",
-                    "Narrative order alone is not a dependency. Every generation unit with dependsOn must provide dependencyReason naming the exact predecessor-created fact unavailable from accepted inputs; otherwise dependsOn must be empty.",
-                    "When independently generated branches need a shared continuity pass, add Planner-sized continuity_review units after their writer dependencies. Review itemIds may overlap generation coverage and must stay inside requiredItemIds.",
-                    "The Planner must make the terminal lifecycle unit depend on every generation graph leaf; the host validates this edge set without rewriting it.",
-                ],
-            }
+        if completion_capability:
+            # Consumed only by the screenplay PlanningPolicy. Agent Core treats
+            # host planning facts as opaque domain data.
+            facts["requestedCompletionCapability"] = completion_capability
     return facts
 
 
-def _completion_capabilities(
+def _completion_capability(
     *,
     stage: str,
     source_kind: str,
-    screenplay_format: str,
     documents: Sequence[Mapping[str, Any]],
-) -> tuple[str, ...]:
-    """Return the stage's terminal capability, not a prescribed tool chain."""
-
-    if stage == "orientation" and source_kind == "book":
-        return ("finalizeSourceAnalysisProposal",)
-    if stage in {"orientation", "brief"}:
-        return ("finalizeCreativeBriefProposal",)
-    if stage == "structure":
-        return ("finalizeScreenplayStructureProposal",)
-    if stage == "scenes":
-        return ("finalizeSceneListProposal",)
-    if stage == "draft":
-        return ("proposeSceneDraft",)
+) -> str | None:
+    if stage == "orientation":
+        return (
+            "analyzeSourceMaterial"
+            if source_kind == "book"
+            else "generateCreativeBrief"
+        )
     if stage == "review":
         mode, _ = _review_mode(documents)
         return (
-            ("finalizeScreenplayRevisionProposal",)
+            "reviseCurrentDraft"
             if mode == "revision"
-            else ("finalizeScreenplayReviewProposal",)
+            else "reviewCurrentDraft"
         )
-    return ()
+    return {
+        "brief": "generateCreativeBrief",
+        "structure": "generateScreenplayStructure",
+        "scenes": "generateSceneList",
+        "draft": "continueScreenplayDraft",
+    }.get(stage)
 
 
 def _stage_task(
@@ -154,6 +118,9 @@ def _stage_task(
     documents: Sequence[Mapping[str, Any]],
     draft_scene_count: int,
     draft_scope: str,
+    bound_draft_scene_ids: Sequence[str],
+    draft_scenes: Sequence[Mapping[str, Any]],
+    completed_scene_ids: Sequence[str],
 ) -> dict[str, object]:
     if stage == "completed":
         return {
@@ -245,12 +212,23 @@ def _stage_task(
         }
 
     if stage == "draft":
-        remaining_scenes = _next_scenes(documents, limit=1_000_000)
-        next_scenes = list(select_draft_scenes(
-            remaining_scenes,
-            scope=draft_scope,
-            fallback_count=draft_scene_count,
-        ))
+        remaining_scenes = _next_scenes(
+            draft_scenes,
+            completed_scene_ids,
+            limit=1_000_000,
+        )
+        next_scenes = (
+            _select_bound_draft_scenes(
+                remaining_scenes,
+                bound_draft_scene_ids,
+            )
+            if bound_draft_scene_ids
+            else list(select_draft_scenes(
+                remaining_scenes,
+                scope=draft_scope,
+                fallback_count=draft_scene_count,
+            ))
+        )
         if not next_scenes:
             return {
                 "objective": "Verify and finalize the complete rolling screenplay draft.",
@@ -273,13 +251,19 @@ def _stage_task(
             ),
             "currentScene": next_scenes[0],
             "currentScenes": next_scenes,
+            "draftPosition": _draft_position_facts(
+                draft_scenes,
+                completed_scene_ids,
+                next_scenes,
+            ),
             "requestedSceneCount": len(next_scenes),
             "requestedDraftScope": draft_scope,
+            "hostBoundSceneIds": list(bound_draft_scene_ids),
             "remainingSceneCount": len(remaining_scenes),
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
+            "draftIntentSchema": {
+                "capability": "continueScreenplayDraft",
+                "targetFields": {
+                    "action": "write_scene_drafts",
                 },
                 "scopes": [
                     "next_scene",
@@ -289,7 +273,7 @@ def _stage_task(
                     "all_remaining",
                     "explicit_scene_ids",
                 ],
-                "scopeParameters": {
+                "parameters": {
                     "next_episodes": {
                         "count": "positive_episode_count",
                     },
@@ -375,21 +359,17 @@ def _content(document: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 
 def _next_scenes(
-    documents: Sequence[Mapping[str, Any]],
+    scenes: Sequence[Mapping[str, Any]],
+    completed_scene_ids: Sequence[str],
     *,
     limit: int,
 ) -> list[dict[str, object]]:
-    scene_list = _content(_accepted_document(documents, "scene_list"))
-    draft = _content(_accepted_document(documents, "scene_draft"))
-    scenes = ordered_scene_mappings(scene_list)
-    completed_values = draft.get("completedSceneIds")
-    completed = {
-        str(item) for item in completed_values
-    } if isinstance(completed_values, list) else set()
-    if not scenes:
+    ordered_scenes = ordered_scene_mappings({"scenes": list(scenes)})
+    completed = {str(item) for item in completed_scene_ids}
+    if not ordered_scenes:
         return []
     pending: list[dict[str, object]] = []
-    for scene in scenes:
+    for scene in ordered_scenes:
         if not isinstance(scene, Mapping):
             continue
         scene_id = str(scene.get("id") or "").strip()
@@ -417,6 +397,68 @@ def _next_scenes(
             if len(pending) >= max(1, int(limit)):
                 break
     return pending
+
+
+def _draft_position_facts(
+    scenes: Sequence[Mapping[str, Any]],
+    completed_scene_ids: Sequence[str],
+    selected_scenes: Sequence[Mapping[str, Any]],
+) -> dict[str, object]:
+    ordered_scenes = ordered_scene_mappings({"scenes": list(scenes)})
+    completed = {
+        str(item) for item in completed_scene_ids if str(item).strip()
+    }
+    episode_scenes: dict[int, list[str]] = {}
+    for scene in ordered_scenes:
+        episode = scene.get("episodeNumber")
+        scene_id = str(scene.get("id") or "").strip()
+        if (
+            isinstance(episode, int)
+            and not isinstance(episode, bool)
+            and episode > 0
+            and scene_id
+        ):
+            episode_scenes.setdefault(episode, []).append(scene_id)
+    return {
+        "completedSceneCount": len(completed),
+        "totalSceneCount": len(ordered_scenes),
+        "completedEpisodeNumbers": [
+            episode
+            for episode, scene_ids in episode_scenes.items()
+            if scene_ids and all(scene_id in completed for scene_id in scene_ids)
+        ],
+        "selectedEpisodeNumbers": list(dict.fromkeys(
+            int(scene["episodeNumber"])
+            for scene in selected_scenes
+            if isinstance(scene.get("episodeNumber"), int)
+            and not isinstance(scene.get("episodeNumber"), bool)
+        )),
+        "selectedSceneIds": [
+            str(scene.get("id") or "") for scene in selected_scenes
+        ],
+    }
+
+
+def _select_bound_draft_scenes(
+    remaining_scenes: Sequence[Mapping[str, Any]],
+    bound_scene_ids: Sequence[str],
+) -> list[Mapping[str, Any]]:
+    requested = [str(item).strip() for item in bound_scene_ids]
+    by_id = {
+        str(scene.get("id") or "").strip(): scene
+        for scene in remaining_scenes
+    }
+    selected = [by_id.get(scene_id) for scene_id in requested]
+    if any(scene is None for scene in selected):
+        return []
+    canonical = [
+        str(scene.get("id") or "").strip()
+        for scene in remaining_scenes
+        if str(scene.get("id") or "").strip() in set(requested)
+    ]
+    if canonical != requested:
+        return []
+    return [scene for scene in selected if scene is not None]
 
 
 def select_draft_scenes(
@@ -477,8 +519,7 @@ def _review_mode(
     review = _content(review_document)
     draft_id = str(draft_document.get("id") or "") if draft_document else ""
     if review_document and str(review.get("reviewedDraftId") or "") == draft_id:
-        issues = review.get("issues")
-        return "revision", len(issues) if isinstance(issues, list) else 0
+        return "revision", int(review.get("issueCount") or 0)
     previous_review_id = str(draft.get("reviewId") or "")
     previous_review = next(
         (
@@ -490,6 +531,7 @@ def _review_mode(
         None,
     )
     if previous_review_id and previous_review:
-        issues = _content(previous_review).get("issues")
-        return "re_review", len(issues) if isinstance(issues, list) else 0
+        return "re_review", int(
+            _content(previous_review).get("issueCount") or 0
+        )
     return "initial_review", 0

@@ -5,7 +5,6 @@ import type {
   AiAgentDelegation,
   AiContextBudgetState,
   AiContextCompactionState,
-  ScreenplayDocumentProposal,
   AiSession,
   ElectronAPI,
   EntityId,
@@ -53,7 +52,6 @@ export interface AccState {
   delegations?: AiAgentDelegation[];
   contextCompaction?: AiContextCompactionState;
   contextBudget?: AiContextBudgetState;
-  screenplayProposal?: ScreenplayDocumentProposal;
   subAgentActivities?: AiSubAgentActivity[];
   /** Live reducer state is isolated per delegation to prevent token mixing. */
   subAgentAccumulators?: Record<string, AccState>;
@@ -77,8 +75,6 @@ export interface ChunkCtx {
   flushCommits: () => void;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>;
-  /** Optional domain surface hook; accumulation and persistence remain generic. */
-  setScreenplayProposal?: (proposal: ScreenplayDocumentProposal) => void;
   appMessage: AppMessage;
 
   // 跨会话守卫

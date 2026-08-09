@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -29,40 +29,27 @@ from agent_core.ports import (
     CheckpointStore,
     ContextCompressionHook,
     ConversationCompactor,
+    ContextProvider,
     DelegationRepository,
     ExecutionLeaseStore,
     PostPlanningContextOptimizer,
     ToolRegistration,
 )
 from agent_core.tools import InMemoryToolCatalog
-from agent_core.work_items import WorkItemLifecycle
 from application.response_judging import ModelBackedResponseJudge
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
-from application.screenplay_long_tasks import ScreenplayLongTaskDispatcher
-from application.screenplay_long_task_execution import (
-    ScreenplayLongTaskExecution,
-)
-from application.screenplay_long_task_conversation import (
-    ScreenplayLongTaskConversationHub,
-)
 from application.agent_profile_registry import (
     AgentProfileRegistration,
     AgentProfileRegistry,
 )
+from application.planning_constraints import RequiredToolPlanningPolicy
 from application.run_execution_control import RunExecutionSession
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider
 from domains.writing.context_source import RepositoryWritingContextSource
 from domains.writing.response import writing_atomic_continuity_judge_policy
-from domains.screenplay.adapter import ScreenplayDomainAdapter
-from domains.screenplay.contracts import (
-    SCREENPLAY_DOMAIN_NAMESPACE,
-    ScreenplayDomainContext,
-)
-from domains.screenplay.source_scope import is_restricted_source_scope
-from domains.screenplay.task_admission import ScreenplayTaskAdmissionEvaluator
 from domains.writing.contracts import (
     WRITING_DOMAIN_NAMESPACE,
     WritingDomainContext,
@@ -114,7 +101,6 @@ from infrastructure.writing import (
     WritingToolDependencies,
     build_writing_tool_catalog,
 )
-from infrastructure.screenplay import build_screenplay_tool_catalog
 from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 from domains.agent_roles import AgentRoleRegistry
 
@@ -132,7 +118,8 @@ class AgentComposition:
         execution_db=None,
         skills_dir: Path | None = None,
         writing: WritingDomainAdapter | None = None,
-        screenplay: ScreenplayDomainAdapter | None = None,
+        event_projector=None,
+        profile_extension_factories: Sequence[Callable[..., Any]] = (),
         provider_capabilities: ProviderCapabilityCache | None = None,
         approval_gateway: ApprovalGateway | None = None,
         tool_execution_limits: ToolExecutionLimits | None = None,
@@ -151,6 +138,7 @@ class AgentComposition:
         self._repository = SqliteRunRepository(
             db,
             delegation_repository=self._delegation_repository,
+            event_projector=event_projector,
         )
         self._tool_idempotency_gateway = SqliteToolIdempotencyGateway(
             db,
@@ -159,15 +147,11 @@ class AgentComposition:
         self._artifact_claim_repository = SqliteArtifactClaimRepository(db)
         self._work_item_repository = SqliteWorkItemRepository(db)
         self._long_task_repository = SqliteLongTaskRepository(db)
-        self._screenplay_long_task_conversation_hub = (
-            ScreenplayLongTaskConversationHub()
-        )
         self._artifact_continuity = ArtifactContinuityCoordinator(
             query=SqliteArtifactContinuityQuery(db),
             work_items=self._work_item_repository,
             claims=self._artifact_claim_repository,
         )
-        self._screenplay_task_admission = ScreenplayTaskAdmissionEvaluator(db)
         self._provider_capabilities = (
             provider_capabilities or ProviderCapabilityCache()
         )
@@ -197,22 +181,35 @@ class AgentComposition:
                     self._writing_context_source
                 ),
             )
-        self._screenplay = screenplay or ScreenplayDomainAdapter.build(
-            db,
-            tool_catalog=build_screenplay_tool_catalog(db),
-            artifact_continuity=self._artifact_continuity,
+        self._profile_extensions = tuple(
+            factory(
+                db=db,
+                artifact_continuity=self._artifact_continuity,
+                work_item_repository=self._work_item_repository,
+                long_task_repository=self._long_task_repository,
+                execution_lease_store=self._execution_lease_store,
+            )
+            for factory in profile_extension_factories
         )
+        extension_registrations = tuple(
+            extension.profile_registration()
+            for extension in self._profile_extensions
+        )
+        self._profile_extensions_by_id = {
+            registration.id: extension
+            for registration, extension in zip(
+                extension_registrations,
+                self._profile_extensions,
+                strict=True,
+            )
+        }
         self._profile_registry = AgentProfileRegistry((
             AgentProfileRegistration(
                 id="writing",
                 domain_namespace=WRITING_DOMAIN_NAMESPACE,
                 adapter=self._writing,
             ),
-            AgentProfileRegistration(
-                id="screenplay",
-                domain_namespace=SCREENPLAY_DOMAIN_NAMESPACE,
-                adapter=self._screenplay,
-            ),
+            *extension_registrations,
         ))
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
         self._tool_execution_limits = tool_execution_limits or ToolExecutionLimits(
@@ -220,8 +217,6 @@ class AgentComposition:
         )
         self._approval_runs: dict[str, str] = {}
         self._background_run_tasks: set[asyncio.Task[None]] = set()
-        self._active_long_task_parent_runs: dict[str, str] = {}
-        self._active_long_task_lock = asyncio.Lock()
         self._closed = False
 
     @property
@@ -269,12 +264,6 @@ class AgentComposition:
         return self._long_task_repository
 
     @property
-    def screenplay_long_task_conversation_hub(
-        self,
-    ) -> ScreenplayLongTaskConversationHub:
-        return self._screenplay_long_task_conversation_hub
-
-    @property
     def conversation_compaction_repository(
         self,
     ) -> SqliteConversationCompactionRepository:
@@ -286,24 +275,11 @@ class AgentComposition:
     ) -> AgentRunRequest:
         """Hydrate renderer-independent, authoritative domain catalogs."""
 
-        if request.domain_context.namespace == SCREENPLAY_DOMAIN_NAMESPACE:
-            context = ScreenplayDomainContext.from_core_context(
-                request.domain_context
-            )
-            project = await self._db.fetch_one(
-                "SELECT source_scope_json FROM screenplay_projects WHERE id = ?",
-                [context.project_id],
-            )
-            if project is None:
-                return request
-            hydrated = replace(
-                context,
-                source_scope_restricted=is_restricted_source_scope(project),
-            )
-            return replace(
-                request,
-                domain_context=hydrated.to_core_context(),
-            )
+        registration = self._profile_registry.for_request(request)
+        extension = self._profile_extensions_by_id.get(registration.id)
+        if extension is not None:
+            prepared = await extension.prepare_request(request)
+            return request if prepared is None else prepared
         if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
             return request
         context = WritingDomainContext.from_core_context(
@@ -365,7 +341,10 @@ class AgentComposition:
         agent_profile: str = "writing",
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
+        agent_role_guidance: Mapping[str, object] | None = None,
+        max_parallel_agents: int = 1,
         allowed_tool_modes: Collection[ToolExecutionMode] | None = None,
+        required_tool_names: Collection[str] | None = None,
         post_planning_context_optimizer: (
             PostPlanningContextOptimizer | None
         ) = None,
@@ -374,6 +353,7 @@ class AgentComposition:
             ContextCompressionSettings()
         ),
         conversation_compactor: ConversationCompactor | None = None,
+        context_provider_override: ContextProvider | None = None,
         long_task_executor=None,
     ) -> AgentCore:
         if self._closed:
@@ -386,9 +366,17 @@ class AgentComposition:
         )
         registration = self._profile_registry.require(agent_profile)
         adapter = registration.adapter
-        context_provider = adapter.context_provider
+        extension = self._profile_extensions_by_id.get(agent_profile)
+        planning_policy = adapter.planning_policy
+        if required_tool_names:
+            planning_policy = RequiredToolPlanningPolicy(
+                planning_policy,
+                required_tool_names,
+            )
+        context_provider = context_provider_override or adapter.context_provider
         if (
-            agent_profile == "writing"
+            context_provider_override is None
+            and agent_profile == "writing"
             and self._writing_context_source is not None
         ):
             context_provider = WritingContextProvider(
@@ -445,24 +433,26 @@ class AgentComposition:
         return AgentCore(
             model_gateway=model_gateway,
             run_repository=self._repository,
-            planning_policy=adapter.planning_policy,
+            planning_policy=planning_policy,
             context_provider=context_provider,
             conversation_compactor=resolved_compactor,
             execution_state_factory=adapter.execution_state_factory,
             tool_catalog=tool_catalog,
+            agent_role_guidance=agent_role_guidance,
+            max_parallel_agents=max_parallel_agents,
             post_planning_context_optimizer=post_planning_context_optimizer,
             task_admission_evaluator=(
-                self._screenplay_task_admission
-                if agent_profile == "screenplay"
+                extension.task_admission
+                if extension is not None
                 else None
             ),
             long_task_dispatcher=(
-                ScreenplayLongTaskDispatcher(
-                    work_items=WorkItemLifecycle(self._work_item_repository),
-                    long_tasks=self._long_task_repository,
+                extension.create_long_task_dispatcher(
+                    work_item_repository=self._work_item_repository,
+                    long_task_repository=self._long_task_repository,
                     executor=long_task_executor,
                 )
-                if agent_profile == "screenplay"
+                if extension is not None
                 else None
             ),
             approval_gateway=self._approval_gateway,
@@ -492,6 +482,9 @@ class AgentComposition:
         return self._profile_registry.for_request(
             request
         ).adapter.agent_role_registry
+
+    def map_domain_event(self, event: AgentEvent) -> dict[str, Any] | None:
+        return self._profile_registry.map_domain_event(event)
 
     def create_response_judges(
         self,
@@ -611,85 +604,12 @@ class AgentComposition:
 
         task.add_done_callback(_discard)
 
-    async def execute_screenplay_long_task(
-        self,
-        task_id: str,
-        *,
-        parent_run_id: str,
-        observer,
-        body,
-        api_key: str,
-        provider_options: dict,
-        signal,
-    ):
-        """Execute durable units as children of one still-active root Run."""
-        normalized = str(task_id or "").strip()
-        normalized_parent = str(parent_run_id or "").strip()
-        async with self._active_long_task_lock:
-            active_parent = self._active_long_task_parent_runs.get(normalized)
-            if active_parent and active_parent != normalized_parent:
-                raise RuntimeError("screenplay_long_task_already_has_active_root")
-            self._active_long_task_parent_runs[normalized] = normalized_parent
-        try:
-            execution = ScreenplayLongTaskExecution(
-                composition=self,
-                repository=self._long_task_repository,
-                work_items=WorkItemLifecycle(self._work_item_repository),
-                body=body,
-                api_key=api_key,
-                provider_options=provider_options,
-                signal=signal,
-                observer=observer,
-                parent_run_id=normalized_parent,
-            )
-            return await execution.run(normalized)
-        finally:
-            async with self._active_long_task_lock:
-                if self._active_long_task_parent_runs.get(normalized) == normalized_parent:
-                    self._active_long_task_parent_runs.pop(normalized, None)
-
-    async def pause_screenplay_long_task(self, task_id: str):
-        """Checkpoint the task and stop the root/child execution tree."""
-
-        normalized = str(task_id or "").strip()
-        task = await self._long_task_repository.pause(normalized)
-        await self._request_long_task_execution_stop(normalized)
-        return task
-
-    async def cancel_screenplay_long_task(self, task_id: str):
-        """Cancel the durable task and its currently bound child Run."""
-
-        normalized = str(task_id or "").strip()
-        units = await self._long_task_repository.list_units(normalized)
-        active_run_ids = tuple(dict.fromkeys(
-            str(unit.run_id or "").strip()
-            for unit in units
-            if str(unit.status.value) in {"claimed", "running"}
-            and str(unit.run_id or "").strip()
-        ))
-        task = await self._long_task_repository.cancel(normalized)
-        await self._request_long_task_execution_stop(
-            normalized,
-            child_run_ids=active_run_ids,
-        )
-        return task
-
-    async def _request_long_task_execution_stop(
-        self,
-        task_id: str,
-        *,
-        child_run_ids: Sequence[str] = (),
-    ) -> None:
-        parent_run_id = self._active_long_task_parent_runs.get(task_id)
-        run_ids = tuple(dict.fromkeys((
-            *(str(item or "").strip() for item in child_run_ids),
-            str(parent_run_id or "").strip(),
-        )))
-        await asyncio.gather(*(
-            self._execution_lease_store.request_cancellation(run_id)
-            for run_id in run_ids
-            if run_id
-        ))
+    def profile_extension(self, profile_id: str):
+        normalized = str(profile_id or "").strip()
+        extension = self._profile_extensions_by_id.get(normalized)
+        if extension is None:
+            raise ValueError(f"Agent profile has no extension: {normalized}")
+        return extension
 
     async def append_run_event(
         self,
@@ -713,7 +633,10 @@ class AgentComposition:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._background_run_tasks.clear()
-        self._active_long_task_parent_runs.clear()
+        for extension in self._profile_extensions:
+            clear = getattr(extension, "clear_active_executions", None)
+            if callable(clear):
+                clear()
         close = getattr(self._approval_gateway, "close", None)
         if close is not None:
             await close()

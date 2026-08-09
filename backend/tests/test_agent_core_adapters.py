@@ -321,7 +321,10 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     }]
     assert captured["options"]["model"] == "requested-model"
     assert captured["options"]["tools"][0]["function"]["name"] == "readThing"
-    assert captured["options"]["tool_choice"] == "required"
+    assert captured["options"]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "readThing"},
+    }
     assert captured["options"]["max_tokens"] == 2_048
     assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
@@ -334,6 +337,37 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert type(parameters) is dict
     assert type(parameters["properties"]) is dict
     assert json.loads(json.dumps(captured["options"])) == captured["options"]
+
+
+def test_provider_options_pin_one_required_tool_and_keep_multi_tool_required():
+    request = ModelRequest(provider="openai", model="requested-model")
+    first = ToolSchema(
+        name="readFirst",
+        description="Read the first input",
+        parameters={"type": "object", "properties": {}},
+    )
+    second = ToolSchema(
+        name="readSecond",
+        description="Read the second input",
+        parameters={"type": "object", "properties": {}},
+    )
+
+    single = provider_model_gateway._provider_options(ModelInvocation(
+        request=request,
+        tools=(first,),
+        tool_choice=ToolChoiceMode.REQUIRED,
+    ))
+    multiple = provider_model_gateway._provider_options(ModelInvocation(
+        request=request,
+        tools=(first, second),
+        tool_choice=ToolChoiceMode.REQUIRED,
+    ))
+
+    assert single["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "readFirst"},
+    }
+    assert multiple["tool_choice"] == "required"
 
 
 @pytest.mark.asyncio

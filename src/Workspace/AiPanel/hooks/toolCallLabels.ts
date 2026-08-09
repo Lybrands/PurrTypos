@@ -35,6 +35,7 @@ export const KNOWN_TOOL_CALL_LABELS = {
   getChapterContent: "查看章节内容",
   getGlobalOutline: "查看总纲",
   getScreenplayDocument: "读取剧本文档",
+  getScreenplayDraftContext: "查看正文创作上下文",
   getScreenplayProject: "读取剧本项目",
   getSettingEntities: "查看世界设定详情",
   getSourceBookOverview: "读取原作概览",

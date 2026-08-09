@@ -1,0 +1,319 @@
+"""Ratchet guards for the Agent Core and screenplay conversation rebuild.
+
+The allowlists in this file describe *known architectural debt*, not approved
+design.  A refactor may remove any listed occurrence without updating the
+baseline.  Adding a new dependency, route, field, or generic UI reference must
+fail until the architecture review deliberately changes this guard.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = ROOT_DIR / "backend"
+SCREENPLAY_DOMAIN_DIR = BACKEND_DIR / "domains" / "screenplay"
+GENERIC_CHUNK_HANDLER_DIR = (
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chunkHandlers"
+)
+SCREENPLAY_CONVERSATION_FRONTEND_FILES = (
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationClient.ts",
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
+)
+SCREENPLAY_PAGE = ROOT_DIR / "src" / "ScreenplayAgentPage" / "index.tsx"
+PHASE_FOUR_REMOVED_PATHS = (
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "proposalProvenance.ts",
+    BACKEND_DIR / "application" / "screenplay_long_task_conversation.py",
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_screenplay_proposal_source.py",
+)
+PHASE_FIVE_REMOVED_PATHS = (
+    BACKEND_DIR / "schemas" / "screenplay_agent.py",
+)
+GENERIC_RUNTIME_PERSISTENCE_FILES = (
+    BACKEND_DIR / "infrastructure" / "persistence" / "sqlite_run_repository.py",
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_work_item_repository.py",
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_long_task_repository.py",
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_artifact_repository.py",
+)
+
+FORBIDDEN_SCREENPLAY_DOMAIN_IMPORT_ROOTS = {
+    "application",
+    "dependencies",
+    "infrastructure",
+    "routers",
+    "schemas",
+}
+
+# Phase 2 closed this debt completely. Any database import is now a regression.
+SCREENPLAY_DOMAIN_DATABASE_DEBT: set[tuple[str, str]] = set()
+
+# These files are generic application surfaces.  Their screenplay references
+# must monotonically decrease until product composition and transport are split.
+GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS = {
+    "application/agent_composition.py": 0,
+    "application/agent_delegation_service.py": 0,
+    "application/agent_orchestrator.py": 0,
+    "application/agent_run_queries.py": 0,
+    "application/agent_run_service.py": 0,
+    "application/request_mapping.py": 0,
+    "application/run_execution_control.py": 0,
+    "application/sse_mapping.py": 0,
+}
+
+CHAT_STREAM_SCREENPLAY_FIELD_DEBT: set[str] = set()
+
+AI_ROUTER_PRODUCT_ROUTE_DEBT: set[str] = set()
+
+GENERIC_FRONTEND_SCREENPLAY_DEBT_CAPS: dict[str, int] = {}
+
+
+def _imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    result: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            result.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            result.append(node.module)
+    return result
+
+
+def _relative_backend(path: Path) -> str:
+    return path.relative_to(BACKEND_DIR).as_posix()
+
+
+def _screenplay_count(path: Path) -> int:
+    return path.read_text(encoding="utf-8").casefold().count("screenplay")
+
+
+def _class_fields(path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                statement.target.id
+                for statement in node.body
+                if isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            }
+    raise AssertionError(f"{class_name} not found in {path}")
+
+
+def _router_paths(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    result: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not decorator.args:
+                continue
+            first = decorator.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                result.add(first.value)
+    return result
+
+
+def test_screenplay_domain_never_depends_on_upper_or_infrastructure_layers():
+    violations: list[str] = []
+    for path in sorted(SCREENPLAY_DOMAIN_DIR.rglob("*.py")):
+        for imported in _imports(path):
+            if imported.split(".", 1)[0] in FORBIDDEN_SCREENPLAY_DOMAIN_IMPORT_ROOTS:
+                violations.append(f"{_relative_backend(path)} imports {imported}")
+
+    assert not violations, "Screenplay domain dependency violations:\n" + "\n".join(
+        violations
+    )
+
+
+def test_screenplay_domain_database_debt_can_only_shrink():
+    observed: set[tuple[str, str]] = set()
+    for path in sorted(SCREENPLAY_DOMAIN_DIR.rglob("*.py")):
+        for imported in _imports(path):
+            if imported.split(".", 1)[0] == "database":
+                observed.add((_relative_backend(path), imported))
+
+    unexpected = observed - SCREENPLAY_DOMAIN_DATABASE_DEBT
+    assert not unexpected, "New screenplay domain database dependencies:\n" + "\n".join(
+        f"{path} imports {module}" for path, module in sorted(unexpected)
+    )
+
+
+def test_generic_application_screenplay_debt_can_only_shrink():
+    violations: list[str] = []
+    for relative, cap in GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS.items():
+        observed = _screenplay_count(BACKEND_DIR / relative)
+        if observed > cap:
+            violations.append(f"{relative}: {observed} references, baseline cap {cap}")
+
+    assert not violations, "Generic application screenplay debt grew:\n" + "\n".join(
+        violations
+    )
+
+
+def test_generic_chat_request_screenplay_fields_can_only_shrink():
+    fields = _class_fields(BACKEND_DIR / "schemas" / "ai.py", "ChatStreamRequest")
+    product_fields = {
+        field
+        for field in fields
+        if "screenplay" in field.casefold()
+        or field in {"activeDocumentId", "activeStage", "sourceBookId"}
+    }
+    unexpected = product_fields - CHAT_STREAM_SCREENPLAY_FIELD_DEBT
+
+    assert not unexpected, "New product fields in ChatStreamRequest: " + ", ".join(
+        sorted(unexpected)
+    )
+
+
+def test_generic_ai_router_product_routes_can_only_shrink():
+    routes = _router_paths(BACKEND_DIR / "routers" / "ai.py")
+    product_routes = {
+        route
+        for route in routes
+        if "screenplay" in route.casefold() or "long-tasks" in route.casefold()
+    }
+    unexpected = product_routes - AI_ROUTER_PRODUCT_ROUTE_DEBT
+
+    assert not unexpected, "New product routes in generic AI router: " + ", ".join(
+        sorted(unexpected)
+    )
+
+
+def test_generic_frontend_screenplay_debt_can_only_shrink():
+    generic_paths = [
+        ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chat.types.ts",
+        *sorted(GENERIC_CHUNK_HANDLER_DIR.glob("*.ts")),
+    ]
+    violations: list[str] = []
+    for path in generic_paths:
+        relative = path.relative_to(ROOT_DIR).as_posix()
+        observed = _screenplay_count(path)
+        cap = GENERIC_FRONTEND_SCREENPLAY_DEBT_CAPS.get(relative, 0)
+        if observed > cap:
+            violations.append(f"{relative}: {observed} references, baseline cap {cap}")
+
+    assert not violations, "Generic frontend screenplay debt grew:\n" + "\n".join(
+        violations
+    )
+
+
+def test_phase_three_native_screenplay_conversation_routes_are_complete():
+    routes = _router_paths(BACKEND_DIR / "routers" / "screenplay_v2.py")
+    required = {
+        "/projects/{project_id}/conversation/turns",
+        "/projects/{project_id}/conversation/snapshot",
+        "/projects/{project_id}/conversation/events",
+        "/conversation/turns/{turn_id}/cancel",
+        "/conversation/turns/{turn_id}/resume",
+    }
+    assert required <= routes, "Missing native Conversation routes: " + ", ".join(
+        sorted(required - routes)
+    )
+
+
+def test_phase_three_frontend_does_not_reuse_writing_chat_runtime():
+    forbidden = {
+        "agent-runtime",
+        "AiPanel/hooks/chunkHandlers",
+        "aiChatStream",
+        "onAiChunk",
+        "dispatchChunk",
+        "parseConversationsFromApi",
+    }
+    violations: list[str] = []
+    for path in SCREENPLAY_CONVERSATION_FRONTEND_FILES:
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in source:
+                violations.append(f"{path.name} contains {token}")
+    assert not violations, "Native screenplay frontend reused Writing chat:\n" + "\n".join(
+        violations
+    )
+
+
+def test_phase_four_screenplay_page_uses_only_native_conversation_runtime():
+    forbidden = {
+        "aiChatStream",
+        "startScreenplayV2Operation",
+        "dispatchChunk",
+        "services.conversations",
+        "getLatestSessionAgentRun",
+        "streamLongTaskConversation",
+        "cancelAgentRun",
+        "abortAiStream",
+        "longTaskConversationAdapter",
+        "proposalProvenance",
+    }
+    source = SCREENPLAY_PAGE.read_text(encoding="utf-8")
+    violations = sorted(token for token in forbidden if token in source)
+    assert not violations, "Legacy screenplay page runtime returned: " + ", ".join(
+        violations
+    )
+
+
+def test_phase_four_removed_compatibility_modules_stay_deleted():
+    restored = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in PHASE_FOUR_REMOVED_PATHS
+        if path.exists()
+    ]
+    assert not restored, "Deleted Phase 4 compatibility modules returned: " + ", ".join(
+        restored
+    )
+
+
+def test_phase_four_generic_conversation_contract_has_no_screenplay_fields():
+    paths = (
+        BACKEND_DIR / "schemas" / "conversations.py",
+        BACKEND_DIR / "routers" / "conversations.py",
+        BACKEND_DIR
+        / "infrastructure"
+        / "persistence"
+        / "run_conversation_store.py",
+    )
+    violations = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in paths
+        if "screenplay" in path.read_text(encoding="utf-8").casefold()
+    ]
+    assert not violations, "Generic conversation owns screenplay state: " + ", ".join(
+        violations
+    )
+
+
+def test_phase_five_removed_migration_transport_stays_deleted():
+    restored = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in PHASE_FIVE_REMOVED_PATHS
+        if path.exists()
+    ]
+    assert not restored, "Deleted Phase 5 migration transport returned: " + ", ".join(
+        restored
+    )
+
+
+def test_phase_five_generic_runtime_has_no_product_operation_ownership():
+    violations = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in GENERIC_RUNTIME_PERSISTENCE_FILES
+        if "operation_id" in path.read_text(encoding="utf-8")
+    ]
+    assert not violations, "Generic runtime owns screenplay Operation: " + ", ".join(
+        violations
+    )

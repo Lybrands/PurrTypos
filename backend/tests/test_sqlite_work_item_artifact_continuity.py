@@ -28,7 +28,7 @@ from agent_core.work_items import (
 )
 from agent_core.work_items.ports import WorkItemRepository
 from database.connection import DatabaseConnection
-from database.crud import screenplay as screenplay_crud
+from tests.support import screenplay_v2_driver as screenplay_crud
 from infrastructure.persistence.sqlite_artifact_claim_repository import (
     SqliteArtifactClaimRepository,
 )

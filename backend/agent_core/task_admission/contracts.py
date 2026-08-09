@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from agent_core.events import AgentEvent
+from agent_core.contracts import ExecutionRecipe
 
 from agent_core.json_values import freeze_json_mapping
 
@@ -26,6 +27,8 @@ class TaskAdmissionDecision:
     estimated_model_calls: int = 1
     requires_confirmation: bool = False
     message: str | None = None
+    covered_step_ids: Sequence[str] = ()
+    execution_recipe: ExecutionRecipe | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -46,16 +49,52 @@ class TaskAdmissionDecision:
         )
         message = str(self.message or "").strip() or None
         object.__setattr__(self, "message", message)
+        if isinstance(self.covered_step_ids, (str, bytes, bytearray)):
+            raise ValueError("covered task admission step ids must be a sequence")
+        covered_step_ids = tuple(
+            str(step_id or "").strip()
+            for step_id in self.covered_step_ids
+        )
+        if any(not step_id for step_id in covered_step_ids):
+            raise ValueError("covered task admission step ids must be non-empty")
+        if len(covered_step_ids) != len(set(covered_step_ids)):
+            raise ValueError("covered task admission step ids must be unique")
+        if self.mode is ExecutionMode.DURABLE and not covered_step_ids:
+            raise ValueError("durable task admission requires covered step ids")
+        if self.mode is not ExecutionMode.DURABLE and covered_step_ids:
+            raise ValueError(
+                "only durable task admission can cover planned steps"
+            )
+        object.__setattr__(self, "covered_step_ids", covered_step_ids)
+        if self.execution_recipe is not None:
+            if self.mode is not ExecutionMode.DURABLE:
+                raise ValueError(
+                    "only durable task admission can carry an execution recipe"
+                )
+            if not isinstance(self.execution_recipe, ExecutionRecipe):
+                raise TypeError(
+                    "task admission execution_recipe must be an ExecutionRecipe"
+                )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
     def to_event_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "mode": self.mode.value,
             "reasonCode": self.reason_code,
             "estimatedUnits": self.estimated_units,
             "estimatedModelCalls": self.estimated_model_calls,
             "requiresConfirmation": self.requires_confirmation,
+            "coveredStepIds": list(self.covered_step_ids),
         }
+        if self.message:
+            payload["message"] = self.message
+        if self.execution_recipe is not None:
+            payload["executionRecipe"] = {
+                "kind": self.execution_recipe.kind,
+                "stepCount": len(self.execution_recipe.steps),
+                "maxParallelism": self.execution_recipe.max_parallelism,
+            }
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

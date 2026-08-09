@@ -37,15 +37,18 @@ export const handleContextCompaction: ChunkHandler = (chunk, ctx) => {
 
 export const handleContextBudget: ChunkHandler = (chunk, ctx) => {
   if (!chunk.contextBudget) return;
+  const startsPreparedRequest = chunk.contextBudget.windowTokens !== undefined;
   if (
     !ctx.acc.contextBudget
-    && chunk.contextBudget.windowTokens === undefined
+    && !startsPreparedRequest
   ) {
     return;
   }
   const budget = {
-    ...(ctx.acc.contextBudget ?? {}),
+    ...(startsPreparedRequest ? {} : (ctx.acc.contextBudget ?? {})),
     ...chunk.contextBudget,
+    ...(ctx.cfg?.id ? { modelConfigId: ctx.cfg.id } : {}),
+    ...(ctx.apiModelName ? { modelName: ctx.apiModelName } : {}),
   } as AiContextBudgetState;
   ctx.acc.contextBudget = budget;
   updateLastAssistant(ctx, { contextBudget: budget });
