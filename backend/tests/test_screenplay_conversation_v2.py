@@ -160,9 +160,53 @@ async def test_read_only_turn_persists_canonical_history_without_operation_or_se
     assert "top-secret-key" not in encoded_profile
     assert "provider.example" not in encoded_profile
     assert json.loads(encoded_profile)["model"] == "conversation-model"
-    assert runner.calls[0]["body"].enableAgentTools is False
+    assert runner.calls[0]["body"].enableAgentTools is True
     assert runner.calls[0]["body"].chatAgentMode == "ask"
     assert runner.calls[0]["body"].screenplayTaskIntent == "chat"
+
+
+async def test_product_conversation_projects_validated_child_response(
+    temp_db: DatabaseConnection,
+):
+    workspace, session = await _project_and_session(temp_db)
+    runner = _Runner((
+        AgentEvent(type="run.started", run_id="run-child-response", payload={}),
+        AgentEvent(
+            type="delegation.event",
+            run_id="run-child-response",
+            payload={
+                "event": {
+                    "type": "screenplay.long_task.response",
+                    "runId": "child-writer",
+                    "payload": {"content": "已完成第五集正文。"},
+                },
+            },
+        ),
+        AgentRunResult(
+            run_id="run-child-response",
+            status=RunStatus.DONE,
+            final_response="不应覆盖已验证的子任务回答",
+        ),
+    ))
+    service = ScreenplayConversationService(
+        temp_db,
+        _Composition(),
+        runner=runner,
+    )
+    request = _request(sessionId=session["id"])
+    turn = await service.submit_turn(
+        command_id="conversation-child-response",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert snapshot["turns"][0]["assistantContent"] == "已完成第五集正文。"
 
 
 async def test_formal_turn_creates_exactly_one_operation_in_the_same_command(
@@ -231,6 +275,38 @@ async def test_formal_turn_creates_exactly_one_operation_in_the_same_command(
         )
 
 
+async def test_session_rejects_a_second_active_turn_instead_of_frontend_queueing(
+    temp_db: DatabaseConnection,
+):
+    workspace, session = await _project_and_session(temp_db)
+    service = ScreenplayConversationService(
+        temp_db,
+        _Composition(),
+        runner=_Runner(()),
+    )
+    request = _request(sessionId=session["id"])
+    first = await service.submit_turn(
+        command_id="conversation-active-first",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+    assert first["retryable"] is False
+
+    with pytest.raises(AppError, match="仍有一轮正在执行"):
+        await service.submit_turn(
+            command_id="conversation-active-second",
+            project_id=workspace["project"]["id"],
+            request=_request(
+                sessionId=session["id"],
+                content="不要在渲染进程里排队这一轮",
+            ),
+        )
+
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_conversation_turns"
+    ) == {"count": 1}
+
+
 async def test_formal_execution_rebuilds_request_from_persisted_operation(
     temp_db: DatabaseConnection,
 ):
@@ -275,6 +351,112 @@ async def test_formal_execution_rebuilds_request_from_persisted_operation(
     assert body.screenplayDraftSceneCount == 7
 
 
+async def test_history_keeps_completed_dialogue_and_excludes_failed_turns(
+    temp_db: DatabaseConnection,
+):
+    workspace, session = await _project_and_session(temp_db)
+    project_id = workspace["project"]["id"]
+
+    async def execute(command_id, content, updates):
+        runner = _Runner(updates)
+        service = ScreenplayConversationService(
+            temp_db,
+            _Composition(),
+            runner=runner,
+        )
+        request = _request(sessionId=session["id"], content=content)
+        turn = await service.submit_turn(
+            command_id=command_id,
+            project_id=project_id,
+            request=request,
+        )
+        await service.execute_turn(turn["id"], request.runtime)
+        return runner
+
+    await execute(
+        "conversation-history-completed",
+        "已经完成的问题",
+        (AgentRunResult(
+            run_id="run-history-completed",
+            status=RunStatus.DONE,
+            final_response="已经确认的回答",
+        ),),
+    )
+    await execute(
+        "conversation-history-failed",
+        "失败轮次不应污染历史",
+        (AgentRunResult(
+            run_id="run-history-failed",
+            status=RunStatus.FAILED,
+            error="provider_failed",
+        ),),
+    )
+    final_runner = await execute(
+        "conversation-history-final",
+        "现在继续讨论",
+        (AgentRunResult(
+            run_id="run-history-final",
+            status=RunStatus.DONE,
+            final_response="继续回答",
+        ),),
+    )
+
+    assert final_runner.calls[0]["body"].messages == [
+        {"role": "user", "content": "已经完成的问题"},
+        {"role": "assistant", "content": "已经确认的回答"},
+        {"role": "user", "content": "现在继续讨论"},
+    ]
+
+
+async def test_conversation_events_never_copy_full_proposal_payload(
+    temp_db: DatabaseConnection,
+):
+    workspace, session = await _project_and_session(temp_db)
+    runner = _Runner((
+        AgentEvent(
+            type="screenplay.document_proposal",
+            run_id="run-no-proposal-copy",
+            payload={"contentText": "MUST_NOT_BE_PERSISTED"},
+        ),
+        AgentEvent(
+            type="screenplay.revision_ready",
+            run_id="run-no-proposal-copy",
+            payload={"revisionId": "revision-reference-only"},
+        ),
+        AgentRunResult(
+            run_id="run-no-proposal-copy",
+            status=RunStatus.DONE,
+            final_response="候选版本已就绪",
+        ),
+    ))
+    service = ScreenplayConversationService(
+        temp_db,
+        _Composition(),
+        runner=runner,
+    )
+    request = _request(sessionId=session["id"])
+    turn = await service.submit_turn(
+        command_id="conversation-no-proposal-copy",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert snapshot["turns"][0]["revisionId"] == "revision-reference-only"
+    persisted_events = await temp_db.fetch_all(
+        "SELECT payload_json FROM screenplay_conversation_events "
+        "WHERE turn_id = ?",
+        [turn["id"]],
+    )
+    assert "MUST_NOT_BE_PERSISTED" not in "".join(
+        str(event["payload_json"]) for event in persisted_events
+    )
+
+
 async def test_resume_command_is_idempotent_without_persisting_credentials(
     temp_db: DatabaseConnection,
 ):
@@ -307,7 +489,7 @@ async def test_resume_command_is_idempotent_without_persisting_credentials(
     )
 
     assert first["id"] == replay["id"] == turn["id"]
-    assert dispatched == [turn["id"], turn["id"]]
+    assert dispatched == [turn["id"]]
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM screenplay_command_receipts "
         "WHERE command_type = 'resumeConversationTurn'"
@@ -355,7 +537,8 @@ async def test_restart_recovery_releases_turn_and_resumes_paused_operation(
     )
     await temp_db.execute(
         "UPDATE screenplay_conversation_turns SET status = 'running', "
-        "execution_owner_id = 'dead-process', lease_expires_at_ms = 9999999999999 "
+        "attempt = 1, execution_owner_id = 'dead-process', "
+        "lease_expires_at_ms = 9999999999999 "
         "WHERE id = ?",
         [turn["id"]],
     )
@@ -400,6 +583,70 @@ async def test_restart_recovery_releases_turn_and_resumes_paused_operation(
         event["type"] == "screenplay.conversation.turn_recovery_required"
         for event in events["events"]
     )
+
+
+async def test_restart_recovery_starts_a_clean_attempt_with_a_new_run_binding(
+    temp_db: DatabaseConnection,
+):
+    workspace, session = await _project_and_session(temp_db)
+    project_id = workspace["project"]["id"]
+    request = _request(sessionId=session["id"])
+    old_repository = SqliteScreenplayConversationRepository(
+        temp_db,
+        owner_id="old-process",
+    )
+    service = ScreenplayConversationService(
+        temp_db,
+        _Composition("new-process"),
+        runner=_Runner((
+            AgentEvent(type="run.started", run_id="run-after-restart", payload={}),
+            AgentEvent(
+                type="model.delta",
+                run_id="run-after-restart",
+                payload={"delta": "干净恢复后的回答"},
+            ),
+            AgentRunResult(
+                run_id="run-after-restart",
+                status=RunStatus.DONE,
+                final_response="干净恢复后的回答",
+            ),
+        )),
+    )
+    turn = await service.submit_turn(
+        command_id="conversation-clean-recovery",
+        project_id=project_id,
+        request=request,
+    )
+    assert await old_repository.claim_execution(turn["id"]) is True
+    await old_repository.bind_run(turn["id"], "run-before-restart")
+    await old_repository.apply_run_progress(
+        turn["id"],
+        assistant_delta="必须清除的半截回答",
+        revision_id="stale-revision",
+    )
+
+    recovered = await SqliteScreenplayConversationRepository(
+        temp_db,
+        owner_id="startup-recovery",
+    ).recover_after_restart()
+    assert recovered == (turn["id"],)
+    queued = await service.get_snapshot(
+        project_id=project_id,
+        session_id=session["id"],
+    )
+    assert queued["turns"][0]["runId"] is None
+    assert queued["turns"][0]["assistantContent"] == ""
+    assert queued["turns"][0]["revisionId"] is None
+    assert queued["turns"][0]["attempt"] == 1
+
+    await service.execute_turn(turn["id"], request.runtime)
+    completed = await service.get_snapshot(
+        project_id=project_id,
+        session_id=session["id"],
+    )
+    assert completed["turns"][0]["runId"] == "run-after-restart"
+    assert completed["turns"][0]["assistantContent"] == "干净恢复后的回答"
+    assert completed["turns"][0]["attempt"] == 2
 
 
 async def test_operation_validation_failure_rolls_back_turn_and_receipts(

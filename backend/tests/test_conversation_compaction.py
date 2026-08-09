@@ -8,11 +8,14 @@ import pytest
 
 from agent_core.context_orchestration.compaction import (
     ContextCompressionCoordinator,
-    ConversationContextCompactor,
 )
 from agent_core.context_orchestration.contracts import (
     ContextCompressionSettings,
     ConversationCompactionResult,
+)
+from agent_core.context_orchestration.ledger import (
+    ContextCompactionBudget,
+    ContextCompactionPhase,
 )
 from agent_core.contracts import (
     AgentMessage,
@@ -34,7 +37,6 @@ from agent_core.planner import build_planner_messages
 from application.conversation_compaction import (
     ConversationCompactionService,
     ConversationSummaryCompressionPolicy,
-    PostPlanningConversationContextOptimizer,
 )
 from database.connection import DatabaseConnection
 from infrastructure.models.model_conversation_summarizer import (
@@ -175,7 +177,7 @@ async def test_core_compactor_depends_only_on_application_compression_hook():
     turns = _turns(8)
     hook = _Hook()
 
-    result = await ConversationContextCompactor(hook).prepare(
+    result = await ContextCompressionCoordinator(hook).prepare(
         _request(turns, context_window=200_000)
     )
 
@@ -525,22 +527,32 @@ async def test_core_does_not_change_compression_target_from_plan_complexity():
         _Gateway(_SUMMARY_JSON),
     ).prepare(
         _request(turns),
-        provider_input_tokens=18_000,
-        resolved_context_tokens=2_000,
-        planned_step_count=2,
-        planned_tool_count=1,
-        selected_tool_count=1,
+        budget=ContextCompactionBudget(
+            phase=ContextCompactionPhase.POST_PLANNING,
+            provider_input_tokens=18_000,
+            context_tokens=2_000,
+            context_tokens_are_resolved=True,
+            output_reserve_tokens=8_192,
+            planned_step_count=2,
+            planned_tool_count=1,
+            selected_tool_count=1,
+        ),
     )
     complex_result = await _coordinator(
         _Repository(turns),
         _Gateway(_SUMMARY_JSON),
     ).prepare(
         _request(turns),
-        provider_input_tokens=18_000,
-        resolved_context_tokens=2_000,
-        planned_step_count=8,
-        planned_tool_count=4,
-        selected_tool_count=4,
+        budget=ContextCompactionBudget(
+            phase=ContextCompactionPhase.POST_PLANNING,
+            provider_input_tokens=18_000,
+            context_tokens=2_000,
+            context_tokens_are_resolved=True,
+            output_reserve_tokens=8_192,
+            planned_step_count=8,
+            planned_tool_count=4,
+            selected_tool_count=4,
+        ),
     )
 
     assert simple.diagnostics["compactionPhase"] == "post_planning"
@@ -598,26 +610,32 @@ async def test_post_planning_optimizer_extends_summary_from_raw_source():
     assert preflight.outcome == "reused"
 
     started = []
-    optimizer = PostPlanningConversationContextOptimizer(
-        _coordinator(
-            repository,
-            _Gateway(_SUMMARY_JSON),
+    optimized = await _coordinator(
+        repository,
+        _Gateway(_SUMMARY_JSON),
+    ).prepare(
+        replace(
+            raw_request,
+            metadata={
+                **dict(raw_request.metadata),
+                **dict(preflight.request.metadata),
+            },
         ),
-        raw_request,
-    )
-    optimized = await optimizer.optimize(
-        preflight.request,
-        provider_input_tokens=22_000,
-        resolved_context_tokens=4_000,
-        output_reserve_tokens=1_024,
-        planned_step_count=6,
-        planned_tool_count=4,
-        selected_tool_names=("read", "analyze", "write", "review"),
+        budget=ContextCompactionBudget(
+            phase=ContextCompactionPhase.POST_PLANNING,
+            provider_input_tokens=22_000,
+            context_tokens=4_000,
+            context_tokens_are_resolved=True,
+            output_reserve_tokens=1_024,
+            planned_step_count=6,
+            planned_tool_count=4,
+            selected_tool_count=4,
+        ),
         on_compaction_started=lambda payload: _record_started(started, payload),
     )
 
     assert optimized.outcome == "compacted"
-    assert optimized.summary_version == 2
+    assert optimized.compression_state_version == 2
     assert repository.summary is not None
     assert repository.summary.covered_turn_count > (
         first_covered_count

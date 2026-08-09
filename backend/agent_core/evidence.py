@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from agent_core.context_budget import estimate_text_tokens
@@ -205,13 +205,13 @@ class RunEvidenceStore:
             payload = receipt.to_mapping(include_summary=False)
             payload["excerpt"] = excerpt
             payload["completeEvidenceStoredByHost"] = record is not None
-            projected.append(AgentMessage(
-                role=MessageRole.TOOL,
-                tool_call_id=message.tool_call_id,
-                content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                origin=message.origin,
-                attributes=message.attributes,
-                host_metadata=message.host_metadata,
+            projected.append(replace(
+                message,
+                content=json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             ))
         return tuple(projected)
 
@@ -230,13 +230,13 @@ class RunEvidenceStore:
         payload["completeEvidenceStoredByHost"] = (
             receipt.evidence_id in self._records
         )
-        return AgentMessage(
-            role=MessageRole.TOOL,
-            tool_call_id=message.tool_call_id,
-            content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            origin=message.origin,
-            attributes=message.attributes,
-            host_metadata=message.host_metadata,
+        return replace(
+            message,
+            content=json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
 
 

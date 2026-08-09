@@ -8,7 +8,6 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from application.agent_run_queries import AgentRunQueryService
-from application.screenplay_sse_mapping import screenplay_event_to_sse_chunk
 from application.agent_composition import set_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -58,7 +57,6 @@ def _queries(db: DatabaseConnection) -> AgentRunQueryService:
     return AgentRunQueryService(
         SqliteCheckpointStore(db),
         role_registry=build_writing_agent_role_registry(),
-        domain_event_mapper=screenplay_event_to_sse_chunk,
     )
 
 
@@ -219,42 +217,6 @@ async def test_run_snapshot_reuses_live_sse_mapper_for_replay(temp_db):
             },
         },
     }
-
-
-async def test_validated_child_response_replays_as_natural_language_delta(temp_db):
-    run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="write scenes",
-        mode="agent",
-    )
-    await append_event(
-        temp_db,
-        run_id,
-        "delegation.event",
-        {
-            "delegationId": "delegation-writer",
-            "parentRunId": run_id,
-            "rootRunId": run_id,
-            "childRunId": "child-writer",
-            "agentRole": "screenplay_writer",
-            "unitId": "ep05",
-            "attempt": 1,
-            "event": {
-                "type": "screenplay.long_task.response",
-                "runId": "child-writer",
-                "payload": {"content": "已完成第五集正文。"},
-            },
-        },
-    )
-
-    snapshot = await _queries(temp_db).get_snapshot(run_id)
-
-    assert snapshot is not None
-    envelope = snapshot["events"][0]["chunk"]["agentSubRunEvent"]
-    assert envelope["unitId"] == "ep05"
-    assert envelope["attempt"] == 1
-    assert envelope["chunk"] == {"delta": "已完成第五集正文。"}
 
 
 async def test_latest_session_run_route_returns_prompt_and_snapshot(temp_db):

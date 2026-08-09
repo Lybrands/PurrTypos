@@ -6,6 +6,10 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    permissive_non_negative_integer as _non_negative_integer,
+)
 from agent_core.evaluation.diagnostics import build_canonical_run_observation
 from agent_core.recovery import (
     RecoveryAction,
@@ -91,14 +95,3 @@ def _decision(trace: Mapping[str, Any]) -> dict[str, Any] | None:
         "effectState": effect_state,
         "mayRepeatSideEffect": bool(details.get("mayRepeatSideEffect")),
     }
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _non_negative_integer(value: Any) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0

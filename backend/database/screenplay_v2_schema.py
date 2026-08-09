@@ -155,6 +155,24 @@ async def init_screenplay_v2_schema(db) -> None:
         "ON screenplay_operation_events(operation_id, sequence)"
     )
 
+    # The first native Conversation experiment allowed one Turn to retain a
+    # stale Run binding across recovery.  Conversation data is disposable in
+    # the current test-stage product, so retire that incompatible shape once
+    # instead of carrying a migration/dual-read path into the rewrite.
+    conversation_columns = await db.fetch_all(
+        "PRAGMA table_info(screenplay_conversation_turns)"
+    )
+    if conversation_columns and "attempt" not in {
+        str(column.get("name") or "") for column in conversation_columns
+    }:
+        await db.execute("DROP TABLE IF EXISTS screenplay_conversation_events")
+        await db.execute("DROP TABLE IF EXISTS screenplay_conversation_turns")
+        await db.execute(
+            "DELETE FROM screenplay_command_receipts WHERE command_type IN "
+            "('submitConversationTurn', 'resumeConversationTurn', "
+            "'cancelConversationTurn')"
+        )
+
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_conversation_turns (
         id TEXT PRIMARY KEY NOT NULL,
         project_id TEXT NOT NULL,
@@ -163,6 +181,7 @@ async def init_screenplay_v2_schema(db) -> None:
         request_digest TEXT NOT NULL,
         route TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
+        attempt INTEGER NOT NULL DEFAULT 0,
         user_content TEXT NOT NULL,
         assistant_content TEXT NOT NULL DEFAULT '',
         runtime_profile_json TEXT NOT NULL DEFAULT '{}',
@@ -185,6 +204,12 @@ async def init_screenplay_v2_schema(db) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_conversation_turns_recovery "
         "ON screenplay_conversation_turns(status, lease_expires_at_ms)"
+    )
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "idx_screenplay_conversation_one_active_turn "
+        "ON screenplay_conversation_turns(session_id) "
+        "WHERE status IN ('queued', 'running')"
     )
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_conversation_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

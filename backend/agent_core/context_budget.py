@@ -21,6 +21,20 @@ from agent_core.errors import ContextOverflowError
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
 
 
+def _validate_context_claims(
+    values: Iterable[ContextBudgetClaim],
+    *,
+    source: str,
+) -> tuple[ContextBudgetClaim, ...]:
+    claims = tuple(values)
+    if any(not isinstance(claim, ContextBudgetClaim) for claim in claims):
+        raise TypeError(f"{source} returned an invalid claim")
+    names = tuple(claim.name for claim in claims)
+    if len(names) != len(set(names)):
+        raise ValueError(f"{source} contains duplicate names")
+    return claims
+
+
 async def resolve_context_budget_claims(
     provider: object,
     request: AgentRunRequest,
@@ -40,13 +54,7 @@ async def resolve_context_budget_claims(
         if callable(resolver)
         else tuple(fallback_claims)
     )
-    claims = tuple(raw_claims)
-    if any(not isinstance(claim, ContextBudgetClaim) for claim in claims):
-        raise TypeError("context demand provider returned an invalid claim")
-    names = [claim.name for claim in claims]
-    if len(names) != len(set(names)):
-        raise ValueError("context demand names must be unique")
-    return claims
+    return _validate_context_claims(raw_claims, source="context demand provider")
 
 
 async def resolve_task_context_budget_claims(
@@ -65,15 +73,10 @@ async def resolve_task_context_budget_claims(
     resolver = getattr(provider, "describe_task_context_demands", None)
     if not callable(resolver):
         return ()
-    claims = tuple(await resolver(request, task, signal))
-    if any(not isinstance(claim, ContextBudgetClaim) for claim in claims):
-        raise TypeError(
-            "task context demand provider returned an invalid claim"
-        )
-    names = [claim.name for claim in claims]
-    if len(names) != len(set(names)):
-        raise ValueError("task context demand names must be unique")
-    return claims
+    return _validate_context_claims(
+        await resolver(request, task, signal),
+        source="task context demand provider",
+    )
 
 
 def _estimate_units(value: str, *, ascii_divisor: int) -> int:
@@ -214,21 +217,10 @@ def allocate_context_budget(
             },
         )
 
-    normalized_claims: list[ContextBudgetClaim] = []
-    seen: set[str] = set()
-    for claim in claims:
-        normalized = (
-            claim
-            if isinstance(claim, ContextBudgetClaim)
-            else ContextBudgetClaim(  # type: ignore[unreachable]
-                name=getattr(claim, "name", ""),
-                desired_tokens=getattr(claim, "desired_tokens", 0),
-            )
-        )
-        if normalized.name in seen:
-            raise ValueError(f"duplicate context budget claim: {normalized.name}")
-        seen.add(normalized.name)
-        normalized_claims.append(normalized)
+    normalized_claims = _validate_context_claims(
+        claims,
+        source="context budget",
+    )
 
     allocations = _allocate_claims(
         normalized_claims,

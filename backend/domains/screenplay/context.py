@@ -305,6 +305,7 @@ class ScreenplayContextProvider:
             stage=state.stage,
             source_book_bound=bool(state.source_book_id),
             source_scope_restricted=is_restricted_source_scope(state.project),
+            task_intent=state.context.task_intent,
         )
         blocks = (
             ContextBlock(
@@ -599,6 +600,7 @@ def _build_screenplay_policy(
     stage: str,
     source_book_bound: bool,
     source_scope_restricted: bool,
+    task_intent: str,
 ) -> str:
     source_rule = (
         "项目绑定了来源书籍。只有通过本轮只读素材工具返回的内容才能作为"
@@ -615,6 +617,23 @@ def _build_screenplay_policy(
         else ""
     )
     range_line = f"- {range_rule}\n" if range_rule else ""
+    if task_intent == "chat":
+        return (
+            "【PurrTypos 剧本创作对话】\n"
+            "- 你是当前剧本项目的协作式剧作顾问。直接回应用户正在讨论的"
+            "人物、情节、结构、场景或创作选择，不要把普通讨论改写成任务报告。\n"
+            "- 可以使用只读工具核对项目与来源素材；找不到依据时明确说明，不要"
+            "把推测写成项目事实。\n"
+            "- 本轮没有修改权限：不得创建提案、候选版本或声称内容已经保存、"
+            "接受、覆盖。用户要求正式生成或修改时，说明需要通过正式任务执行。\n"
+            "- 来源书籍保持只读，已接受剧本版本也不得被静默改写。\n"
+            f"- {source_rule}\n"
+            f"{range_line}"
+            f"- 当前项目阶段是 {stage}；回答应结合当前阶段，但不要机械复述"
+            "工作流。\n"
+            "- 默认使用自然、清晰的中文；优先给出具体判断、理由和可选择的"
+            "下一步。"
+        )
     proposal_rule = {
         "brief": (
             "正式创作简报必须先调用 beginCreativeBriefArtifact 声明改编决策"
@@ -705,8 +724,8 @@ def _build_screenplay_policy(
         "- 用户做关键创作取舍；你的输出是可审阅提案，不得声称已经保存、接受"
         "或覆盖任何项目文档。\n"
         "- 已接受版本不可被静默改写；提出新版时说明继承内容、变更点和待确认项。\n"
-        "- 来源书籍只读，剧本产物独立保存。"
-        f"{source_rule}\n"
+        "- 来源书籍只读，剧本产物独立保存。\n"
+        f"- {source_rule}\n"
         f"{range_line}"
         f"- 当前阶段是 {stage}：{_STAGE_GUIDANCE[stage]}\n"
         + proposal_line

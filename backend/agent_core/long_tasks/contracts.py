@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from graphlib import CycleError, TopologicalSorter
 from typing import Any, Mapping
 
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_text,
+    positive_int,
+    required_text,
+    unique_text_tuple,
+)
 from agent_core.json_values import freeze_json_mapping
 
 
@@ -53,31 +61,28 @@ class LongTaskUnitSpec:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        unit_id = str(self.id or "").strip()
-        if not unit_id:
-            raise ValueError("long task unit id is required")
-        object.__setattr__(self, "id", unit_id)
-        position = int(self.position)
-        if position < 0:
-            raise ValueError("long task unit position must be non-negative")
-        object.__setattr__(self, "position", position)
-        dependencies = tuple(dict.fromkeys(
-            str(item or "").strip()
-            for item in self.dependencies
-            if str(item or "").strip()
-        ))
-        if unit_id in dependencies:
-            raise ValueError("long task unit cannot depend on itself")
-        object.__setattr__(self, "dependencies", dependencies)
         object.__setattr__(
             self,
-            "input_ref",
-            str(self.input_ref or "").strip() or None,
+            "id",
+            required_text(self.id, "long task unit id"),
         )
-        attempts = int(self.max_attempts)
-        if attempts <= 0:
-            raise ValueError("long task unit max_attempts must be positive")
-        object.__setattr__(self, "max_attempts", attempts)
+        object.__setattr__(
+            self,
+            "position",
+            non_negative_int(self.position, "long task unit position"),
+        )
+        dependencies = unique_text_tuple(
+            str(item or "").strip() for item in self.dependencies
+        )
+        if self.id in dependencies:
+            raise ValueError("long task unit cannot depend on itself")
+        object.__setattr__(self, "dependencies", dependencies)
+        object.__setattr__(self, "input_ref", optional_text(self.input_ref))
+        object.__setattr__(
+            self,
+            "max_attempts",
+            positive_int(self.max_attempts, "long task unit max_attempts"),
+        )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -100,10 +105,11 @@ class LongTaskCreateCommand:
             "work_item_id",
             "created_by_run_id",
         ):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"long task {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"long task {name}"),
+            )
         units = tuple(self.units)
         if not units:
             raise ValueError("long task requires at least one execution unit")
@@ -127,10 +133,11 @@ class LongTaskCreateCommand:
             )
         _require_acyclic(units)
         object.__setattr__(self, "units", units)
-        parallelism = int(self.max_parallelism)
-        if parallelism <= 0:
-            raise ValueError("long task max_parallelism must be positive")
-        object.__setattr__(self, "max_parallelism", parallelism)
+        object.__setattr__(
+            self,
+            "max_parallelism",
+            positive_int(self.max_parallelism, "long task max_parallelism"),
+        )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -161,22 +168,27 @@ class LongTaskRecord:
             "work_item_id",
             "created_by_run_id",
         ):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"long task record {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), f"long task record {name}"),
+            )
         object.__setattr__(self, "status", LongTaskStatus(self.status))
-        for name in (
-            "revision",
-            "total_units",
-            "completed_units",
-            "failed_units",
-            "max_parallelism",
-        ):
-            value = int(getattr(self, name))
-            if value < 0 or (name in {"revision", "total_units", "max_parallelism"} and value == 0):
-                raise ValueError(f"long task record {name} is invalid")
-            object.__setattr__(self, name, value)
+        for name in ("revision", "total_units", "max_parallelism"):
+            object.__setattr__(
+                self,
+                name,
+                positive_int(getattr(self, name), f"long task record {name}"),
+            )
+        for name in ("completed_units", "failed_units"):
+            object.__setattr__(
+                self,
+                name,
+                non_negative_int(
+                    getattr(self, name),
+                    f"long task record {name}",
+                ),
+            )
         if self.completed_units + self.failed_units > self.total_units:
             raise ValueError("long task progress exceeds total units")
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
@@ -184,7 +196,7 @@ class LongTaskRecord:
             object.__setattr__(
                 self,
                 name,
-                str(getattr(self, name) or "").strip() or None,
+                optional_text(getattr(self, name)),
             )
 
 
@@ -209,22 +221,31 @@ class LongTaskUnitRecord:
 
     def __post_init__(self) -> None:
         for name in ("task_id", "id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"long task unit record {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(
+                self,
+                name,
+                required_text(
+                    getattr(self, name),
+                    f"long task unit record {name}",
+                ),
+            )
         object.__setattr__(self, "status", LongTaskUnitStatus(self.status))
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
         for name in ("position", "attempt", "max_attempts"):
-            value = int(getattr(self, name))
-            if value < 0 or (name == "max_attempts" and value == 0):
-                raise ValueError(f"long task unit record {name} is invalid")
-            object.__setattr__(self, name, value)
+            normalizer = positive_int if name == "max_attempts" else non_negative_int
+            object.__setattr__(
+                self,
+                name,
+                normalizer(
+                    getattr(self, name),
+                    f"long task unit record {name}",
+                ),
+            )
         for name in ("worker_id", "run_id", "input_ref", "output_ref", "error_code"):
             object.__setattr__(
                 self,
                 name,
-                str(getattr(self, name) or "").strip() or None,
+                optional_text(getattr(self, name)),
             )
         if self.lease_expires_at_ms is not None:
             object.__setattr__(
@@ -237,7 +258,7 @@ class LongTaskUnitRecord:
             object.__setattr__(
                 self,
                 name,
-                str(getattr(self, name) or "").strip() or None,
+                optional_text(getattr(self, name)),
             )
 
 
@@ -248,22 +269,24 @@ class LongTaskUnitResult:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        output_ref = str(self.output_ref or "").strip()
-        if not output_ref:
-            raise ValueError("long task unit result output_ref is required")
-        object.__setattr__(self, "output_ref", output_ref)
-        object.__setattr__(self, "run_id", str(self.run_id or "").strip() or None)
+        object.__setattr__(
+            self,
+            "output_ref",
+            required_text(self.output_ref, "long task unit result output_ref"),
+        )
+        object.__setattr__(self, "run_id", optional_text(self.run_id))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
 def _require_acyclic(units: tuple[LongTaskUnitSpec, ...]) -> None:
-    dependencies = {unit.id: set(unit.dependencies) for unit in units}
-    pending = set(dependencies)
-    while pending:
-        ready = {item for item in pending if not dependencies[item].intersection(pending)}
-        if not ready:
-            raise ValueError("long task unit dependencies contain a cycle")
-        pending.difference_update(ready)
+    try:
+        tuple(TopologicalSorter({
+            unit.id: unit.dependencies for unit in units
+        }).static_order())
+    except CycleError as error:
+        raise ValueError(
+            "long task unit dependencies contain a cycle"
+        ) from error
 
 
 __all__ = [

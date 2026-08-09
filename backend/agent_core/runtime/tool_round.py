@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from agent_core.cancellation import OperationCanceled
+from agent_core.cancellation import OperationCanceled, is_canceled as _is_canceled
 from agent_core.contracts import ToolBatchRequest, ToolBatchResult
 from agent_core.events import AgentEvent
 from agent_core.ports import CancellationSignal, ToolExecutionGateway
@@ -169,7 +169,3 @@ async def close_async_iterator(iterator: AsyncIterator) -> None:
         # Stream termination has already been classified by the runtime. A
         # provider cleanup failure must not replace that public outcome.
         pass
-
-
-def _is_canceled(signal: CancellationSignal | None) -> bool:
-    return bool(signal is not None and signal.is_set())

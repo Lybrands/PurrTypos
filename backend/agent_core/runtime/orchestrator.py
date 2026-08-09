@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator, Mapping, Sequence
 from agent_core.cancellation import (
     OperationCanceled,
     await_with_cancellation,
+    is_canceled as _is_canceled,
 )
 from agent_core.context_budget import (
     estimate_agent_messages_tokens,
@@ -87,6 +88,7 @@ from agent_core.runtime.tool_round import (
     close_async_iterator as _close_async_iterator,
     stream_tool_batch as _stream_tool_batch,
 )
+from agent_core.timing import duration_ms as _duration_ms
 from agent_core.recovery import (
     RecoveryAction,
     RecoveryCause,
@@ -274,7 +276,7 @@ class AgentRuntime:
         context_contracts = dict(tool_context_contracts or {})
         configured_tools = tuple(tools) if request.tools_enabled else ()
         tool_display_names = {
-            schema.name: dict(schema.display_names)
+            schema.name: schema.display_names
             for schema in configured_tools
             if schema.display_names
         }
@@ -486,9 +488,9 @@ class AgentRuntime:
                 ):
                     runtime_request = replace(
                         request,
-                        messages=tuple(projection.messages),
+                        messages=projection.messages,
                         metadata={
-                            **dict(request.metadata),
+                            **request.metadata,
                             "contextCompressionScope": "runtime",
                             "runtimeLogicalRound": logical_round_number + 1,
                         },
@@ -2622,7 +2624,7 @@ class AgentRuntime:
             return all_names
         if self._observer is None:
             return frozenset()
-        return frozenset(self._observer.current_allowed_tool_names()) & all_names
+        return self._observer.current_allowed_tool_names() & all_names
 
     def _future_allowed_names(
         self,
@@ -2633,7 +2635,7 @@ class AgentRuntime:
         if not scope_tools_to_observer or self._observer is None:
             return frozenset()
         all_names = frozenset(schema.name for schema in tools)
-        return frozenset(self._observer.future_allowed_tool_names()) & all_names
+        return self._observer.future_allowed_tool_names() & all_names
 
     async def _decide_recovery(
         self,
@@ -2857,14 +2859,6 @@ def _runtime_result(
         round_count=round_count,
         error_code=error_code,
     )
-
-
-def _duration_ms(started: float) -> int:
-    return round((perf_counter() - started) * 1000)
-
-
-def _is_canceled(signal: CancellationSignal | None) -> bool:
-    return bool(signal is not None and signal.is_set())
 
 
 def _is_retryable_stream_interruption(error: Exception) -> bool:

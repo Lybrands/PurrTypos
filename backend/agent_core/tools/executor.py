@@ -7,7 +7,11 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from agent_core.cancellation import OperationCanceled, await_with_cancellation
+from agent_core.cancellation import (
+    OperationCanceled,
+    await_with_cancellation,
+    is_canceled as _is_canceled,
+)
 from agent_core.contracts import (
     ApprovalRequest,
     ApprovalStatus,
@@ -219,56 +223,46 @@ class CoreToolExecutor:
                         else ToolBatchOutcome.FAILED
                     )
                 )
-                result = _failure_result(
-                    parsed.call,
-                    code,
-                    message,
-                    approval_status=(ApprovalStatus.CANCELED if canceled else None),
-                )
-                results.append(result)
-                cache_hits.append(False)
-                await _emit_completed(
-                    event_sink,
+                return await _failed_call_batch(
                     request,
+                    event_sink,
+                    parsed,
                     index,
-                    result,
-                    outcome,
-                    normalized_argument_paths=parsed.normalized_argument_paths,
-                )
-                return ToolBatchResult(
-                    results=tuple(results),
+                    results,
+                    cache_hits,
                     outcome=outcome,
-                    error=code,
-                    cache_hits=tuple(cache_hits),
+                    code=code,
+                    message=message,
+                    approval_status=(
+                        ApprovalStatus.CANCELED if canceled else None
+                    ),
                     effect_state=ToolEffectState.NOT_STARTED,
                 )
 
             # Defense in depth: authorization never comes from mutable state.
             if parsed.call.name not in request.allowed_tool_names:
-                result = _failure_result(
-                    parsed.call,
-                    "tool_not_authorized",
-                    "The requested tool is outside the current execution scope.",
-                )
-                results.append(result)
-                cache_hits.append(False)
-                await _emit_completed(
-                    event_sink,
+                return await _failed_call_batch(
                     request,
+                    event_sink,
+                    parsed,
                     index,
-                    result,
-                    ToolBatchOutcome.REJECTED,
-                    normalized_argument_paths=parsed.normalized_argument_paths,
-                )
-                return ToolBatchResult(
-                    results=tuple(results),
+                    results,
+                    cache_hits,
                     outcome=ToolBatchOutcome.REJECTED,
-                    error="tool_not_authorized",
-                    cache_hits=tuple(cache_hits),
+                    code="tool_not_authorized",
+                    message=(
+                        "The requested tool is outside the current execution "
+                        "scope."
+                    ),
                     effect_state=ToolEffectState.NOT_STARTED,
                 )
 
             policy = registration.policy
+            failure_effect_state = (
+                ToolEffectState.NOT_STARTED
+                if policy.mode is ToolExecutionMode.READ
+                else ToolEffectState.UNKNOWN
+            )
             predicted_cache_hit = _probe_cache(registration, request, parsed)
             cache_hits.append(predicted_cache_hit)
 
@@ -304,11 +298,11 @@ class CoreToolExecutor:
                         ToolBatchOutcome.CANCELED,
                         ToolBatchOutcome.FAILED,
                     }:
-                        return ToolBatchResult(
-                            results=tuple(results),
-                            outcome=approval_batch_outcome,
+                        return _batch_result(
+                            results,
+                            approval_batch_outcome,
+                            cache_hits,
                             error=code,
-                            cache_hits=tuple(cache_hits),
                             effect_state=ToolEffectState.NOT_STARTED,
                         )
                     continue
@@ -357,60 +351,34 @@ class CoreToolExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                result = _failure_result(
-                    parsed.call,
-                    "tool_execution_failed",
-                    "Tool execution failed.",
-                    approval_status=approval_status,
-                )
-                results.append(result)
-                await _emit_completed(
-                    event_sink,
+                return await _failed_call_batch(
                     request,
+                    event_sink,
+                    parsed,
                     index,
-                    result,
-                    ToolBatchOutcome.FAILED,
-                    exception_type=type(error).__name__,
-                    normalized_argument_paths=parsed.normalized_argument_paths,
-                )
-                return ToolBatchResult(
-                    results=tuple(results),
+                    results,
+                    cache_hits,
                     outcome=ToolBatchOutcome.FAILED,
-                    error="tool_execution_failed",
-                    cache_hits=tuple(cache_hits),
-                    effect_state=(
-                        ToolEffectState.NOT_STARTED
-                        if policy.mode is ToolExecutionMode.READ
-                        else ToolEffectState.UNKNOWN
-                    ),
+                    code="tool_execution_failed",
+                    message="Tool execution failed.",
+                    approval_status=approval_status,
+                    exception_type=type(error).__name__,
+                    effect_state=failure_effect_state,
                 )
 
             if not isinstance(handler_result, ToolHandlerResult):
-                result = _failure_result(
-                    parsed.call,
-                    "invalid_tool_result",
-                    "Tool handler returned an invalid result.",
-                    approval_status=approval_status,
-                )
-                results.append(result)
-                await _emit_completed(
-                    event_sink,
+                return await _failed_call_batch(
                     request,
+                    event_sink,
+                    parsed,
                     index,
-                    result,
-                    ToolBatchOutcome.FAILED,
-                    normalized_argument_paths=parsed.normalized_argument_paths,
-                )
-                return ToolBatchResult(
-                    results=tuple(results),
+                    results,
+                    cache_hits,
                     outcome=ToolBatchOutcome.FAILED,
-                    error="invalid_tool_result",
-                    cache_hits=tuple(cache_hits),
-                    effect_state=(
-                        ToolEffectState.NOT_STARTED
-                        if policy.mode is ToolExecutionMode.READ
-                        else ToolEffectState.UNKNOWN
-                    ),
+                    code="invalid_tool_result",
+                    message="Tool handler returned an invalid result.",
+                    approval_status=approval_status,
+                    effect_state=failure_effect_state,
                 )
 
             handler_error = (
@@ -452,11 +420,11 @@ class CoreToolExecutor:
                     ToolBatchOutcome.FAILED,
                     normalized_argument_paths=parsed.normalized_argument_paths,
                 )
-                return ToolBatchResult(
-                    results=tuple(results),
-                    outcome=ToolBatchOutcome.FAILED,
+                return _batch_result(
+                    results,
+                    ToolBatchOutcome.FAILED,
+                    cache_hits,
                     error=handler_error,
-                    cache_hits=tuple(cache_hits),
                     effect_state=(
                         ToolEffectState.NOT_STARTED
                         if policy.mode is ToolExecutionMode.READ
@@ -483,11 +451,10 @@ class CoreToolExecutor:
                 normalized_argument_paths=parsed.normalized_argument_paths,
             )
 
-        outcome = aggregate_outcomes(outcomes)
-        return ToolBatchResult(
-            results=tuple(results),
-            outcome=outcome,
-            cache_hits=tuple(cache_hits),
+        return _batch_result(
+            results,
+            aggregate_outcomes(outcomes),
+            cache_hits,
         )
 
     async def _validate_scope(
@@ -562,28 +529,17 @@ class CoreToolExecutor:
         results: list[ToolCallResult],
         cache_hits: list[bool],
     ) -> ToolBatchResult:
-        result = _failure_result(
-            parsed.call,
-            "tool_execution_canceled",
-            "Tool execution was canceled.",
-            approval_status=ApprovalStatus.CANCELED,
-        )
-        results.append(result)
-        if len(cache_hits) < len(results):
-            cache_hits.append(False)
-        await _emit_completed(
-            event_sink,
+        return await _failed_call_batch(
             request,
+            event_sink,
+            parsed,
             index,
-            result,
-            ToolBatchOutcome.CANCELED,
-            normalized_argument_paths=parsed.normalized_argument_paths,
-        )
-        return ToolBatchResult(
-            results=tuple(results),
+            results,
+            cache_hits,
             outcome=ToolBatchOutcome.CANCELED,
-            error="tool_execution_canceled",
-            cache_hits=tuple(cache_hits),
+            code="tool_execution_canceled",
+            message="Tool execution was canceled.",
+            approval_status=ApprovalStatus.CANCELED,
         )
 
 
@@ -700,6 +656,65 @@ def _whole_batch_failure(
     )
 
 
+async def _failed_call_batch(
+    request: ToolBatchRequest,
+    event_sink: EventSink,
+    parsed: ParsedToolCall,
+    index: int,
+    results: list[ToolCallResult],
+    cache_hits: list[bool],
+    *,
+    outcome: ToolBatchOutcome,
+    code: str,
+    message: str,
+    approval_status: ApprovalStatus | None = None,
+    exception_type: str | None = None,
+    effect_state: ToolEffectState = ToolEffectState.UNKNOWN,
+) -> ToolBatchResult:
+    result = _failure_result(
+        parsed.call,
+        code,
+        message,
+        approval_status=approval_status,
+    )
+    results.append(result)
+    if len(cache_hits) < len(results):
+        cache_hits.append(False)
+    await _emit_completed(
+        event_sink,
+        request,
+        index,
+        result,
+        outcome,
+        exception_type=exception_type,
+        normalized_argument_paths=parsed.normalized_argument_paths,
+    )
+    return _batch_result(
+        results,
+        outcome,
+        cache_hits,
+        error=result.error,
+        effect_state=effect_state,
+    )
+
+
+def _batch_result(
+    results: Sequence[ToolCallResult],
+    outcome: ToolBatchOutcome,
+    cache_hits: Sequence[bool],
+    *,
+    error: str | None = None,
+    effect_state: ToolEffectState = ToolEffectState.UNKNOWN,
+) -> ToolBatchResult:
+    return ToolBatchResult(
+        results=tuple(results),
+        outcome=outcome,
+        error=error,
+        cache_hits=tuple(cache_hits),
+        effect_state=effect_state,
+    )
+
+
 def _failure_result(
     call: ToolCall,
     code: str,
@@ -730,7 +745,3 @@ def _approval_message(status: ApprovalStatus) -> str:
     if status is ApprovalStatus.TIMED_OUT:
         return "The approval request timed out."
     return "Approval is unavailable."
-
-
-def _is_canceled(signal: CancellationSignal | None) -> bool:
-    return bool(signal is not None and signal.is_set())

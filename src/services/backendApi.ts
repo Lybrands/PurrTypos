@@ -58,8 +58,7 @@ const apiPatchIdempotent = <T>(path: string, body: unknown, commandId: string) =
     body: JSON.stringify(body),
   })
 
-function aiErrorReportSource(streamId: string, data: AiStreamRequest): string {
-  if (data.agentProfile === 'screenplay' || streamId.startsWith('screenplay-')) return 'screenplay_agent'
+function aiErrorReportSource(streamId: string): string {
   if (streamId.startsWith('chat-')) return 'workspace_chat'
   if (streamId.startsWith('inline-edit-')) return 'inline_edit'
   if (streamId.startsWith('editor-float-')) return 'editor_rewrite'
@@ -68,27 +67,10 @@ function aiErrorReportSource(streamId: string, data: AiStreamRequest): string {
 }
 
 function aiErrorReportDiagnostics(data: AiStreamRequest): Record<string, unknown> {
-  const screenplayStageLabels: Record<string, string> = {
-    orientation: '原作分析',
-    brief: '创作简报',
-    structure: '剧本结构',
-    scenes: '场景表',
-    draft: '场景正文',
-    review: '剧本审阅',
-    completed: '已完成项目',
-  }
-  const taskType = data.agentProfile === 'screenplay'
-    ? data.screenplayTaskIntent === 'stage_deliverable'
-      ? `剧本阶段交付 · ${screenplayStageLabels[String(data.activeStage || '')] || data.activeStage || '当前阶段'}`
-      : '剧本自由对话'
-    : data.chatAgentMode === 'agent'
-      ? '写作 Agent 任务'
-      : '普通对话'
   return {
     provider: data.apiProvider || 'openai',
     agentMode: data.chatAgentMode || '',
-    agentProfile: data.agentProfile || 'writing',
-    taskType,
+    taskType: data.chatAgentMode === 'agent' ? '写作 Agent 任务' : '普通对话',
     toolsEnabled: data.enableAgentTools === true,
     thinkingEnabled: data.options?.thinking?.type === 'enabled',
     contextWindow: data.contextWindow || data.options?.context_window || '',
@@ -143,6 +125,31 @@ export const backendApi: BackendApi = {
     return apiGet(
       `/screenplay/v2/projects/${data.projectId}/conversation/events?${params.toString()}`,
     )
+  },
+  watchScreenplayConversationEvents: (data) => {
+    const params = new URLSearchParams({
+      sessionId: String(data.sessionId),
+      after: String(Math.max(0, data.after)),
+      follow: 'true',
+    })
+    const source = new EventSource(
+      `${backendBaseUrl}/api/screenplay/v2/projects/${encodeURIComponent(data.projectId)}/conversation/events?${params.toString()}`,
+    )
+    source.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data)
+        if (
+          event
+          && typeof event === 'object'
+          && Number.isFinite(Number(event.cursor))
+        ) {
+          data.onEvent(event)
+        }
+      } catch {
+        // Snapshot polling remains the recovery path for a malformed notice.
+      }
+    }
+    return () => source.close()
   },
   cancelScreenplayConversationTurn: (data) => apiPostIdempotent(
     `/screenplay/v2/conversation/turns/${data.turnId}/cancel`,
@@ -565,7 +572,7 @@ export const backendApi: BackendApi = {
           sessionId: data.sessionId,
           bookId: data.bookId || null,
           chapterId: data.chapterId || null,
-          source: aiErrorReportSource(streamId, data),
+          source: aiErrorReportSource(streamId),
           errorCode,
           errorMessage,
           model: chunk.model || data.options?.model,

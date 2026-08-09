@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_core.contracts.normalization import (
+    optional_text,
+    positive_int,
+    required_text,
+)
 from agent_core.json_values import freeze_json_mapping
 
 
@@ -20,10 +25,9 @@ class RunBinding:
 
     def __post_init__(self) -> None:
         for name in ("namespace", "aggregate_id", "command_id"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"run binding {name} is required")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"run binding {name}"
+            ))
         object.__setattr__(
             self,
             "attributes",
@@ -43,10 +47,8 @@ class ExecutionRecipeStep:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        step_id = str(self.id or "").strip()
-        kind = str(self.kind or "").strip()
-        if not step_id or not kind:
-            raise ValueError("execution recipe step id and kind are required")
+        step_id = required_text(self.id, "execution recipe step id")
+        kind = required_text(self.kind, "execution recipe step kind")
         dependencies = tuple(
             str(value or "").strip() for value in self.depends_on
         )
@@ -59,16 +61,8 @@ class ExecutionRecipeStep:
         object.__setattr__(self, "id", step_id)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "depends_on", dependencies)
-        object.__setattr__(
-            self,
-            "input_ref",
-            str(self.input_ref or "").strip() or None,
-        )
-        object.__setattr__(
-            self,
-            "executor",
-            str(self.executor or "").strip() or None,
-        )
+        object.__setattr__(self, "input_ref", optional_text(self.input_ref))
+        object.__setattr__(self, "executor", optional_text(self.executor))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -82,10 +76,8 @@ class ExecutionRecipe:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        kind = str(self.kind or "").strip()
+        kind = required_text(self.kind, "execution recipe kind")
         steps = tuple(self.steps)
-        if not kind:
-            raise ValueError("execution recipe kind is required")
         if not steps:
             raise ValueError("execution recipe requires at least one step")
         if not all(isinstance(step, ExecutionRecipeStep) for step in steps):
@@ -94,8 +86,9 @@ class ExecutionRecipe:
         if len(ids) != len(set(ids)):
             raise ValueError("execution recipe step ids must be unique")
         known: set[str] = set()
+        known_ids = set(ids)
         for step in steps:
-            unknown = set(step.depends_on) - set(ids)
+            unknown = set(step.depends_on) - known_ids
             if unknown:
                 raise ValueError(
                     "execution recipe names unknown dependencies: "
@@ -106,22 +99,21 @@ class ExecutionRecipe:
                     "execution recipe steps must be topologically ordered"
                 )
             known.add(step.id)
-        parallelism = int(self.max_parallelism)
-        if parallelism <= 0:
-            raise ValueError("execution recipe max_parallelism must be positive")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "steps", steps)
-        object.__setattr__(self, "max_parallelism", parallelism)
+        object.__setattr__(self, "max_parallelism", positive_int(
+            self.max_parallelism, "execution recipe max_parallelism"
+        ))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
     def to_metadata(self) -> dict[str, Any]:
         return {
-            **dict(self.metadata),
+            **self.metadata,
             "kind": self.kind,
             "maxParallelism": self.max_parallelism,
             "steps": [
                 {
-                    **dict(step.metadata),
+                    **step.metadata,
                     "id": step.id,
                     "kind": step.kind,
                     "dependsOn": list(step.depends_on),

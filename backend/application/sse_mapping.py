@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from agent_core.contracts import AgentRunResult, RunStatus
@@ -14,7 +14,6 @@ def core_update_to_sse_chunk(
     update: AgentEvent | AgentRunResult,
     *,
     model: str,
-    domain_event_mapper: Callable[[AgentEvent], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any] | None:
     if isinstance(update, AgentRunResult):
         if update.status is RunStatus.DONE:
@@ -24,17 +23,10 @@ def core_update_to_sse_chunk(
         if update.status is RunStatus.BLOCKED:
             return {"error": "Agent 未完成全部计划步骤，已安全停止。"}
         return {"error": _runtime_error_message(update.error)}
-    return core_event_to_sse_chunk(
-        update,
-        domain_event_mapper=domain_event_mapper,
-    )
+    return core_event_to_sse_chunk(update)
 
 
-def core_event_to_sse_chunk(
-    event: AgentEvent,
-    *,
-    domain_event_mapper: Callable[[AgentEvent], dict[str, Any] | None] | None = None,
-) -> dict[str, Any] | None:
+def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
     payload = thaw_json_mapping(event.payload)
     run_id = str(event.run_id or "")
 
@@ -156,7 +148,6 @@ def core_event_to_sse_chunk(
                 run_id=child_run_id or None,
                 payload=child_payload,
             ),
-            domain_event_mapper=domain_event_mapper,
         )
         if child_chunk is None:
             return None
@@ -247,8 +238,6 @@ def core_event_to_sse_chunk(
         return {domain_names[event.type]: dict(payload)}
     if event.type == "writing.progress":
         return payload
-    if domain_event_mapper is not None:
-        return domain_event_mapper(event)
     return None
 
 

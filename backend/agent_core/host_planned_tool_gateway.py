@@ -86,7 +86,7 @@ class HostPlannedToolGateway:
             return await self._delegate.stream(messages, invocation, signal)
         name, arguments = direct
         arguments_json = json.dumps(
-            dict(arguments),
+            arguments,
             ensure_ascii=False,
             separators=(",", ":"),
             allow_nan=False,

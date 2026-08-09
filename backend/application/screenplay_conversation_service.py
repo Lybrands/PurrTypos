@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from typing import Any, Protocol
 
 from agent_core.contracts import AgentRunResult, RunStatus
 from agent_core.events import AgentEvent, CoreEventType
+from agent_core.json_values import canonical_json_digest, thaw_json_mapping
 from application.request_mapping import build_chat_provider_options
 from application.screenplay_agent_run_service import ScreenplayAgentRunService
-from application.screenplay_sse_mapping import screenplay_update_to_sse_chunk
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from exceptions import AppError, NotFoundError
 from infrastructure.persistence.sqlite_screenplay_conversation_repository import (
@@ -27,15 +26,17 @@ from schemas.screenplay_conversation import (
 from utils.url import normalize_base_url
 
 
-def _digest(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _command_id(value: object, action: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise AppError(f"{action}必须提供 Idempotency-Key", 422)
+    if len(normalized) > 200:
+        raise AppError("Idempotency-Key 不能超过 200 个字符", 422)
+    return normalized
+
+
+def _derived_command_id(kind: str, *parts: str) -> str:
+    return f"screenplay:{kind}:{canonical_json_digest(parts)}"
 
 
 class ScreenplayTurnRunner(Protocol):
@@ -44,7 +45,6 @@ class ScreenplayTurnRunner(Protocol):
 
 class ScreenplayConversationService:
     def __init__(self, db, composition, *, runner: ScreenplayTurnRunner | None = None):
-        self._db = db
         self._composition = composition
         self._repository = SqliteScreenplayConversationRepository(
             db,
@@ -60,12 +60,8 @@ class ScreenplayConversationService:
         project_id: str,
         request: SubmitScreenplayConversationTurnRequest,
     ) -> dict[str, Any]:
-        normalized_command_id = str(command_id or "").strip()
+        normalized_command_id = _command_id(command_id, "提交剧本对话")
         normalized_project_id = str(project_id or "").strip()
-        if not normalized_command_id:
-            raise AppError("提交剧本对话必须提供 Idempotency-Key", 422)
-        if len(normalized_command_id) > 200:
-            raise AppError("Idempotency-Key 不能超过 200 个字符", 422)
         if not normalized_project_id:
             raise NotFoundError("剧本项目不存在")
 
@@ -82,7 +78,7 @@ class ScreenplayConversationService:
             if request.operation is not None
             else None
         )
-        request_digest = _digest({
+        request_digest = canonical_json_digest({
             "projectId": normalized_project_id,
             "sessionId": request.sessionId,
             "content": request.content,
@@ -125,13 +121,8 @@ class ScreenplayConversationService:
         heartbeat_task = asyncio.create_task(self._heartbeat_turn(turn_id))
         try:
             workspace = await self._projects.get_workspace(turn["projectId"])
-            project = workspace["project"]
-            source = project.get("source") if isinstance(project, Mapping) else {}
-            source_book_id = (
-                str(source.get("bookId") or "").strip() or None
-                if isinstance(source, Mapping)
-                else None
-            )
+            source = workspace["project"].get("source") or {}
+            source_book_id = str(source.get("bookId") or "").strip() or None
             messages = await self._repository.history_messages(
                 session_id=int(turn["sessionId"]),
                 before_turn_id=turn_id,
@@ -151,33 +142,26 @@ class ScreenplayConversationService:
                 if operation_id is not None
                 else None
             )
-            intent = (
-                operation.get("intent", {})
-                if isinstance(operation, Mapping)
-                else {}
-            )
-            scope = (
-                intent.get("scope", {})
-                if isinstance(intent, Mapping)
-                and isinstance(intent.get("scope"), Mapping)
-                else {}
-            )
+            scope = operation["intent"].get("scope", {}) if operation else {}
+            if not isinstance(scope, Mapping):
+                scope = {}
             draft_scope = str(scope.get("mode") or "planner")
             draft_scene_count = scope.get("sceneCount", 1)
             if not isinstance(draft_scene_count, int):
                 draft_scene_count = 1
             body = ScreenplayAgentRunRequest(
                 messages=messages,
-                apiKey=runtime.apiKey.get_secret_value(),
                 baseURL=runtime.baseURL,
                 apiProvider=runtime.apiProvider,
                 locale=runtime.locale,
                 options=dict(runtime.options),
                 sessionId=int(turn["sessionId"]),
-                enableAgentTools=operation is not None,
+                # Consultation still needs authenticated project/source reads.
+                # The product Run facade limits it to READ tools; only an
+                # Operation receives PROPOSE authority.
+                enableAgentTools=True,
                 chatAgentMode="agent" if operation is not None else "ask",
                 contextWindow=runtime.contextWindow,
-                agentProfile="screenplay",
                 screenplayProjectId=str(turn["projectId"]),
                 screenplayOperationId=operation_id,
                 sourceBookId=source_book_id,
@@ -193,9 +177,10 @@ class ScreenplayConversationService:
                 ),
             )
             signal = asyncio.Event()
+            api_key = runtime.apiKey.get_secret_value()
             stream = self._runner.run(
                 body=body,
-                api_key=runtime.apiKey.get_secret_value(),
+                api_key=api_key,
                 provider_options=provider_options,
                 signal=signal,
                 conversation_turn_id=turn_id,
@@ -206,24 +191,13 @@ class ScreenplayConversationService:
                     if isinstance(update, AgentEvent):
                         if update.type == CoreEventType.RUN_STARTED and update.run_id:
                             await self._repository.bind_run(turn_id, update.run_id)
-                        chunk = screenplay_update_to_sse_chunk(
-                            update,
-                            model=model,
-                        )
-                        if chunk is None:
-                            continue
-                        revision = chunk.get("screenplayRevisionReady")
-                        revision_id = (
-                            str(revision.get("revisionId") or "").strip() or None
-                            if isinstance(revision, Mapping)
-                            else None
-                        )
-                        await self._repository.append_chunk(
-                            turn_id,
-                            chunk=chunk,
-                            assistant_delta=str(chunk.get("delta") or ""),
-                            revision_id=revision_id,
-                        )
+                        assistant_delta, revision_id = _turn_projection(update)
+                        if assistant_delta or revision_id:
+                            await self._repository.apply_run_progress(
+                                turn_id,
+                                assistant_delta=assistant_delta,
+                                revision_id=revision_id,
+                            )
                     else:
                         result = update
             finally:
@@ -238,11 +212,11 @@ class ScreenplayConversationService:
             elif result.status is RunStatus.CANCELED:
                 await self._repository.cancel_turn(
                     turn_id,
-                    command_id=(
-                        "screenplay:run-canceled:"
-                        + hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
-                    ),
-                    request_digest=_digest({"turnId": turn_id, "source": "run"}),
+                    command_id=_derived_command_id("run-canceled", turn_id),
+                    request_digest=canonical_json_digest({
+                        "turnId": turn_id,
+                        "source": "run",
+                    }),
                 )
             else:
                 await self._repository.fail_turn(
@@ -250,8 +224,6 @@ class ScreenplayConversationService:
                     code=result.error or result.status.value,
                     message=result.error or "剧本 Agent 未能完成本次对话",
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             await self._repository.fail_turn(
                 turn_id,
@@ -261,10 +233,8 @@ class ScreenplayConversationService:
             await self._cancel_active_operation(turn)
         finally:
             heartbeat_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await heartbeat_task
-            except asyncio.CancelledError:
-                pass
 
     async def _heartbeat_turn(self, turn_id: str) -> None:
         while True:
@@ -285,9 +255,9 @@ class ScreenplayConversationService:
             }:
                 return
             await self._projects.control_operation(
-                command_id=(
-                    "screenplay:conversation-failed:"
-                    + hashlib.sha256(turn["id"].encode("utf-8")).hexdigest()
+                command_id=_derived_command_id(
+                    "conversation-failed",
+                    str(turn["id"]),
                 ),
                 operation_id=operation_id,
                 action="cancel",
@@ -304,9 +274,7 @@ class ScreenplayConversationService:
         command_id: str,
         runtime: ScreenplayConversationRuntimeRequest,
     ) -> dict[str, Any]:
-        normalized_command_id = str(command_id or "").strip()
-        if not normalized_command_id:
-            raise AppError("恢复剧本对话必须提供 Idempotency-Key", 422)
+        normalized_command_id = _command_id(command_id, "恢复剧本对话")
         existing_turn = await self._repository.load_turn(turn_id)
         if existing_turn is None:
             raise NotFoundError("剧本对话 Turn 不存在")
@@ -329,27 +297,26 @@ class ScreenplayConversationService:
             locale=runtime.locale,
             context_window=runtime.contextWindow,
         )
-        turn = await self._repository.prepare_resume(
+        turn, prepared = await self._repository.prepare_resume(
             turn_id,
             command_id=normalized_command_id,
-            request_digest=_digest({
+            request_digest=canonical_json_digest({
                 "turnId": turn_id,
                 "runtimeProfile": profile,
             }),
         )
-        if operation_id:
-            if operation_status == "paused":
-                await self._projects.control_operation(
-                    command_id=(
-                        "screenplay:conversation-resume-operation:"
-                        + hashlib.sha256(
-                            f"{turn_id}:{normalized_command_id}".encode("utf-8")
-                        ).hexdigest()
-                    ),
-                    operation_id=operation_id,
-                    action="resume",
-                )
-        self.dispatch_turn(turn_id, runtime)
+        if prepared and operation_id and operation_status == "paused":
+            await self._projects.control_operation(
+                command_id=_derived_command_id(
+                    "conversation-resume-operation",
+                    turn_id,
+                    normalized_command_id,
+                ),
+                operation_id=operation_id,
+                action="resume",
+            )
+        if prepared:
+            self.dispatch_turn(turn_id, runtime)
         return turn
 
     async def get_snapshot(
@@ -384,13 +351,14 @@ class ScreenplayConversationService:
         *,
         command_id: str,
     ) -> dict[str, Any]:
-        normalized_command_id = str(command_id or "").strip()
-        if not normalized_command_id:
-            raise AppError("取消剧本对话必须提供 Idempotency-Key", 422)
+        normalized_command_id = _command_id(command_id, "取消剧本对话")
         turn = await self._repository.cancel_turn(
             turn_id,
             command_id=normalized_command_id,
-            request_digest=_digest({"turnId": turn_id, "action": "cancel"}),
+            request_digest=canonical_json_digest({
+                "turnId": turn_id,
+                "action": "cancel",
+            }),
         )
         run_id = str(turn.get("runId") or "").strip()
         if run_id:
@@ -400,14 +368,37 @@ class ScreenplayConversationService:
         operation_id = str(turn.get("operationId") or "").strip()
         if operation_id:
             await self._projects.control_operation(
-                command_id=(
-                    "screenplay:conversation-cancel:"
-                    + hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
-                ),
+                command_id=_derived_command_id("conversation-cancel", turn_id),
                 operation_id=operation_id,
                 action="cancel",
             )
         return turn
+
+
+def _turn_projection(event: AgentEvent) -> tuple[str, str | None]:
+    """Reduce Core/domain facts to the two fields owned by a Turn.
+
+    Conversation events are invalidation notices, not a second SSE transcript.
+    In particular, a full screenplay proposal is never copied into conversation
+    persistence; only the projected Revision reference is retained.
+    """
+
+    payload = thaw_json_mapping(event.payload)
+    if event.type == CoreEventType.MODEL_DELTA:
+        return str(payload.get("delta") or ""), None
+    if event.type == "screenplay.long_task.response":
+        return str(payload.get("content") or ""), None
+    if event.type == CoreEventType.DELEGATION_EVENT:
+        child = payload.get("event")
+        if (
+            isinstance(child, Mapping)
+            and child.get("type") == "screenplay.long_task.response"
+            and isinstance(child.get("payload"), Mapping)
+        ):
+            return str(child["payload"].get("content") or ""), None
+    if event.type == "screenplay.revision_ready":
+        return "", str(payload.get("revisionId") or "").strip() or None
+    return "", None
 
 
 __all__ = ["ScreenplayConversationService", "ScreenplayTurnRunner"]

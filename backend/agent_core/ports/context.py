@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from agent_core.context_orchestration.contracts import (
@@ -15,7 +15,6 @@ from agent_core.contracts import (
     ContextBudget,
     ContextBudgetClaim,
     ContextBundle,
-    PostPlanningContextOptimizationResult,
     TaskContextRequest,
 )
 from agent_core.ports.model import CancellationSignal
@@ -98,35 +97,7 @@ class ConversationCompactor(Protocol):
             Callable[[Mapping[str, Any]], Awaitable[None]] | None
         ) = None,
         budget: ContextCompactionBudget | None = None,
-        anticipated_context_tokens: int = 0,
-        resolved_context_tokens: int | None = None,
-        output_reserve_tokens: int | None = None,
-        provider_input_tokens: int | None = None,
-        planned_step_count: int | None = None,
-        planned_tool_count: int | None = None,
-        selected_tool_count: int | None = None,
     ) -> ConversationCompactionResult: ...
-
-
-@runtime_checkable
-class PostPlanningContextOptimizer(Protocol):
-    """Re-evaluate conversation pressure after the actual plan is compiled."""
-
-    async def optimize(
-        self,
-        request: AgentRunRequest,
-        *,
-        provider_input_tokens: int,
-        resolved_context_tokens: int,
-        output_reserve_tokens: int,
-        planned_step_count: int,
-        planned_tool_count: int,
-        selected_tool_names: Sequence[str],
-        signal: CancellationSignal | None = None,
-        on_compaction_started: (
-            Callable[[Mapping[str, Any]], Awaitable[None]] | None
-        ) = None,
-    ) -> PostPlanningContextOptimizationResult: ...
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

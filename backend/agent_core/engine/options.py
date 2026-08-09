@@ -11,6 +11,10 @@ from agent_core.contracts import (
     RunLineage,
     RunProvenance,
 )
+from agent_core.contracts.normalization import (
+    optional_non_negative_int,
+    positive_int,
+)
 from agent_core.output_budget import ResolvedOutputBudget
 from agent_core.ports import ResponseJudge, ResponseValidator
 
@@ -42,10 +46,7 @@ class AgentCoreRunOptions:
             raise ValueError("context claim names must be unique")
         object.__setattr__(self, "context_claims", claims)
         for name in ("output_reserve_tokens", "default_context_window_tokens"):
-            value = int(getattr(self, name))
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, positive_int(getattr(self, name), name))
         if self.output_budget is not None:
             if not isinstance(self.output_budget, ResolvedOutputBudget):
                 raise TypeError("output budget must be ResolvedOutputBudget")
@@ -58,13 +59,9 @@ class AgentCoreRunOptions:
             "runtime_reserve_tokens",
             "minimum_message_tokens",
         ):
-            raw = getattr(self, name)
-            if raw is None:
-                continue
-            value = int(raw)
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, optional_non_negative_int(
+                getattr(self, name), name
+            ))
         object.__setattr__(self, "model_supports_tools", bool(self.model_supports_tools))
         object.__setattr__(
             self,

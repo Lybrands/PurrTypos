@@ -24,7 +24,6 @@ from agent_core.contracts import (
     AgentRunRequest,
     MessageOrigin,
     MessageRole,
-    PostPlanningContextOptimizationResult,
 )
 from agent_core.errors import ContextOverflowError, ContractViolationError
 from agent_core.ports import CancellationSignal, ContextCompressionHook
@@ -67,22 +66,8 @@ class ContextCompressionCoordinator:
             Callable[[Mapping[str, Any]], Awaitable[None]] | None
         ) = None,
         budget: ContextCompactionBudget | None = None,
-        anticipated_context_tokens: int = 0,
-        resolved_context_tokens: int | None = None,
-        output_reserve_tokens: int | None = None,
-        provider_input_tokens: int | None = None,
-        planned_step_count: int | None = None,
-        planned_tool_count: int | None = None,
-        selected_tool_count: int | None = None,
     ) -> ConversationCompactionResult:
-        del planned_step_count, planned_tool_count, selected_tool_count
-        snapshot = budget or _legacy_budget(
-            request,
-            anticipated_context_tokens=anticipated_context_tokens,
-            resolved_context_tokens=resolved_context_tokens,
-            output_reserve_tokens=output_reserve_tokens,
-            provider_input_tokens=provider_input_tokens,
-        )
+        snapshot = budget or _default_budget(request)
         message_tokens = estimate_agent_messages_tokens(request.messages)
         context_tokens = min(
             snapshot.provider_input_tokens,
@@ -171,7 +156,7 @@ class ContextCompressionCoordinator:
             )
 
         diagnostics = {
-            **dict(result.diagnostics),
+            **result.diagnostics,
             "compactionPhase": snapshot.phase.value,
             "strategy": (
                 "application_hook"
@@ -204,106 +189,18 @@ class ContextCompressionCoordinator:
         )
 
 
-class PostPlanningConversationContextOptimizer:
-    """Compatibility adapter for callers that still use the older hook."""
-
-    def __init__(
-        self,
-        service: ContextCompressionCoordinator,
-        source_request: AgentRunRequest,
-    ) -> None:
-        self._service = service
-        self._source_request = source_request
-
-    async def optimize(
-        self,
-        request: AgentRunRequest,
-        *,
-        provider_input_tokens: int,
-        resolved_context_tokens: int,
-        output_reserve_tokens: int,
-        planned_step_count: int,
-        planned_tool_count: int,
-        selected_tool_names: Sequence[str],
-        signal: CancellationSignal | None = None,
-        on_compaction_started: (
-            Callable[[Mapping[str, Any]], Awaitable[None]] | None
-        ) = None,
-    ) -> PostPlanningContextOptimizationResult:
-        source = replace(
-            self._source_request,
-            metadata={
-                **dict(self._source_request.metadata),
-                **dict(request.metadata),
-            },
-        )
-        result = await self._service.prepare(
-            source,
-            signal,
-            budget=ContextCompactionBudget(
-                phase=ContextCompactionPhase.POST_PLANNING,
-                provider_input_tokens=provider_input_tokens,
-                context_tokens=resolved_context_tokens,
-                context_tokens_are_resolved=True,
-                output_reserve_tokens=output_reserve_tokens,
-                planned_step_count=planned_step_count,
-                planned_tool_count=planned_tool_count,
-                selected_tool_count=len(tuple(selected_tool_names)),
-            ),
-            on_compaction_started=on_compaction_started,
-        )
-        optimized = replace(
-            result.request,
-            metadata={
-                **dict(request.metadata),
-                **dict(result.request.metadata),
-            },
-        )
-        return PostPlanningContextOptimizationResult(
-            request=optimized,
-            outcome=result.outcome,
-            compacted_turn_count=result.compacted_turn_count,
-            retained_raw_turn_count=result.retained_raw_turn_count,
-            summary_version=result.compression_state_version,
-            diagnostics=result.diagnostics,
-        )
-
-
-def _legacy_budget(
-    request: AgentRunRequest,
-    *,
-    anticipated_context_tokens: int,
-    resolved_context_tokens: int | None,
-    output_reserve_tokens: int | None,
-    provider_input_tokens: int | None,
-) -> ContextCompactionBudget:
-    output = max(1, int(output_reserve_tokens or 8_192))
-    if provider_input_tokens is None:
-        allocated = allocate_context_budget(
-            window_tokens=max(1, int(request.context_window or 128_000)),
-            output_reserve_tokens=output,
-        )
-        provider_input = allocated.provider_input_tokens
-    else:
-        provider_input = max(1, int(provider_input_tokens))
-    resolved = resolved_context_tokens is not None
+def _default_budget(request: AgentRunRequest) -> ContextCompactionBudget:
+    output_tokens = 8_192
+    allocated = allocate_context_budget(
+        window_tokens=max(1, int(request.context_window or 128_000)),
+        output_reserve_tokens=output_tokens,
+    )
     return ContextCompactionBudget(
-        phase=(
-            ContextCompactionPhase.POST_PLANNING
-            if resolved
-            else ContextCompactionPhase.PRE_PLANNING
-        ),
-        provider_input_tokens=provider_input,
-        context_tokens=max(
-            0,
-            int(
-                resolved_context_tokens
-                if resolved_context_tokens is not None
-                else anticipated_context_tokens
-            ),
-        ),
-        context_tokens_are_resolved=resolved,
-        output_reserve_tokens=output,
+        phase=ContextCompactionPhase.PRE_PLANNING,
+        provider_input_tokens=allocated.provider_input_tokens,
+        context_tokens=0,
+        context_tokens_are_resolved=False,
+        output_reserve_tokens=output_tokens,
     )
 
 
@@ -335,13 +232,12 @@ def _default_trim(
         "keepRecentMessages": settings.default_keep_recent_messages,
         "droppedMessageCount": trimmed.dropped_count,
     }
-    projected = replace(
-        compression.request,
-        messages=trimmed.messages,
-        metadata=metadata,
-    )
     return ConversationCompactionResult(
-        request=projected,
+        request=replace(
+            compression.request,
+            messages=trimmed.messages,
+            metadata=metadata,
+        ),
         outcome="compacted_default_trim",
         retained_raw_turn_count=_conversation_turn_count(trimmed.messages),
         diagnostics={
@@ -461,12 +357,6 @@ def _conversation_turn_count(messages: Sequence[AgentMessage]) -> int:
     )
 
 
-# The old name remains as a source-compatible alias for one migration cycle.
-ConversationContextCompactor = ContextCompressionCoordinator
-
-
 __all__ = [
     "ContextCompressionCoordinator",
-    "ConversationContextCompactor",
-    "PostPlanningConversationContextOptimizer",
 ]

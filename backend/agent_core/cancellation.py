@@ -16,6 +16,10 @@ class OperationCanceled(AgentCoreError):
     """An in-flight Core operation was canceled by its run signal."""
 
 
+def is_canceled(signal: CancellationSignal | None) -> bool:
+    return bool(signal is not None and signal.is_set())
+
+
 async def cancel_and_wait(task: asyncio.Future) -> None:
     if not task.done():
         task.cancel()
