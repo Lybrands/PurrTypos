@@ -1,5 +1,4 @@
 import type {
-  ScreenplayConversationEventPage,
   ScreenplayConversationSnapshot,
   ScreenplayConversationTurn,
   ScreenplayConversationTurnStatus,
@@ -38,13 +37,6 @@ export function stateFromScreenplayConversationSnapshot(
     turns: snapshot.turns,
     messages: snapshot.turns.flatMap(messagesFromTurn),
   }
-}
-
-export function conversationPageRequiresSnapshot(
-  state: ScreenplayConversationState,
-  page: ScreenplayConversationEventPage,
-): boolean {
-  return page.events.some((event) => event.cursor > state.cursor)
 }
 
 export function isScreenplayTurnTerminal(

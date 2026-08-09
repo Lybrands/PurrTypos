@@ -2897,43 +2897,6 @@
   font-size: var(--font-size-xs);
 }
 
-.screenplay-agent-queued {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  background: var(--warning-dim);
-}
-
-.screenplay-agent-queued__item {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-  font-size: 11px;
-
-  > span:first-child {
-    flex: none;
-    color: var(--warning);
-    font-weight: var(--font-weight-semibold);
-  }
-
-  > span:last-child {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-.screenplay-agent-queued__more,
-.screenplay-agent-queue-count {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-
 .screenplay-agent-result {
   max-height: 42%;
   margin: 0;

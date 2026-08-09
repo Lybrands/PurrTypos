@@ -32,7 +32,6 @@ from agent_core.ports import (
     ContextProvider,
     DelegationRepository,
     ExecutionLeaseStore,
-    PostPlanningContextOptimizer,
     ToolRegistration,
 )
 from agent_core.tools import InMemoryToolCatalog
@@ -345,9 +344,6 @@ class AgentComposition:
         max_parallel_agents: int = 1,
         allowed_tool_modes: Collection[ToolExecutionMode] | None = None,
         required_tool_names: Collection[str] | None = None,
-        post_planning_context_optimizer: (
-            PostPlanningContextOptimizer | None
-        ) = None,
         context_compression_hook: ContextCompressionHook | None = None,
         context_compression_settings: ContextCompressionSettings = (
             ContextCompressionSettings()
@@ -440,7 +436,6 @@ class AgentComposition:
             tool_catalog=tool_catalog,
             agent_role_guidance=agent_role_guidance,
             max_parallel_agents=max_parallel_agents,
-            post_planning_context_optimizer=post_planning_context_optimizer,
             task_admission_evaluator=(
                 extension.task_admission
                 if extension is not None
@@ -482,9 +477,6 @@ class AgentComposition:
         return self._profile_registry.for_request(
             request
         ).adapter.agent_role_registry
-
-    def map_domain_event(self, event: AgentEvent) -> dict[str, Any] | None:
-        return self._profile_registry.map_domain_event(event)
 
     def create_response_judges(
         self,

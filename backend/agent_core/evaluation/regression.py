@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_core.evaluation._values import as_mapping as _mapping
 from agent_core.evaluation.diagnostics import (
     build_canonical_run_observation,
     evaluate_agent_run,
@@ -158,7 +159,3 @@ def run_runtime_regression_suite(
         },
         "results": results,
     }
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}

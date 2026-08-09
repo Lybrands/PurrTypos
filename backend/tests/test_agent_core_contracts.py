@@ -29,39 +29,8 @@ from agent_core.contracts import (
     ToolRiskLevel,
     ToolSchema,
 )
-from agent_core.contracts.context import ContextBudget as ContextBudgetFamily
-from agent_core.contracts.messages import AgentMessage as AgentMessageFamily
-from agent_core.contracts.planning import TaskPlan as TaskPlanFamily
-from agent_core.contracts.runs import RunStatus as RunStatusFamily
-from agent_core.contracts.tools import ToolSchema as ToolSchemaFamily
-from agent_core.ports.persistence import RunCommit as RunCommitFamily
-from agent_core.ports.context import ContextProvider as ContextProviderFamily
-from agent_core.ports.model import ModelGateway as ModelGatewayFamily
-from agent_core.ports.planning import TaskPlanner as TaskPlannerFamily
-from agent_core.ports.tools import ToolCatalog as ToolCatalogFamily
 from agent_core.events import AgentCommand, AgentEvent, CoreCommandType, CoreEventType
 from agent_core.task_admission import ExecutionMode, TaskAdmissionDecision
-
-
-def test_phase_one_contract_family_exports_keep_legacy_identity():
-    assert AgentMessageFamily is AgentMessage
-    assert ContextBudgetFamily is ContextBudget
-    assert TaskPlanFamily is TaskPlan
-    assert ToolSchemaFamily is ToolSchema
-    assert RunStatusFamily is RunStatus
-    from agent_core.ports import (
-        ContextProvider,
-        ModelGateway,
-        RunCommit,
-        TaskPlanner,
-        ToolCatalog,
-    )
-
-    assert RunCommitFamily is RunCommit
-    assert ContextProviderFamily is ContextProvider
-    assert ModelGatewayFamily is ModelGateway
-    assert TaskPlannerFamily is TaskPlanner
-    assert ToolCatalogFamily is ToolCatalog
 
 
 def test_run_request_snapshots_opaque_context_and_finds_latest_user_text():

@@ -5,9 +5,6 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from agent_core.contracts import AgentMessage, ModelInvocation
-from agent_core.json_values import thaw_json_mapping
-
-
 _SECRET_FIELD_NAMES = frozenset({
     "apikey",
     "authorization",
@@ -27,9 +24,9 @@ def build_model_call_parameters(
     provider_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     options = _redact(
-        dict(provider_options)
+        provider_options
         if provider_options is not None
-        else thaw_json_mapping(invocation.request.options)
+        else invocation.request.options
     )
     if isinstance(options, dict):
         options.pop("tools", None)
@@ -66,7 +63,7 @@ def describe_model_call(
     if callable(describe):
         value = describe(messages, invocation)
         if isinstance(value, Mapping):
-            return _redact(dict(value))
+            return _redact(value)
     return build_model_call_parameters(messages, invocation)
 
 

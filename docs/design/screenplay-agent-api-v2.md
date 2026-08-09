@@ -213,6 +213,14 @@ POST /conversation/turns/{turnId}/resume
 
 Snapshot 是界面事实源，cursor event 只负责通知 Snapshot 已失效。事件订阅断开只移除订阅者，不取消 Turn、Run 或 Operation；取消必须调用 cancel 命令。普通咨询必须保持 Operation、Candidate 与 Revision 数量为零。
 
+普通咨询仍可调用经过项目范围校验的只读工具，以核对当前 Project、已接受 Revision 和来源材料；它不能调用任何提案工具。正式 Operation 才获得提案权限及阶段 Artifact 协议。两种路径使用不同的宿主指令，普通对话不会再收到正式交付物的机械提交流程。
+
+同一 Session 同时只允许一个 queued/running Turn。页面不保存未提交的发送队列；正在执行时，用户必须等待完成或显式取消。只有 completed Turn 进入后续模型历史，failed/canceled Turn 仍保留在 Snapshot 中供用户查看，但不会污染模型上下文。
+
+Turn 的 `attempt` 表示当前请求的执行次数。进程或 lease 中断后，恢复会保留 User 内容，清空旧 Run 引用、半截 Assistant 内容和未完成 Revision 引用，然后以新的 Core Run 开始下一次 attempt。Core 中的旧 Run 审计不删除。
+
+Conversation event 只包含失效通知元数据；`screenplay.document_proposal` 全文不会写入 Conversation 表或通用 AI wire。候选结果只保存权威 `revisionId`。前端通过 SSE cursor 触发 Snapshot 刷新，低频 HTTP cursor 检查只作为断线兜底。
+
 ### 5.3 Operation
 
 ```http

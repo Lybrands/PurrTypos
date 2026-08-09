@@ -6,8 +6,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
-from agent_core.events import AgentEvent
 from agent_core.contracts import ExecutionRecipe
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_text,
+    required_text,
+)
+from agent_core.events import AgentEvent
 
 from agent_core.json_values import freeze_json_mapping
 
@@ -33,22 +38,19 @@ class TaskAdmissionDecision:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", ExecutionMode(self.mode))
-        reason = str(self.reason_code or "").strip()
-        if not reason:
-            raise ValueError("task admission reason_code is required")
-        object.__setattr__(self, "reason_code", reason)
+        object.__setattr__(self, "reason_code", required_text(
+            self.reason_code, "task admission reason_code"
+        ))
         for name in ("estimated_units", "estimated_model_calls"):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"task admission {name} must be non-negative")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, non_negative_int(
+                getattr(self, name), f"task admission {name}"
+            ))
         object.__setattr__(
             self,
             "requires_confirmation",
             bool(self.requires_confirmation),
         )
-        message = str(self.message or "").strip() or None
-        object.__setattr__(self, "message", message)
+        object.__setattr__(self, "message", optional_text(self.message))
         if isinstance(self.covered_step_ids, (str, bytes, bytearray)):
             raise ValueError("covered task admission step ids must be a sequence")
         covered_step_ids = tuple(
@@ -104,14 +106,12 @@ class LongTaskDispatchReceipt:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        task_id = str(self.task_id or "").strip()
-        if not task_id:
-            raise ValueError("long task dispatch task_id is required")
-        object.__setattr__(self, "task_id", task_id)
-        message = str(self.message or "").strip()
-        if not message:
-            raise ValueError("long task dispatch message is required")
-        object.__setattr__(self, "message", message)
+        object.__setattr__(self, "task_id", required_text(
+            self.task_id, "long task dispatch task_id"
+        ))
+        object.__setattr__(self, "message", required_text(
+            self.message, "long task dispatch message"
+        ))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -139,13 +139,12 @@ class LongTaskExecutionResult:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        task_id = str(self.task_id or "").strip()
-        if not task_id:
-            raise ValueError("long task execution task_id is required")
-        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "task_id", required_text(
+            self.task_id, "long task execution task_id"
+        ))
         object.__setattr__(self, "status", LongTaskExecutionStatus(self.status))
         object.__setattr__(self, "final_response", str(self.final_response or ""))
-        object.__setattr__(self, "error", str(self.error or "").strip() or None)
+        object.__setattr__(self, "error", optional_text(self.error))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 

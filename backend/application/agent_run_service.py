@@ -29,6 +29,7 @@ from application.agent_delegation_service import AgentDelegationService
 from application.agent_delegation_tool import (
     build_delegation_tool_registration,
 )
+from application.agent_run_input import AgentRunInput
 from application.request_mapping import (
     agent_context_claims,
     agent_run_options,
@@ -37,9 +38,6 @@ from application.request_mapping import (
 from application.run_provenance import build_chat_run_provenance
 from application.run_binding import RunBindingLifecycle
 from infrastructure.models.capabilities import normalize_thinking_enabled
-from schemas.ai import ChatStreamRequest
-
-
 AgentRunUpdate = AgentEvent | AgentRunResult
 _QUEUE_END = object()
 
@@ -58,7 +56,7 @@ class AgentRunService:
     async def run(
         self,
         *,
-        body: ChatStreamRequest,
+        body: AgentRunInput,
         api_key: str,
         provider_options: dict,
         signal: CancellationSignal,

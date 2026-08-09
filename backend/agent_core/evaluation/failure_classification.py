@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    non_negative_integer as _non_negative_integer,
+)
 from agent_core.evaluation.diagnostics import (
     build_canonical_run_observation,
     evaluate_agent_run,
@@ -322,19 +326,6 @@ def _append_finding(
         "evidence": dict(evidence),
         "remediation": remediation,
     })
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _non_negative_integer(value: Any) -> int:
-    if value is None or isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
 __all__ = ["classify_agent_run_failures"]

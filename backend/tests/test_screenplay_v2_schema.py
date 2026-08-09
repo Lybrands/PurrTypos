@@ -10,6 +10,65 @@ from database.connection import DatabaseConnection
 pytestmark = pytest.mark.asyncio
 
 
+async def test_startup_drops_only_the_incompatible_conversation_experiment(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute("DROP TABLE screenplay_conversation_events")
+    await first.execute("DROP TABLE screenplay_conversation_turns")
+    await first.execute("""CREATE TABLE screenplay_conversation_turns (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        session_id INTEGER NOT NULL,
+        status TEXT NOT NULL
+    )""")
+    await first.execute("""CREATE TABLE screenplay_conversation_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id TEXT NOT NULL
+    )""")
+    await first.execute(
+        "INSERT INTO screenplay_conversation_turns "
+        "(id, project_id, session_id, status) "
+        "VALUES ('discarded-turn', 'project', 1, 'completed')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_projects (id, title, source_snapshot_json) "
+        "VALUES ('kept-native-project', '保留项目', '{}')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_command_receipts "
+        "(command_id, command_type, project_id, request_digest, result_ref) "
+        "VALUES ('discarded-turn-command', 'submitConversationTurn', "
+        "'kept-native-project', 'digest', "
+        "'screenplay-conversation-turn://discarded-turn')"
+    )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        columns = {
+            row["name"] for row in await reopened.fetch_all(
+                "PRAGMA table_info(screenplay_conversation_turns)"
+            )
+        }
+        assert "attempt" in columns
+        assert await reopened.fetch_one(
+            "SELECT COUNT(*) AS count FROM screenplay_conversation_turns"
+        ) == {"count": 0}
+        assert await reopened.fetch_one(
+            "SELECT title FROM screenplay_projects "
+            "WHERE id = 'kept-native-project'"
+        ) == {"title": "保留项目"}
+        assert await reopened.fetch_one(
+            "SELECT COUNT(*) AS count FROM screenplay_command_receipts "
+            "WHERE command_type = 'submitConversationTurn'"
+        ) == {"count": 0}
+    finally:
+        await reopened.close()
+
+
 async def test_startup_retires_legacy_screenplay_store_without_touching_writing_data(
     tmp_path: Path,
 ):

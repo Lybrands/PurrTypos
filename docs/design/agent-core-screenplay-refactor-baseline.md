@@ -166,7 +166,7 @@ Phase 2 已完成 Core/Application 所有权收紧：
 | 领域结果投影 | Repository 调用通用 `DomainEventProjector`，剧本 Projector 在同一事务中产出 Revision 引用 | `agent_core/ports/projection.py`、`ScreenplayV2ProposalProjector` |
 | 剧本权威读取 | Domain 只依赖 `ScreenplayQueryPort`，SQLite 查询位于 Infrastructure | `domains/screenplay/query_port.py`、`infrastructure/screenplay/agent_query.py` |
 | 产品请求与执行 | 通用 DTO/映射/Run Service 不再含剧本字段或分支 | `schemas/screenplay_agent_run.py`、`screenplay_agent_request_mapping.py`、`screenplay_agent_run_service.py` |
-| 产品事件 | 通用 SSE/Run snapshot 只调用注入的事件映射器 | `screenplay_sse_mapping.py`、`AgentProfileRegistry.event_mapper` |
+| 产品事件 | 原生 Conversation 直接投影所需事件；通用 SSE/Run snapshot 不再认识剧本事件 | `screenplay_conversation_service.py` |
 | 产品装配 | 剧本 Query、Admission、Projector 与 Long Task 生命周期由产品 Composition 拥有 | `screenplay_agent_composition.py` |
 
 本阶段把以下架构债务固定为零：
@@ -189,7 +189,7 @@ Phase 3 已建立一条与旧 Writing Chat 完全分离、但尚未切换生产�
 |---|---|---|
 | 对话事实 | User/Assistant 内容、route、status、Run/Operation/Revision 引用和执行 lease 持久化为 Turn | `screenplay_conversation_turns` |
 | 增量订阅 | 每个 Turn 事件有单调 cursor 与 Turn 内 sequence；断开订阅不改变执行状态 | `screenplay_conversation_events`、Conversation events API |
-| 只读问答 | 服务端结构化分流为 `read_only`，工具关闭，Operation 数量保持为零 | `ScreenplayConversationService` |
+| 只读问答 | 服务端结构化分流为 `read_only`，只暴露 READ 工具，Operation 数量保持为零 | `ScreenplayConversationService` |
 | 正式任务 | User Turn、Operation、Command Receipt 在同一取消线性化事务提交 | `SqliteScreenplayConversationRepository.begin_turn` |
 | 执行恢复 | 业务输入从持久化 Operation 恢复；模型密钥不落库，恢复时重新注入；lease 有独立心跳 | `execute_turn`、`resume_turn` |
 | 前端事实源 | cursor 只触发失效，Snapshot 重建完整剧本消息状态 | `conversationClient.ts`、`conversationState.ts` |
@@ -233,3 +233,9 @@ Phase 5 不再把旧剧本 Agent 数据可读作为约束。测试阶段数据�
 保留的 `agent_core.contracts`、`agent_core.engine`、`agent_core.ports`、`agent_core.runtime` 包入口是 Core 自身稳定的公开导入面，服务所有 Agent；它们不是旧剧本数据兼容层，因此不在删除范围。Provider 协议兼容、Fountain 文本兼容等也不参与剧本状态归属，不能与旧数据迁移混为一谈。
 
 Phase 5 完整门禁与故障注入矩阵记录在 [`agent-core-screenplay-phase5-verification.md`](agent-core-screenplay-phase5-verification.md)。
+
+## 12. native Conversation 二次收口记录
+
+第一版 native Conversation 已被进一步收紧：剧本 Run 输入不再继承 Writing Chat DTO；咨询和正式任务分别使用只读/提案工具权限与独立宿主规则；Session 不再允许渲染进程维护的临时发送队列。Turn 增加 execution attempt，重启恢复会清除旧 Run 引用和半截 Assistant 内容后再创建新的 Core Run。只有 completed Turn 进入后续模型历史。
+
+持久化事件不再保存通用 SSE chunk 或 Proposal 全文，只记录 Turn 已变化与 Revision 引用。前端现在真正订阅 cursor SSE，并在收到通知后重取权威 Snapshot；低频轮询仅用于订阅故障恢复。Conversation HTTP 已从项目聚合路由拆到 `routers/screenplay_conversations.py`。

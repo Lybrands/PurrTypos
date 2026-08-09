@@ -95,7 +95,7 @@ def is_unstructured_tool_output(content: str) -> bool:
             normalized = "\n".join(lines[1:-1]).strip()
     try:
         value = json.loads(normalized)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except ValueError:
         return False
     return isinstance(value, dict) and len(value) >= 2
 

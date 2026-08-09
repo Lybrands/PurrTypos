@@ -34,8 +34,7 @@ def to_screenplay_agent_request(
     body_options = dict(body.options or {})
     options = {**body_options, **dict(provider_options)}
     if (
-        _has_caller_tool_definitions(body.tools)
-        or _has_caller_tool_definitions(body_options.get("tools"))
+        _has_caller_tool_definitions(body_options.get("tools"))
         or body_options.get("tool_choice") is not None
         or _has_caller_tool_definitions(options.get("tools"))
         or options.get("tool_choice") is not None

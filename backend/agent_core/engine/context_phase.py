@@ -194,7 +194,7 @@ def assemble_messages(
     context_messages = [_context_message(block) for block in blocks]
     if plan is not None:
         context_messages.append(build_execution_message(plan))
-    return tuple((*leading, *context_messages, *remainder))
+    return (*leading, *context_messages, *remainder)
 
 
 def planned_tool_names(plan: TaskPlan) -> frozenset[str]:

@@ -9,6 +9,7 @@ from agent_core.contracts import (
     RunBinding,
     RunLineage,
     RunProvenance,
+    ToolExecutionMode,
 )
 from agent_core.ports import CancellationSignal
 from application.agent_run_service import AgentRunService, AgentRunUpdate
@@ -140,6 +141,11 @@ class ScreenplayAgentRunService:
             base_options=base_options,
             run_binding_lifecycle=lifecycle,
             long_task_executor=execute_long_task,
+            allowed_tool_modes=(
+                frozenset({ToolExecutionMode.READ, ToolExecutionMode.PROPOSE})
+                if operation_id
+                else frozenset({ToolExecutionMode.READ})
+            ),
         )
         try:
             async for update in stream:

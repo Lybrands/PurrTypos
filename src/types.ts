@@ -367,6 +367,7 @@ export interface ScreenplayConversationTurn {
   commandId: string;
   route: 'read_only' | 'operation';
   status: ScreenplayConversationTurnStatus;
+  attempt: number;
   userContent: string;
   assistantContent: string;
   runtimeProfile: {
@@ -1491,6 +1492,12 @@ export interface ElectronAPI {
     after?: number;
     limit?: number;
   }) => Promise<ApiResult<ScreenplayConversationEventPage>>;
+  watchScreenplayConversationEvents: (data: {
+    projectId: EntityId;
+    sessionId: number;
+    after: number;
+    onEvent: (event: ScreenplayConversationEvent) => void;
+  }) => () => void;
   cancelScreenplayConversationTurn: (data: {
     commandId: string;
     turnId: string;
@@ -2119,22 +2126,6 @@ export interface ElectronAPI {
     selectedForeshadowingIds?: (number | string)[];
     chatAgentMode?: ChatAgentMode;
     contextWindow?: AiContextWindow;
-    /** 领域运行配置；省略时保持现有 Writing Agent。 */
-    agentProfile?: "writing" | "screenplay";
-    /** screenplay profile 的唯一项目作用域。 */
-    screenplayProjectId?: EntityId;
-    /** Operation-first 生成任务的稳定业务身份。 */
-    screenplayOperationId?: string;
-    /** 仅作一致性校验，不能覆盖项目持久化的来源书籍。 */
-    sourceBookId?: EntityId | null;
-    activeDocumentId?: EntityId | null;
-    activeStage?: ScreenplayStage;
-    /** 区分自由对话与必须产出当前阶段正式提案的任务。 */
-    screenplayTaskIntent?: "chat" | "stage_deliverable";
-    /** 正文阶段一次生成的连续场景数；超长范围由宿主转交持久化任务。 */
-    screenplayDraftSceneCount?: number;
-    /** 稳定的正文范围意图；实际场景由后端在运行开始时解析。 */
-    screenplayDraftScope?: "planner" | "next_scene" | "next_episode" | `next_${number}_episodes` | "all_remaining" | "count";
   }) => string;
   abortAiStream: (streamId?: string) => void;
   onAiChunk: (
@@ -2189,10 +2180,6 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
-      /** 剧本 Agent 生成的待审阅内容；v2 会在服务端投影为候选，旧项目仍由前端保存。 */
-      proposedScreenplayDocument?: ScreenplayDocumentProposal;
-      /** Native v2 candidate reference; never contains proposal content. */
-      screenplayRevisionReady?: ScreenplayRevisionRef;
       /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
       toolApprovalRequired?: ToolApprovalRequest;
       /** 审批的服务端最终状态（包含超时与连接取消）。 */

@@ -1,4 +1,4 @@
-"""Structural ratchets for the behavior-preserving Agent Core split."""
+"""Structural ratchets for Agent Core package boundaries."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ ORCHESTRATOR_LINE_CAPS = {
     "engine/orchestrator.py": 1975,
 }
 
-FACADE_LINE_CAPS = {
+PACKAGE_LINE_CAPS = {
     "contracts/__init__.py": 1947,
     "ports/__init__.py": 58,
 }
@@ -80,14 +80,9 @@ MOVED_TOP_LEVEL_DEFINITIONS = {
     },
 }
 
-REQUIRED_PHASE_ONE_MODULES = {
-    "contracts/context.py",
+REQUIRED_CORE_MODULES = {
     "contracts/enums.py",
     "contracts/host.py",
-    "contracts/messages.py",
-    "contracts/planning.py",
-    "contracts/runs.py",
-    "contracts/tools.py",
     "engine/context_phase.py",
     "engine/durable_execution.py",
     "engine/options.py",
@@ -118,32 +113,32 @@ def _line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8").splitlines())
 
 
-def test_phase_one_replaces_monolith_files_with_packages():
+def test_agent_core_uses_focused_packages():
     for legacy_name in ("contracts.py", "engine.py", "ports.py", "runtime.py"):
         assert not (CORE_DIR / legacy_name).exists(), legacy_name
     missing = sorted(
         relative
-        for relative in REQUIRED_PHASE_ONE_MODULES
+        for relative in REQUIRED_CORE_MODULES
         if not (CORE_DIR / relative).is_file()
     )
-    assert not missing, "Missing Phase 1 modules: " + ", ".join(missing)
+    assert not missing, "Missing Agent Core modules: " + ", ".join(missing)
 
 
-def test_phase_one_extracted_definitions_cannot_return_to_facades_or_orchestrators():
+def test_extracted_definitions_cannot_return_to_facades_or_orchestrators():
     violations: list[str] = []
     for relative, forbidden in MOVED_TOP_LEVEL_DEFINITIONS.items():
         observed = _top_level_definitions(CORE_DIR / relative)
         for name in sorted(observed & forbidden):
             violations.append(f"{relative} defines {name}")
-    assert not violations, "Phase 1 responsibilities moved backwards:\n" + "\n".join(
+    assert not violations, "Agent Core responsibilities moved backwards:\n" + "\n".join(
         violations
     )
 
 
-def test_phase_one_orchestrators_and_facades_can_only_shrink():
+def test_orchestrators_and_packages_can_only_shrink():
     violations: list[str] = []
-    for relative, cap in {**ORCHESTRATOR_LINE_CAPS, **FACADE_LINE_CAPS}.items():
+    for relative, cap in {**ORCHESTRATOR_LINE_CAPS, **PACKAGE_LINE_CAPS}.items():
         observed = _line_count(CORE_DIR / relative)
         if observed > cap:
-            violations.append(f"{relative}: {observed} lines, Phase 1 cap {cap}")
+            violations.append(f"{relative}: {observed} lines, cap {cap}")
     assert not violations, "Agent Core monoliths grew:\n" + "\n".join(violations)

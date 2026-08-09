@@ -17,6 +17,8 @@ from infrastructure.persistence.sqlite_screenplay_v2_repository import (
 
 
 TURN_LEASE_DURATION_MS = 30_000
+ACTIVE_TURN_STATUSES = frozenset({"queued", "running"})
+TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "canceled"})
 
 
 def _dump(value: object) -> str:
@@ -32,7 +34,7 @@ def _dump(value: object) -> str:
 def _object(value: object) -> dict[str, Any]:
     try:
         parsed = json.loads(str(value or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -42,8 +44,7 @@ def _digest(value: object) -> str:
 
 
 def _operation_command_id(command_id: str) -> str:
-    digest = hashlib.sha256(command_id.encode("utf-8")).hexdigest()
-    return f"screenplay:conversation-operation:{digest}"
+    return f"screenplay:conversation-operation:{_digest(command_id)}"
 
 
 class SqliteScreenplayConversationRepository:
@@ -67,13 +68,22 @@ class SqliteScreenplayConversationRepository:
         operation: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
-            replay = await self._find_receipt(
+            replay = await self._find_turn_receipt(
                 command_id=command_id,
+                command_type="submitConversationTurn",
                 request_digest=request_digest,
             )
             if replay is not None:
                 return replay
             await self._require_project_session(project_id, session_id)
+            active = await self._db.fetch_one(
+                "SELECT id FROM screenplay_conversation_turns "
+                "WHERE project_id = ? AND session_id = ? "
+                "AND status IN ('queued', 'running') LIMIT 1",
+                [project_id, int(session_id)],
+            )
+            if active is not None:
+                raise AppError("当前剧本对话仍有一轮正在执行", 409)
             turn_id = f"spturn_{uuid.uuid4().hex}"
             await self._db.execute(
                 "INSERT INTO screenplay_conversation_turns "
@@ -99,7 +109,7 @@ class SqliteScreenplayConversationRepository:
                 payload={"route": route},
             )
 
-            operation_result: dict[str, Any] | None = None
+            operation_id: str | None = None
             if operation is not None:
                 operation_command_id = _operation_command_id(command_id)
                 operation_payload = {
@@ -129,9 +139,7 @@ class SqliteScreenplayConversationRepository:
                     },
                     within_transaction=True,
                 )
-                operation_id = str(
-                    operation_result["operation"]["id"]
-                )
+                operation_id = str(operation_result["operation"]["id"])
                 await self._db.execute(
                     "UPDATE screenplay_conversation_turns SET operation_id = ?, "
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
@@ -150,52 +158,33 @@ class SqliteScreenplayConversationRepository:
 
             response = {
                 "turnId": turn_id,
-                "operationId": (
-                    operation_result["operation"]["id"]
-                    if operation_result is not None
-                    else None
-                ),
+                "operationId": operation_id,
             }
-            await self._db.execute(
-                "INSERT INTO screenplay_command_receipts "
-                "(command_id, command_type, project_id, request_digest, "
-                "result_ref, response_json) VALUES "
-                "(?, 'submitConversationTurn', ?, ?, ?, ?)",
-                [
-                    command_id,
-                    project_id,
-                    request_digest,
-                    f"screenplay-conversation-turn://{turn_id}",
-                    _dump(response),
-                ],
+            await self._record_turn_receipt(
+                command_id=command_id,
+                command_type="submitConversationTurn",
+                project_id=project_id,
+                request_digest=request_digest,
+                turn_id=turn_id,
+                response=response,
             )
             return _turn_view(await self._require_turn(turn_id))
 
-    async def _find_receipt(
+    async def _find_turn_receipt(
         self,
         *,
         command_id: str,
+        command_type: str,
         request_digest: str,
     ) -> dict[str, Any] | None:
-        receipt = await self._db.fetch_one(
-            "SELECT command_type, request_digest, response_json "
-            "FROM screenplay_command_receipts WHERE command_id = ?",
-            [command_id],
+        response = await self._operations.find_command_receipt(
+            command_id=command_id,
+            command_type=command_type,
+            request_digest=request_digest,
         )
-        if receipt is None:
+        if response is None:
             return None
-        if (
-            str(receipt.get("command_type") or "")
-            != "submitConversationTurn"
-            or str(receipt.get("request_digest") or "") != request_digest
-        ):
-            raise AppError(
-                "同一个 Idempotency-Key 不能用于不同的对话请求",
-                409,
-            )
-        turn_id = str(
-            _object(receipt.get("response_json")).get("turnId") or ""
-        )
+        turn_id = str(response.get("turnId") or "")
         if not turn_id:
             raise AppError("对话命令回执缺少 Turn 引用", 409)
         return _turn_view(await self._require_turn(turn_id))
@@ -205,29 +194,31 @@ class SqliteScreenplayConversationRepository:
         lease_expires_at_ms = current_ms + TURN_LEASE_DURATION_MS
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            if str(turn["status"]) in {"completed", "failed", "canceled"}:
+            if str(turn["status"]) in TERMINAL_TURN_STATUSES:
                 return False
             existing_owner = str(turn.get("execution_owner_id") or "")
             existing_lease = int(turn.get("lease_expires_at_ms") or 0)
-            if (
-                existing_owner
-                and existing_owner != self._owner_id
-                and existing_lease > current_ms
-            ):
+            if existing_owner and existing_lease > current_ms:
                 return False
-            if existing_owner == self._owner_id and existing_lease > current_ms:
-                return False
+            attempt = int(turn.get("attempt") or 0) + 1
             await self._db.execute(
                 "UPDATE screenplay_conversation_turns SET status = 'running', "
+                "attempt = ?, "
                 "execution_owner_id = ?, lease_expires_at_ms = ?, "
                 "heartbeat_at_ms = ?, update_time = CURRENT_TIMESTAMP "
                 "WHERE id = ? AND status IN ('queued', 'running')",
-                [self._owner_id, lease_expires_at_ms, current_ms, turn_id],
+                [
+                    attempt,
+                    self._owner_id,
+                    lease_expires_at_ms,
+                    current_ms,
+                    turn_id,
+                ],
             )
             await self._append_event_for_turn(
                 turn,
                 "screenplay.conversation.turn_started",
-                {},
+                {"attempt": attempt},
             )
             return True
 
@@ -267,42 +258,37 @@ class SqliteScreenplayConversationRepository:
         *,
         command_id: str,
         request_digest: str,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            receipt = await self._db.fetch_one(
-                "SELECT command_type, request_digest FROM "
-                "screenplay_command_receipts WHERE command_id = ?",
-                [command_id],
+            replay = await self._find_turn_receipt(
+                command_id=command_id,
+                command_type="resumeConversationTurn",
+                request_digest=request_digest,
             )
-            if receipt is not None:
-                if (
-                    str(receipt.get("command_type") or "")
-                    != "resumeConversationTurn"
-                    or str(receipt.get("request_digest") or "")
-                    != request_digest
-                ):
-                    raise AppError(
-                        "同一个 Idempotency-Key 不能用于不同的恢复请求",
-                        409,
-                    )
-                return _turn_view(turn)
-            if str(turn["status"]) in {"completed", "failed", "canceled"}:
+            if replay is not None:
+                return replay, False
+            if str(turn["status"]) in TERMINAL_TURN_STATUSES:
                 raise AppError("剧本对话 Turn 已结束，不能恢复", 409)
-            await self._db.execute(
-                "INSERT INTO screenplay_command_receipts "
-                "(command_id, command_type, project_id, request_digest, "
-                "result_ref, response_json) VALUES "
-                "(?, 'resumeConversationTurn', ?, ?, ?, ?)",
-                [
-                    command_id,
-                    str(turn["project_id"]),
-                    request_digest,
-                    f"screenplay-conversation-turn://{turn_id}",
-                    _dump({"turnId": turn_id}),
-                ],
+            if (
+                str(turn["status"]) == "running"
+                and int(turn.get("lease_expires_at_ms") or 0) > now_ms()
+            ):
+                raise AppError("剧本对话 Turn 仍在执行，不能重复恢复", 409)
+            if str(turn["status"]) == "running":
+                await self._reset_interrupted_turn(
+                    turn,
+                    reason="execution_lease_expired",
+                )
+                turn = await self._require_turn(turn_id)
+            await self._record_turn_receipt(
+                command_id=command_id,
+                command_type="resumeConversationTurn",
+                project_id=str(turn["project_id"]),
+                request_digest=request_digest,
+                turn_id=turn_id,
             )
-            return _turn_view(turn)
+            return _turn_view(turn), True
 
     async def recover_after_restart(self) -> tuple[str, ...]:
         """Release process-owned Turn leases without inventing credentials.
@@ -320,18 +306,9 @@ class SqliteScreenplayConversationRepository:
             recovered: list[str] = []
             for turn in rows:
                 turn_id = str(turn["id"])
-                await self._db.execute(
-                    "UPDATE screenplay_conversation_turns SET "
-                    "status = 'queued', execution_owner_id = NULL, "
-                    "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
-                    "update_time = CURRENT_TIMESTAMP WHERE id = ? "
-                    "AND status = 'running'",
-                    [turn_id],
-                )
-                await self._append_event_for_turn(
+                await self._reset_interrupted_turn(
                     turn,
-                    "screenplay.conversation.turn_recovery_required",
-                    {"reason": "process_restart"},
+                    reason="process_restart",
                 )
                 recovered.append(turn_id)
             return tuple(recovered)
@@ -343,16 +320,16 @@ class SqliteScreenplayConversationRepository:
         before_turn_id: str,
     ) -> list[dict[str, str]]:
         current = await self._require_turn(before_turn_id)
-        current_position = await self._db.fetch_one(
-            "SELECT rowid AS position FROM screenplay_conversation_turns "
-            "WHERE id = ?",
-            [before_turn_id],
-        )
         rows = await self._db.fetch_all(
             "SELECT id, user_content, assistant_content FROM "
-            "screenplay_conversation_turns WHERE session_id = ? "
+            "screenplay_conversation_turns WHERE project_id = ? "
+            "AND session_id = ? AND status = 'completed' "
             "AND rowid < ? ORDER BY rowid ASC",
-            [int(session_id), int(current_position["position"])],
+            [
+                str(current["project_id"]),
+                int(session_id),
+                int(current["position"]),
+            ],
         )
         messages: list[dict[str, str]] = []
         for row in rows:
@@ -389,11 +366,10 @@ class SqliteScreenplayConversationRepository:
                 {"runId": run_id},
             )
 
-    async def append_chunk(
+    async def apply_run_progress(
         self,
         turn_id: str,
         *,
-        chunk: Mapping[str, Any],
         assistant_delta: str = "",
         revision_id: str | None = None,
     ) -> None:
@@ -420,8 +396,11 @@ class SqliteScreenplayConversationRepository:
                 )
             await self._append_event_for_turn(
                 turn,
-                "screenplay.conversation.chunk",
-                {"chunk": dict(chunk)},
+                "screenplay.conversation.turn_updated",
+                {
+                    "contentChanged": bool(assistant_delta),
+                    "revisionId": revision_id,
+                },
             )
 
     async def complete_turn(
@@ -432,13 +411,10 @@ class SqliteScreenplayConversationRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            if str(turn["status"]) == "completed":
-                return _turn_view(turn)
-            if str(turn["status"]) == "canceled":
+            if str(turn["status"]) in TERMINAL_TURN_STATUSES:
                 return _turn_view(turn)
             content = str(turn.get("assistant_content") or "")
-            if not content.strip():
-                content = str(final_response or "")
+            content = content if content.strip() else str(final_response or "")
             await self._db.execute(
                 "UPDATE screenplay_conversation_turns SET status = 'completed', "
                 "assistant_content = ?, execution_owner_id = NULL, "
@@ -466,7 +442,7 @@ class SqliteScreenplayConversationRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            if str(turn["status"]) in {"completed", "failed", "canceled"}:
+            if str(turn["status"]) in TERMINAL_TURN_STATUSES:
                 return _turn_view(turn)
             error = {"code": code, "message": str(message or "")[:2_000]}
             await self._db.execute(
@@ -492,24 +468,14 @@ class SqliteScreenplayConversationRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            receipt = await self._db.fetch_one(
-                "SELECT command_type, request_digest FROM "
-                "screenplay_command_receipts WHERE command_id = ?",
-                [command_id],
+            replay = await self._find_turn_receipt(
+                command_id=command_id,
+                command_type="cancelConversationTurn",
+                request_digest=request_digest,
             )
-            if receipt is not None:
-                if (
-                    str(receipt.get("command_type") or "")
-                    != "cancelConversationTurn"
-                    or str(receipt.get("request_digest") or "")
-                    != request_digest
-                ):
-                    raise AppError(
-                        "同一个 Idempotency-Key 不能用于不同的取消请求",
-                        409,
-                    )
-                return _turn_view(turn)
-            if str(turn["status"]) not in {"completed", "failed", "canceled"}:
+            if replay is not None:
+                return replay
+            if str(turn["status"]) not in TERMINAL_TURN_STATUSES:
                 await self._db.execute(
                     "UPDATE screenplay_conversation_turns SET status = 'canceled', "
                     "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
@@ -525,18 +491,12 @@ class SqliteScreenplayConversationRepository:
                         "operationId": turn.get("operation_id"),
                     },
                 )
-            await self._db.execute(
-                "INSERT INTO screenplay_command_receipts "
-                "(command_id, command_type, project_id, request_digest, "
-                "result_ref, response_json) VALUES "
-                "(?, 'cancelConversationTurn', ?, ?, ?, ?)",
-                [
-                    command_id,
-                    str(turn["project_id"]),
-                    request_digest,
-                    f"screenplay-conversation-turn://{turn_id}",
-                    _dump({"turnId": turn_id}),
-                ],
+            await self._record_turn_receipt(
+                command_id=command_id,
+                command_type="cancelConversationTurn",
+                project_id=str(turn["project_id"]),
+                request_digest=request_digest,
+                turn_id=turn_id,
             )
             return _turn_view(await self._require_turn(turn_id))
 
@@ -628,7 +588,8 @@ class SqliteScreenplayConversationRepository:
 
     async def _require_turn(self, turn_id: str) -> dict[str, Any]:
         row = await self._db.fetch_one(
-            "SELECT * FROM screenplay_conversation_turns WHERE id = ?",
+            "SELECT rowid AS position, * FROM screenplay_conversation_turns "
+            "WHERE id = ?",
             [str(turn_id or "").strip()],
         )
         if row is None:
@@ -644,6 +605,33 @@ class SqliteScreenplayConversationRepository:
             raise AppError("剧本对话 Turn 的执行租约已失效", 409)
         return turn
 
+    async def _reset_interrupted_turn(
+        self,
+        turn: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        turn_id = str(turn["id"])
+        previous_run_id = str(turn.get("run_id") or "").strip() or None
+        await self._db.execute(
+            "UPDATE screenplay_conversation_turns SET status = 'queued', "
+            "assistant_content = '', run_id = NULL, revision_id = NULL, "
+            "error_json = NULL, execution_owner_id = NULL, "
+            "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND status = 'running'",
+            [turn_id],
+        )
+        await self._append_event_for_turn(
+            turn,
+            "screenplay.conversation.turn_recovery_required",
+            {
+                "reason": reason,
+                "previousRunId": previous_run_id,
+                "nextAttempt": int(turn.get("attempt") or 0) + 1,
+            },
+        )
+
     async def _append_event_for_turn(
         self,
         turn: Mapping[str, Any],
@@ -656,6 +644,30 @@ class SqliteScreenplayConversationRepository:
             session_id=int(turn["session_id"]),
             event_type=event_type,
             payload=payload,
+        )
+
+    async def _record_turn_receipt(
+        self,
+        *,
+        command_id: str,
+        command_type: str,
+        project_id: str,
+        request_digest: str,
+        turn_id: str,
+        response: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self._db.execute(
+            "INSERT INTO screenplay_command_receipts "
+            "(command_id, command_type, project_id, request_digest, "
+            "result_ref, response_json) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                command_id,
+                command_type,
+                project_id,
+                request_digest,
+                f"screenplay-conversation-turn://{turn_id}",
+                _dump(dict(response or {"turnId": turn_id})),
+            ],
         )
 
     async def _append_event(
@@ -706,13 +718,16 @@ def runtime_profile(
 
 
 def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(row["status"])
+    attempt = int(row.get("attempt") or 0)
     return {
         "id": str(row["id"]),
         "projectId": str(row["project_id"]),
         "sessionId": int(row["session_id"]),
         "commandId": str(row["command_id"]),
         "route": str(row["route"]),
-        "status": str(row["status"]),
+        "status": status,
+        "attempt": attempt,
         "userContent": str(row.get("user_content") or ""),
         "assistantContent": str(row.get("assistant_content") or ""),
         "runtimeProfile": _object(row.get("runtime_profile_json")),
@@ -721,7 +736,8 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "revisionId": str(row.get("revision_id") or "") or None,
         "error": _object(row.get("error_json")) or None,
         "retryable": (
-            str(row.get("status") or "") in {"queued", "running"}
+            attempt > 0
+            and status in ACTIVE_TURN_STATUSES
             and int(row.get("lease_expires_at_ms") or 0) <= now_ms()
         ),
         "createdAt": row.get("create_time"),

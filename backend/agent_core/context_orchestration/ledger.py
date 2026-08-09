@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from agent_core.contracts.normalization import non_negative_int, positive_int
 
 class ContextCompactionPhase(str, Enum):
     PRE_PLANNING = "pre_planning"
@@ -35,14 +36,12 @@ class ContextCompactionBudget:
             "planned_tool_count",
             "selected_tool_count",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-            object.__setattr__(self, name, value)
-        if self.provider_input_tokens <= 0:
-            raise ValueError("provider_input_tokens must be positive")
-        if self.output_reserve_tokens <= 0:
-            raise ValueError("output_reserve_tokens must be positive")
+            normalizer = (
+                positive_int
+                if name in {"provider_input_tokens", "output_reserve_tokens"}
+                else non_negative_int
+            )
+            object.__setattr__(self, name, normalizer(getattr(self, name), name))
         object.__setattr__(
             self,
             "context_tokens_are_resolved",

@@ -8,8 +8,8 @@ from hashlib import sha256
 from typing import Any
 
 from agent_core.contracts import RunProvenance
+from application.agent_run_input import AgentRunInput
 from application.request_mapping import context_window_tokens
-from schemas.ai import ChatStreamRequest
 from utils.url import normalize_base_url
 
 
@@ -27,7 +27,7 @@ _SECRET_FIELD_NAMES = frozenset({
 
 
 def build_chat_run_provenance(
-    body: ChatStreamRequest,
+    body: AgentRunInput,
 ) -> RunProvenance:
     """Hash the complete inbound profile without retaining credentials or URLs.
 

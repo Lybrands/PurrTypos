@@ -10,6 +10,23 @@ class AgentCoreError(Exception):
     """Base class for errors with host-controlled public handling."""
 
 
+class CodedAgentCoreError(AgentCoreError):
+    """Base failure carrying a stable code and immutable diagnostic details."""
+
+    default_code = "agent_core_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or self.default_code)
+        self.details = MappingProxyType(dict(details or {}))
+
+
 class ContractViolationError(AgentCoreError):
     """A registered capability violates a Core contract."""
 

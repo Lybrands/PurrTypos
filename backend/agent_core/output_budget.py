@@ -11,6 +11,12 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
+from agent_core.contracts.normalization import (
+    non_negative_int,
+    optional_positive_int,
+    positive_int,
+    required_text,
+)
 
 class ThinkingTokenAccounting(StrEnum):
     INCLUDED = "included"
@@ -46,11 +52,9 @@ class ModelOutputCapabilities:
     )
 
     def __post_init__(self) -> None:
-        if self.max_output_tokens is not None:
-            maximum = int(self.max_output_tokens)
-            if maximum <= 0:
-                raise ValueError("model max output tokens must be positive")
-            object.__setattr__(self, "max_output_tokens", maximum)
+        object.__setattr__(self, "max_output_tokens", optional_positive_int(
+            self.max_output_tokens, "model max output tokens"
+        ))
         object.__setattr__(
             self,
             "thinking_token_accounting",
@@ -78,20 +82,14 @@ class OutputBudgetPolicy:
     length_strategy: OutputLengthStrategy = OutputLengthStrategy.FAIL
 
     def __post_init__(self) -> None:
-        key = str(self.key or "").strip()
-        if not key:
-            raise ValueError("output budget policy key is required")
-        object.__setattr__(self, "key", key)
-        for name in (
-            "base_tokens",
-            "per_work_unit_tokens",
-            "hard_cap_tokens",
-            "reasoning_reserve_tokens",
-        ):
-            value = int(getattr(self, name))
-            if value < 0 or (name == "hard_cap_tokens" and value <= 0):
-                raise ValueError(f"{name} has an invalid output budget value")
-            object.__setattr__(self, name, value)
+        object.__setattr__(self, "key", required_text(
+            self.key, "output budget policy key"
+        ))
+        for name in ("base_tokens", "per_work_unit_tokens", "reasoning_reserve_tokens"):
+            object.__setattr__(self, name, non_negative_int(getattr(self, name), name))
+        object.__setattr__(self, "hard_cap_tokens", positive_int(
+            self.hard_cap_tokens, "hard_cap_tokens"
+        ))
         factor = float(self.safety_factor)
         if not math.isfinite(factor) or factor < 1:
             raise ValueError("output budget safety factor must be at least one")
@@ -138,19 +136,20 @@ class ResolvedOutputBudget:
             "task_hard_cap_tokens",
             "context_max_output_tokens",
         ):
-            value = int(getattr(self, name))
-            if value < 0 or (name != "reasoning_reserve_tokens" and value == 0):
-                raise ValueError(f"{name} must be positive")
-            object.__setattr__(self, name, value)
-        if self.model_max_output_tokens is not None:
-            model_maximum = int(self.model_max_output_tokens)
-            if model_maximum <= 0:
-                raise ValueError("model max output tokens must be positive")
-            object.__setattr__(
-                self,
-                "model_max_output_tokens",
-                model_maximum,
+            normalizer = (
+                non_negative_int
+                if name == "reasoning_reserve_tokens"
+                else positive_int
             )
+            object.__setattr__(self, name, normalizer(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "model_max_output_tokens",
+            optional_positive_int(
+                self.model_max_output_tokens,
+                "model max output tokens",
+            ),
+        )
         object.__setattr__(
             self,
             "limiting_factor",
@@ -231,27 +230,17 @@ def resolve_output_budget(
         ),
     )
 
-    effective = min(
-        requested,
-        policy.hard_cap_tokens,
-        context_maximum,
-        *(
-            (capabilities.max_output_tokens,)
-            if capabilities.max_output_tokens is not None
-            else ()
-        ),
-    )
-    if effective == requested:
-        limiting_factor = OutputBudgetLimit.TASK_ESTIMATE
-    elif effective == policy.hard_cap_tokens:
-        limiting_factor = OutputBudgetLimit.TASK_HARD_CAP
-    elif (
-        capabilities.max_output_tokens is not None
-        and effective == capabilities.max_output_tokens
-    ):
-        limiting_factor = OutputBudgetLimit.MODEL_CAPABILITY
-    else:
-        limiting_factor = OutputBudgetLimit.CONTEXT_AVAILABLE
+    candidates = [
+        (OutputBudgetLimit.TASK_ESTIMATE, requested),
+        (OutputBudgetLimit.TASK_HARD_CAP, policy.hard_cap_tokens),
+    ]
+    if capabilities.max_output_tokens is not None:
+        candidates.append((
+            OutputBudgetLimit.MODEL_CAPABILITY,
+            capabilities.max_output_tokens,
+        ))
+    candidates.append((OutputBudgetLimit.CONTEXT_AVAILABLE, context_maximum))
+    limiting_factor, effective = min(candidates, key=lambda item: item[1])
 
     return ResolvedOutputBudget(
         policy_key=policy.key,

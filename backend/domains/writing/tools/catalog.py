@@ -105,7 +105,6 @@ def build_writing_tool_catalog(
             cancellation_linearizable=(
                 name in cancellation_linearizable_handlers
             ),
-            planning_dependencies=WRITING_TOOL_PLANNING_DEPENDENCIES.get(name, ()),
             context_contract=WRITING_TOOL_CONTEXT_CONTRACTS[name],
         )
         for name in ordered_names

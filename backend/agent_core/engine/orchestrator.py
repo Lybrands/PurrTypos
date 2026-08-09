@@ -9,14 +9,17 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
 
-from agent_core.cancellation import OperationCanceled, await_with_cancellation
+from agent_core.cancellation import (
+    OperationCanceled,
+    await_with_cancellation,
+    is_canceled as _is_canceled,
+)
 from agent_core.context_budget import (
     allocate_context_budget,
     estimate_agent_messages_tokens,
     estimate_json_tokens,
     resolve_context_budget_claims,
     resolve_task_context_budget_claims,
-    trim_agent_messages_by_turn,
 )
 from agent_core.context_orchestration.contracts import (
     ConversationCompactionResult,
@@ -47,7 +50,6 @@ from agent_core.contracts import (
     PlanningConstraints,
     PlanningKind,
     PlanningTurn,
-    PostPlanningContextOptimizationResult,
     ResponseConstraints,
     RunCreateParams,
     RunId,
@@ -66,6 +68,7 @@ from agent_core.contracts import (
     ToolRiskLevel,
     TraceRecord,
 )
+from agent_core.contracts.normalization import optional_text as _optional_text
 from agent_core.errors import (
     ContextOverflowError,
     ContractViolationError,
@@ -133,7 +136,6 @@ from agent_core.ports import (
     ToolIdempotencyGateway,
     ToolRegistration,
     ModelGateway,
-    PostPlanningContextOptimizer,
 )
 from agent_core.run_controller import AgentRunController
 from agent_core.run_state import RunStateMachine
@@ -154,6 +156,7 @@ from agent_core.task_admission import (
     TaskAdmissionDecision,
     TaskAdmissionEvaluator,
 )
+from agent_core.timing import duration_ms as _duration_ms
 
 
 CoreRunUpdate = AgentEvent | AgentRunResult
@@ -180,9 +183,6 @@ class AgentCore:
         tool_catalog: ToolCatalog | None = None,
         agent_role_guidance: Mapping[str, Any] | None = None,
         max_parallel_agents: int = 1,
-        post_planning_context_optimizer: (
-            PostPlanningContextOptimizer | None
-        ) = None,
         task_admission_evaluator: TaskAdmissionEvaluator | None = None,
         long_task_dispatcher: LongTaskDispatcher | None = None,
         approval_gateway: ApprovalGateway | None = None,
@@ -197,9 +197,6 @@ class AgentCore:
         self._recovery_policy = recovery_policy
         self._conversation_compactor = (
             conversation_compactor or ContextCompressionCoordinator()
-        )
-        self._post_planning_context_optimizer = (
-            post_planning_context_optimizer
         )
         self._task_admission_evaluator = task_admission_evaluator
         self._long_task_dispatcher = long_task_dispatcher
@@ -1032,9 +1029,8 @@ class AgentCore:
                     ),
                     "selectedToolCount": len(selected_names),
                 }
-                optimizer = self._post_planning_context_optimizer
                 compactor = self._conversation_compactor
-                if compactor is not None or optimizer is not None:
+                if compactor is not None:
                     resolved_context_tokens = estimate_agent_messages_tokens(
                         _assemble_messages((), bundle.blocks, plan)
                     )
@@ -1048,94 +1044,62 @@ class AgentCore:
                         optimization_started.set()
 
                     async def run_context_optimization(
-                    ) -> PostPlanningContextOptimizationResult:
-                        if optimizer is None and compactor is not None:
-                            source_request = replace(
-                                compaction_source_request,
-                                metadata={
-                                    **dict(compaction_source_request.metadata),
-                                    **dict(request.metadata),
-                                },
-                            )
-                            compacted = await await_with_cancellation(
-                                compactor.prepare(
-                                    source_request,
-                                    signal,
-                                    budget=ContextCompactionBudget(
-                                        phase=(
-                                            ContextCompactionPhase.POST_PLANNING
-                                        ),
-                                        provider_input_tokens=(
-                                            budget.provider_input_tokens
-                                        ),
-                                        context_tokens=resolved_context_tokens,
-                                        context_tokens_are_resolved=True,
-                                        output_reserve_tokens=(
-                                            budget.output_reserve_tokens
-                                        ),
-                                        planned_step_count=(
-                                            post_planning_diagnostics[
-                                                "plannedStepCount"
-                                            ]
-                                        ),
-                                        planned_tool_count=(
-                                            post_planning_diagnostics[
-                                                "plannedToolCount"
-                                            ]
-                                        ),
-                                        selected_tool_count=len(selected_names),
-                                    ),
-                                    on_compaction_started=(
-                                        notify_optimization_started
-                                    ),
-                                ),
+                    ) -> ConversationCompactionResult:
+                        source_request = replace(
+                            compaction_source_request,
+                            metadata={
+                                **compaction_source_request.metadata,
+                                **request.metadata,
+                            },
+                        )
+                        compacted = await await_with_cancellation(
+                            compactor.prepare(
+                                source_request,
                                 signal,
+                                budget=ContextCompactionBudget(
+                                    phase=ContextCompactionPhase.POST_PLANNING,
+                                    provider_input_tokens=(
+                                        budget.provider_input_tokens
+                                    ),
+                                    context_tokens=resolved_context_tokens,
+                                    context_tokens_are_resolved=True,
+                                    output_reserve_tokens=(
+                                        budget.output_reserve_tokens
+                                    ),
+                                    planned_step_count=(
+                                        post_planning_diagnostics[
+                                            "plannedStepCount"
+                                        ]
+                                    ),
+                                    planned_tool_count=(
+                                        post_planning_diagnostics[
+                                            "plannedToolCount"
+                                        ]
+                                    ),
+                                    selected_tool_count=len(selected_names),
+                                ),
+                                on_compaction_started=(
+                                    notify_optimization_started
+                                ),
+                            ),
+                            signal,
+                        )
+                        if not isinstance(
+                            compacted,
+                            ConversationCompactionResult,
+                        ):
+                            raise ContractViolationError(
+                                "conversation compactor returned an invalid "
+                                "post-planning result"
                             )
-                            if not isinstance(
-                                compacted,
-                                ConversationCompactionResult,
-                            ):
-                                raise ContractViolationError(
-                                    "conversation compactor returned an "
-                                    "invalid post-planning result"
-                                )
-                            optimized_request = replace(
+                        return replace(
+                            compacted,
+                            request=replace(
                                 compacted.request,
                                 metadata={
-                                    **dict(request.metadata),
-                                    **dict(compacted.request.metadata),
+                                    **request.metadata,
+                                    **compacted.request.metadata,
                                 },
-                            )
-                            return PostPlanningContextOptimizationResult(
-                                request=optimized_request,
-                                outcome=compacted.outcome,
-                                compacted_turn_count=(
-                                    compacted.compacted_turn_count
-                                ),
-                                retained_raw_turn_count=(
-                                    compacted.retained_raw_turn_count
-                                ),
-                                summary_version=(
-                                    compacted.compression_state_version
-                                ),
-                                diagnostics=compacted.diagnostics,
-                            )
-                        assert optimizer is not None
-                        return await optimizer.optimize(
-                            request,
-                            provider_input_tokens=budget.provider_input_tokens,
-                            resolved_context_tokens=resolved_context_tokens,
-                            output_reserve_tokens=budget.output_reserve_tokens,
-                            planned_step_count=post_planning_diagnostics[
-                                "plannedStepCount"
-                            ],
-                            planned_tool_count=post_planning_diagnostics[
-                                "plannedToolCount"
-                            ],
-                            selected_tool_names=tuple(sorted(selected_names)),
-                            signal=signal,
-                            on_compaction_started=(
-                                notify_optimization_started
                             ),
                         )
 
@@ -1146,11 +1110,11 @@ class AgentCore:
                         optimization_started.wait()
                     )
                     optimization_result: (
-                        PostPlanningContextOptimizationResult | None
+                        ConversationCompactionResult | None
                     ) = None
                     optimization_failed = False
                     try:
-                        done, _pending = await asyncio.wait(
+                        await asyncio.wait(
                             (optimization_task, optimization_started_wait),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
@@ -1173,11 +1137,11 @@ class AgentCore:
                         candidate = await optimization_task
                         if not isinstance(
                             candidate,
-                            PostPlanningContextOptimizationResult,
+                            ConversationCompactionResult,
                         ):
                             raise ContractViolationError(
-                                "post-planning context optimizer returned "
-                                "an invalid result"
+                                "conversation compactor returned an invalid "
+                                "post-planning result"
                             )
                         optimization_result = candidate
                     except OperationCanceled:
@@ -1217,7 +1181,7 @@ class AgentCore:
                                 optimization_result.retained_raw_turn_count
                             ),
                             "summaryVersion": (
-                                optimization_result.summary_version
+                                optimization_result.compression_state_version
                             ),
                         }
                         await controller.record_trace(TraceRecord(
@@ -1264,7 +1228,7 @@ class AgentCore:
                                     else 0
                                 ),
                                 "summaryVersion": (
-                                    optimization_result.summary_version
+                                    optimization_result.compression_state_version
                                     if optimization_result is not None
                                     else None
                                 ),
@@ -1280,26 +1244,14 @@ class AgentCore:
                     messages=_assemble_messages(request.messages, bundle.blocks, plan),
                     context_window=budget.window_tokens,
                 )
-                if self._conversation_compactor is None:
-                    trimmed = trim_agent_messages_by_turn(
-                        prepared_request.messages,
-                        budget.provider_input_tokens,
-                        max_recent_messages=20,
-                    )
-                    prepared_messages = trimmed.messages
-                    estimated_input_tokens = trimmed.token_estimate
-                    dropped_message_count = trimmed.dropped_count
-                    overflow_tokens = trimmed.overflow_tokens
-                else:
-                    prepared_messages = prepared_request.messages
-                    estimated_input_tokens = estimate_agent_messages_tokens(
-                        prepared_messages
-                    )
-                    dropped_message_count = 0
-                    overflow_tokens = max(
-                        0,
-                        estimated_input_tokens - budget.provider_input_tokens,
-                    )
+                estimated_input_tokens = estimate_agent_messages_tokens(
+                    prepared_request.messages
+                )
+                dropped_message_count = 0
+                overflow_tokens = max(
+                    0,
+                    estimated_input_tokens - budget.provider_input_tokens,
+                )
                 if overflow_tokens:
                     raise ContextOverflowError(
                         "required messages exceed the initial provider input budget",
@@ -1310,10 +1262,6 @@ class AgentCore:
                             "overflowTokens": overflow_tokens,
                         },
                     )
-                prepared_request = replace(
-                    prepared_request,
-                    messages=prepared_messages,
-                )
                 state = self._execution_state_factory.create(request)
                 if not isinstance(state, ExecutionState):
                     raise ContractViolationError(
@@ -1926,7 +1874,7 @@ async def _record_safe_exception(
     overflow_details = (
         {
             "reasonCode": error.reason_code,
-            **dict(error.details),
+            **error.details,
         }
         if isinstance(error, ContextOverflowError)
         else {}
@@ -1937,7 +1885,7 @@ async def _record_safe_exception(
         details={
             "errorType": type(error).__name__,
             **overflow_details,
-            **dict(safe_details or {}),
+            **(safe_details or {}),
         },
         duration_ms=(_duration_ms(started) if started is not None else None),
     ))
@@ -1958,18 +1906,3 @@ def _run_result(
         error=snapshot.error,
         model=model,
     )
-
-
-def _is_canceled(signal: CancellationSignal | None) -> bool:
-    return bool(signal is not None and signal.is_set())
-
-
-def _duration_ms(started: float) -> int:
-    return max(0, round((perf_counter() - started) * 1_000))
-
-
-def _optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

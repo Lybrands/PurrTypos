@@ -9,7 +9,7 @@ from agent_core.recovery.contracts import (
     RecoveryRequest,
 )
 from agent_core.recovery.ledger import RecoveryLedger
-from agent_core.recovery.policy import RecoveryPolicy, RecoveryRule
+from agent_core.recovery.policy import RecoveryPolicy
 
 __all__ = [
     "RecoveryAction",
@@ -20,5 +20,4 @@ __all__ = [
     "RecoveryPolicy",
     "RecoveryReason",
     "RecoveryRequest",
-    "RecoveryRule",
 ]

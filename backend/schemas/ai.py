@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from schemas.common import normalize_locale_tag
+
 
 class ChatStreamRequest(BaseModel):
     messages: List[Dict[str, Any]]
@@ -30,19 +32,10 @@ class ChatStreamRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     chatAgentMode: Optional[str] = None
     contextWindow: Optional[str] = None
-    agentProfile: Literal["writing"] = "writing"
-
     @field_validator("locale")
     @classmethod
     def normalize_locale(cls, value: str) -> str:
-        parts = [
-            part
-            for part in str(value or "").strip().replace("_", "-").split("-")
-            if part
-        ]
-        if not parts or any(not part.isalnum() for part in parts):
-            raise ValueError("locale must be a valid language tag")
-        return "-".join(parts)
+        return normalize_locale_tag(value)
 
     @field_validator("bookId")
     @classmethod

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 from pydantic import ValidationError
 
-from agent_core.contracts import ContextBudget
+from agent_core.contracts import (
+    AgentRunResult,
+    ContextBudget,
+    RunStatus,
+    ToolExecutionMode,
+)
+from application.agent_run_service import AgentRunService
 from application.composition_factory import create_agent_composition
 from application.request_mapping import (
     to_agent_request as to_writing_agent_request,
@@ -15,6 +23,7 @@ from application.screenplay_agent_request_mapping import (
     screenplay_run_options,
     to_screenplay_agent_request,
 )
+from application.screenplay_agent_run_service import ScreenplayAgentRunService
 from database.connection import DatabaseConnection
 from tests.support import screenplay_v2_driver as screenplay_crud
 from domains.screenplay.context import (
@@ -43,10 +52,8 @@ async def screenplay_db(tmp_path: Path):
 def _body(**updates) -> ScreenplayAgentRunRequest:
     payload = {
         "messages": [{"role": "user", "content": "帮我完善创作简报"}],
-        "apiKey": "key",
         "apiProvider": "openai",
         "options": {"model": "model"},
-        "agentProfile": "screenplay",
         "screenplayProjectId": "project-1",
         "activeStage": "orientation",
     }
@@ -84,13 +91,53 @@ def test_chat_request_defaults_to_writing_profile():
         options={"model": "model"},
     )
     request = to_agent_request(body, {"model": "model"})
-    assert body.agentProfile == "writing"
     assert request.domain_context.namespace == WRITING_DOMAIN_NAMESPACE
 
 
 def test_screenplay_profile_requires_project_scope():
     with pytest.raises(ValidationError, match="screenplayProjectId"):
         _body(screenplayProjectId=None)
+
+
+def test_screenplay_run_input_does_not_inherit_writing_chat_transport():
+    assert not issubclass(ScreenplayAgentRunRequest, ChatStreamRequest)
+    assert {"apiKey", "agentProfile"}.isdisjoint(
+        ScreenplayAgentRunRequest.model_fields
+    )
+
+
+@pytest.mark.asyncio
+async def test_screenplay_consultation_exposes_only_read_tools(
+    screenplay_db,
+    monkeypatch,
+):
+    captured = {}
+
+    async def run(_service, **kwargs):
+        captured.update(kwargs)
+        yield AgentRunResult(
+            run_id="read-only-screenplay-run",
+            status=RunStatus.DONE,
+            final_response="只读回答",
+        )
+
+    monkeypatch.setattr(AgentRunService, "run", run)
+    service = ScreenplayAgentRunService(
+        SimpleNamespace(database=screenplay_db)
+    )
+    updates = []
+    async for update in service.run(
+        body=_body(enableAgentTools=True, chatAgentMode="ask"),
+        api_key="key",
+        provider_options={"model": "model"},
+        signal=asyncio.Event(),
+    ):
+        updates.append(update)
+
+    assert updates[-1].status is RunStatus.DONE
+    assert captured["allowed_tool_modes"] == frozenset({
+        ToolExecutionMode.READ,
+    })
 
 
 def test_screenplay_operation_scope_is_normalized_and_profile_bound():
@@ -151,7 +198,7 @@ def test_screenplay_request_accepts_a_bounded_dynamic_episode_scope():
     assert context.draft_scope == "next_12_episodes"
     with pytest.raises(
         ValidationError,
-        match="unsupported screenplay draft scope",
+        match="screenplayDraftScope",
     ):
         _body(screenplayDraftScope="next_101_episodes")
 
@@ -190,7 +237,10 @@ async def test_screenplay_context_uses_persisted_project_scope(screenplay_db):
     assert blocks[SCREENPLAY_POLICY_CONTEXT].untrusted is False
     assert blocks[SCREENPLAY_PROJECT_CONTEXT].untrusted is True
     assert "雾港" in blocks[SCREENPLAY_PROJECT_CONTEXT].content
-    assert "不得声称已经保存" in blocks[SCREENPLAY_POLICY_CONTEXT].content
+    assert "本轮没有修改权限" in blocks[SCREENPLAY_POLICY_CONTEXT].content
+    assert "beginCreativeBriefArtifact" not in (
+        blocks[SCREENPLAY_POLICY_CONTEXT].content
+    )
     assert bundle.diagnostics["screenplayProjectId"] == project["id"]
     assert bundle.diagnostics["screenplayDocumentCount"] == 1
     assert demands[0].desired_tokens == bundle.diagnostics[
@@ -291,7 +341,7 @@ async def test_screenplay_context_declares_restricted_adaptation_scope(
     assert "先调用 getSourceCoveragePlan" not in (
         blocks[SCREENPLAY_POLICY_CONTEXT].content
     )
-    assert "此阶段不得直接形成创作简报" in (
+    assert "本轮没有修改权限" in (
         blocks[SCREENPLAY_POLICY_CONTEXT].content
     )
     facts = bundle.diagnostics["hostPlanningFacts"]

@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from agent_core.evaluation._values import (
+    as_mapping as _mapping,
+    optional_non_negative_integer as _optional_non_negative_integer,
+)
 from agent_core.evaluation.diagnostics import (
     TRACE_EVENT_TYPE,
     build_canonical_run_observation,
@@ -278,20 +282,6 @@ def _handler_did_not_execute_for_approval(
 
 def _normalized_status(value: Any) -> str:
     return str(value or "").strip().lower()
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _optional_non_negative_integer(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 0 else None
 
 
 def _duration(trace: Mapping[str, Any]) -> int:

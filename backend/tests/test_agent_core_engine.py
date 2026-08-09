@@ -34,7 +34,6 @@ from agent_core.contracts import (
     PlanningKind,
     PlanningConstraints,
     PlanningResult,
-    PostPlanningContextOptimizationResult,
     ResponseValidationResult,
     RunCreateParams,
     RunStatus,
@@ -1659,102 +1658,6 @@ async def test_core_builds_host_planning_facts_before_planning_and_keeps_tool_gu
     assert budget_event.payload["reservedToolSchemaTokens"] == (
         budget_event.payload["toolSchemaTokens"]
     )
-
-
-@pytest.mark.asyncio
-async def test_core_runs_context_optimization_after_actual_plan_and_tools():
-    class _CaptureOptimizer:
-        def __init__(self):
-            self.arguments = None
-
-        async def optimize(
-            self,
-            request,
-            *,
-            provider_input_tokens,
-            resolved_context_tokens,
-            output_reserve_tokens,
-            planned_step_count,
-            planned_tool_count,
-            selected_tool_names,
-            signal=None,
-            on_compaction_started=None,
-        ):
-            self.arguments = {
-                "providerInputTokens": provider_input_tokens,
-                "resolvedContextTokens": resolved_context_tokens,
-                "outputReserveTokens": output_reserve_tokens,
-                "plannedStepCount": planned_step_count,
-                "plannedToolCount": planned_tool_count,
-                "selectedToolNames": tuple(selected_tool_names),
-            }
-            assert on_compaction_started is not None
-            await on_compaction_started({
-                "selectedTurnCount": 2,
-                "pressureRatio": 0.81,
-            })
-            return PostPlanningContextOptimizationResult(
-                request=request,
-                outcome="compacted",
-                compacted_turn_count=2,
-                retained_raw_turn_count=4,
-                summary_version=2,
-                diagnostics={"providerBudgetKind": "resolved"},
-            )
-
-    optimizer = _CaptureOptimizer()
-    core, request, options, repository, _model, _state = _core_fixture()
-    core._post_planning_context_optimizer = optimizer
-
-    updates = []
-    async for item in core.run(request, options=options):
-        updates.append(item)
-        if (
-            isinstance(item, AgentEvent)
-            and item.type == CoreEventType.APPROVAL_REQUESTED
-        ):
-            await core.resolve_approval(
-                item.run_id,
-                str(item.payload["approvalId"]),
-                ApprovalDecision.APPROVE,
-            )
-
-    assert updates[-1].status is RunStatus.DONE
-    assert optimizer.arguments is not None
-    assert optimizer.arguments["plannedStepCount"] == 4
-    assert optimizer.arguments["plannedToolCount"] == 3
-    assert optimizer.arguments["selectedToolNames"] == (
-        "apply_change",
-        "propose_change",
-        "read_resource",
-    )
-    assert optimizer.arguments["resolvedContextTokens"] > 0
-    compaction_events = [
-        item
-        for item in updates
-        if isinstance(item, AgentEvent)
-        and item.type.startswith("conversation.compaction.")
-    ]
-    assert [item.type for item in compaction_events] == [
-        "conversation.compaction.started",
-        "conversation.compaction.completed",
-    ]
-    assert compaction_events[-1].payload["postPlanning"] is True
-    budget_event = next(
-        item
-        for item in updates
-        if isinstance(item, AgentEvent)
-        and item.type == CoreEventType.CONTEXT_BUDGETED
-    )
-    assert budget_event.payload["diagnostics"][
-        "postPlanningOptimization"
-    ]["outcome"] == "compacted"
-    trace = next(
-        item
-        for item in repository.traces
-        if item.stage == "post_planning_context_optimization"
-    )
-    assert trace.outcome == "compacted"
 
 
 @pytest.mark.asyncio

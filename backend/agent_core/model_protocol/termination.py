@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent_core.contracts import ModelFinishReason
+from agent_core.contracts.normalization import non_negative_int, optional_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,9 +32,7 @@ class ModelTermination:
             "finish_reason",
             ModelFinishReason(self.finish_reason),
         )
-        count = int(self.tool_call_count)
-        if count < 0:
-            raise ValueError("tool_call_count must be non-negative")
+        count = non_negative_int(self.tool_call_count, "tool_call_count")
         object.__setattr__(self, "tool_call_count", count)
         object.__setattr__(self, "incomplete", bool(self.incomplete))
         object.__setattr__(
@@ -42,8 +41,7 @@ class ModelTermination:
             bool(self.authorizes_tool_calls),
         )
         object.__setattr__(self, "retryable", bool(self.retryable))
-        normalized_error = str(self.error_code or "").strip() or None
-        object.__setattr__(self, "error_code", normalized_error)
+        object.__setattr__(self, "error_code", optional_text(self.error_code))
         if self.incomplete and self.authorizes_tool_calls:
             raise ValueError("incomplete output cannot authorize tool calls")
         if self.retryable and not self.incomplete:
@@ -68,46 +66,31 @@ def classify_model_termination(
 
     reason = ModelFinishReason(finish_reason)
     count = int(tool_call_count)
-    if count < 0:
-        raise ValueError("tool_call_count must be non-negative")
+    incomplete = reason in {
+        ModelFinishReason.LENGTH,
+        ModelFinishReason.FILTERED,
+        ModelFinishReason.OTHER,
+    }
+    error_code = {
+        ModelFinishReason.FILTERED: "model_output_filtered",
+        ModelFinishReason.OTHER: "unsupported_model_finish_reason",
+    }.get(reason)
     if reason is ModelFinishReason.LENGTH:
-        return ModelTermination(
-            finish_reason=reason,
-            tool_call_count=count,
-            incomplete=True,
-            authorizes_tool_calls=False,
-            retryable=True,
-            error_code=(
-                "tool_call_truncated" if count else "model_output_truncated"
-            ),
-        )
-    if reason is ModelFinishReason.FILTERED:
-        return ModelTermination(
-            finish_reason=reason,
-            tool_call_count=count,
-            incomplete=True,
-            authorizes_tool_calls=False,
-            error_code="model_output_filtered",
-        )
-    if reason is ModelFinishReason.OTHER:
-        return ModelTermination(
-            finish_reason=reason,
-            tool_call_count=count,
-            incomplete=True,
-            authorizes_tool_calls=False,
-            error_code="unsupported_model_finish_reason",
-        )
+        error_code = "tool_call_truncated" if count else "model_output_truncated"
     return ModelTermination(
         finish_reason=reason,
         tool_call_count=count,
-        incomplete=False,
+        incomplete=incomplete,
         authorizes_tool_calls=bool(
-            count
+            not incomplete
+            and count
             and reason in {
                 ModelFinishReason.TOOL_CALLS,
                 ModelFinishReason.STOP,
             }
         ),
+        retryable=reason is ModelFinishReason.LENGTH,
+        error_code=error_code,
     )
 
 

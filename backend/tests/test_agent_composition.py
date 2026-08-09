@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from agent_core.context_orchestration.compaction import (
-    ConversationContextCompactor,
+    ContextCompressionCoordinator,
 )
 from agent_core.contracts import (
     AgentRunResult,
@@ -33,7 +33,6 @@ from application.request_mapping import (
     writing_run_options,
 )
 from application.sse_mapping import core_update_to_sse_chunk
-from application.screenplay_sse_mapping import screenplay_update_to_sse_chunk
 from application.screenplay_agent_composition import ScreenplayAgentComposition
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -426,7 +425,7 @@ async def test_composition_wires_compaction_into_core_not_run_service(
 
     assert isinstance(
         core._conversation_compactor,
-        ConversationContextCompactor,
+        ContextCompressionCoordinator,
     )
     assert isinstance(
         core._conversation_compactor.hook,
@@ -605,26 +604,11 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         ),
         model="model",
     )
-    screenplay_effect = screenplay_update_to_sse_chunk(
+    screenplay_effect = core_update_to_sse_chunk(
         AgentEvent(
             type="screenplay.document_proposal",
             run_id="run-1",
             payload={"kind": "creative_brief", "title": "创作简报"},
-        ),
-        model="model",
-    )
-    screenplay_revision = screenplay_update_to_sse_chunk(
-        AgentEvent(
-            type="screenplay.revision_ready",
-            run_id="run-1",
-            payload={
-                "schemaVersion": 1,
-                "projectId": "project-1",
-                "operationId": "operation-1",
-                "revisionId": "revision-1",
-                "role": "creativeBrief",
-                "revisionNo": 1,
-            },
         ),
         model="model",
     )
@@ -745,24 +729,7 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
         "agentRunStarted": {"runId": "run-1", "status": "running"},
     }
     assert effect == {"proposedSettingDiff": {"kind": "character"}}
-    assert screenplay_effect == {
-        "proposedScreenplayDocument": {
-            "kind": "creative_brief",
-            "title": "创作简报",
-            "sourceRunId": "run-1",
-        },
-    }
-    assert screenplay_revision == {
-        "screenplayRevisionReady": {
-            "schemaVersion": 1,
-            "projectId": "project-1",
-            "operationId": "operation-1",
-            "revisionId": "revision-1",
-            "role": "creativeBrief",
-            "revisionNo": 1,
-            "sourceRunId": "run-1",
-        },
-    }
+    assert screenplay_effect is None
     assert done == {"done": True, "model": "provider-resolved-model"}
     assert compaction == {
         "contextCompaction": {

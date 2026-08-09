@@ -160,8 +160,6 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
     apiKey: 'key',
     messages: [{ role: 'user', content: '继续创作三集' }],
     options: { model: 'model' },
-    agentProfile: 'screenplay',
-    screenplayProjectId: 'project-1',
     enableAgentTools: true,
   });
   recordAiDebugChunk('live-before-detach', {
@@ -206,8 +204,6 @@ test("debug store preserves a rejected tool's concrete failure", () => {
       apiKey: "key",
       messages: [{ role: "user", content: "分析限定范围" }],
       options: { model: "model" },
-      agentProfile: "screenplay",
-      screenplayProjectId: "project-1",
       enableAgentTools: true,
     });
     recordAiDebugChunk("screenplay-test", {
@@ -262,8 +258,6 @@ test("debug store does not treat a successful tool message as an error", () => {
     apiKey: "key",
     messages: [{ role: "user", content: "提交正式提案" }],
     options: { model: "model" },
-    agentProfile: "screenplay",
-    screenplayProjectId: "project-1",
     enableAgentTools: true,
   });
   recordAiDebugChunk("screenplay-success", {
@@ -298,21 +292,18 @@ test("debug store does not treat a successful tool message as an error", () => {
   assert.equal(tool.errorMessage, undefined);
 });
 
-test("debug store identifies durable screenplay task type", () => {
+test("debug store identifies a durable screenplay chunk", () => {
   clearAiDebugRuns();
   startAiDebugRun("screenplay-long-task", {
     apiKey: "key",
     messages: [{ role: "user", content: "创作剩余全部场景" }],
     options: { model: "model" },
-    agentProfile: "screenplay",
-    screenplayProjectId: "project-1",
-    activeStage: "draft",
-    screenplayTaskIntent: "stage_deliverable",
+    chatAgentMode: "agent",
     enableAgentTools: true,
   });
   assert.equal(
     getAiDebugSnapshot().runs[0].taskType,
-    "剧本阶段交付 · 场景正文",
+    "写作 Agent 任务",
   );
 
   recordAiDebugChunk("screenplay-long-task", {
@@ -342,8 +333,6 @@ test("durable child activity is accounted under the orchestration root", () => {
     apiKey: "key",
     messages: [{ role: "user", content: "连续创作" }],
     options: { model: "model" },
-    agentProfile: "screenplay",
-    screenplayProjectId: "project-1",
     enableAgentTools: true,
   });
   recordAiDebugChunk("screenplay-workflow", {
@@ -384,8 +373,6 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
     apiKey: "key",
     messages: [{ role: "user", content: "并行创作" }],
     options: { model: "root-model" },
-    agentProfile: "screenplay",
-    screenplayProjectId: "project-1",
     enableAgentTools: true,
   });
   recordAiDebugChunk("screenplay-multi-agent", {

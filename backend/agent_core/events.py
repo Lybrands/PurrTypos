@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 from agent_core.contracts import ApprovalDecision, RunId
+from agent_core.contracts.normalization import required_text
 from agent_core.json_values import freeze_json_mapping
 
 
@@ -56,10 +57,7 @@ class AgentEvent:
     run_id: RunId | None = None
 
     def __post_init__(self) -> None:
-        event_type = str(self.type or "").strip()
-        if not event_type:
-            raise ValueError("event type is required")
-        object.__setattr__(self, "type", event_type)
+        object.__setattr__(self, "type", required_text(self.type, "event type"))
         object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
 
 
@@ -78,7 +76,7 @@ class AgentCommand:
         object.__setattr__(self, "type", command_type)
         if not str(self.run_id or "").strip():
             raise ValueError(f"{command_type} command requires a run id")
-        payload = dict(freeze_json_mapping(self.payload))
+        payload = dict(self.payload)
         if command_type is CoreCommandType.APPROVAL_RESOLVE:
             if not str(payload.get("approval_id") or "").strip():
                 raise ValueError("approval.resolve requires approval_id")

@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 _ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
     "agentMode",
-    "agentProfile",
     "associatedChapterCount",
     "associatedOutlineCount",
     "contextWindow",
@@ -526,7 +525,6 @@ async def get_latest_session_agent_run(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         role_registry=getattr(composition, "agent_role_registry", None),
-        domain_event_mapper=getattr(composition, "map_domain_event", None),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
         return {"success": True, "data": None}
@@ -554,7 +552,6 @@ async def get_agent_run_snapshot(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         role_registry=getattr(composition, "agent_role_registry", None),
-        domain_event_mapper=getattr(composition, "map_domain_event", None),
     ).get_snapshot(
         run_id,
         after_event_id=after,
