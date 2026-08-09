@@ -1,4 +1,5 @@
 import type {
+  AiAgentRunSnapshot,
   AiErrorReport,
   AiErrorReportStatus,
   ElectronAPI,
@@ -131,6 +132,7 @@ export interface AiDebugRun {
   error?: string;
   errorReport?: AiErrorReport;
   abortRequested?: boolean;
+  persistedEventCursor?: number;
 }
 
 interface AiDebugState {
@@ -407,7 +409,11 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   if (chunk.error) return "failed";
   if (chunk.done && chunk.errorReport && !chunk.aborted) return "failed";
   if (chunk.aborted) return "aborted";
+  if (chunk.agentRunCompleted) return "completed";
+  if (chunk.agentRunFailed || chunk.agentRunBlocked) return "failed";
+  if (chunk.agentRunCanceled) return "aborted";
   if (TERMINAL_STATUSES.has(run.status)) return run.status;
+  if (chunk.longTaskDispatched) return "dispatched";
   if (chunk.done) {
     return run.taskType.startsWith("持久化长任务")
       ? "dispatched"
@@ -760,6 +766,123 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
   });
 }
 
+function persistedRunStatus(
+  status: AiAgentRunSnapshot['run']['status'],
+): AiDebugRunStatus {
+  if (status === 'done') return 'completed';
+  if (status === 'canceled') return 'aborted';
+  if (status === 'failed' || status === 'blocked') return 'failed';
+  return 'preparing';
+}
+
+function persistedTimestamp(value: string | null | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
+    ? value
+    : `${value.replace(' ', 'T')}Z`;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : fallback;
+}
+
+/** Rebuild a debug entry from the canonical persisted Run event stream. */
+export function hydrateAiDebugRunSnapshot(data: {
+  snapshot: AiAgentRunSnapshot;
+  prompt: string;
+  source?: string;
+}): void {
+  if (!DEBUG_STORE_ENABLED) return;
+  const { snapshot } = data;
+  const runId = String(snapshot.run.runId || '').trim();
+  if (!runId) return;
+  const recoveredId = `recovered:${runId}`;
+  const existing = state.runs.find((run) => run.id === recoveredId);
+
+  if (!existing) {
+    const now = Date.now();
+    const startedAt = persistedTimestamp(snapshot.run.createdAt, now);
+    const source = String(data.source || '').trim() || 'Agent 历史恢复';
+    const run: AiDebugRun = {
+      id: recoveredId,
+      sessionId: snapshot.run.sessionId ?? undefined,
+      conversationId: snapshot.run.conversationId ?? undefined,
+      source,
+      taskType: '持久化 Agent Run · 历史恢复',
+      status: persistedRunStatus(snapshot.run.status),
+      startedAt,
+      updatedAt: persistedTimestamp(snapshot.run.updatedAt, now),
+      finishedAt: snapshot.run.status === 'running'
+        ? undefined
+        : persistedTimestamp(snapshot.run.updatedAt, now),
+      request: {
+        messages: data.prompt.trim()
+          ? [{ role: 'user', content: data.prompt }]
+          : [],
+        meta: { recovered: true },
+      },
+      model: snapshot.run.provenance.modelName ?? undefined,
+      output: '',
+      thinking: '',
+      modelCalls: [],
+      tools: [],
+      events: [{
+        id: ++eventSequence,
+        at: startedAt,
+        type: 'recovered',
+        label: '从持久化事件恢复 Agent Run',
+        payload: { runId },
+      }],
+      eventCount: 1,
+      agentRunId: runId,
+      agentPlan: snapshot.todos.length
+        ? { status: snapshot.run.status, steps: snapshot.todos }
+        : undefined,
+      delegations: snapshot.delegations.items.map((item) => sanitizeValue(item)),
+      childRuns: [],
+      approvals: [],
+      persistedEventCursor: 0,
+    };
+    // Snapshot monitoring starts only after the live stream is detached. At
+    // that boundary the persisted event stream is authoritative, so replace
+    // any partial live debug copy instead of merging and duplicating events.
+    const withoutSameRun = state.runs.filter(
+      (item) => item.id !== recoveredId && item.agentRunId !== runId,
+    );
+    setState({
+      runs: [run, ...withoutSameRun].slice(0, MAX_RUNS),
+      selectedRunId: recoveredId,
+    });
+  }
+
+  const currentCursor = state.runs.find(
+    (run) => run.id === recoveredId,
+  )?.persistedEventCursor ?? 0;
+  let nextCursor = currentCursor;
+  for (const event of [...snapshot.events].sort((left, right) => (
+    left.cursor - right.cursor
+  ))) {
+    if (event.cursor <= currentCursor) continue;
+    if (event.chunk) {
+      recordAiDebugRunContinuation(runId, event.chunk as AiDebugChunk);
+    }
+    nextCursor = Math.max(nextCursor, event.cursor);
+  }
+  replaceRunByAgentRunId(runId, (run) => {
+    const terminal = snapshot.run.status !== 'running' && !snapshot.hasMore;
+    return {
+      ...run,
+      sessionId: snapshot.run.sessionId ?? run.sessionId,
+      conversationId: snapshot.run.conversationId ?? run.conversationId,
+      model: snapshot.run.provenance.modelName ?? run.model,
+      status: terminal ? persistedRunStatus(snapshot.run.status) : run.status,
+      updatedAt: persistedTimestamp(snapshot.run.updatedAt, run.updatedAt),
+      finishedAt: terminal
+        ? persistedTimestamp(snapshot.run.updatedAt, run.updatedAt)
+        : run.finishedAt,
+      persistedEventCursor: Math.max(nextCursor, snapshot.nextCursor),
+    };
+  });
+}
+
 export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void {
   if (!DEBUG_STORE_ENABLED) return;
   const now = Date.now();
@@ -831,6 +954,7 @@ export function recordAiDebugRunContinuation(
     return {
       ...run,
       status,
+      taskType: updatedTaskType(run, chunk),
       updatedAt: now,
       finishedAt: terminal ? now : undefined,
       model: chunk.model || run.model,

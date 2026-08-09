@@ -96,7 +96,6 @@ export default function SubAgentStatusList({
                         streaming={Boolean(active && part.startedAt != null)}
                         startedAt={part.startedAt}
                         durationMs={part.durationMs}
-                        showCursor={active}
                       />
                     );
                   }

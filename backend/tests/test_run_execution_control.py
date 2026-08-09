@@ -282,3 +282,41 @@ async def test_orphan_monitor_reaps_expired_run_without_restart(db):
         monitor.cancel()
         with pytest.raises(asyncio.CancelledError):
             await monitor
+
+
+@pytest.mark.asyncio
+async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="expire and reconcile",
+        mode="agent",
+        execution_owner_id="lost-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    reconciled = asyncio.Event()
+    calls = 0
+
+    async def reconcile_linked_state():
+        nonlocal calls
+        calls += 1
+        run = await run_store.get_run(db, run_id)
+        if run is not None and run["status"] == "canceled":
+            reconciled.set()
+            return ("linked-operation",)
+        return ()
+
+    monitor = asyncio.create_task(monitor_orphaned_runs(
+        db,
+        poll_interval_seconds=0.01,
+        reconcile_linked_state=reconcile_linked_state,
+    ))
+    try:
+        await asyncio.wait_for(reconciled.wait(), timeout=1)
+    finally:
+        monitor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitor
+
+    assert calls >= 1

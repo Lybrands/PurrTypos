@@ -7,11 +7,17 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from agent_core.contracts import RunProvenance
+    from agent_core.contracts import RunBinding, RunProvenance
     from database.connection import DatabaseConnection
 
 
 TRACE_EVENT_TYPE = "agentRunTrace"
+
+
+def _thaw_mapping(value) -> dict[str, Any]:
+    from agent_core.json_values import thaw_json_mapping
+
+    return thaw_json_mapping(value)
 
 
 def new_run_id() -> str:
@@ -25,6 +31,7 @@ async def create_run(
     prompt: str,
     mode: str | None,
     provenance: "RunProvenance | None" = None,
+    binding: "RunBinding | None" = None,
     execution_owner_id: str | None = None,
     lease_expires_at_ms: int | None = None,
     heartbeat_at_ms: int | None = None,
@@ -47,20 +54,37 @@ async def create_run(
         if provenance is not None
         else [None, None, None, None, None]
     )
+    binding_values = (
+        [
+            binding.namespace,
+            binding.aggregate_id,
+            binding.command_id,
+            json.dumps(
+                _thaw_mapping(binding.attributes),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ]
+        if binding is not None
+        else [None, None, None, None]
+    )
     await db.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "binding_command_id, binding_attributes_json, parent_run_id, "
+        "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             run_id,
             session_id,
             mode,
             prompt,
             *provenance_values,
+            *binding_values,
             parent_run_id,
             normalized_root_run_id,
             delegation_id,
@@ -98,8 +122,10 @@ async def upsert_todos(
             await db.execute(
                 "INSERT INTO ai_agent_run_todos "
                 "(run_id, step_id, title, status, executor, step_type, "
-                "risk_level, description, expected_tools, result_summary, "
-                "error, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "risk_level, description, expected_tools, agent_role, "
+                "assignment_json, depends_on_json, result_summary, "
+                "error, protocol_private, planning_capability, sort) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     run_id,
                     str(step.get("id") or f"step-{idx + 1}"),
@@ -110,8 +136,13 @@ async def upsert_todos(
                     step.get("riskLevel"),
                     step.get("description"),
                     json.dumps(step.get("suggestedTools") or [], ensure_ascii=False),
+                    step.get("agentRole"),
+                    json.dumps(step.get("assignment") or {}, ensure_ascii=False),
+                    json.dumps(step.get("dependsOn") or [], ensure_ascii=False),
                     step.get("resultSummary"),
                     step.get("error"),
+                    1 if step.get("protocolPrivate") else 0,
+                    step.get("planningCapability"),
                     idx,
                 ],
             )
@@ -168,7 +199,9 @@ async def get_run(
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "binding_command_id, binding_attributes_json, parent_run_id, "
+        "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
@@ -184,7 +217,9 @@ async def get_latest_run_for_session(
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, parent_run_id, root_run_id, delegation_id, "
+        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "binding_command_id, binding_attributes_json, parent_run_id, "
+        "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
@@ -331,6 +366,20 @@ def _todo_row_to_step(row: dict[str, Any]) -> dict[str, Any]:
             expected_tools = [str(x) for x in parsed if str(x).strip()]
     except json.JSONDecodeError:
         expected_tools = []
+    assignment: dict[str, Any] = {}
+    depends_on: list[str] = []
+    try:
+        parsed = json.loads(row.get("assignment_json") or "{}")
+        if isinstance(parsed, dict):
+            assignment = parsed
+    except json.JSONDecodeError:
+        assignment = {}
+    try:
+        parsed = json.loads(row.get("depends_on_json") or "[]")
+        if isinstance(parsed, list):
+            depends_on = [str(item) for item in parsed if str(item).strip()]
+    except json.JSONDecodeError:
+        depends_on = []
 
     step = {
         "id": str(row.get("step_id") or ""),
@@ -341,7 +390,19 @@ def _todo_row_to_step(row: dict[str, Any]) -> dict[str, Any]:
         "riskLevel": row.get("risk_level"),
         "description": row.get("description"),
         "suggestedTools": expected_tools,
+        "agentRole": row.get("agent_role"),
+        "assignment": assignment,
+        "dependsOn": depends_on,
         "resultSummary": row.get("result_summary"),
         "error": row.get("error"),
+        "protocolPrivate": bool(row.get("protocol_private")),
+        "planningCapability": row.get("planning_capability"),
     }
-    return {k: v for k, v in step.items() if v not in (None, "", [])}
+    return {
+        key: value
+        for key, value in step.items()
+        if (
+            key == "suggestedTools"
+            or value not in (None, "", [], {}, False)
+        )
+    }

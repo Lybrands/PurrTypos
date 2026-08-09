@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from domains.screenplay.tool_contracts import (
+    SCREENPLAY_PLANNING_CAPABILITY_NAMES,
     SCREENPLAY_TOOL_NAMES,
     SCREENPLAY_TOOL_SCHEMAS,
 )
@@ -21,7 +22,10 @@ def test_every_production_domain_tool_has_zh_and_en_display_names():
         path.parent.name for path in SKILLS_DIR.glob("*/SKILL.md")
     }
     assert set(WRITING_TOOL_DISPLAY_NAMES) == writing_names
-    assert set(SCREENPLAY_TOOL_DISPLAY_NAMES) == set(SCREENPLAY_TOOL_NAMES)
+    assert set(SCREENPLAY_TOOL_DISPLAY_NAMES) == (
+        set(SCREENPLAY_TOOL_NAMES)
+        | set(SCREENPLAY_PLANNING_CAPABILITY_NAMES)
+    )
     for localized_names in (
         *WRITING_TOOL_DISPLAY_NAMES.values(),
         *SCREENPLAY_TOOL_DISPLAY_NAMES.values(),

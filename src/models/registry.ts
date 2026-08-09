@@ -1,4 +1,5 @@
 import type { AiBuiltinProviderId, AiModelConfig } from '../types'
+import { deepseekV4FlashProfile, deepseekV4ProProfile } from './profiles/deepseekV4'
 import { glm5_2Profile } from './profiles/glm5_2'
 import { kimiK3Profile } from './profiles/kimiK3'
 import { kimiK2_6Profile } from './profiles/kimiK2_6'
@@ -9,6 +10,8 @@ import type { BuiltinModelProfile } from './types'
 
 export const AI_BUILTIN_MODEL_PROFILES: readonly BuiltinModelProfile[] = [
   glm5_2Profile,
+  deepseekV4ProProfile,
+  deepseekV4FlashProfile,
   kimiK3Profile,
   kimiK2_6Profile,
   minimaxM3Profile,
@@ -42,8 +45,13 @@ export function getDefaultPreset(providerId: AiBuiltinProviderId) {
 export function migrateKnownModelConfigs(configs: readonly AiModelConfig[]) {
   let changed = false
   const migrated: AiModelConfig[] = configs.map((config) => {
-    const profile = AI_BUILTIN_MODEL_PROFILES.find((candidate) => candidate.matches(config))
-    const next = profile?.migrate(config) ?? config
+    const current = config.outputTokenBudget === undefined ? config : { ...config }
+    if (current !== config) {
+      delete current.outputTokenBudget
+      changed = true
+    }
+    const profile = AI_BUILTIN_MODEL_PROFILES.find((candidate) => candidate.matches(current))
+    const next = profile?.migrate(current) ?? current
     if (!hasSameModelFields(config, next)) changed = true
     return next
   })
@@ -65,7 +73,6 @@ export function migrateKnownModelConfigs(configs: readonly AiModelConfig[]) {
       thinkingOnly: profile.preset.thinkingOnly,
       thinkingEnabled: profile.preset.thinkingEnabled,
       contextWindow: profile.preset.contextWindow,
-      outputTokenBudget: profile.preset.defaultOutputTokens,
       customizeTemperature: profile.preset.customizeTemperature,
       temperatureThinking: profile.preset.temperatureThinking,
       temperatureNonThinking: profile.preset.temperatureNonThinking,

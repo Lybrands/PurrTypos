@@ -47,60 +47,6 @@ _ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
 })
 
 
-def _long_task_payload(task, units, *, include_results: bool = True) -> dict[str, Any]:
-    from agent_core.json_values import thaw_json_mapping
-
-    return {
-        "id": task.id,
-        "workItemId": task.work_item_id,
-        "namespace": task.namespace,
-        "kind": task.kind,
-        "ownerId": task.owner_id,
-        "parentRunId": task.created_by_run_id,
-        "status": task.status.value,
-        "revision": task.revision,
-        "totalUnits": task.total_units,
-        "completedUnits": task.completed_units,
-        "failedUnits": task.failed_units,
-        "maxParallelism": task.max_parallelism,
-        "createTime": getattr(task, "create_time", None),
-        "updateTime": getattr(task, "update_time", None),
-        "metadata": thaw_json_mapping(task.metadata),
-        "units": [{
-            "id": unit.id,
-            "position": unit.position,
-            "status": unit.status.value,
-            "attempt": unit.attempt,
-            "maxAttempts": unit.max_attempts,
-            "runId": unit.run_id,
-            "inputRef": unit.input_ref,
-            "outputRef": unit.output_ref,
-            "errorCode": unit.error_code,
-            "createTime": getattr(unit, "create_time", None),
-            "updateTime": getattr(unit, "update_time", None),
-            "metadata": (
-                {
-                    key: value
-                    for key, value in thaw_json_mapping(unit.metadata).items()
-                    if key != "liveConversation"
-                }
-                if include_results
-                else {
-                    key: value
-                    for key, value in thaw_json_mapping(unit.metadata).items()
-                    if key not in {
-                        "scenes",
-                        "proposal",
-                        "continuitySummary",
-                        "liveConversation",
-                        "assistantResponse",
-                    }
-                }
-            ),
-        } for unit in units],
-    }
-
-
 class _AgentClientDisconnected(Exception):
     """A guarded ASGI send observed the client disconnect."""
 
@@ -580,6 +526,7 @@ async def get_latest_session_agent_run(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         role_registry=getattr(composition, "agent_role_registry", None),
+        domain_event_mapper=getattr(composition, "map_domain_event", None),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
         return {"success": True, "data": None}
@@ -607,6 +554,7 @@ async def get_agent_run_snapshot(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         role_registry=getattr(composition, "agent_role_registry", None),
+        domain_event_mapper=getattr(composition, "map_domain_event", None),
     ).get_snapshot(
         run_id,
         after_event_id=after,
@@ -615,121 +563,6 @@ async def get_agent_run_snapshot(
     if snapshot is None:
         return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": snapshot}
-
-
-@router.get("/ai/long-tasks/{task_id}")
-async def get_long_task(task_id: str):
-    from application.agent_composition import get_agent_composition
-
-    repository = get_agent_composition().long_task_repository
-    task = await repository.load(task_id)
-    if task is None:
-        return {"success": False, "error": "长任务不存在"}
-    units = await repository.list_units(task.id)
-    return {"success": True, "data": _long_task_payload(task, units)}
-
-
-@router.get("/ai/long-tasks/{task_id}/conversation/stream")
-async def stream_long_task_conversation(
-    task_id: str,
-    session_id: int | None = Query(default=None, alias="sessionId", ge=1),
-    after: int = Query(default=0, ge=0),
-):
-    """Replay and follow canonical child-Run events for one conversation."""
-
-    from application.agent_composition import get_agent_composition
-    from application.screenplay_long_task_conversation import (
-        ScreenplayLongTaskConversationStream,
-    )
-
-    composition = get_agent_composition()
-    conversation = ScreenplayLongTaskConversationStream(
-        long_tasks=composition.long_task_repository,
-        checkpoint_store=composition.checkpoint_store,
-        role_registry=getattr(composition, "agent_role_registry", None),
-        live_events=composition.screenplay_long_task_conversation_hub,
-    )
-
-    async def _events():
-        try:
-            async for event in conversation.stream(
-                task_id,
-                session_id=session_id,
-                after_event_id=after,
-            ):
-                yield json.dumps(event, ensure_ascii=False)
-        except LookupError:
-            yield json.dumps({
-                "type": "stream.error",
-                "taskId": task_id,
-                "error": "长任务不存在",
-            }, ensure_ascii=False)
-        except PermissionError:
-            yield json.dumps({
-                "type": "stream.error",
-                "taskId": task_id,
-                "error": "长任务不属于当前对话",
-            }, ensure_ascii=False)
-        except Exception:
-            logger.exception("[ai/long-tasks] conversation stream failed")
-            yield json.dumps({
-                "type": "stream.error",
-                "taskId": task_id,
-                "error": "长任务对话流异常中断",
-            }, ensure_ascii=False)
-
-    return EventSourceResponse(_events(), media_type="text/event-stream")
-
-
-@router.get("/ai/screenplay-projects/{project_id}/long-tasks")
-async def list_screenplay_long_tasks(
-    project_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
-):
-    from application.agent_composition import get_agent_composition
-    from domains.screenplay.contracts import SCREENPLAY_DOMAIN_NAMESPACE
-
-    repository = get_agent_composition().long_task_repository
-    tasks = await repository.list_for_owner(
-        namespace=SCREENPLAY_DOMAIN_NAMESPACE,
-        owner_id=project_id,
-        limit=limit,
-    )
-    return {
-        "success": True,
-        "data": [
-            _long_task_payload(
-                task,
-                await repository.list_units(task.id),
-                include_results=False,
-            )
-            for task in tasks
-        ],
-    }
-
-
-@router.post("/ai/long-tasks/{task_id}/pause")
-async def pause_long_task(task_id: str):
-    from application.agent_composition import get_agent_composition
-
-    composition = get_agent_composition()
-    try:
-        task = await composition.pause_screenplay_long_task(task_id)
-    except (LookupError, ValueError) as error:
-        return {"success": False, "error": str(error)}
-    return {"success": True, "data": _long_task_payload(task, ())}
-
-
-@router.post("/ai/long-tasks/{task_id}/cancel")
-async def cancel_long_task(task_id: str):
-    from application.agent_composition import get_agent_composition
-
-    composition = get_agent_composition()
-    try:
-        task = await composition.cancel_screenplay_long_task(task_id)
-    except (LookupError, ValueError) as error:
-        return {"success": False, "error": str(error)}
-    return {"success": True, "data": _long_task_payload(task, ())}
 
 
 @router.get("/ai/agent-runtime-regressions")
@@ -972,7 +805,9 @@ async def _stream_composed_agent(
 
 
 @router.post("/ai/chat/stream")
-async def chat_stream(body: ChatStreamRequest):
+async def chat_stream(
+    body: ChatStreamRequest,
+):
     key = (body.apiKey or "").strip()
     if not key:
         async def _err_key():

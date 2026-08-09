@@ -15,7 +15,6 @@ import {
 import {
   handleChapterCreated,
   handleProposedChapterDiff,
-  handleProposedScreenplayDocument,
   handleSettingUpdated,
 } from "./sideEffects";
 import { handleProposedSettingDiff } from "./settingDiff";
@@ -58,7 +57,6 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
 
   // 3. 副作用：派发 DOM 事件（无短路）
   handleProposedChapterDiff(chunk, ctx);
-  handleProposedScreenplayDocument(chunk, ctx);
   handleProposedSettingDiff(chunk, ctx);
   handleToolApprovalRequired(chunk, ctx);
   handleToolApprovalResolved(chunk, ctx);

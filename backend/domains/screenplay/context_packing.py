@@ -239,6 +239,29 @@ def _document_index_item(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _document_content_item(row: Mapping[str, Any]) -> dict[str, Any]:
     content_json = _json_value(row.get("content_json"), {})
+    if (
+        str(row.get("kind") or "") == "scene_draft"
+        and isinstance(content_json, Mapping)
+    ):
+        content_json = {
+            key: value
+            for key, value in content_json.items()
+            if key not in {"sceneExecutions", "episodeDrafts"}
+        }
+    if (
+        isinstance(content_json, Mapping)
+        and content_json.get("storageMode") == "episode_documents"
+    ):
+        content_json = {
+            key: value
+            for key, value in content_json.items()
+            if key not in {
+                "episodes",
+                "scenes",
+                "issues",
+                "verificationResults",
+            }
+        }
     if isinstance(content_json, Mapping) and content_json:
         content_format = "json"
         content: Any = dict(content_json)
@@ -261,6 +284,8 @@ def _serialize_content(payload: Mapping[str, Any]) -> str:
 
 
 def _json_value(value: object, fallback: Any) -> Any:
+    if isinstance(value, (Mapping, list)):
+        return value
     try:
         return json.loads(str(value or ""))
     except (TypeError, ValueError, json.JSONDecodeError):

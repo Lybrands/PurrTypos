@@ -1,0 +1,287 @@
+"""Durable admission execution isolated from the high-level pipeline."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import suppress
+from typing import Protocol
+
+from agent_core.cancellation import await_with_cancellation
+from agent_core.contracts import (
+    AgentRunRequest,
+    RunId,
+    StepExecutor,
+    StepStatus,
+    TaskPlan,
+)
+from agent_core.errors import ContractViolationError
+from agent_core.events import AgentEvent, CoreEventType
+from agent_core.json_values import thaw_json_mapping
+from agent_core.ports import CancellationSignal
+from agent_core.run_controller import AgentRunController
+from agent_core.task_admission import (
+    ExecutionMode,
+    LongTaskDispatcher,
+    LongTaskDispatchReceipt,
+    LongTaskExecutionStatus,
+    LongTaskExecutionUpdate,
+    TaskAdmissionDecision,
+)
+
+
+class BufferedEventSink(Protocol):
+    def drain(self) -> tuple[AgentEvent, ...]: ...
+
+
+async def complete_admitted_task(
+    *,
+    controller: AgentRunController,
+    request: AgentRunRequest,
+    plan: TaskPlan,
+    admission: TaskAdmissionDecision,
+    dispatcher: LongTaskDispatcher | None,
+    sink: BufferedEventSink,
+    signal: CancellationSignal | None,
+) -> AsyncIterator[AgentEvent]:
+    """Run durable work under the originating Run and its event stream."""
+
+    if admission.mode is ExecutionMode.INLINE:
+        raise ContractViolationError(
+            "inline admission cannot use the durable handoff path"
+        )
+    if admission.mode is ExecutionMode.DURABLE:
+        if admission.requires_confirmation:
+            await controller.complete(
+                admission.message
+                or "This long-running task requires confirmation."
+            )
+            for event in sink.drain():
+                yield event
+            return
+        if dispatcher is None:
+            raise ContractViolationError(
+                "durable task admission requires a dispatcher"
+            )
+        receipt = await await_with_cancellation(
+            dispatcher.dispatch(
+                request,
+                plan,
+                admission,
+                parent_run_id=controller.run_id,
+                signal=signal,
+            ),
+            signal,
+        )
+        await controller.record_event(
+            CoreEventType.LONG_TASK_DISPATCHED,
+            {
+                "taskId": receipt.task_id,
+                "message": receipt.message,
+                **thaw_json_mapping(receipt.metadata),
+            },
+        )
+        for event in sink.drain():
+            yield event
+
+        durable_step_aliases = _durable_step_aliases(receipt, admission)
+        updates: asyncio.Queue[LongTaskExecutionUpdate] = asyncio.Queue()
+
+        async def observe(update: LongTaskExecutionUpdate) -> None:
+            await updates.put(update)
+
+        execution = asyncio.create_task(dispatcher.execute(
+            receipt.task_id,
+            parent_run_id=str(controller.run_id or ""),
+            observer=observe,
+            signal=signal,
+        ))
+        try:
+            while not execution.done() or not updates.empty():
+                pending_update = asyncio.create_task(updates.get())
+                done, _ = await asyncio.wait(
+                    (execution, pending_update),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if pending_update in done:
+                    update = pending_update.result()
+                    event = bind_event_to_run(update.event, controller.run_id)
+                    if update.persist:
+                        event = _bind_durable_progress_to_plan(
+                            event,
+                            durable_step_aliases,
+                        )
+                        durable_statuses = _durable_plan_step_statuses(event)
+                        if durable_statuses:
+                            await controller.sync_durable_execution(
+                                durable_statuses
+                            )
+                        await controller.record_event(
+                            event.type,
+                            thaw_json_mapping(event.payload),
+                        )
+                        for persisted in sink.drain():
+                            yield persisted
+                    else:
+                        yield event
+                else:
+                    pending_update.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await pending_update
+            result = await execution
+        except asyncio.CancelledError:
+            execution.cancel()
+            with suppress(asyncio.CancelledError):
+                await execution
+            raise
+
+        if result.status is LongTaskExecutionStatus.COMPLETED:
+            # Durable execution has now genuinely completed. This transition
+            # closes the Planner steps atomically at the end of the work.
+            await controller.complete_durable_execution(
+                result.final_response,
+                covered_step_ids=admission.covered_step_ids,
+            )
+        elif result.status is LongTaskExecutionStatus.FAILED:
+            await controller.fail(result.error or "long_task_execution_failed")
+        else:
+            await controller.cancel(
+                "long_task_paused"
+                if result.status is LongTaskExecutionStatus.PAUSED
+                else "long_task_canceled"
+            )
+        for event in sink.drain():
+            yield event
+        return
+    await controller.complete(
+        admission.message
+        or (
+            "The task needs clarification before it can run."
+            if admission.mode is ExecutionMode.CLARIFY
+            else "The task was not admitted for execution."
+        )
+    )
+    for event in sink.drain():
+        yield event
+
+
+def validate_task_admission_coverage(
+    plan: TaskPlan,
+    admission: TaskAdmissionDecision,
+) -> None:
+    """Require a durable executor to own every step it bypasses."""
+
+    has_agent_steps = any(
+        step.executor is StepExecutor.AGENT
+        for step in plan.steps
+    )
+    if has_agent_steps and admission.mode is ExecutionMode.INLINE:
+        raise ContractViolationError(
+            "Agent plan steps require durable task admission"
+        )
+    if admission.mode is not ExecutionMode.DURABLE:
+        return
+    planned_step_ids = {step.id for step in plan.steps}
+    covered_step_ids = set(admission.covered_step_ids)
+    unknown = covered_step_ids - planned_step_ids
+    uncovered = planned_step_ids - covered_step_ids
+    if unknown or uncovered:
+        details: list[str] = []
+        if unknown:
+            details.append("unknown=" + ",".join(sorted(unknown)))
+        if uncovered:
+            details.append("uncovered=" + ",".join(sorted(uncovered)))
+        raise ContractViolationError(
+            "durable task admission must cover every planned step: "
+            + "; ".join(details)
+        )
+
+
+def _durable_plan_step_statuses(event: AgentEvent) -> dict[str, StepStatus]:
+    if event.type != CoreEventType.LONG_TASK_PROGRESS:
+        return {}
+    units = event.payload.get("units")
+    if not isinstance(units, Sequence) or isinstance(
+        units,
+        (str, bytes, bytearray),
+    ):
+        return {}
+    status_map = {
+        "pending": StepStatus.PENDING,
+        "claimed": StepStatus.RUNNING,
+        "running": StepStatus.RUNNING,
+        "completed": StepStatus.DONE,
+        "failed": StepStatus.FAILED,
+        "canceled": StepStatus.BLOCKED,
+    }
+    projected: dict[str, StepStatus] = {}
+    for raw in units:
+        if not isinstance(raw, Mapping):
+            continue
+        step_id = str(raw.get("plannerStepId") or "").strip()
+        status = status_map.get(str(raw.get("status") or "").strip())
+        if step_id and status is not None:
+            projected[step_id] = status
+    return projected
+
+
+def _durable_step_aliases(
+    receipt: LongTaskDispatchReceipt,
+    admission: TaskAdmissionDecision,
+) -> dict[str, str]:
+    raw = receipt.metadata.get("durableStepAliases")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ContractViolationError("durable step aliases must be a mapping")
+    aliases = {
+        str(source or "").strip(): str(target or "").strip()
+        for source, target in raw.items()
+    }
+    if (
+        any(not source or not target for source, target in aliases.items())
+        or len(set(aliases.values())) != len(aliases)
+        or not set(aliases.values()).issubset(set(admission.covered_step_ids))
+    ):
+        raise ContractViolationError(
+            "durable step aliases must bind uniquely to admitted plan steps"
+        )
+    return aliases
+
+
+def _bind_durable_progress_to_plan(
+    event: AgentEvent,
+    aliases: Mapping[str, str],
+) -> AgentEvent:
+    if event.type != CoreEventType.LONG_TASK_PROGRESS or not aliases:
+        return event
+    payload = thaw_json_mapping(event.payload)
+    units = payload.get("units")
+    if not isinstance(units, list):
+        return event
+    rebound_units: list[object] = []
+    for raw in units:
+        if not isinstance(raw, Mapping):
+            rebound_units.append(raw)
+            continue
+        unit = dict(raw)
+        persisted_step_id = str(unit.get("plannerStepId") or "").strip()
+        if persisted_step_id in aliases:
+            unit["plannerStepId"] = aliases[persisted_step_id]
+        rebound_units.append(unit)
+    payload["units"] = rebound_units
+    return AgentEvent(
+        type=event.type,
+        run_id=event.run_id,
+        payload=payload,
+    )
+
+
+def bind_event_to_run(event: AgentEvent, run_id: RunId | None) -> AgentEvent:
+    if run_id is None:
+        raise ContractViolationError("active run has no id")
+    if event.run_id is None:
+        return AgentEvent(type=event.type, run_id=run_id, payload=event.payload)
+    if event.run_id != run_id:
+        raise ContractViolationError("runtime event belongs to another run")
+    return event

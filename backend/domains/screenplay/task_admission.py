@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -22,10 +21,14 @@ from domains.screenplay.contracts import (
 from domains.screenplay.adaptation_brief import SERIES_FORMATS
 from domains.screenplay.scene_order import ordered_scene_mappings
 from domains.screenplay.stage_tasks import select_draft_scenes
+from domains.screenplay.workflow_compiler import (
+    ScreenplayDraftWorkflow,
+    build_screenplay_draft_workflow,
+)
+from domains.screenplay.query_port import ScreenplayQueryPort
 
 
 SCREENPLAY_DRAFT_LONG_TASK_KIND = "screenplay_draft_generation"
-_MAX_SCREENPLAY_CHILD_AGENTS = 3
 _STAGE_COMPLETION_TOOLS = {
     "source_analysis": "finalizeSourceAnalysisProposal",
     "creative_brief": "finalizeCreativeBriefProposal",
@@ -48,7 +51,7 @@ class ResolvedScreenplayDraftTask:
     scene_list_document_id: str
     base_draft_document_id: str | None
     target_scenes: tuple[Mapping[str, Any], ...]
-    execution_units: tuple[Mapping[str, Any], ...]
+    workflow: ScreenplayDraftWorkflow | None
     scope: str
 
     def decision_metadata(self) -> dict[str, Any]:
@@ -60,19 +63,29 @@ class ResolvedScreenplayDraftTask:
             "baseDraftDocumentId": self.base_draft_document_id,
             "scope": self.scope,
             "targetSceneIds": [str(scene["id"]) for scene in self.target_scenes],
-            "executionUnits": [dict(unit) for unit in self.execution_units],
-            # Planner owns the graph and batch boundaries.  The host derives
-            # only the executor capacity from that graph, capped by the
-            # screenplay writer pool's resource limit.
-            "maxParallelism": _planned_parallelism(self.execution_units),
+            "maxParallelism": (
+                self.workflow.max_parallelism
+                if self.workflow is not None
+                else 1
+            ),
+            "minimumModelCalls": (
+                self.workflow.minimum_model_call_count
+                if self.workflow is not None
+                else 1
+            ),
+            "plannedModelCalls": (
+                self.workflow.model_call_count
+                if self.workflow is not None
+                else 1
+            ),
         }
 
 
 class ScreenplayTaskAdmissionEvaluator:
     """Application-injected evaluator backed by screenplay domain rules."""
 
-    def __init__(self, db) -> None:
-        self._db = db
+    def __init__(self, query: ScreenplayQueryPort) -> None:
+        self._query = query
 
     async def evaluate(self, request, plan, signal=None) -> TaskAdmissionDecision:
         del signal
@@ -88,32 +101,13 @@ class ScreenplayTaskAdmissionEvaluator:
                 "scenes",
             }
         ):
-            task_spec = plan.task_spec
             planned_tools = {
                 tool
                 for step in plan.steps
                 for tool in step.suggested_tools
             }
-            if (
-                task_spec is None
-                or str(
-                    task_spec.target.get("domainAction") or ""
-                ).strip() != "generate_stage_deliverable"
-                or str(task_spec.target.get("scope") or "").strip()
-                != "current_stage"
-            ):
-                return TaskAdmissionDecision(
-                    mode=ExecutionMode.REJECT,
-                    reason_code="screenplay_stage_planner_scope_invalid",
-                    estimated_units=0,
-                    estimated_model_calls=0,
-                    message=(
-                        "Planner 未生成当前阶段所需的合法执行范围，"
-                        "已停止本次执行。"
-                    ),
-                )
             resolved_stage = await resolve_screenplay_stage_task(
-                self._db,
+                self._query,
                 request,
             )
             if resolved_stage is None:
@@ -151,7 +145,23 @@ class ScreenplayTaskAdmissionEvaluator:
                 ),
                 metadata=resolved_stage,
             )
-        resolved = await resolve_screenplay_draft_task(self._db, request, plan)
+        try:
+            resolved = await resolve_screenplay_draft_task(
+                self._query,
+                request,
+                plan,
+            )
+        except ValueError as error:
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.REJECT,
+                reason_code="screenplay_draft_workflow_invalid",
+                estimated_units=0,
+                estimated_model_calls=0,
+                message=(
+                    "当前剧本范围无法生成可靠的持久化执行流程："
+                    + str(error)
+                ),
+            )
         if resolved is None:
             if _is_screenplay_draft_plan(request, plan):
                 # A draft plan whose semantic range no longer resolves must
@@ -170,17 +180,12 @@ class ScreenplayTaskAdmissionEvaluator:
                 )
             return TaskAdmissionDecision()
         scene_count = len(resolved.target_scenes)
-        model_calls = sum(
-            1 for unit in resolved.execution_units
-            if str(unit.get("kind") or "") in {
-                "scene_generation",
-                "continuity_review",
-            }
+        model_calls = (
+            resolved.workflow.model_call_count
+            if resolved.workflow is not None
+            else 1
         )
-        if (
-            scene_count == 1
-            and not resolved.execution_units
-        ):
+        if scene_count == 1 and resolved.workflow is None:
             return TaskAdmissionDecision(
                 mode=ExecutionMode.INLINE,
                 reason_code="screenplay_draft_fits_inline_run",
@@ -188,27 +193,25 @@ class ScreenplayTaskAdmissionEvaluator:
                 estimated_model_calls=1,
                 metadata=resolved.decision_metadata(),
             )
-        if not resolved.execution_units or model_calls < 1:
-            return TaskAdmissionDecision(
-                mode=ExecutionMode.REJECT,
-                reason_code="screenplay_draft_planner_units_missing",
-                estimated_units=0,
-                estimated_model_calls=0,
-                message=(
-                    "Planner 未生成完整的长任务执行图，已停止本次执行。"
-                ),
-            )
         return TaskAdmissionDecision(
             mode=ExecutionMode.DURABLE,
             reason_code="screenplay_draft_requires_multiple_runs",
             estimated_units=scene_count,
             estimated_model_calls=model_calls,
+            # Core Planner owns the user-visible capability step. The host
+            # owns the durable mechanics once that step is admitted.
+            covered_step_ids=tuple(step.id for step in plan.steps),
+            execution_recipe=(
+                resolved.workflow.to_execution_recipe()
+                if resolved.workflow is not None
+                else None
+            ),
             metadata=resolved.decision_metadata(),
         )
 
 
 async def resolve_screenplay_stage_task(
-    db,
+    query: ScreenplayQueryPort,
     request: AgentRunRequest,
 ) -> dict[str, Any] | None:
     """Validate the current stage and accepted inputs for primary-Run execution."""
@@ -218,11 +221,7 @@ async def resolve_screenplay_stage_task(
     context = ScreenplayDomainContext.from_core_context(request.domain_context)
     if context.task_intent != "stage_deliverable":
         return None
-    project = await db.fetch_one(
-        "SELECT id, active_stage, source_kind, source_book_id, format "
-        "FROM screenplay_projects WHERE id = ?",
-        [context.project_id],
-    )
+    project = await query.get_project(context.project_id)
     if project is None:
         return None
     stage = str(project.get("active_stage") or "orientation").strip()
@@ -254,12 +253,7 @@ async def resolve_screenplay_stage_task(
         required_kinds = ("episode_outline", "beat_sheet")
     else:
         return None
-    rows = await db.fetch_all(
-        "SELECT id, kind, version FROM screenplay_documents "
-        "WHERE project_id = ? AND status = 'accepted' "
-        "ORDER BY version DESC",
-        [context.project_id],
-    )
+    rows = await query.list_current_documents(context.project_id)
     accepted_by_kind: dict[str, str] = {}
     for row in rows:
         kind = str(row.get("kind") or "").strip()
@@ -294,49 +288,38 @@ def _is_screenplay_draft_plan(
     if request.domain_context.namespace != SCREENPLAY_DOMAIN_NAMESPACE:
         return False
     context = ScreenplayDomainContext.from_core_context(request.domain_context)
-    if context.requested_stage != "draft" or plan.task_spec is None:
+    if context.requested_stage != "draft":
         return False
     planned_tools = {
         tool
         for step in plan.steps
         for tool in step.suggested_tools
     }
-    return (
-        str(plan.task_spec.target.get("domainAction") or "").strip()
-        == "generate_scene_drafts"
-        or "proposeSceneDraft" in planned_tools
-    )
+    return "proposeSceneDraft" in planned_tools
 
 
 async def resolve_screenplay_draft_task(
-    db,
+    query: ScreenplayQueryPort,
     request: AgentRunRequest,
     plan: TaskPlan,
 ) -> ResolvedScreenplayDraftTask | None:
     if request.domain_context.namespace != SCREENPLAY_DOMAIN_NAMESPACE:
         return None
     context = ScreenplayDomainContext.from_core_context(request.domain_context)
-    if context.requested_stage != "draft" or plan.task_spec is None:
+    if context.requested_stage != "draft":
         return None
     planned_tools = {
         tool
         for step in plan.steps
         for tool in step.suggested_tools
     }
-    target = plan.task_spec.target
-    domain_action = str(target.get("domainAction") or "").strip()
-    if (
-        domain_action != "generate_scene_drafts"
-        and "proposeSceneDraft" not in planned_tools
-    ):
+    if "proposeSceneDraft" not in planned_tools:
         return None
-    rows = await db.fetch_all(
-        "SELECT id, kind, version, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND status = 'accepted' "
-        "AND kind IN ('scene_list', 'scene_draft') "
-        "ORDER BY version DESC",
-        [context.project_id],
-    )
+    target = plan.task_spec.target if plan.task_spec is not None else {}
+    rows = [
+        row for row in await query.list_current_documents(context.project_id)
+        if str(row.get("kind") or "") in {"scene_list", "scene_draft"}
+    ]
     scene_list = next(
         (row for row in rows if str(row.get("kind")) == "scene_list"),
         None,
@@ -347,7 +330,24 @@ async def resolve_screenplay_draft_task(
     )
     if scene_list is None:
         return None
-    scene_content = _mapping(scene_list.get("content_json"))
+    scene_episode_rows = await query.list_episode_rows(
+        str(scene_list.get("id") or ""),
+        include_content=True,
+    )
+    if scene_episode_rows:
+        scene_values = [
+            dict(scene)
+            for row in scene_episode_rows
+            for scene in row.get("content_json", {}).get("scenes", [])
+            if isinstance(scene, Mapping)
+        ]
+    else:
+        scene_content = _mapping(scene_list.get("content_json"))
+        scene_values = [
+            dict(scene)
+            for scene in scene_content.get("scenes", [])
+            if isinstance(scene, Mapping)
+        ]
     draft_content = _mapping(
         latest_draft.get("content_json") if latest_draft else None
     )
@@ -356,7 +356,9 @@ async def resolve_screenplay_draft_task(
         for item in draft_content.get("completedSceneIds", [])
         if str(item).strip()
     } if isinstance(draft_content.get("completedSceneIds"), list) else set()
-    raw_scenes = ordered_scene_mappings(scene_content)
+    raw_scenes = ordered_scene_mappings({
+        "scenes": scene_values,
+    })
     pending = tuple(
         dict(scene)
         for scene in raw_scenes
@@ -373,17 +375,13 @@ async def resolve_screenplay_draft_task(
             scope=context.draft_scope,
             fallback_count=context.draft_scene_count,
         )
-        if not requested or not _planner_scope_matches_bound_request(
-            target,
-            requested_scope=context.draft_scope,
-            requested_scenes=requested,
-            requested_count=context.draft_scene_count,
-        ):
+        if not requested:
             return None
-        # A button or inferred stable scope is resolved exactly once from the
-        # accepted scene-list checkpoint. Planner owns execution-unit
-        # decomposition, not a second interpretation of that user range.
+        # Explicit UI/application commands bind the domain range. The shared
+        # Core Planner still authors the visible execution plan, but cannot
+        # broaden the host-bound scene range.
         selected = tuple(requested)
+        scope = context.draft_scope
     else:
         selected = _select_target_scenes(
             pending,
@@ -393,9 +391,11 @@ async def resolve_screenplay_draft_task(
         )
         if not selected:
             return None
-    execution_units = _resolve_planned_execution_units(target, selected)
-    if target.get("executionUnits") is not None and execution_units is None:
-        return None
+    workflow = (
+        build_screenplay_draft_workflow(selected)
+        if len(selected) > 1
+        else None
+    )
     return ResolvedScreenplayDraftTask(
         project_id=context.project_id,
         scene_list_document_id=str(scene_list["id"]),
@@ -403,7 +403,7 @@ async def resolve_screenplay_draft_task(
             str(latest_draft["id"]) if latest_draft is not None else None
         ),
         target_scenes=selected,
-        execution_units=execution_units or (),
+        workflow=workflow,
         scope=scope or "count",
     )
 
@@ -452,241 +452,12 @@ def _select_target_scenes(
     return pending[:count]
 
 
-def _planner_scope_matches_bound_request(
-    target: Mapping[str, Any],
-    *,
-    requested_scope: str,
-    requested_scenes: Sequence[Mapping[str, Any]],
-    requested_count: int,
-) -> bool:
-    """Validate Planner semantics without re-resolving a host-bound range."""
-
-    scope = str(target.get("scope") or "").strip()
-    if scope == "explicit_scene_ids":
-        raw_ids = target.get("sceneIds")
-        if not isinstance(raw_ids, Sequence) or isinstance(
-            raw_ids,
-            (str, bytes, bytearray),
-        ):
-            return False
-        return [str(item) for item in raw_ids] == [
-            str(scene.get("id")) for scene in requested_scenes
-        ]
-    if requested_scope == "next_scene":
-        return scope == "next_scene"
-    if requested_scope == "next_episode":
-        return scope in {"next_episode", "current_episode_remaining"}
-    stable_episode_scope = re.fullmatch(
-        r"next_(\d+)_episodes",
-        requested_scope,
-    )
-    if stable_episode_scope is not None:
-        episode_count = int(stable_episode_scope.group(1))
-        return (
-            scope == "next_episodes"
-            and _positive_int(target.get("count")) == episode_count
-        )
-    if requested_scope == "all_remaining":
-        return scope == "all_remaining"
-    if requested_scope == "count":
-        return (
-            scope == "count"
-            and _positive_int(target.get("count"))
-            == max(1, int(requested_count))
-        )
-    return False
-
-
 def _positive_int(value: object) -> int | None:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
-
-
-def _resolve_planned_execution_units(
-    target: Mapping[str, Any],
-    scenes: Sequence[Mapping[str, Any]],
-) -> tuple[Mapping[str, Any], ...] | None:
-    raw_units = target.get("executionUnits")
-    if raw_units is None:
-        return ()
-    if not isinstance(raw_units, Sequence) or isinstance(
-        raw_units,
-        (str, bytes, bytearray),
-    ) or not raw_units:
-        return None
-    scenes_by_id = {str(scene.get("id")): scene for scene in scenes}
-    expected_ids = [str(scene.get("id")) for scene in scenes]
-    covered_ids: list[str] = []
-    seen_unit_ids: set[str] = set()
-    dependencies_by_id: dict[str, tuple[str, ...]] = {}
-    units: list[Mapping[str, Any]] = []
-    terminal_ids: list[str] = []
-    item_ids_by_unit: dict[str, tuple[str, ...]] = {}
-    for position, raw_unit in enumerate(raw_units):
-        if not isinstance(raw_unit, Mapping):
-            return None
-        unit_id = str(raw_unit.get("id") or "").strip()
-        kind = str(raw_unit.get("kind") or "").strip()
-        raw_dependencies = raw_unit.get("dependsOn")
-        if (
-            not unit_id
-            or unit_id in seen_unit_ids
-            or kind not in {
-                "scene_generation",
-                "continuity_review",
-                "finalize",
-            }
-            or not isinstance(raw_dependencies, Sequence)
-            or isinstance(raw_dependencies, (str, bytes, bytearray))
-        ):
-            return None
-        dependencies = tuple(str(item).strip() for item in raw_dependencies)
-        dependency_reason = str(
-            raw_unit.get("dependencyReason") or ""
-        ).strip()
-        if (
-            any(not item for item in dependencies)
-            or len(dependencies) != len(set(dependencies))
-            or any(item not in seen_unit_ids for item in dependencies)
-            or (
-                kind == "scene_generation"
-                and dependencies
-                and not dependency_reason
-            )
-        ):
-            return None
-        raw_item_ids = raw_unit.get("itemIds")
-        if kind in {"scene_generation", "continuity_review"}:
-            if (
-                not isinstance(raw_item_ids, Sequence)
-                or isinstance(raw_item_ids, (str, bytes, bytearray))
-                or not raw_item_ids
-            ):
-                return None
-            scene_ids = [str(item).strip() for item in raw_item_ids]
-            if any(scene_id not in scenes_by_id for scene_id in scene_ids):
-                return None
-            if kind == "scene_generation":
-                covered_ids.extend(scene_ids)
-            elif not _review_items_are_generated_by_ancestors(
-                scene_ids,
-                dependencies,
-                dependencies_by_id,
-                item_ids_by_unit,
-            ):
-                return None
-            units.append({
-                "id": unit_id,
-                "kind": kind,
-                "position": position,
-                "dependsOn": list(dependencies),
-                "sceneIds": scene_ids,
-                "sceneHeadings": [
-                    str(scenes_by_id[scene_id].get("heading") or "")
-                    for scene_id in scene_ids
-                ],
-                "dependencyReason": dependency_reason,
-            })
-        else:
-            if raw_item_ids not in (None, (), []):
-                return None
-            terminal_ids.append(unit_id)
-            units.append({
-                "id": unit_id,
-                "kind": kind,
-                "position": position,
-                "dependsOn": list(dependencies),
-            })
-        seen_unit_ids.add(unit_id)
-        dependencies_by_id[unit_id] = dependencies
-        item_ids_by_unit[unit_id] = tuple(
-            str(item).strip()
-            for item in raw_item_ids
-        ) if kind != "finalize" else ()
-    if covered_ids != expected_ids or len(terminal_ids) != 1:
-        return None
-    terminal_id = terminal_ids[0]
-    if str(units[-1].get("id") or "") != terminal_id:
-        return None
-    depended_on = {
-        dependency
-        for unit in units
-        if str(unit.get("id") or "") != terminal_id
-        for dependency in dependencies_by_id[str(unit["id"])]
-    }
-    execution_leaves = {
-        str(unit["id"])
-        for unit in units
-        if unit.get("kind") != "finalize"
-        and str(unit["id"]) not in depended_on
-    }
-    if set(dependencies_by_id[terminal_id]) != execution_leaves:
-        return None
-    return tuple(units)
-
-
-def _review_items_are_generated_by_ancestors(
-    scene_ids: Sequence[str],
-    dependencies: Sequence[str],
-    dependencies_by_id: Mapping[str, Sequence[str]],
-    item_ids_by_unit: Mapping[str, Sequence[str]],
-) -> bool:
-    """Reject reviewer nodes that cannot observe their assigned draft prose."""
-
-    ancestors: set[str] = set()
-    pending = list(dependencies)
-    while pending:
-        dependency_id = str(pending.pop() or "").strip()
-        if not dependency_id or dependency_id in ancestors:
-            continue
-        ancestors.add(dependency_id)
-        pending.extend(dependencies_by_id.get(dependency_id, ()))
-    available = {
-        scene_id
-        for dependency_id in ancestors
-        for scene_id in item_ids_by_unit.get(dependency_id, ())
-    }
-    return set(scene_ids).issubset(available)
-
-
-def _planned_parallelism(
-    units: Sequence[Mapping[str, Any]],
-) -> int:
-    """Return the widest Planner-authored child-agent frontier.
-
-    This does not invent batches or dependencies.  It merely turns the
-    validated DAG into a bounded worker-pool size; serial Planner graphs stay
-    serial and independent branches may run together.
-    """
-
-    levels: dict[str, int] = {}
-    width_by_level: dict[int, int] = {}
-    for unit in units:
-        unit_id = str(unit.get("id") or "").strip()
-        if not unit_id:
-            continue
-        dependencies = tuple(
-            str(item or "").strip()
-            for item in unit.get("dependsOn", [])
-            if str(item or "").strip()
-        )
-        level = 0 if not dependencies else 1 + max(
-            levels.get(dependency, 0) for dependency in dependencies
-        )
-        levels[unit_id] = level
-        if str(unit.get("kind") or "") not in {
-            "scene_generation",
-            "continuity_review",
-        }:
-            continue
-        width_by_level[level] = width_by_level.get(level, 0) + 1
-    return min(
-        _MAX_SCREENPLAY_CHILD_AGENTS,
-        max(width_by_level.values(), default=1),
-    )
 
 
 def _mapping(value: object) -> Mapping[str, Any]:

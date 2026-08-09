@@ -139,7 +139,6 @@ function messageFromAccumulator(
     delegations: acc.delegations,
     contextCompaction: acc.contextCompaction,
     contextBudget: acc.contextBudget,
-    screenplayProposal: acc.screenplayProposal,
   };
 }
 
@@ -233,7 +232,6 @@ export function handleAgentSubRunEvent(
     setConversations: scopedSetConversations(ctx, envelope),
     scheduleCommit: scopedScheduleCommit(ctx, envelope),
     setLoading: () => undefined,
-    setScreenplayProposal: undefined,
     persistConversation: false,
     cleanup: () => undefined,
   };

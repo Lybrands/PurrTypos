@@ -5,7 +5,7 @@ import type { AiModelConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
   getBuiltinProvider,
-  getDefaultModelOutputTokens,
+  getModelMaxOutputTokens,
   getModelPreset,
   getModelContextWindowOptions,
   normalizeApiProvider,
@@ -56,8 +56,10 @@ export default function SettingsPage({
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
-  const displayOutputBudget = (c: AiModelConfig) =>
-    `${Math.round(getDefaultModelOutputTokens(c) / 1024)}K`
+  const displayModelOutputCapability = (c: AiModelConfig) => {
+    const maximum = getModelMaxOutputTokens(c)
+    return maximum ? `${Math.round(maximum / 1024)}K` : '未登记'
+  }
 
   React.useEffect(() => {
     setModelConfigList(modelConfigs)
@@ -310,7 +312,7 @@ export default function SettingsPage({
                             Context {(c.contextWindow ?? '128k').toUpperCase()}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                            Output {displayOutputBudget(c)}
+                            模型输出上限 {displayModelOutputCapability(c)}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                             {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
@@ -388,7 +390,7 @@ export default function SettingsPage({
                         <div className="settings-model-preset-meta">
                           <PurrTag>系统内置</PurrTag>
                           <PurrTag>Context {getModelPreset(editingConfig?.presetId)?.contextWindow.toUpperCase()}</PurrTag>
-                          <PurrTag>Output {displayOutputBudget(editingConfig!)}</PurrTag>
+                          <PurrTag>模型输出上限 {displayModelOutputCapability(editingConfig!)}</PurrTag>
                         </div>
                       </div>
                       <PurrForm.Item name="nickname" label="昵称">

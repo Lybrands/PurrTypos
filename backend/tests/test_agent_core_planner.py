@@ -5,6 +5,7 @@ import json
 import pytest
 
 from agent_core.contracts import (
+    AgentAssignmentCoverage,
     AgentMessage,
     AgentRunRequest,
     DomainContext,
@@ -22,6 +23,7 @@ from agent_core.contracts import (
     StepStatus,
     StepType,
     TaskStep,
+    TaskPlan,
     ToolBatchOutcome,
 )
 from agent_core.errors import (
@@ -68,14 +70,8 @@ def _request() -> AgentRunRequest:
 
 
 @pytest.mark.asyncio
-async def test_planner_repairs_missing_host_task_admission_semantics():
-    missing_scope = (
-        '{"needsTodos":true,"title":"写完正文","goal":"写完正文",'
-        '"taskSpec":{"goal":"写完正文","target":{},"operation":"write"},'
-        '"todos":[{"id":"draft","title":"生成正文","type":"write",'
-        '"executor":"tool","expectedTools":["proposeSceneDraft"],'
-        '"riskLevel":"write"}]}'
-    )
+async def test_planner_repairs_missing_request_required_capability():
+    missing_scope = '{"needsTodos":false,"reason":"直接回复"}'
     repaired = (
         '{"needsTodos":true,"title":"写完正文","goal":"写完正文",'
         '"taskSpec":{"goal":"写完正文","target":{'
@@ -89,15 +85,9 @@ async def test_planner_repairs_missing_host_task_admission_semantics():
         _request(),
         PlanningCapabilities(
             available_tool_names=frozenset({"proposeSceneDraft"}),
-            host_planning_facts={
-                "taskAdmissionVocabulary": {
-                    "domainActions": ["generate_scene_drafts"],
-                    "requiredForTools": {
-                        "proposeSceneDraft": "generate_scene_drafts",
-                    },
-                    "scopes": ["next_scene", "count", "all_remaining"],
-                },
-            },
+            constraints=PlanningConstraints(
+                required_any_tool_names=frozenset({"proposeSceneDraft"}),
+            ),
         ),
     )
 
@@ -106,384 +96,43 @@ async def test_planner_repairs_missing_host_task_admission_semantics():
     assert result.plan.task_spec.target["scope"] == "all_remaining"
 
 
-@pytest.mark.asyncio
-async def test_planner_owns_fifty_item_durable_decomposition():
-    scene_ids = [f"s{index:03d}" for index in range(1, 51)]
-    group_sizes = [3, 8, 5, 11, 4, 9, 10]
-    execution_units = []
-    offset = 0
-    previous = None
-    for index, size in enumerate(group_sizes, start=1):
-        unit_id = f"model-unit-{index}"
-        execution_units.append({
-            "id": unit_id,
-            "kind": "scene_generation",
-            "itemIds": scene_ids[offset:offset + size],
-            "dependsOn": [previous] if previous else [],
-            **({
-                "dependencyReason": "需要上一单元生成的连续性状态",
-            } if previous else {}),
-        })
-        previous = unit_id
-        offset += size
-    execution_units.append({
-        "id": "model-finalize",
-        "kind": "finalize",
-        "dependsOn": [previous],
-    })
-    gateway = FakeModelGateway(json.dumps({
-        "needsTodos": True,
-        "title": "创作五十场正文",
-        "goal": "完成全部五十场正文",
-        "taskSpec": {
-            "goal": "完成全部五十场正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
-                "executionUnits": execution_units,
-            },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "tool",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }, ensure_ascii=False))
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"proposeSceneDraft"}),
-        host_planning_facts={
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
+def test_core_rejects_model_authored_execution_graphs():
+    with pytest.raises(InvalidPlannerOutputError, match="host-owned execution"):
+        normalize_task_plan({
+            "needsTodos": True,
+            "title": "Work",
+            "goal": "Finish",
+            "taskSpec": {
+                "goal": "Finish",
+                "target": {
+                    "scope": "selected_items",
+                    "executionUnits": [{"id": "model-unit"}],
                 },
-                "scopes": ["all_remaining"],
             },
-            "durableExecutionPlan": {
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": scene_ids,
-                "generationUnitKind": "scene_generation",
-                "terminalUnitKind": "finalize",
-            },
-        },
-    )
+            "todos": [{
+                "id": "work",
+                "title": "Work",
+                "type": "write",
+                "executor": "tool",
+                "expectedTools": ["execute"],
+            }],
+        }, PlanningCapabilities(
+            available_tool_names=frozenset({"execute"}),
+        ))
 
-    result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
 
-    units = result.plan.task_spec.target["executionUnits"]
-    assert [
-        len(unit["itemIds"])
-        for unit in units
-        if unit["kind"] == "scene_generation"
-    ] == group_sizes
-    assert len(gateway.invocations) == 1
+
+
+
+
+
+
+
+
 
 
 @pytest.mark.asyncio
-async def test_planner_owns_optional_continuity_reviewer_nodes():
-    execution_units = [
-        {
-            "id": "writer-a",
-            "kind": "scene_generation",
-            "itemIds": ["s01"],
-            "dependsOn": [],
-        },
-        {
-            "id": "writer-b",
-            "kind": "scene_generation",
-            "itemIds": ["s02"],
-            "dependsOn": [],
-        },
-        {
-            "id": "reviewer",
-            "kind": "continuity_review",
-            "itemIds": ["s01", "s02"],
-            "dependsOn": ["writer-a", "writer-b"],
-        },
-        {
-            "id": "finalize",
-            "kind": "finalize",
-            "dependsOn": ["reviewer"],
-        },
-    ]
-    response = {
-        "needsTodos": True,
-        "title": "创作并审阅正文",
-        "goal": "完成两场连续正文",
-        "taskSpec": {
-            "goal": "完成两场连续正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
-                "executionUnits": execution_units,
-            },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "tool",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }
-    gateway = FakeModelGateway(json.dumps(response, ensure_ascii=False))
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"proposeSceneDraft"}),
-        host_planning_facts={
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
-                },
-                "scopes": ["all_remaining"],
-            },
-            "durableExecutionPlan": {
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": ["s01", "s02"],
-                "generationUnitKind": "scene_generation",
-                "reviewUnitKind": "continuity_review",
-                "terminalUnitKind": "finalize",
-            },
-        },
-    )
-
-    result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
-
-    units = result.plan.task_spec.target["executionUnits"]
-    assert [unit["kind"] for unit in units] == [
-        "scene_generation",
-        "scene_generation",
-        "continuity_review",
-        "finalize",
-    ]
-    assert units[-1]["dependsOn"] == ("reviewer",)
-    assert len(gateway.invocations) == 1
-
-
-@pytest.mark.asyncio
-async def test_planner_repairs_omitted_first_dependency_without_host_rewrite():
-    execution_units = [
-        {
-            "id": "model-write",
-            "kind": "scene_generation",
-            "itemIds": ["s01", "s02"],
-        },
-        {
-            "id": "model-finalize",
-            "kind": "finalize",
-            "dependsOn": ["model-write"],
-        },
-    ]
-    response = {
-        "needsTodos": True,
-        "title": "创作正文",
-        "goal": "完成两场正文",
-        "taskSpec": {
-            "goal": "完成两场正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
-                "executionUnits": execution_units,
-            },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "tool",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }
-    repaired = json.loads(json.dumps(response))
-    repaired["taskSpec"]["target"]["executionUnits"][0]["dependsOn"] = []
-    gateway = FakeModelGateway(
-        json.dumps(response, ensure_ascii=False),
-        json.dumps(repaired, ensure_ascii=False),
-    )
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"proposeSceneDraft"}),
-        host_planning_facts={
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
-                },
-                "scopes": ["all_remaining"],
-            },
-            "durableExecutionPlan": {
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": ["s01", "s02"],
-                "generationUnitKind": "scene_generation",
-                "terminalUnitKind": "finalize",
-            },
-        },
-    )
-
-    result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
-
-    units = result.plan.task_spec.target["executionUnits"]
-    assert units[0]["dependsOn"] == ()
-    assert units[1]["dependsOn"] == ("model-write",)
-    assert len(gateway.invocations) == 2
-
-
-@pytest.mark.asyncio
-async def test_planner_repairs_terminal_barrier_without_host_rewrite():
-    execution_units = [
-        {
-            "id": "model-write-a",
-            "kind": "scene_generation",
-            "itemIds": ["s01"],
-            "dependsOn": [],
-        },
-        {
-            "id": "model-write-b",
-            "kind": "scene_generation",
-            "itemIds": ["s02"],
-            "dependsOn": [],
-        },
-        {
-            "id": "model-finalize",
-            "kind": "finalize",
-            "dependsOn": ["model-write-b"],
-        },
-    ]
-    response = {
-        "needsTodos": True,
-        "title": "创作正文",
-        "goal": "完成两场正文",
-        "taskSpec": {
-            "goal": "完成两场正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
-                "executionUnits": execution_units,
-            },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "tool",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }
-    repaired = json.loads(json.dumps(response))
-    repaired["taskSpec"]["target"]["executionUnits"][-1]["dependsOn"] = [
-        "model-write-a",
-        "model-write-b",
-    ]
-    gateway = FakeModelGateway(
-        json.dumps(response, ensure_ascii=False),
-        json.dumps(repaired, ensure_ascii=False),
-    )
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"proposeSceneDraft"}),
-        host_planning_facts={
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
-                },
-                "scopes": ["all_remaining"],
-            },
-            "durableExecutionPlan": {
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": ["s01", "s02"],
-                "generationUnitKind": "scene_generation",
-                "terminalUnitKind": "finalize",
-            },
-        },
-    )
-
-    result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
-
-    units = result.plan.task_spec.target["executionUnits"]
-    assert units[0]["itemIds"] == ("s01",)
-    assert units[1]["itemIds"] == ("s02",)
-    assert units[2]["dependsOn"] == ("model-write-a", "model-write-b")
-    assert len(gateway.invocations) == 2
-
-
-@pytest.mark.asyncio
-async def test_planner_repairs_missing_durable_units_instead_of_host_fallback():
-    base = {
-        "needsTodos": True,
-        "title": "创作正文",
-        "goal": "完成两场正文",
-        "taskSpec": {
-            "goal": "完成两场正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
-            },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "tool",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }
-    repaired = json.loads(json.dumps(base))
-    repaired["taskSpec"]["target"]["executionUnits"] = [
-        {
-            "id": "model-write",
-            "kind": "scene_generation",
-            "itemIds": ["s01", "s02"],
-            "dependsOn": [],
-        },
-        {
-            "id": "model-finalize",
-            "kind": "finalize",
-            "dependsOn": ["model-write"],
-        },
-    ]
-    gateway = FakeModelGateway(
-        json.dumps(base, ensure_ascii=False),
-        json.dumps(repaired, ensure_ascii=False),
-    )
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"proposeSceneDraft"}),
-        host_planning_facts={
-            "taskAdmissionVocabulary": {
-                "domainActions": ["generate_scene_drafts"],
-                "requiredForTools": {
-                    "proposeSceneDraft": "generate_scene_drafts",
-                },
-                "scopes": ["all_remaining"],
-            },
-            "durableExecutionPlan": {
-                "requiredForAction": "generate_scene_drafts",
-                "requiredItemIds": ["s01", "s02"],
-                "generationUnitKind": "scene_generation",
-                "terminalUnitKind": "finalize",
-            },
-        },
-    )
-
-    result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
-
-    assert len(gateway.invocations) == 2
-    assert len(result.plan.task_spec.target["executionUnits"]) == 2
-    assert "executionUnits" in gateway.invocations[1][0][-1].content
-
-
-@pytest.mark.asyncio
-async def test_planner_repairs_explicit_scene_scope_without_scene_ids():
+async def test_core_does_not_validate_domain_specific_target_fields():
     missing_ids = (
         '{"needsTodos":true,"title":"写指定正文","goal":"写指定正文",'
         '"taskSpec":{"goal":"写指定正文","target":{'
@@ -508,7 +157,7 @@ async def test_planner_repairs_explicit_scene_scope_without_scene_ids():
         PlanningCapabilities(
             available_tool_names=frozenset({"proposeSceneDraft"}),
             host_planning_facts={
-                "taskAdmissionVocabulary": {
+                "domainIntentVocabulary": {
                     "domainActions": ["generate_scene_drafts"],
                     "requiredForTools": {
                         "proposeSceneDraft": "generate_scene_drafts",
@@ -519,9 +168,10 @@ async def test_planner_repairs_explicit_scene_scope_without_scene_ids():
         ),
     )
 
-    assert len(gateway.invocations) == 2
+    assert len(gateway.invocations) == 1
     assert result.plan.task_spec is not None
-    assert list(result.plan.task_spec.target["sceneIds"]) == ["s05", "s06"]
+    assert result.plan.task_spec.target["scope"] == "explicit_scene_ids"
+    assert "sceneIds" not in result.plan.task_spec.target
 
 
 @pytest.mark.asyncio
@@ -567,6 +217,26 @@ async def test_planner_uses_non_streaming_gateway_and_normalizes_safe_plan():
             },
         ],
     }
+
+
+def test_execution_message_omits_missing_optional_risk_level():
+    message = build_execution_message(TaskPlan(
+        title="Recovered plan",
+        steps=(TaskStep(
+            id="respond",
+            title="Respond",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            risk_level=None,
+        ),),
+    ))
+
+    payload = json.loads(message.content.rsplit("\n", 1)[-1])
+    assert payload["steps"] == [{
+        "position": 1,
+        "type": "review",
+        "executor": "model",
+    }]
 
 
 @pytest.mark.asyncio
@@ -703,7 +373,7 @@ async def test_planner_drops_artifact_continuity_when_host_has_no_candidates():
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"proposeSceneDraft"}),
         host_planning_facts={
-            "taskAdmissionVocabulary": {
+            "domainIntentVocabulary": {
                 "domainActions": ["generate_scene_drafts"],
                 "requiredForTools": {
                     "proposeSceneDraft": "generate_scene_drafts",
@@ -722,7 +392,7 @@ async def test_planner_drops_artifact_continuity_when_host_has_no_candidates():
 
 
 @pytest.mark.asyncio
-async def test_required_stage_deliverable_repairs_premature_direct_response():
+async def test_required_capability_repairs_premature_direct_response():
     gateway = FakeModelGateway(
         '{"needsTodos":false,"reason":"I will fetch it next"}',
         '{"needsTodos":true,"title":"Create proposal","todos":['
@@ -732,10 +402,9 @@ async def test_required_stage_deliverable_repairs_premature_direct_response():
     )
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"readSource", "proposeResult"}),
-        host_planning_facts={
-            "stageDeliverableRequired": True,
-            "completionCapabilities": ["proposeResult"],
-        },
+        constraints=PlanningConstraints(
+            required_any_tool_names=frozenset({"proposeResult"}),
+        ),
     )
 
     result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
@@ -743,11 +412,11 @@ async def test_required_stage_deliverable_repairs_premature_direct_response():
     assert result.kind is PlanningKind.PLANNED
     assert result.plan.steps[0].suggested_tools == ("proposeResult",)
     assert result.model_call_count == 2
-    assert "requires completing" in gateway.invocations[1][0][-1].content
+    assert "requires selecting" in gateway.invocations[1][0][-1].content
 
 
 @pytest.mark.asyncio
-async def test_required_stage_deliverable_allows_final_response_after_completion():
+async def test_required_capability_allows_final_response_after_completion():
     gateway = FakeModelGateway(
         '{"needsTodos":false,"reason":"formal proposal is complete"}'
     )
@@ -769,10 +438,9 @@ async def test_required_stage_deliverable_allows_final_response_after_completion
     )
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"proposeResult"}),
-        host_planning_facts={
-            "stageDeliverableRequired": True,
-            "completionCapabilities": ["proposeResult"],
-        },
+        constraints=PlanningConstraints(
+            required_any_tool_names=frozenset({"proposeResult"}),
+        ),
     )
 
     result = await AgentPlanner(gateway).revise_plan(
@@ -1155,11 +823,11 @@ def test_planner_output_is_strict_and_never_expands_tool_authority():
         }, capabilities)
 
 
-def test_host_declared_task_tool_repairs_model_executor_discriminator():
+def test_core_never_repairs_a_domain_declared_executor_discriminator():
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"proposeSceneDraft"}),
         host_planning_facts={
-            "taskAdmissionVocabulary": {
+            "domainIntentVocabulary": {
                 "domainActions": ["generate_scene_drafts"],
                 "requiredForTools": {
                     "proposeSceneDraft": "generate_scene_drafts",
@@ -1169,35 +837,29 @@ def test_host_declared_task_tool_repairs_model_executor_discriminator():
         },
     )
 
-    result = normalize_task_plan({
-        "needsTodos": True,
-        "title": "继续创作",
-        "goal": "继续创作剧本正文",
-        "taskSpec": {
+    with pytest.raises(InvalidPlannerOutputError, match="model steps"):
+        normalize_task_plan({
+            "needsTodos": True,
+            "title": "继续创作",
             "goal": "继续创作剧本正文",
-            "operation": "write",
-            "target": {
-                "domainAction": "generate_scene_drafts",
-                "scope": "all_remaining",
+            "taskSpec": {
+                "goal": "继续创作剧本正文",
+                "operation": "write",
+                "target": {"scope": "all_remaining"},
             },
-        },
-        "todos": [{
-            "id": "draft",
-            "title": "创作正文",
-            "type": "write",
-            "executor": "model",
-            "expectedTools": ["proposeSceneDraft"],
-            "riskLevel": "write",
-        }],
-    }, capabilities)
-
-    step = result.plan.steps[0]
-    assert step.executor is StepExecutor.TOOL
-    assert step.suggested_tools == ("proposeSceneDraft",)
+            "todos": [{
+                "id": "draft",
+                "title": "创作正文",
+                "type": "write",
+                "executor": "model",
+                "expectedTools": ["proposeSceneDraft"],
+                "riskLevel": "write",
+            }],
+        }, capabilities)
 
 
 @pytest.mark.asyncio
-async def test_host_parameterized_scope_requires_positive_count():
+async def test_core_keeps_domain_target_semantics_opaque():
     invalid = (
         '{"needsTodos":true,"title":"继续创作","goal":"继续创作",'
         '"taskSpec":{"goal":"继续创作","operation":"write","target":{'
@@ -1214,7 +876,7 @@ async def test_host_parameterized_scope_requires_positive_count():
     capabilities = PlanningCapabilities(
         available_tool_names=frozenset({"proposeSceneDraft"}),
         host_planning_facts={
-            "taskAdmissionVocabulary": {
+            "domainIntentVocabulary": {
                 "domainActions": ["generate_scene_drafts"],
                 "requiredForTools": {
                     "proposeSceneDraft": "generate_scene_drafts",
@@ -1232,8 +894,9 @@ async def test_host_parameterized_scope_requires_positive_count():
     result = await AgentPlanner(gateway).create_plan(_request(), capabilities)
 
     assert result.plan.task_spec is not None
-    assert result.plan.task_spec.target["count"] == 3
-    assert len(gateway.invocations) == 2
+    assert result.plan.task_spec.target["scope"] == "next_episodes"
+    assert "count" not in result.plan.task_spec.target
+    assert len(gateway.invocations) == 1
 
 
 def test_multi_tool_destructive_step_is_repairable_but_never_locally_expanded():
@@ -1536,3 +1199,200 @@ def test_parser_accepts_json_fence_but_rejects_non_object_output():
     )["reason"] == "done"
     with pytest.raises(InvalidPlannerOutputError, match="object"):
         parse_planner_output("[]")
+
+
+def test_planner_normalizes_visible_agent_steps_and_dependencies():
+    result = normalize_task_plan({
+        "needsTodos": True,
+        "title": "并行创作并审校",
+        "todos": [
+            {
+                "id": "write-1",
+                "title": "创作第一集",
+                "type": "write",
+                "executor": "agent",
+                "agentRole": "screenplay_writer",
+                "assignment": {"sceneIds": ["s01"]},
+                "dependsOn": [],
+                "riskLevel": "write",
+            },
+            {
+                "id": "review-1",
+                "title": "审校第一集",
+                "type": "review",
+                "executor": "agent",
+                "agentRole": "screenplay_reviewer",
+                "assignment": {"sceneIds": ["s01"]},
+                "dependsOn": ["write-1"],
+                "riskLevel": "write",
+            },
+        ],
+    }, PlanningCapabilities(
+        available_agent_roles=frozenset({
+            "screenplay_writer",
+            "screenplay_reviewer",
+        }),
+        max_parallel_agents=3,
+    ))
+
+    assert result.plan.steps[0].executor is StepExecutor.AGENT
+    assert result.plan.steps[0].agent_role == "screenplay_writer"
+    assert result.plan.steps[0].assignment["sceneIds"] == ("s01",)
+    assert result.plan.steps[1].depends_on == ("write-1",)
+
+
+@pytest.mark.asyncio
+async def test_required_agent_role_repairs_a_tool_only_plan():
+    tool_only = (
+        '{"needsTodos":true,"title":"提交","todos":['
+        '{"id":"submit","title":"提交","type":"write",'
+        '"executor":"tool","expectedTools":["proposeSceneDraft"]}]}'
+    )
+    repaired = (
+        '{"needsTodos":true,"title":"创作并提交","todos":['
+        '{"id":"write","title":"创作第一集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s01"]}},'
+        '{"id":"submit","title":"提交","type":"write",'
+        '"executor":"tool","expectedTools":["proposeSceneDraft"],'
+        '"dependsOn":["write"]}]}'
+    )
+    gateway = FakeModelGateway(tool_only, repaired)
+
+    result = await AgentPlanner(gateway).create_plan(
+        _request(),
+        PlanningCapabilities(
+            available_tool_names=frozenset({"proposeSceneDraft"}),
+            available_agent_roles=frozenset({"screenplay_writer"}),
+            max_parallel_agents=3,
+            constraints=PlanningConstraints(
+                required_any_tool_names=frozenset({"proposeSceneDraft"}),
+                required_any_agent_roles=frozenset({"screenplay_writer"}),
+            ),
+        ),
+    )
+
+    assert result.model_call_count == 2
+    assert result.plan.steps[0].executor is StepExecutor.AGENT
+    assert "requires selecting" in gateway.invocations[1][0][-1].content
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_agent_assignment_outside_authenticated_coverage():
+    stale = (
+        '{"needsTodos":true,"title":"创作第11集","todos":['
+        '{"id":"write-11","title":"创作第11集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s11-01","s11-02"]}}]}'
+    )
+    repaired = (
+        '{"needsTodos":true,"title":"创作第8至9集","todos":['
+        '{"id":"write-8","title":"创作第8集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s08-01","s08-02"]}},'
+        '{"id":"write-9","title":"创作第9集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s09-01","s09-02"]}}]}'
+    )
+    gateway = FakeModelGateway(stale, repaired)
+
+    result = await AgentPlanner(gateway).create_plan(
+        _request(),
+        PlanningCapabilities(
+            available_agent_roles=frozenset({"screenplay_writer"}),
+            max_parallel_agents=3,
+            constraints=PlanningConstraints(
+                agent_assignment_coverages=(
+                    AgentAssignmentCoverage(
+                        agent_role="screenplay_writer",
+                        assignment_field="sceneIds",
+                        required_values=(
+                            "s08-01",
+                            "s08-02",
+                            "s09-01",
+                            "s09-02",
+                        ),
+                        root_only=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert result.model_call_count == 2
+    assert [
+        tuple(step.assignment["sceneIds"])
+        for step in result.plan.steps
+    ] == [
+        ("s08-01", "s08-02"),
+        ("s09-01", "s09-02"),
+    ]
+    assert "s08-01" in gateway.invocations[1][0][-1].content
+
+
+def test_planner_rejects_agent_frontier_above_host_parallel_limit():
+    todos = [
+        {
+            "id": f"write-{index}",
+            "title": f"创作 {index}",
+            "type": "write",
+            "executor": "agent",
+            "agentRole": "screenplay_writer",
+            "assignment": {"sceneIds": [f"s{index}"]},
+        }
+        for index in range(3)
+    ]
+
+    with pytest.raises(RepairablePlannerOutputError, match="parallel limit of 2"):
+        normalize_task_plan(
+            {"needsTodos": True, "title": "并行创作", "todos": todos},
+            PlanningCapabilities(
+                available_agent_roles=frozenset({"screenplay_writer"}),
+                max_parallel_agents=2,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_a_serial_plan_when_parallel_frontier_is_required():
+    serial = (
+        '{"needsTodos":true,"title":"串行",'
+        '"todos":[{"id":"write-all","title":"创作三集",'
+        '"type":"write","executor":"agent",'
+        '"agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s05","s06","s07"]}}]}'
+    )
+    parallel = (
+        '{"needsTodos":true,"title":"并行",'
+        '"todos":['
+        '{"id":"write-5","title":"创作第5集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s05"]}},'
+        '{"id":"write-6","title":"创作第6集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s06"]}},'
+        '{"id":"write-7","title":"创作第7集","type":"write",'
+        '"executor":"agent","agentRole":"screenplay_writer",'
+        '"assignment":{"sceneIds":["s07"]}}]}'
+    )
+    gateway = FakeModelGateway(serial, parallel)
+
+    result = await AgentPlanner(gateway).create_plan(
+        _request(),
+        PlanningCapabilities(
+            available_agent_roles=frozenset({"screenplay_writer"}),
+            max_parallel_agents=3,
+            constraints=PlanningConstraints(
+                required_any_agent_roles=frozenset({"screenplay_writer"}),
+                minimum_root_agent_count=3,
+            ),
+        ),
+    )
+
+    assert result.model_call_count == 2
+    assert [step.id for step in result.plan.steps] == [
+        "write-5",
+        "write-6",
+        "write-7",
+    ]
+    assert "dependency-free" in gateway.invocations[1][0][-1].content

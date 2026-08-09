@@ -2,6 +2,8 @@
 
 本基线只验证当前三层架构，不比较旧 Agent 实现，也不调用外部模型。
 
+> 本文继续作为 Writing Agent 历史基线；2026-08 Core/剧本对话重构的现状清单与完整门禁见 [`docs/design/agent-core-screenplay-refactor-baseline.md`](design/agent-core-screenplay-refactor-baseline.md)。
+
 ## 覆盖范围
 
 - `backend/agent_core/`：契约、Planner、Runtime、Run Controller、工具安全、审批与取消；

@@ -5,12 +5,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from agent_core.output_budget import (
+    ModelOutputCapabilities,
+    ThinkingTokenAccounting,
+)
+
 
 class ModelProfile:
     profile_id = "generic"
     model_names: frozenset[str] = frozenset()
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
+    max_output_tokens: int | None = None
+    thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (
@@ -29,6 +36,12 @@ class ModelProfile:
         """Minimum output budget for narrow host-controlled model calls."""
 
         return 0
+
+    def output_capabilities(self) -> ModelOutputCapabilities:
+        return ModelOutputCapabilities(
+            max_output_tokens=self.max_output_tokens,
+            thinking_token_accounting=self.thinking_token_accounting,
+        )
 
     def normalize_openai_chunk(self, chunk: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(chunk)

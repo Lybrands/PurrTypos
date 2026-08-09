@@ -53,6 +53,7 @@ def inspect_tool_contract(
         name for name in names if name and names.count(name) > 1
     )
     violations: list[str] = []
+    planning_capabilities = {}
 
     for index, registration in enumerate(items):
         name = names[index]
@@ -67,6 +68,21 @@ def inspect_tool_contract(
             violations.append(
                 f"{label}: cancellation_linearizable must be boolean"
             )
+        capability = registration.planning_capability
+        if capability is not None:
+            capability_name = capability.name
+            if capability_name in names:
+                violations.append(
+                    f"{label}: planning capability collides with a runtime "
+                    f"tool: {capability_name}"
+                )
+            previous = planning_capabilities.get(capability_name)
+            if previous is not None and previous != capability:
+                violations.append(
+                    f"{label}: planning capability conflicts with another "
+                    f"runtime tool: {capability_name}"
+                )
+            planning_capabilities[capability_name] = capability
 
         parameters = thaw_json_mapping(registration.schema.parameters)
         if parameters.get("type") != "object":

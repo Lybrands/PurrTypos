@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from agent_core.contracts import AgentDelegation, DelegationAggregation
@@ -23,9 +24,13 @@ class AgentRunQueryService:
         store: CheckpointStore,
         *,
         role_registry: AgentRoleRegistry | None = None,
+        domain_event_mapper: (
+            Callable[[AgentEvent], dict[str, Any] | None] | None
+        ) = None,
     ) -> None:
         self._store = store
         self._role_registry = role_registry
+        self._domain_event_mapper = domain_event_mapper
 
     async def get_snapshot(
         self,
@@ -56,11 +61,14 @@ class AgentRunQueryService:
         for event in checkpoint.events:
             event_type = str(event.get("eventType") or "")
             payload = thaw_json_mapping(event.get("payload") or {})
-            mapped_chunk = core_event_to_sse_chunk(AgentEvent(
-                type=event_type,
-                run_id=normalized_run_id,
-                payload=payload,
-            ))
+            mapped_chunk = core_event_to_sse_chunk(
+                AgentEvent(
+                    type=event_type,
+                    run_id=normalized_run_id,
+                    payload=payload,
+                ),
+                domain_event_mapper=self._domain_event_mapper,
+            )
             envelope = {
                 "version": RUN_SNAPSHOT_VERSION,
                 "cursor": int(event.get("id") or 0),

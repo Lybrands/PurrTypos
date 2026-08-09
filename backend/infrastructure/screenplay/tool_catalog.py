@@ -19,7 +19,21 @@ from agent_core.contracts import (
 from agent_core.artifacts.errors import ArtifactError
 from agent_core.ports import CancellationSignal, ToolRegistration
 from agent_core.tools import InMemoryToolCatalog
-from database.crud.screenplay_source_refs import record_source_refs
+from database.crud.screenplay_source_receipts import record_source_receipts
+from database.crud.screenplay_drafts import (
+    latest_accepted_draft_manifest,
+    list_episode_rows,
+)
+from database.crud.screenplay_episode_documents import (
+    assemble_episode_document,
+    get_episode as get_structured_episode,
+    list_episode_rows as list_structured_episode_rows,
+)
+from database.crud.screenplay_head_projection import (
+    get_current_document,
+    get_document as get_project_document,
+    list_current_documents,
+)
 from domains.screenplay.source_scope import (
     is_restricted_source_scope,
     parse_source_scope,
@@ -34,6 +48,7 @@ from domains.screenplay.scene_execution import (
     normalize_scene_execution,
     validate_scene_execution_history,
 )
+from domains.screenplay.draft_episodes import build_episode_draft_batches
 from domains.screenplay.proposal_rendering import render_screenplay_proposal
 from domains.screenplay.source_coverage import (
     build_source_coverage_plan,
@@ -45,6 +60,8 @@ from domains.screenplay.contracts import (
 )
 from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
 from domains.screenplay.tool_contracts import (
+    SCREENPLAY_PLANNING_CAPABILITY_SCHEMA_BY_NAME,
+    SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY,
     SCREENPLAY_TOOL_CONTEXT_CONTRACTS,
     SCREENPLAY_TOOL_DATA_CONTRACTS,
     SCREENPLAY_TOOL_POLICIES,
@@ -58,6 +75,16 @@ from utils.text import extract_text_from_lexical
 
 
 logger = logging.getLogger(__name__)
+
+
+_HOST_PLANNED_FINALIZE_TOOLS = frozenset({
+    "finalizeSourceAnalysisProposal",
+    "finalizeCreativeBriefProposal",
+    "finalizeScreenplayStructureProposal",
+    "finalizeSceneListProposal",
+    "finalizeScreenplayReviewProposal",
+    "finalizeScreenplayRevisionProposal",
+})
 
 
 _SOURCE_TOOL_NAMES = frozenset({
@@ -122,7 +149,10 @@ _ARTIFACT_TOOL_NAMES = frozenset({
 _ARTIFACT_APPEND_TOOL_NAMES = frozenset({
     name for name in _ARTIFACT_TOOL_NAMES if name.startswith("append")
 })
-_STATEFUL_TOOL_NAMES = frozenset({"proposeSceneDraft"})
+_STATEFUL_TOOL_NAMES = frozenset({
+    "getScreenplayDraftContext",
+    "proposeSceneDraft",
+})
 _SERIES_FORMATS = frozenset({"连续剧", "竖屏短剧"})
 _GLOBAL_SOURCE_TOOL_NAMES = frozenset({
     "getSourceCharacters",
@@ -135,6 +165,8 @@ def build_screenplay_tool_catalog(db) -> InMemoryToolCatalog:
     handlers = {
         "getScreenplayProject": _get_screenplay_project,
         "getScreenplayDocument": _get_screenplay_document,
+        "getScreenplayEpisodeContext": _get_screenplay_episode_context,
+        "getScreenplayDraftContext": _get_screenplay_draft_context,
         "getSourceBookOverview": _get_source_book_overview,
         "getSourceCoveragePlan": _get_source_coverage_plan,
         "readSourceCoverageBatch": _read_source_coverage_batch,
@@ -181,6 +213,19 @@ def build_screenplay_tool_catalog(db) -> InMemoryToolCatalog:
             data_contract=SCREENPLAY_TOOL_DATA_CONTRACTS[schema.name],
             cancellation_linearizable=(schema.name in _ARTIFACT_TOOL_NAMES),
             host_managed_durability=(schema.name in _ARTIFACT_TOOL_NAMES),
+            host_planned_arguments=(
+                {}
+                if schema.name in _HOST_PLANNED_FINALIZE_TOOLS
+                else None
+            ),
+            planning_capability=(
+                SCREENPLAY_PLANNING_CAPABILITY_SCHEMA_BY_NAME[
+                    SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY[schema.name]
+                ]
+                if schema.name
+                in SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY
+                else None
+            ),
         )
         for schema in SCREENPLAY_TOOL_SCHEMAS
     )
@@ -201,6 +246,10 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
         "getScreenplayDocument",
     })
     enabled = set(project_tools)
+    if context.requested_stage in {"scenes", "draft", "review", "completed"}:
+        enabled.add("getScreenplayEpisodeContext")
+    if context.requested_stage in {"draft", "review", "completed"}:
+        enabled.add("getScreenplayDraftContext")
     if context.requested_source_book_id:
         enabled.update(_SOURCE_TOOL_NAMES)
         if context.source_scope_restricted:
@@ -285,7 +334,7 @@ def _bind_handler(db, tool_name: str, operation):
                 else ()
             )
             if refs and state.run_id:
-                await record_source_refs(
+                await record_source_receipts(
                     db,
                     project_id=str(project["id"]),
                     agent_run_id=str(state.run_id),
@@ -411,12 +460,7 @@ async def _load_project_scope(db, state: ExecutionState) -> dict[str, Any]:
 
 async def _get_screenplay_project(db, project, arguments):
     del arguments
-    documents = await db.fetch_all(
-        "SELECT id, kind, title, version, status, derived_from_ids, "
-        "create_time, update_time FROM screenplay_documents "
-        "WHERE project_id = ? ORDER BY kind ASC, version DESC",
-        [project["id"]],
-    )
+    documents = await list_current_documents(db, str(project["id"]))
     return {
         "project": {
             "id": project["id"],
@@ -434,7 +478,17 @@ async def _get_screenplay_project(db, project, arguments):
         },
         "documents": [
             {
-                **row,
+                key: row.get(key)
+                for key in (
+                    "id",
+                    "kind",
+                    "title",
+                    "version",
+                    "status",
+                    "create_time",
+                    "update_time",
+                )
+            } | {
                 "derived_from_ids": _json_value(
                     row.get("derived_from_ids"),
                     [],
@@ -449,9 +503,10 @@ async def _get_screenplay_document(db, project, arguments):
     document_id = str(arguments.get("documentId") or "").strip()
     if not document_id:
         raise _ToolInputError("documentId is required.")
-    row = await db.fetch_one(
-        "SELECT * FROM screenplay_documents WHERE id = ? AND project_id = ?",
-        [document_id, project["id"]],
+    row = await get_project_document(
+        db,
+        str(project["id"]),
+        document_id,
     )
     if row is None:
         raise _ToolInputError(
@@ -465,6 +520,289 @@ async def _get_screenplay_document(db, project, arguments):
     return {"document": row}, []
 
 
+async def _get_screenplay_episode_context(db, project, arguments):
+    document_id = str(arguments.get("documentId") or "").strip()
+    if not document_id:
+        raise _ToolInputError("documentId is required.")
+    document = await get_project_document(
+        db,
+        str(project["id"]),
+        document_id,
+    )
+    if document is None:
+        raise _ToolInputError(
+            "The requested document is outside the current screenplay project."
+        )
+    index = await list_structured_episode_rows(
+        db,
+        document_id=document_id,
+        include_content=False,
+    )
+    if not index:
+        raise _ToolInputError(
+            "The requested document has no episode-native payloads."
+        )
+    raw_numbers = arguments.get("episodeNumbers")
+    if raw_numbers is None:
+        requested = [int(index[0]["episode_number"])]
+    elif isinstance(raw_numbers, list):
+        requested = list(dict.fromkeys(
+            int(item)
+            for item in raw_numbers
+            if isinstance(item, int)
+            and not isinstance(item, bool)
+            and item > 0
+        ))[:8]
+    else:
+        raise _ToolInputError("episodeNumbers must be an array.")
+    available = {int(item["episode_number"]) for item in index}
+    unknown = set(requested) - available
+    if unknown:
+        raise _ToolInputError(
+            "Requested episodes are outside this document: "
+            + ", ".join(str(item) for item in sorted(unknown))
+        )
+    selected = []
+    for number in requested:
+        row = await get_structured_episode(
+            db,
+            document_id=document_id,
+            episode_number=number,
+        )
+        if row is not None:
+            selected.append(row)
+    return {
+        "document": {
+            "id": str(document["id"]),
+            "kind": str(document["kind"]),
+            "title": str(document["title"]),
+            "version": int(document["version"]),
+            "status": str(document["status"]),
+            "manifest": _json_value(document.get("content_json"), {}),
+        },
+        "episodeIndex": index,
+        "selectedEpisodes": selected,
+    }, []
+
+
+async def _get_screenplay_draft_context(db, project, arguments, state):
+    scene_list = await get_current_document(
+        db,
+        str(project["id"]),
+        kind="scene_list",
+    )
+    if scene_list is None:
+        raise _ToolInputError(
+            "An accepted scene list is required before reading draft context."
+        )
+    scene_episode_rows = await list_structured_episode_rows(
+        db,
+        document_id=str(scene_list.get("id") or ""),
+        include_content=True,
+    )
+    if scene_episode_rows:
+        scene_list_json = {
+            "scenes": [
+                dict(scene)
+                for episode in scene_episode_rows
+                for scene in episode.get("content_json", {}).get("scenes", [])
+                if isinstance(scene, Mapping)
+            ],
+        }
+    else:
+        scene_list_json = _json_value(scene_list.get("content_json"), {})
+    ordered_scenes = list(ordered_scene_mappings(
+        scene_list_json if isinstance(scene_list_json, Mapping) else {}
+    ))
+    draft = await latest_accepted_draft_manifest(db, str(project["id"]))
+    draft_json = _json_value((draft or {}).get("content_json"), {})
+    completed_ids = [
+        str(item).strip()
+        for item in (
+            draft_json.get("completedSceneIds", [])
+            if isinstance(draft_json, Mapping)
+            else []
+        )
+        if str(item).strip()
+    ]
+    completed_set = set(completed_ids)
+    episode_rows = await list_episode_rows(
+        db,
+        project_id=str(project["id"]),
+        status="accepted",
+        include_content=True,
+    )
+    episode_document_by_number = {
+        int(row["episode_number"]): row
+        for row in episode_rows
+    }
+
+    episode_scenes: dict[int, list[Mapping[str, Any]]] = {}
+    for scene in ordered_scenes:
+        raw_episode = scene.get("episodeNumber")
+        if (
+            isinstance(raw_episode, bool)
+            or not isinstance(raw_episode, int)
+            or raw_episode <= 0
+        ):
+            raw_episode = 1
+        episode_scenes.setdefault(raw_episode, []).append(scene)
+    episode_index: list[dict[str, Any]] = []
+    next_episode_number: int | None = None
+    for episode_number, scenes in episode_scenes.items():
+        scene_ids = [str(scene.get("id") or "") for scene in scenes]
+        completed_scene_ids = [
+            scene_id for scene_id in scene_ids if scene_id in completed_set
+        ]
+        if not completed_scene_ids:
+            status = "pending"
+        elif len(completed_scene_ids) == len(scene_ids):
+            status = "completed"
+        else:
+            status = "in_progress"
+        if next_episode_number is None and status != "completed":
+            next_episode_number = episode_number
+        episode_document = episode_document_by_number.get(episode_number)
+        episode_index.append({
+            "episodeNumber": episode_number,
+            "status": status,
+            "sceneCount": len(scene_ids),
+            "completedSceneCount": len(completed_scene_ids),
+            "sceneIds": scene_ids,
+            "documentId": (
+                str(episode_document["id"])
+                if episode_document is not None
+                else None
+            ),
+        })
+
+    raw_requested = arguments.get("episodeNumbers")
+    if raw_requested is None:
+        bound_scene_ids = {
+            str(item).strip()
+            for item in state.domain.get(
+                "screenplayBoundDraftSceneIds",
+                [],
+            )
+            if str(item).strip()
+        }
+        requested_numbers = list(dict.fromkeys(
+            episode_number
+            for episode_number, scenes in episode_scenes.items()
+            if any(
+                str(scene.get("id") or "").strip() in bound_scene_ids
+                for scene in scenes
+            )
+        ))
+        if not requested_numbers and next_episode_number is not None:
+            requested_numbers = [next_episode_number]
+    elif isinstance(raw_requested, list):
+        requested_numbers = list(dict.fromkeys(
+            int(item)
+            for item in raw_requested
+            if isinstance(item, int)
+            and not isinstance(item, bool)
+            and item > 0
+        ))[:3]
+    else:
+        raise _ToolInputError("episodeNumbers must be an array.")
+    unknown_episodes = set(requested_numbers) - set(episode_scenes)
+    if unknown_episodes:
+        raise _ToolInputError(
+            "Requested episodes are outside the accepted scene list: "
+            + ", ".join(str(item) for item in sorted(unknown_episodes))
+        )
+
+    selected_episodes: list[dict[str, Any]] = []
+    for episode_number in requested_numbers:
+        document = episode_document_by_number.get(episode_number)
+        selected_episodes.append({
+            "episodeNumber": episode_number,
+            "scenes": [
+                {
+                    key: scene.get(key)
+                    for key in (
+                        "id",
+                        "order",
+                        "heading",
+                        "location",
+                        "timeOfDay",
+                        "characters",
+                        "objective",
+                        "conflict",
+                        "turn",
+                        "synopsis",
+                    )
+                    if scene.get(key) is not None
+                }
+                for scene in episode_scenes[episode_number]
+            ],
+            "acceptedDocument": (
+                {
+                    "id": str(document["id"]),
+                    "version": int(document["version"]),
+                    "sceneIds": list(document.get("scene_ids", [])),
+                    "contentText": str(document.get("content_text") or ""),
+                    "continuitySummary": str(
+                        document.get("continuity_summary") or ""
+                    ),
+                }
+                if document is not None
+                else None
+            ),
+        })
+
+    executions = (
+        draft_json.get("sceneExecutions", [])
+        if isinstance(draft_json, Mapping)
+        else []
+    )
+    latest_execution = next(
+        (
+            dict(item)
+            for item in reversed(executions)
+            if isinstance(item, Mapping)
+        ),
+        None,
+    )
+    previous_episode_document = next(
+        (
+            episode_document_by_number[number]
+            for number in sorted(episode_document_by_number, reverse=True)
+            if not requested_numbers or number < min(requested_numbers)
+        ),
+        None,
+    )
+    return {
+        "sceneListDocumentId": str(scene_list["id"]),
+        "acceptedDraftDocumentId": (
+            str(draft["id"]) if draft is not None else None
+        ),
+        "completedSceneCount": len(completed_ids),
+        "totalSceneCount": len(ordered_scenes),
+        "nextEpisodeNumber": next_episode_number,
+        "episodeIndex": episode_index,
+        "selectedEpisodes": selected_episodes,
+        "previousEpisodeBoundary": {
+            "episodeNumber": (
+                int(previous_episode_document["episode_number"])
+                if previous_episode_document is not None
+                else None
+            ),
+            "continuitySummary": (
+                str(previous_episode_document.get("continuity_summary") or "")
+                if previous_episode_document is not None
+                else str((latest_execution or {}).get("continuityState") or "")
+            ),
+            "contentTail": (
+                str(previous_episode_document.get("content_text") or "")[-6_000:]
+                if previous_episode_document is not None
+                else ""
+            ),
+        },
+    }, []
+
+
 async def _propose_scene_list(db, project, arguments):
     required_kind = (
         "episode_outline"
@@ -476,16 +814,19 @@ async def _propose_scene_list(db, project, arguments):
         project,
         required_accepted_kind=required_kind,
     )
-    structure = await db.fetch_one(
-        "SELECT id, kind, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = ? AND status = 'accepted' "
-        "ORDER BY version DESC LIMIT 1",
-        [project["id"], required_kind],
+    structure = await get_current_document(
+        db,
+        str(project["id"]),
+        kind=required_kind,
     )
     if structure is None:
         raise _ToolInputError(
             "An accepted structure is required before this proposal."
         )
+    structure = (
+        await assemble_episode_document(db, structure, include_text=False)
+        or structure
+    )
     parsed_structure = _json_value(structure.get("content_json"), {})
     try:
         scenes = normalize_scene_trace(
@@ -516,11 +857,10 @@ async def _propose_scene_list(db, project, arguments):
 
 
 async def _propose_scene_draft(db, project, arguments, state):
-    accepted_scene_list = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'scene_list' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
+    accepted_scene_list = await get_current_document(
+        db,
+        str(project["id"]),
+        kind="scene_list",
     )
     if accepted_scene_list is None:
         raise _ToolInputError(
@@ -545,15 +885,12 @@ async def _propose_scene_draft(db, project, arguments, state):
         for scene in ordered_scenes
         if str(scene.get("id") or "").strip()
     ]
-    latest_draft = await db.fetch_one(
-        "SELECT id, content_json, content_text FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'scene_draft' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project["id"]],
+    latest_draft = await latest_accepted_draft_manifest(
+        db,
+        str(project["id"]),
     )
     previous_completed: list[str] = []
     previous_executions: list[dict[str, Any]] = []
-    previous_content_text = ""
     if latest_draft is not None:
         previous_json = _json_value(latest_draft.get("content_json"), {})
         if (
@@ -576,15 +913,19 @@ async def _propose_scene_draft(db, project, arguments, state):
                 for item in raw_previous
                 if str(item).strip()
             ]
-        raw_executions = previous_json.get("sceneExecutions")
-        if isinstance(raw_executions, list):
-            previous_executions = [
-                dict(item) for item in raw_executions
-                if isinstance(item, Mapping)
-            ]
-        previous_content_text = str(
-            latest_draft.get("content_text") or ""
-        ).strip()
+        previous_episode_rows = await list_episode_rows(
+            db,
+            project_id=str(project["id"]),
+            draft_document_id=str(latest_draft["id"]),
+            status=None,
+            include_content=True,
+        )
+        previous_executions = [
+            dict(execution)
+            for episode in previous_episode_rows
+            for execution in episode.get("scene_executions", [])
+            if isinstance(execution, Mapping)
+        ]
     expected_previous = ordered_scene_ids[:len(previous_completed)]
     if previous_completed != expected_previous:
         raise _ToolInputError(
@@ -686,10 +1027,22 @@ async def _propose_scene_draft(db, project, arguments, state):
             "notes exceeds "
             f"{SCENE_DRAFT_PAYLOAD_LIMITS.draft_notes_chars} characters."
         )
-    content_text = "\n\n".join(
-        item
-        for item in (previous_content_text, *scene_texts)
-        if item
+    content_text = "\n\n".join(item for item in scene_texts if item)
+    episode_drafts = build_episode_draft_batches(
+        scenes_by_id=scenes_by_id,
+        generated_scenes=[
+            {
+                "sceneId": scene_id,
+                "sceneText": scene_text,
+                "execution": execution,
+            }
+            for scene_id, scene_text, execution in zip(
+                selected_scene_ids,
+                scene_texts,
+                current_executions,
+                strict=True,
+            )
+        ],
     )
     content_json = {
         "schemaVersion": 1,
@@ -701,10 +1054,11 @@ async def _propose_scene_draft(db, project, arguments, state):
         "newSceneIds": selected_scene_ids,
         "newSceneHeadings": scene_headings,
         "completedSceneIds": completed_ids,
-        "sceneExecutions": scene_executions,
         "isComplete": all_scenes_complete,
         "notes": notes,
     }
+    if episode_drafts:
+        content_json["episodeDrafts"] = episode_drafts
     return _proposal_result(
         kind="scene_draft",
         title=_proposal_title(
@@ -776,11 +1130,10 @@ async def _proposal_parent_ids(
     # mix book/chapter/coverage-plan ids into the screenplay document graph.
     parent_ids: list[str] = []
     if required_accepted_kind:
-        accepted = await db.fetch_one(
-            "SELECT id FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = ? AND status = 'accepted' "
-            "ORDER BY version DESC LIMIT 1",
-            [project["id"], required_accepted_kind],
+        accepted = await get_current_document(
+            db,
+            str(project["id"]),
+            kind=required_accepted_kind,
         )
         if accepted is None:
             label = (
@@ -796,11 +1149,10 @@ async def _proposal_parent_ids(
         accepted_id = str(accepted["id"])
         parent_ids = [accepted_id]
     else:
-        latest = await db.fetch_one(
-            "SELECT id FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'creative_brief' "
-            "ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        latest = await get_current_document(
+            db,
+            str(project["id"]),
+            kind="creative_brief",
         )
         if latest is not None:
             parent_ids = [str(latest["id"])]
@@ -1449,6 +1801,10 @@ def _error(
 
 
 def _json_value(value: object, fallback: Any) -> Any:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
     try:
         return json.loads(str(value or ""))
     except (TypeError, ValueError, json.JSONDecodeError):

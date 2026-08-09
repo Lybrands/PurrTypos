@@ -9,6 +9,11 @@ import AgentConversationTurnIndex, {
 } from '../AgentConversationTurnIndex'
 import AgentMessageEditor from './MessageEditor'
 import AgentUserMessageBody from './UserMessageBody'
+import {
+  createScrollFollowState,
+  detachScrollFollow,
+  observeScrollBottom,
+} from './scrollFollowPolicy'
 import './index.scss'
 
 export interface AgentConversationProps {
@@ -37,7 +42,7 @@ export default function AgentConversation({
 }: AgentConversationProps) {
   const viewportRef = React.useRef<HTMLDivElement | null>(null)
   const portalHostRef = React.useRef<HTMLDivElement | null>(null)
-  const followOutputRef = React.useRef(true)
+  const scrollFollowStateRef = React.useRef(createScrollFollowState())
   const turnIndexItems = React.useMemo(
     () => buildAgentConversationTurnIndex(messages),
     [messages],
@@ -66,8 +71,21 @@ export default function AgentConversation({
     viewport.scrollTop = viewport.scrollHeight
   }, [])
 
+  const viewportIsAtBottom = React.useCallback(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return true
+    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 40
+  }, [])
+
+  const detachFromOutput = React.useCallback((isAtBottom?: boolean) => {
+    scrollFollowStateRef.current = detachScrollFollow(
+      scrollFollowStateRef.current,
+      isAtBottom ?? viewportIsAtBottom(),
+    )
+  }, [viewportIsAtBottom])
+
   React.useEffect(() => {
-    if (followOutputRef.current) {
+    if (!scrollFollowStateRef.current.userDetached) {
       scrollToBottom()
       setActiveTurnIndex(Math.max(0, turnIndexItems.length - 1))
     }
@@ -97,7 +115,7 @@ export default function AgentConversation({
       `[data-agent-turn-index="${item.dataIndex}"]`,
     )
     if (!viewport || !target) return
-    followOutputRef.current = false
+    detachFromOutput(false)
     setActiveTurnIndex(turnIndexItems.findIndex((turn) => turn.dataIndex === item.dataIndex))
     const viewportRect = viewport.getBoundingClientRect()
     const targetRect = target.getBoundingClientRect()
@@ -105,7 +123,7 @@ export default function AgentConversation({
       top: viewport.scrollTop + targetRect.top - viewportRect.top - 12,
       behavior: 'smooth',
     })
-  }, [turnIndexItems])
+  }, [detachFromOutput, turnIndexItems])
 
   const setPortalHost = React.useCallback((node: HTMLDivElement | null) => {
     portalHostRef.current = node
@@ -123,7 +141,7 @@ export default function AgentConversation({
     const followPortalOutput = () => {
       window.cancelAnimationFrame(frame)
       frame = window.requestAnimationFrame(() => {
-        if (followOutputRef.current) scrollToBottom()
+        if (!scrollFollowStateRef.current.userDetached) scrollToBottom()
       })
     }
     const observer = new MutationObserver(followPortalOutput)
@@ -144,10 +162,22 @@ export default function AgentConversation({
       <div
         ref={viewportRef}
         className="agent-conversation"
+        onWheel={(event) => {
+          if (event.deltaY < 0) detachFromOutput()
+        }}
+        onTouchMove={() => detachFromOutput()}
+        onPointerDown={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect()
+          if (event.clientX >= bounds.right - 16) detachFromOutput()
+        }}
         onScroll={(event) => {
           const target = event.currentTarget
-          followOutputRef.current = (
-            target.scrollHeight - target.scrollTop - target.clientHeight < 360
+          const atBottom = (
+            target.scrollHeight - target.scrollTop - target.clientHeight <= 40
+          )
+          scrollFollowStateRef.current = observeScrollBottom(
+            scrollFollowStateRef.current,
+            atBottom,
           )
           updateActiveTurn(target)
         }}
@@ -222,7 +252,7 @@ export default function AgentConversation({
                       && !message.toolCallSegments?.length
                     )}
                     setScrolledUpByReason={(value) => {
-                      if (value) followOutputRef.current = false
+                      if (value) detachFromOutput()
                     }}
                   />
                 ) : null}

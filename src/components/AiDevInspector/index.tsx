@@ -104,6 +104,14 @@ function formatDuration(ms: number): string {
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1_000)}s`;
 }
 
+function formatTokens(value: unknown): string {
+  const tokens = Number(value);
+  if (!Number.isFinite(tokens) || tokens <= 0) return "—";
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K`;
+  return String(Math.round(tokens));
+}
+
 function isRunActive(run: AiDebugRun | undefined): boolean {
   return Boolean(
     run &&
@@ -320,7 +328,25 @@ const MODEL_PHASE_LABELS: Record<string, string> = {
   response_judge: "回答校验",
 };
 
-function ModelCallRow({ call, index }: { call: AiDebugModelCall; index: number }) {
+const MODEL_FINISH_REASON_LABELS: Record<string, string> = {
+  stop: "正常完成",
+  tool_calls: "进入工具调用",
+  length: "达到本次输出预算",
+  filtered: "供应商内容过滤",
+  other: "供应商其他原因",
+};
+
+function ModelCallRow({
+  call,
+  index,
+  source,
+}: {
+  call: AiDebugModelCall;
+  index: number;
+  source: string;
+}) {
+  const outputBudget = call.parameters?.outputBudget as Record<string, unknown> | undefined;
+  const modelCapabilities = call.parameters?.modelOutputCapabilities as Record<string, unknown> | undefined;
   const roundLabel =
     call.logicalRound != null
       ? `逻辑轮次 ${call.logicalRound}${call.attempt != null ? ` / 尝试 ${call.attempt}` : ""}`
@@ -333,9 +359,16 @@ function ModelCallRow({ call, index }: { call: AiDebugModelCall; index: number }
         <span>#{index + 1}</span>
         <strong>{MODEL_PHASE_LABELS[call.phase] || call.phase}</strong>
         {call.count > 1 ? <em>×{call.count}</em> : null}
+        <small>{source}</small>
         {roundLabel ? <small>{roundLabel}</small> : null}
       </div>
       <div className="ai-dev-inspector__tool-chips">
+        {outputBudget ? (
+          <span>本次预算 {formatTokens(outputBudget.effectiveTokens)}</span>
+        ) : null}
+        {modelCapabilities?.maxOutputTokens ? (
+          <span>模型上限 {formatTokens(modelCapabilities.maxOutputTokens)}</span>
+        ) : null}
         {call.toolNames.length > 0
           ? call.toolNames.map((name) => <code key={name}>{name}</code>)
           : <span>未传入工具</span>}
@@ -803,6 +836,7 @@ function StabilityCard({ run }: { run: AiDebugRun }) {
           <summary>完整稳定性报告</summary>
           <pre>{formatJson({
             stability: report.stability,
+            performance: report.performance,
             artifacts: report.artifacts,
             artifactMaintenance: report.artifactMaintenance,
             failureClassification: report.failureClassification,
@@ -913,17 +947,31 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
     0,
   );
   const modelCallCount = rootModelCallCount + childModelCallCount;
+  const modelCallRows = [
+    ...run.modelCalls.map((call) => ({
+      key: `root:${call.id}`,
+      call,
+      source: '根 Run',
+    })),
+    ...run.childRuns.flatMap((child) => child.modelCalls.map((call) => ({
+      key: `${child.id}:${call.id}`,
+      call,
+      source: child.agentTitle || child.agentRole,
+    }))),
+  ];
   const modelToolNames = [...new Set(
     [
       ...run.modelCalls,
       ...run.childRuns.flatMap((child) => child.modelCalls),
     ].flatMap((call) => call.toolNames),
   )];
-  const inputTokens = (run.contextBudget as Record<string, unknown> | undefined)
+  const contextBudget = run.contextBudget as Record<string, unknown> | undefined;
+  const resolvedOutputBudget = contextBudget?.outputBudget as Record<string, unknown> | undefined;
+  const inputTokens = contextBudget
     ?.actualInputTokens ??
-    (run.contextBudget as Record<string, unknown> | undefined)?.estimatedInputTokens;
-  const outputTokens = (run.contextBudget as Record<string, unknown> | undefined)
-    ?.actualOutputTokens;
+    contextBudget?.estimatedInputTokens;
+  const outputTokens = contextBudget?.actualOutputTokens;
+  const finishReason = String(contextBudget?.finishReason ?? "");
   return (
     <div className="ai-dev-inspector__section">
       <div className="ai-dev-inspector__metrics">
@@ -932,6 +980,18 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
         <div><span>耗时</span><strong>{formatDuration(elapsed)}</strong></div>
         <div><span>模型</span><strong title={run.model}>{run.model || "待返回"}</strong></div>
         <div><span>Token</span><strong>{String(inputTokens ?? "—")} / {String(outputTokens ?? "—")}</strong></div>
+        <div>
+          <span>本次输出预算</span>
+          <strong>{formatTokens(resolvedOutputBudget?.effectiveTokens ?? contextBudget?.outputReserveTokens)}</strong>
+        </div>
+        <div>
+          <span>模型输出上限</span>
+          <strong>{formatTokens(resolvedOutputBudget?.modelMaxOutputTokens)}</strong>
+        </div>
+        <div>
+          <span>结束原因</span>
+          <strong>{MODEL_FINISH_REASON_LABELS[finishReason] ?? (finishReason || "—")}</strong>
+        </div>
         <div>
           <span>模型调用</span>
           <strong title={`根 Run ${rootModelCallCount} 次 · 子 Run ${childModelCallCount} 次`}>
@@ -990,15 +1050,20 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
           {modelCallCount > 0 ? "本轮模型调用未传入工具函数" : "等待模型调用…"}
         </div>
       )}
-      {run.modelCalls.length > 0 ? (
+      {modelCallRows.length > 0 ? (
         <details className="ai-dev-inspector__model-calls">
           <summary>
             模型调用明细
             <small>{modelCallCount} 次</small>
           </summary>
           <div>
-            {run.modelCalls.map((call, index) => (
-              <ModelCallRow key={call.id} call={call} index={index} />
+            {modelCallRows.map((item, index) => (
+              <ModelCallRow
+                key={item.key}
+                call={item.call}
+                index={index}
+                source={item.source}
+              />
             ))}
           </div>
         </details>
@@ -1029,7 +1094,7 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
 
       {run.agentPlan !== undefined && (
         <details className="ai-dev-inspector__text-block">
-          <summary>Agent 计划</summary>
+          <summary>Core Planner 执行计划</summary>
           <pre>{formatJson(run.agentPlan)}</pre>
         </details>
       )}

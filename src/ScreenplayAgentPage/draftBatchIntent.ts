@@ -1,11 +1,13 @@
 export const MAX_SCREENPLAY_DRAFT_BATCH_SCENES = 100
+export const MAX_SCREENPLAY_DRAFT_BATCH_EPISODES = 100
+
+export type ScreenplayEpisodeDraftScope = `next_${number}_episodes`
 
 export type ScreenplayDraftScope =
   | 'planner'
   | 'next_scene'
   | 'next_episode'
-  | 'next_3_episodes'
-  | 'next_5_episodes'
+  | ScreenplayEpisodeDraftScope
   | 'all_remaining'
   | 'count'
 
@@ -15,9 +17,42 @@ export interface DraftBatchIntentScope {
 }
 
 export interface DraftBatchAction {
-  key: 'next_3_episodes' | 'next_5_episodes' | 'all_remaining'
+  key: ScreenplayEpisodeDraftScope | 'all_remaining'
   label: string
   episodeCount: number
+}
+
+export function draftScopeForEpisodeCount(
+  episodeCount: number,
+): 'next_episode' | ScreenplayEpisodeDraftScope {
+  const normalized = Math.trunc(episodeCount)
+  if (!Number.isFinite(episodeCount) || !Number.isInteger(episodeCount)) {
+    throw new RangeError('episode count must be an integer')
+  }
+  if (normalized < 1) {
+    throw new RangeError('episode count must be positive')
+  }
+  if (normalized === 1) return 'next_episode'
+  if (normalized > MAX_SCREENPLAY_DRAFT_BATCH_EPISODES) {
+    throw new RangeError(
+      `episode count must not exceed ${MAX_SCREENPLAY_DRAFT_BATCH_EPISODES}`,
+    )
+  }
+  return `next_${normalized}_episodes`
+}
+
+export function draftEpisodeCountFromScope(
+  scope: ScreenplayDraftScope,
+): number | null {
+  if (scope === 'next_episode') return 1
+  const matched = /^next_(\d+)_episodes$/.exec(scope)
+  if (!matched) return null
+  const episodeCount = Number(matched[1])
+  return Number.isInteger(episodeCount)
+    && episodeCount >= 2
+    && episodeCount <= MAX_SCREENPLAY_DRAFT_BATCH_EPISODES
+    ? episodeCount
+    : null
 }
 
 /** Keep the request semantic; the backend resolves concrete scenes at run time. */
@@ -29,13 +64,18 @@ export function inferDraftScope(prompt: string): ScreenplayDraftScope {
     return 'all_remaining'
   }
   const episodeCountMatch = normalized.match(
-    /(?:接下来|连续|批量|创作|完成)([一二两三四五六七八九十\d]{1,3})集/,
+    /(?:接下来|连续|批量|创作|完成)(?:创作|完成|写|生成|接下来)?([一二两三四五六七八九十\d]{1,3})集/,
   )
   const episodeCount = episodeCountMatch
     ? parseSceneCount(episodeCountMatch[1])
     : null
-  if (episodeCount === 3) return 'next_3_episodes'
-  if (episodeCount === 5) return 'next_5_episodes'
+  if (
+    episodeCount != null
+    && episodeCount > 0
+    && episodeCount <= MAX_SCREENPLAY_DRAFT_BATCH_EPISODES
+  ) {
+    return draftScopeForEpisodeCount(episodeCount)
+  }
   if (/(?:下一集|本集|当前集)/.test(normalized)) return 'next_episode'
   if (/(?:下一场|本场|当前场)/.test(normalized)) return 'next_scene'
   return /[一二两三四五六七八九十\d]{1,3}场/.test(normalized)
@@ -54,11 +94,11 @@ export function buildDraftBatchActions(
   )
   if (pending <= 0 || pendingEpisodeCount <= 1) return []
 
-  const episodeRangeActions = [3, 5].flatMap((episodeCount) => {
+  const episodeRangeActions = [2, 3, 5].flatMap((episodeCount) => {
     if (pendingEpisodeCount <= episodeCount) return []
     return [{
-      key: `next_${episodeCount}_episodes` as 'next_3_episodes' | 'next_5_episodes',
-      label: `创作接下来 ${episodeCount} 集`,
+      key: draftScopeForEpisodeCount(episodeCount) as ScreenplayEpisodeDraftScope,
+      label: `连续创作 ${episodeCount} 集`,
       episodeCount,
     }]
   })

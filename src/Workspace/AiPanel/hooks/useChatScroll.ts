@@ -1,5 +1,11 @@
 import React from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
+import {
+  createScrollFollowState,
+  detachScrollFollow,
+  observeScrollBottom,
+  type ScrollFollowState,
+} from "../../../components/AgentConversation/scrollFollowPolicy";
 import type { ChatMessage } from "./chat.types";
 
 /**
@@ -23,16 +29,47 @@ export function useChatScroll({
   /** 用户主动上滚后为 true，不再自动滚到底部；滚回底部或点击「回到底部」后恢复为 false。 */
   const [userHasScrolledUp, setUserHasScrolledUp] = React.useState(false);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
+  const isAtBottomRef = React.useRef(true);
+  const scrollFollowStateRef = React.useRef<ScrollFollowState>(
+    createScrollFollowState(),
+  );
   const pinNewTurnToTopRef = React.useRef(false);
+
+  const applyScrollFollowState = React.useCallback(
+    (nextState: ScrollFollowState) => {
+      scrollFollowStateRef.current = nextState;
+      setUserHasScrolledUp((previous) =>
+        previous === nextState.userDetached
+          ? previous
+          : nextState.userDetached,
+      );
+    },
+    [],
+  );
 
   const setScrolledUpByReason = React.useCallback(
     (nextValue: boolean, _reason: string) => {
-      setUserHasScrolledUp((prev) => {
-        if (prev === nextValue) return prev;
-        return nextValue;
-      });
+      applyScrollFollowState(
+        nextValue
+          ? detachScrollFollow(
+              scrollFollowStateRef.current,
+              isAtBottomRef.current,
+            )
+          : createScrollFollowState(),
+      );
     },
-    [],
+    [applyScrollFollowState],
+  );
+
+  const handleAtBottomStateChange = React.useCallback(
+    (atBottom: boolean) => {
+      isAtBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+      applyScrollFollowState(
+        observeScrollBottom(scrollFollowStateRef.current, atBottom),
+      );
+    },
+    [applyScrollFollowState],
   );
 
   /** 发送/编辑发送时调用：下一次列表增长时把本轮用户消息钉到顶部。 */
@@ -88,6 +125,7 @@ export function useChatScroll({
   React.useEffect(() => {
     if (!streamFollowKey) return;
     const raf = requestAnimationFrame(() => {
+      if (scrollFollowStateRef.current.userDetached) return;
       virtuosoRef.current?.scrollToIndex({
         index: combinedData.length - 1,
         align: "end",
@@ -102,7 +140,7 @@ export function useChatScroll({
     userHasScrolledUp,
     setScrolledUpByReason,
     isAtBottom,
-    setIsAtBottom,
+    handleAtBottomStateChange,
     handleScrollToBottom,
     pinNewTurnToTop,
   };

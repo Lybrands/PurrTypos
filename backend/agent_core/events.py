@@ -17,6 +17,7 @@ class CoreEventType(StrEnum):
     MODEL_CALL_RECORDED = "model.call_recorded"
     MODEL_DELTA = "model.delta"
     MODEL_THINKING_DELTA = "model.thinking_delta"
+    HOST_PLANNED_TOOL_DISPATCHED = "tool.host_planned_dispatched"
     TOOL_CALLS_STARTED = "tool.calls_started"
     TOOL_CALL_COMPLETED = "tool.call_completed"
     TOOL_RESULTS = "tool.results"

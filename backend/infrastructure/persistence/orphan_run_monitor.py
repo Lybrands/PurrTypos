@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Sequence
 
 from infrastructure.persistence.run_execution_store import recover_orphaned_runs
 
@@ -16,8 +17,11 @@ async def monitor_orphaned_runs(
     *,
     poll_interval_seconds: float = 5.0,
     stop_event: asyncio.Event | None = None,
+    reconcile_linked_state: (
+        Callable[[], Awaitable[Sequence[str]]] | None
+    ) = None,
 ) -> None:
-    """Continuously terminalize Runs whose execution lease has expired."""
+    """Terminalize expired Runs and reconcile their durable owner state."""
 
     interval = float(poll_interval_seconds)
     if interval <= 0:
@@ -42,4 +46,19 @@ async def monitor_orphaned_runs(
                 "Terminalized %s orphaned Agent Run(s): %s",
                 len(recovered),
                 ", ".join(recovered),
+            )
+        if reconcile_linked_state is None:
+            continue
+        try:
+            reconciled = tuple(await reconcile_linked_state())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to reconcile terminal Agent Run owners")
+            continue
+        if reconciled:
+            logger.warning(
+                "Reconciled %s terminal Agent Run owner(s): %s",
+                len(reconciled),
+                ", ".join(reconciled),
             )

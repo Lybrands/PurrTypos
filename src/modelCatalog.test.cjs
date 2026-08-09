@@ -12,7 +12,7 @@ const {
   createConfigFromPreset,
   getBuiltinProvider,
   getDefaultModelContextWindow,
-  getDefaultModelOutputTokens,
+  getModelMaxOutputTokens,
   getDefaultPreset,
   getModelContextWindowOptions,
   getProviderPresets,
@@ -72,6 +72,48 @@ test('Z.ai GLM-5.2 is the first built-in and materializes as the default candida
   assert.equal(result.configs[0].apiProvider, 'zai')
 })
 
+test('DeepSeek V4 Pro and Flash share the official provider and expose real limits', () => {
+  const provider = getBuiltinProvider('deepseek')
+  const presets = getProviderPresets('deepseek')
+
+  assert.deepEqual(provider, {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    apiProvider: 'openai',
+    baseUrl: 'https://api.deepseek.com',
+    keyPlaceholder: '请输入 DeepSeek API Key',
+  })
+  assert.deepEqual(
+    presets.map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      contextWindow: preset.contextWindow,
+      maxOutputTokens: preset.maxOutputTokens,
+      supportsThinking: preset.supportsThinking,
+      thinkingEnabled: preset.thinkingEnabled,
+    })),
+    [
+      {
+        id: 'deepseek:deepseek-v4-pro',
+        name: 'deepseek-v4-pro',
+        contextWindow: '1m',
+        maxOutputTokens: 393_216,
+        supportsThinking: true,
+        thinkingEnabled: true,
+      },
+      {
+        id: 'deepseek:deepseek-v4-flash',
+        name: 'deepseek-v4-flash',
+        contextWindow: '1m',
+        maxOutputTokens: 393_216,
+        supportsThinking: true,
+        thinkingEnabled: true,
+      },
+    ],
+  )
+  assert.equal(getDefaultPreset('deepseek').id, 'deepseek:deepseek-v4-pro')
+})
+
 test('API provider normalization preserves Z.ai and rejects unknown legacy values', () => {
   assert.equal(normalizeApiProvider('zai'), 'zai')
   assert.equal(normalizeApiProvider('anthropic'), 'anthropic')
@@ -112,7 +154,6 @@ test('createConfigFromPreset keeps the legacy runtime config shape', () => {
     thinkingOnly: true,
     thinkingEnabled: true,
     contextWindow: preset.contextWindow,
-    outputTokenBudget: preset.defaultOutputTokens,
     customizeTemperature: false,
     temperatureThinking: 0.6,
     temperatureNonThinking: 0.6,
@@ -121,28 +162,44 @@ test('createConfigFromPreset keeps the legacy runtime config shape', () => {
   })
 })
 
-test('output budgets are independent from context windows and support custom models', () => {
+test('model catalog exposes capability ceilings instead of task budgets', () => {
   assert.equal(
-    getDefaultModelOutputTokens({
+    getModelMaxOutputTokens({
       presetId: 'mimo:mimo-v2.5-pro',
       contextWindow: '32k',
     }),
-    16_384,
+    131_072,
   )
-  assert.equal(getDefaultModelOutputTokens({ contextWindow: '32k' }), 4_096)
-  assert.equal(getDefaultModelOutputTokens({ contextWindow: '128k' }), 16_000)
-  assert.equal(getDefaultModelOutputTokens({ contextWindow: '1m' }), 16_384)
+  assert.equal(
+    getModelMaxOutputTokens({ presetId: 'deepseek:deepseek-v4-pro' }),
+    393_216,
+  )
+  assert.equal(
+    getModelMaxOutputTokens({ presetId: 'minimax:MiniMax-M3' }),
+    undefined,
+  )
+  assert.equal(getModelMaxOutputTokens({ contextWindow: '1m' }), undefined)
 })
 
 test('the catalog contains GLM-5.2 and the existing models', () => {
   assert.deepEqual(
     AI_MODEL_PRESETS.map((preset) => preset.name),
-    ['glm-5.2', 'kimi-k3', 'kimi-k2.6', 'MiniMax-M3', 'mimo-v2.5-pro'],
+    [
+      'glm-5.2',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+      'kimi-k3',
+      'kimi-k2.6',
+      'MiniMax-M3',
+      'mimo-v2.5-pro',
+    ],
   )
   assert.deepEqual(
     Object.fromEntries(AI_MODEL_PRESETS.map((preset) => [preset.name, preset.contextWindow])),
     {
       'glm-5.2': '1m',
+      'deepseek-v4-pro': '1m',
+      'deepseek-v4-flash': '1m',
       'kimi-k3': '1m',
       'kimi-k2.6': '256k',
       'MiniMax-M3': '1m',
@@ -155,6 +212,8 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
     ),
     {
       'glm-5.2': false,
+      'deepseek-v4-pro': false,
+      'deepseek-v4-flash': false,
       'kimi-k3': true,
       'kimi-k2.6': false,
       'MiniMax-M3': true,
@@ -167,6 +226,8 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
     ),
     {
       'glm-5.2': ['32k', '256k', '1m'],
+      'deepseek-v4-pro': ['32k', '256k', '1m'],
+      'deepseek-v4-flash': ['32k', '256k', '1m'],
       'kimi-k3': ['32k', '256k', '1m'],
       'kimi-k2.6': ['32k', '128k', '256k'],
       'MiniMax-M3': ['32k', '256k', '1m'],
@@ -316,6 +377,22 @@ test('known config migration updates only exact legacy provider models', () => {
         apiKey: '',
       },
       {
+        name: 'deepseek-v4-pro',
+        nickname: 'DeepSeek V4 Pro',
+        contextWindow: '1m',
+        presetId: 'deepseek:deepseek-v4-pro',
+        providerId: 'deepseek',
+        apiKey: '',
+      },
+      {
+        name: 'deepseek-v4-flash',
+        nickname: 'DeepSeek V4 Flash',
+        contextWindow: '1m',
+        presetId: 'deepseek:deepseek-v4-flash',
+        providerId: 'deepseek',
+        apiKey: '',
+      },
+      {
         name: 'kimi-k3',
         nickname: 'Kimi K3',
         contextWindow: '1m',
@@ -357,18 +434,18 @@ test('known config migration updates only exact legacy provider models', () => {
       },
     ],
   )
-  assert.equal(result.configs[5], legacyConfigs[4])
-  assert.equal(result.configs[1].supportsThinking, true)
-  assert.equal(result.configs[1].thinkingOnly, true)
-  assert.equal(result.configs[1].thinkingEnabled, true)
-  assert.equal(result.configs[1].customizeTemperature, false)
-  assert.equal(result.configs[1].outputTokenBudget, 16_384)
+  assert.equal(result.configs[7], legacyConfigs[4])
   assert.equal(result.configs[3].supportsThinking, true)
   assert.equal(result.configs[3].thinkingOnly, true)
   assert.equal(result.configs[3].thinkingEnabled, true)
-  assert.equal(result.configs[3].apiProvider, 'openai')
-  assert.equal(result.configs[3].baseUrl, 'https://api.minimaxi.com/v1')
-  assert.equal(result.configs[3].outputTokenBudget, 16_384)
+  assert.equal(result.configs[3].customizeTemperature, false)
+  assert.equal(result.configs[3].outputTokenBudget, undefined)
+  assert.equal(result.configs[5].supportsThinking, true)
+  assert.equal(result.configs[5].thinkingOnly, true)
+  assert.equal(result.configs[5].thinkingEnabled, true)
+  assert.equal(result.configs[5].apiProvider, 'openai')
+  assert.equal(result.configs[5].baseUrl, 'https://api.minimaxi.com/v1')
+  assert.equal(result.configs[5].outputTokenBudget, undefined)
 })
 
 test('GLM-5.2 migration claims only the official Z.ai endpoint', () => {
@@ -403,6 +480,41 @@ test('GLM-5.2 migration claims only the official Z.ai endpoint', () => {
   assert.equal(preservedProxy, proxy)
 })
 
+test('DeepSeek migration claims official endpoint variants and shares credentials', () => {
+  const officialFlash = {
+    id: 'official-deepseek-flash',
+    name: 'deepseek-v4-flash',
+    nickname: '快速模型',
+    apiKey: 'deepseek-secret',
+    baseUrl: 'https://api.deepseek.com/v1/',
+    supportsThinking: false,
+    thinkingOnly: false,
+    contextWindow: '128k',
+  }
+  const proxy = {
+    id: 'proxy-deepseek-pro',
+    name: 'deepseek-v4-pro',
+    apiKey: 'proxy-secret',
+    baseUrl: 'https://proxy.example/v1',
+    supportsThinking: false,
+    thinkingOnly: false,
+  }
+
+  const result = migrateKnownModelConfigs([officialFlash, proxy])
+  const pro = result.configs.find((config) => config.presetId === 'deepseek:deepseek-v4-pro')
+  const flash = result.configs.find((config) => config.id === officialFlash.id)
+
+  assert.equal(pro.apiKey, 'deepseek-secret')
+  assert.equal(flash.presetId, 'deepseek:deepseek-v4-flash')
+  assert.equal(flash.providerId, 'deepseek')
+  assert.equal(flash.apiProvider, 'openai')
+  assert.equal(flash.baseUrl, 'https://api.deepseek.com')
+  assert.equal(flash.supportsThinking, true)
+  assert.equal(flash.thinkingEnabled, true)
+  assert.equal(flash.contextWindow, '256k')
+  assert.equal(result.configs.find((config) => config.id === proxy.id), proxy)
+})
+
 test('system built-ins are materialized without user add actions', () => {
   const result = migrateKnownModelConfigs([
     {
@@ -418,9 +530,11 @@ test('system built-ins are materialized without user add actions', () => {
 
   assert.equal(result.changed, true)
   assert.deepEqual(
-    result.configs.slice(0, 5).map((config) => config.presetId),
+    result.configs.slice(0, 7).map((config) => config.presetId),
     [
       'zai:glm-5.2',
+      'deepseek:deepseek-v4-pro',
+      'deepseek:deepseek-v4-flash',
       'moonshot:kimi-k3',
       'moonshot:kimi-k2.6',
       'minimax:MiniMax-M3',
@@ -428,7 +542,9 @@ test('system built-ins are materialized without user add actions', () => {
     ],
   )
   assert.equal(result.configs[0].apiKey, '')
-  assert.equal(result.configs[1].apiKey, 'shared-moonshot-key')
-  assert.equal(result.configs[3].apiKey, '')
-  assert.equal(result.configs[4].apiKey, '')
+  assert.equal(result.configs[1].apiKey, '')
+  assert.equal(result.configs[2].apiKey, '')
+  assert.equal(result.configs[3].apiKey, 'shared-moonshot-key')
+  assert.equal(result.configs[5].apiKey, '')
+  assert.equal(result.configs[6].apiKey, '')
 })

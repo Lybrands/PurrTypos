@@ -9,7 +9,6 @@ export interface WorkLogProps {
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
-  activeLabel?: string;
   children: React.ReactNode;
 }
 
@@ -58,7 +57,6 @@ export default function WorkLog({
   startedAt,
   durationMs,
   hasError = false,
-  activeLabel,
   children,
 }: WorkLogProps) {
   const storedState = openStateStore.get(logKey);
@@ -86,17 +84,13 @@ export default function WorkLog({
     active && startedAt != null
       ? Math.max(0, now - startedAt)
       : durationMs;
-  const title = active
-    ? activeLabel || "正在处理"
-    : hasError
-      ? "处理过程有异常"
-      : "已处理";
   const hasDetails = React.Children.count(children) > 0;
   const durationText = active
     ? formatActiveElapsed(elapsedMs ?? 0)
     : elapsedMs != null && elapsedMs > 0
       ? formatDuration(elapsedMs)
       : null;
+  const title = active ? "正在进行" : durationText ? "用时" : "已完成";
 
   const toggleOpen = () => {
     const nextOpen = !open;
@@ -124,7 +118,6 @@ export default function WorkLog({
           {durationText ? (
             <span className="work-log__duration">{durationText}</span>
           ) : null}
-          {active ? <span className="a-blink-dots">...</span> : null}
         </button>
       ) : (
         <div className="work-log__toggle work-log__toggle--static" role="status">
@@ -132,7 +125,6 @@ export default function WorkLog({
           {durationText ? (
             <span className="work-log__duration">{durationText}</span>
           ) : null}
-          {active ? <span className="a-blink-dots">...</span> : null}
         </div>
       )}
       {hasDetails ? (

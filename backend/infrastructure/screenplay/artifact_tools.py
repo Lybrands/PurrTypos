@@ -24,11 +24,25 @@ from agent_core.artifacts import (
 from agent_core.artifacts.errors import ArtifactValidationError
 from agent_core.contracts import DomainEffect, ExecutionState
 from agent_core.json_values import thaw_json_mapping
+from database.crud.screenplay_drafts import (
+    assemble_draft_document,
+    list_episode_rows,
+)
+from database.crud.screenplay_head_projection import (
+    find_document,
+    get_current_document,
+    get_document as get_project_document,
+    get_latest_document,
+)
+from database.crud.screenplay_episode_documents import (
+    assemble_episode_document,
+)
 from domains.screenplay.adaptation_brief import (
     ADAPTATION_ACTIONS,
     normalize_creative_brief,
 )
 from domains.screenplay.proposal_rendering import render_screenplay_proposal
+from domains.screenplay.draft_episodes import build_episode_draft_batches
 from domains.screenplay.review_trace import (
     REVIEW_CATEGORIES,
     REVIEW_EXECUTION_FIELDS,
@@ -39,6 +53,7 @@ from domains.screenplay.review_trace import (
 )
 from domains.screenplay.review_trace import build_revision_trace
 from domains.screenplay.scene_trace import normalize_scene_trace
+from domains.screenplay.scene_order import ordered_scene_mappings
 from domains.screenplay.source_scope import scoped_chapters
 from domains.screenplay.structure_trace import normalize_structure_trace
 from infrastructure.persistence.sqlite_artifact_repository import (
@@ -347,13 +362,16 @@ class ScreenplayArtifactValidator:
             ).strip()
             source_analysis_content: Mapping[str, Any] | None = None
             if source_analysis_id:
-                source_analysis = await self._db.fetch_one(
-                    "SELECT content_json FROM screenplay_documents "
-                    "WHERE id = ? AND project_id = ? "
-                    "AND kind = 'source_analysis' AND status = 'accepted'",
-                    [source_analysis_id, artifact.owner_id],
+                source_analysis = await get_current_document(
+                    self._db,
+                    artifact.owner_id,
+                    kind="source_analysis",
                 )
-                if source_analysis is None:
+                if (
+                    source_analysis is None
+                    or str(source_analysis.get("id") or "")
+                    != source_analysis_id
+                ):
                     return ArtifactValidationResult(
                         False,
                         "screenplay_source_analysis_changed",
@@ -396,13 +414,12 @@ class ScreenplayArtifactValidator:
                     },
                 )
             brief_id = str(metadata.get("creativeBriefId") or "").strip()
-            brief = await self._db.fetch_one(
-                "SELECT content_json FROM screenplay_documents "
-                "WHERE id = ? AND project_id = ? AND kind = 'creative_brief' "
-                "AND status = 'accepted'",
-                [brief_id, artifact.owner_id],
+            brief = await get_current_document(
+                self._db,
+                artifact.owner_id,
+                kind="creative_brief",
             )
-            if brief is None:
+            if brief is None or str(brief.get("id") or "") != brief_id:
                 return ArtifactValidationResult(
                     False,
                     "screenplay_creative_brief_changed",
@@ -431,17 +448,27 @@ class ScreenplayArtifactValidator:
         if artifact.kind == _SCENE_LIST_ARTIFACT:
             metadata = thaw_json_mapping(artifact.metadata)
             structure_id = str(metadata.get("structureId") or "").strip()
-            structure = await self._db.fetch_one(
-                "SELECT kind, content_json FROM screenplay_documents "
-                "WHERE id = ? AND project_id = ? AND status = 'accepted' "
-                "AND kind IN ('beat_sheet', 'episode_outline')",
-                [structure_id, artifact.owner_id],
+            structure = await get_current_document(
+                self._db,
+                artifact.owner_id,
+                kinds=("beat_sheet", "episode_outline"),
             )
-            if structure is None:
+            if (
+                structure is None
+                or str(structure.get("id") or "") != structure_id
+            ):
                 return ArtifactValidationResult(
                     False,
                     "screenplay_structure_changed",
                 )
+            structure = (
+                await assemble_episode_document(
+                    self._db,
+                    structure,
+                    include_text=False,
+                )
+                or structure
+            )
             try:
                 normalize_scene_trace(
                     scenes=_batch_items(batches),
@@ -582,11 +609,10 @@ class ScreenplayArtifactToolService:
             *coverage.get("limitations", []),
             *limitations,
         )))
-        accepted = await self._db.fetch_one(
-            "SELECT id FROM screenplay_documents WHERE project_id = ? "
-            "AND kind = 'source_analysis' AND status = 'accepted' "
-            "ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        accepted = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="source_analysis",
         )
         metadata = {
             "title": _title(arguments, "Agent 原作范围分析"),
@@ -830,7 +856,7 @@ class ScreenplayArtifactToolService:
         chapter_ids = [str(chapter["id"]) for chapter in chapters]
         rows = await self._db.fetch_all(
             "SELECT source_type, source_id, coverage_mode FROM "
-            "screenplay_source_refs WHERE project_id = ? AND agent_run_id = ? "
+            "screenplay_source_receipts WHERE project_id = ? AND agent_run_id = ? "
             "ORDER BY id ASC",
             [project["id"], run_id],
         )
@@ -920,11 +946,10 @@ class ScreenplayArtifactToolService:
         if source_analysis is not None:
             parent_document_ids = [str(source_analysis["id"])]
         else:
-            latest_brief = await self._db.fetch_one(
-                "SELECT id FROM screenplay_documents WHERE project_id = ? "
-                "AND kind = 'creative_brief' "
-                "ORDER BY version DESC LIMIT 1",
-                [project["id"]],
+            latest_brief = await get_latest_document(
+                self._db,
+                str(project["id"]),
+                kind="creative_brief",
             )
             parent_document_ids = (
                 [str(latest_brief["id"])]
@@ -1901,9 +1926,33 @@ class ScreenplayArtifactToolService:
             raise ScreenplayArtifactInputError(
                 "Final revision is missing scene text: " + ", ".join(missing)
             )
-        content_text = "\n\n".join(
-            scene_texts[scene_id].strip()
+        execution_by_id = {
+            str(item.get("sceneId") or ""): item
+            for item in scene_executions
+            if isinstance(item, Mapping)
+        }
+        reassessed_set = set(reassessed_scene_ids)
+        revised_scene_ids = [
+            scene_id
             for scene_id in completed_scene_ids
+            if scene_id in reassessed_set
+        ]
+        scene_list_content = _json_object(scene_list.get("content_json"))
+        scenes_by_id = {
+            str(scene.get("id") or ""): scene
+            for scene in ordered_scene_mappings(scene_list_content)
+            if str(scene.get("id") or "")
+        }
+        episode_drafts = build_episode_draft_batches(
+            scenes_by_id=scenes_by_id,
+            generated_scenes=[{
+                "sceneId": scene_id,
+                "sceneText": scene_texts[scene_id],
+                "execution": execution_by_id[scene_id],
+            } for scene_id in revised_scene_ids],
+        )
+        content_text = "\n\n".join(
+            scene_texts[scene_id].strip() for scene_id in revised_scene_ids
         )
         content_json = {
             "schemaVersion": 1,
@@ -1912,7 +1961,7 @@ class ScreenplayArtifactToolService:
             "isComplete": True,
             "sceneListId": str(scene_list["id"]),
             "completedSceneIds": completed_scene_ids,
-            "sceneExecutions": scene_executions,
+            "episodeDrafts": episode_drafts,
             "revisionOf": str(draft["id"]),
             "reviewId": str(review["id"]),
             "revisionArtifactId": artifact.id,
@@ -1943,27 +1992,32 @@ class ScreenplayArtifactToolService:
         self,
         project: Mapping[str, Any],
     ) -> dict[str, Any]:
-        structure = await self._db.fetch_one(
-            "SELECT id, kind, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind IN ('beat_sheet', 'episode_outline') "
-            "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        structure = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kinds=("beat_sheet", "episode_outline"),
         )
         if structure is None:
             raise ScreenplayArtifactInputError(
                 "An accepted structure is required before the scene list."
             )
-        return structure
+        return (
+            await assemble_episode_document(
+                self._db,
+                structure,
+                include_text=False,
+            )
+            or structure
+        )
 
     async def _accepted_creative_brief(
         self,
         project: Mapping[str, Any],
     ) -> dict[str, Any]:
-        brief = await self._db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'creative_brief' "
-            "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        brief = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="creative_brief",
         )
         if brief is None:
             raise ScreenplayArtifactInputError(
@@ -1976,11 +2030,10 @@ class ScreenplayArtifactToolService:
         self,
         project: Mapping[str, Any],
     ) -> dict[str, Any]:
-        source_analysis = await self._db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'source_analysis' "
-            "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        source_analysis = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="source_analysis",
         )
         if source_analysis is None:
             raise ScreenplayArtifactInputError(
@@ -1992,28 +2045,34 @@ class ScreenplayArtifactToolService:
         self,
         project: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        draft = await self._db.fetch_one(
-            "SELECT id, content_json, content_text, version FROM "
-            "screenplay_documents WHERE project_id = ? AND kind = 'scene_draft' "
-            "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        draft = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="scene_draft",
         )
-        review = await self._db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'review' AND status = 'accepted' "
-            "ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        review = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="review",
         )
-        scene_list = await self._db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'scene_list' "
-            "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-            [project["id"]],
+        scene_list = await get_current_document(
+            self._db,
+            str(project["id"]),
+            kind="scene_list",
         )
         if draft is None or review is None or scene_list is None:
             raise ScreenplayArtifactInputError(
                 "An accepted screenplay review, complete draft, and scene "
                 "list are required before revision."
+            )
+        draft = await assemble_draft_document(
+            self._db,
+            draft,
+            include_text=False,
+        )
+        if draft is None:
+            raise ScreenplayArtifactInputError(
+                "The accepted screenplay draft is unavailable."
             )
         draft_json = _json_object(draft.get("content_json"))
         review_json = _json_object(review.get("content_json"))
@@ -2035,12 +2094,15 @@ class ScreenplayArtifactToolService:
         project: Mapping[str, Any],
         run_id: str,
         kind: str,
+        *,
+        writable: bool = True,
     ) -> ArtifactRecord | None:
         linked = await self._repository.find_linked_for_run(
             namespace=_NAMESPACE,
             kind=kind,
             owner_id=str(project["id"]),
             run_id=run_id,
+            writable=writable,
         )
         if linked is not None:
             return linked
@@ -2063,6 +2125,7 @@ class ScreenplayArtifactToolService:
             project,
             _required_run_id(state),
             kind,
+            writable=not allow_finalized,
         )
         if artifact is None:
             raise ScreenplayArtifactInputError(
@@ -2170,11 +2233,7 @@ class ScreenplayArtifactToolService:
             raise ScreenplayArtifactInputError(
                 "The draft revision lineage contains a cycle."
             )
-        document = await self._db.fetch_one(
-            "SELECT id, project_id, content_json, content_text, version FROM "
-            "screenplay_documents WHERE id = ?",
-            [document_id],
-        )
+        document = await find_document(self._db, document_id)
         if document is None:
             raise ScreenplayArtifactInputError(
                 "The revision base draft no longer exists."
@@ -2185,6 +2244,23 @@ class ScreenplayArtifactToolService:
             for value in content.get("completedSceneIds", [])
             if str(value).strip()
         ]
+        episode_rows = await list_episode_rows(
+            self._db,
+            project_id=str(document["project_id"]),
+            draft_document_id=document_id,
+            status=None,
+            include_content=True,
+        )
+        episode_scene_texts = {
+            str(item.get("sceneId") or ""): str(
+                item.get("contentText") or ""
+            ).strip()
+            for episode in episode_rows
+            for item in episode.get("scene_texts", [])
+            if isinstance(item, Mapping)
+        }
+        if completed and all(episode_scene_texts.get(item) for item in completed):
+            return episode_scene_texts
         artifact_id = str(content.get("revisionArtifactId") or "").strip()
         revision_of = str(content.get("revisionOf") or "").strip()
         if artifact_id and revision_of:
@@ -2202,58 +2278,13 @@ class ScreenplayArtifactToolService:
                 ).strip()
             if all(result.get(scene_id) for scene_id in completed):
                 return result
-        rolling = await self._rolling_scene_texts(
-            project_id=str(document["project_id"]),
-            scene_list_id=str(content.get("sceneListId") or ""),
-            maximum_version=int(document.get("version") or 0),
-        )
-        if all(rolling.get(scene_id) for scene_id in completed):
-            return rolling
         split = _split_fountain_text(
             str(document.get("content_text") or ""),
             completed,
         )
         if all(split.get(scene_id) for scene_id in completed):
             return split
-        return rolling
-
-    async def _rolling_scene_texts(
-        self,
-        *,
-        project_id: str,
-        scene_list_id: str,
-        maximum_version: int,
-    ) -> dict[str, str]:
-        rows = await self._db.fetch_all(
-            "SELECT content_json, content_text FROM screenplay_documents "
-            "WHERE project_id = ? AND kind = 'scene_draft' AND version <= ? "
-            "ORDER BY version ASC",
-            [project_id, maximum_version],
-        )
-        result: dict[str, str] = {}
-        previous_full = ""
-        for row in rows:
-            content = _json_object(row.get("content_json"))
-            if (
-                str(content.get("sceneListId") or "") != scene_list_id
-                or content.get("revisionOf")
-            ):
-                continue
-            scene_id = str(content.get("sceneId") or "").strip()
-            full_text = str(row.get("content_text") or "").strip()
-            if not scene_id or not full_text:
-                continue
-            if previous_full and full_text.startswith(previous_full):
-                scene_text = full_text[len(previous_full):].strip()
-            elif not previous_full:
-                scene_text = full_text
-            else:
-                previous_full = full_text
-                continue
-            if scene_text:
-                result[scene_id] = scene_text
-            previous_full = full_text
-        return result
+        return {}
 
 
 async def _preflight_revision_finalization(
@@ -3057,15 +3088,19 @@ def _review_item_coverage(item: Mapping[str, Any]) -> str:
 
 
 async def _review_source_state(db, project_id: str) -> dict[str, Any]:
-    draft = await db.fetch_one(
-        "SELECT id, content_json FROM screenplay_documents "
-        "WHERE project_id = ? AND kind = 'scene_draft' "
-        "AND status = 'accepted' ORDER BY version DESC LIMIT 1",
-        [project_id],
+    draft = await get_current_document(
+        db,
+        project_id,
+        kind="scene_draft",
     )
     if draft is None:
         raise ScreenplayArtifactInputError(
             "An accepted complete scene draft is required for review."
+        )
+    draft = await assemble_draft_document(db, draft, include_text=False)
+    if draft is None:
+        raise ScreenplayArtifactInputError(
+            "The accepted complete scene draft is unavailable."
         )
     draft_json = _json_object(draft.get("content_json"))
     if draft_json.get("isComplete") is not True:
@@ -3102,11 +3137,13 @@ async def _review_source_state(db, project_id: str) -> dict[str, Any]:
             raise ScreenplayArtifactInputError(
                 "The current revision has incomplete review provenance."
             )
-        previous_review = await db.fetch_one(
-            "SELECT id, content_json FROM screenplay_documents "
-            "WHERE id = ? AND project_id = ? AND kind = 'review'",
-            [previous_review_id, project_id],
+        previous_review = await get_project_document(
+            db,
+            project_id,
+            previous_review_id,
         )
+        if previous_review is not None and previous_review.get("kind") != "review":
+            previous_review = None
         previous_review_json = _json_object(
             (previous_review or {}).get("content_json")
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from agent_core.cancellation import await_with_cancellation
 from agent_core.contracts import (
@@ -37,6 +37,10 @@ from agent_core.errors import (
 )
 from agent_core.json_values import thaw_json_mapping, thaw_json_value
 from agent_core.model_call_parameters import describe_model_call
+from agent_core.output_budget import OutputBudgetPolicy, resolve_output_budget
+from agent_core.plan_constraints import (
+    agent_assignment_coverage_violations,
+)
 from agent_core.ports import CancellationSignal, ModelGateway
 from agent_core.structured_output import (
     StructuredOutputParseError,
@@ -62,51 +66,23 @@ For a multi-step task, return:
   "instruction":"normalized instruction","constraints":[],"preserve":[],
   "deliverable":"expected output"},"todos":[
  {"id":"stable-id","title":"short step","type":"read|analyze|write|review",
-  "executor":"model|tool","expectedTools":["required for tool steps"],
+  "executor":"model|tool|agent","expectedTools":["required for tool steps"],
+  "agentRole":"required for agent steps","assignment":{},
+  "dependsOn":["earlier-step-id"],
   "riskLevel":"read|write|destructive"}
 ]}
 
-The taskSpec normally captures semantic intent only. Never put tool names,
-permissions, database access claims, dependency keys, requires, produces, or
-dependsOn in it, except for the explicit executionUnits contract described
-below. The host owns tool prerequisites and evidence dependencies.
-When host facts contain taskAdmissionVocabulary, normalize the semantic task
-using only the declared domainActions and scopes. Put the selected domain action
-in taskSpec.target.domainAction and the selected scope in taskSpec.target.scope.
-For a count scope also put the positive integer in taskSpec.target.count. This is
-an intent declaration only: never estimate actual target counts, model calls,
-cost, duration, or whether the host should create a long task.
-When taskAdmissionVocabulary contains scopeParameters, include every declared
-parameter with the stated semantic; do not substitute a scene count for an
-episode count or vice versa.
-When host facts contain durableExecutionPlan, you own the complete decomposition
-of the selected items. Put it in taskSpec.target.executionUnits. Choose the
-number of generation units, exact item grouping, stable unit ids, and dependsOn
-edges dynamically from the requested material; do not assume a fixed batch
-size. Add the required terminal unit. Follow the supplied unitKinds and exact
-requiredItemIds contract. The host will validate and execute this graph but
-will not invent, repartition, or repair missing units. Every execution unit must
-include dependsOn; the first unit must use an explicit empty array [].
-Add a generation dependency only when that unit genuinely requires prose or a
-continuity state produced by the predecessor. Independent episode, location, or
-character branches should omit artificial cross-branch edges so the executor
-may run them concurrently. The host supplies stable accepted inputs and scene
-boundary context to every generation unit; do not serialize units merely to
-pass those host-owned facts forward. Narrative order alone is not a dependency.
-When a generation unit has a non-empty dependsOn, also include a concise
-dependencyReason naming the exact predecessor-created fact that is unavailable
-from accepted inputs or scene boundaries. If no such fact exists, use an empty
-dependsOn array. A later continuity review may depend on multiple independent
-generation branches and reconcile their prose after parallel execution.
-When story continuity is relevant, declare semantic recall hints inside target:
-storyContext may contain characters, relationships, plot_threads, timeline, or
-world_facts; entities may name relevant characters/objects; chapterIds may name
-relevant chapters. Include only hints supported by the request and conversation.
-These hints describe relevance only; they never authorize access or override the
-host's evidence filters and tool contracts.
+The taskSpec captures semantic intent only. Never put tool names, permissions,
+database access claims, execution graphs, dependency keys, requires, produces,
+or dependsOn in it. Execution dependencies belong only on visible todo steps.
+The host owns tool prerequisites, authority validation and execution policy.
+Domain-specific host facts may
+describe allowed semantic target fields; copy only semantics supported by the
+request and those facts. Never estimate model calls, cost, duration, or whether
+the host should create a background task.
 
 When host facts contain artifactContinuity candidates, decide semantically from
-the current userText and conversation whether an unfinished candidate is needed.
+the current userText and conversation whether a candidate is needed.
 Do not continue merely because a candidate exists, and never match on fixed user
 phrases. Put the decision in taskSpec.target.artifactContinuity using exactly one
 of these forms:
@@ -119,6 +95,10 @@ lifecycle fields are host-authenticated. When selecting continue, do not
 initialize a new Artifact; select only the
 remaining append/finalize actions needed for that existing Artifact. The host
 will recognize dependency state from the exact authenticated candidate.
+If a candidate has nextAction:"replay_finalization", its content is already
+finalized but its delivery projection did not commit. Select reference (never
+continue), and plan only that Artifact kind's finalize action. Do not initialize,
+append, or regenerate content; the host will replay finalization read-only.
 If a candidate is needed even for a response with no tool call, return
 needsTodos:true with a model step and a
 TaskSpec so the host can authorize and inject that candidate; the direct-response
@@ -140,6 +120,28 @@ trusted context. Never plan a tool named in
 planningConstraints.planningExcludedTools: it remains a valid host capability
 but is outside this request's evidence or action scope. Plan supplemental discovery only when the user explicitly
 asks to broaden the scope or host facts mark the selected evidence incomplete.
+Never use an executor listed in planningConstraints.excludedExecutors.
+When availableAgents is non-empty, an agent step must select exactly one listed
+agentRole, must use executor:"agent", must include a bounded semantic
+assignment, and must not include expectedTools. Use dependsOn to express the
+actual execution DAG. Dependencies may reference only earlier todo ids. Leave
+dependsOn empty for independent work that can run in parallel; never add a
+dependency merely to serialize presentation order. Do not create more mutually
+independent agent steps than maxParallelAgents. Agent steps are the visible
+execution plan, not suggestions for a hidden host-authored workflow. When
+planningConstraints.requiredAnyAgentRoles is non-empty, include at least one of
+those roles. Never use a role in excludedAgentRoles.
+When planningConstraints.minimumRootAgentCount is present, the plan must contain
+at least that many dependency-free Agent steps. Do not satisfy it with serial
+Agent steps or downstream reviewers.
+When planningConstraints.requiredAgentAssignmentCoverage is present, Agent
+steps of the named role must partition the authenticated requiredValues exactly
+once and in order through the named assignmentField. If rootOnly is true, all
+matching Agent steps must have empty dependsOn. The values are opaque IDs: copy
+them exactly and never infer, skip, rename or broaden them.
+When planningConstraints.requiredAnyTools is non-empty, the plan must include at
+least one of those exact tools before returning a direct or model-only response,
+unless executionState.completedSteps already shows one completed.
 Edge-scoped waivers in planningConstraints.satisfiedToolDependencyEdges waive
 only that consumer tool's named dependency. The dependency tool remains
 available for an explicit request and for every other consumer requiring it.
@@ -158,7 +160,9 @@ PLANNER_REPAIR_PROMPT = """Your previous JSON plan violated this recoverable con
 Re-plan from the original request. Do not mechanically expand every listed
 tool. Choose the smallest non-redundant action sequence, use exactly one expectedTools
 entry and executor:"tool" in each tool step. Model steps must use
-executor:"model" and must not name expectedTools. Use at most {max_tool_steps}
+executor:"model" and must not name expectedTools. Agent steps must use
+executor:"agent", one available agentRole, a bounded assignment and valid
+dependsOn ids. Use at most {max_tool_steps}
 tool steps and {max_steps} total steps. Reading context already injected by the
 host is model analysis/review, not a read step; reserve read steps for the tool
 executor. Continue to follow host planningRules exactly: never broaden an
@@ -167,8 +171,9 @@ other discovery steps unless the user requests broader scope or host facts mark
 that evidence incomplete. Do not reuse a tool named in
 planningConstraints.contextSatisfiedTools or planningExcludedTools. Treat satisfiedToolDependencyEdges
 as edge-scoped waivers, never as evidence that the dependency tool is globally
-satisfied or unavailable. When returning executionUnits, include dependsOn on
-every unit and use [] for the first unit. Return one JSON object only.
+satisfied or unavailable. If requiredAnyTools is non-empty, select at least one
+of those exact tools unless executionState already shows it completed. Return
+one JSON object only.
 """
 
 RUNTIME_REPLANNING_PROMPT = """
@@ -193,28 +198,16 @@ until a later call reports completed.
 """
 
 
-def _validate_required_deliverable(
+def _validate_required_tool_selection(
     result: PlanningResult,
     capabilities: PlanningCapabilities,
     turn: PlanningTurn | None,
 ) -> None:
-    facts = capabilities.host_planning_facts
-    if facts.get("stageDeliverableRequired") is not True:
-        return
-    raw_required = thaw_json_value(facts.get("completionCapabilities"))
-    if not isinstance(raw_required, (list, tuple)):
-        raise RepairablePlannerOutputError(
-            "the host requires a stage deliverable but supplied no completion capability"
-        )
-    required = {
-        str(name).strip()
-        for name in raw_required
-        if str(name).strip()
-    }
+    """Enforce a request-scoped, domain-neutral completion capability guard."""
+
+    required = capabilities.constraints.required_any_tool_names
     if not required:
-        raise RepairablePlannerOutputError(
-            "the host requires a stage deliverable but supplied no completion capability"
-        )
+        return
     completed = {
         name
         for step in (turn.completed_steps if turn is not None else ())
@@ -231,10 +224,56 @@ def _validate_required_deliverable(
     if planned & required:
         return
     raise RepairablePlannerOutputError(
-        "the host requires completing one of these stage deliverable capabilities "
+        "the request requires selecting at least one of these capabilities "
         "before a direct or model-only response: "
         + ", ".join(sorted(required))
     )
+
+
+def _validate_required_agent_selection(
+    result: PlanningResult,
+    capabilities: PlanningCapabilities,
+    turn: PlanningTurn | None,
+) -> None:
+    """Require one of the host-declared collaborator roles when requested."""
+
+    required = capabilities.constraints.required_any_agent_roles
+    completed = {
+        step.agent_role
+        for step in (turn.completed_steps if turn is not None else ())
+        if step.status is StepStatus.DONE and step.agent_role is not None
+    }
+    if completed & required:
+        required = frozenset()
+    planned = {
+        step.agent_role
+        for step in result.plan.steps
+        if step.agent_role is not None
+    }
+    if required and not planned & required:
+        raise RepairablePlannerOutputError(
+            "the request requires selecting at least one of these agent roles: "
+            + ", ".join(sorted(required))
+        )
+    minimum_frontier = capabilities.constraints.minimum_root_agent_count
+    if (
+        turn is None
+        and minimum_frontier > 0
+        and sum(
+            step.executor is StepExecutor.AGENT and not step.depends_on
+            for step in result.plan.steps
+        ) < minimum_frontier
+    ):
+        raise RepairablePlannerOutputError(
+            "the initial plan requires at least "
+            f"{minimum_frontier} dependency-free agent steps"
+        )
+    coverage_violations = agent_assignment_coverage_violations(
+        result.plan,
+        capabilities.constraints.agent_assignment_coverages,
+    )
+    if coverage_violations:
+        raise RepairablePlannerOutputError("; ".join(coverage_violations))
 
 
 def _validate_artifact_continuity_selection(
@@ -321,266 +360,6 @@ def _remove_unavailable_artifact_continuity_selection(
     )
 
 
-def _validate_task_admission_selection(
-    result: PlanningResult,
-    capabilities: PlanningCapabilities,
-) -> None:
-    """Require host-declared semantic vocabulary for matching tool plans."""
-
-    facts = capabilities.host_planning_facts.get("taskAdmissionVocabulary")
-    if not isinstance(facts, Mapping):
-        return
-    required_for_tools = facts.get("requiredForTools")
-    if not isinstance(required_for_tools, Mapping):
-        return
-    planned_tools = {
-        tool
-        for step in result.plan.steps
-        for tool in step.suggested_tools
-    }
-    required_actions = {
-        str(action).strip()
-        for tool, action in required_for_tools.items()
-        if str(tool).strip() in planned_tools and str(action).strip()
-    }
-    if not required_actions:
-        return
-    task_spec = result.plan.task_spec
-    if task_spec is None:
-        raise RepairablePlannerOutputError(
-            "taskSpec is required for host task admission"
-        )
-    action = str(task_spec.target.get("domainAction") or "").strip()
-    if action not in required_actions:
-        raise RepairablePlannerOutputError(
-            "taskSpec.target.domainAction must match the host task admission vocabulary"
-        )
-    allowed_scopes = {
-        str(item).strip()
-        for item in facts.get("scopes", ())
-        if str(item).strip()
-    }
-    scope = str(task_spec.target.get("scope") or "").strip()
-    if not scope or (allowed_scopes and scope not in allowed_scopes):
-        raise RepairablePlannerOutputError(
-            "taskSpec.target.scope must match the host task admission vocabulary"
-        )
-    scope_parameters = facts.get("scopeParameters")
-    selected_parameters = (
-        scope_parameters.get(scope)
-        if isinstance(scope_parameters, Mapping)
-        else None
-    )
-    requires_positive_count = scope == "count" or (
-        isinstance(selected_parameters, Mapping)
-        and "count" in selected_parameters
-    )
-    if requires_positive_count:
-        try:
-            count = int(task_spec.target.get("count"))
-        except (TypeError, ValueError):
-            count = 0
-        if count <= 0:
-            raise RepairablePlannerOutputError(
-                "taskSpec.target.count must be a positive integer for the "
-                "selected parameterized scope"
-            )
-    if scope == "explicit_scene_ids":
-        raw_scene_ids = task_spec.target.get("sceneIds")
-        if not isinstance(raw_scene_ids, Sequence) or isinstance(
-            raw_scene_ids,
-            (str, bytes, bytearray),
-        ):
-            raise RepairablePlannerOutputError(
-                "taskSpec.target.sceneIds must be a non-empty array for "
-                "explicit_scene_ids scope"
-            )
-        scene_ids = [str(item or "").strip() for item in raw_scene_ids]
-        if (
-            not scene_ids
-            or any(not item for item in scene_ids)
-            or len(scene_ids) != len(set(scene_ids))
-        ):
-            raise RepairablePlannerOutputError(
-                "taskSpec.target.sceneIds must contain unique non-empty ids "
-                "for explicit_scene_ids scope"
-            )
-
-
-def _validate_durable_execution_plan(
-    result: PlanningResult,
-    capabilities: PlanningCapabilities,
-) -> None:
-    """Validate a model-owned durable graph without synthesizing any units."""
-
-    contract = capabilities.host_planning_facts.get("durableExecutionPlan")
-    if not isinstance(contract, Mapping):
-        return
-    task_spec = result.plan.task_spec
-    if task_spec is None:
-        raise RepairablePlannerOutputError(
-            "taskSpec is required for durable execution planning"
-        )
-    required_action = str(contract.get("requiredForAction") or "").strip()
-    action = str(task_spec.target.get("domainAction") or "").strip()
-    if required_action and action != required_action:
-        return
-    raw_units = thaw_json_value(task_spec.target.get("executionUnits"))
-    if not isinstance(raw_units, (list, tuple)) or not raw_units:
-        raise RepairablePlannerOutputError(
-            "taskSpec.target.executionUnits must contain the Planner-owned "
-            "durable execution graph"
-        )
-    generation_kind = str(
-        contract.get("generationUnitKind") or "generation"
-    ).strip()
-    terminal_kind = str(
-        contract.get("terminalUnitKind") or "finalize"
-    ).strip()
-    review_kind = str(
-        contract.get("reviewUnitKind") or ""
-    ).strip()
-    allowed_kinds = {generation_kind, terminal_kind}
-    if review_kind:
-        allowed_kinds.add(review_kind)
-    required_items = [
-        str(item).strip()
-        for item in thaw_json_value(contract.get("requiredItemIds")) or ()
-        if str(item).strip()
-    ]
-    seen_ids: set[str] = set()
-    dependencies_by_id: dict[str, tuple[str, ...]] = {}
-    item_ids_by_id: dict[str, tuple[str, ...]] = {}
-    generation_items: list[str] = []
-    terminal_ids: list[str] = []
-    for raw_unit in raw_units:
-        if not isinstance(raw_unit, Mapping):
-            raise RepairablePlannerOutputError(
-                "every durable execution unit must be an object"
-            )
-        unit_id = str(raw_unit.get("id") or "").strip()
-        kind = str(raw_unit.get("kind") or "").strip()
-        if not unit_id or unit_id in seen_ids:
-            raise RepairablePlannerOutputError(
-                "durable execution unit ids must be unique and non-empty"
-            )
-        if kind not in allowed_kinds:
-            raise RepairablePlannerOutputError(
-                "durable execution unit kind is outside the host contract"
-            )
-        raw_dependencies = thaw_json_value(raw_unit.get("dependsOn"))
-        if not isinstance(raw_dependencies, (list, tuple)):
-            raise RepairablePlannerOutputError(
-                "every durable execution unit must declare dependsOn"
-            )
-        dependencies = tuple(
-            str(item).strip() for item in raw_dependencies
-            if str(item).strip()
-        )
-        if len(dependencies) != len(raw_dependencies):
-            raise RepairablePlannerOutputError(
-                "durable execution dependencies must be non-empty ids"
-            )
-        if len(dependencies) != len(set(dependencies)) or any(
-            dependency not in seen_ids for dependency in dependencies
-        ):
-            raise RepairablePlannerOutputError(
-                "durable execution dependencies must reference earlier units"
-            )
-        raw_items = thaw_json_value(raw_unit.get("itemIds"))
-        if kind == generation_kind:
-            if not isinstance(raw_items, (list, tuple)) or not raw_items:
-                raise RepairablePlannerOutputError(
-                    "every generation unit must contain non-empty itemIds"
-                )
-            items = [str(item).strip() for item in raw_items]
-            if any(not item for item in items):
-                raise RepairablePlannerOutputError(
-                    "generation itemIds must be non-empty"
-                )
-            generation_items.extend(items)
-            item_ids_by_id[unit_id] = tuple(items)
-            dependency_reason = str(
-                raw_unit.get("dependencyReason") or ""
-            ).strip()
-            if dependencies and not dependency_reason:
-                raise RepairablePlannerOutputError(
-                    "a dependent generation unit must explain the exact "
-                    "dependencyReason; narrative order alone is insufficient"
-                )
-        elif kind == terminal_kind:
-            terminal_ids.append(unit_id)
-            if raw_items not in (None, (), []):
-                raise RepairablePlannerOutputError(
-                    "the terminal durable unit cannot contain itemIds"
-                )
-            item_ids_by_id[unit_id] = ()
-        else:
-            if not isinstance(raw_items, (list, tuple)) or not raw_items:
-                raise RepairablePlannerOutputError(
-                    "every review unit must contain non-empty itemIds"
-                )
-            review_items = [str(item).strip() for item in raw_items]
-            if (
-                len(review_items) != len(set(review_items))
-                or any(item not in required_items for item in review_items)
-            ):
-                raise RepairablePlannerOutputError(
-                    "review itemIds must be unique and stay inside requiredItemIds"
-                )
-            ancestor_ids: set[str] = set()
-            pending_ancestors = list(dependencies)
-            while pending_ancestors:
-                ancestor_id = pending_ancestors.pop()
-                if ancestor_id in ancestor_ids:
-                    continue
-                ancestor_ids.add(ancestor_id)
-                pending_ancestors.extend(
-                    dependencies_by_id.get(ancestor_id, ())
-                )
-            available_items = {
-                item
-                for ancestor_id in ancestor_ids
-                for item in item_ids_by_id.get(ancestor_id, ())
-            }
-            if not set(review_items).issubset(available_items):
-                raise RepairablePlannerOutputError(
-                    "review units must depend on the generated items they review"
-                )
-            item_ids_by_id[unit_id] = tuple(review_items)
-        seen_ids.add(unit_id)
-        dependencies_by_id[unit_id] = dependencies
-    if generation_items != required_items:
-        raise RepairablePlannerOutputError(
-            "durable execution generation units must cover requiredItemIds "
-            "exactly once and in order"
-        )
-    if len(terminal_ids) != 1 or terminal_ids[0] != str(
-        raw_units[-1].get("id") or ""
-    ).strip():
-        raise RepairablePlannerOutputError(
-            "durable execution must end with exactly one terminal unit"
-        )
-    terminal_dependencies = set(dependencies_by_id[terminal_ids[0]])
-    depended_on = {
-        dependency
-        for unit_id, dependencies in dependencies_by_id.items()
-        if unit_id != terminal_ids[0]
-        for dependency in dependencies
-    }
-    execution_leaves = {
-        str(unit.get("id") or "").strip()
-        for unit in raw_units
-        if isinstance(unit, Mapping)
-        and str(unit.get("kind") or "").strip() != terminal_kind
-        and str(unit.get("id") or "").strip() not in depended_on
-    }
-    if terminal_dependencies != execution_leaves:
-        raise RepairablePlannerOutputError(
-            "the terminal durable unit must depend on every execution leaf"
-        )
-
-
 class AgentPlanner:
     def __init__(
         self,
@@ -646,35 +425,32 @@ class AgentPlanner:
             request,
             signal,
         )
-        try:
-            result = self._normalize_completion(
-                completion,
-                capabilities,
-                limits,
-                turn=turn,
-            )
-        except InvalidPlannerOutputError as error:
-            completion, repair_call_parameters = await self._repair(
-                messages,
-                completion,
-                request,
-                limits,
-                error,
-                signal,
-            )
-            model_call_parameters += repair_call_parameters
-            # A single repair is intentionally shared by syntax, shape, enum,
-            # authority and deliverable validation.  Previously only parse
-            # failures and a narrow RepairablePlannerOutputError subset reached
-            # this path, so a valid JSON object with one bad field terminated
-            # the entire Agent run without giving the model a chance to obey
-            # the correction prompt.
-            result = self._normalize_completion(
-                completion,
-                capabilities,
-                limits,
-                turn=turn,
-            )
+        active_messages = messages
+        for repair_attempt in range(limits.max_repair_attempts + 1):
+            try:
+                result = self._normalize_completion(
+                    completion,
+                    capabilities,
+                    limits,
+                    turn=turn,
+                )
+                break
+            except InvalidPlannerOutputError as error:
+                if repair_attempt >= limits.max_repair_attempts:
+                    raise
+                (
+                    completion,
+                    repair_call_parameters,
+                    active_messages,
+                ) = await self._repair(
+                    active_messages,
+                    completion,
+                    request,
+                    limits,
+                    error,
+                    signal,
+                )
+                model_call_parameters += repair_call_parameters
         return PlanningResult(
             kind=result.kind,
             plan=result.plan,
@@ -699,9 +475,8 @@ class AgentPlanner:
             capabilities,
         )
         _validate_artifact_continuity_selection(result, capabilities)
-        _validate_task_admission_selection(result, capabilities)
-        _validate_durable_execution_plan(result, capabilities)
-        _validate_required_deliverable(result, capabilities, turn)
+        _validate_required_tool_selection(result, capabilities, turn)
+        _validate_required_agent_selection(result, capabilities, turn)
         return result
 
     async def _repair(
@@ -712,7 +487,11 @@ class AgentPlanner:
         limits: PlannerLimits,
         error: InvalidPlannerOutputError,
         signal: CancellationSignal | None,
-    ) -> tuple[ModelCompletion, tuple[Mapping[str, Any], ...]]:
+    ) -> tuple[
+        ModelCompletion,
+        tuple[Mapping[str, Any], ...],
+        tuple[AgentMessage, ...],
+    ]:
         repair_messages = (
             *messages,
             completion.message,
@@ -725,7 +504,12 @@ class AgentPlanner:
                 ),
             )
         )
-        return await self._complete(repair_messages, request, signal)
+        completion, parameters = await self._complete(
+            repair_messages,
+            request,
+            signal,
+        )
+        return completion, parameters, repair_messages
 
     async def _complete(
         self,
@@ -733,11 +517,23 @@ class AgentPlanner:
         request: AgentRunRequest,
         signal: CancellationSignal | None,
     ) -> tuple[ModelCompletion, tuple[Mapping[str, Any], ...]]:
+        output_budget = resolve_output_budget(
+            policy=OutputBudgetPolicy(
+                key="core_planner",
+                base_tokens=self._limits.max_output_tokens,
+                per_work_unit_tokens=0,
+                safety_factor=1,
+                hard_cap_tokens=self._limits.max_output_tokens,
+            ),
+            capabilities=request.model.output_capabilities,
+            context_window_tokens=request.context_window or 128_000,
+        )
         invocation = ModelInvocation(
             request=request.model,
             tools=(),
             tool_choice=ToolChoiceMode.NONE,
-            max_output_tokens=self._limits.max_output_tokens,
+            max_output_tokens=output_budget.effective_tokens,
+            output_budget=output_budget,
             reasoning_mode=ReasoningMode.DISABLED,
         )
         parameters = describe_model_call(
@@ -755,7 +551,8 @@ class AgentPlanner:
                 request=request.model,
                 tools=(),
                 tool_choice=ToolChoiceMode.NONE,
-                max_output_tokens=self._limits.max_output_tokens,
+                max_output_tokens=output_budget.effective_tokens,
+                output_budget=output_budget,
                 reasoning_mode=ReasoningMode.DEFAULT,
             )
             fallback_parameters = describe_model_call(
@@ -783,12 +580,34 @@ def build_planner_messages(
     turn: PlanningTurn | None = None,
 ) -> tuple[AgentMessage, ...]:
     available_tool_names = effective_planning_tool_names(capabilities)
+    available_agent_roles = (
+        capabilities.available_agent_roles
+        - capabilities.constraints.planning_excluded_agent_roles
+    )
     tool_guidance = effective_tool_guidance(capabilities)
     context_satisfied = sorted(
         capabilities.constraints.context_satisfied_tool_names
     )
     planning_excluded = sorted(
         capabilities.constraints.planning_excluded_tool_names
+    )
+    excluded_agent_roles = sorted(
+        capabilities.constraints.planning_excluded_agent_roles
+    )
+    required_any_tools = sorted(
+        capabilities.constraints.required_any_tool_names
+    )
+    required_any_agent_roles = sorted(
+        capabilities.constraints.required_any_agent_roles
+    )
+    minimum_root_agent_count = capabilities.constraints.minimum_root_agent_count
+    assignment_coverages = [
+        coverage.to_planning_payload()
+        for coverage in capabilities.constraints.agent_assignment_coverages
+    ]
+    excluded_executors = sorted(
+        executor.value
+        for executor in capabilities.constraints.planning_excluded_executors
     )
     satisfied_edges = [
         {"tool": tool_name, "dependency": dependency_name}
@@ -802,6 +621,9 @@ def build_planner_messages(
         "availableTools": sorted(available_tool_names),
         "maxToolSteps": limits.max_tool_steps,
     }
+    if available_agent_roles:
+        payload["availableAgents"] = sorted(available_agent_roles)
+        payload["maxParallelAgents"] = capabilities.max_parallel_agents
     host_context = _planner_host_context(request)
     if host_context:
         payload["hostContext"] = host_context
@@ -835,6 +657,12 @@ def build_planner_messages(
             "contextSatisfiedTools": context_satisfied,
             "planningExcludedTools": planning_excluded,
             "satisfiedToolDependencyEdges": satisfied_edges,
+            "requiredAnyTools": required_any_tools,
+            "excludedAgentRoles": excluded_agent_roles,
+            "requiredAnyAgentRoles": required_any_agent_roles,
+            "minimumRootAgentCount": minimum_root_agent_count,
+            "requiredAgentAssignmentCoverage": assignment_coverages,
+            "excludedExecutors": excluded_executors,
         }.items()
         if value
     }
@@ -843,6 +671,13 @@ def build_planner_messages(
         for key, value in {
             "facts": thaw_json_mapping(capabilities.host_planning_facts),
             "toolGuidance": tool_guidance,
+            "agentRoleGuidance": {
+                role: guidance
+                for role, guidance in thaw_json_mapping(
+                    capabilities.agent_role_guidance
+                ).items()
+                if role in available_agent_roles
+            },
             "planningConstraints": planning_constraints,
         }.items()
         if value
@@ -976,33 +811,6 @@ def parse_planner_output(content: Any) -> Mapping[str, Any]:
         ) from error
 
 
-def _is_host_declared_task_tool(
-    tool_name: str,
-    capabilities: PlanningCapabilities,
-) -> bool:
-    """Return whether the host explicitly bound this tool to a task action.
-
-    This is deliberately narrower than ``available_tool_names``. Availability
-    alone is not enough to reinterpret a model step as a tool step because that
-    would expand model-authored authority. The task-admission vocabulary is a
-    trusted host declaration that the named capability is the stage action.
-    """
-
-    vocabulary = capabilities.host_planning_facts.get(
-        "taskAdmissionVocabulary"
-    )
-    if not isinstance(vocabulary, Mapping):
-        return False
-    required_for_tools = vocabulary.get("requiredForTools")
-    if not isinstance(required_for_tools, Mapping):
-        return False
-    return tool_name in {
-        str(name).strip()
-        for name in required_for_tools
-        if str(name).strip()
-    }
-
-
 def normalize_task_plan(
     value: Mapping[str, Any],
     capabilities: PlanningCapabilities,
@@ -1070,6 +878,11 @@ def normalize_task_plan(
             ))
         except ValueError as error:
             raise InvalidPlannerOutputError("planner step contains an unsupported enum") from error
+        if executor in capabilities.constraints.planning_excluded_executors:
+            raise RepairablePlannerOutputError(
+                "planner selected an executor excluded by the request: "
+                + executor.value
+            )
         if step_type is StepType.CONFIRM:
             raise InvalidPlannerOutputError("planner must not create confirm steps")
 
@@ -1079,16 +892,30 @@ def normalize_task_plan(
         suggested = tuple(dict.fromkeys(
             str(name).strip() for name in raw_tools if str(name).strip()
         ))
-        if (
-            executor is StepExecutor.MODEL
-            and len(suggested) == 1
-            and _is_host_declared_task_tool(suggested[0], capabilities)
-        ):
-            # The model selected the exact host-declared stage capability but
-            # serialized the executor discriminator incorrectly. Canonicalize
-            # only this unambiguous shape; the regular tool validation below
-            # still enforces availability, scope constraints and step limits.
-            executor = StepExecutor.TOOL
+        raw_agent_role = _optional_text(raw.get("agentRole"))
+        raw_assignment = raw.get("assignment")
+        if raw_assignment is None:
+            raw_assignment = {}
+        if not isinstance(raw_assignment, Mapping):
+            raise InvalidPlannerOutputError(
+                "planner agent assignment must be an object"
+            )
+        raw_dependencies = raw.get("dependsOn", [])
+        if not isinstance(raw_dependencies, list):
+            raise InvalidPlannerOutputError(
+                "planner step dependsOn must be a list"
+            )
+        depends_on = tuple(dict.fromkeys(
+            dependency
+            for item in raw_dependencies
+            if (dependency := _clean_id(item, limits.max_step_id_chars))
+        ))
+        invalid_dependencies = set(depends_on) - (seen_ids - {step_id})
+        if invalid_dependencies:
+            raise RepairablePlannerOutputError(
+                "planner dependencies must reference earlier todo ids: "
+                + ", ".join(sorted(invalid_dependencies))
+            )
         if executor is StepExecutor.TOOL:
             if not suggested:
                 raise InvalidPlannerOutputError("tool step requires at least one tool")
@@ -1121,8 +948,41 @@ def normalize_task_plan(
                 repair_reason = (
                     "each tool step must contain exactly one expected tool"
                 )
+            if raw_agent_role is not None or raw_assignment:
+                raise InvalidPlannerOutputError(
+                    "tool steps cannot declare agentRole or assignment"
+                )
+        elif executor is StepExecutor.AGENT:
+            if suggested:
+                raise InvalidPlannerOutputError(
+                    "agent steps cannot grant tool access"
+                )
+            if raw_agent_role is None:
+                raise InvalidPlannerOutputError(
+                    "agent step requires agentRole"
+                )
+            if raw_agent_role not in capabilities.available_agent_roles:
+                raise InvalidPlannerOutputError(
+                    "planner requested an unavailable agent role"
+                )
+            if (
+                raw_agent_role
+                in capabilities.constraints.planning_excluded_agent_roles
+            ):
+                raise RepairablePlannerOutputError(
+                    "planner requested an agent role excluded by the request: "
+                    + raw_agent_role
+                )
+            if not raw_assignment:
+                raise RepairablePlannerOutputError(
+                    "agent step requires a non-empty bounded assignment"
+                )
         elif suggested:
             raise InvalidPlannerOutputError("model steps cannot grant tool access")
+        elif raw_agent_role is not None or raw_assignment:
+            raise InvalidPlannerOutputError(
+                "model steps cannot declare agentRole or assignment"
+            )
         elif step_type is StepType.READ and repair_reason is None:
             repair_reason = (
                 "read steps are reserved for the tool executor; use analyze or "
@@ -1137,6 +997,9 @@ def normalize_task_plan(
             status=StepStatus.PENDING,
             risk_level=risk,
             suggested_tools=suggested,
+            agent_role=raw_agent_role,
+            assignment=dict(raw_assignment),
+            depends_on=depends_on,
             description=_optional_text(raw.get("description")),
         ))
 
@@ -1158,11 +1021,33 @@ def normalize_task_plan(
         ),
         steps=tuple(steps),
     )
+    if _maximum_agent_frontier(plan) > capabilities.max_parallel_agents:
+        raise RepairablePlannerOutputError(
+            "planner created more independent agent steps than the host "
+            f"parallel limit of {capabilities.max_parallel_agents}"
+        )
     return PlanningResult(
         kind=PlanningKind.PLANNED,
         plan=plan,
         reason=_optional_text(value.get("reason")),
     )
+
+
+def _maximum_agent_frontier(plan: TaskPlan) -> int:
+    """Return the widest dependency level containing Agent steps."""
+
+    levels: dict[str, int] = {}
+    widths: dict[int, int] = {}
+    for step in plan.steps:
+        level = (
+            0
+            if not step.depends_on
+            else 1 + max(levels[dependency] for dependency in step.depends_on)
+        )
+        levels[step.id] = level
+        if step.executor is StepExecutor.AGENT:
+            widths[level] = widths.get(level, 0) + 1
+    return max(widths.values(), default=0)
 
 
 def _planner_task_spec_value(value: Mapping[str, Any]) -> Any:
@@ -1204,6 +1089,20 @@ def _normalize_task_spec(
         target = {}
     if not isinstance(target, Mapping):
         raise InvalidPlannerOutputError("planner taskSpec target must be an object")
+    forbidden_target = {
+        "dependsOn",
+        "dependencies",
+        "executionGraph",
+        "executionUnits",
+        "permissions",
+        "tools",
+        "workflowUnits",
+    }.intersection(target)
+    if forbidden_target:
+        raise InvalidPlannerOutputError(
+            "planner taskSpec target contains host-owned execution fields: "
+            + ", ".join(sorted(forbidden_target))
+        )
 
     def _text_rows(name: str) -> tuple[str, ...]:
         value = raw.get(name)
@@ -1305,7 +1204,24 @@ def build_execution_message(plan: TaskPlan) -> AgentMessage:
                 "position": index,
                 "type": step.type.value,
                 "executor": step.executor.value,
-                "riskLevel": step.risk_level.value,
+                **(
+                    {"riskLevel": step.risk_level.value}
+                    if step.risk_level is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "agentRole": step.agent_role,
+                        "assignment": thaw_json_mapping(step.assignment),
+                    }
+                    if step.executor is StepExecutor.AGENT
+                    else {}
+                ),
+                **(
+                    {"dependsOn": list(step.depends_on)}
+                    if step.depends_on
+                    else {}
+                ),
             }
             for index, step in enumerate(plan.steps, start=1)
         ],

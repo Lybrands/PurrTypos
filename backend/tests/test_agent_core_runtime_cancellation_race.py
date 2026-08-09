@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-import agent_core.runtime as runtime_module
+import agent_core.runtime.orchestrator as runtime_module
 from agent_core.cancellation import OperationCanceled
 from agent_core.contracts import (
     AgentMessage,
@@ -271,11 +271,7 @@ async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gatewa
         tracked_streams.append(stream)
         return stream
 
-    monkeypatch.setattr(
-        runtime_module,
-        "_stream_tool_batch",
-        tracked_stream_tool_batch,
-    )
+    monkeypatch.setattr(runtime_module, "_stream_tool_batch", tracked_stream_tool_batch)
     runtime = AgentRuntime(
         model_gateway=ToolCallingModelGateway(),
         tool_execution_gateway=BlockingToolGateway(),

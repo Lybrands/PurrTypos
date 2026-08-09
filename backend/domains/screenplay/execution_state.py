@@ -18,4 +18,7 @@ class ScreenplayExecutionStateFactory:
             "contextWindow": context.context_window_label,
             "screenplayDraftSceneCount": context.draft_scene_count,
             "screenplayDraftScope": context.draft_scope,
+            "screenplayBoundDraftSceneIds": list(
+                context.bound_draft_scene_ids
+            ),
         })

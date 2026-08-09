@@ -48,6 +48,7 @@ async def lifespan(application: FastAPI):
         clear_agent_composition,
         set_agent_composition,
     )
+    from application.composition_factory import create_agent_composition
     from database.connection import DatabaseConnection
     from dependencies import clear_db, set_db
 
@@ -111,6 +112,37 @@ async def lifespan(application: FastAPI):
                 ", ".join(recovered_long_tasks),
             )
 
+        from infrastructure.persistence.sqlite_screenplay_v2_repository import (
+            SqliteScreenplayV2Repository,
+        )
+
+        screenplay_repository = SqliteScreenplayV2Repository(db)
+        recovered_operations = (
+            await screenplay_repository.recover_operations_after_restart()
+        )
+        if recovered_operations:
+            logging.getLogger(__name__).warning(
+                "Checkpointed %s screenplay Operation(s) after restart: %s",
+                len(recovered_operations),
+                ", ".join(recovered_operations),
+            )
+
+        from infrastructure.persistence.sqlite_screenplay_conversation_repository import (
+            SqliteScreenplayConversationRepository,
+        )
+
+        recovered_turns = await SqliteScreenplayConversationRepository(
+            db,
+            owner_id="screenplay-startup-recovery",
+        ).recover_after_restart()
+        if recovered_turns:
+            logging.getLogger(__name__).warning(
+                "Released %s screenplay Conversation Turn(s) for credential "
+                "re-injection after restart: %s",
+                len(recovered_turns),
+                ", ".join(recovered_turns),
+            )
+
         from agent_core.artifacts import ArtifactMaintenancePolicy
         from application.artifact_maintenance import (
             monitor_artifact_maintenance,
@@ -153,7 +185,7 @@ async def lifespan(application: FastAPI):
             if SKILLS_DIR and SKILLS_DIR != Path("")
             else Path(__file__).parent / "skills"
         )
-        composition = AgentComposition(
+        composition = create_agent_composition(
             db,
             execution_db=execution_db,
             skills_dir=skills_dir,
@@ -170,6 +202,9 @@ async def lifespan(application: FastAPI):
             monitor_orphaned_runs(
                 execution_db,
                 stop_event=orphan_monitor_stop,
+                reconcile_linked_state=(
+                    screenplay_repository.settle_terminal_root_operations
+                ),
             )
         )
         artifact_monitor = asyncio.create_task(
@@ -198,7 +233,7 @@ async def lifespan(application: FastAPI):
             memories,
             outlines,
             prompt_templates,
-            screenplay,
+            screenplay_v2,
             sessions,
             setting_diff,
             setting_entities,
@@ -220,7 +255,7 @@ async def lifespan(application: FastAPI):
         application.include_router(story_background.router, prefix="/api")
         application.include_router(files.router, prefix="/api")
         application.include_router(prompt_templates.router, prefix="/api")
-        application.include_router(screenplay.router, prefix="/api")
+        application.include_router(screenplay_v2.router, prefix="/api")
         application.include_router(book_style.router, prefix="/api")
         application.include_router(chapter_diff.router, prefix="/api")
         application.include_router(setting_diff.router, prefix="/api")

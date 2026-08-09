@@ -1,9 +1,8 @@
-# 剧本 Agent 端到端验收
+# 剧本 Agent V2 确定性验收
 
 ## 目标
 
-这套验收不是评价模型写出的台词是否“好看”，而是验证剧本 Agent 的权威工作流
-在代表性项目中能够完整推进、正确拒绝无效版本，并生成一致的最终交付快照。
+这套验收不评价模型文案质量，也不调用外部模型。它冻结重构期间必须保持的 Project、Operation、Revision、Head、Candidate、幂等和事务边界。
 
 运行：
 
@@ -11,59 +10,36 @@
 npm run test:screenplay-acceptance
 ```
 
-独立入口只执行
-`backend/tests/test_screenplay_acceptance_scenarios.py`，适合在修改剧本领域逻辑后
-快速检查；`npm run check` 仍会把这些场景纳入完整后端回归。
+该入口只运行 Native V2 测试，不再引用已经删除的 v1 Document 场景。
 
-## 场景一：原创电影
+## 覆盖集合
 
-流程：
+- `test_screenplay_project_aggregate.py`：Stage 与 nextActions 只由权威 Heads 派生；
+- `test_screenplay_v2_schema.py`：公共请求 DTO、枚举和输入校验；
+- `test_screenplay_v2_routes.py`：项目、会话、Workspace、Operation、Working Copy、Revision、Accept 与幂等命令；
+- `test_screenplay_v2_agent_projection.py`：Run/Artifact/Long Task 到一个 Candidate Revision 的原子投影与归属；
+- `test_screenplay_v2_persistence_boundaries.py`：旧运行时文件不会恢复，V2 Repository 不回退旧 CRUD。
 
-`原创项目 -> 创作简报 -> 节拍表 -> 两场场景表 -> 滚动整稿 ->
-最终审阅 -> 完成交付`
+## 必须保持的业务不变量
 
-验收点：
+1. 新项目从 Working Copy 开始，不制造假的初始 Revision；
+2. 相同 Idempotency-Key 与相同请求返回同一回执，不产生重复 Project、Operation 或 Revision；
+3. Operation 在 Run 之前持久化；Root Run 通过不可变 RunBinding 归属 Operation，Artifact 与 Long Task 只通过通用 lineage 关联；
+4. 一个 Operation 最多产生一个 Candidate Revision；
+5. 对话和 SSE 只暴露 Revision 引用，不复制 Proposal 全文；
+6. Accept 只切换 Head，不复制 Revision；
+7. 上游 Head 更新会在同一事务中失效下游 Head；
+8. Project revision 与 Working Copy revision 使用各自的 CAS；
+9. 重放、并发冲突或事务失败不留下半完成 Candidate；
+10. 旧 `screenplay_documents`、v1 runtime 路径和通用 runtime `operation_id` 业务列不能重新进入运行时。
 
-- 每次滚动正文只追加一场，历史执行记录保持不变；
-- `ready` 审阅只要仍包含开放问题就必须拒绝；
-- 拒绝发生后项目仍停留在 `review`，错误报告仍是草稿，也不会生成
-  `delivery_manifest`；
-- 合法最终审阅通过后，交付清单包含五个权威文档角色和两场执行记录。
+## 与重构门禁的关系
 
-## 场景二：前一章改编
+本验收回答“剧本业务结果是否仍正确”。Core 的 Run 生命周期和跨层依赖由以下入口分别验证：
 
-流程：
+```bash
+npm run check:agent-refactor-boundaries
+npm run check:agent-refactor
+```
 
-`前 1 章范围快照 -> 来源凭据 -> 原作范围分析 -> 改编简报 -> 节拍表 ->
-场景表 -> 完整剧本 -> 最终审阅 -> 完成交付`
-
-原作另外准备第二章，但它不属于项目范围。
-
-验收点：
-
-- 范围快照只包含第一章的稳定章节 ID；
-- 原作分析引用的事实必须有实际读取凭据；
-- 创作简报、结构和最终剧本保持完整的改编追踪链；
-- 最终交付包含六个权威文档角色和来源凭据统计；
-- 范围外第二章的 ID 不得出现在交付清单。
-
-## 场景三：两集连续剧
-
-流程：
-
-`连续剧简报 -> 两集分集结构 -> 每集场景 -> 滚动整稿 -> 结构化审阅 ->
-完整修订 -> 验收标准复审 -> 完成交付`
-
-验收点：
-
-- 连续剧使用 `episode_outline`，集数与简报一致；
-- 每个场景只能归属一个分集，`episodeNumber` 与结构单元一致；
-- 修订逐项回应审阅问题并重新评估受影响场景；
-- 最终复审逐项验证上一轮验收标准；
-- 交付清单指向修订后的最终剧本和最终复审，并记录历史问题验证数量。
-
-## 边界
-
-这套测试使用确定性结构化样本，不调用外部模型，因此适合持续集成和离线回归。
-它只验证当前产品功能的数据边界、版本链、阶段转换、事务回滚和交付一致性，
-不扩展为模型对比或创作质量评测。
+只有新对话链路通过完整门禁后，才允许删除旧剧本聊天实现。

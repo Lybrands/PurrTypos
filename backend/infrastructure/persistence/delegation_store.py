@@ -172,7 +172,7 @@ async def claim_delegation(
     claim_lease_duration_ms: int = 30_000,
     timestamp_ms: int | None = None,
 ) -> dict[str, Any] | None:
-    """Atomically claim one exact Planner-owned delegation."""
+    """Atomically claim one exact host-compiled delegation."""
 
     normalized_id = _required_text(delegation_id, "delegation id")
     normalized_parent = _required_text(parent_run_id, "parent run id")

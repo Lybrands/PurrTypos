@@ -1,0 +1,40 @@
+.bubble-processing-standby {
+  display: block;
+  min-height: 0;
+  margin: 0;
+  padding: 5px 0;
+  color: color-mix(in srgb, var(--text-muted) 78%, transparent);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.4;
+  animation: bubble-processing-standby-pulse 1.6s ease-in-out infinite;
+}
+
+.work-log:has(+ .bubble-processing-standby) {
+  margin-bottom: 0;
+
+  .work-log__body {
+    padding-bottom: 0;
+
+    > :last-child {
+      margin-bottom: 0;
+    }
+  }
+}
+
+@keyframes bubble-processing-standby-pulse {
+  0%,
+  100% {
+    opacity: 0.48;
+  }
+
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble-processing-standby {
+    animation: none;
+  }
+}

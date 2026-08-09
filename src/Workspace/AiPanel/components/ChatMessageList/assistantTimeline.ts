@@ -68,13 +68,13 @@ export function getAssistantProcessingLabel(message: ChatMessage): string {
       (approval) => !approval.status || approval.status === "pending",
     )
   ) {
-    return "等待你确认下一步";
+    return "等待确认";
   }
   if (message.contextCompaction?.status === "running") {
-    return "正在整理对话上下文";
+    return "整理上下文";
   }
   if (message.toolCalling) {
-    return "正在执行必要操作";
+    return "执行操作";
   }
   if (
     message.delegations?.some((item) =>
@@ -83,32 +83,32 @@ export function getAssistantProcessingLabel(message: ChatMessage): string {
       item.status === "running"
     )
   ) {
-    return "正在协调多个处理任务";
+    return "协调任务";
   }
   if ((message.thinking ?? "").trim()) {
-    return "正在推演处理方案";
+    return "推演方案";
   }
   if ((message.contentAfterToolCalls ?? "").trim()) {
-    return "正在组织回复内容";
+    return "组织回复";
   }
   if (
     message.taskPlan?.status === "planned" ||
     message.taskPlan?.status === "running"
   ) {
     return message.taskPlan.steps.some((step) => step.status === "running")
-      ? "正在推进任务步骤"
-      : "正在拆解任务步骤";
+      ? "推进任务"
+      : "拆解任务";
   }
   if (message.toolCallSegments?.some((segment) => segment.labels.length > 0)) {
-    return "正在核对执行结果";
+    return "核对结果";
   }
   if (message.content.trim()) {
-    return "正在组织回复内容";
+    return "组织回复";
   }
   if (message.contextBudget) {
-    return "正在装配相关上下文";
+    return "准备上下文";
   }
-  return "正在理解请求并准备处理";
+  return "理解请求";
 }
 
 function visibleToolSegment(seg: ToolCallSegment): boolean {

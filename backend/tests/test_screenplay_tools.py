@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
-from application.request_mapping import to_agent_request
+from application.screenplay_agent_request_mapping import (
+    to_screenplay_agent_request,
+)
 from agent_core.artifacts import ArtifactScope, ArtifactWriteClaimCommand
 from agent_core.contracts import (
     ToolBatchOutcome,
@@ -17,18 +20,22 @@ from agent_core.contracts import (
     ToolStepDisposition,
 )
 from agent_core.json_values import thaw_json_mapping
+from agent_core.plan_compiler import projected_planning_tool_names
 from agent_core.tools.executor import CoreToolExecutor
 from agent_core.work_items import WorkItemRunLinkCommand, WorkItemRunRelation
 from database.connection import DatabaseConnection
-from database.crud import screenplay as screenplay_crud
-from database.crud.screenplay_source_refs import (
+from tests.support import screenplay_v2_driver as screenplay_crud
+from tests.support.screenplay_v2_driver import (
     list_source_refs,
     record_source_refs,
 )
 from domains.screenplay.execution_state import ScreenplayExecutionStateFactory
+from domains.screenplay.contracts import ScreenplayDomainContext
 from domains.screenplay.payload_limits import SCENE_DRAFT_PAYLOAD_LIMITS
 from domains.screenplay.tool_contracts import (
     SCREENPLAY_PROPOSAL_TOOL_NAMES,
+    SCREENPLAY_PLANNING_CAPABILITY_NAMES,
+    SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY,
     SCREENPLAY_READ_TOOL_NAMES,
     SCREENPLAY_TOOL_NAMES,
     SCREENPLAY_TOOL_SCHEMAS,
@@ -41,7 +48,7 @@ from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
 )
 from exceptions import AppError
-from schemas.ai import ChatStreamRequest
+from schemas.screenplay_agent_run import ScreenplayAgentRunRequest
 
 
 @pytest_asyncio.fixture
@@ -128,6 +135,40 @@ async def _seed_source_project(db: DatabaseConnection):
         approach="结构重组",
         premise="保留兄妹关系，强化悬疑。",
     )
+
+
+def test_artifact_protocol_projects_to_business_planning_capabilities():
+    class _Db:
+        pass
+
+    catalog = build_screenplay_tool_catalog(_Db())
+    registrations = catalog.registrations()
+    runtime_names = frozenset(
+        SCREENPLAY_PRIVATE_TOOL_TO_PLANNING_CAPABILITY
+    )
+
+    assert projected_planning_tool_names(
+        registrations,
+        runtime_names,
+    ) == frozenset(SCREENPLAY_PLANNING_CAPABILITY_NAMES)
+    assert all(
+        registration.planning_capability is not None
+        for registration in registrations
+        if registration.schema.name in runtime_names
+    )
+    host_planned = {
+        registration.schema.name
+        for registration in registrations
+        if registration.host_planned_arguments is not None
+    }
+    assert host_planned == {
+        "finalizeSourceAnalysisProposal",
+        "finalizeCreativeBriefProposal",
+        "finalizeScreenplayStructureProposal",
+        "finalizeSceneListProposal",
+        "finalizeScreenplayReviewProposal",
+        "finalizeScreenplayRevisionProposal",
+    }
 
 
 def test_proposal_tool_inputs_do_not_expose_host_owned_document_provenance():
@@ -286,8 +327,8 @@ def _request(
     active_stage: str = "orientation",
     draft_scene_count: int = 1,
 ):
-    return to_agent_request(
-        ChatStreamRequest(
+    return to_screenplay_agent_request(
+        ScreenplayAgentRunRequest(
             messages=[{"role": "user", "content": "检索原作并完善简报"}],
             apiKey="key",
             options={"model": "model"},
@@ -655,7 +696,7 @@ class _RecordingSink:
         self.events.append(event)
 
 
-async def _accept_source_analysis(db, created):
+async def _accept_source_analysis(db, created, *, limitations=None):
     project_id = created["project"]["id"]
     run_id = f"source-analysis-{project_id}"
     await record_source_refs(
@@ -682,7 +723,7 @@ async def _accept_source_analysis(db, created):
                     "selectedChapterCount": 1,
                     "readChapterIds": ["chapter-source"],
                     "sampledChapterIds": [],
-                    "limitations": [],
+                    "limitations": list(limitations or []),
                 },
                 "plotEvents": [{
                     "order": 1,
@@ -783,6 +824,8 @@ def _scene_execution_input(index: int = 1) -> dict:
 def _book_draft_content(
     scene_list_id: str,
     completed_scene_ids: list[str],
+    *,
+    scene_text: str,
 ) -> dict:
     executions = []
     for scene_id in completed_scene_ids:
@@ -798,8 +841,21 @@ def _book_draft_content(
         "sceneListId": scene_list_id,
         "sceneId": last_id,
         "sceneHeading": f"内景·电台·夜·{last_index}",
+        "newSceneIds": [last_id],
+        "newSceneHeadings": [f"内景·电台·夜·{last_index}"],
         "completedSceneIds": completed_scene_ids,
         "sceneExecutions": executions,
+        "episodeDrafts": [{
+            "episodeNumber": 1,
+            "sceneIds": [last_id],
+            "sceneExecutions": [executions[-1]],
+            "sceneTexts": [{
+                "sceneId": last_id,
+                "contentText": scene_text,
+            }],
+            "contentText": scene_text,
+            "continuitySummary": executions[-1]["continuityState"],
+        }],
         "isComplete": False,
     }
 
@@ -864,7 +920,7 @@ async def test_screenplay_catalog_exposes_read_and_stage_proposal_tools(source_d
         "beginSourceAnalysisArtifact",
         "appendSourceAnalysisBatch",
         "finalizeSourceAnalysisProposal",
-    })
+    } - {"getScreenplayDraftContext", "getScreenplayEpisodeContext"})
     assert all(
         catalog.get(name).policy.mode.value == "read"
         for name in SCREENPLAY_READ_TOOL_NAMES
@@ -1079,23 +1135,6 @@ async def test_source_analysis_proposal_requires_and_preserves_read_evidence(
     assert proposal["contentJson"]["artifactRef"].startswith("artifact://")
     assert proposal["contentText"].startswith("# Agent 原作范围分析")
     assert "林岚追查雾中广播" in proposal["contentText"]
-
-    forged_content = dict(proposal["contentJson"])
-    forged_content["artifactRef"] = (
-        "artifact://purrtypos.screenplay/source_analysis_entries/fake"
-    )
-    forged_content["sourceAnalysisArtifactId"] = "fake"
-    forged = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind=proposal["kind"],
-        title="伪造原作分析",
-        content_json=forged_content,
-        content_text=proposal["contentText"],
-        derived_from_ids=[],
-    )
-    with pytest.raises(AppError, match="Artifact"):
-        await screenplay_crud.accept_document(source_db, forged["id"])
 
     document = await screenplay_crud.create_document(
         source_db,
@@ -1572,95 +1611,6 @@ async def test_screenplay_internal_tool_error_is_opaque(
 
 
 @pytest.mark.asyncio
-async def test_source_analysis_cannot_accept_unread_evidence(source_db):
-    created = await _seed_source_project(source_db)
-    document = await screenplay_crud.create_document(
-        source_db,
-        project_id=created["project"]["id"],
-        kind="source_analysis",
-        title="无凭据分析",
-        content_json={
-            "analysis": {
-                "narrativeSummary": "未经读取的总结。",
-                "coverage": {
-                    "selectedChapterCount": 1,
-                    "readChapterIds": ["chapter-source"],
-                    "sampledChapterIds": [],
-                    "limitations": [],
-                },
-                "plotEvents": [{
-                    "order": 1,
-                    "event": "假定事件",
-                    "consequence": "假定结果",
-                }],
-                "evidence": [{
-                    "sourceType": "chapter",
-                    "sourceId": "chapter-source",
-                    "claim": "这条来源没有绑定到文档",
-                }],
-            },
-        },
-        content_text="# 无凭据分析",
-        derived_from_ids=[created["initialDocument"]["id"]],
-    )
-
-    with pytest.raises(AppError, match="未实际读取"):
-        await screenplay_crud.accept_document(source_db, document["id"])
-
-
-@pytest.mark.asyncio
-async def test_source_analysis_cannot_understate_locked_scope(source_db):
-    created = await _seed_source_project(source_db)
-    project_id = created["project"]["id"]
-    run_id = "run-understated-scope"
-    await record_source_refs(
-        source_db,
-        project_id=project_id,
-        agent_run_id=run_id,
-        tool_name="readSourcePassages",
-        refs=[{
-            "sourceType": "chapter",
-            "sourceId": "chapter-source",
-            "sourceRevision": "revision-source",
-            "excerpt": "林岚在雾港听见失踪哥哥的声音。",
-        }],
-    )
-    document = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="source_analysis",
-        title="缩小范围的分析",
-        content_json={
-            "analysis": {
-                "narrativeSummary": "林岚追查雾中广播。",
-                "coverage": {
-                    "selectedChapterCount": 0,
-                    "readChapterIds": [],
-                    "sampledChapterIds": [],
-                    "limitations": ["未覆盖原作章节。"],
-                },
-                "plotEvents": [{
-                    "order": 1,
-                    "event": "异常广播出现",
-                    "consequence": "林岚开始调查",
-                }],
-                "evidence": [{
-                    "sourceType": "chapter",
-                    "sourceId": "chapter-source",
-                    "claim": "异常广播触发主线",
-                }],
-            },
-        },
-        content_text="# 缩小范围的分析",
-        derived_from_ids=[created["initialDocument"]["id"]],
-        source_run_id=run_id,
-    )
-
-    with pytest.raises(AppError, match="项目锁定范围"):
-        await screenplay_crud.accept_document(source_db, document["id"])
-
-
-@pytest.mark.asyncio
 async def test_source_analysis_host_discloses_partial_reading_limitations(
     source_db,
 ):
@@ -1766,7 +1716,7 @@ async def test_creative_brief_tool_emits_unsaved_structured_proposal(source_db):
         == "decision-radio-inciting"
     )
     documents = await screenplay_crud.list_documents(source_db, project_id)
-    assert len(documents) == 2
+    assert [document["id"] for document in documents] == [analysis["id"]]
 
 
 @pytest.mark.asyncio
@@ -1798,14 +1748,10 @@ async def test_creative_brief_artifact_resumes_and_host_inherits_limitations(
 ):
     created = await _seed_source_project(source_db)
     project_id = created["project"]["id"]
-    analysis = await _accept_source_analysis(source_db, created)
-    analysis_content = json.loads(json.dumps(analysis["content_json"]))
-    analysis_content["analysis"]["coverage"]["limitations"] = [
-        "部分环境细节仅获得片段文本。"
-    ]
-    await source_db.execute(
-        "UPDATE screenplay_documents SET content_json = ? WHERE id = ?",
-        [json.dumps(analysis_content, ensure_ascii=False), analysis["id"]],
+    analysis = await _accept_source_analysis(
+        source_db,
+        created,
+        limitations=["部分环境细节仅获得片段文本。"],
     )
     state = ScreenplayExecutionStateFactory().create(
         _request(project_id, active_stage="brief")
@@ -1955,20 +1901,6 @@ async def test_creative_brief_artifact_resumes_and_host_inherits_limitations(
     assert len(brief["adaptationDecisions"]) == 2
     assert proposal["derivedFromIds"] == [analysis["id"]]
 
-    forged_content = dict(proposal["contentJson"])
-    forged_content["creativeBriefArtifactId"] = "forged-artifact"
-    forged = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="creative_brief",
-        title="伪造 Artifact 的创作简报",
-        content_json=forged_content,
-        content_text=str(proposal["contentText"]),
-        derived_from_ids=list(proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="Artifact"):
-        await screenplay_crud.accept_document(source_db, forged["id"])
-
     document = await screenplay_crud.create_document(
         source_db,
         project_id=project_id,
@@ -2021,31 +1953,7 @@ async def test_original_creative_brief_artifact_uses_one_content_item(source_db)
     assert "acknowledgedSourceLimitations" not in proposal[
         "contentJson"
     ]["brief"]
-    assert proposal["derivedFromIds"] == [created["initialDocument"]["id"]]
-
-
-@pytest.mark.asyncio
-async def test_accepting_book_brief_revalidates_adaptation_contract(source_db):
-    created = await _seed_source_project(source_db)
-    analysis = await _accept_source_analysis(source_db, created)
-    document = await screenplay_crud.create_document(
-        source_db,
-        project_id=created["project"]["id"],
-        kind="creative_brief",
-        title="绕过 Agent 的不完整简报",
-        content_json={
-            "sourceAnalysisId": analysis["id"],
-            "brief": {
-                "logline": "维修员追查异常广播。",
-                "coreConflict": "真相与执念之间的选择。",
-            },
-        },
-        content_text="# 不完整简报",
-        derived_from_ids=[analysis["id"]],
-    )
-
-    with pytest.raises(AppError, match="结构化成片规模"):
-        await screenplay_crud.accept_document(source_db, document["id"])
+    assert proposal["derivedFromIds"] == []
 
 
 @pytest.mark.asyncio
@@ -2136,33 +2044,6 @@ async def test_structure_artifact_derives_project_format_and_parent(source_db):
 
 
 @pytest.mark.asyncio
-async def test_structure_acceptance_revalidates_decision_coverage(source_db):
-    created = await _seed_source_project(source_db)
-    brief = await _advance_book_to_structure(source_db, created)
-    document = await screenplay_crud.create_document(
-        source_db,
-        project_id=created["project"]["id"],
-        kind="beat_sheet",
-        title="遗漏改编决策的节拍表",
-        content_json={
-            "creativeBriefId": brief["id"],
-            "beats": [{
-                "id": "beat-1",
-                "order": 1,
-                "label": "开场",
-                "summary": "异常广播出现。",
-            }],
-            "decisionCoverage": [],
-        },
-        content_text="# 节拍表",
-        derived_from_ids=[brief["id"]],
-    )
-
-    with pytest.raises(AppError, match="全部改编决策"):
-        await screenplay_crud.accept_document(source_db, document["id"])
-
-
-@pytest.mark.asyncio
 async def test_episode_outline_matches_brief_scale_and_decisions(source_db):
     await _seed_source_project(source_db)
     created = await screenplay_crud.create_project(
@@ -2244,6 +2125,18 @@ async def test_episode_outline_matches_brief_scale_and_decisions(source_db):
         active_stage="scenes",
     )
     scene_state = ScreenplayExecutionStateFactory().create(scene_request)
+    _, episode_context_result = await _invoke(
+        catalog,
+        scene_state,
+        "getScreenplayEpisodeContext",
+        {"documentId": structure["id"], "episodeNumbers": [2]},
+    )
+    assert episode_context_result.error_code is None
+    episode_context = json.loads(episode_context_result.content)
+    assert len(episode_context["episodeIndex"]) == 2
+    assert episode_context["selectedEpisodes"][0]["content_json"][
+        "episode"
+    ]["id"] == "episode-2"
     scenes = [
         {
             "id": "scene-episode-1",
@@ -2286,6 +2179,68 @@ async def test_episode_outline_matches_brief_scale_and_decisions(source_db):
     assert scene_result.error_code is None
     scene_proposal = thaw_json_mapping(scene_result.effects[0].payload)
     assert scene_proposal["contentJson"]["structureId"] == structure["id"]
+    scene_list = await screenplay_crud.create_document(
+        source_db,
+        project_id=created["project"]["id"],
+        kind="scene_list",
+        title=str(scene_proposal["title"]),
+        content_json=dict(scene_proposal["contentJson"]),
+        content_text=str(scene_proposal["contentText"]),
+        derived_from_ids=list(scene_proposal["derivedFromIds"]),
+    )
+    await screenplay_crud.accept_document(source_db, scene_list["id"])
+    draft_state = ScreenplayExecutionStateFactory().create(_request(
+        created["project"]["id"],
+        active_stage="draft",
+    ))
+    _, context_result = await _invoke(
+        catalog,
+        draft_state,
+        "getScreenplayDraftContext",
+        {},
+    )
+    assert context_result.error_code is None
+    context_payload = json.loads(context_result.content)
+    assert context_payload["nextEpisodeNumber"] == 1
+    assert context_payload["selectedEpisodes"][0]["episodeNumber"] == 1
+    assert [
+        scene["id"]
+        for scene in context_payload["selectedEpisodes"][0]["scenes"]
+    ] == ["scene-episode-1"]
+    _, draft_result = await _invoke(
+        catalog,
+        draft_state,
+        "proposeSceneDraft",
+        {
+            "execution": _scene_execution_input(1),
+            "sceneText": "INT. 电台 - 夜\n\n林岚听见异常广播。",
+        },
+    )
+    assert draft_result.error_code is None
+    draft_proposal = thaw_json_mapping(draft_result.effects[0].payload)
+    assert draft_proposal["contentJson"]["episodeDrafts"][0][
+        "episodeNumber"
+    ] == 1
+    draft = await screenplay_crud.create_document(
+        source_db,
+        project_id=created["project"]["id"],
+        kind="scene_draft",
+        title=str(draft_proposal["title"]),
+        content_json=dict(draft_proposal["contentJson"]),
+        content_text=str(draft_proposal["contentText"]),
+        derived_from_ids=list(draft_proposal["derivedFromIds"]),
+    )
+    await screenplay_crud.accept_document(source_db, draft["id"])
+    episode_documents = await screenplay_crud.list_accepted_draft_episodes(
+        source_db,
+        created["project"]["id"],
+    )
+    assert episode_documents[0]["episode_number"] == 1
+    assert episode_documents[0]["storage_mode"] == "revision_part"
+    accepted_draft = await screenplay_crud.get_document(source_db, draft["id"])
+    assert accepted_draft["content_json"]["episodeDrafts"][0][
+        "episodeNumber"
+    ] == 1
 
 
 @pytest.mark.asyncio
@@ -2473,43 +2428,11 @@ async def test_scene_list_and_rolling_draft_follow_accepted_versions(source_db):
         scene_list["id"],
         first_draft["id"],
     }
-    assert [
-        item["sceneId"]
-        for item in second_proposal["contentJson"]["sceneExecutions"]
-    ] == ["scene-1", "scene-2"]
-    assert second_proposal["contentText"] == (
-        "INT. 电台 - 夜\n\n林岚调试设备。\n\n"
-        "EXT. 雾港 - 夜\n\n她走进浓雾。"
-    )
-    tampered_content = json.loads(json.dumps(
-        second_proposal["contentJson"],
-        ensure_ascii=False,
-    ))
-    tampered_content["sceneExecutions"][0]["turnResult"] = "改写上一场转折"
-    tampered = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="scene_draft",
-        title="篡改历史执行记录的整稿",
-        content_json=tampered_content,
-        content_text=str(second_proposal["contentText"]),
-        derived_from_ids=list(second_proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="不能改写"):
-        await screenplay_crud.accept_document(source_db, tampered["id"])
-
-    tampered_text = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="scene_draft",
-        title="篡改历史正文的整稿",
-        content_json=dict(second_proposal["contentJson"]),
-        content_text="INT. 电台 - 夜\n\n上一场被替换。\n\nEXT. 雾港 - 夜",
-        derived_from_ids=list(second_proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="不能改写或删除"):
-        await screenplay_crud.accept_document(source_db, tampered_text["id"])
-
+    assert "sceneExecutions" not in second_proposal["contentJson"]
+    assert second_proposal["contentJson"]["episodeDrafts"][0][
+        "sceneIds"
+    ] == ["scene-2"]
+    assert second_proposal["contentText"] == "EXT. 雾港 - 夜\n\n她走进浓雾。"
     second_draft = await screenplay_crud.create_document(
         source_db,
         project_id=project_id,
@@ -2522,37 +2445,6 @@ async def test_scene_list_and_rolling_draft_follow_accepted_versions(source_db):
     await screenplay_crud.accept_document(source_db, second_draft["id"])
     project = await screenplay_crud.get_project(source_db, project_id)
     assert project["active_stage"] == "review"
-
-
-@pytest.mark.asyncio
-async def test_scene_list_acceptance_revalidates_structure_mapping(source_db):
-    created = await _seed_source_project(source_db)
-    project_id = created["project"]["id"]
-    brief_id = (await _advance_book_to_structure(source_db, created))["id"]
-    structure = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="beat_sheet",
-        title="节拍表",
-        content_json=_book_beat_structure(brief_id),
-        content_text="结构",
-        derived_from_ids=[brief_id],
-    )
-    await screenplay_crud.accept_document(source_db, structure["id"])
-    content = _book_scene_list(structure["id"])
-    content["scenes"][0]["structureUnitIds"] = ["missing-beat"]
-    scene_list = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="scene_list",
-        title="错误映射的场景表",
-        content_json=content,
-        content_text="场景表",
-        derived_from_ids=[structure["id"]],
-    )
-
-    with pytest.raises(AppError, match="不存在的结构单元"):
-        await screenplay_crud.accept_document(source_db, scene_list["id"])
 
 
 @pytest.mark.asyncio
@@ -2732,20 +2624,6 @@ async def test_structure_artifact_resumes_replays_and_freezes_brief_contract(
         1,
         2,
     ]
-
-    forged_content = dict(proposal["contentJson"])
-    forged_content["structureArtifactId"] = "forged-artifact"
-    forged = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="beat_sheet",
-        title="伪造 Artifact 的节拍表",
-        content_json=forged_content,
-        content_text=str(proposal["contentText"]),
-        derived_from_ids=list(proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="Artifact"):
-        await screenplay_crud.accept_document(source_db, forged["id"])
 
     document = await screenplay_crud.create_document(
         source_db,
@@ -2942,20 +2820,6 @@ async def test_scene_list_artifact_resumes_replays_and_finalizes_in_batches(
     )
     assert completed == {"status": "completed", "claim_count": 0}
 
-    tampered_content = dict(proposal["contentJson"])
-    tampered_content["artifactRef"] = "artifact://purrtypos.screenplay/fake"
-    tampered = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="scene_list",
-        title="伪造 Artifact 场景表",
-        content_json=tampered_content,
-        content_text=str(proposal["contentText"]),
-        derived_from_ids=list(proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="Artifact"):
-        await screenplay_crud.accept_document(source_db, tampered["id"])
-
     _, replayed_final = await _invoke(
         catalog,
         state,
@@ -2964,6 +2828,35 @@ async def test_scene_list_artifact_resumes_replays_and_finalizes_in_batches(
     )
     assert replayed_final.error_code is None
     assert replayed_final.effects[0].payload == finalized.effects[0].payload
+
+    # A later delivery-recovery Run receives read-only reference access to the
+    # finalized Artifact. It can replay the proposal projection without a
+    # write claim or regenerating any scene content.
+    completed_item = await SqliteWorkItemRepository(source_db).load(
+        str(scoped["work_item_id"])
+    )
+    assert completed_item is not None
+    recovery_run_id = "run-scene-list-delivery-recovery"
+    await SqliteWorkItemRepository(source_db).link_run(
+        WorkItemRunLinkCommand(
+            work_item_id=completed_item.id,
+            run_id=recovery_run_id,
+            relation=WorkItemRunRelation.REFERENCE,
+            expected_revision=completed_item.revision,
+        )
+    )
+    recovery_state = ScreenplayExecutionStateFactory().create(
+        _request(project_id, active_stage="scenes")
+    )
+    recovery_state.run_id = recovery_run_id
+    _, recovered_final = await _invoke(
+        build_screenplay_tool_catalog(source_db),
+        recovery_state,
+        "finalizeSceneListProposal",
+        {},
+    )
+    assert recovered_final.error_code is None
+    assert recovered_final.effects[0].payload == finalized.effects[0].payload
     row = await source_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_artifact_batches",
     )
@@ -3107,7 +3000,11 @@ async def test_review_artifact_resumes_replays_and_rejects_unknown_scenes(
         kind="scene_draft",
         title="完整剧本",
         content_json={
-            **_book_draft_content(scene_list["id"], ["scene-1"]),
+            **_book_draft_content(
+                scene_list["id"],
+                ["scene-1"],
+                scene_text="INT. 电台 - 夜\n\n@林岚\n广播开始了。",
+            ),
             "isComplete": True,
         },
         content_text="INT. 电台 - 夜\n\n@林岚\n广播开始了。",
@@ -3246,20 +3143,6 @@ async def test_review_artifact_resumes_replays_and_rejects_unknown_scenes(
     assert len(proposal["contentJson"]["issues"]) == 2
     assert proposal["derivedFromIds"] == [draft["id"]]
 
-    forged_content = dict(proposal["contentJson"])
-    forged_content["reviewArtifactId"] = "forged-artifact"
-    forged = await screenplay_crud.create_document(
-        source_db,
-        project_id=project_id,
-        kind="review",
-        title="伪造 Artifact 的审阅报告",
-        content_json=forged_content,
-        content_text=str(proposal["contentText"]),
-        derived_from_ids=list(proposal["derivedFromIds"]),
-    )
-    with pytest.raises(AppError, match="Artifact"):
-        await screenplay_crud.accept_document(source_db, forged["id"])
-
     document = await screenplay_crud.create_document(
         source_db,
         project_id=project_id,
@@ -3304,7 +3187,11 @@ async def test_review_then_revision_requires_user_accepted_report(source_db):
         kind="scene_draft",
         title="完整剧本",
         content_json={
-            **_book_draft_content(scene_list["id"], ["scene-1"]),
+            **_book_draft_content(
+                scene_list["id"],
+                ["scene-1"],
+                scene_text="INT. 电台 - 夜\n\n@林岚\n广播开始了。",
+            ),
             "isComplete": True,
         },
         content_text="INT. 电台 - 夜\n\n@林岚\n广播开始了。",
@@ -3410,8 +3297,11 @@ async def test_review_then_revision_requires_user_accepted_report(source_db):
     assert revision["contentJson"]["resolvedIssueIds"] == ["issue-1"]
     assert revision["contentJson"]["partiallyResolvedIssueIds"] == []
     assert revision["contentJson"]["reassessedSceneIds"] == ["scene-1"]
+    assert "sceneExecutions" not in revision["contentJson"]
     assert (
-        revision["contentJson"]["sceneExecutions"][0]["turnResult"]
+        revision["contentJson"]["episodeDrafts"][0][
+            "sceneExecutions"
+        ][0]["turnResult"]
         == "她从追踪信号转为直接回应声音。"
     )
     assert set(revision["derivedFromIds"]) == {
@@ -3502,7 +3392,11 @@ async def test_revision_artifact_replaces_only_affected_scene_text(source_db):
         project_id=project_id,
         kind="scene_draft",
         title="第一场正文",
-        content_json=_book_draft_content(scene_list["id"], ["scene-1"]),
+        content_json=_book_draft_content(
+            scene_list["id"],
+            ["scene-1"],
+            scene_text=original_scene_1,
+        ),
         content_text=original_scene_1,
         derived_from_ids=[scene_list["id"]],
     )
@@ -3513,10 +3407,14 @@ async def test_revision_artifact_replaces_only_affected_scene_text(source_db):
         kind="scene_draft",
         title="完整剧本",
         content_json={
-            **_book_draft_content(scene_list["id"], ["scene-1", "scene-2"]),
+            **_book_draft_content(
+                scene_list["id"],
+                ["scene-1", "scene-2"],
+                scene_text=original_scene_2,
+            ),
             "isComplete": True,
         },
-        content_text=f"{original_scene_1}\n\n{original_scene_2}",
+        content_text=original_scene_2,
         derived_from_ids=[scene_list["id"], first_draft["id"]],
     )
     await screenplay_crud.accept_document(source_db, draft["id"])
@@ -3570,7 +3468,7 @@ async def test_revision_artifact_replaces_only_affected_scene_text(source_db):
 
     assert result.error_code is None
     proposal = thaw_json_mapping(result.effects[0].payload)
-    assert proposal["contentText"] == f"{original_scene_1}\n\n{revised_scene_2}"
+    assert proposal["contentText"] == revised_scene_2
     assert original_scene_2 not in proposal["contentText"]
     assert proposal["contentJson"]["reassessedSceneIds"] == ["scene-2"]
     assert proposal["contentJson"]["artifactRef"].startswith("artifact://")

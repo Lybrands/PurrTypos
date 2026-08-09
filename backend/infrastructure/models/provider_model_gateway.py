@@ -166,7 +166,14 @@ def _provider_options(
             for schema in invocation.tools
         ]
         if invocation.tool_choice is ToolChoiceMode.REQUIRED:
-            options["tool_choice"] = "required"
+            options["tool_choice"] = (
+                {
+                    "type": "function",
+                    "function": {"name": invocation.tools[0].name},
+                }
+                if len(invocation.tools) == 1
+                else "required"
+            )
     return options
 
 

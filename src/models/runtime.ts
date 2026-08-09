@@ -34,24 +34,9 @@ export function getDefaultModelContextWindow(config?: AiModelConfig | null): AiC
   return config?.contextWindow ?? getModelPreset(config?.presetId)?.contextWindow ?? '128k'
 }
 
-function positiveInteger(value: unknown) {
-  const number = Number(value)
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined
-}
-
-/**
- * 解析单次响应的输出预算。输出预算不能由上下文窗口冒充，也不能由具体页面写死：
- * 用户配置优先，其次使用模型预设；未知自定义模型才按上下文窗口保守推导。
- */
-export function getDefaultModelOutputTokens(config?: AiModelConfig | null): number {
-  const preset = getModelPreset(config?.presetId)
-  const configured = positiveInteger(config?.outputTokenBudget)
-  const presetDefault = positiveInteger(preset?.defaultOutputTokens)
-  const contextTokens = contextWindowTokens(getDefaultModelContextWindow(config))
-  const inferred = Math.min(16_384, Math.max(4_096, Math.floor(contextTokens / 8)))
-  const requested = configured ?? presetDefault ?? inferred
-  const maximum = positiveInteger(preset?.maxOutputTokens)
-  return maximum ? Math.min(requested, maximum) : requested
+/** 返回供应商已登记的模型能力上限；任务预算由后端 Agent Core 决定。 */
+export function getModelMaxOutputTokens(config?: AiModelConfig | null): number | undefined {
+  return getModelPreset(config?.presetId)?.maxOutputTokens
 }
 
 export function isModelThinkingEnabled(config?: AiModelConfig | null) {
@@ -94,7 +79,6 @@ export function createConfigFromPreset(params: {
     thinkingOnly: params.preset.thinkingOnly,
     thinkingEnabled: params.preset.thinkingEnabled,
     contextWindow: params.preset.contextWindow,
-    outputTokenBudget: params.preset.defaultOutputTokens,
     customizeTemperature: params.preset.customizeTemperature,
     temperatureThinking: params.preset.temperatureThinking,
     temperatureNonThinking: params.preset.temperatureNonThinking,

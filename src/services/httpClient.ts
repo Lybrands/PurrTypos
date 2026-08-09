@@ -1,4 +1,5 @@
 import type { ApiResult } from '../types'
+import { canRetryHttpRequest } from './httpRetryPolicy'
 
 const configuredBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
 
@@ -27,13 +28,17 @@ export async function requestJson<T>(
           ...options.headers,
         },
       })
-      if (!response.ok && attempt < retries) {
+      if (
+        !response.ok
+        && attempt < retries
+        && canRetryHttpRequest(options.method, response.status)
+      ) {
         await retryDelay(attempt)
         continue
       }
       return await response.json() as ApiResult<T>
     } catch (error) {
-      if (attempt >= retries) {
+      if (attempt >= retries || !canRetryHttpRequest(options.method)) {
         return {
           success: false,
           data: undefined as T,
@@ -58,6 +63,12 @@ export const apiPost = <T>(path: string, body: unknown) =>
 export const apiPut = <T>(path: string, body: unknown) =>
   requestJson<T>(`/api${path}`, {
     method: 'PUT',
+    body: JSON.stringify(body),
+  })
+
+export const apiPatch = <T>(path: string, body: unknown) =>
+  requestJson<T>(`/api${path}`, {
+    method: 'PATCH',
     body: JSON.stringify(body),
   })
 
