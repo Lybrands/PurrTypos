@@ -182,7 +182,6 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           taskPlan:
             acc.taskPlan ??
             (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
-          screenplayProposal: acc.screenplayProposal ?? cm.screenplayProposal,
           longTaskId: acc.longTaskId ?? cm.longTaskId,
           termination:
             chunk.aborted && hasVisibleModelResponse
@@ -245,7 +244,6 @@ function saveConversationIfNeeded(
         acc.taskPlan ||
         savedThinkingBlocks.length > 0 ||
         (acc.toolCallSegments?.length ?? 0) > 0 ||
-        acc.screenplayProposal ||
         acc.longTaskId,
     );
   if (!shouldSave) return;
@@ -272,7 +270,6 @@ function saveConversationIfNeeded(
       taskPlan: acc.taskPlan ?? undefined,
       contextCompaction: acc.contextCompaction,
       contextBudget: acc.contextBudget,
-      screenplayProposal: acc.screenplayProposal,
       agentProcess: (
         acc.delegations?.length || acc.subAgentActivities?.length
       ) ? {

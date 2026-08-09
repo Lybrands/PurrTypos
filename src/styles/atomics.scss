@@ -103,22 +103,6 @@
   }
 }
 
-.a-thinking-cursor {
-  display: inline-block;
-  width: 2px;
-  height: 0.9em;
-  background: var(--text-muted);
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  animation: a-thinking-cursor-blink 0.8s step-end infinite;
-}
-
-@keyframes a-thinking-cursor-blink {
-  50% {
-    opacity: 0;
-  }
-}
-
 .a-loading-dots {
   animation: a-loading-pulse 1.2s ease-in-out infinite;
   color: var(--text-muted);

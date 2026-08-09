@@ -1,1 +1,1 @@
-"""Reusable test support for Agent runtime migration fixtures."""
+"""Reusable test support for native Agent runtime fixtures."""

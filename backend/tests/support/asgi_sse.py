@@ -200,19 +200,23 @@ def start_asgi_request(
     method: str,
     path: str,
     json_body: Any | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> LiveASGIResponse:
     body = (
         json.dumps(json_body, ensure_ascii=False).encode("utf-8")
         if json_body is not None
         else b""
     )
-    headers = {"content-type": "application/json"} if json_body is not None else {}
+    request_headers = {
+        **({"content-type": "application/json"} if json_body is not None else {}),
+        **dict(headers or {}),
+    }
     return LiveASGIResponse(
         app,
         method=method,
         path=path,
         body=body,
-        headers=headers,
+        headers=request_headers,
     )
 
 

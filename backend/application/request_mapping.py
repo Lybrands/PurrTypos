@@ -15,11 +15,7 @@ from agent_core.contracts import (
 )
 from agent_core.engine import AgentCoreRunOptions
 from agent_core.ports import ResponseJudge
-from domains.screenplay.context import screenplay_context_claims
-from domains.screenplay.contracts import (
-    SCREENPLAY_DOMAIN_NAMESPACE,
-    ScreenplayDomainContext,
-)
+from application.output_budget_policies import resolve_request_output_budget
 from domains.writing.context import writing_context_claims
 from domains.writing.contracts import (
     WRITING_DOMAIN_NAMESPACE,
@@ -30,6 +26,7 @@ from domains.writing.response import (
     writing_response_validators,
 )
 from schemas.ai import ChatStreamRequest
+from infrastructure.models.profiles.registry import resolve_model_profile
 
 
 CONTEXT_WINDOW_TOKENS: dict[str, int] = {
@@ -94,6 +91,7 @@ def to_writing_agent_request(
         )
     model = str(options.pop("model", "") or "").strip()
     profile_id = str(options.pop("model_profile", "") or "").strip() or None
+    options.pop("max_tokens", None)
     options.pop("tools", None)
     options.pop("tool_choice", None)
     window_label = body.contextWindow or options.pop("context_window", None)
@@ -117,6 +115,11 @@ def to_writing_agent_request(
             provider=body.apiProvider,
             model=model,
             profile_id=profile_id,
+            output_capabilities=resolve_model_profile(
+                profile_id,
+                model,
+                str(options.get("baseURL") or ""),
+            ).output_capabilities(),
             options=options,
         ),
         domain_context=context.to_core_context(),
@@ -128,79 +131,21 @@ def to_writing_agent_request(
     )
 
 
-def to_screenplay_agent_request(
-    body: ChatStreamRequest,
-    provider_options: Mapping[str, Any],
-) -> AgentRunRequest:
-    """Map a project-bound screenplay request without trusting caller scope."""
-
-    body_options = dict(body.options or {})
-    options = {**body_options, **dict(provider_options)}
-    if (
-        _has_caller_tool_definitions(body.tools)
-        or _has_caller_tool_definitions(body_options.get("tools"))
-        or body_options.get("tool_choice") is not None
-        or _has_caller_tool_definitions(options.get("tools"))
-        or options.get("tool_choice") is not None
-    ):
-        raise UnsupportedCallerToolContractError(
-            "caller-owned tools and tool_choice are not supported by the "
-            "composed screenplay agent"
-        )
-    model = str(options.pop("model", "") or "").strip()
-    profile_id = str(options.pop("model_profile", "") or "").strip() or None
-    options.pop("tools", None)
-    options.pop("tool_choice", None)
-    window_label = body.contextWindow or options.pop("context_window", None)
-    context = ScreenplayDomainContext(
-        project_id=str(body.screenplayProjectId or ""),
-        requested_source_book_id=body.sourceBookId,
-        active_document_id=body.activeDocumentId,
-        requested_stage=body.activeStage,
-        context_window_label=str(window_label) if window_label else None,
-        task_intent=body.screenplayTaskIntent,
-        draft_scene_count=body.screenplayDraftSceneCount,
-        draft_scope=body.screenplayDraftScope,
-    )
-    return AgentRunRequest(
-        messages=tuple(
-            AgentMessage.from_mapping(message)
-            for message in body.messages
-            if isinstance(message, Mapping)
-        ),
-        model=ModelRequest(
-            provider=body.apiProvider,
-            model=model,
-            profile_id=profile_id,
-            options=options,
-        ),
-        domain_context=context.to_core_context(),
-        session_id=body.sessionId,
-        mode=body.chatAgentMode,
-        context_window=context_window_tokens(window_label),
-        tools_enabled=bool(body.enableAgentTools),
-        metadata={"locale": body.locale},
-    )
-
-
 def to_agent_request(
     body: ChatStreamRequest,
     provider_options: Mapping[str, Any],
 ) -> AgentRunRequest:
-    if body.agentProfile == "screenplay":
-        return to_screenplay_agent_request(body, provider_options)
     return to_writing_agent_request(body, provider_options)
 
 
 def agent_context_claims(
     request: AgentRunRequest,
 ) -> tuple[ContextBudgetClaim, ...]:
-    namespace = request.domain_context.namespace
-    if namespace == SCREENPLAY_DOMAIN_NAMESPACE:
-        return screenplay_context_claims(request)
-    if namespace == WRITING_DOMAIN_NAMESPACE:
+    if request.domain_context.namespace == WRITING_DOMAIN_NAMESPACE:
         return writing_context_claims(request)
-    raise ValueError(f"unsupported Agent domain namespace: {namespace}")
+    raise ValueError(
+        "generic Agent mapping supports only the Writing domain"
+    )
 
 
 def writing_run_options(
@@ -211,21 +156,19 @@ def writing_run_options(
     provenance: RunProvenance | None = None,
     lineage: RunLineage | None = None,
     response_judges: Sequence[ResponseJudge] = (),
+    agent_role: str | None = None,
+    output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
-    output_reserve = _positive_int(provider_options.get("max_tokens"), 8_192)
-    if str(request.model.provider or "").strip().lower() == "anthropic":
-        from infrastructure.models.capabilities import (
-            build_anthropic_thinking_param,
-            normalize_thinking_enabled,
-        )
-
-        _, output_reserve = build_anthropic_thinking_param(
-            normalize_thinking_enabled(dict(provider_options)),
-            output_reserve,
-        )
+    output_budget = resolve_request_output_budget(
+        request,
+        agent_role=agent_role,
+        work_units=output_work_units,
+    )
+    output_reserve = output_budget.effective_tokens
     return AgentCoreRunOptions(
         context_claims=writing_context_claims(request),
         output_reserve_tokens=output_reserve,
+        output_budget=output_budget,
         default_context_window_tokens=request.context_window or 200_000,
         force_planned_tool_choice=force_planned_tool_choice,
         provenance=provenance,
@@ -244,40 +187,22 @@ def agent_run_options(
     provenance: RunProvenance | None = None,
     lineage: RunLineage | None = None,
     response_judges: Sequence[ResponseJudge] = (),
+    agent_role: str | None = None,
+    output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
-    if request.domain_context.namespace == WRITING_DOMAIN_NAMESPACE:
-        return writing_run_options(
-            request,
-            provider_options,
-            force_planned_tool_choice=force_planned_tool_choice,
-            provenance=provenance,
-            lineage=lineage,
-            response_judges=response_judges,
-        )
-    if request.domain_context.namespace != SCREENPLAY_DOMAIN_NAMESPACE:
+    if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
         raise ValueError(
-            "unsupported Agent domain namespace: "
-            f"{request.domain_context.namespace}"
+            "generic Agent run options support only the Writing domain"
         )
-    output_reserve = _positive_int(provider_options.get("max_tokens"), 8_192)
-    if str(request.model.provider or "").strip().lower() == "anthropic":
-        from infrastructure.models.capabilities import (
-            build_anthropic_thinking_param,
-            normalize_thinking_enabled,
-        )
-
-        _, output_reserve = build_anthropic_thinking_param(
-            normalize_thinking_enabled(dict(provider_options)),
-            output_reserve,
-        )
-    return AgentCoreRunOptions(
-        context_claims=screenplay_context_claims(request),
-        output_reserve_tokens=output_reserve,
-        default_context_window_tokens=request.context_window or 200_000,
+    return writing_run_options(
+        request,
+        provider_options,
         force_planned_tool_choice=force_planned_tool_choice,
         provenance=provenance,
         lineage=lineage,
-        response_judges=tuple(response_judges),
+        response_judges=response_judges,
+        agent_role=agent_role,
+        output_work_units=output_work_units,
     )
 
 
@@ -287,11 +212,3 @@ def _has_caller_tool_definitions(value: Any) -> bool:
     if value is None:
         return False
     return not (isinstance(value, (list, tuple)) and not value)
-
-
-def _positive_int(value: Any, default: int) -> int:
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
-        return default
-    return normalized if normalized > 0 else default

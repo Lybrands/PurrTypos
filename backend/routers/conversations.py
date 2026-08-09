@@ -43,11 +43,6 @@ async def save_conversation(body: SaveConversationRequest):
         if body.contextBudget is not None
         else None
     )
-    screenplay_proposal_json = (
-        json.dumps(body.screenplayProposal, ensure_ascii=False)
-        if body.screenplayProposal is not None
-        else None
-    )
     agent_process_json = (
         json.dumps(body.agentProcess, ensure_ascii=False)
         if body.agentProcess is not None
@@ -66,7 +61,6 @@ async def save_conversation(body: SaveConversationRequest):
         task_plan_json,
         context_compaction_json,
         context_budget_json,
-        screenplay_proposal_json,
         agent_process_json,
     ]
     async with db.transaction():
@@ -85,7 +79,7 @@ async def save_conversation(body: SaveConversationRequest):
                 "response = ?, model = ?, thinking = ?, tool_call_segments = ?, "
                 "thinking_blocks = ?, thinking_durations_ms = ?, duration_ms = ?, "
                 "task_plan = ?, context_compaction = ?, context_budget = ?, "
-                "screenplay_proposal = ?, agent_process = ? "
+                "agent_process = ? "
                 "WHERE id = ? AND session_id = ?",
                 [*values, conversation_id, body.sessionId],
             )
@@ -95,8 +89,8 @@ async def save_conversation(body: SaveConversationRequest):
                    (session_id, chapter_id, prompt, response, model, thinking,
                     tool_call_segments, thinking_blocks, thinking_durations_ms,
                     duration_ms, task_plan, context_compaction, context_budget,
-                    screenplay_proposal, agent_process)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    agent_process)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [body.sessionId, *values],
             )
             if body.agentRunId and conversation_id is not None:
@@ -145,14 +139,7 @@ async def get_conversations(sessionId: str):
         "      AND CAST(json_extract(lt.metadata_json, '$.sessionId') AS INTEGER) = c.session_id) "
         "      OR (json_extract(lt.metadata_json, '$.sessionId') IS NULL "
         "        AND lt.created_by_run_id = r.id)) "
-        "  ORDER BY lt.update_time DESC LIMIT 1) AS long_task_id, "
-        "COALESCE(c.screenplay_proposal, ("
-        "  SELECT e.payload_json FROM ai_agent_runs AS r "
-        "  JOIN ai_agent_run_events AS e ON e.run_id = r.id "
-        "  WHERE r.conversation_id = c.id "
-        "    AND e.event_type = 'screenplay.document_proposal' "
-        "  ORDER BY e.id DESC LIMIT 1"
-        ")) AS screenplay_proposal "
+        "  ORDER BY lt.update_time DESC LIMIT 1) AS long_task_id "
         "FROM ai_conversations AS c WHERE c.session_id = ? ORDER BY c.id ASC",
         [sessionId],
     )

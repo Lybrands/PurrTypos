@@ -226,6 +226,12 @@ class SqliteArtifactMaintenanceRepository:
         )
         artifact_count = int((count or {}).get("count") or 0)
         await self._db.execute(
+            "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN ("
+            "SELECT id FROM ai_agent_artifacts WHERE work_item_id IN "
+            f"({placeholders}))",
+            list(work_item_ids),
+        )
+        await self._db.execute(
             "DELETE FROM ai_agent_artifact_claims WHERE work_item_id IN "
             f"({placeholders})",
             list(work_item_ids),
@@ -283,6 +289,11 @@ class SqliteArtifactMaintenanceRepository:
         if not artifact_ids:
             return 0
         placeholders = ",".join("?" for _ in artifact_ids)
+        await self._db.execute(
+            "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN "
+            f"({placeholders})",
+            list(artifact_ids),
+        )
         await self._db.execute(
             "DELETE FROM ai_agent_artifact_claims WHERE artifact_id IN "
             f"({placeholders})",

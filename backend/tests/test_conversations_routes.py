@@ -70,13 +70,6 @@ async def test_save_conversation_persists_context_ui_state(
             "estimatedInputTokens": 12_000,
             "toolSchemaTokens": 1_000,
         },
-        screenplayProposal={
-            "kind": "creative_brief",
-            "title": "第一版创作简报",
-            "contentJson": {"theme": "重逢"},
-            "contentText": "# 第一版创作简报",
-            "derivedFromIds": [],
-        },
         agentProcess={
             "delegations": [{"delegationId": "delegation-1", "status": "done"}],
             "subAgentActivities": [{
@@ -87,14 +80,12 @@ async def test_save_conversation_persists_context_ui_state(
     ))
 
     row = await temp_db.fetch_one(
-        "SELECT context_compaction, context_budget, screenplay_proposal, "
-        "agent_process "
+        "SELECT context_compaction, context_budget, agent_process "
         "FROM ai_conversations WHERE id = ?",
         [created["data"]["id"]],
     )
     assert json.loads(row["context_compaction"])["compactedTurnCount"] == 4
     assert json.loads(row["context_budget"])["windowTokens"] == 200_000
-    assert json.loads(row["screenplay_proposal"])["title"] == "第一版创作简报"
     assert json.loads(row["agent_process"])["subAgentActivities"][0][
         "message"
     ]["content"] == "子任务结果"
@@ -288,42 +279,6 @@ async def test_durable_dispatch_materializes_without_host_receipt_as_answer(
     ) == {"prompt": "连续创作剩余场景", "response": ""}
 
 
-async def test_history_recovers_legacy_screenplay_proposal_from_run_event(
-    temp_db: DatabaseConnection,
-):
-    from infrastructure.persistence import run_store
-
-    run_id = await run_store.create_run(
-        temp_db,
-        session_id=12,
-        prompt="生成创作简报",
-        mode="agent",
-    )
-    proposal = {
-        "kind": "creative_brief",
-        "title": "可恢复的创作简报",
-        "contentJson": {"theme": "重逢"},
-        "contentText": "# 可恢复的创作简报",
-        "derivedFromIds": [],
-    }
-    await run_store.append_event(
-        temp_db,
-        run_id,
-        "screenplay.document_proposal",
-        proposal,
-    )
-    await save_conversation(SaveConversationRequest(
-        sessionId=12,
-        prompt="生成创作简报",
-        response="已经生成，请确认。",
-        agentRunId=run_id,
-    ))
-
-    history = await get_conversations("12")
-
-    assert json.loads(history["data"][0]["screenplay_proposal"]) == proposal
-
-
 async def test_conversation_schema_and_api_expose_only_current_turn_fields(
     temp_db: DatabaseConnection,
 ):
@@ -347,7 +302,6 @@ async def test_conversation_schema_and_api_expose_only_current_turn_fields(
         "task_plan",
         "context_compaction",
         "context_budget",
-        "screenplay_proposal",
         "agent_process",
     }
 

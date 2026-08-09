@@ -56,6 +56,24 @@ class WritingPlanningPolicy:
             context_satisfied_tool_names=base.context_satisfied_tool_names,
             planning_excluded_tool_names=base.planning_excluded_tool_names,
             satisfied_tool_dependency_edges=frozenset(satisfied_edges),
+            required_any_tool_names=base.required_any_tool_names,
+            execution_satisfied_tool_names=(
+                base.execution_satisfied_tool_names
+            ),
+            planning_excluded_agent_roles=(
+                base.planning_excluded_agent_roles
+            ),
+            required_any_agent_roles=base.required_any_agent_roles,
+            minimum_root_agent_count=(
+                base.minimum_root_agent_count
+            ),
+            agent_assignment_coverages=(
+                base.agent_assignment_coverages
+            ),
+            planning_excluded_executors=(
+                base.planning_excluded_executors
+            ),
+            allow_model_only_fallback=base.allow_model_only_fallback,
         )
 
     def should_plan(

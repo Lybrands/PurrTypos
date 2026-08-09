@@ -17,6 +17,7 @@ from agent_core.artifacts import (
     ArtifactResumeCandidate,
     ArtifactScope,
     ArtifactScopeBinding,
+    ArtifactStatus,
 )
 from agent_core.artifacts.continuity import ArtifactWriteClaim
 from agent_core.artifacts.ports import ArtifactClaimRepository
@@ -25,6 +26,7 @@ from agent_core.work_items import (
     WorkItemRecord,
     WorkItemRunLinkCommand,
     WorkItemRunRelation,
+    WorkItemStatus,
 )
 from agent_core.work_items.ports import WorkItemRepository
 
@@ -63,6 +65,19 @@ class ArtifactContinuityRecord:
             raise ValueError("artifact and Work Item ownership do not match")
 
     def planning_view(self) -> dict[str, Any]:
+        if (
+            self.artifact.status is ArtifactStatus.FINALIZED
+            and self.work_item.status is WorkItemStatus.COMPLETED
+        ):
+            next_action = "replay_finalization"
+        elif (
+            self.artifact.expected_item_count is not None
+            and self.artifact.committed_item_count
+            == self.artifact.expected_item_count
+        ):
+            next_action = "finalize"
+        else:
+            next_action = "append_batch"
         return {
             key: value
             for key, value in {
@@ -70,10 +85,12 @@ class ArtifactContinuityRecord:
                 "workItemId": self.work_item.id,
                 "kind": self.artifact.kind,
                 "artifactStatus": self.artifact.status.value,
+                "workItemStatus": self.work_item.status.value,
                 "artifactRevision": self.artifact.revision,
                 "workItemRevision": self.work_item.revision,
                 "committedItemCount": self.artifact.committed_item_count,
                 "expectedItemCount": self.artifact.expected_item_count,
+                "nextAction": next_action,
             }.items()
             if value not in (None, "")
         }

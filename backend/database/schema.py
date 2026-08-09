@@ -96,29 +96,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ON screenplay_projects(update_time DESC)"
     )
 
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_documents (
-        id TEXT PRIMARY KEY NOT NULL,
-        project_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        title TEXT NOT NULL,
-        content_json TEXT NOT NULL DEFAULT '{}',
-        content_text TEXT NOT NULL DEFAULT '',
-        version INTEGER NOT NULL DEFAULT 1,
-        status TEXT NOT NULL DEFAULT 'draft',
-        derived_from_ids TEXT NOT NULL DEFAULT '[]',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(project_id, kind, version)
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_documents_project "
-        "ON screenplay_documents(project_id, kind, version DESC)"
-    )
-
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_source_refs (
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_source_receipts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         project_id TEXT NOT NULL,
-        document_id TEXT DEFAULT NULL,
         agent_run_id TEXT NOT NULL,
         tool_name TEXT NOT NULL,
         source_type TEXT NOT NULL,
@@ -131,35 +111,24 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(
         db,
-        "ALTER TABLE screenplay_source_refs ADD COLUMN coverage_mode TEXT "
+        "ALTER TABLE screenplay_source_receipts ADD COLUMN coverage_mode TEXT "
         "NOT NULL DEFAULT 'referenced'",
     )
     await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_project "
-        "ON screenplay_source_refs(project_id, create_time DESC)"
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_receipts_project "
+        "ON screenplay_source_receipts(project_id, create_time DESC)"
     )
     await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_document "
-        "ON screenplay_source_refs(document_id, create_time ASC)"
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_receipts_run "
+        "ON screenplay_source_receipts(agent_run_id, create_time ASC)"
     )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_source_refs_run "
-        "ON screenplay_source_refs(agent_run_id, create_time ASC)"
+
+    from database.screenplay_v2_schema import (
+        init_screenplay_v2_runtime_schema,
+        init_screenplay_v2_schema,
     )
-    # Source reads are immutable Run receipts.  A proposal Artifact may be
-    # resumed/finalized by another Run and the same proposal may be saved as
-    # more than one document version, so document provenance is many-to-many
-    # rather than ownership of ``screenplay_source_refs.document_id``.
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_document_source_refs (
-        document_id TEXT NOT NULL,
-        source_ref_id INTEGER NOT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY(document_id, source_ref_id)
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_document_source_refs_ref "
-        "ON screenplay_document_source_refs(source_ref_id, document_id)"
-    )
+
+    await init_screenplay_v2_schema(db)
 
     # ── outlines ─────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS outlines (
@@ -257,7 +226,20 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_compaction TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_budget TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN screenplay_proposal TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN screenplay_proposal")
+    await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN screenplay_revision_ref")
+    remaining_conversation_columns = {
+        str(column["name"])
+        for column in await db.fetch_all("PRAGMA table_info(ai_conversations)")
+    }
+    retired_conversation_columns = {
+        "screenplay_proposal",
+        "screenplay_revision_ref",
+    }
+    if remaining_conversation_columns & retired_conversation_columns:
+        raise RuntimeError(
+            "failed to retire legacy screenplay conversation columns"
+        )
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN agent_process TEXT DEFAULT NULL")
 
     # ── ai_conversation_summaries ────────────────────────────────
@@ -289,6 +271,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         context_window INTEGER DEFAULT NULL,
         endpoint_digest TEXT DEFAULT NULL,
         request_profile_digest TEXT DEFAULT NULL,
+        binding_namespace TEXT DEFAULT NULL,
+        binding_aggregate_id TEXT DEFAULT NULL,
+        binding_command_id TEXT DEFAULT NULL,
+        binding_attributes_json TEXT DEFAULT NULL,
         parent_run_id TEXT DEFAULT NULL,
         root_run_id TEXT DEFAULT NULL,
         delegation_id TEXT DEFAULT NULL,
@@ -312,6 +298,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         "context_window INTEGER DEFAULT NULL",
         "endpoint_digest TEXT DEFAULT NULL",
         "request_profile_digest TEXT DEFAULT NULL",
+        "binding_namespace TEXT DEFAULT NULL",
+        "binding_aggregate_id TEXT DEFAULT NULL",
+        "binding_command_id TEXT DEFAULT NULL",
+        "binding_attributes_json TEXT DEFAULT NULL",
         "parent_run_id TEXT DEFAULT NULL",
         "root_run_id TEXT DEFAULT NULL",
         "delegation_id TEXT DEFAULT NULL",
@@ -348,6 +338,31 @@ async def init_schema(db: DatabaseConnection) -> None:
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END
     """)
+    await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_binding_immutable")
+    await db.execute("""CREATE TRIGGER ai_agent_runs_binding_immutable
+        BEFORE UPDATE OF
+            binding_namespace,
+            binding_aggregate_id,
+            binding_command_id,
+            binding_attributes_json
+        ON ai_agent_runs
+        WHEN
+            OLD.binding_namespace IS NOT NEW.binding_namespace
+            OR OLD.binding_aggregate_id IS NOT NEW.binding_aggregate_id
+            OR OLD.binding_command_id IS NOT NEW.binding_command_id
+            OR OLD.binding_attributes_json IS NOT NEW.binding_attributes_json
+        BEGIN
+            SELECT RAISE(ABORT, 'agent run binding is immutable');
+        END
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_binding
+        ON ai_agent_runs(
+            binding_namespace,
+            binding_aggregate_id,
+            binding_command_id
+        )
+    """)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_runs_execution_lease
         ON ai_agent_runs(status, lease_expires_at_ms)
@@ -375,8 +390,13 @@ async def init_schema(db: DatabaseConnection) -> None:
         risk_level TEXT DEFAULT NULL,
         description TEXT DEFAULT NULL,
         expected_tools TEXT DEFAULT NULL,
+        agent_role TEXT DEFAULT NULL,
+        assignment_json TEXT DEFAULT NULL,
+        depends_on_json TEXT DEFAULT NULL,
         result_summary TEXT DEFAULT NULL,
         error TEXT DEFAULT NULL,
+        protocol_private INTEGER NOT NULL DEFAULT 0,
+        planning_capability TEXT DEFAULT NULL,
         sort INTEGER DEFAULT 0,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -385,6 +405,11 @@ async def init_schema(db: DatabaseConnection) -> None:
         "step_type TEXT NOT NULL DEFAULT 'analyze'",
         "risk_level TEXT DEFAULT NULL",
         "description TEXT DEFAULT NULL",
+        "agent_role TEXT DEFAULT NULL",
+        "assignment_json TEXT DEFAULT NULL",
+        "depends_on_json TEXT DEFAULT NULL",
+        "protocol_private INTEGER NOT NULL DEFAULT 0",
+        "planning_capability TEXT DEFAULT NULL",
     ):
         await _try_exec(
             db,
@@ -680,6 +705,18 @@ async def init_schema(db: DatabaseConnection) -> None:
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_artifact_claims_expiry
         ON ai_agent_artifact_claims(expires_at_ms)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifact_projections (
+        artifact_id TEXT NOT NULL,
+        projector_namespace TEXT NOT NULL,
+        result_ref TEXT NOT NULL,
+        projected_by_run_id TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (artifact_id, projector_namespace)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_artifact_projections_result
+        ON ai_agent_artifact_projections(projector_namespace, result_ref)
     """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
         id TEXT PRIMARY KEY NOT NULL,
@@ -1532,5 +1569,10 @@ async def init_schema(db: DatabaseConnection) -> None:
                 "UPDATE outlines SET book_id = ? WHERE book_id IS NULL",
                 [default_bid],
             )
+
+    # Retire the pre-v2 screenplay store only after every generic Agent table
+    # used by project deletion has been initialized. This keeps first startup,
+    # repeated startup, and a legacy-database upgrade on the same code path.
+    await init_screenplay_v2_runtime_schema(db)
 
     # TODO: migrateEntityIdsToText8 – placeholder for entity ID migration

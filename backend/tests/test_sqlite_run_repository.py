@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest_asyncio
 
 from agent_core.contracts import (
     RunCreateParams,
+    RunBinding,
     RunLineage,
     RunProvenance,
     RunStatus,
@@ -59,6 +61,10 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "context_window",
         "endpoint_digest",
         "request_profile_digest",
+        "binding_namespace",
+        "binding_aggregate_id",
+        "binding_command_id",
+        "binding_attributes_json",
         "parent_run_id",
         "root_run_id",
         "delegation_id",
@@ -77,7 +83,14 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         row["name"]
         for row in await run_db.fetch_all("PRAGMA table_info(ai_agent_run_todos)")
     }
-    assert {"step_type", "risk_level", "description"}.issubset(todo_columns)
+    assert {
+        "step_type",
+        "risk_level",
+        "description",
+        "agent_role",
+        "assignment_json",
+        "depends_on_json",
+    }.issubset(todo_columns)
 
     run_id = await repository.create(RunCreateParams(
         session_id=7,
@@ -215,6 +228,36 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
 
 
 @pytest.mark.asyncio
+async def test_run_binding_is_opaque_persisted_and_immutable(run_db):
+    repository = SqliteRunRepository(run_db)
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="bound command",
+        mode="agent",
+        binding=RunBinding(
+            namespace="screenplay.operation",
+            aggregate_id="project-1",
+            command_id="operation-1",
+            attributes={"target": "structure"},
+        ),
+    ))
+
+    row = await get_run(run_db, run_id)
+    assert row is not None
+    assert row["binding_namespace"] == "screenplay.operation"
+    assert row["binding_aggregate_id"] == "project-1"
+    assert row["binding_command_id"] == "operation-1"
+    assert json.loads(row["binding_attributes_json"]) == {
+        "target": "structure",
+    }
+    with pytest.raises(sqlite3.IntegrityError, match="binding is immutable"):
+        await run_db.execute(
+            "UPDATE ai_agent_runs SET binding_command_id = ? WHERE id = ?",
+            ["operation-2", run_id],
+        )
+
+
+@pytest.mark.asyncio
 async def test_schema_migrates_existing_agent_runs_without_fabricating_provenance(
     tmp_path: Path,
 ):
@@ -249,10 +292,18 @@ async def test_schema_migrates_existing_agent_runs_without_fabricating_provenanc
             "context_window",
             "endpoint_digest",
             "request_profile_digest",
+            "binding_namespace",
+            "binding_aggregate_id",
+            "binding_command_id",
+            "binding_attributes_json",
         }.issubset(columns)
         historical = await get_run(db, "run-before-provenance")
         assert historical is not None
         assert historical["request_profile_digest"] is None
+        assert historical["binding_namespace"] is None
+        assert historical["binding_aggregate_id"] is None
+        assert historical["binding_command_id"] is None
+        assert historical["binding_attributes_json"] is None
     finally:
         await db.close()
 
@@ -360,6 +411,41 @@ async def test_sqlite_repository_rejects_updates_for_unknown_steps(run_db):
             step_id="missing",
             status=StepStatus.DONE,
         ))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_repository_round_trips_agent_plan_metadata(run_db):
+    repository = SqliteRunRepository(run_db)
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="parallel screenplay work",
+        mode="agent",
+    ))
+    await repository.replace_steps(run_id, [
+        TaskStep(
+            id="write-1",
+            title="创作第一集",
+            type=StepType.WRITE,
+            executor=StepExecutor.AGENT,
+            agent_role="screenplay_writer",
+            assignment={"sceneIds": ["s01"]},
+        ),
+        TaskStep(
+            id="review-1",
+            title="审校第一集",
+            type=StepType.REVIEW,
+            executor=StepExecutor.AGENT,
+            agent_role="screenplay_reviewer",
+            assignment={"sceneIds": ["s01"]},
+            depends_on=("write-1",),
+        ),
+    ])
+
+    todos = await get_run_todos(run_db, run_id)
+
+    assert todos[0]["agentRole"] == "screenplay_writer"
+    assert todos[0]["assignment"] == {"sceneIds": ["s01"]}
+    assert todos[1]["dependsOn"] == ["write-1"]
 
 
 @pytest.mark.asyncio

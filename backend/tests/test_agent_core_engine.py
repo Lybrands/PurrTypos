@@ -70,6 +70,7 @@ from agent_core.task_admission import (
     LongTaskDispatchReceipt,
     LongTaskExecutionResult,
     LongTaskExecutionStatus,
+    LongTaskExecutionUpdate,
     TaskAdmissionDecision,
 )
 
@@ -496,7 +497,14 @@ async def _final_chunks(content: str):
     )
 
 
-def _registration(name, handler, *, mode, risk):
+def _registration(
+    name,
+    handler,
+    *,
+    mode,
+    risk,
+    host_planned_arguments=None,
+):
     return ToolRegistration(
         schema=ToolSchema(
             name=name,
@@ -514,6 +522,7 @@ def _registration(name, handler, *, mode, risk):
             title=f"Use {name}",
             risk_level=risk,
         ),
+        host_planned_arguments=host_planned_arguments,
     )
 
 
@@ -528,7 +537,10 @@ def _core_fixture(
     task_admission_evaluator=None,
     long_task_dispatcher=None,
     context_provider=None,
+    planning_policy=None,
+    agent_role_guidance=None,
     replan_after_tools: frozenset[str] = frozenset(),
+    host_direct_apply: bool = False,
 ):
     state_factory = SharedStateFactory()
 
@@ -591,6 +603,7 @@ def _core_fixture(
             apply_change,
             mode=ToolExecutionMode.CONFIRM,
             risk=ToolRiskLevel.DESTRUCTIVE,
+            host_planned_arguments={} if host_direct_apply else None,
         ),
     ))
     repository = repository or MemoryRunRepository()
@@ -602,13 +615,15 @@ def _core_fixture(
         model_gateway=model,
         run_repository=repository,
         planner=planner,
-        planning_policy=AlwaysPlan(),
+        planning_policy=planning_policy or AlwaysPlan(),
         context_provider=context_provider or FixtureContextProvider(),
         execution_state_factory=state_factory,
         tool_catalog=catalog,
         runtime_limits=runtime_limits,
         task_admission_evaluator=task_admission_evaluator,
         long_task_dispatcher=long_task_dispatcher,
+        agent_role_guidance=agent_role_guidance or {},
+        max_parallel_agents=3,
     )
     request = AgentRunRequest(
         messages=(AgentMessage(
@@ -660,6 +675,7 @@ async def test_durable_task_admission_dispatches_before_runtime_execution():
                 reason_code="multiple_model_calls_required",
                 estimated_units=100,
                 estimated_model_calls=20,
+                covered_step_ids=("write",),
             )
 
     class _Dispatcher:
@@ -732,8 +748,242 @@ async def test_durable_task_admission_dispatches_before_runtime_execution():
     persisted_steps = repository.runs[result.run_id]["steps"]
     assert persisted_steps[0].status is StepStatus.DONE
     assert persisted_steps[0].result_summary == (
-        "Durable execution completed this planned step."
+        "Durable execution fulfilled this admitted step."
     )
+
+
+@pytest.mark.asyncio
+async def test_durable_progress_rebinds_persisted_steps_to_current_plan_ids():
+    plan = TaskPlan(
+        title="Resume equivalent durable task",
+        task_spec=TaskSpec(
+            goal="Resume persisted work",
+            operation="write",
+        ),
+        steps=(TaskStep(
+            id="current-write",
+            title="Write units",
+            type=StepType.WRITE,
+            executor=StepExecutor.TOOL,
+            suggested_tools=("propose_change",),
+        ),),
+    )
+
+    class _Admission:
+        async def evaluate(self, request, planned, signal=None):
+            del request, planned, signal
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.DURABLE,
+                reason_code="resume_durable_task",
+                estimated_units=1,
+                estimated_model_calls=0,
+                covered_step_ids=("current-write",),
+            )
+
+    class _Dispatcher:
+        async def dispatch(
+            self,
+            request,
+            planned,
+            decision,
+            *,
+            parent_run_id,
+            signal=None,
+        ):
+            del request, planned, decision, parent_run_id, signal
+            return LongTaskDispatchReceipt(
+                task_id="task-resumed",
+                message="Recovered persisted task.",
+                metadata={
+                    "durableStepAliases": {
+                        "persisted-write": "current-write",
+                    },
+                },
+            )
+
+        async def execute(
+            self,
+            task_id,
+            *,
+            parent_run_id,
+            observer,
+            signal=None,
+        ):
+            del parent_run_id, signal
+            await observer(LongTaskExecutionUpdate(event=AgentEvent(
+                type=CoreEventType.LONG_TASK_PROGRESS,
+                payload={
+                    "taskId": task_id,
+                    "units": [{
+                        "plannerStepId": "persisted-write",
+                        "status": "completed",
+                    }],
+                },
+            )))
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="Recovered result.",
+            )
+
+    core, request, options, repository, *_ = _core_fixture(
+        planner=CapturePlanner(plan),
+        task_admission_evaluator=_Admission(),
+        long_task_dispatcher=_Dispatcher(),
+    )
+
+    updates = [update async for update in core.run(request, options=options)]
+
+    assert isinstance(updates[-1], AgentRunResult)
+    assert updates[-1].status is RunStatus.DONE
+    progress = next(
+        event
+        for event in repository.events
+        if event.type == CoreEventType.LONG_TASK_PROGRESS
+    )
+    assert progress.payload["units"][0]["plannerStepId"] == "current-write"
+
+
+@pytest.mark.asyncio
+async def test_agent_plan_without_task_spec_still_enters_task_admission():
+    plan = TaskPlan(
+        title="Delegate bounded work",
+        steps=(TaskStep(
+            id="writer",
+            title="Write selected scenes",
+            type=StepType.WRITE,
+            executor=StepExecutor.AGENT,
+            agent_role="fixture_writer",
+            assignment={"itemIds": ["item-1"]},
+        ),),
+    )
+
+    class _Admission:
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, request, planned, signal=None):
+            del request, signal
+            self.calls += 1
+            assert planned.task_spec is None
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.DURABLE,
+                reason_code="agent_executor_requires_durable_scheduler",
+                estimated_units=1,
+                estimated_model_calls=1,
+                covered_step_ids=("writer",),
+            )
+
+    class _Dispatcher:
+        async def dispatch(
+            self,
+            request,
+            planned,
+            decision,
+            *,
+            parent_run_id,
+            signal=None,
+        ):
+            del request, planned, decision, parent_run_id, signal
+            return LongTaskDispatchReceipt(
+                task_id="task-agent",
+                message="Agent task created.",
+            )
+
+        async def execute(
+            self,
+            task_id,
+            *,
+            parent_run_id,
+            observer,
+            signal=None,
+        ):
+            del parent_run_id, observer, signal
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="Agent work complete.",
+            )
+
+    admission = _Admission()
+    core, request, options, *_ = _core_fixture(
+        planner=CapturePlanner(plan),
+        task_admission_evaluator=admission,
+        long_task_dispatcher=_Dispatcher(),
+        agent_role_guidance={
+            "fixture_writer": {"description": "Writes bounded fixture items."},
+        },
+    )
+
+    updates = [update async for update in core.run(request, options=options)]
+
+    assert admission.calls == 1
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert result.final_response == "Agent work complete."
+
+
+@pytest.mark.asyncio
+async def test_durable_admission_rejects_uncovered_planner_steps():
+    plan = TaskPlan(
+        title="Read then generate",
+        task_spec=TaskSpec(
+            goal="Generate all remaining units",
+            operation="write",
+            target={"scope": "all_remaining"},
+        ),
+        steps=(
+            TaskStep(
+                id="read",
+                title="Read resource",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+                risk_level=ToolRiskLevel.READ,
+                suggested_tools=("read_resource",),
+            ),
+            TaskStep(
+                id="write",
+                title="Write units",
+                type=StepType.WRITE,
+                executor=StepExecutor.TOOL,
+                risk_level=ToolRiskLevel.WRITE,
+                suggested_tools=("propose_change",),
+            ),
+        ),
+    )
+
+    class _Admission:
+        async def evaluate(self, request, planned, signal=None):
+            del request, planned, signal
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.DURABLE,
+                reason_code="multiple_model_calls_required",
+                estimated_units=10,
+                estimated_model_calls=2,
+                covered_step_ids=("write",),
+            )
+
+    core, request, options, repository, *_ = _core_fixture(
+        planner=CapturePlanner(plan),
+        task_admission_evaluator=_Admission(),
+    )
+
+    updates = [update async for update in core.run(request, options=options)]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.FAILED
+    assert result.error == "planning_contract_violation"
+    assert not any(
+        event.type == CoreEventType.LONG_TASK_DISPATCHED
+        for event in repository.events
+    )
+    trace = next(
+        item for item in repository.traces
+        if item.stage == "planning" and item.outcome == "contract_violation"
+    )
+    assert trace.details["errorType"] == "ContractViolationError"
 
 
 @pytest.mark.asyncio
@@ -837,6 +1087,49 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
     assert CoreEventType.CONTEXT_BUDGETED in [item.type for item in updates[:-1]]
     assert updates[-2].type == CoreEventType.RUN_COMPLETED
     assert await core.cancel_pending_approvals(result.run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_dispatches_registered_host_planned_tool_without_model():
+    core, request, options, repository, model, state = _core_fixture(
+        host_direct_apply=True,
+    )
+    updates = []
+
+    async for update in core.run(request, options=options):
+        updates.append(update)
+        if (
+            isinstance(update, AgentEvent)
+            and update.type == CoreEventType.APPROVAL_REQUESTED
+        ):
+            assert await core.resolve_approval(
+                update.run_id,
+                str(update.payload["approvalId"]),
+                ApprovalDecision.APPROVE,
+            ) is ApprovalStatus.APPROVED
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert state.domain["handler_order"] == ["read", "propose", "apply"]
+    assert [
+        tuple(schema.name for schema in invocation.tools)
+        for invocation in model.invocations
+    ] == [
+        ("read_resource",),
+        ("propose_change",),
+        (),
+    ]
+    assert any(
+        isinstance(update, AgentEvent)
+        and update.type == CoreEventType.HOST_PLANNED_TOOL_DISPATCHED
+        for update in updates
+    )
+    assert any(
+        trace.stage == "tool_dispatch"
+        and trace.outcome == "host_planned_call"
+        for trace in repository.traces
+    )
 
 
 @pytest.mark.asyncio
@@ -1607,6 +1900,21 @@ def test_dependency_edge_waivers_require_available_tools_and_a_declared_edge():
                 }),
             ),
         )
+    with pytest.raises(ContractViolationError, match="unavailable tools"):
+        _validate_planning_constraints(
+            capabilities,
+            PlanningConstraints(
+                required_any_tool_names=frozenset({"missing"}),
+            ),
+        )
+    with pytest.raises(ContractViolationError, match="remain selectable"):
+        _validate_planning_constraints(
+            capabilities,
+            PlanningConstraints(
+                planning_excluded_tool_names=frozenset({"write"}),
+                required_any_tool_names=frozenset({"write"}),
+            ),
+        )
 
 
 def test_task_planning_constraints_can_add_but_not_remove_host_guards():
@@ -1614,6 +1922,8 @@ def test_task_planning_constraints_can_add_but_not_remove_host_guards():
         context_satisfied_tool_names=frozenset({"read"}),
         planning_excluded_tool_names=frozenset({"delete"}),
         satisfied_tool_dependency_edges=frozenset({("write", "read")}),
+        required_any_tool_names=frozenset({"write"}),
+        allow_model_only_fallback=False,
     )
     _validate_task_constraint_refinement(
         base,
@@ -1624,6 +1934,8 @@ def test_task_planning_constraints_can_add_but_not_remove_host_guards():
                 ("write", "read"),
                 ("publish", "write"),
             }),
+            required_any_tool_names=frozenset({"write", "publish"}),
+            allow_model_only_fallback=False,
         ),
     )
     with pytest.raises(ContractViolationError, match="cannot weaken"):
@@ -1632,6 +1944,19 @@ def test_task_planning_constraints_can_add_but_not_remove_host_guards():
             PlanningConstraints(
                 planning_excluded_tool_names=frozenset({"delete"}),
                 satisfied_tool_dependency_edges=frozenset({("write", "read")}),
+                required_any_tool_names=frozenset({"write"}),
+                allow_model_only_fallback=False,
+            ),
+        )
+    with pytest.raises(ContractViolationError, match="cannot weaken"):
+        _validate_task_constraint_refinement(
+            base,
+            PlanningConstraints(
+                context_satisfied_tool_names=frozenset({"read"}),
+                planning_excluded_tool_names=frozenset({"delete"}),
+                satisfied_tool_dependency_edges=frozenset({("write", "read")}),
+                required_any_tool_names=frozenset({"write"}),
+                allow_model_only_fallback=True,
             ),
         )
 
@@ -1968,21 +2293,14 @@ async def test_planner_failure_still_has_a_traceable_failed_run_and_one_result()
 
 @pytest.mark.asyncio
 async def test_host_can_deny_model_only_fallback_for_invalid_plan():
-    class FailClosedContextProvider(FixtureContextProvider):
-        async def build_context(self, request, budget, signal=None):
-            bundle = await super().build_context(request, budget, signal)
-            return ContextBundle(
-                blocks=bundle.blocks,
-                diagnostics={
-                    "hostPlanningFacts": {
-                        "modelOnlyPlanningFallbackAllowed": False,
-                    },
-                },
-            )
+    class FailClosedPlanningPolicy(AlwaysPlan):
+        def planning_constraints(self, request, capabilities):
+            del request, capabilities
+            return PlanningConstraints(allow_model_only_fallback=False)
 
     core, request, options, repository, model, state = _core_fixture(
         invalid_plan=True,
-        context_provider=FailClosedContextProvider(),
+        planning_policy=FailClosedPlanningPolicy(),
     )
 
     updates = [item async for item in core.run(request, options=options)]

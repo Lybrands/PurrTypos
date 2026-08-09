@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -8,16 +7,16 @@ import pytest_asyncio
 from pydantic import ValidationError
 
 from agent_core.contracts import ContextBudget
-from application.agent_composition import (
-    AgentComposition,
-    set_agent_composition,
-)
+from application.composition_factory import create_agent_composition
 from application.request_mapping import (
-    agent_run_options,
-    to_agent_request,
+    to_agent_request as to_writing_agent_request,
+)
+from application.screenplay_agent_request_mapping import (
+    screenplay_run_options,
+    to_screenplay_agent_request,
 )
 from database.connection import DatabaseConnection
-from database.crud import screenplay as screenplay_crud
+from tests.support import screenplay_v2_driver as screenplay_crud
 from domains.screenplay.context import (
     SCREENPLAY_POLICY_CONTEXT,
     SCREENPLAY_PROJECT_CONTEXT,
@@ -28,7 +27,7 @@ from domains.screenplay.contracts import (
 )
 from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
 from schemas.ai import ChatStreamRequest
-from routers.ai import _stream_composed_agent
+from schemas.screenplay_agent_run import ScreenplayAgentRunRequest
 
 
 @pytest_asyncio.fixture
@@ -41,7 +40,7 @@ async def screenplay_db(tmp_path: Path):
         await db.close()
 
 
-def _body(**updates) -> ChatStreamRequest:
+def _body(**updates) -> ScreenplayAgentRunRequest:
     payload = {
         "messages": [{"role": "user", "content": "帮我完善创作简报"}],
         "apiKey": "key",
@@ -52,7 +51,18 @@ def _body(**updates) -> ChatStreamRequest:
         "activeStage": "orientation",
     }
     payload.update(updates)
-    return ChatStreamRequest(**payload)
+    return ScreenplayAgentRunRequest(**payload)
+
+
+def to_agent_request(body, provider_options):
+    if isinstance(body, ScreenplayAgentRunRequest):
+        return to_screenplay_agent_request(body, provider_options)
+    return to_writing_agent_request(body, provider_options)
+
+
+def agent_run_options(request, provider_options):
+    del provider_options
+    return screenplay_run_options(request)
 
 
 def _context_budget(request) -> ContextBudget:
@@ -83,6 +93,21 @@ def test_screenplay_profile_requires_project_scope():
         _body(screenplayProjectId=None)
 
 
+def test_screenplay_operation_scope_is_normalized_and_profile_bound():
+    body = _body(screenplayOperationId=" operation-1 ")
+    request = to_agent_request(body, {"model": "model"})
+
+    assert body.screenplayOperationId == "operation-1"
+    assert "screenplayOperationId" not in request.metadata
+    writing_body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "继续写"}],
+        apiKey="key",
+        options={"model": "model"},
+        screenplayOperationId="operation-1",
+    )
+    assert not hasattr(writing_body, "screenplayOperationId")
+
+
 def test_screenplay_request_mapping_uses_opaque_domain_context():
     request = to_agent_request(
         _body(
@@ -110,6 +135,27 @@ def test_screenplay_request_mapping_uses_opaque_domain_context():
     assert request.tools_enabled is False
 
 
+def test_screenplay_request_accepts_a_bounded_dynamic_episode_scope():
+    request = to_agent_request(
+        _body(
+            activeStage="draft",
+            screenplayTaskIntent="stage_deliverable",
+            screenplayDraftScope="next_12_episodes",
+        ),
+        {"model": "model"},
+    )
+    context = ScreenplayDomainContext.from_core_context(
+        request.domain_context
+    )
+
+    assert context.draft_scope == "next_12_episodes"
+    with pytest.raises(
+        ValidationError,
+        match="unsupported screenplay draft scope",
+    ):
+        _body(screenplayDraftScope="next_101_episodes")
+
+
 @pytest.mark.asyncio
 async def test_screenplay_context_uses_persisted_project_scope(screenplay_db):
     created = await screenplay_crud.create_project(
@@ -126,9 +172,10 @@ async def test_screenplay_context_uses_persisted_project_scope(screenplay_db):
     body = _body(
         screenplayProjectId=project["id"],
         activeDocumentId=document["id"],
+        activeStage="brief",
     )
     request = to_agent_request(body, {"model": "model"})
-    composition = AgentComposition(screenplay_db)
+    composition = create_agent_composition(screenplay_db)
     registration = composition._profile_registry.for_request(request)
     provider = registration.adapter.context_provider
     demands = await provider.describe_context_demands(request)
@@ -183,7 +230,7 @@ async def test_screenplay_context_rejects_caller_source_override(screenplay_db):
         ),
         {"model": "model"},
     )
-    composition = AgentComposition(screenplay_db)
+    composition = create_agent_composition(screenplay_db)
     provider = composition._profile_registry.for_request(
         request
     ).adapter.context_provider
@@ -229,7 +276,7 @@ async def test_screenplay_context_declares_restricted_adaptation_scope(
         ),
         {"model": "model"},
     )
-    provider = AgentComposition(screenplay_db)._profile_registry.for_request(
+    provider = create_agent_composition(screenplay_db)._profile_registry.for_request(
         request
     ).adapter.context_provider
     bundle = await provider.build_context(request, _context_budget(request))
@@ -290,7 +337,7 @@ async def test_restricted_scope_hides_book_global_tools_before_planning(
         ),
         {"model": "model"},
     )
-    composition = AgentComposition(screenplay_db)
+    composition = create_agent_composition(screenplay_db)
     try:
         prepared = await composition.prepare_request(request)
         context = ScreenplayDomainContext.from_core_context(
@@ -326,7 +373,7 @@ async def test_screenplay_context_rejects_stale_stage_scope(screenplay_db):
         ),
         {"model": "model"},
     )
-    provider = AgentComposition(screenplay_db)._profile_registry.for_request(
+    provider = create_agent_composition(screenplay_db)._profile_registry.for_request(
         request
     ).adapter.context_provider
 
@@ -364,10 +411,11 @@ async def test_screenplay_context_rejects_session_from_another_project(
         _body(
             screenplayProjectId=first["project"]["id"],
             sessionId=foreign_session["id"],
+            activeStage="brief",
         ),
         {"model": "model"},
     )
-    provider = AgentComposition(screenplay_db)._profile_registry.for_request(
+    provider = create_agent_composition(screenplay_db)._profile_registry.for_request(
         request
     ).adapter.context_provider
 
@@ -377,7 +425,7 @@ async def test_screenplay_context_rejects_session_from_another_project(
 
 @pytest.mark.asyncio
 async def test_composition_registry_selects_screenplay_adapter(screenplay_db):
-    composition = AgentComposition(screenplay_db)
+    composition = create_agent_composition(screenplay_db)
     request = to_agent_request(_body(), {"model": "model"})
     core = composition.create_core_for_request(request, "key")
     options = agent_run_options(request, {"max_tokens": 2_048})
@@ -388,8 +436,10 @@ async def test_composition_registry_selects_screenplay_adapter(screenplay_db):
     )
     assert core._runtime_limits.max_model_rounds == 12
     assert core._tool_catalog.names == frozenset({
-        "getScreenplayProject",
-        "getScreenplayDocument",
+            "getScreenplayProject",
+                "getScreenplayDocument",
+                "getScreenplayEpisodeContext",
+                "getScreenplayDraftContext",
         "getSourceBookOverview",
         "getSourceCoveragePlan",
         "readSourceCoverageBatch",
@@ -421,73 +471,3 @@ async def test_composition_registry_selects_screenplay_adapter(screenplay_db):
     assert core._tool_catalog.enabled_names(request) == frozenset()
     assert options.context_claims == ()
     assert options.response_validators == ()
-
-
-@pytest.mark.asyncio
-async def test_composed_stream_routes_screenplay_profile_end_to_end(
-    screenplay_db,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    created = await screenplay_crud.create_project(
-        screenplay_db,
-        title="月背电台",
-        source_kind="original",
-        source_book_id=None,
-        screenplay_format="短片",
-        approach="先推情节",
-        premise="月球背面只剩一个仍在播音的人。",
-    )
-    captured_messages: list[dict] = []
-    captured_options: dict = {}
-
-    async def _create_chat_stream(
-        _key,
-        messages,
-        options,
-        _api_provider,
-        signal=None,
-    ):
-        assert signal is not None
-        captured_messages.extend(messages)
-        captured_options.update(options)
-
-        async def _stream():
-            yield {
-                "choices": [{
-                    "delta": {"content": "先确认主角为何仍在播音。"},
-                    "finish_reason": "stop",
-                }],
-            }
-
-        return {"stream": _stream(), "model": "model"}
-
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_stream",
-        _create_chat_stream,
-    )
-    composition = AgentComposition(screenplay_db)
-    set_agent_composition(composition)
-    try:
-        chunks = [
-            chunk
-            async for chunk in _stream_composed_agent(
-                body=_body(
-                    screenplayProjectId=created["project"]["id"],
-                ),
-                api_key="key",
-                provider_options={"model": "model"},
-                signal=asyncio.Event(),
-            )
-        ]
-    finally:
-        set_agent_composition(None)
-        await composition.shutdown()
-
-    serialized_messages = str(captured_messages)
-    assert "PurrTypos 剧本 Agent 工作约定" in serialized_messages
-    assert "月背电台" in serialized_messages
-    assert "tools" not in captured_options
-    assert "".join(chunk.get("delta", "") for chunk in chunks) == (
-        "先确认主角为何仍在播音。"
-    )
-    assert chunks[-1] == {"done": True, "model": "model"}

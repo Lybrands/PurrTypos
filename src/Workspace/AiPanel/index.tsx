@@ -191,7 +191,7 @@ export default function AiPanel({
     userHasScrolledUp,
     setScrolledUpByReason,
     isAtBottom,
-    setIsAtBottom,
+    handleAtBottomStateChange,
     handleScrollToBottom,
     pinNewTurnToTop,
   } = useChatScroll({ loading, combinedData });
@@ -458,7 +458,7 @@ export default function AiPanel({
             loading={loading}
             userHasScrolledUp={userHasScrolledUp}
             isAtBottom={isAtBottom}
-            setIsAtBottom={setIsAtBottom}
+            onAtBottomStateChange={handleAtBottomStateChange}
             setScrolledUpByReason={setScrolledUpByReason}
             onScrollToBottom={handleScrollToBottom}
             bookId={bookId}
@@ -539,6 +539,7 @@ export default function AiPanel({
                     <ContextUsageIndicator
                       conversations={conversations}
                       selectedModelConfig={selectedModelConfig}
+                      draft={prompt}
                     />
                     {loading ? (
                       <PurrButton

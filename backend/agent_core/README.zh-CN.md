@@ -19,6 +19,23 @@ Core 不得导入宿主传输协议、产品领域、模型 SDK、数据库驱�
 - `tests/test_agent_core_boundaries.py`
 - `tests/test_application_boundaries.py`
 
+## Phase 1 模块边界
+
+历史的 `runtime.py`、`engine.py`、`contracts.py` 和 `ports.py` 已迁为同名包，原有导入路径保持不变。新增代码应直接依赖最窄的职责模块：
+
+- `runtime/orchestrator.py` 只协调运行流程；模型流聚合、工具批次和最终回答校验分别位于 `model_round.py`、`tool_round.py`、`response_finalization.py`；
+- `engine/orchestrator.py` 组合完整 Run；上下文、规划约束、持久执行和选项分别位于独立模块；
+- `contracts` 按 messages、planning、context、tools、runs 提供稳定导入边界，基础枚举位于 `enums.py`；
+- `ports/__init__.py` 只是兼容聚合，真实端口定义按 model、context、planning、tools、persistence 和 run lifecycle 分组。
+
+`tests/test_agent_core_phase_one_structure.py` 会阻止旧单文件恢复、职责回流以及 facade/orchestrator 重新膨胀。
+
+## Phase 2 宿主扩展边界
+
+Core 通过三个业务无关契约支持产品宿主：`RunBinding` 保存不可解释的聚合与命令关联，`ExecutionRecipe` 校验宿主编译的机械 DAG，`DomainEventProjector` 允许持久化适配器在同一提交事务内投影领域 effect。Core 不读取 Binding 的产品含义，不生成产品 Recipe，也不解释 Projector 的业务结果。
+
+产品请求 DTO、请求映射、事件映射、权威状态查询和业务 Run 生命周期必须位于 Core 之外。当前剧本实现分别由 `schemas/screenplay_agent_run.py`、`application/screenplay_agent_*`、`domains/screenplay/query_port.py` 与 `infrastructure/screenplay/agent_query.py` 提供；通用 `ChatStreamRequest`、`AgentRunService` 和 `sse_mapping` 不包含剧本字段或分支。
+
 ## 动态规划
 
 初始计划仍是可修订路线，但正常成功执行默认沿用已经编译和授权的计划。Runtime 只会在可恢复失败、协议或授权漂移之后，或者宿主工具的权威结果因选择了分支而显式返回 `ToolPlanningDisposition.REPLAN` 时调用 `DynamicTaskPlanner`。普通的 `PROGRESSED` 与 `COMPLETED` 批次不再额外消耗一次 Planner 模型调用。
@@ -35,9 +52,11 @@ Runtime 的轮次约束同样区分“单调的有效分批进展”和“停滞
 
 Planner 仍是唯一的模型语义判断入口。它只把用户目标编译成 `TaskSpec`，不估算调用成本，也不直接决定是否开启长任务。Core 在计划通过约束编译和权限校验后、安装执行计划前调用 `TaskAdmissionEvaluator`；应用与领域实现负责把 `TaskSpec` 对照权威业务状态解析为精确范围，并返回 `inline`、`durable`、`clarify` 或 `reject`。这样无需再增加一次意图模型请求，也不会让 Core 理解“场景、章节、数据集”等产品概念。
 
+持久执行准入必须明确声明它将覆盖的全部 Planner 步骤。只有当覆盖集与已安装计划精确一致时，Core 才允许把执行权交给持久工作流；并且只有在持久结果成功后，才完成这些被覆盖的步骤。这是通用契约，可以防止外部工作流绕过或假完成无关 Planner 步骤，不需要 Core 知道任何业务概念。
+
 `long_tasks` 定义通用的持久化任务、依赖单元、租约、检查点、重试、暂停、恢复和取消契约。Core 的 Coordinator 只认任务 DAG 和执行状态；业务层决定如何拆分、每批输入、领域完整性校验及最终合并。Application 创建 Work Item 和 Long Task，把每个单元作为独立 Agent Run 执行，并在全部单元完成后由宿主确定性汇总。暂停会释放当前单元租约，恢复从最近完成的检查点继续；失败任务只有经过显式恢复才会获得新的重试额度。
 
-当前剧本领域只把多场正文创作准入持久长任务。Planner 在 `TaskSpec.target.executionUnits` 中动态给出完整执行图，业务层只校验场景覆盖、顺序、依赖关系和最终单元，不再按固定场数硬编码拆批；每个生成单元携带压缩连续性状态，最终单元确定性校验执行历史并组装一个完整剧本提案。列表接口只暴露进度摘要；批次正文和最终提案仅通过单任务详情读取，避免大任务轮询时反复传输全部内容。
+当前剧本领域只把多场正文创作准入持久长任务。共享 Planner 仍负责用户可见的语义计划，但只选择有界的正文创作能力，不再生成内部子 Agent 图。准入层把范围绑定到权威场景表后，由剧本宿主生成固定的机械 DAG：每场一个可持久化 Writer 检查点；同一集内按顺序创作，不同集可并行；全部 Writer 完成后只进行一次全局连续性审阅；随后仅对被问题清单点名的场景启动 Rewriter，其他场景直接复用 Writer 结果；最后确定性组装提案。Writer、Reviewer、Rewriter 子 Run 都使用宿主已经组装好的精确输入，以直答模式和空工具目录运行，不再启动第二层 Planner，也不再重复加载整个项目上下文。Reviewer 只返回紧凑的问题报告，不返回正文。只有供应商或流中断类瞬时故障可以重试；截断和结构错误不会用同一输入原样重跑。任一单元终态失败时，未完成兄弟单元会在同一事务内全部取消，避免残留“仍在运行”的子任务。列表接口只暴露进度摘要；场景正文和最终提案仅通过单任务详情读取。
 
 原作分析、创作简报、结构和场景表等阶段提案不再进入“持久任务单元内再启动完整 Agent”的应用旁路。它们始终留在发起请求的主 Run，通过普通 Agent 的动态 Planner、工具事件、流式输出和提案效果链执行；Artifact 只负责有界写入和完整性，不承担第二套编排或整任务重试。
 
@@ -53,7 +72,9 @@ Agent Core 只负责上下文预算、压缩时机、Hook 调用和技术校验�
 
 ## 模型输出与工具数据边界
 
-`model_protocol` 统一解释不同供应商的结束原因。只要供应商声明达到长度上限，本轮输出就属于不完整结果：残缺的文本不会被当作最终回答，残缺的工具调用不会执行，也不会写入后续模型历史。Runtime 只允许一次无副作用的干净重试；再次截断时保留 `tool_call_truncated` 或 `model_output_truncated` 根因和安全诊断。
+`model_protocol` 统一解释不同供应商的结束原因。只要供应商声明达到长度上限，本轮输出就属于不完整结果：残缺的文本不会被当作最终回答，残缺的工具调用不会执行，也不会写入后续模型历史。已经由宿主解析任务预算的请求不会再用同一额度重复执行；只有未接入预算决策的底层 Runtime 调用保留一次无副作用干净重试。截断始终保留 `tool_call_truncated` 或 `model_output_truncated` 根因和安全诊断。
+
+输出额度分成三个独立事实源：Infrastructure 模型 Profile 只声明供应商能力上限，Application 策略估算并限制单个业务工作单元，`agent_core.output_budget` 再结合上下文窗口解析本次实际额度。只有这个解析结果可以进入供应商 `max_tokens`。Run 事件会持久化任务策略、模型能力上限、限制来源、实际用量和结束原因。分片任务必须增加或拆分执行单元，不能通过提高全局模型默认值解决。
 
 每个已审计工具通过 `ToolDataContract` 声明模型生成字段、宿主绑定字段和宿主派生字段。宿主字段不得出现在模型可见 JSON Schema 中。长内容工具应优先使用 `delta`、`batch` 或 `resource_reference`，模型只生成新的语义增量，标识、版本、谱系、累计正文和完成状态由宿主绑定或计算。
 
@@ -85,7 +106,9 @@ Agent Core 只负责上下文预算、压缩时机、Hook 调用和技术校验�
 
 只有同时声明为 `batch`、`PROPOSE`、取消线性化并由宿主管理持久化的同名 Artifact 工具，才允许在一个模型轮次内提交多个调用。Core 仍会在任何写入前预检整批 JSON、调用数量、授权和 Schema；普通写工具继续禁止多调用。这让大结果获得吞吐量，同时不放宽一般副作用工具的安全边界。模型轮次上限由领域适配器通过 `RuntimeLimits` 注入，Core 默认值不再承担具体产品的批次数量假设。
 
-当前剧本适配器已经把创作简报、结构提案、场景表和剧本审阅改为“开始、分批追加、最终提交”。创作简报 Artifact 会冻结已接受原作分析版本、证据清单、阅读局限、项目形态和版本谱系；模型只提交一个简报正文条目及有界的改编决策批次。结构 Artifact 冻结创作简报版本、结构类型、单元数量及改编决策清单。审阅 Artifact 则用摘要条目、问题批次和复审核验批次承载报告；复审时宿主冻结上一轮问题顺序，并补齐问题 ID、验收标准和解决记录，模型只提交核验状态与新证据。完整剧本修订拆成受影响场景批次与问题回写批次；最终正文、执行追踪、版本谱系和 Artifact 引用均由宿主组装。
+Planner 契约与运行时工具契约已经分离。工具注册可以用稳定的业务级 `planning_capability` 映射一个或多个私有运行时工具；Core 先校验公共计划，再按依赖关系确定性下沉为执行协议。私有步骤仍会持久化并接受完整授权校验，但不会出现在公共任务计划 SSE 中，用户只看到业务能力。经过宿主认证的续写状态可以把部分私有工具标记为已完成；已经持久化、仍使用旧运行时工具名的计划继续按原路径执行。
+
+当前剧本 Planner 只看到 `analyzeSourceMaterial`、`generateCreativeBrief`、`generateScreenplayStructure`、`generateSceneList`、`continueScreenplayDraft`、`reviewCurrentDraft` 和 `reviseCurrentDraft`。适配器内部仍以“开始、分批追加、最终提交”完成创作简报、结构提案、场景表和剧本审阅。创作简报 Artifact 会冻结已接受原作分析版本、证据清单、阅读局限、项目形态和版本谱系；模型只提交一个简报正文条目及有界的改编决策批次。结构 Artifact 冻结创作简报版本、结构类型、单元数量及改编决策清单。审阅 Artifact 则用摘要条目、问题批次和复审核验批次承载报告；复审时宿主冻结上一轮问题顺序，并补齐问题 ID、验收标准和解决记录，模型只提交核验状态与新证据。完整剧本修订拆成受影响场景批次与问题回写批次；最终正文、执行追踪、版本谱系和 Artifact 引用均由宿主组装。
 
 原作范围分析也使用同一生命周期：模型先声明总述和各类分析条目数量，再分批提交人物、事件、冲突、改编资产、风险、问题与证据。锁定章节总数、完整读取章节、抽样章节及未读取局限由宿主根据当前 Run 的持久化来源凭证生成；证据只能引用该凭证清单内的来源。模型不再返回章节覆盖 ID 数组。
 

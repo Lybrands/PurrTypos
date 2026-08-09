@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Awaitable, TypeVar
 
 from agent_core.contracts import (
     RunCreateParams,
     RunStatus,
+    StepStatus,
     TaskPlan,
     TaskStep,
     ToolBatchOutcome,
     TraceRecord,
 )
+from agent_core.json_values import thaw_json_mapping
 from agent_core.events import AgentEvent, CoreEventType
 from agent_core.ports import EventSink, RunCommit, RunRepository
 from agent_core.run_state import RunSnapshot, RunStateMachine, RunTransition
@@ -222,6 +225,8 @@ class AgentRunController:
     async def complete_durable_execution(
         self,
         final_response: str = "",
+        *,
+        covered_step_ids: tuple[str, ...],
     ) -> None:
         async with self._mutation_lock:
             state = self._require_started()
@@ -229,6 +234,20 @@ class AgentRunController:
                 RunStateMachine.complete_durable_execution(
                     state,
                     final_response,
+                    covered_step_ids=covered_step_ids,
+                )
+            )
+
+    async def sync_durable_execution(
+        self,
+        statuses: Mapping[str, StepStatus],
+    ) -> None:
+        async with self._mutation_lock:
+            state = self._require_started()
+            await self._apply(
+                RunStateMachine.sync_durable_execution(
+                    state,
+                    dict(statuses),
                 )
             )
 
@@ -386,7 +405,7 @@ def _transition_events(transition: RunTransition) -> tuple[AgentEvent, ...]:
 
 
 def _step_payload(step: TaskStep) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": step.id,
         "title": step.title,
         "type": step.type.value,
@@ -394,7 +413,15 @@ def _step_payload(step: TaskStep) -> dict[str, object]:
         "status": step.status.value,
         "risk_level": step.risk_level.value if step.risk_level else None,
         "suggested_tools": list(step.suggested_tools),
+        "agent_role": step.agent_role,
+        "assignment": thaw_json_mapping(step.assignment),
+        "depends_on": list(step.depends_on),
         "description": step.description,
         "result_summary": step.result_summary,
         "error": step.error,
     }
+    if step.protocol_private:
+        payload["protocol_private"] = True
+    if step.planning_capability is not None:
+        payload["planning_capability"] = step.planning_capability
+    return payload

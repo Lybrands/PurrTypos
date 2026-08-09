@@ -121,6 +121,7 @@ export interface ScreenplayProject {
   delivery_manifest: ScreenplayDeliveryManifest | null;
   active_stage: ScreenplayStage;
   status: ScreenplayProjectStatus;
+  revision?: number;
   create_time?: string;
   update_time?: string;
 }
@@ -139,12 +140,65 @@ export interface ScreenplayDocument {
   update_time?: string;
 }
 
+export interface ScreenplayDraftEpisode {
+  id: EntityId;
+  project_id: EntityId;
+  draft_document_id: EntityId;
+  scene_list_document_id: EntityId;
+  episode_number: number;
+  title: string;
+  scene_ids: EntityId[];
+  scene_count: number;
+  scene_executions?: Array<Record<string, unknown>>;
+  scene_texts?: Array<{ sceneId: EntityId; contentText: string }>;
+  content_text?: string;
+  continuity_excerpt: string;
+  continuity_summary?: string;
+  version: number;
+  status: ScreenplayDocumentStatus;
+  storage_mode: 'revision_part';
+  create_time?: string;
+  update_time?: string;
+}
+
+export interface ScreenplayDocumentEpisode {
+  id: EntityId;
+  project_id: EntityId;
+  document_id: EntityId;
+  document_kind: Extract<ScreenplayDocumentKind, 'episode_outline' | 'scene_list' | 'review'>;
+  episode_number: number;
+  title: string;
+  item_ids: EntityId[];
+  item_count: number;
+  content_json?: Record<string, unknown>;
+  content_text?: string;
+  version: number;
+  status: ScreenplayDocumentStatus;
+  storage_mode: 'revision_part';
+  create_time?: string;
+  update_time?: string;
+}
+
 export interface ScreenplayDocumentProposal {
   kind: ScreenplayDocumentKind;
   title: string;
   contentJson: Record<string, unknown>;
   contentText: string;
   derivedFromIds: EntityId[];
+  /** Run whose formal proposal event produced this exact payload. */
+  sourceRunId?: string;
+}
+
+export interface ScreenplayRevisionRef {
+  schemaVersion: 1;
+  projectId: EntityId;
+  operationId: string;
+  revisionId: string;
+  role: ScreenplayV2DeliverableRole;
+  revisionNo: number;
+  taskId?: string;
+  /** Live transport provenance; persisted conversations resolve by Revision id. */
+  sourceRunId?: string;
 }
 
 export interface ScreenplaySourceRef {
@@ -166,19 +220,208 @@ export interface ScreenplaySourceRef {
   create_time?: string;
 }
 
-export interface CreateScreenplayProjectPayload {
-  title: string;
-  sourceKind: ScreenplaySourceKind;
-  sourceBookId?: EntityId | null;
-  format: ScreenplayFormat;
-  approach: string;
-  premise: string;
-  sourceScope?: ScreenplaySourceScopeRequest;
+export type ScreenplayV2Format =
+  | 'shortFilm'
+  | 'featureFilm'
+  | 'singleEpisode'
+  | 'series'
+  | 'verticalSeries';
+export type ScreenplayV2DeliverableRole =
+  | 'sourceAnalysis'
+  | 'creativeBrief'
+  | 'structure'
+  | 'sceneList'
+  | 'screenplayDraft'
+  | 'review';
+export type ScreenplayV2OperationStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+export type ScreenplayV2OperationIntentType =
+  | 'generate'
+  | 'regenerate'
+  | 'continue'
+  | 'review'
+  | 'revise';
+
+export interface ScreenplayV2RevisionSummary {
+  id: string;
+  deliverableId: string;
+  role: ScreenplayV2DeliverableRole;
+  revisionNo: number;
+  parentRevisionId: string | null;
+  contentDigest: string;
+  summary: Record<string, unknown>;
+  operationId: string | null;
+  rootRunId?: string | null;
+  finalizingRunId?: string | null;
+  applicability?: 'current' | 'stale';
+  status?: 'current' | 'historical' | 'candidate';
+  createdAt?: string | null;
 }
 
-export interface CreateScreenplayProjectResult {
-  project: ScreenplayProject;
-  initialDocument: ScreenplayDocument;
+export interface ScreenplayV2RevisionPart {
+  type: 'document' | 'episode' | 'scene' | 'reviewIssueGroup';
+  key: string;
+  position: number;
+  payload: Record<string, unknown>;
+  contentText: string;
+  contentDigest: string;
+}
+
+export interface ScreenplayV2RevisionDetail extends ScreenplayV2RevisionSummary {
+  projectId: EntityId;
+  schemaVersion: number;
+  createdBy: 'agent' | 'user';
+  inputRevisions: Partial<Record<ScreenplayV2DeliverableRole, string>>;
+  parts: ScreenplayV2RevisionPart[];
+  sources: Array<{
+    type: string;
+    id: string;
+    revision: string;
+    excerpt: string;
+  }>;
+}
+
+export interface ScreenplayV2WorkingCopy {
+  id: string;
+  projectId: EntityId;
+  deliverableId: string;
+  role: ScreenplayV2DeliverableRole;
+  baseRevisionId: string | null;
+  revision: number;
+  content: Record<string, unknown>;
+  updatedAt?: string | null;
+}
+
+export interface ScreenplayV2OperationSummary {
+  id: string;
+  targetRole: ScreenplayV2DeliverableRole;
+  status: ScreenplayV2OperationStatus;
+  progress: Record<string, unknown>;
+  resultRevisionId: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ScreenplayV2Operation extends ScreenplayV2OperationSummary {
+  projectId: string;
+  commandId: string;
+  intent: Record<string, unknown>;
+  baseProjectRevision: number;
+  baseHeads: Partial<Record<ScreenplayV2DeliverableRole, string>>;
+  error: { code?: string; message?: string; runId?: string } | null;
+  createdAt?: string | null;
+}
+
+export interface ScreenplayV2Project {
+  id: string;
+  revision: number;
+  title: string;
+  format: ScreenplayV2Format;
+  source: Record<string, unknown> & {
+    type?: ScreenplaySourceKind;
+    bookId?: string | null;
+    scope?: Record<string, unknown>;
+  };
+  brief: {
+    approach: string;
+    premise: string;
+  };
+  lifecycle: 'active' | 'archived';
+  stage: ScreenplayStage;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ScreenplayV2Workspace {
+  project: ScreenplayV2Project;
+  workflow: {
+    stage: ScreenplayStage;
+    heads: Partial<Record<ScreenplayV2DeliverableRole, ScreenplayV2RevisionSummary | null>>;
+    nextActions: Array<Record<string, unknown>>;
+  };
+  deliverables: Array<{
+    id: string;
+    role: ScreenplayV2DeliverableRole;
+    headRevisionId: string | null;
+  }>;
+  candidates: ScreenplayV2RevisionSummary[];
+  activeOperations: ScreenplayV2OperationSummary[];
+  workingCopies: ScreenplayV2WorkingCopy[];
+}
+
+export type ScreenplayConversationTurnStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+export interface ScreenplayConversationTurn {
+  id: string;
+  projectId: EntityId;
+  sessionId: number;
+  commandId: string;
+  route: 'read_only' | 'operation';
+  status: ScreenplayConversationTurnStatus;
+  userContent: string;
+  assistantContent: string;
+  runtimeProfile: {
+    apiProvider?: string;
+    model?: string;
+    modelProfile?: string | null;
+    endpointDigest?: string;
+    locale?: string;
+    contextWindow?: string | null;
+  };
+  operationId: string | null;
+  runId: string | null;
+  revisionId: string | null;
+  error: { code?: string; message?: string } | null;
+  retryable: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ScreenplayConversationEvent {
+  cursor: number;
+  turnId: string;
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface ScreenplayConversationSnapshot {
+  projectId: EntityId;
+  sessionId: number;
+  turns: ScreenplayConversationTurn[];
+  cursor: number;
+}
+
+export interface ScreenplayConversationEventPage {
+  events: ScreenplayConversationEvent[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export interface ScreenplayConversationRuntimeInput {
+  apiKey: string;
+  baseURL?: string;
+  apiProvider?: AiApiProvider;
+  locale?: string;
+  options: {
+    model: string;
+    model_profile?: string;
+    temperature?: number;
+    max_tokens?: number;
+    thinking?: { type: 'disabled' | 'enabled' };
+    context_window?: AiContextWindow;
+  };
+  contextWindow?: AiContextWindow;
 }
 
 export interface CharacterOption {
@@ -590,7 +833,6 @@ export interface Conversation {
   task_plan?: string | null;
   context_compaction?: string | null;
   context_budget?: string | null;
-  screenplay_proposal?: string | null;
   agent_process?: string | null;
   agent_run_id?: string | null;
   long_task_id?: string | null;
@@ -607,8 +849,28 @@ export interface AiContextCompactionState {
   summaryVersion?: number | null;
 }
 
+export interface AiOutputBudgetState {
+  policyKey: string;
+  workUnits: number;
+  targetTokens: number;
+  requestedTokens: number;
+  effectiveTokens: number;
+  reasoningReserveTokens: number;
+  thinkingEnabled: boolean;
+  taskHardCapTokens: number;
+  modelMaxOutputTokens?: number | null;
+  contextMaxOutputTokens: number;
+  limitingFactor: 'task_estimate' | 'task_hard_cap' | 'model_capability' | 'context_available';
+  executionMode: 'single' | 'chunked';
+  lengthStrategy: 'fail' | 'continue' | 'retry_larger';
+}
+
 export interface AiContextBudgetState {
   windowTokens: number;
+  /** 发起本轮请求时所用的本地模型配置，防止同窗口模型互相复用用量。 */
+  modelConfigId?: string;
+  /** 发给供应商的模型名称，用于兼容没有 modelConfigId 的历史记录。 */
+  modelName?: string;
   estimatedInputTokens: number;
   toolSchemaTokens: number;
   outputReserveTokens: number;
@@ -627,6 +889,9 @@ export interface AiContextBudgetState {
   actualUsageRound?: number;
   inputTokenEstimateAtUsage?: number;
   usageSource?: "provider";
+  requestedOutputTokens?: number;
+  finishReason?: string;
+  outputBudget?: AiOutputBudgetState;
 }
 
 export interface AiTaskPlanChunk {
@@ -639,9 +904,12 @@ export interface AiTaskPlanChunk {
     description?: string;
     type: 'read' | 'analyze' | 'write' | 'review' | 'confirm';
     status: 'pending' | 'running' | 'done' | 'blocked' | 'failed';
-    executor?: 'model' | 'tool';
+    executor?: 'model' | 'tool' | 'agent';
     riskLevel?: 'read' | 'write' | 'destructive';
     suggestedTools?: string[];
+    agentRole?: string;
+    assignment?: Record<string, unknown>;
+    dependsOn?: string[];
     resultSummary?: string;
     error?: string;
   }[];
@@ -701,135 +969,21 @@ export interface AiAgentRunSnapshot {
   hasMore: boolean;
 }
 
-export interface AiLongTaskUnit {
-  id: string;
-  position: number;
-  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'canceled';
-  attempt: number;
-  maxAttempts: number;
-  runId?: string | null;
-  inputRef?: string | null;
-  outputRef?: string | null;
-  errorCode?: string | null;
-  createTime?: string | null;
-  updateTime?: string | null;
-  metadata: Record<string, unknown>;
-}
+export type AiLongTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
 
-export interface AiLongTask {
-  id: string;
-  workItemId: string;
-  namespace: string;
-  kind: string;
-  ownerId: EntityId;
-  parentRunId: string;
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled';
-  revision: number;
-  totalUnits: number;
-  completedUnits: number;
-  failedUnits: number;
-  maxParallelism: number;
-  createTime?: string | null;
-  updateTime?: string | null;
-  metadata: Record<string, unknown>;
-  units: AiLongTaskUnit[];
-}
-
-export type AiLongTaskConversationEvent = {
-  type:
-    | 'turn.started'
-    | 'turn.thinking.delta'
-    | 'turn.thinking.snapshot'
-    | 'turn.chunk'
-    | 'turn.model.call'
-    | 'turn.context.budgeted'
-    | 'turn.context.usage'
-    | 'turn.tool.started'
-    | 'turn.tool.results'
-    | 'turn.tool.completed'
-    | 'turn.response'
-    | 'turn.completed';
-  taskId: string;
-  unitId: string;
-  attempt: number;
-  runId: string;
-  title?: string;
-  cursor?: number;
-  createdAt?: string | null;
-  delta?: string;
-  content?: string;
-  /** Canonical ordinary Agent SSE chunk for a durable child Run. */
-  chunk?: Record<string, unknown>;
-  modelInvocation?: {
-    phase: string;
-    count?: number;
-    toolNames?: string[];
-    toolChoice?: string;
-    round?: number;
-    logicalRound?: number;
-    attempt?: number;
-    revision?: number;
-    judgeIndex?: number;
-    parameters?: Record<string, unknown>;
-  };
-  contextBudget?: Partial<AiContextBudgetState>;
-  toolCallId?: string;
-  toolName?: string;
-  label?: string;
-  toolCalls?: Array<{
-    id: string;
-    name: string;
-    argumentsJson: string;
-    displayNames?: Record<string, string>;
-  }>;
-  toolResults?: Array<{
-    toolCallId: string;
-    toolName?: string;
-    content: string;
-  }>;
-  inProgress?: boolean;
-  partialContent?: string;
-  partialThinking?: string;
-  model?: string;
-  toolIndex?: number;
-  fromCache?: boolean;
-  exceptionType?: string;
-  status?: string;
-  errorCode?: string;
-} | {
-  type: 'task.progress';
-  taskId: string;
-  status: AiLongTask['status'];
-  revision: number;
-  totalUnits: number;
-  completedUnits: number;
-  failedUnits: number;
-  updateTime?: string | null;
-  units: Array<{
-    id: string;
-    position: number;
-    status: AiLongTaskUnit['status'];
-    attempt: number;
-    maxAttempts: number;
-    runId?: string | null;
-    outputRef?: string | null;
-    errorCode?: string | null;
-    updateTime?: string | null;
-  }>;
-} | {
-  type: 'task.terminal';
-  taskId: string;
-  status: AiLongTask['status'];
-  cursor?: number;
-  /** Final validated proposal, routed through the ordinary chat reducer. */
-  proposal?: ScreenplayDocumentProposal;
-  /** Root/coordinator response shown as the ordinary assistant answer. */
-  finalResponse?: string;
-} | {
-  type: 'stream.error';
-  taskId: string;
-  error: string;
-};
+export type AiLongTaskUnitStatus =
+  | 'pending'
+  | 'claimed'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
 
 export interface AiAgentDelegation {
   delegationId: string;
@@ -839,9 +993,9 @@ export interface AiAgentDelegation {
   agentRole: string;
   agentTitle?: string | null;
   objective: string;
-  /** Planner-owned durable unit identity, when this delegation executes one. */
+  /** Planner step identity bound to a durable unit for this delegation. */
   unitId?: string | null;
-  /** One-based execution attempt for the same Planner unit. */
+  /** One-based execution attempt for the same durable unit. */
   attempt?: number | null;
   status: 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'canceled';
   required: boolean;
@@ -1299,10 +1453,7 @@ export interface ElectronAPI {
   // 剧本项目
   listScreenplayProjects: (data?: {
     includeArchived?: boolean;
-  }) => Promise<ApiResult<ScreenplayProject[]>>;
-  getScreenplayProject: (data: {
-    projectId: EntityId;
-  }) => Promise<ApiResult<ScreenplayProject>>;
+  }) => Promise<ApiResult<ScreenplayV2Project[]>>;
   getOrCreateScreenplaySession: (data: {
     projectId: EntityId;
   }) => Promise<ApiResult<AiSession>>;
@@ -1311,61 +1462,164 @@ export interface ElectronAPI {
     includeClosed?: boolean;
   }) => Promise<ApiResult<AiSession[]>>;
   createScreenplaySession: (data: {
+    commandId: string;
     projectId: EntityId;
   }) => Promise<ApiResult<AiSession>>;
-  createScreenplayProject: (
-    data: CreateScreenplayProjectPayload,
-  ) => Promise<ApiResult<CreateScreenplayProjectResult>>;
-  updateScreenplayProject: (data: {
+  submitScreenplayConversationTurn: (data: {
+    commandId: string;
     projectId: EntityId;
-    patch: Partial<Pick<
-      ScreenplayProject,
-      'title' | 'format' | 'approach' | 'premise' | 'status'
-    >>;
-  }) => Promise<ApiResult<ScreenplayProject>>;
-  deleteScreenplayProject: (data: {
-    projectId: EntityId;
-  }) => Promise<ApiResult<void>>;
-  listScreenplayDocuments: (data: {
-    projectId: EntityId;
-    kind?: ScreenplayDocumentKind;
-    status?: ScreenplayDocumentStatus;
-  }) => Promise<ApiResult<ScreenplayDocument[]>>;
-  getScreenplayDocument: (data: {
-    documentId: EntityId;
-  }) => Promise<ApiResult<ScreenplayDocument>>;
-  createScreenplayDocument: (data: {
-    projectId: EntityId;
-    kind: ScreenplayDocumentKind;
-    title: string;
-    contentJson?: Record<string, unknown>;
-    contentText?: string;
-    derivedFromIds?: EntityId[];
-    sourceRunId?: string;
-  }) => Promise<ApiResult<ScreenplayDocument>>;
-  listScreenplaySourceRefs: (data: {
-    projectId: EntityId;
-    documentId?: EntityId;
-    agentRunId?: string;
-  }) => Promise<ApiResult<ScreenplaySourceRef[]>>;
-  updateScreenplayDocument: (data: {
-    documentId: EntityId;
-    patch: {
-      title?: string;
-      contentJson?: Record<string, unknown>;
-      contentText?: string;
-      derivedFromIds?: EntityId[];
+    sessionId: number;
+    content: string;
+    operation?: {
+      expectedProjectRevision: number;
+      targetRole: ScreenplayV2DeliverableRole;
+      intent: {
+        type: ScreenplayV2OperationIntentType;
+        scope?: Record<string, unknown>;
+        instruction?: string;
+      };
     };
-  }) => Promise<ApiResult<ScreenplayDocument>>;
-  acceptScreenplayDocument: (data: {
-    documentId: EntityId;
-  }) => Promise<ApiResult<ScreenplayDocument>>;
-  restoreScreenplayDocument: (data: {
-    documentId: EntityId;
-  }) => Promise<ApiResult<ScreenplayDocument>>;
-  deleteScreenplayDocument: (data: {
-    documentId: EntityId;
-  }) => Promise<ApiResult<void>>;
+    runtime: ScreenplayConversationRuntimeInput;
+  }) => Promise<ApiResult<ScreenplayConversationTurn>>;
+  getScreenplayConversationSnapshot: (data: {
+    projectId: EntityId;
+    sessionId: number;
+  }) => Promise<ApiResult<ScreenplayConversationSnapshot>>;
+  listScreenplayConversationEvents: (data: {
+    projectId: EntityId;
+    sessionId: number;
+    after?: number;
+    limit?: number;
+  }) => Promise<ApiResult<ScreenplayConversationEventPage>>;
+  cancelScreenplayConversationTurn: (data: {
+    commandId: string;
+    turnId: string;
+  }) => Promise<ApiResult<ScreenplayConversationTurn>>;
+  resumeScreenplayConversationTurn: (data: {
+    commandId: string;
+    turnId: string;
+    runtime: ScreenplayConversationRuntimeInput;
+  }) => Promise<ApiResult<ScreenplayConversationTurn>>;
+  createScreenplayV2Project: (data: {
+    commandId: string;
+    title: string;
+    format: ScreenplayV2Format;
+    source: {
+      type: ScreenplaySourceKind;
+      bookId?: EntityId;
+      scope?: {
+        mode: 'wholeBook' | 'firstChapters' | 'firstVolumes' | 'selectedChapters' | 'selectedVolumes';
+        count?: number;
+        chapterIds?: EntityId[];
+        volumeIds?: EntityId[];
+      };
+    };
+    brief: { approach: string; premise: string };
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  getScreenplayV2Workspace: (data: {
+    projectId: EntityId;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  getScreenplayV2Revision: (data: {
+    revisionId: string;
+    view?: 'summary' | 'full';
+  }) => Promise<ApiResult<ScreenplayV2RevisionDetail>>;
+  listScreenplayV2RevisionHistory: (data: {
+    projectId: EntityId;
+    role: ScreenplayV2DeliverableRole;
+    cursor?: string;
+    limit?: number;
+  }) => Promise<ApiResult<{
+    projectId: EntityId;
+    deliverableId: string;
+    role: ScreenplayV2DeliverableRole;
+    items: ScreenplayV2RevisionSummary[];
+    nextCursor: string | null;
+  }>>;
+  createScreenplayV2WorkingCopyFromRevision: (data: {
+    commandId: string;
+    projectId: EntityId;
+    revisionId: string;
+    expectedProjectRevision: number;
+    expectedWorkingCopyRevision?: number;
+  }) => Promise<ApiResult<ScreenplayV2WorkingCopy>>;
+  updateScreenplayV2WorkingCopy: (data: {
+    workingCopyId: string;
+    expectedRevision: number;
+    content: Record<string, unknown>;
+  }) => Promise<ApiResult<ScreenplayV2WorkingCopy>>;
+  publishScreenplayV2WorkingCopy: (data: {
+    commandId: string;
+    workingCopyId: string;
+    expectedProjectRevision: number;
+    expectedWorkingCopyRevision: number;
+  }) => Promise<ApiResult<{
+    revision: ScreenplayV2RevisionSummary;
+    workspace: ScreenplayV2Workspace;
+  }>>;
+  startScreenplayV2Operation: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+    targetRole: ScreenplayV2DeliverableRole;
+    intent: {
+      type: ScreenplayV2OperationIntentType;
+      scope?: Record<string, unknown>;
+      instruction?: string;
+    };
+    conversation?: { sessionId?: number; userMessageId?: string };
+  }) => Promise<ApiResult<{
+    operation: ScreenplayV2Operation;
+    projectRevision: number;
+    workspace: ScreenplayV2Workspace;
+  }>>;
+  getScreenplayV2Operation: (data: {
+    operationId: string;
+  }) => Promise<ApiResult<ScreenplayV2Operation>>;
+  pauseScreenplayV2Operation: (data: {
+    commandId: string;
+    operationId: string;
+  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
+  resumeScreenplayV2Operation: (data: {
+    commandId: string;
+    operationId: string;
+  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
+  cancelScreenplayV2Operation: (data: {
+    commandId: string;
+    operationId: string;
+  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
+  acceptScreenplayV2Revision: (data: {
+    commandId: string;
+    projectId: EntityId;
+    revisionId: string;
+    expectedProjectRevision: number;
+    confirmInvalidation?: boolean;
+  }) => Promise<ApiResult<{
+    acceptedRevisionId: string;
+    projectRevision: number;
+    invalidatedHeads: Array<{ role: ScreenplayV2DeliverableRole; revisionId: string }>;
+    workspace: ScreenplayV2Workspace;
+  }>>;
+  updateScreenplayV2Project: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+    title: string;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  archiveScreenplayV2Project: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  restoreScreenplayV2Project: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  deleteScreenplayV2Project: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+  }) => Promise<ApiResult<{ projectId: EntityId; deleted: true }>>;
   // 人物
   getCharacters: (data: { bookId: EntityId }) => Promise<ApiResult<Character[]>>;
   createCharacter: (data: {
@@ -1647,7 +1901,6 @@ export interface ElectronAPI {
     taskPlan?: AiTaskPlanChunk;
     contextCompaction?: AiContextCompactionState;
     contextBudget?: AiContextBudgetState;
-    screenplayProposal?: ScreenplayDocumentProposal;
     agentProcess?: {
       delegations?: AiAgentDelegation[];
       subAgentActivities?: unknown[];
@@ -1826,21 +2079,6 @@ export interface ElectronAPI {
     childrenCanceled: number;
     terminalized: boolean;
   }>>;
-  getLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
-  streamLongTaskConversation: (
-    data: {
-      taskId: string;
-      sessionId: number;
-      after?: number;
-    },
-    listener: (event: AiLongTaskConversationEvent) => void,
-  ) => () => void;
-  listScreenplayLongTasks: (data: {
-    projectId: EntityId;
-    limit?: number;
-  }) => Promise<ApiResult<AiLongTask[]>>;
-  pauseLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
-  cancelLongTask: (data: { taskId: string }) => Promise<ApiResult<AiLongTask>>;
   createAgentDelegation: (data: {
     runId: string;
     agentRole: string;
@@ -1885,6 +2123,8 @@ export interface ElectronAPI {
     agentProfile?: "writing" | "screenplay";
     /** screenplay profile 的唯一项目作用域。 */
     screenplayProjectId?: EntityId;
+    /** Operation-first 生成任务的稳定业务身份。 */
+    screenplayOperationId?: string;
     /** 仅作一致性校验，不能覆盖项目持久化的来源书籍。 */
     sourceBookId?: EntityId | null;
     activeDocumentId?: EntityId | null;
@@ -1894,7 +2134,7 @@ export interface ElectronAPI {
     /** 正文阶段一次生成的连续场景数；超长范围由宿主转交持久化任务。 */
     screenplayDraftSceneCount?: number;
     /** 稳定的正文范围意图；实际场景由后端在运行开始时解析。 */
-    screenplayDraftScope?: "planner" | "next_scene" | "next_episode" | "next_3_episodes" | "next_5_episodes" | "all_remaining" | "count";
+    screenplayDraftScope?: "planner" | "next_scene" | "next_episode" | `next_${number}_episodes` | "all_remaining" | "count";
   }) => string;
   abortAiStream: (streamId?: string) => void;
   onAiChunk: (
@@ -1949,8 +2189,10 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
-      /** 剧本 Agent 生成的待审阅文档；只有用户明确操作后才会保存或接受。 */
+      /** 剧本 Agent 生成的待审阅内容；v2 会在服务端投影为候选，旧项目仍由前端保存。 */
       proposedScreenplayDocument?: ScreenplayDocumentProposal;
+      /** Native v2 candidate reference; never contains proposal content. */
+      screenplayRevisionReady?: ScreenplayRevisionRef;
       /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
       toolApprovalRequired?: ToolApprovalRequest;
       /** 审批的服务端最终状态（包含超时与连接取消）。 */
@@ -2029,6 +2271,8 @@ export interface ElectronAPI {
         estimatedUnits: number;
         estimatedModelCalls: number;
         requiresConfirmation: boolean;
+        /** Present on events emitted after durable step coverage was introduced. */
+        coveredStepIds?: string[];
       };
       longTaskDispatched?: {
         runId: string;
@@ -2037,7 +2281,7 @@ export interface ElectronAPI {
         taskTitle?: string;
         message?: string;
         projectId?: EntityId;
-        status: AiLongTask['status'];
+        status: AiLongTaskStatus;
         totalUnits: number;
         completedUnits: number;
         estimatedScenes?: number;
@@ -2045,7 +2289,7 @@ export interface ElectronAPI {
       longTaskProgress?: {
         runId: string;
         taskId: string;
-        status: AiLongTask['status'];
+        status: AiLongTaskStatus;
         revision: number;
         totalUnits: number;
         completedUnits: number;
@@ -2054,7 +2298,7 @@ export interface ElectronAPI {
         units: Array<{
           id: string;
           position: number;
-          status: AiLongTaskUnit['status'];
+          status: AiLongTaskUnitStatus;
           attempt: number;
           maxAttempts: number;
           runId?: string | null;
@@ -2094,7 +2338,7 @@ export interface GeneralSettings {
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
 
-export type AiBuiltinProviderId = 'zai' | 'moonshot' | 'minimax' | 'mimo';
+export type AiBuiltinProviderId = 'zai' | 'deepseek' | 'moonshot' | 'minimax' | 'mimo';
 export type AiApiProvider = 'openai' | 'anthropic' | 'zai';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
@@ -2120,7 +2364,7 @@ export interface AiModelConfig {
   thinkingEnabled?: boolean;
   /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
   contextWindow?: AiContextWindow;
-  /** 单次模型响应的最大输出 token 预算；未设置时使用模型预设或运行时推导值。 */
+  /** @deprecated Agent 输出预算现由后端按任务解析；仅保留以读取旧配置。 */
   outputTokenBudget?: number;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。

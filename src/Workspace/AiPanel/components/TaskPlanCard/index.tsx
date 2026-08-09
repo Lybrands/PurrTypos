@@ -92,10 +92,12 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   const {
     total,
     completed,
+    runningSteps,
     currentStep,
     currentStepNumber,
     percent,
   } = getTaskPlanProgress(plan);
+  const parallel = runningSteps.length > 1;
 
   React.useEffect(() => {
     const stored = openStateStore.get(stateKey);
@@ -133,12 +135,16 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
         <ChevronRightIcon className="task-plan-card__chevron" />
         <span className="task-plan-card__label">{getTaskPlanLabel(plan)}</span>
         <span className="task-plan-card__count">
-          {!terminal && currentStepNumber != null
-            ? `第 ${currentStepNumber}/${total} 步`
+          {!terminal && parallel
+            ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
+            : !terminal && currentStepNumber != null
+              ? `第 ${currentStepNumber}/${total} 步`
             : `已完成 ${completed}/${total}`}
         </span>
         {currentStep && !terminal ? (
-          <span className="task-plan-card__current">· {currentStep.title}</span>
+          <span className="task-plan-card__current">
+            · {parallel ? `${currentStep.title} 等` : currentStep.title}
+          </span>
         ) : null}
       </button>
       <div className="task-plan-card__progress" aria-hidden="true">

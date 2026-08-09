@@ -30,8 +30,8 @@ class ScreenplayDomainAdapter:
     @classmethod
     def build(
         cls,
-        db,
         *,
+        context_query,
         tool_catalog: ToolCatalog | None = None,
         artifact_continuity=None,
     ) -> "ScreenplayDomainAdapter":
@@ -41,7 +41,7 @@ class ScreenplayDomainAdapter:
             tool_catalog=tool_catalog or InMemoryToolCatalog(()),
             agent_role_registry=build_screenplay_agent_role_registry(),
             context_provider=ScreenplayContextProvider(
-                db,
+                context_query,
                 artifact_continuity=artifact_continuity,
             ),
         )

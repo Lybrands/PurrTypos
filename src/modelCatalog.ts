@@ -15,7 +15,7 @@ export {
   applyModelRuntimeConfigPatch,
   createConfigFromPreset,
   getDefaultModelContextWindow,
-  getDefaultModelOutputTokens,
+  getModelMaxOutputTokens,
   getModelContextWindowOptions,
   isModelThinkingEnabled,
   normalizeApiProvider,

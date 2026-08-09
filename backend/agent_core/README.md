@@ -22,6 +22,40 @@ driver, or concrete persistence adapter. Static tests in
 `tests/test_agent_core_boundaries.py` and `tests/test_application_boundaries.py`
 enforce this rule.
 
+## Phase 1 module boundaries
+
+The historical `runtime.py`, `engine.py`, `contracts.py`, and `ports.py` entry
+points are now same-name packages; existing imports remain compatible. New
+code should import the narrowest responsibility module:
+
+- Runtime orchestration is separate from model-round accumulation, tool-batch
+  streaming, and buffered-response finalization.
+- Engine orchestration is separate from options, context assembly, planning
+  validation, and durable-execution helpers.
+- Contracts expose stable message, planning, context, tool, and run families,
+  with foundational enums in `enums.py`.
+- The ports package facade only aggregates definitions owned by the model,
+  context, planning, tools, persistence, and run-lifecycle modules.
+
+`tests/test_agent_core_phase_one_structure.py` prevents the legacy files,
+already extracted definitions, or facade/orchestrator growth from returning.
+
+## Phase 2 host-extension boundary
+
+Core supports product hosts through three product-neutral contracts:
+`RunBinding` persists an opaque aggregate/command association,
+`ExecutionRecipe` validates a host-compiled mechanical DAG, and
+`DomainEventProjector` lets a persistence adapter project a domain effect in
+the same commit transaction. Core does not interpret a Binding, author a
+product Recipe, or understand a Projector's business result.
+
+Product request DTOs, request/event mapping, authoritative queries, and
+business Run lifecycle hooks remain outside Core. The screenplay host owns
+those pieces in `schemas/screenplay_agent_run.py`, `application/screenplay_agent_*`,
+`domains/screenplay/query_port.py`, and
+`infrastructure/screenplay/agent_query.py`; the generic `ChatStreamRequest`,
+`AgentRunService`, and SSE mapper contain no screenplay fields or branches.
+
 ## Dynamic planning
 
 The initial plan is a tentative roadmap, but successful execution follows that
@@ -69,6 +103,13 @@ state and returns `inline`, `durable`, `clarify`, or `reject`. Core therefore
 does not need product concepts such as scenes, chapters, or datasets, and the
 host does not need a second intent-model request.
 
+A durable admission must explicitly name every Planner step that the durable
+executor will fulfil. Core accepts the handoff only when that coverage is an
+exact match for the installed plan, and completes only those covered steps
+after the durable result succeeds. This generic invariant prevents an external
+workflow from silently bypassing or falsely completing an unrelated Planner
+step without teaching Core anything about the domain.
+
 `long_tasks` defines product-neutral contracts for durable tasks, dependency
 units, leases, checkpoints, retries, pause, resume, and cancellation. The Core
 coordinator understands only the unit DAG and execution states. Domain code
@@ -78,13 +119,21 @@ independent Agent Run. Pausing releases the active unit for immediate resume,
 and a failed task receives a fresh retry allowance only after explicit resume.
 
 The screenplay adapter admits only multi-scene draft generation to durable
-execution. The Planner supplies the complete dependency graph in
-`TaskSpec.target.executionUnits`; the domain validates exact scene coverage,
-ordering, dependencies, and the terminal unit without imposing a hard-coded
-batch size. Generation units carry compact continuity state, and the terminal
-unit deterministically validates execution history before assembling one
-complete proposal. List endpoints expose progress only; batch text and the
-final proposal are loaded from task detail on demand.
+execution. The shared Planner remains the AI author of the user-visible plan;
+its plan selects the bounded draft capability rather than inventing an internal
+child-Agent graph. After admission binds the authoritative scene range, the
+screenplay host builds one stable mechanical DAG: one checkpointed Writer per
+scene, ordered Writer lanes within each episode, a single global continuity
+Reviewer after all Writers, conditional per-scene Rewriters, and deterministic
+proposal assembly. Writer, Reviewer, and Rewriter child Runs use the exact
+host-built prompt in direct-response mode with an empty tool catalog, so they
+do not start another Planner or reload the whole project context. The Reviewer
+returns only a compact issue report; scenes with no issues reuse their Writer
+checkpoint without another model call. Only transient provider/stream failures
+are retried. Truncation or invalid structured output fails the unit unchanged,
+and a terminal unit failure atomically cancels every unfinished sibling so the
+task cannot retain stale running children. List endpoints expose progress only;
+scene text and the final proposal are loaded from task detail on demand.
 
 Stage deliverables such as source analysis, creative briefs, structures, and
 scene lists no longer enter an application path that launches a complete Agent
@@ -130,9 +179,19 @@ dependency failure would otherwise leave the request above the hard budget.
 `model_protocol` normalizes provider finish reasons. Any provider-declared
 length limit makes the round incomplete: partial text cannot become a final
 answer, and partial tool calls are neither executed nor written into later
-model history. Runtime permits one clean, side-effect-free retry, then retains
-the `tool_call_truncated` or `model_output_truncated` root cause and safe
-diagnostics.
+model history. A request with a host-resolved task budget is not repeated with
+the same allowance; legacy direct Runtime callers may retain one clean,
+side-effect-free retry. Exhaustion preserves the `tool_call_truncated` or
+`model_output_truncated` root cause and safe diagnostics.
+
+Output sizing has three separate authorities. Infrastructure model profiles
+declare provider capability ceilings, Application policies estimate and cap
+one unit of product work, and `agent_core.output_budget` resolves the effective
+allowance against the context window. Only that resolved allowance may become
+a provider `max_tokens` parameter. The resolution, capability ceiling, limiting
+factor, actual provider usage, and finish reason are emitted in durable Run
+events. Chunked work must add or split execution units instead of increasing a
+global model default.
 
 Audited tools declare model-generated, host-bound, and host-derived paths with
 `ToolDataContract`. Host-owned paths must stay outside the model-visible JSON
@@ -227,8 +286,19 @@ call batch is still preflighted before any write. Domain adapters inject their
 own `RuntimeLimits`, so Core's default no longer encodes a product-specific
 batch-count assumption.
 
-The screenplay adapter uses begin/append/finalize tools for creative briefs,
-structures, and scene lists. A creative-brief artifact freezes the accepted
+Planner and runtime tool contracts are now distinct. A registration may map a
+stable business-level `planning_capability` onto one or more private runtime
+tools. Core validates the public plan first, then deterministically lowers the
+capability into its dependency-ordered runtime protocol. Private steps remain
+durable and authorized but are omitted from public task-plan SSE; only the
+business capability is shown. Host-authenticated continuation state can mark
+individual private tools as already satisfied, while legacy persisted plans
+that name runtime tools continue to execute unchanged.
+
+The screenplay adapter internally uses begin/append/finalize tools for creative briefs,
+structures, and scene lists. The Planner instead sees stable operations such
+as `generateCreativeBrief`, `generateScreenplayStructure`, and
+`generateSceneList`. A creative-brief artifact freezes the accepted
 source-analysis version, evidence manifest, source limitations, target format,
 and lineage. The model batches one brief-content entry plus bounded adaptation
 decisions; it no longer echoes source limitations or the project format. A

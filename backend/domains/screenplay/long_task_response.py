@@ -112,6 +112,98 @@ class ScreenplayDraftBatchResponseValidator:
         return ResponseValidationResult()
 
 
+@dataclass(frozen=True, slots=True)
+class ScreenplayReviewReportValidator:
+    """Validate a compact review report without regenerating scene prose."""
+
+    scene_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        ids = tuple(str(item or "").strip() for item in self.scene_ids)
+        if not ids or any(not item for item in ids):
+            raise ValueError("review report validator requires scene ids")
+        if len(ids) != len(set(ids)):
+            raise ValueError("review report scene ids must be unique")
+        object.__setattr__(self, "scene_ids", ids)
+
+    def validate(
+        self,
+        *,
+        content: str,
+        messages: Sequence,
+    ) -> ResponseValidationResult:
+        del messages
+        try:
+            payload = parse_json_object(content)
+        except Exception:
+            return _rejection(
+                "screenplay.review.invalid_json",
+                "返回且只返回一个完整 JSON 对象，不要输出正文或 Markdown。",
+            )
+        if any(key in payload for key in ("scenes", "draftScenes", "sceneText")):
+            return _rejection(
+                "screenplay.review.prose_forbidden",
+                "审阅节点只返回问题报告，不得返回或改写任何场景正文。",
+            )
+        reviewed = payload.get("reviewedSceneIds")
+        if not isinstance(reviewed, list) or tuple(
+            str(item or "").strip() for item in reviewed
+        ) != self.scene_ids:
+            return _rejection(
+                "screenplay.review.coverage_mismatch",
+                "reviewedSceneIds 必须按原顺序完整覆盖 requiredSceneIds。",
+                expectedSceneIds=list(self.scene_ids),
+            )
+        issues = payload.get("issues")
+        if not isinstance(issues, list) or len(issues) > 64:
+            return _rejection(
+                "screenplay.review.issues_invalid",
+                "issues 必须是不超过 64 项的数组；没有问题时返回空数组。",
+            )
+        allowed_ids = set(self.scene_ids)
+        for index, issue in enumerate(issues):
+            if not isinstance(issue, Mapping):
+                return _rejection(
+                    "screenplay.review.issue_invalid",
+                    "issues 中的每一项都必须是对象。",
+                    issueIndex=index,
+                )
+            scene_ids = issue.get("sceneIds")
+            normalized_ids = (
+                [str(item or "").strip() for item in scene_ids]
+                if isinstance(scene_ids, list)
+                else []
+            )
+            if (
+                not normalized_ids
+                or any(not item or item not in allowed_ids for item in normalized_ids)
+            ):
+                return _rejection(
+                    "screenplay.review.issue_scope_invalid",
+                    "每个问题必须引用 requiredSceneIds 范围内的 sceneIds。",
+                    issueIndex=index,
+                )
+            if str(issue.get("severity") or "") not in {
+                "blocking",
+                "major",
+                "minor",
+            }:
+                return _rejection(
+                    "screenplay.review.issue_severity_invalid",
+                    "severity 只能是 blocking、major 或 minor。",
+                    issueIndex=index,
+                )
+            for field_name in ("category", "problem", "instruction"):
+                value = str(issue.get(field_name) or "").strip()
+                if not value or len(value) > 4_000:
+                    return _rejection(
+                        "screenplay.review.issue_text_invalid",
+                        f"每个问题必须包含长度合规的 {field_name}。",
+                        issueIndex=index,
+                    )
+        return ResponseValidationResult()
+
+
 def _rejection(
     code: str,
     guidance: str,
@@ -124,4 +216,7 @@ def _rejection(
     )
 
 
-__all__ = ["ScreenplayDraftBatchResponseValidator"]
+__all__ = [
+    "ScreenplayDraftBatchResponseValidator",
+    "ScreenplayReviewReportValidator",
+]

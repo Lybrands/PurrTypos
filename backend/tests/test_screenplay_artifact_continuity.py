@@ -49,6 +49,7 @@ from infrastructure.persistence.sqlite_artifact_continuity_query import (
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
 )
+from infrastructure.screenplay.agent_query import SqliteScreenplayAgentQuery
 
 
 @pytest_asyncio.fixture
@@ -161,18 +162,8 @@ def _request(*, session_id: int = 1) -> AgentRunRequest:
 
 def test_continuation_task_waives_only_authenticated_completed_dependencies():
     available = frozenset({
-        "beginSceneListArtifact",
-        "appendSceneListBatch",
-        "finalizeSceneListProposal",
+        "generateSceneList",
     })
-    guidance = {
-        "appendSceneListBatch": {
-            "requires": ["beginSceneListArtifact"],
-        },
-        "finalizeSceneListProposal": {
-            "requires": ["appendSceneListBatch"],
-        },
-    }
     facts = {"artifactContinuity": {"candidates": [{
         "artifactId": "artifact-scenes",
         "workItemId": "work-item-scenes",
@@ -183,7 +174,6 @@ def test_continuation_task_waives_only_authenticated_completed_dependencies():
     capabilities = PlanningCapabilities(
         available_tool_names=available,
         host_planning_facts=facts,
-        tool_guidance=guidance,
     )
     constraints = ScreenplayPlanningPolicy().planning_constraints_for_task(
         _request(),
@@ -198,10 +188,11 @@ def test_continuation_task_waives_only_authenticated_completed_dependencies():
         ),
     )
 
-    assert constraints.satisfied_tool_dependency_edges == frozenset({
-        ("appendSceneListBatch", "beginSceneListArtifact"),
-        ("finalizeSceneListProposal", "appendSceneListBatch"),
+    assert constraints.execution_satisfied_tool_names == frozenset({
+        "beginSceneListArtifact",
+        "appendSceneListBatch",
     })
+    assert not constraints.satisfied_tool_dependency_edges
 
     unrelated = ScreenplayPlanningPolicy().planning_constraints_for_task(
         _request(),
@@ -212,12 +203,48 @@ def test_continuation_task_waives_only_authenticated_completed_dependencies():
         ),
     )
     assert unrelated.satisfied_tool_dependency_edges == frozenset()
+    assert unrelated.execution_satisfied_tool_names == frozenset()
+
+
+def test_finalized_delivery_replay_waives_generation_steps_read_only():
+    facts = {"artifactContinuity": {"candidates": [{
+        "artifactId": "artifact-scenes",
+        "workItemId": "work-item-scenes",
+        "kind": "scene_list_batches",
+        "artifactStatus": "finalized",
+        "workItemStatus": "completed",
+        "committedItemCount": 3,
+        "expectedItemCount": 3,
+        "nextAction": "replay_finalization",
+    }]}}
+    capabilities = PlanningCapabilities(
+        available_tool_names=frozenset({"generateSceneList"}),
+        host_planning_facts=facts,
+    )
+
+    constraints = ScreenplayPlanningPolicy().planning_constraints_for_task(
+        _request(),
+        capabilities,
+        TaskSpec(
+            goal="恢复场景表交付",
+            target={"artifactContinuity": {
+                "action": "reference",
+                "artifactId": "artifact-scenes",
+                "workItemId": "work-item-scenes",
+            }},
+        ),
+    )
+
+    assert constraints.execution_satisfied_tool_names == frozenset({
+        "beginSceneListArtifact",
+        "appendSceneListBatch",
+    })
 
 
 def _provider(db, *, claims=None) -> ScreenplayContextProvider:
     claim_repository = claims or SqliteArtifactClaimRepository(db)
     return ScreenplayContextProvider(
-        db,
+        SqliteScreenplayAgentQuery(db),
         artifact_continuity=ArtifactContinuityCoordinator(
             query=SqliteArtifactContinuityQuery(db),
             work_items=SqliteWorkItemRepository(db),
@@ -294,6 +321,80 @@ async def test_planning_exposes_only_same_session_stage_candidates(
         await _budget(provider, other_session),
     )
     assert "artifactContinuity" not in other_planning.diagnostics[
+        "hostPlanningFacts"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finalized_unprojected_artifact_is_discovered_for_read_only_replay(
+    screenplay_continuity,
+) -> None:
+    db, item, artifact = screenplay_continuity
+    await db.execute(
+        "UPDATE ai_agent_artifacts SET status = 'finalized', "
+        "expected_item_count = committed_item_count, revision = revision + 1, "
+        "resource_ref = ? WHERE id = ?",
+        ["artifact://purrtypos.screenplay/scene-list", artifact.id],
+    )
+    await db.execute(
+        "UPDATE ai_agent_work_items SET status = 'completed', "
+        "revision = revision + 1 WHERE id = ?",
+        [item.id],
+    )
+    provider = _provider(db)
+    request = _request()
+
+    planning = await provider.build_planning_context(
+        request,
+        await _budget(provider, request),
+    )
+
+    candidate = planning.diagnostics["hostPlanningFacts"][
+        "artifactContinuity"
+    ]["candidates"][0]
+    assert candidate["artifactStatus"] == "finalized"
+    assert candidate["workItemStatus"] == "completed"
+    assert candidate["nextAction"] == "replay_finalization"
+
+    task = _task(action="reference", run_id="run-reference")
+    bundle = await provider.build_task_context(
+        request,
+        await _budget(provider, request, task),
+        task,
+    )
+    projection = next(
+        block for block in bundle.blocks
+        if block.name == SCREENPLAY_ARTIFACT_CONTEXT
+    )
+    assert "只调用当前阶段的 finalize 工具重放交付投影" in projection.content
+    linked = await SqliteArtifactRepository(db).find_linked_for_run(
+        namespace="purrtypos.screenplay",
+        kind="scene_list_batches",
+        owner_id="project-1",
+        run_id="run-reference",
+        writable=False,
+    )
+    assert linked is not None and linked.status.value == "finalized"
+    assert await SqliteArtifactClaimRepository(db).load_active(
+        artifact.id
+    ) is None
+
+    await db.execute(
+        "INSERT INTO ai_agent_artifact_projections "
+        "(artifact_id, projector_namespace, result_ref, projected_by_run_id) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            artifact.id,
+            "purrtypos.screenplay.revision",
+            "screenplay-revision://projected",
+            "run-origin",
+        ],
+    )
+    after_projection = await provider.build_planning_context(
+        request,
+        await _budget(provider, request),
+    )
+    assert "artifactContinuity" not in after_projection.diagnostics[
         "hostPlanningFacts"
     ]
 

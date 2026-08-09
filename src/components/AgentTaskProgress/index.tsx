@@ -36,6 +36,7 @@ export default function AgentTaskProgress({
   const {
     completed,
     total,
+    runningSteps,
     currentStep,
     currentStepNumber,
     percent,
@@ -47,9 +48,15 @@ export default function AgentTaskProgress({
     || displayPlan.status === 'blocked'
     || displayPlan.status === 'failed'
     || displayPlan.status === 'canceled'
-  const countLabel = !terminal && currentStepNumber != null
-    ? `第 ${currentStepNumber}/${total} 步`
+  const parallel = runningSteps.length > 1
+  const countLabel = !terminal && parallel
+    ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
+    : !terminal && currentStepNumber != null
+      ? `第 ${currentStepNumber}/${total} 步`
     : `已完成 ${completed}/${total}`
+  const currentLabel = currentStep
+    ? parallel ? `${currentStep.title} 等` : currentStep.title
+    : ''
 
   return (
     <PurrPopover
@@ -67,7 +74,7 @@ export default function AgentTaskProgress({
           </div>
           {currentStep ? (
             <div className="ai-task-progress-popover__current">
-              当前：{currentStep.title}
+              当前：{currentLabel}
             </div>
           ) : null}
           <div className="ai-task-progress-popover__progress">
@@ -85,7 +92,7 @@ export default function AgentTaskProgress({
       >
         <span className="ai-task-progress-trigger__status">{label}</span>
         {currentStep ? (
-          <span className="ai-task-progress-trigger__current">{currentStep.title}</span>
+          <span className="ai-task-progress-trigger__current">{currentLabel}</span>
         ) : null}
         <span className="ai-task-progress-trigger__count">
           {countLabel}

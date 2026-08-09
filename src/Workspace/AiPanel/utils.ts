@@ -159,9 +159,6 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         contextBudget: parseJsonObject<
           NonNullable<ChatMessage['contextBudget']>
         >(item.context_budget),
-        screenplayProposal: parseJsonObject<
-          NonNullable<ChatMessage['screenplayProposal']>
-        >(item.screenplay_proposal),
       }
       const agentProcess = parseJsonObject<{
         delegations?: ChatMessage['delegations']

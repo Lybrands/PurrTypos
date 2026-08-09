@@ -1,5 +1,5 @@
 import type { AiModelConfig } from '../../types'
-import { normalizeBaseUrl, normalizePresetContextWindow, normalizePresetOutputTokenBudget } from '../shared'
+import { normalizeBaseUrl, normalizePresetContextWindow } from '../shared'
 import type { BuiltinModelProfile } from '../types'
 
 const provider = {
@@ -18,7 +18,6 @@ const preset = {
   summary: '1M 上下文，支持深度思考与工具调用',
   contextWindowOptions: ['32k', '256k', '1m'],
   contextWindow: '1m',
-  defaultOutputTokens: 16_384,
   maxOutputTokens: 131_072,
   supportsThinking: true,
   thinkingOnly: false,
@@ -50,7 +49,6 @@ export const glm5_2Profile: BuiltinModelProfile = {
       thinkingOnly: preset.thinkingOnly,
       thinkingEnabled: config.thinkingEnabled ?? preset.thinkingEnabled,
       contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
-      outputTokenBudget: normalizePresetOutputTokenBudget(config.outputTokenBudget, preset),
       customizeTemperature: config.customizeTemperature ?? preset.customizeTemperature,
       temperatureThinking: config.temperatureThinking ?? preset.temperatureThinking,
       temperatureNonThinking: config.temperatureNonThinking ?? preset.temperatureNonThinking,
