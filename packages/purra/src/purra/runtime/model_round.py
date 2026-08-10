@@ -76,7 +76,7 @@ def truncation_trace_details(
     retry_used: bool,
     reasoning_only: bool,
     emitted_delta_count: int,
-    output_budget: Any | None,
+    output_limit: Any | None,
 ) -> dict[str, Any]:
     return {
         "round": round_number,
@@ -92,8 +92,8 @@ def truncation_trace_details(
         "reasoningOnly": reasoning_only,
         "fallbackReasoningMode": None,
         "emittedDeltaCount": emitted_delta_count,
-        "outputBudget": (
-            output_budget.to_mapping() if output_budget is not None else None
+        "outputLimit": (
+            output_limit.to_mapping() if output_limit is not None else None
         ),
     }
 

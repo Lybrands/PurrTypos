@@ -11,12 +11,6 @@ from purra.model_execution import ManagedModelExecutor
 from purra.errors import ModelGatewayError
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
-from application.output_budget_policies import (
-    SCREENPLAY_DELIVERABLE_OUTPUT_POLICY,
-    SCREENPLAY_EPISODE_OUTPUT_POLICY,
-    SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY,
-    SCREENPLAY_REVIEW_OUTPUT_POLICY,
-)
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_incremental_generation import (
     ScreenplayIncrementalGeneration,
@@ -290,7 +284,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
             phase="screenplay_final_response_composition",
-            output_policy=SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY,
             repair_instruction=(
                 "只返回包含非空 finalResponse 的 JSON 对象；"
                 "答复保持简短，不得加入候选正文或内部字段。"
@@ -378,8 +371,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
             phase="screenplay_episode_generation",
-            output_policy=SCREENPLAY_EPISODE_OUTPUT_POLICY,
-            work_units=len(scene_ids),
             repair_instruction="严格按指定 JSON 协议重写；集数和 sceneId 必须与场景表完全一致，每场 processSummary 和 sceneText 都不能为空。",
             validate=lambda value: _validate_episode(value, episode_number, scene_ids),
             execution_progress_fields={
@@ -564,11 +555,6 @@ class ScreenplayTaskModelCalls:
                     runtime=runtime,
                 ),
                 conversation_turn_id=str(task["turnId"]),
-                output_policy=(
-                    SCREENPLAY_REVIEW_OUTPUT_POLICY
-                    if role == "review"
-                    else SCREENPLAY_DELIVERABLE_OUTPUT_POLICY
-                ),
                 validate_candidate=(
                     None
                     if str(unit.get("kind") or "") == "generate_candidate"
@@ -629,11 +615,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
             phase=f"screenplay_{role}_generation",
-            output_policy=(
-                SCREENPLAY_REVIEW_OUTPUT_POLICY
-                if role == "review"
-                else SCREENPLAY_DELIVERABLE_OUTPUT_POLICY
-            ),
             repair_instruction="上一个输出不符合目标交付物协议。只输出完整合法 JSON，title、contentText 和 contentJson 都不能为空。",
             validate=lambda value: _validate_deliverable(
                 role,

@@ -16,6 +16,11 @@ from purra.model_protocol.requirements import (
     TaskCapabilityRequirements,
     preflight_capabilities,
 )
+from purra.model_protocol.output_limits import (
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
+    resolve_invocation_output_limit,
+)
 
 from purra.model_protocol.termination import (
     ModelTermination,
@@ -26,6 +31,8 @@ __all__ = [
     "AssistantContentWithToolCalls",
     "FeatureRequirement",
     "FeatureSupport",
+    "InvocationOutputLimit",
+    "InvocationOutputLimitSource",
     "ModelCapabilitySnapshot",
     "ModelOutputCapabilities",
     "ModelProtocolCapabilities",
@@ -37,4 +44,5 @@ __all__ = [
     "classify_model_termination",
     "generic_capability_snapshot",
     "preflight_capabilities",
+    "resolve_invocation_output_limit",
 ]

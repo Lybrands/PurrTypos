@@ -63,8 +63,17 @@ from purra.engine import (
     _validate_task_constraint_refinement,
 )
 from purra.engine.durable_execution import _durable_plan_step_statuses
-from purra.errors import ContractViolationError, InvalidPlannerOutputError
+from purra.errors import (
+    ContractViolationError,
+    InvalidPlannerOutputError,
+    UnsupportedModelFeatureError,
+)
 from purra.events import AgentEvent, CoreEventType
+from purra.model_protocol import (
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
+    generic_capability_snapshot,
+)
 from purra.ports import RunBeginResult, RunCommit, ToolRegistration
 from purra.tools import InMemoryToolCatalog
 from purra.task_admission import (
@@ -116,6 +125,22 @@ PLAN = {
         },
     ],
 }
+
+
+_FIXTURE_OUTPUT_LIMIT = InvocationOutputLimit(
+    max_tokens=1_024,
+    source=InvocationOutputLimitSource.USER_OVERRIDE,
+    profile_max_tokens=32_000,
+)
+
+
+def _fixture_snapshot():
+    return replace(
+        generic_capability_snapshot(),
+        profile_id="fixture:scripted",
+        context_window_tokens=32_000,
+        max_output_tokens=32_000,
+    )
 
 
 class MemoryRunRepository:
@@ -633,7 +658,12 @@ def _core_fixture(
             role=MessageRole.USER,
             content="Update the generic resource safely.",
         ),),
-        model=ModelRequest(provider="fixture", model="scripted"),
+        model=ModelRequest(
+            provider="fixture",
+            model="scripted",
+            capability_snapshot=_fixture_snapshot(),
+            options={"max_tokens": 1_024},
+        ),
         domain_context=DomainContext(
             namespace="test.fixture",
             payload={"resource": "alpha"},
@@ -645,9 +675,34 @@ def _core_fixture(
     )
     options = AgentCoreRunOptions(
         context_claims=(ContextBudgetClaim("fixture", 1_000),),
-        output_reserve_tokens=1_024,
+        output_limit=_FIXTURE_OUTPUT_LIMIT,
     )
     return core, request, options, repository, model, state_factory.state
+
+
+@pytest.mark.asyncio
+async def test_output_limit_incompatible_with_context_fails_before_run_creation():
+    core, request, options, repository, *_ = _core_fixture()
+    incompatible = InvocationOutputLimit(
+        max_tokens=32_000,
+        source=InvocationOutputLimitSource.MODEL_PROFILE,
+        profile_max_tokens=32_000,
+    )
+
+    with pytest.raises(
+        UnsupportedModelFeatureError,
+        match="output limit leaves no room",
+    ) as captured:
+        async for _ in core.run(
+            request,
+            options=replace(options, output_limit=incompatible),
+        ):
+            pass
+
+    assert getattr(captured.value, "code", None) == (
+        "model_context_capacity_incompatible"
+    )
+    assert repository.runs == {}
 
 
 @pytest.mark.asyncio
@@ -2415,7 +2470,12 @@ async def test_reused_core_does_not_leak_request_scoped_response_judge():
     )
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="answer"),),
-        model=ModelRequest(provider="fixture", model="model"),
+        model=ModelRequest(
+            provider="fixture",
+            model="model",
+            capability_snapshot=_fixture_snapshot(),
+            options={"max_tokens": 1_024},
+        ),
         domain_context=DomainContext(namespace="fixture"),
     )
 

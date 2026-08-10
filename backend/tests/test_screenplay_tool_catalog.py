@@ -9,8 +9,6 @@ import pytest_asyncio
 import application.agent_composition as agent_composition_module
 from application.agent_composition import AgentComposition
 from application.composition_factory import create_agent_composition
-from application.output_budget_policies import SCREENPLAY_DELIVERABLE_OUTPUT_POLICY
-from application.output_budget_policies import SCREENPLAY_SCENE_OUTPUT_POLICY
 from application.screenplay_tool_calling import (
     ScreenplayToolCallingService,
     _screenplay_chunk,
@@ -717,7 +715,11 @@ async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body
         "apiKey": "secret",
         "apiProvider": "openai",
         "baseURL": "https://provider.example/v1",
-        "options": {"model": "fixture-model"},
+        "options": {
+            "model": "fixture-model",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
+        },
         "contextWindow": "128k",
     })
     try:
@@ -732,7 +734,6 @@ async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body
             user_payload={"instruction": "生成创作简报"},
             domain_context=_context(),
             conversation_turn_id="turn-screenplay-tools",
-            output_policy=SCREENPLAY_DELIVERABLE_OUTPUT_POLICY,
             reasoning_mode=ReasoningMode.DISABLED,
         )
     finally:
@@ -775,6 +776,7 @@ async def test_screenplay_tool_run_retries_without_changing_reasoning_mode(
         "options": {
             "model": "deepseek-v4-flash",
             "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
             "thinking": {"type": "enabled"},
         },
         "contextWindow": "128k",
@@ -791,7 +793,6 @@ async def test_screenplay_tool_run_retries_without_changing_reasoning_mode(
             user_payload={"instruction": "生成创作简报"},
             domain_context=_context(),
             conversation_turn_id="turn-reasoning-fallback",
-            output_policy=SCREENPLAY_DELIVERABLE_OUTPUT_POLICY,
         )
     finally:
         await composition.shutdown()
@@ -829,7 +830,11 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
         "apiKey": "secret",
         "apiProvider": "openai",
         "baseURL": "https://provider.example/v1",
-        "options": {"model": "fixture-model"},
+        "options": {
+            "model": "fixture-model",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
+        },
         "contextWindow": "128k",
     })
     try:
@@ -854,7 +859,6 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
                 expected_part_key="ep01_s04",
             ),
             conversation_turn_id="turn-host-prepared-scene",
-            output_policy=SCREENPLAY_SCENE_OUTPUT_POLICY,
             reasoning_mode=ReasoningMode.DISABLED,
             host_candidate_template={
                 "sceneId": "ep01_s04",
@@ -982,7 +986,11 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
         "apiKey": "secret",
         "apiProvider": "openai",
         "baseURL": "https://provider.example/v1",
-        "options": {"model": "fixture-model"},
+        "options": {
+            "model": "fixture-model",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
+        },
         "contextWindow": "128k",
     })
     try:
@@ -1002,7 +1010,6 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
                     expected_part_key="ep01_s04",
                 ),
                 conversation_turn_id="turn-atomic-rollback",
-                output_policy=SCREENPLAY_SCENE_OUTPUT_POLICY,
                 reasoning_mode=ReasoningMode.DISABLED,
                 host_candidate_template={
                     "sceneId": "ep01_s04",

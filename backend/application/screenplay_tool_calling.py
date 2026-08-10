@@ -25,7 +25,7 @@ from purra.contracts import (
 )
 from purra.errors import ModelGatewayError
 from purra.events import AgentEvent, CoreEventType
-from purra.output_budget import OutputBudgetPolicy, resolve_output_budget
+from purra.model_protocol import resolve_invocation_output_limit
 
 from application.model_runtime import (
     model_request_from_runtime,
@@ -67,8 +67,6 @@ class ScreenplayToolCallingService:
         user_payload: Mapping[str, Any],
         domain_context: ScreenplayAgentDomainContext,
         conversation_turn_id: str,
-        output_policy: OutputBudgetPolicy,
-        work_units: int = 1,
         reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT,
         validate_candidate: (
             Callable[[Mapping[str, Any]], Mapping[str, Any]] | None
@@ -80,15 +78,9 @@ class ScreenplayToolCallingService:
         window = context_window_tokens(
             runtime.contextWindow or runtime.options.get("context_window")
         )
-        output_budget = resolve_output_budget(
-            policy=output_policy,
-            capabilities=model_request.output_capabilities,
-            context_window_tokens=window,
-            work_units=work_units,
-            thinking_enabled=(
-                reasoning_mode is not ReasoningMode.DISABLED
-                and reasoning_mode_from_options(runtime.options).value != "disabled"
-            ),
+        output_limit = resolve_invocation_output_limit(
+            model_request.capability_snapshot,
+            explicit_user_override=model_request.options.get("max_tokens"),
         )
         request = AgentRunRequest(
             messages=(
@@ -118,8 +110,7 @@ class ScreenplayToolCallingService:
             },
         )
         options = AgentCoreRunOptions(
-            output_reserve_tokens=output_budget.effective_tokens,
-            output_budget=output_budget,
+            output_limit=output_limit,
             default_context_window_tokens=window,
             force_planned_tool_choice=False,
             require_tool_call=False,

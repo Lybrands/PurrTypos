@@ -35,6 +35,7 @@ from application.conversation_compaction_contracts import (
 )
 from purra.errors import ContextOverflowError, ContractViolationError
 from purra.model_execution import ManagedModelExecutor
+from purra.model_protocol import generic_capability_snapshot
 from purra.planner import build_planner_messages
 from application.conversation_compaction import (
     ConversationCompactionService,
@@ -126,7 +127,15 @@ def _request(
             *history,
             AgentMessage(role=MessageRole.USER, content="current"),
         ),
-        model=ModelRequest(provider="test", model="model"),
+        model=ModelRequest(
+            provider="test",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=4_096,
+            ),
+        ),
         domain_context=DomainContext(namespace="test"),
         session_id=7,
         tools_enabled=tools_enabled,

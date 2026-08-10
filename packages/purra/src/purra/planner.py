@@ -34,7 +34,6 @@ from purra.normalization import (
 from purra.errors import InvalidPlannerOutputError, RepairablePlannerOutputError
 from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_execution import ManagedModelCall, ManagedModelExecutor
-from purra.output_budget import OutputBudgetPolicy
 from purra.plan_constraints import (
     agent_assignment_coverage_violations,
 )
@@ -518,14 +517,6 @@ class AgentPlanner:
             messages,
             ManagedModelCall(
                 request=request.model,
-                output_policy=OutputBudgetPolicy(
-                    key="core_planner",
-                    base_tokens=self._limits.max_output_tokens,
-                    per_work_unit_tokens=0,
-                    safety_factor=1,
-                    hard_cap_tokens=self._limits.max_output_tokens,
-                ),
-                context_window_tokens=request.context_window or 128_000,
                 reasoning_mode=ReasoningMode.DISABLED,
             ),
             signal,

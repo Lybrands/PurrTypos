@@ -16,11 +16,10 @@ from purra.contracts import (
 from purra.errors import ResponseJudgeContractError
 from purra.json_values import thaw_json_mapping
 from purra.model_execution import ManagedModelCall, ManagedModelExecutor
-from purra.output_budget import OutputBudgetPolicy
 from purra.ports import CancellationSignal
 
 
-_JUDGE_CONNECTION_OPTION_KEYS = frozenset({"baseURL"})
+_JUDGE_CONNECTION_OPTION_KEYS = frozenset({"baseURL", "max_tokens"})
 
 
 class ModelJudgePolicy(Protocol):
@@ -48,7 +47,6 @@ class ModelBackedResponseJudge:
     model_executor: ManagedModelExecutor
     model_request: ModelRequest
     policy: ModelJudgePolicy
-    max_output_tokens: int = 1_200
     context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
@@ -56,9 +54,6 @@ class ModelBackedResponseJudge:
             raise TypeError("model-backed judge requires a ManagedModelExecutor")
         if not isinstance(self.model_request, ModelRequest):
             raise TypeError("model-backed judge requires a ModelRequest")
-        maximum = self.max_output_tokens
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
-            raise ValueError("judge max output tokens must be a positive integer")
         if int(self.context_window_tokens) <= 0:
             raise ValueError("judge context window must be positive")
 
@@ -102,14 +97,6 @@ class ModelBackedResponseJudge:
             messages,
             ManagedModelCall(
                 request=_deterministic_request(self.model_request),
-                output_policy=OutputBudgetPolicy(
-                    key="response_judge",
-                    base_tokens=self.max_output_tokens,
-                    per_work_unit_tokens=0,
-                    safety_factor=1,
-                    hard_cap_tokens=self.max_output_tokens,
-                ),
-                context_window_tokens=self.context_window_tokens,
                 reasoning_mode=reasoning_mode,
             ),
             signal,

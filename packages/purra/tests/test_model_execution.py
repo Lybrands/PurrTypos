@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -18,20 +19,20 @@ from purra.model_execution import (
     ManagedModelCall,
     ManagedModelExecutor,
 )
-from purra.output_budget import OutputBudgetPolicy
+from purra.model_protocol import generic_capability_snapshot
 
 
 def _call() -> ManagedModelCall:
     return ManagedModelCall(
-        request=ModelRequest(provider="test", model="model"),
-        output_policy=OutputBudgetPolicy(
-            key="test",
-            base_tokens=200,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=200,
+        request=ModelRequest(
+            provider="test",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=200,
+            ),
         ),
-        context_window_tokens=32_000,
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
@@ -61,13 +62,13 @@ class _Gateway:
         return ModelStream(chunks=chunks(), model="model")
 
 
-def test_complete_resolves_the_only_provider_output_budget():
+def test_complete_resolves_the_exact_provider_output_limit():
     async def run():
         gateway = _Gateway()
         result = await ManagedModelExecutor(gateway).complete((), _call())
         assert result.completion.message.content == "done"
-        assert result.output_budget.effective_tokens == 200
-        assert gateway.invocations[0].output_budget == result.output_budget
+        assert result.output_limit.max_tokens == 200
+        assert gateway.invocations[0].output_limit == result.output_limit
         assert gateway.invocations[0].max_output_tokens == 200
 
     asyncio.run(run())

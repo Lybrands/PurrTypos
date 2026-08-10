@@ -46,6 +46,14 @@ from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
+def _fixture_model_options() -> dict[str, object]:
+    return {
+        "model": "model",
+        "model_profile": "deepseek:deepseek-v4-flash",
+        "max_tokens": 2_048,
+    }
+
+
 @pytest_asyncio.fixture
 async def temp_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
@@ -114,9 +122,8 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)
     assert "max_tokens" not in request.model.options
-    assert options.output_reserve_tokens == 7_500
-    assert options.output_budget is not None
-    assert options.output_budget.policy_key == "conversation"
+    assert options.output_limit is not None
+    assert options.output_limit.max_tokens == 393_216
     assert options.context_claims[0].name == "writing_retrieval"
 
 
@@ -176,7 +183,7 @@ async def test_composition_hydrates_authoritative_book_catalogs(
         "messages": [{"role": "user", "content": "读取第一章"}],
         "apiKey": "key",
         "apiProvider": "openai",
-        "options": {"model": "model"},
+        "options": _fixture_model_options(),
         "enableAgentTools": True,
         "bookId": "book-1",
         "chapterId": "chapter-1",
@@ -257,7 +264,7 @@ def test_writing_run_options_carries_host_response_constraints(
         messages=[{"role": "user", "content": user_text}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
         chapterId="chapter-1",
@@ -306,7 +313,7 @@ def test_unavailable_host_material_does_not_force_refusal_into_items(
         }],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=enable_agent_tools,
         bookId=book_id,
         chapterId=chapter_id,
@@ -329,7 +336,7 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
             messages=[{"role": "user", "content": user_text}],
             apiKey="key",
             apiProvider="openai",
-            options={"model": "model"},
+            options=_fixture_model_options(),
             enableAgentTools=True,
             bookId="book-1",
             chapterId="chapter-1",
@@ -416,7 +423,7 @@ async def test_composition_filters_child_tools_from_business_role_policy(
             messages=[{"role": "user", "content": "读取当前章节"}],
             apiKey="key",
             apiProvider="openai",
-            options={"model": "model"},
+            options=_fixture_model_options(),
             enableAgentTools=True,
             bookId="book-1",
             chapterId="chapter-1",
@@ -448,7 +455,7 @@ def test_request_mapping_rejects_caller_owned_tool_contract():
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
     )
@@ -497,7 +504,7 @@ def test_request_mapping_does_not_silently_drop_invalid_caller_tool_shapes(
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
     )
@@ -514,7 +521,7 @@ def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
         apiProvider="anthropic",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
     )
@@ -529,9 +536,8 @@ def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
     options = writing_run_options(request, provider_options)
 
     assert request.model.options["max_tokens"] == 1_000
-    assert options.output_reserve_tokens == 7_500
-    assert options.output_budget is not None
-    assert options.output_budget.policy_key == "conversation"
+    assert options.output_limit is not None
+    assert options.output_limit.max_tokens == 1_000
 
 
 def test_sse_mapping_preserves_public_run_and_domain_event_names():
@@ -807,7 +813,7 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
             messages=[{"role": "user", "content": "搜索"}],
             apiKey="key",
             apiProvider="openai",
-            options={"model": "model"},
+            options=_fixture_model_options(),
             tools=custom_tools,
             enableAgentTools=True,
             bookId="book-1",
@@ -882,7 +888,7 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         messages=[{"role": "user", "content": "执行一个足够长的写作任务"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",
@@ -960,7 +966,7 @@ async def test_composed_route_uses_complete_purra(
             messages=[{"role": "user", "content": "简短"}],
             apiKey="key",
             apiProvider="openai",
-            options={"model": "model"},
+            options=_fixture_model_options(),
             tools=[],
             enableAgentTools=True,
             bookId="book-1",
@@ -1032,7 +1038,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
         messages=[{"role": "user", "content": "删除"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model"},
+        options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",

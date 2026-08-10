@@ -191,8 +191,8 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
         }
         if isinstance(diagnostics, Mapping):
             context_budget.update(dict(diagnostics))
-        if isinstance(payload.get("outputBudget"), Mapping):
-            context_budget["outputBudget"] = dict(payload["outputBudget"])
+        if isinstance(payload.get("outputLimit"), Mapping):
+            context_budget["outputLimit"] = dict(payload["outputLimit"])
         return {"contextBudget": context_budget}
     if event.type == CoreEventType.CONTEXT_USAGE_RECORDED:
         context_usage = {
@@ -215,8 +215,8 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
             )
         if payload.get("finishReason") is not None:
             context_usage["finishReason"] = payload.get("finishReason")
-        if isinstance(payload.get("outputBudget"), Mapping):
-            context_usage["outputBudget"] = dict(payload["outputBudget"])
+        if isinstance(payload.get("outputLimit"), Mapping):
+            context_usage["outputLimit"] = dict(payload["outputLimit"])
         return {
             "contextBudget": context_usage,
         }

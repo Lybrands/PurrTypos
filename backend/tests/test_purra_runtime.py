@@ -48,10 +48,9 @@ from purra.contracts import (
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.events import AgentEvent, CoreEventType
 from purra.host_planned_tool_gateway import HostPlannedToolGateway
-from purra.output_budget import (
-    ModelOutputCapabilities,
-    OutputBudgetPolicy,
-    resolve_output_budget,
+from purra.model_protocol import (
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
 )
 from purra.ports import (
     ModelGateway,
@@ -248,6 +247,14 @@ def _matching_budget(
         provider_input_tokens=(
             window - output - safety - runtime - schema_tokens
         ),
+    )
+
+
+def _output_limit(max_tokens: int = 4_000) -> InvocationOutputLimit:
+    return InvocationOutputLimit(
+        max_tokens=max_tokens,
+        source=InvocationOutputLimitSource.USER_OVERRIDE,
+        profile_max_tokens=32_000,
     )
 
 
@@ -546,21 +553,9 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
         ),
     ]])
     observer = RecordingObserver()
-    output_budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="fixture",
-            base_tokens=4_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=8_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
-        context_window_tokens=128_000,
-    )
-
     updates = await _collect(
         AgentRuntime(model_gateway=model, observer=observer),
-        output_budget=output_budget,
+        output_limit=_output_limit(),
     )
 
     usage_events = [
@@ -576,7 +571,7 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
     assert usage_events[0].payload["usageSource"] == "provider"
     assert usage_events[0].payload["requestedOutputTokens"] == 4_000
     assert usage_events[0].payload["finishReason"] == "stop"
-    assert usage_events[0].payload["outputBudget"]["policyKey"] == "fixture"
+    assert usage_events[0].payload["outputLimit"]["maxTokens"] == 4_000
     usage_trace = next(
         trace for trace in observer.traces
         if trace.stage == "model_usage"
@@ -3026,21 +3021,9 @@ async def test_resolved_task_budget_never_retries_the_same_truncated_allowance()
     )]
     model = ScriptedModelGateway([truncated])
     observer = RecordingObserver([{"readA"}])
-    output_budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="bounded-task",
-            base_tokens=4_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=4_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
-        context_window_tokens=128_000,
-    )
-
     updates = await _collect(
         AgentRuntime(model_gateway=model, observer=observer),
-        output_budget=output_budget,
+        output_limit=_output_limit(),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
         force_tool_choice=True,
@@ -3054,7 +3037,7 @@ async def test_resolved_task_budget_never_retries_the_same_truncated_allowance()
         if item.stage == "model_output"
     )
     assert trace.outcome == "truncated"
-    assert trace.details["outputBudget"]["policyKey"] == "bounded-task"
+    assert trace.details["outputLimit"]["maxTokens"] == 4_000
 
 
 @pytest.mark.asyncio
@@ -3072,19 +3055,6 @@ async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode
         _batch("candidate-call", "writeCandidate"),
     ])
     observer = RecordingObserver()
-    output_budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="reasoning-heavy-task",
-            base_tokens=4_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=8_000,
-            reasoning_reserve_tokens=4_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
-        context_window_tokens=128_000,
-        thinking_enabled=True,
-    )
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="write the candidate"),),
         model=ModelRequest(
@@ -3107,7 +3077,7 @@ async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode
             ),
         ),
         request=request,
-        output_budget=output_budget,
+        output_limit=_output_limit(),
         tools=(_schema("writeCandidate"),),
         scope_tools_to_observer=False,
     )
@@ -3130,7 +3100,7 @@ async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode
     )
     assert trace.details["reasoningOnly"] is True
     assert trace.details["fallbackReasoningMode"] is None
-    assert trace.details["outputBudget"]["policyKey"] == "reasoning-heavy-task"
+    assert trace.details["outputLimit"]["maxTokens"] == 4_000
 
 
 @pytest.mark.asyncio
@@ -3180,19 +3150,6 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
         _batch("write-call", "writeCandidate"),
     ])
     observer = RecordingObserver()
-    output_budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="reasoning-heavy-tool-chain",
-            base_tokens=4_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=8_000,
-            reasoning_reserve_tokens=4_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=32_000),
-        context_window_tokens=128_000,
-        thinking_enabled=True,
-    )
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="review and write"),),
         model=ModelRequest(
@@ -3212,7 +3169,7 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
             limits=RuntimeLimits(max_model_rounds=3, max_progress_rounds=0),
         ),
         request=request,
-        output_budget=output_budget,
+        output_limit=_output_limit(),
         tools=(_schema("readA"), _schema("writeCandidate")),
         scope_tools_to_observer=False,
     )
@@ -3769,7 +3726,7 @@ async def test_runtime_rejects_actual_tool_schema_cost_mismatch_before_model_cal
 
 
 @pytest.mark.asyncio
-async def test_runtime_forces_typed_output_reserve_on_normal_model_invocation():
+async def test_runtime_passes_the_exact_output_limit_to_normal_invocation():
     schema = _schema("readA")
     budget = _matching_budget(window=4_096, tools=(schema,), output=321)
     model = ScriptedModelGateway([_answer("done")])
@@ -3778,6 +3735,7 @@ async def test_runtime_forces_typed_output_reserve_on_normal_model_invocation():
         AgentRuntime(model_gateway=model),
         request=_request(context_window=4_096),
         context_budget=budget,
+        output_limit=_output_limit(321),
         tools=(schema,),
         scope_tools_to_observer=False,
     )
@@ -3788,7 +3746,7 @@ async def test_runtime_forces_typed_output_reserve_on_normal_model_invocation():
 
 
 @pytest.mark.asyncio
-async def test_runtime_preserves_typed_output_reserve_on_tool_choice_fallback():
+async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
     schema = _schema("readA")
     budget = _matching_budget(window=4_096, tools=(schema,), output=257)
     model = ScriptedModelGateway([
@@ -3805,6 +3763,7 @@ async def test_runtime_preserves_typed_output_reserve_on_tool_choice_fallback():
         ),
         request=_request(context_window=4_096),
         context_budget=budget,
+        output_limit=_output_limit(257),
         tools=(schema,),
         scope_tools_to_observer=False,
         force_tool_choice=True,
