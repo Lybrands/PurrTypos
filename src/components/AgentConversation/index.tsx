@@ -200,19 +200,20 @@ export default function AgentConversation({
             }
             if (message.role !== 'assistant') return null
             const hasVisibleContent = Boolean(
-              message.isError
-              || message.content
+              message.content
               || message.commentary
               || message.toolCallSegments?.length
               || message.delegations?.length
               || message.contextCompaction
-              || message.termination
-              || message.error,
+            )
+            const hasStatus = Boolean(
+              message.isError || message.termination || message.error,
             )
             const attachment = afterAssistantMessage?.(message, index)
             if (!assistantMessageVisible({
               hasVisibleContent,
               hasAttachment: Boolean(attachment),
+              hasStatus,
               isLast,
               loading,
             })) return null
@@ -220,10 +221,10 @@ export default function AgentConversation({
               <article className="agent-conversation__message is-assistant" key={`message-${index}`}>
                 {message.isError ? (
                   <ErrorReportNotice
-                    message={message.content || '本轮执行失败'}
+                    message={message.error || '本轮执行失败'}
                     report={message.errorReport}
                   />
-                ) : hasVisibleContent || (isLast && loading) ? (
+                ) : hasVisibleContent || hasStatus || (isLast && loading) ? (
                   <AssistantMessageBody
                     index={index}
                     message={message}
