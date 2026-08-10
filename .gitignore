@@ -56,3 +56,6 @@ Desktop.ini
 
 # IDE (personal / machine-specific; keep shared .vscode tasks if you commit them)
 .idea/
+
+# Local isolated implementation worktrees
+.worktrees/
