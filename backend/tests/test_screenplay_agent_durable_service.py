@@ -11,6 +11,7 @@ from application.screenplay_agent_service import (
     ResolvedScreenplayTask,
     ScreenplayAgentService,
 )
+from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from domains.screenplay_agent import (
@@ -20,9 +21,6 @@ from domains.screenplay_agent import (
     ScreenplayOperationCreateCommand,
 )
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
-from infrastructure.persistence.sqlite_screenplay_task_output_store import (
-    SqliteScreenplayTaskOutputStore,
-)
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
@@ -67,8 +65,9 @@ class _Resolver:
 
 class _UnitExecutor:
     def __init__(self, db) -> None:
-        self._outputs = SqliteScreenplayTaskOutputStore(db)
+        self._parts = ScreenplayPartArtifactQuery(db)
         self.calls = []
+        self.output_refs = {}
 
     async def execute(self, context, signal=None):
         del signal
@@ -85,14 +84,20 @@ class _UnitExecutor:
             output = {"revisionId": "sprev-durable-candidate"}
         else:
             output = {"partId": context.unit.id}
-        output_ref = await self._outputs.put(
+        ref = await self._parts.write_host_part(
+            project_id=str(context.task.owner_id),
             task_id=context.task.id,
             unit_id=context.unit.id,
+            semantic_key=str(context.unit.semantic_key),
+            part_kind=str(context.unit.metadata.get("unitKind") or ""),
             output=output,
         )
+        self.output_refs[context.unit.id] = ref.output_ref
         return LongTaskUnitResult(
-            output_ref=output_ref,
-            run_id=str(output.get("runId") or "") or None,
+            output_ref=ref.output_ref,
+            run_id=ref.run_id,
+            artifact_digest=ref.content_digest,
+            validation_receipt=ref.validation_receipt,
             metadata=(
                 {"revisionId": output["revisionId"]}
                 if "revisionId" in output else {}
@@ -342,7 +347,7 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     ]
     assert [unit["id"] for unit in task["units"]] == expected_ids
     def output_ref(unit_id: str) -> str:
-        return f"screenplay-task-output://{task['id']}/{unit_id}"
+        return executor.output_refs[unit_id]
     assert executor.calls == [
         ("evidence:4", {}),
         ("draft:4:ep04_s01", {"evidence:4": output_ref("evidence:4")}),

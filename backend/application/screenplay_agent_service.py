@@ -46,6 +46,7 @@ from domains.screenplay_agent import (
 from application.screenplay_manifest_compiler import (
     compile_screenplay_manifest,
 )
+from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from exceptions import NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
@@ -55,9 +56,6 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 )
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
-)
-from infrastructure.persistence.sqlite_screenplay_task_output_store import (
-    SqliteScreenplayTaskOutputStore,
 )
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
@@ -133,7 +131,7 @@ class ScreenplayAgentService:
         self._long_tasks = SqliteLongTaskRepository(db)
         self._operations = SqliteScreenplayOperationRepository(db)
         self._work_items = SqliteWorkItemRepository(db)
-        self._outputs = SqliteScreenplayTaskOutputStore(db)
+        self._parts = ScreenplayPartArtifactQuery(db)
 
     async def submit_turn(
         self,
@@ -269,6 +267,7 @@ class ScreenplayAgentService:
                     "turnId": turn_id,
                     "targetRole": compiled.target_role,
                     "plannerRunId": planned.run_id,
+                    "sourceRevisionRefs": list(resolved.source_revision_refs),
                 },
             )
             dispatcher = RecipeLongTaskDispatcher(
@@ -348,19 +347,19 @@ class ScreenplayAgentService:
                 )
                 await self._stream.terminal(turn_id)
                 return
-            published = await self._outputs.load_unit(
+            published = await self._parts.require_unit(
                 receipt.task_id,
                 "publish-candidate",
             )
-            revision_id = str((published or ("", {}))[1].get("revisionId") or "")
+            revision_id = str((published or {}).get("revisionId") or "")
             if not revision_id:
                 raise RuntimeError("screenplay task did not publish a Revision")
-            composed = await self._outputs.load_unit(
+            composed = await self._parts.require_unit(
                 receipt.task_id,
                 "compose-final-response",
             )
             final_response = str(
-                (composed or ("", {}))[1].get("finalResponse") or ""
+                (composed or {}).get("finalResponse") or ""
             ).strip()
             if not final_response:
                 raise RuntimeError(

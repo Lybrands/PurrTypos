@@ -313,8 +313,8 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
             "screenplay_agent_turns",
             "screenplay_agent_events",
             "screenplay_agent_chunks",
-            "screenplay_agent_task_outputs",
         }.issubset(native_tables)
+        assert "screenplay_agent_task_outputs" not in native_tables
         assert "screenplay_agent_jobs" not in native_tables
         assert "screenplay_agent_job_steps" not in native_tables
         assert "screenplay_conversation_turns" not in native_tables

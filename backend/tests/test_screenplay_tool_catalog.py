@@ -31,6 +31,7 @@ from purra.contracts import (
     ToolCallDelta,
 )
 from purra.errors import ModelGatewayError
+from purra.artifacts.errors import ArtifactValidationError
 from purra.events import AgentEvent, CoreEventType
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
@@ -271,8 +272,7 @@ async def test_candidate_artifact_stores_long_content_only_once(
 async def test_candidate_artifact_accepts_one_incremental_scene(
     screenplay_tool_db,
 ):
-    catalog = build_screenplay_tool_catalog(db=screenplay_tool_db)
-    write = _tool_handler(catalog, "writeScreenplayCandidatePart")
+    artifacts = ScreenplayCandidateArtifacts(screenplay_tool_db)
     state = ExecutionState(
         domain={
             "projectId": "screenplay-project",
@@ -290,14 +290,80 @@ async def test_candidate_artifact_accepts_one_incremental_scene(
         "sceneText": "只写入当前场景正文。",
     }
 
-    await write(state, {"candidate": scene})
-    finalized = await ScreenplayCandidateArtifacts(
-        screenplay_tool_db
-    ).finalize_run(state.run_id)
+    await artifacts.write(state, {"candidate": scene})
+    finalized = await artifacts.finalize_run(state.run_id)
 
     assert finalized["partType"] == "scene"
     assert finalized["payload"] == scene
     assert finalized["contentText"] == scene["sceneText"]
+
+
+async def test_invalid_candidate_part_cannot_be_finalized(
+    screenplay_tool_db,
+):
+    artifacts = ScreenplayCandidateArtifacts(screenplay_tool_db)
+    state = ExecutionState(
+        domain={
+            "projectId": "screenplay-project",
+            "taskId": "screenplay-task",
+            "unitId": "draft:4:scene-1",
+            "targetRole": "screenplayDraft",
+            "expectedPartType": "scene",
+            "expectedPartKey": "scene-1",
+        },
+        run_id="run-invalid-scene",
+    )
+
+    with pytest.raises(ArtifactValidationError):
+        await artifacts.write(state, {"candidate": {
+            "sceneId": "another-scene",
+            "processSummary": "错误场景。",
+            "sceneText": "不应提交。",
+        }})
+
+    artifact = await screenplay_tool_db.fetch_one(
+        "SELECT id, status FROM ai_agent_artifacts WHERE run_id = ?",
+        [state.run_id],
+    )
+    assert artifact is not None
+    assert artifact["status"] == "open"
+    assert await screenplay_tool_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_batches "
+        "WHERE artifact_id = ?",
+        [artifact["id"]],
+    ) == {"count": 0}
+
+
+async def test_candidate_artifact_has_no_hidden_character_limit(
+    screenplay_tool_db,
+):
+    catalog = build_screenplay_tool_catalog(db=screenplay_tool_db)
+    write = _tool_handler(catalog, "writeScreenplayCandidatePart")
+    state = ExecutionState(
+        domain={
+            "projectId": "screenplay-project",
+            "taskId": "screenplay-task",
+            "unitId": "section:creativeBrief:premise",
+            "targetRole": "creativeBrief",
+            "expectedPartType": "document_section",
+            "expectedPartKey": "premise",
+        },
+        run_id="run-long-document-section",
+    )
+    section = {
+        "sectionKey": "premise",
+        "title": "故事前提",
+        "executionSummary": "完成当前最小业务章节。",
+        "contentText": "正文" * 50_000,
+        "contentJson": {"fields": {"premise": "人物重新相遇。"}},
+    }
+
+    await write(state, {"candidate": section})
+    finalized = await ScreenplayCandidateArtifacts(
+        screenplay_tool_db
+    ).finalize_run(state.run_id)
+
+    assert finalized["contentText"] == section["contentText"]
 
 
 async def test_source_tool_persists_a_run_bound_evidence_receipt(

@@ -796,6 +796,27 @@ async def _task_with_completed_and_active_unit(db, suffix: str):
 
 
 @pytest.mark.asyncio
+async def test_unit_completion_replay_requires_the_same_artifact_receipt(
+    long_task_db,
+):
+    repository, task, _active = await _task_with_completed_and_active_unit(
+        long_task_db,
+        "artifact-receipt",
+    )
+    with pytest.raises(ValueError, match="completion conflicts"):
+        await repository.complete_unit(
+            task.id,
+            "completed",
+            worker_id="worker-1",
+            result=LongTaskUnitResult(
+                output_ref="artifact://completed",
+                artifact_digest="sha256:different",
+                validation_receipt={"valid": True, "receipt": "different"},
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_exhausted_recoverable_unit_pauses_without_canceling_completed_units(
     long_task_db,
 ):
