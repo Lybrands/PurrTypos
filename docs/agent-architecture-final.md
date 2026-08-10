@@ -1,6 +1,6 @@
 # PurrTypos Agent 最终架构
 
-> 历史状态：本文记录上一轮 Writing Agent 三层架构的完成状态，不再是 2026-08 Agent Core/剧本对话重构的权威目标。当前层级所有权、迁移门槛与断线语义以 [`docs/design/agent-core-screenplay-refactor-charter.md`](design/agent-core-screenplay-refactor-charter.md) 为准。
+> 历史状态：本文记录上一轮 Writing Agent 三层架构的完成状态，不再是 2026-08 PurrA/剧本对话重构的权威目标。当前层级所有权、迁移门槛与断线语义以 [`docs/design/purra-screenplay-refactor-charter.md`](design/purra-screenplay-refactor-charter.md) 为准。
 
 ## 1. 架构目标
 
@@ -13,13 +13,13 @@ Agent 的核心不是“让模型可以调用工具”，而是让不确定的�
 | API / Stream | 接收请求、映射 SSE、传播连接中断 | `routers/ai.py`、`application/sse_mapping.py` | 决定工具安全策略 |
 | Composition | 装配每次完整 Agent Run | `application/agent_composition.py` | 实现 Core 或 Writing 规则 |
 | Request Mapping | 将 HTTP DTO 转为 Core 请求与 Writing 上下文 | `application/request_mapping.py` | 静默丢弃不支持的调用方工具 |
-| Core Runtime | 规划、上下文预算、模型轮次、工具循环与终态 | `agent_core/engine.py`、`agent_core/runtime.py` | 导入具体写作业务 |
-| Core Tool Boundary | Schema、allowlist、批次校验、审批与执行限制 | `agent_core/tools/` | 相信模型自行遵守权限 |
+| Core Runtime | 规划、上下文预算、模型轮次、工具循环与终态 | `purra/engine.py`、`purra/runtime.py` | 导入具体写作业务 |
+| Core Tool Boundary | Schema、allowlist、批次校验、审批与执行限制 | `purra/tools/` | 相信模型自行遵守权限 |
 | Writing Policy | 定义 Planning、工具风险和响应语义 | `domains/writing/` | 依赖 HTTP 或供应商 SDK |
 | Writing Infrastructure | 执行具体读写并校验对象归属 | `infrastructure/writing/` | 修改 Core 生命周期 |
 | Model Infrastructure | 对接供应商并规范化流式协议 | `infrastructure/models/` | 决定 Writing 语义 |
 | Persistence | 持久化 Run、Trace 和 Writing 数据 | `infrastructure/persistence/` | 重新实现状态机 |
-| Deterministic Evaluation | 验证历史事故和安全不变量 | `agent_core/evaluation/`、`domains/writing/evaluation/` | 调用外部模型或改变运行状态 |
+| Deterministic Evaluation | 验证历史事故和安全不变量 | `purra/evaluation/`、`domains/writing/evaluation/` | 调用外部模型或改变运行状态 |
 
 ## 3. 一次 Agent Run 的数据流
 

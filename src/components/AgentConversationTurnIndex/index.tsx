@@ -65,9 +65,8 @@ export function buildAgentConversationTurnIndex(
         break
       }
     }
-    const assistantSource = assistant?.contentAfterToolCalls
-      || assistant?.content
-      || assistant?.thinking
+    const assistantSource = assistant?.content
+      || assistant?.commentary
       || assistant?.toolCallSegments?.flatMap((segment) => segment.labels).join('、')
     turns.push({
       dataIndex,

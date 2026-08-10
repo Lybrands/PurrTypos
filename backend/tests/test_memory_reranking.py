@@ -4,12 +4,14 @@ import json
 
 import pytest
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
     ModelCompletion,
+    ModelFinishReason,
     ModelRequest,
 )
+from purra.model_execution import ManagedModelExecutor
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.memory_reranking import MemoryCandidateCard
 
@@ -36,6 +38,7 @@ class _Gateway:
                 }, ensure_ascii=False),
             ),
             model="judge-model",
+            finish_reason=ModelFinishReason.STOP,
         )
 
     async def stream(self, messages, invocation, signal=None):  # pragma: no cover
@@ -58,7 +61,7 @@ def _candidate(record_id: str, state: str) -> MemoryCandidateCard:
 @pytest.mark.asyncio
 async def test_model_reranker_selects_only_host_candidates():
     gateway = _Gateway("record-2")
-    reranker = ModelBackedMemoryReranker(gateway)
+    reranker = ModelBackedMemoryReranker(ManagedModelExecutor(gateway))
 
     result = await reranker.rerank(
         query="续写两人决裂后的对话",
@@ -86,7 +89,7 @@ async def test_model_reranker_selects_only_host_candidates():
 @pytest.mark.asyncio
 async def test_model_reranker_rejects_unknown_candidate_ids():
     gateway = _Gateway("invented-record")
-    reranker = ModelBackedMemoryReranker(gateway)
+    reranker = ModelBackedMemoryReranker(ManagedModelExecutor(gateway))
 
     with pytest.raises(ValueError, match="unknown candidate"):
         await reranker.rerank(

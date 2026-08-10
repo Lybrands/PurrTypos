@@ -1,5 +1,5 @@
 import React from 'react'
-import { RobotIcon } from '@/purr-components'
+import { LoadingIcon, RobotIcon } from '@/purr-components'
 import type { ChatMessage } from '../../agent-runtime'
 import AssistantMessageBody from '../../Workspace/AiPanel/components/ChatMessageList/AssistantMessageBody'
 import ErrorReportNotice from '../../Workspace/AiPanel/components/ChatMessageList/ErrorReportNotice'
@@ -19,13 +19,14 @@ import './index.scss'
 export interface AgentConversationProps {
   messages: ChatMessage[]
   loading: boolean
+  /** 历史消息及其持久化执行过程仍在恢复时，避免先绘制不完整内容。 */
+  initializing?: boolean
   emptyTitle?: string
   emptyDescription?: string
-  afterMessages?: React.ReactNode
-  /** 供业务产物以 Portal 形式附着到最后一轮回复之后。 */
-  afterMessagesHostRef?: React.Ref<HTMLDivElement>
-  /** Portal 产物挂载或状态变化时，触发对话跟随到底部。 */
-  afterMessagesVersion?: string | number
+  /** 将业务操作附着到产生它的助手消息，而不是整个会话末尾。 */
+  afterAssistantMessage?: (message: ChatMessage, index: number) => React.ReactNode
+  /** 消息附件状态变化时，触发仍在跟随输出的会话继续滚动。 */
+  messageAttachmentsVersion?: string | number
   /** 编辑历史提问后，从该轮重新开始对话。 */
   onEditMessage?: (messageIndex: number, content: string) => void | Promise<void>
 }
@@ -33,15 +34,14 @@ export interface AgentConversationProps {
 export default function AgentConversation({
   messages,
   loading,
+  initializing = false,
   emptyTitle = '等待开始对话',
   emptyDescription = '发送任务后，这里会展示 Agent 的执行过程与结果。',
-  afterMessages,
-  afterMessagesHostRef,
-  afterMessagesVersion,
+  afterAssistantMessage,
+  messageAttachmentsVersion,
   onEditMessage,
 }: AgentConversationProps) {
   const viewportRef = React.useRef<HTMLDivElement | null>(null)
-  const portalHostRef = React.useRef<HTMLDivElement | null>(null)
   const scrollFollowStateRef = React.useRef(createScrollFollowState())
   const turnIndexItems = React.useMemo(
     () => buildAgentConversationTurnIndex(messages),
@@ -84,12 +84,17 @@ export default function AgentConversation({
     )
   }, [viewportIsAtBottom])
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
+    if (initializing) {
+      scrollFollowStateRef.current = createScrollFollowState()
+      setActiveTurnIndex(0)
+      return
+    }
     if (!scrollFollowStateRef.current.userDetached) {
       scrollToBottom()
       setActiveTurnIndex(Math.max(0, turnIndexItems.length - 1))
     }
-  }, [afterMessages, afterMessagesVersion, loading, messages, scrollToBottom, turnIndexItems.length])
+  }, [initializing, loading, messageAttachmentsVersion, messages, scrollToBottom, turnIndexItems.length])
 
   React.useEffect(() => {
     setActiveTurnIndex((current) => Math.min(
@@ -125,38 +130,6 @@ export default function AgentConversation({
     })
   }, [detachFromOutput, turnIndexItems])
 
-  const setPortalHost = React.useCallback((node: HTMLDivElement | null) => {
-    portalHostRef.current = node
-    if (typeof afterMessagesHostRef === 'function') {
-      afterMessagesHostRef(node)
-    } else if (afterMessagesHostRef) {
-      (afterMessagesHostRef as React.MutableRefObject<HTMLDivElement | null>).current = node
-    }
-  }, [afterMessagesHostRef])
-
-  React.useEffect(() => {
-    const host = portalHostRef.current
-    if (!host) return undefined
-    let frame = 0
-    const followPortalOutput = () => {
-      window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(() => {
-        if (!scrollFollowStateRef.current.userDetached) scrollToBottom()
-      })
-    }
-    const observer = new MutationObserver(followPortalOutput)
-    observer.observe(host, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    })
-    followPortalOutput()
-    return () => {
-      observer.disconnect()
-      window.cancelAnimationFrame(frame)
-    }
-  }, [afterMessagesVersion, scrollToBottom])
-
   return (
     <div className="agent-conversation-shell">
       <div
@@ -182,7 +155,12 @@ export default function AgentConversation({
           updateActiveTurn(target)
         }}
       >
-      {messages.length === 0 && !afterMessages ? (
+      {initializing ? (
+        <div className="agent-conversation__empty agent-conversation__initializing" role="status">
+          <span><LoadingIcon spin /></span>
+          <strong>正在恢复对话</strong>
+        </div>
+      ) : messages.length === 0 ? (
         <div className="agent-conversation__empty">
           <span><RobotIcon /></span>
           <strong>{emptyTitle}</strong>
@@ -223,7 +201,7 @@ export default function AgentConversation({
             const hasVisibleContent = Boolean(
               message.isError
               || message.content
-              || message.thinking
+              || message.commentary
               || message.toolCallSegments?.length
               || message.delegations?.length
               || message.contextCompaction
@@ -231,6 +209,7 @@ export default function AgentConversation({
               || message.error,
             )
             if (!hasVisibleContent && !(isLast && loading)) return null
+            const attachment = afterAssistantMessage?.(message, index)
             return (
               <article className="agent-conversation__message is-assistant" key={`message-${index}`}>
                 {message.isError ? (
@@ -248,7 +227,7 @@ export default function AgentConversation({
                       isLast
                       && loading
                       && !message.content
-                      && !message.thinking
+                      && !message.commentary
                       && !message.toolCallSegments?.length
                     )}
                     setScrolledUpByReason={(value) => {
@@ -256,21 +235,19 @@ export default function AgentConversation({
                     }}
                   />
                 ) : null}
+                {attachment ? (
+                  <div className="agent-conversation__artifact">
+                    {attachment}
+                  </div>
+                ) : null}
               </article>
             )
           })}
-          {afterMessages}
-          {afterMessagesHostRef ? (
-            <div
-              ref={setPortalHost}
-              className="agent-conversation__after-messages-host"
-            />
-          ) : null}
         </div>
       )}
       </div>
       <AgentConversationTurnIndex
-        items={turnIndexItems}
+        items={initializing ? [] : turnIndexItems}
         activeIndex={activeTurnIndex}
         onSelect={selectTurn}
       />

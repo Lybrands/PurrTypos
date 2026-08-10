@@ -13,8 +13,58 @@ async def _try_exec(db, sql: str) -> None:
         pass
 
 
+async def _normalize_revision_columns(db) -> None:
+    columns = {
+        str(column["name"])
+        for column in await db.fetch_all("PRAGMA table_info(screenplay_revisions)")
+    }
+    if (
+        "operation_id" not in columns
+        and "agent_job_id" not in columns
+        and "agent_task_id" in columns
+    ):
+        return
+    agent_task_id = "agent_task_id" if "agent_task_id" in columns else "NULL"
+    async with db.transaction():
+        await db.execute("DROP TABLE IF EXISTS screenplay_revisions_without_operation")
+        await db.execute("""CREATE TABLE screenplay_revisions_without_operation (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL,
+            deliverable_id TEXT NOT NULL,
+            revision_no INTEGER NOT NULL,
+            parent_revision_id TEXT DEFAULT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            content_digest TEXT NOT NULL,
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            root_run_id TEXT DEFAULT NULL,
+            finalizing_run_id TEXT DEFAULT NULL,
+            created_by TEXT NOT NULL,
+            agent_task_id TEXT DEFAULT NULL UNIQUE,
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(deliverable_id, revision_no)
+        )""")
+        await db.execute(
+            "INSERT INTO screenplay_revisions_without_operation "
+            "(id, project_id, deliverable_id, revision_no, parent_revision_id, "
+            "schema_version, content_digest, summary_json, root_run_id, "
+            "finalizing_run_id, created_by, agent_task_id, create_time) "
+            "SELECT id, project_id, deliverable_id, revision_no, "
+            "parent_revision_id, schema_version, content_digest, summary_json, "
+            "root_run_id, finalizing_run_id, "
+            "CASE WHEN created_by IN ('agent', 'screenplay_agent_job', "
+            "'screenplay_agent_task') THEN 'screenplay_agent_task' "
+            "ELSE created_by END, "
+            f"{agent_task_id}, create_time FROM screenplay_revisions"
+        )
+        await db.execute("DROP TABLE screenplay_revisions")
+        await db.execute(
+            "ALTER TABLE screenplay_revisions_without_operation "
+            "RENAME TO screenplay_revisions"
+        )
+
+
 async def init_screenplay_v2_schema(db) -> None:
-    """Create the v2 aggregate, immutable revision, and operation tables."""
+    """Create the native project aggregate and immutable Revision store."""
 
     await _try_exec(
         db,
@@ -47,13 +97,14 @@ async def init_screenplay_v2_schema(db) -> None:
         schema_version INTEGER NOT NULL DEFAULT 1,
         content_digest TEXT NOT NULL,
         summary_json TEXT NOT NULL DEFAULT '{}',
-        operation_id TEXT DEFAULT NULL UNIQUE,
         root_run_id TEXT DEFAULT NULL,
         finalizing_run_id TEXT DEFAULT NULL,
         created_by TEXT NOT NULL,
+        agent_task_id TEXT DEFAULT NULL UNIQUE,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(deliverable_id, revision_no)
     )""")
+    await _normalize_revision_columns(db)
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_revisions_project "
         "ON screenplay_revisions(project_id, deliverable_id, revision_no DESC)"
@@ -116,116 +167,13 @@ async def init_screenplay_v2_schema(db) -> None:
         "ON screenplay_working_copies(project_id, update_time DESC)"
     )
 
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_operations (
-        id TEXT PRIMARY KEY NOT NULL,
-        project_id TEXT NOT NULL,
-        command_id TEXT NOT NULL,
-        target_role TEXT NOT NULL,
-        intent_json TEXT NOT NULL DEFAULT '{}',
-        base_project_revision INTEGER NOT NULL,
-        base_heads_json TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'queued',
-        progress_json TEXT NOT NULL DEFAULT '{}',
-        result_revision_id TEXT DEFAULT NULL,
-        error_json TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(project_id, command_id)
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_operations_project_status "
-        "ON screenplay_operations(project_id, status, update_time DESC)"
-    )
-    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_screenplay_operations_one_active_target
-        ON screenplay_operations(project_id, target_role)
-        WHERE status IN ('queued', 'running', 'paused')
-    """)
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_operation_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL DEFAULT '{}',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(operation_id, sequence)
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_operation_events_cursor "
-        "ON screenplay_operation_events(operation_id, sequence)"
-    )
+    await db.execute("DROP TABLE IF EXISTS screenplay_operation_events")
+    await db.execute("DROP TABLE IF EXISTS screenplay_operations")
 
-    # The first native Conversation experiment allowed one Turn to retain a
-    # stale Run binding across recovery.  Conversation data is disposable in
-    # the current test-stage product, so retire that incompatible shape once
-    # instead of carrying a migration/dual-read path into the rewrite.
-    conversation_columns = await db.fetch_all(
-        "PRAGMA table_info(screenplay_conversation_turns)"
-    )
-    if conversation_columns and "attempt" not in {
-        str(column.get("name") or "") for column in conversation_columns
-    }:
-        await db.execute("DROP TABLE IF EXISTS screenplay_conversation_events")
-        await db.execute("DROP TABLE IF EXISTS screenplay_conversation_turns")
-        await db.execute(
-            "DELETE FROM screenplay_command_receipts WHERE command_type IN "
-            "('submitConversationTurn', 'resumeConversationTurn', "
-            "'cancelConversationTurn')"
-        )
-
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_conversation_turns (
-        id TEXT PRIMARY KEY NOT NULL,
-        project_id TEXT NOT NULL,
-        session_id INTEGER NOT NULL,
-        command_id TEXT NOT NULL UNIQUE,
-        request_digest TEXT NOT NULL,
-        route TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'queued',
-        attempt INTEGER NOT NULL DEFAULT 0,
-        user_content TEXT NOT NULL,
-        assistant_content TEXT NOT NULL DEFAULT '',
-        runtime_profile_json TEXT NOT NULL DEFAULT '{}',
-        operation_id TEXT DEFAULT NULL UNIQUE,
-        run_id TEXT DEFAULT NULL UNIQUE,
-        revision_id TEXT DEFAULT NULL,
-        error_json TEXT DEFAULT NULL,
-        execution_owner_id TEXT DEFAULT NULL,
-        lease_expires_at_ms INTEGER DEFAULT NULL,
-        heartbeat_at_ms INTEGER DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        CHECK(route IN ('read_only', 'operation')),
-        CHECK(status IN ('queued', 'running', 'completed', 'failed', 'canceled'))
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_conversation_turns_session "
-        "ON screenplay_conversation_turns(session_id, create_time, id)"
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_conversation_turns_recovery "
-        "ON screenplay_conversation_turns(status, lease_expires_at_ms)"
-    )
-    await db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS "
-        "idx_screenplay_conversation_one_active_turn "
-        "ON screenplay_conversation_turns(session_id) "
-        "WHERE status IN ('queued', 'running')"
-    )
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_conversation_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id TEXT NOT NULL,
-        session_id INTEGER NOT NULL,
-        turn_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL DEFAULT '{}',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(turn_id, sequence)
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_conversation_events_cursor "
-        "ON screenplay_conversation_events(session_id, id)"
-    )
+    # Test-stage cutover: the rewritten Agent intentionally has no compatibility
+    # reader for the discarded operation-bound conversation model.
+    await db.execute("DROP TABLE IF EXISTS screenplay_conversation_events")
+    await db.execute("DROP TABLE IF EXISTS screenplay_conversation_turns")
 
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_revision_source_refs (
         revision_id TEXT NOT NULL,
@@ -313,6 +261,21 @@ async def init_screenplay_v2_runtime_schema(db) -> None:
     for project in legacy_projects:
         await delete_screenplay_project_data(db, str(project["id"]))
 
+    await db.execute(
+        "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN ("
+        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
+    )
+    await db.execute(
+        "DELETE FROM ai_agent_artifact_claims WHERE artifact_id IN ("
+        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
+    )
+    await db.execute(
+        "DELETE FROM ai_agent_artifact_batches WHERE artifact_id IN ("
+        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
+    )
+    await db.execute(
+        "DELETE FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay'"
+    )
     for table in (
         "screenplay_document_source_refs",
         "screenplay_source_refs",

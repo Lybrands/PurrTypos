@@ -8,8 +8,7 @@ const { loadTypeScriptModule } = require('../../../../scripts/load-typescript-mo
 const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, 'streamOptions.ts'))
 const {
   handleDelta,
-  handleThinkingDelta,
-  handleThinkingSnapshot,
+  handleCommentaryDelta,
 } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/streaming.ts'),
 )
@@ -20,6 +19,7 @@ const {
   handleAgentDelegation,
   handleAgentRunTerminal,
   handleLongTaskDispatched,
+  handleLongTaskProgress,
 } = loadTypeScriptModule(
   path.join(__dirname, 'chunkHandlers/agentRun.ts'),
 )
@@ -69,6 +69,7 @@ const {
 )
 const {
   getActiveTaskPlan,
+  getTaskPlanCountLabel,
   getTaskPlanProgress,
   getVisibleTaskPlanSteps,
   shouldShowTaskPlan,
@@ -149,7 +150,7 @@ test('built-in selection sends its model profile while custom models stay generi
   assert.equal(Object.hasOwn(custom.options, 'max_tokens'), false)
 })
 
-test('renderer never sends its legacy output budget to Agent Core', () => {
+test('renderer never sends its legacy output budget to PurrA', () => {
   const configured = buildStreamOptions({
     cfg: {
       id: 'mimo',
@@ -167,13 +168,14 @@ test('renderer never sends its legacy output budget to Agent Core', () => {
   assert.equal(Object.hasOwn(configured.options, 'max_tokens'), false)
 })
 
-test('thinking SSE deltas become visible thinking blocks before answer text', () => {
-  let conversations = [{ role: 'assistant', content: '', thinking: '' }]
+test('answer deltas stay buffered while commentary continues and commit only on done', () => {
+  let conversations = [{ role: 'assistant', content: '', commentary: '' }]
+  let loading = true
   const acc = {
-    thinking: '',
+    commentary: '',
     response: '',
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
     toolCallSegments: [],
   }
   const ctx = {
@@ -182,48 +184,49 @@ test('thinking SSE deltas become visible thinking blocks before answer text', ()
     scheduleCommit: (updater) => {
       conversations = updater(conversations)
     },
+    flushCommits: () => {},
+    setConversations: (updater) => {
+      conversations = updater(conversations)
+    },
+    setLoading: (next) => {
+      loading = next
+    },
+    cleanup: () => {},
+    persistConversation: false,
   }
 
-  handleThinkingDelta({ thinkingDelta: '模型思考内容' }, ctx)
-  assert.equal(acc.thinking, '模型思考内容')
-  assert.equal(conversations[0].thinking, '模型思考内容')
+  handleCommentaryDelta({ commentaryDelta: '正在核对人物连续性。\n' }, ctx)
+  assert.equal(acc.commentary, '正在核对人物连续性。\n')
+  assert.equal(conversations[0].commentary, '正在核对人物连续性。\n')
 
   handleDelta({ delta: '最终答案' }, ctx)
+  assert.equal(acc.response, '最终答案')
+  assert.equal(conversations[0].content, '')
+
+  handleCommentaryDelta({ commentaryDelta: '继续完成剩余步骤。' }, ctx)
+  assert.equal(conversations[0].content, '')
+  assert.equal(
+    conversations[0].commentary,
+    '正在核对人物连续性。\n继续完成剩余步骤。',
+  )
+
+  assert.equal(handleDone({ done: true }, ctx), true)
   assert.equal(conversations[0].content, '最终答案')
-  assert.deepEqual(conversations[0].thinkingBlocks, ['模型思考内容'])
+  assert.deepEqual(
+    conversations[0].commentaryBlocks,
+    ['正在核对人物连续性。\n继续完成剩余步骤。'],
+  )
+  assert.equal(loading, false)
 })
 
-test('a replay snapshot replaces live thinking instead of duplicating it', () => {
-  let conversations = [{ role: 'assistant', content: '', thinking: '部分思考' }]
+test('commentary and tool calls keep their actual interleaved order', () => {
+  let conversations = [{ role: 'assistant', content: '', commentary: '' }]
   const acc = {
-    thinking: '部分思考',
+    commentary: '',
     response: '',
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
-  }
-  const ctx = {
-    acc,
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-
-  handleThinkingSnapshot({ thinkingSnapshot: '完整思考内容' }, ctx)
-
-  assert.equal(acc.thinking, '完整思考内容')
-  assert.equal(conversations[0].thinking, '完整思考内容')
-})
-
-test('thinking and tool calls keep their actual interleaved order', () => {
-  let conversations = [{ role: 'assistant', content: '', thinking: '' }]
-  const acc = {
-    thinking: '',
-    response: '',
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
     toolCallSegments: [],
-    contentAfterToolCalls: '',
   }
   const ctx = {
     acc,
@@ -240,44 +243,99 @@ test('thinking and tool calls keep their actual interleaved order', () => {
       function: { name, arguments: '{}' },
     }],
     toolCallsInProgress: true,
-    partialContent: '',
-    partialThinking: '',
   })
 
   handleToolCallsInProgress(toolChunk('listBookCharacters'), ctx)
-  handleThinkingDelta({ thinkingDelta: '读取列表后继续判断' }, ctx)
+  handleCommentaryDelta({ commentaryDelta: '读取列表后继续判断' }, ctx)
   handleToolCallsInProgress(toolChunk('getBookCharacters'), ctx)
 
   assert.equal(
-    conversations[0].toolCallSegments[0].thinkingBlockIndex,
+    conversations[0].toolCallSegments[0].commentaryBlockIndex,
     null,
   )
   assert.equal(
-    conversations[0].toolCallSegments[1].thinkingBlockIndex,
+    conversations[0].toolCallSegments[1].commentaryBlockIndex,
     0,
   )
   assert.deepEqual(
     buildAssistantTimeline(conversations[0], { messageIndex: 0 })
       .map((part) => part.type),
-    ['tools', 'thinking', 'tools'],
+    ['tools', 'commentary', 'tools'],
   )
 })
 
-test('legacy missing tool-round thinking stays after all recorded tools', () => {
-  const timeline = buildAssistantTimeline({
+test('unassigned commentary stays after all recorded tools', () => {
+  const message = {
     role: 'assistant',
     content: '最终答复',
-    contentAfterToolCalls: '最终答复',
-    thinkingBlocks: ['两个工具完成后的最终思考'],
+    commentaryBlocks: ['两个工具完成后的公开说明'],
     toolCallSegments: [
-      { textBefore: '', labels: ['查看人物列表'] },
-      { textBefore: '', labels: ['查看人物信息'] },
+      { commentaryBlockIndex: null, labels: ['查看人物列表'] },
+      { commentaryBlockIndex: null, labels: ['查看人物信息'] },
     ],
-  }, { messageIndex: 0 })
+  }
+  const timeline = buildAssistantTimeline(message, { messageIndex: 0 })
 
   assert.deepEqual(
     timeline.map((part) => part.type),
-    ['tools', 'tools', 'thinking', 'text'],
+    ['tools', 'tools', 'commentary', 'text'],
+  )
+  assert.deepEqual(
+    buildAssistantTimeline(message, {
+      messageIndex: 0,
+      isStreaming: true,
+      isLastAssistant: true,
+      loading: true,
+    }).map((part) => part.type),
+    ['tools', 'tools', 'commentary'],
+  )
+})
+
+test('durable task progress stays out of the work log', () => {
+  let conversations = [{ role: 'assistant', content: '' }]
+  const acc = {}
+  const ctx = {
+    acc,
+    isVisibleSession: () => true,
+    scheduleCommit: (updater) => {
+      conversations = updater(conversations)
+    },
+  }
+
+  handleLongTaskProgress({
+    longTaskProgress: {
+      runId: 'turn-1',
+      taskId: 'task-1',
+      status: 'running',
+      revision: 2,
+      totalUnits: 2,
+      completedUnits: 0,
+      failedUnits: 0,
+      units: [{
+        id: 'generate',
+        position: 0,
+        title: '生成审阅报告',
+        status: 'claimed',
+        attempt: 1,
+        maxAttempts: 2,
+      }, {
+        id: 'publish',
+        position: 1,
+        title: '整理并发布候选稿',
+        status: 'pending',
+        attempt: 0,
+        maxAttempts: 1,
+      }],
+    },
+  }, ctx)
+
+  assert.equal(acc.longTaskId, 'task-1')
+  assert.equal(conversations[0].longTaskId, 'task-1')
+  assert.equal(conversations[0].longTaskProgress, undefined)
+  assert.deepEqual(
+    buildAssistantTimeline(conversations[0], { messageIndex: 0 })
+      .map((part) => part.type),
+    [],
   )
 })
 
@@ -337,7 +395,7 @@ test('interleaved child run deltas stay isolated by delegation', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   const acc = {
     response: '',
-    thinking: '',
+    commentary: '',
     sessionId: 1,
     needsTitle: false,
     userText: 'coordinate',
@@ -783,25 +841,26 @@ test('task header does not reuse a completed plan from the previous turn', () =>
   assert.equal(getActiveTaskPlan(conversations, true), undefined)
 })
 
-test('task progress distinguishes active step number from completed count', () => {
-  const progress = getTaskPlanProgress({
+test('task progress never presents a non-linear item index as completion', () => {
+  const plan = {
     title: 'execute plan',
     status: 'running',
     steps: [
       { id: 'one', title: 'one', type: 'read', status: 'done' },
-      { id: 'two', title: 'two', type: 'analyze', status: 'done' },
+      { id: 'two', title: 'two', type: 'analyze', status: 'pending' },
       { id: 'three', title: 'three', type: 'write', status: 'running' },
       { id: 'four', title: 'four', type: 'review', status: 'pending' },
       { id: 'respond', title: 'Respond', type: 'review', status: 'pending' },
     ],
-  })
+  }
+  const progress = getTaskPlanProgress(plan)
 
-  assert.equal(progress.completed, 2)
+  assert.equal(progress.completed, 1)
   assert.equal(progress.total, 4)
   assert.equal(progress.currentStep.id, 'three')
-  assert.equal(progress.currentStepNumber, 3)
   assert.deepEqual(progress.runningSteps.map((step) => step.id), ['three'])
-  assert.equal(progress.percent, 50)
+  assert.equal(progress.percent, 25)
+  assert.equal(getTaskPlanCountLabel(plan), '已完成 1/4')
 })
 
 test('task progress exposes concurrent Planner Agent steps as one frontier', () => {
@@ -831,7 +890,7 @@ test('manual abort replaces an empty response with an explicit notice', () => {
   let cleanedUp = false
   const acc = {
     response: '',
-    thinking: '',
+    commentary: '',
     bookId: 1,
     sessionId: 0,
     chapterId: 1,
@@ -839,8 +898,8 @@ test('manual abort replaces an empty response with an explicit notice', () => {
     userText: 'stop this response',
     model: '',
     turnStartedAt: performance.now(),
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   }
   const ctx = {
     acc,
@@ -870,7 +929,7 @@ test('manual abort preserves partial output and exposes a separate terminal stat
   let conversations = [{ role: 'assistant', content: '已经完成一部分' }]
   const acc = {
     response: '已经完成一部分',
-    thinking: '',
+    commentary: '',
     bookId: 1,
     sessionId: 0,
     chapterId: 1,
@@ -878,8 +937,8 @@ test('manual abort preserves partial output and exposes a separate terminal stat
     userText: 'stop this response',
     model: '',
     turnStartedAt: performance.now(),
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   }
   const ctx = {
     acc,
@@ -904,7 +963,7 @@ test('completed stream without visible model content becomes an explicit failure
     role: 'assistant',
     content: '',
     toolCallSegments: [{
-      textBefore: '',
+      commentaryBlockIndex: null,
       labels: ['查看人物列表'],
     }],
   }]
@@ -912,7 +971,7 @@ test('completed stream without visible model content becomes an explicit failure
   let outcome
   const acc = {
     response: '',
-    thinking: 'internal reasoning only',
+    commentary: 'internal reasoning only',
     bookId: 1,
     sessionId: 0,
     chapterId: 1,
@@ -921,9 +980,8 @@ test('completed stream without visible model content becomes an explicit failure
     model: '',
     turnStartedAt: performance.now(),
     toolCallSegments: conversations[0].toolCallSegments,
-    contentAfterToolCalls: '',
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   }
   const ctx = {
     acc,
@@ -950,11 +1008,11 @@ test('completed stream without visible model content becomes an explicit failure
   assert.equal(outcome, 'failed')
 })
 
-test('deterministic run completion text becomes the visible assistant answer', () => {
+test('run completion text remains a fallback until the root turn is done', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   const acc = {
     response: '',
-    thinking: '',
+    commentary: '',
     bookId: 1,
     sessionId: 0,
     chapterId: 1,
@@ -962,8 +1020,8 @@ test('deterministic run completion text becomes the visible assistant answer', (
     userText: 'continue screenplay',
     model: '',
     turnStartedAt: performance.now(),
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   }
   const ctx = {
     acc,
@@ -981,8 +1039,9 @@ test('deterministic run completion text becomes the visible assistant answer', (
     },
   }, ctx)
 
-  assert.equal(acc.response, '当前阶段已经变化，请刷新后重试。')
-  assert.equal(conversations[0].content, '当前阶段已经变化，请刷新后重试。')
+  assert.equal(acc.response, '')
+  assert.equal(acc.pendingFinalResponse, '当前阶段已经变化，请刷新后重试。')
+  assert.equal(conversations[0].content, '')
 })
 
 test('durable root terminal uses the same final-answer path as an ordinary run', () => {
@@ -990,7 +1049,7 @@ test('durable root terminal uses the same final-answer path as an ordinary run',
   let outcome
   const acc = {
     response: '',
-    thinking: '',
+    commentary: '',
     bookId: 1,
     sessionId: 0,
     chapterId: 1,
@@ -998,8 +1057,8 @@ test('durable root terminal uses the same final-answer path as an ordinary run',
     userText: 'write all remaining scenes',
     model: '',
     turnStartedAt: performance.now(),
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   }
   const ctx = {
     acc,
@@ -1035,6 +1094,7 @@ test('durable root terminal uses the same final-answer path as an ordinary run',
       finalResponse: '已恢复原有长篇正文任务，将从上次检查点继续。',
     },
   }, ctx)
+  assert.equal(conversations[0].content, '')
   assert.equal(handleDone({ done: true }, ctx), true)
   assert.equal(acc.longTaskId, 'task-1')
   assert.equal(conversations[0].longTaskId, 'task-1')
@@ -1048,7 +1108,7 @@ test('durable root terminal uses the same final-answer path as an ordinary run',
 
 test('persisted tool-only placeholder is distinguishable from a real answer', () => {
   const toolCallSegments = [{
-    textBefore: '',
+    commentaryBlockIndex: null,
     labels: ['查看人物列表'],
   }]
   assert.equal(isSynthesizedToolOnlyResponse({
@@ -1137,9 +1197,9 @@ test('assistant processing label follows the actual runtime phase', () => {
     getAssistantProcessingLabel({
       role: 'assistant',
       content: '',
-      thinking: 'reasoning',
+      commentary: '正在核对范围',
     }),
-    '推演方案',
+    '推进任务',
   )
   assert.equal(
     getAssistantProcessingLabel({
@@ -1169,8 +1229,7 @@ test('assistant processing label follows the actual runtime phase', () => {
   assert.equal(
     getAssistantProcessingLabel({
       role: 'assistant',
-      content: 'draft',
-      contentAfterToolCalls: 'final answer',
+      content: 'final answer',
     }),
     '组织回复',
   )
@@ -1202,7 +1261,7 @@ test('assistant processing label follows the actual runtime phase', () => {
     getAssistantProcessingLabel({
       role: 'assistant',
       content: '',
-      toolCallSegments: [{ labels: ['tool'], textBefore: '' }],
+      toolCallSegments: [{ labels: ['tool'], commentaryBlockIndex: null }],
     }),
     '核对结果',
   )

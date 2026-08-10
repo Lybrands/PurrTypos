@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
-import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from domains.screenplay.project_aggregate import (
@@ -206,8 +205,6 @@ class SqliteScreenplayV2Repository:
             if actual_revision != int(expected_project_revision):
                 raise AppError("项目已被其他操作更新，请刷新后重试", 409)
             current = str(project.get("status") or "active")
-            if lifecycle == "archived":
-                await self._require_no_active_operation(project_id)
             next_revision = actual_revision
             if current != lifecycle:
                 next_revision += 1
@@ -264,7 +261,6 @@ class SqliteScreenplayV2Repository:
             actual_revision = int(project.get("revision") or 1)
             if actual_revision != int(expected_project_revision):
                 raise AppError("项目已被其他操作更新，请刷新后重试", 409)
-            await self._require_no_active_operation(project_id)
             deleted = await delete_screenplay_project_data(
                 self._db,
                 project_id,
@@ -300,432 +296,6 @@ class SqliteScreenplayV2Repository:
         if project is None:
             raise NotFoundError("剧本项目不存在")
         return project
-
-    async def _require_no_active_operation(self, project_id: str) -> None:
-        active = await self._db.fetch_one(
-            "SELECT id FROM screenplay_operations WHERE project_id = ? "
-            "AND status IN ('queued', 'running', 'paused') LIMIT 1",
-            [project_id],
-        )
-        if active is not None:
-            raise AppError(
-                "项目仍有活动 Operation，请先完成或取消后再操作",
-                409,
-            )
-
-    async def create_operation(
-        self,
-        *,
-        command_id: str,
-        request_digest: str,
-        project_id: str,
-        expected_project_revision: int,
-        target_role: str,
-        intent: Mapping[str, Any],
-        conversation: Mapping[str, Any],
-        within_transaction: bool = False,
-    ) -> dict[str, Any]:
-        """Create the durable command boundary before any Agent Run exists."""
-
-        transaction = self._db.transaction(
-            cancellation_linearizable=not within_transaction,
-        )
-        async with transaction:
-            replay = await self.find_command_receipt(
-                command_id=command_id,
-                command_type="startOperation",
-                request_digest=request_digest,
-            )
-            if replay is not None:
-                return replay
-            project = await self._require_native_project(project_id)
-            if str(project.get("status") or "") == "archived":
-                raise AppError("项目已归档，不能启动 Operation", 409)
-            actual_revision = int(project.get("revision") or 1)
-            if actual_revision != int(expected_project_revision):
-                raise AppError("项目已被其他操作更新，请刷新后重试", 409)
-            deliverable = await self._db.fetch_one(
-                "SELECT id FROM screenplay_deliverables "
-                "WHERE project_id = ? AND role = ?",
-                [project_id, target_role],
-            )
-            if deliverable is None:
-                raise AppError("目标交付物不属于该剧本项目", 409)
-            heads = await self._head_rows(project_id)
-            base_heads = {
-                str(row["role"]): str(row["revision_id"])
-                for row in heads
-            }
-            prerequisite = _prerequisite_role(
-                target_role,
-                str(project.get("source_kind") or "original"),
-            )
-            if prerequisite and prerequisite not in base_heads:
-                raise AppError("启动该 Operation 前必须先接受上游版本", 409)
-            active = await self._db.fetch_one(
-                "SELECT id FROM screenplay_operations WHERE project_id = ? "
-                "AND target_role = ? "
-                "AND status IN ('queued', 'running', 'paused') LIMIT 1",
-                [project_id, target_role],
-            )
-            if active is not None:
-                raise AppError("同一目标已有未结束的 Operation", 409)
-
-            operation_id = f"spop_{uuid.uuid4().hex}"
-            stored_intent = {
-                **dict(intent),
-                "conversation": dict(conversation),
-            }
-            await self._db.execute(
-                "INSERT INTO screenplay_operations "
-                "(id, project_id, command_id, target_role, intent_json, "
-                "base_project_revision, base_heads_json, status, progress_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-                [
-                    operation_id,
-                    project_id,
-                    command_id,
-                    target_role,
-                    _dump(stored_intent),
-                    actual_revision,
-                    _dump(base_heads),
-                    _dump({"phase": "queued", "percent": 0}),
-                ],
-            )
-            queued_payload = {
-                "operationId": operation_id,
-                "projectId": project_id,
-                "targetRole": target_role,
-                "status": "queued",
-            }
-            await self._record_operation_event(
-                operation_id=operation_id,
-                sequence=1,
-                event_type="screenplay.operation.queued",
-                payload=queued_payload,
-            )
-            next_project_revision = actual_revision + 1
-            await self._db.execute(
-                "UPDATE screenplay_projects SET revision = ?, "
-                "update_time = CURRENT_TIMESTAMP WHERE id = ? AND revision = ?",
-                [next_project_revision, project_id, actual_revision],
-            )
-            row = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations WHERE id = ?",
-                [operation_id],
-            )
-            response = {
-                "operation": _operation_view(row),
-                "projectRevision": next_project_revision,
-            }
-            await self._record_command_receipt(
-                command_id=command_id,
-                command_type="startOperation",
-                project_id=project_id,
-                request_digest=request_digest,
-                result_ref=f"screenplay-operation://{operation_id}",
-                response=response,
-            )
-            await self._record_outbox(
-                aggregate_type="screenplayOperation",
-                aggregate_id=operation_id,
-                event_type="screenplay.operation.queued",
-                payload=queued_payload,
-            )
-            return response
-
-    async def require_executable_operation(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-    ) -> dict[str, Any]:
-        row = await self._db.fetch_one(
-            "SELECT * FROM screenplay_operations WHERE id = ? AND project_id = ?",
-            [operation_id, project_id],
-        )
-        if row is None:
-            raise NotFoundError("剧本 Operation 不存在")
-        if str(row.get("status") or "") not in {"queued", "running"}:
-            raise AppError("剧本 Operation 当前不能接管新的 Agent Run", 409)
-        return _operation_view(row)
-
-    async def activate_bound_run(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-        run_id: str,
-    ) -> dict[str, Any]:
-        """Atomically claim one newly-created Run for an executable Operation."""
-
-        async with self._db.transaction(cancellation_linearizable=True):
-            operation = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations "
-                "WHERE id = ? AND project_id = ?",
-                [operation_id, project_id],
-            )
-            if operation is None:
-                raise NotFoundError("剧本 Operation 不存在")
-            status = str(operation.get("status") or "")
-            if status not in {"queued", "running"}:
-                raise AppError("剧本 Operation 当前不能接管新的 Agent Run", 409)
-            run = await self._db.fetch_one(
-                "SELECT r.id, r.binding_namespace, "
-                "r.binding_aggregate_id, r.binding_command_id, "
-                "COALESCE(s.screenplay_project_id, root_s.screenplay_project_id, "
-                "parent_s.screenplay_project_id) AS bound_project_id "
-                "FROM ai_agent_runs AS r "
-                "LEFT JOIN ai_sessions AS s ON s.id = r.session_id "
-                "LEFT JOIN ai_agent_runs AS root ON root.id = r.root_run_id "
-                "LEFT JOIN ai_sessions AS root_s ON root_s.id = root.session_id "
-                "LEFT JOIN ai_agent_runs AS parent ON parent.id = r.parent_run_id "
-                "LEFT JOIN ai_sessions AS parent_s ON parent_s.id = parent.session_id "
-                "WHERE r.id = ?",
-                [run_id],
-            )
-            if run is None:
-                raise NotFoundError("Agent Run 不存在")
-            binding_namespace = str(run.get("binding_namespace") or "").strip()
-            if (
-                binding_namespace != "screenplay.operation"
-                or str(run.get("binding_aggregate_id") or "").strip()
-                != project_id
-                or str(run.get("binding_command_id") or "").strip()
-                != operation_id
-            ):
-                raise AppError("Agent Run 的持久化业务绑定不匹配", 409)
-            bound_project_id = str(run.get("bound_project_id") or "").strip()
-            if bound_project_id and bound_project_id != project_id:
-                raise AppError("Agent Run 不属于该剧本 Operation", 409)
-            if status == "queued":
-                await self._db.execute(
-                    "UPDATE screenplay_operations SET status = 'running', "
-                    "progress_json = ?, update_time = CURRENT_TIMESTAMP "
-                    "WHERE id = ? AND status = 'queued'",
-                    [_dump({"phase": "running", "percent": 0}), operation_id],
-                )
-                await self._record_operation_event(
-                    operation_id=operation_id,
-                    sequence=await self._next_operation_sequence(operation_id),
-                    event_type="screenplay.operation.started",
-                    payload={
-                        "operationId": operation_id,
-                        "projectId": project_id,
-                        "runId": run_id,
-                    },
-                )
-            row = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations WHERE id = ?",
-                [operation_id],
-            )
-            return _operation_view(row)
-
-    async def settle_operation_from_root_run(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-        run_id: str,
-        run_status: str,
-        error: str | None,
-    ) -> dict[str, Any]:
-        """Close an unfinished Operation when its owning root Run terminates."""
-
-        normalized_status = str(run_status or "").strip()
-        if normalized_status not in {"done", "blocked", "failed", "canceled"}:
-            raise ValueError("root Agent Run status must be terminal")
-        async with self._db.transaction(cancellation_linearizable=True):
-            operation = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations "
-                "WHERE id = ? AND project_id = ?",
-                [operation_id, project_id],
-            )
-            if operation is None:
-                raise NotFoundError("剧本 Operation 不存在")
-            run = await self._db.fetch_one(
-                "SELECT binding_namespace, binding_aggregate_id, "
-                "binding_command_id FROM ai_agent_runs WHERE id = ?",
-                [run_id],
-            )
-            if run is None or (
-                str(run.get("binding_namespace") or "") != "screenplay.operation"
-                or str(run.get("binding_aggregate_id") or "") != project_id
-                or str(run.get("binding_command_id") or "") != operation_id
-            ):
-                raise AppError("Agent Run 不属于该剧本 Operation", 409)
-            current = str(operation.get("status") or "")
-            if current in {"succeeded", "failed", "canceled", "paused"}:
-                return _operation_view(operation)
-
-            if normalized_status == "canceled":
-                target = "paused"
-                reason = "root_run_canceled"
-                error_payload = None
-                await self._checkpoint_operation_runtime(
-                    operation_id=operation_id,
-                    action="pause",
-                )
-                progress = {"phase": "paused", "reason": reason}
-            else:
-                target = "failed"
-                reason = (
-                    "candidate_not_produced"
-                    if normalized_status == "done"
-                    else f"root_run_{normalized_status}"
-                )
-                message = str(error or "").strip() or (
-                    "Agent Run 已结束，但没有提交候选版本"
-                    if normalized_status == "done"
-                    else "Agent Run 未能完成剧本 Operation"
-                )
-                error_payload = {
-                    "code": reason,
-                    "message": message[:2_000],
-                    "runId": run_id,
-                }
-                await self._checkpoint_operation_runtime(
-                    operation_id=operation_id,
-                    action="cancel",
-                )
-                progress = {"phase": "failed"}
-            await self._db.execute(
-                "UPDATE screenplay_operations SET status = ?, progress_json = ?, "
-                "error_json = ?, update_time = CURRENT_TIMESTAMP WHERE id = ? "
-                "AND status IN ('queued', 'running')",
-                [
-                    target,
-                    _dump(progress),
-                    _dump(error_payload) if error_payload is not None else None,
-                    operation_id,
-                ],
-            )
-            payload = {
-                "operationId": operation_id,
-                "projectId": project_id,
-                "status": target,
-                "reason": reason,
-                "runId": run_id,
-            }
-            await self._record_operation_event(
-                operation_id=operation_id,
-                sequence=await self._next_operation_sequence(operation_id),
-                event_type=f"screenplay.operation.{target}",
-                payload=payload,
-            )
-            await self._record_outbox(
-                aggregate_type="screenplayOperation",
-                aggregate_id=operation_id,
-                event_type=f"screenplay.operation.{target}",
-                payload=payload,
-            )
-            updated = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations WHERE id = ?",
-                [operation_id],
-            )
-            return _operation_view(updated)
-
-    async def control_operation(
-        self,
-        *,
-        command_id: str,
-        request_digest: str,
-        operation_id: str,
-        action: str,
-    ) -> dict[str, Any]:
-        """Checkpoint, requeue, or cancel an Operation and its runtime tree."""
-
-        normalized_action = str(action or "").strip()
-        if normalized_action not in {"pause", "resume", "cancel"}:
-            raise ValueError("unsupported screenplay Operation action")
-        command_type = f"{normalized_action}Operation"
-        async with self._db.transaction(cancellation_linearizable=True):
-            replay = await self.find_command_receipt(
-                command_id=command_id,
-                command_type=command_type,
-                request_digest=request_digest,
-            )
-            if replay is not None:
-                return replay
-            row = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations WHERE id = ?",
-                [operation_id],
-            )
-            if row is None:
-                raise NotFoundError("剧本 Operation 不存在")
-            current = str(row.get("status") or "")
-            target = {
-                "pause": "paused",
-                "resume": "queued",
-                "cancel": "canceled",
-            }[normalized_action]
-            no_op = (
-                (normalized_action == "pause" and current == "paused")
-                or (
-                    normalized_action == "resume"
-                    and current in {"queued", "running"}
-                )
-                or (normalized_action == "cancel" and current == "canceled")
-            )
-            if not no_op:
-                allowed = {
-                    "pause": {"queued", "running"},
-                    "resume": {"paused"},
-                    "cancel": {"queued", "running", "paused"},
-                }[normalized_action]
-                if current not in allowed:
-                    raise AppError(
-                        f"Operation 不能从 {current} 执行 {normalized_action}",
-                        409,
-                    )
-                await self._checkpoint_operation_runtime(
-                    operation_id=operation_id,
-                    action=normalized_action,
-                )
-                progress = {
-                    "phase": target,
-                    **({"percent": 0} if target == "queued" else {}),
-                }
-                await self._db.execute(
-                    "UPDATE screenplay_operations SET status = ?, "
-                    "progress_json = ?, update_time = CURRENT_TIMESTAMP "
-                    "WHERE id = ?",
-                    [target, _dump(progress), operation_id],
-                )
-                await self._record_operation_event(
-                    operation_id=operation_id,
-                    sequence=await self._next_operation_sequence(operation_id),
-                    event_type=f"screenplay.operation.{target}",
-                    payload={
-                        "operationId": operation_id,
-                        "projectId": str(row["project_id"]),
-                        "status": target,
-                    },
-                )
-                await self._record_outbox(
-                    aggregate_type="screenplayOperation",
-                    aggregate_id=operation_id,
-                    event_type=f"screenplay.operation.{target}",
-                    payload={
-                        "operationId": operation_id,
-                        "projectId": str(row["project_id"]),
-                        "status": target,
-                    },
-                )
-            updated = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations WHERE id = ?",
-                [operation_id],
-            )
-            response = {"operation": _operation_view(updated)}
-            await self._record_command_receipt(
-                command_id=command_id,
-                command_type=command_type,
-                project_id=str(row["project_id"]),
-                request_digest=request_digest,
-                result_ref=f"screenplay-operation://{operation_id}",
-                response=response,
-            )
-            return response
 
     async def create_project(
         self,
@@ -1155,149 +725,75 @@ class SqliteScreenplayV2Repository:
             )
             return str(row["project_id"]), revision_id
 
-    async def finalize_agent_candidate(
+    async def publish_screenplay_agent_task_candidate(
         self,
         *,
-        finalizing_run_id: str,
-        proposal_kind: str,
+        task_id: str,
+        project_id: str,
         target_role: str,
+        proposal_kind: str,
         title: str,
         content_json: Mapping[str, Any],
         content_text: str,
-        derived_from_ids: tuple[str, ...] = (),
-    ) -> dict[str, Any] | None:
-        """Atomically turn one Agent proposal into one v2 Candidate Revision.
+        planner_run_id: str | None,
+        finalizing_run_id: str | None,
+        base_revision_id: str | None,
+        source_run_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Publish one idempotent candidate owned by a PurrA task."""
 
-        The caller is normally inside the Run-event transaction.  The nested
-        transaction is therefore a SAVEPOINT: if either projection or event
-        persistence fails, neither side becomes visible.  Runtime staging
-        artifacts are intentionally left intact so a retry can replay the same
-        proposal without regenerating creative content.
-        """
-
-        normalized_run_id = str(finalizing_run_id or "").strip()
-        if not normalized_run_id:
-            raise ValueError("finalizing Run id is required")
-        normalized_content = dict(content_json)
-        normalized_text = str(content_text or "")
-        proposal_content_digest = _content_digest(
-            normalized_content,
-            normalized_text,
-        )
-        proposal_digest = hashlib.sha256(_dump({
-            "kind": proposal_kind,
-            "role": target_role,
-            "title": title,
-            "contentDigest": proposal_content_digest,
-            "derivedFromIds": list(derived_from_ids),
-        }).encode("utf-8")).hexdigest()
-
-        async with self._db.transaction():
-            context = await self._agent_projection_context(
-                finalizing_run_id=normalized_run_id,
-                content_json=normalized_content,
-            )
-            if context is None:
-                return None
-            project = context["project"]
-            if str(project.get("status") or "") == "archived":
-                raise AppError("项目已归档，不能保存 Agent 候选版本", 409)
-
-            project_id = str(project["id"])
-            identity = _agent_proposal_identity(
-                proposal_kind=proposal_kind,
-                content_json=normalized_content,
-                finalizing_run_id=normalized_run_id,
-                content_digest=proposal_content_digest,
-            )
-            operation_id = str(context.get("operation_id") or "").strip()
-            if not operation_id:
-                raise AppError("剧本候选必须属于原生 Operation", 409)
+        async with self._db.transaction(cancellation_linearizable=True):
             existing = await self._db.fetch_one(
-                "SELECT * FROM screenplay_operations "
-                "WHERE id = ? AND project_id = ?",
-                [operation_id, project_id],
+                "SELECT r.*, d.role FROM screenplay_revisions AS r "
+                "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "
+                "WHERE r.agent_task_id = ?",
+                [task_id],
             )
-            if existing is None:
-                raise NotFoundError("剧本 Operation 不存在")
-            intent = _object(existing.get("intent_json"))
-            finalization = _object(intent.get("finalization"))
-            recorded_digest = str(
-                finalization.get("proposalDigest")
-                or intent.get("proposalDigest")
-                or ""
-            )
-            if (
-                str(existing.get("target_role") or "") != target_role
-                or (recorded_digest and recorded_digest != proposal_digest)
-            ):
-                raise AppError(
-                    "同一个 Agent 产物身份对应了不同的候选内容",
-                    409,
-                )
-            result_revision_id = str(
-                existing.get("result_revision_id") or ""
-            ).strip()
-            if result_revision_id:
-                revision = await self._db.fetch_one(
-                    "SELECT r.*, d.role FROM screenplay_revisions AS r "
-                    "JOIN screenplay_deliverables AS d "
-                    "ON d.id = r.deliverable_id WHERE r.id = ?",
-                    [result_revision_id],
-                )
-                if revision is None:
-                    raise RuntimeError(
-                        "succeeded screenplay Operation has no result Revision"
-                    )
-                await self._record_artifact_projection(
-                    artifact_id=str(context.get("artifact_id") or ""),
-                    revision_id=result_revision_id,
-                    run_id=normalized_run_id,
-                )
+            if existing is not None:
                 return {
-                    "projectId": project_id,
-                    "operationId": str(existing["id"]),
-                    "revisionId": result_revision_id,
-                    "role": str(revision["role"]),
-                    "revisionNo": int(revision.get("revision_no") or 1),
+                    "projectId": str(existing["project_id"]),
+                    "taskId": task_id,
+                    "revisionId": str(existing["id"]),
+                    "role": str(existing["role"]),
+                    "revisionNo": int(existing["revision_no"]),
                     "replayed": True,
                 }
-            if str(existing.get("status") or "") != "running":
-                raise AppError("Agent 候选版本的 Operation 不在运行中", 409)
-            intent["finalization"] = {
-                "proposalKind": proposal_kind,
-                "title": title,
-                "proposalDigest": proposal_digest,
-                "runtimeIdentity": identity,
-                "derivedFromIds": list(derived_from_ids),
-                "artifactRef": str(
-                    normalized_content.get("artifactRef") or ""
-                ) or None,
-                "longTaskId": str(
-                    normalized_content.get("longTaskId") or ""
-                ) or None,
-            }
-            await self._db.execute(
-                "UPDATE screenplay_operations SET intent_json = ?, "
-                "progress_json = ?, update_time = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status = 'running'",
-                [
-                    _dump(intent),
-                    _dump({"phase": "finalizing"}),
-                    operation_id,
-                ],
+            project = await self._db.fetch_one(
+                "SELECT * FROM screenplay_projects WHERE id = ?",
+                [project_id],
             )
-
+            if project is None:
+                raise NotFoundError("剧本项目不存在")
+            if str(project.get("status") or "") == "archived":
+                raise AppError("项目已归档，不能生成候选版本", 409)
             deliverable = await self._db.fetch_one(
                 "SELECT id FROM screenplay_deliverables "
                 "WHERE project_id = ? AND role = ?",
                 [project_id, target_role],
             )
             if deliverable is None:
-                raise AppError("Agent 产物不属于该项目的交付物流程", 409)
-            base_heads = _object(existing.get("base_heads_json"))
-            parent_revision_id = base_heads.get(target_role)
-
+                raise AppError("剧本任务目标不属于当前项目", 409)
+            head_rows = await self._db.fetch_all(
+                "SELECT d.role, h.revision_id FROM screenplay_project_heads AS h "
+                "JOIN screenplay_deliverables AS d ON d.id = h.deliverable_id "
+                "WHERE h.project_id = ?",
+                [project_id],
+            )
+            base_heads = {
+                str(row["role"]): str(row["revision_id"])
+                for row in head_rows
+            }
+            parent_revision_id = str(base_revision_id or "").strip() or base_heads.get(
+                target_role
+            )
+            if parent_revision_id:
+                parent = await self._db.fetch_one(
+                    "SELECT id FROM screenplay_revisions WHERE id = ? "
+                    "AND project_id = ? AND deliverable_id = ?",
+                    [parent_revision_id, project_id, deliverable["id"]],
+                )
+                if parent is None:
+                    raise AppError("剧本任务的基础版本已失效", 409)
             latest = await self._db.fetch_one(
                 "SELECT COALESCE(MAX(revision_no), 0) AS revision_no "
                 "FROM screenplay_revisions WHERE deliverable_id = ?",
@@ -1309,44 +805,42 @@ class SqliteScreenplayV2Repository:
                 project_id=project_id,
                 target_role=target_role,
                 parent_revision_id=parent_revision_id,
-                content_json=normalized_content,
-                content_text=normalized_text,
+                content_json=dict(content_json),
+                content_text=str(content_text or ""),
             )
             document_part = parts[0]
-            content_digest = str(document_part["contentDigest"])
             summary = {
                 "role": target_role,
                 "proposalKind": proposal_kind,
                 "title": title,
                 "textLength": len(str(document_part["contentText"])),
                 "partCount": len(parts),
-                "derivedFromIds": list(derived_from_ids),
+                "derivedFromIds": list(base_heads.values()),
             }
             await self._db.execute(
                 "INSERT INTO screenplay_revisions "
-                "(id, project_id, deliverable_id, revision_no, "
-                "parent_revision_id, schema_version, content_digest, "
-                "summary_json, operation_id, root_run_id, finalizing_run_id, "
-                "created_by) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'agent')",
+                "(id, project_id, deliverable_id, revision_no, parent_revision_id, "
+                "schema_version, content_digest, summary_json, root_run_id, "
+                "finalizing_run_id, created_by, agent_task_id) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'screenplay_agent_task', ?)",
                 [
                     revision_id,
                     project_id,
                     deliverable["id"],
                     revision_no,
                     parent_revision_id,
-                    content_digest,
+                    str(document_part["contentDigest"]),
                     _dump(summary),
-                    operation_id,
-                    context["root_run_id"],
-                    normalized_run_id,
+                    str(planner_run_id or "").strip() or None,
+                    str(finalizing_run_id or "").strip() or None,
+                    task_id,
                 ],
             )
             for part in parts:
                 await self._db.execute(
                     "INSERT INTO screenplay_revision_parts "
-                    "(revision_id, part_type, part_key, position, "
-                    "payload_json, content_text, content_digest) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(revision_id, part_type, part_key, position, payload_json, "
+                    "content_text, content_digest) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
                         revision_id,
                         part["partType"],
@@ -1364,79 +858,32 @@ class SqliteScreenplayV2Repository:
                 source_kind=str(project.get("source_kind") or "original"),
                 base_heads=base_heads,
             )
+            run_ids = tuple(dict.fromkeys(
+                value for value in (
+                    str(planner_run_id or "").strip(),
+                    str(finalizing_run_id or "").strip(),
+                    *(str(value or "").strip() for value in source_run_ids),
+                ) if value
+            ))
             await self._attach_agent_source_refs(
                 revision_id=revision_id,
                 project_id=project_id,
-                run_ids=context["source_run_ids"],
+                run_ids=run_ids,
             )
-            await self._record_artifact_projection(
-                artifact_id=str(context.get("artifact_id") or ""),
-                revision_id=revision_id,
-                run_id=normalized_run_id,
-            )
-
-            await self._db.execute(
-                "UPDATE screenplay_operations SET status = 'succeeded', "
-                "progress_json = ?, result_revision_id = ?, "
-                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [
-                    _dump({"phase": "completed", "percent": 100}),
-                    revision_id,
-                    operation_id,
-                ],
-            )
-            candidate_payload = {
+            payload = {
                 "projectId": project_id,
-                "operationId": operation_id,
+                "taskId": task_id,
                 "revisionId": revision_id,
                 "role": target_role,
                 "revisionNo": revision_no,
             }
-            await self._record_operation_event(
-                operation_id=operation_id,
-                sequence=await self._next_operation_sequence(operation_id),
-                event_type="screenplay.candidate.ready",
-                payload=candidate_payload,
-            )
-            await self._record_operation_event(
-                operation_id=operation_id,
-                sequence=await self._next_operation_sequence(operation_id),
-                event_type="screenplay.operation.succeeded",
-                payload=candidate_payload,
-            )
             await self._record_outbox(
                 aggregate_type="screenplayRevision",
                 aggregate_id=revision_id,
                 event_type="screenplay.candidate.ready",
-                payload=candidate_payload,
+                payload=payload,
             )
-            return {**candidate_payload, "replayed": False}
-
-    async def _record_artifact_projection(
-        self,
-        *,
-        artifact_id: str,
-        revision_id: str,
-        run_id: str,
-    ) -> None:
-        normalized_artifact_id = str(artifact_id or "").strip()
-        if not normalized_artifact_id:
-            return
-        result_ref = f"screenplay-revision://{revision_id}"
-        await self._db.execute(
-            "INSERT OR IGNORE INTO ai_agent_artifact_projections "
-            "(artifact_id, projector_namespace, result_ref, projected_by_run_id) "
-            "VALUES (?, 'purrtypos.screenplay.revision', ?, ?)",
-            [normalized_artifact_id, result_ref, run_id],
-        )
-        stored = await self._db.fetch_one(
-            "SELECT result_ref FROM ai_agent_artifact_projections "
-            "WHERE artifact_id = ? "
-            "AND projector_namespace = 'purrtypos.screenplay.revision'",
-            [normalized_artifact_id],
-        )
-        if stored is None or str(stored.get("result_ref") or "") != result_ref:
-            raise AppError("同一个 Agent Artifact 不能投影为多个剧本版本", 409)
+            return {**payload, "replayed": False}
 
     async def _materialize_agent_candidate_parts(
         self,
@@ -1668,149 +1115,6 @@ class SqliteScreenplayV2Repository:
             ))
         return [current_parts[0], *episode_parts]
 
-    async def _agent_projection_context(
-        self,
-        *,
-        finalizing_run_id: str,
-        content_json: Mapping[str, Any],
-    ) -> dict[str, Any] | None:
-        run = await self._db.fetch_one(
-            "SELECT r.id, r.session_id, r.parent_run_id, r.root_run_id, "
-            "r.binding_namespace, "
-            "r.binding_aggregate_id, r.binding_command_id, "
-            "root.binding_namespace AS root_binding_namespace, "
-            "root.binding_aggregate_id AS root_binding_aggregate_id, "
-            "root.binding_command_id AS root_binding_command_id, "
-            "parent.binding_namespace AS parent_binding_namespace, "
-            "parent.binding_aggregate_id AS parent_binding_aggregate_id, "
-            "parent.binding_command_id AS parent_binding_command_id, "
-            "s.screenplay_project_id AS run_project_id, "
-            "root.session_id AS root_session_id, "
-            "root_session.screenplay_project_id AS root_project_id, "
-            "parent.session_id AS parent_session_id, "
-            "parent_session.screenplay_project_id AS parent_project_id "
-            "FROM ai_agent_runs AS r "
-            "LEFT JOIN ai_sessions AS s ON s.id = r.session_id "
-            "LEFT JOIN ai_agent_runs AS root ON root.id = r.root_run_id "
-            "LEFT JOIN ai_sessions AS root_session "
-            "ON root_session.id = root.session_id "
-            "LEFT JOIN ai_agent_runs AS parent ON parent.id = r.parent_run_id "
-            "LEFT JOIN ai_sessions AS parent_session "
-            "ON parent_session.id = parent.session_id "
-            "WHERE r.id = ?",
-            [finalizing_run_id],
-        )
-        project_ids: set[str] = set()
-        operation_ids: set[str] = set()
-        source_run_ids: set[str] = {finalizing_run_id}
-        root_run_id = finalizing_run_id
-        if run is not None:
-            root_run_id = str(
-                run.get("root_run_id") or finalizing_run_id
-            ).strip()
-            source_run_ids.update(
-                str(value).strip()
-                for value in (
-                    run.get("parent_run_id"),
-                    run.get("root_run_id"),
-                )
-                if str(value or "").strip()
-            )
-            project_ids.update(
-                str(value).strip()
-                for value in (
-                    run.get("run_project_id"),
-                    run.get("root_project_id"),
-                    run.get("parent_project_id"),
-                )
-                if str(value or "").strip()
-            )
-            for prefix in ("", "root_", "parent_"):
-                namespace = str(
-                    run.get(f"{prefix}binding_namespace") or ""
-                ).strip()
-                if namespace != "screenplay.operation":
-                    continue
-                project_ids.add(str(
-                    run.get(f"{prefix}binding_aggregate_id") or ""
-                ).strip())
-                operation_ids.add(str(
-                    run.get(f"{prefix}binding_command_id") or ""
-                ).strip())
-
-        artifact_ref = str(content_json.get("artifactRef") or "").strip()
-        if artifact_ref:
-            artifact_id = artifact_ref.rsplit("/", 1)[-1].strip()
-            artifact = await self._db.fetch_one(
-                "SELECT owner_id, run_id, created_by_run_id "
-                "FROM ai_agent_artifacts WHERE id = ? AND resource_ref = ? "
-                "AND namespace = 'purrtypos.screenplay'",
-                [artifact_id, artifact_ref],
-            )
-            if artifact is None:
-                raise AppError("Agent 提案引用的 Artifact 不存在", 409)
-            project_ids.add(str(artifact["owner_id"]))
-            source_run_ids.update(
-                str(value).strip()
-                for value in (
-                    artifact.get("run_id"),
-                    artifact.get("created_by_run_id"),
-                )
-                if str(value or "").strip()
-            )
-
-        long_task_id = str(content_json.get("longTaskId") or "").strip()
-        if long_task_id:
-            long_task = await self._db.fetch_one(
-                "SELECT owner_id, created_by_run_id "
-                "FROM ai_agent_long_tasks "
-                "WHERE id = ? AND namespace = 'purrtypos.screenplay'",
-                [long_task_id],
-            )
-            if long_task is None:
-                raise AppError("Agent 提案引用的 Long Task 不存在", 409)
-            project_ids.add(str(long_task["owner_id"]))
-            source_run_ids.add(str(long_task["created_by_run_id"]))
-            unit_runs = await self._db.fetch_all(
-                "SELECT run_id FROM ai_agent_long_task_units "
-                "WHERE task_id = ? AND run_id IS NOT NULL",
-                [long_task_id],
-            )
-            source_run_ids.update(
-                str(row.get("run_id") or "").strip()
-                for row in unit_runs
-                if str(row.get("run_id") or "").strip()
-            )
-
-        project_ids.discard("")
-        if not project_ids:
-            return None
-        if len(project_ids) != 1:
-            raise AppError("Agent 提案的项目归属不一致", 409)
-        operation_ids.discard("")
-        if len(operation_ids) > 1:
-            raise AppError("Agent 提案的 Operation 归属不一致", 409)
-        project_id = next(iter(project_ids))
-        project = await self._db.fetch_one(
-            "SELECT * FROM screenplay_projects "
-            "WHERE id = ? AND source_snapshot_json IS NOT NULL",
-            [project_id],
-        )
-        if project is None:
-            raise NotFoundError("剧本项目不存在")
-        return {
-            "project": project,
-            "root_run_id": root_run_id,
-            "source_run_ids": tuple(sorted(source_run_ids)),
-            "artifact_id": (
-                artifact_ref.rsplit("/", 1)[-1].strip()
-                if artifact_ref
-                else None
-            ),
-            "long_task_id": long_task_id or None,
-            "operation_id": next(iter(operation_ids), None),
-        }
-
     async def _attach_agent_source_refs(
         self,
         *,
@@ -1847,264 +1151,6 @@ class SqliteScreenplayV2Repository:
                     str(row.get("excerpt") or ""),
                 ],
             )
-
-    async def _record_operation_event(
-        self,
-        *,
-        operation_id: str,
-        sequence: int,
-        event_type: str,
-        payload: Mapping[str, Any],
-    ) -> None:
-        await self._db.execute(
-            "INSERT INTO screenplay_operation_events "
-            "(operation_id, sequence, event_type, payload_json) "
-            "VALUES (?, ?, ?, ?)",
-            [operation_id, sequence, event_type, _dump(dict(payload))],
-        )
-
-    async def _next_operation_sequence(self, operation_id: str) -> int:
-        row = await self._db.fetch_one(
-            "SELECT COALESCE(MAX(sequence), 0) AS sequence "
-            "FROM screenplay_operation_events WHERE operation_id = ?",
-            [operation_id],
-        )
-        return int((row or {}).get("sequence") or 0) + 1
-
-    async def _checkpoint_operation_runtime(
-        self,
-        *,
-        operation_id: str,
-        action: str,
-    ) -> None:
-        if action == "resume":
-            # A fresh root Run claims the queued Operation. Its existing paused
-            # Long Task is resumed by ScreenplayLongTaskDispatcher after the new
-            # Run is linked to the same Work Item.
-            return
-        runtime = await self._operation_runtime_ids(operation_id)
-        run_ids = runtime["runs"]
-        task_ids = runtime["long_tasks"]
-        artifact_ids = runtime["artifacts"]
-        work_item_ids = runtime["work_items"]
-        requested_at_ms = int(time.time() * 1_000)
-        if run_ids:
-            placeholders = ",".join("?" for _ in run_ids)
-            await self._db.execute(
-                "UPDATE ai_agent_runs SET cancel_requested_at_ms = COALESCE("
-                "cancel_requested_at_ms, ?), update_time = CURRENT_TIMESTAMP "
-                f"WHERE id IN ({placeholders}) AND status = 'running'",
-                [requested_at_ms, *run_ids],
-            )
-        if action == "pause":
-            if task_ids:
-                placeholders = ",".join("?" for _ in task_ids)
-                await self._db.execute(
-                    "UPDATE ai_agent_long_task_units SET status = 'pending', "
-                    "max_attempts = max_attempts + 1, worker_id = NULL, "
-                    "lease_expires_at_ms = NULL, error_code = 'operation_paused', "
-                    "update_time = CURRENT_TIMESTAMP "
-                    f"WHERE task_id IN ({placeholders}) "
-                    "AND status IN ('claimed', 'running')",
-                    list(task_ids),
-                )
-                await self._db.execute(
-                    "UPDATE ai_agent_long_tasks SET status = 'paused', "
-                    "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
-                    f"WHERE id IN ({placeholders}) "
-                    "AND status IN ('pending', 'running')",
-                    list(task_ids),
-                )
-            return
-        if task_ids:
-            placeholders = ",".join("?" for _ in task_ids)
-            await self._db.execute(
-                "UPDATE ai_agent_long_task_units SET status = 'canceled', "
-                "worker_id = NULL, lease_expires_at_ms = NULL, "
-                f"update_time = CURRENT_TIMESTAMP WHERE task_id IN ({placeholders}) "
-                "AND status IN ('pending', 'claimed', 'running')",
-                list(task_ids),
-            )
-            await self._db.execute(
-                "UPDATE ai_agent_long_tasks SET status = 'canceled', "
-                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
-                f"WHERE id IN ({placeholders}) "
-                "AND status IN ('pending', 'running', 'paused')",
-                list(task_ids),
-            )
-        if artifact_ids:
-            placeholders = ",".join("?" for _ in artifact_ids)
-            await self._db.execute(
-                "UPDATE ai_agent_artifacts SET status = 'aborted', "
-                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
-                f"WHERE id IN ({placeholders}) AND status = 'open'",
-                list(artifact_ids),
-            )
-        if work_item_ids:
-            placeholders = ",".join("?" for _ in work_item_ids)
-            await self._db.execute(
-                "UPDATE ai_agent_work_items SET status = 'canceled', "
-                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
-                f"WHERE id IN ({placeholders}) AND status = 'open'",
-                list(work_item_ids),
-            )
-
-    async def _operation_runtime_ids(
-        self,
-        operation_id: str,
-    ) -> dict[str, tuple[str, ...]]:
-        roots = await self._db.fetch_all(
-            "SELECT r.id FROM ai_agent_runs AS r "
-            "JOIN screenplay_operations AS o ON o.id = ? "
-            "WHERE r.binding_namespace = 'screenplay.operation' "
-            "AND r.binding_aggregate_id = o.project_id "
-            "AND r.binding_command_id = o.id",
-            [operation_id],
-        )
-        root_ids = tuple(str(row["id"]) for row in roots)
-        if not root_ids:
-            return {
-                "runs": (),
-                "work_items": (),
-                "long_tasks": (),
-                "artifacts": (),
-            }
-        root_placeholders = ",".join("?" for _ in root_ids)
-        run_rows = await self._db.fetch_all(
-            "SELECT id FROM ai_agent_runs "
-            f"WHERE id IN ({root_placeholders}) "
-            f"OR root_run_id IN ({root_placeholders})",
-            [*root_ids, *root_ids],
-        )
-        run_ids = tuple(dict.fromkeys(str(row["id"]) for row in run_rows))
-        run_placeholders = ",".join("?" for _ in run_ids)
-        work_rows = await self._db.fetch_all(
-            "SELECT DISTINCT w.id FROM ai_agent_work_items AS w "
-            "LEFT JOIN ai_agent_work_item_runs AS wr ON wr.work_item_id = w.id "
-            f"WHERE w.created_by_run_id IN ({run_placeholders}) "
-            f"OR wr.run_id IN ({run_placeholders})",
-            [*run_ids, *run_ids],
-        )
-        work_item_ids = tuple(str(row["id"]) for row in work_rows)
-        task_clauses = [f"created_by_run_id IN ({run_placeholders})"]
-        task_params: list[Any] = list(run_ids)
-        if work_item_ids:
-            work_placeholders = ",".join("?" for _ in work_item_ids)
-            task_clauses.append(f"work_item_id IN ({work_placeholders})")
-            task_params.extend(work_item_ids)
-        task_rows = await self._db.fetch_all(
-            "SELECT id FROM ai_agent_long_tasks WHERE " + " OR ".join(task_clauses),
-            task_params,
-        )
-        artifact_clauses = [
-            f"run_id IN ({run_placeholders})",
-            f"created_by_run_id IN ({run_placeholders})",
-        ]
-        artifact_params: list[Any] = [*run_ids, *run_ids]
-        if work_item_ids:
-            work_placeholders = ",".join("?" for _ in work_item_ids)
-            artifact_clauses.append(f"work_item_id IN ({work_placeholders})")
-            artifact_params.extend(work_item_ids)
-        artifact_rows = await self._db.fetch_all(
-            "SELECT id FROM ai_agent_artifacts WHERE "
-            + " OR ".join(artifact_clauses),
-            artifact_params,
-        )
-        return {
-            "runs": run_ids,
-            "work_items": work_item_ids,
-            "long_tasks": tuple(str(row["id"]) for row in task_rows),
-            "artifacts": tuple(str(row["id"]) for row in artifact_rows),
-        }
-
-    async def recover_operations_after_restart(self) -> tuple[str, ...]:
-        """Checkpoint running Operations after their process-owned Runs stop."""
-
-        async with self._db.transaction(cancellation_linearizable=True):
-            rows = await self._db.fetch_all(
-                "SELECT id, project_id FROM screenplay_operations "
-                "WHERE status = 'running' ORDER BY create_time ASC"
-            )
-            operation_ids: list[str] = []
-            for row in rows:
-                operation_id = str(row["id"])
-                await self._checkpoint_operation_runtime(
-                    operation_id=operation_id,
-                    action="pause",
-                )
-                await self._db.execute(
-                    "UPDATE screenplay_operations SET status = 'paused', "
-                    "progress_json = ?, update_time = CURRENT_TIMESTAMP "
-                    "WHERE id = ? AND status = 'running'",
-                    [_dump({"phase": "paused", "reason": "restart"}), operation_id],
-                )
-                await self._record_operation_event(
-                    operation_id=operation_id,
-                    sequence=await self._next_operation_sequence(operation_id),
-                    event_type="screenplay.operation.paused",
-                    payload={
-                        "operationId": operation_id,
-                        "projectId": str(row["project_id"]),
-                        "status": "paused",
-                        "reason": "execution_recovery_after_restart",
-                    },
-                )
-                operation_ids.append(operation_id)
-            return tuple(operation_ids)
-
-    async def settle_terminal_root_operations(self) -> tuple[str, ...]:
-        """Reconcile Operations whose latest owning root Run is terminal.
-
-        The ordinary live stream settles an Operation when it observes the
-        root ``AgentRunResult``.  A lost execution lease is terminalized by a
-        separate process monitor, so that result cannot travel through the
-        original stream.  Reconcile the durable aggregate from persisted Run
-        state and checkpoint its long task instead of leaving a zombie
-        ``running`` Operation behind.
-        """
-
-        rows = await self._db.fetch_all(
-            "SELECT o.id AS operation_id, o.project_id, r.id AS run_id, "
-            "r.status AS run_status FROM screenplay_operations AS o "
-            "JOIN ai_agent_runs AS r "
-            "ON r.binding_namespace = 'screenplay.operation' "
-            "AND r.binding_aggregate_id = o.project_id "
-            "AND r.binding_command_id = o.id "
-            "WHERE o.status IN ('queued', 'running') "
-            "AND r.parent_run_id IS NULL "
-            "AND r.status IN ('done', 'blocked', 'failed', 'canceled') "
-            "AND r.rowid = ("
-            "SELECT latest.rowid FROM ai_agent_runs AS latest "
-            "WHERE latest.binding_namespace = 'screenplay.operation' "
-            "AND latest.binding_aggregate_id = o.project_id "
-            "AND latest.binding_command_id = o.id "
-            "AND latest.parent_run_id IS NULL "
-            "ORDER BY latest.create_time DESC, latest.rowid DESC LIMIT 1"
-            ") ORDER BY o.create_time ASC, o.id ASC"
-        )
-        settled: list[str] = []
-        for row in rows:
-            operation_id = str(row.get("operation_id") or "").strip()
-            project_id = str(row.get("project_id") or "").strip()
-            run_id = str(row.get("run_id") or "").strip()
-            run_status = str(row.get("run_status") or "").strip()
-            if not operation_id or not project_id or not run_id:
-                continue
-            operation = await self.settle_operation_from_root_run(
-                operation_id=operation_id,
-                project_id=project_id,
-                run_id=run_id,
-                run_status=run_status,
-                error=None,
-            )
-            if str(operation.get("status") or "") in {
-                "succeeded",
-                "failed",
-                "canceled",
-                "paused",
-            }:
-                settled.append(operation_id)
-        return tuple(settled)
 
     async def accept_revision(
         self,
@@ -2411,12 +1457,6 @@ class SqliteScreenplayV2Repository:
             "ORDER BY r.create_time DESC, r.revision_no DESC",
             [project_id],
         )
-        operations = await self._db.fetch_all(
-            "SELECT * FROM screenplay_operations WHERE project_id = ? "
-            "AND status IN ('queued', 'running', 'paused') "
-            "ORDER BY create_time ASC",
-            [project_id],
-        )
         working_copies = await self._db.fetch_all(
             "SELECT w.*, d.role FROM screenplay_working_copies AS w "
             "JOIN screenplay_deliverables AS d ON d.id = w.deliverable_id "
@@ -2498,7 +1538,6 @@ class SqliteScreenplayV2Repository:
                 ),
             } for row in deliverables if str(row["role"]) in roles],
             "candidates": candidate_views,
-            "activeOperations": [_operation_summary(row) for row in operations],
             "workingCopies": [{
                 "id": str(row["id"]),
                 "deliverableId": str(row["deliverable_id"]),
@@ -2558,7 +1597,7 @@ class SqliteScreenplayV2Repository:
             **_revision_summary(row),
             "projectId": str(row["project_id"]),
             "schemaVersion": int(row.get("schema_version") or 1),
-            "createdBy": str(row.get("created_by") or ""),
+            "createdBy": _revision_creator(row.get("created_by")),
             "rootRunId": row.get("root_run_id"),
             "finalizingRunId": row.get("finalizing_run_id"),
             "applicability": await self._revision_applicability(
@@ -2681,45 +1720,6 @@ class SqliteScreenplayV2Repository:
             ),
         }
 
-    async def get_operation(self, operation_id: str) -> dict[str, Any]:
-        row = await self._db.fetch_one(
-            "SELECT * FROM screenplay_operations WHERE id = ?",
-            [operation_id],
-        )
-        if row is None:
-            raise NotFoundError("剧本 Operation 不存在")
-        return _operation_view(row)
-
-    async def list_operation_events(
-        self,
-        operation_id: str,
-        *,
-        after: int,
-        limit: int,
-    ) -> dict[str, Any]:
-        await self.get_operation(operation_id)
-        rows = await self._db.fetch_all(
-            "SELECT sequence, event_type, payload_json, create_time "
-            "FROM screenplay_operation_events "
-            "WHERE operation_id = ? AND sequence > ? "
-            "ORDER BY sequence ASC LIMIT ?",
-            [operation_id, max(0, int(after)), max(1, min(500, int(limit)))],
-        )
-        events = [{
-            "sequence": int(row["sequence"]),
-            "type": str(row["event_type"]),
-            "payload": _object(row.get("payload_json")),
-            "createdAt": row.get("create_time"),
-        } for row in rows]
-        return {
-            "operationId": operation_id,
-            "events": events,
-            "nextAfter": (
-                events[-1]["sequence"] if events else max(0, int(after))
-            ),
-        }
-
-
 def _revision_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -2729,35 +1729,18 @@ def _revision_summary(row: Mapping[str, Any]) -> dict[str, Any]:
         "parentRevisionId": row.get("parent_revision_id"),
         "contentDigest": str(row.get("content_digest") or ""),
         "summary": _object(row.get("summary_json")),
-        "operationId": row.get("operation_id"),
+        "agentTaskId": row.get("agent_task_id"),
         "rootRunId": row.get("root_run_id"),
         "finalizingRunId": row.get("finalizing_run_id"),
         "createdAt": row.get("create_time"),
     }
 
 
-def _operation_summary(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "id": str(row["id"]),
-        "targetRole": str(row.get("target_role") or ""),
-        "status": str(row.get("status") or "queued"),
-        "progress": _object(row.get("progress_json")),
-        "resultRevisionId": row.get("result_revision_id"),
-        "updatedAt": row.get("update_time"),
-    }
-
-
-def _operation_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        **_operation_summary(row),
-        "projectId": str(row["project_id"]),
-        "commandId": str(row.get("command_id") or ""),
-        "intent": _object(row.get("intent_json")),
-        "baseProjectRevision": int(row.get("base_project_revision") or 1),
-        "baseHeads": _object(row.get("base_heads_json")),
-        "error": _nullable_object(row.get("error_json")),
-        "createdAt": row.get("create_time"),
-    }
+def _revision_creator(value: object) -> str:
+    return "agent" if str(value or "") in {
+        "agent",
+        "screenplay_agent_task",
+    } else "user"
 
 
 def _working_copy_view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -2809,28 +1792,6 @@ def _content_digest(content: Mapping[str, Any], content_text: str) -> str:
         "contentText": content_text,
     }).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
-
-
-def _agent_proposal_identity(
-    *,
-    proposal_kind: str,
-    content_json: Mapping[str, Any],
-    finalizing_run_id: str,
-    content_digest: str,
-) -> str:
-    artifact_ref = str(content_json.get("artifactRef") or "").strip()
-    if artifact_ref:
-        return f"artifact:{artifact_ref}"
-    long_task_id = str(content_json.get("longTaskId") or "").strip()
-    if long_task_id:
-        return f"long-task:{long_task_id}"
-    # Small proposals that do not use an Artifact still receive a stable
-    # identity within their Run. Re-emitting the same DomainEffect is a replay;
-    # emitting different content is a distinct candidate.
-    return (
-        f"run:{finalizing_run_id}:kind:{proposal_kind}:"
-        f"content:{content_digest}"
-    )
 
 
 def _agent_candidate_parts(

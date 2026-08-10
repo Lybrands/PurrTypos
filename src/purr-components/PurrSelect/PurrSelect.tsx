@@ -215,7 +215,13 @@ export function PurrSelect<T extends string | number = string | number>(props: P
         </span>
       </BaseSelect.Trigger>
       <BaseSelect.Portal>
-        <BaseSelect.Positioner side="bottom" align="start" sideOffset={4}>
+        <BaseSelect.Positioner
+          className="purr-select__positioner"
+          side="bottom"
+          align="start"
+          sideOffset={4}
+          alignItemWithTrigger={false}
+        >
           <BaseSelect.Popup className={['purr-select__popup', classNames?.popup?.root].filter(Boolean).join(' ')}>
             <BaseSelect.List className="purr-select__list">
               {options.length ? options.map((option) => (

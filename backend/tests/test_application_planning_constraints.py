@@ -1,4 +1,4 @@
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     DomainContext,

@@ -4,32 +4,61 @@ import type { AiAgentRunSnapshot } from "../../types.ts";
 import {
   clearAiDebugRuns,
   getAiDebugSnapshot,
+  groupAiDebugRunsByTurn,
   hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
   recordAiDebugRunContinuation,
+  recordScreenplayAiDebugChunk,
   startAiDebugRun,
 } from "./store.ts";
+
+test('diagnostics group multiple Runs under their conversation turn', () => {
+  clearAiDebugRuns();
+  const request = {
+    apiKey: 'key',
+    sessionId: 7,
+    messages: [{ role: 'user' as const, content: '继续创作三集' }],
+    options: { model: 'model' },
+    enableAgentTools: true,
+  };
+  startAiDebugRun('turn-1-planner', request, { turnId: 'turn-1' });
+  startAiDebugRun('turn-1-writer', request, { turnId: 'turn-1' });
+  startAiDebugRun('turn-2-planner', {
+    ...request,
+    messages: [{ role: 'user' as const, content: '检查第五集' }],
+  }, { turnId: 'turn-2' });
+
+  const turns = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map((turn) => turn.prompt), ['检查第五集', '继续创作三集']);
+  assert.deepEqual(
+    turns.find((turn) => turn.prompt === '继续创作三集')?.runs.map((run) => run.id),
+    ['turn-1-writer', 'turn-1-planner'],
+  );
+});
 
 function persistedSnapshot(
   events: AiAgentRunSnapshot['events'],
   options: {
+    runId?: string;
     status?: AiAgentRunSnapshot['run']['status'];
     nextCursor?: number;
     hasMore?: boolean;
   } = {},
 ): AiAgentRunSnapshot {
   const status = options.status ?? 'running';
+  const runId = options.runId ?? 'run-recovered';
   return {
     version: 1,
     run: {
-      runId: 'run-recovered',
+      runId,
       sessionId: 7,
       conversationId: null,
       status,
       mode: 'agent',
       lineage: {
         parentRunId: null,
-        rootRunId: 'run-recovered',
+        rootRunId: runId,
         delegationId: null,
         agentRole: null,
         agentTitle: null,
@@ -118,7 +147,7 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
   });
 
   let run = getAiDebugSnapshot().runs[0];
-  assert.equal(run.id, 'recovered:run-recovered');
+  assert.equal(run.id, 'screenplay-run-recovered');
   assert.equal(run.agentRunId, 'run-recovered');
   assert.equal(run.modelCalls.length, 2);
   assert.deepEqual(
@@ -194,8 +223,49 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
 
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
-  assert.equal(runs[0].id, 'recovered:run-recovered');
+  assert.equal(runs[0].id, 'screenplay-run-recovered');
   assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['planning']);
+});
+
+test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', () => {
+  clearAiDebugRuns();
+  const input = {
+    runId: 'run-terminal-race',
+    turnId: 'turn-terminal-race',
+    sessionId: 9,
+    prompt: '继续创作下一集',
+    model: 'model',
+  };
+  recordScreenplayAiDebugChunk({
+    ...input,
+    chunk: { reasoningDelta: '实时片段' },
+  });
+
+  hydrateAiDebugRunSnapshot({
+    snapshot: persistedSnapshot([], {
+      runId: input.runId,
+      status: 'done',
+    }),
+    turnId: input.turnId,
+    prompt: input.prompt,
+    source: '剧本 Agent 对话',
+  });
+  const completed = getAiDebugSnapshot().runs[0];
+  const finishedAt = completed.finishedAt;
+  assert.equal(completed.id, 'screenplay-run-terminal-race');
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.reasoning, '实时片段');
+  assert.ok(finishedAt);
+
+  recordScreenplayAiDebugChunk({
+    ...input,
+    chunk: { modelContentDelta: '晚到的历史片段' },
+  });
+  const runs = getAiDebugSnapshot().runs;
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].status, 'completed');
+  assert.equal(runs[0].finishedAt, finishedAt);
+  assert.equal(runs[0].modelContent, '晚到的历史片段');
 });
 
 test("debug store preserves a rejected tool's concrete failure", () => {
@@ -303,7 +373,7 @@ test("debug store identifies a durable screenplay chunk", () => {
   });
   assert.equal(
     getAiDebugSnapshot().runs[0].taskType,
-    "写作 Agent 任务",
+    "剧本 Agent 任务",
   );
 
   recordAiDebugChunk("screenplay-long-task", {
@@ -325,6 +395,53 @@ test("debug store identifies a durable screenplay chunk", () => {
 
   recordAiDebugChunk("screenplay-long-task", { done: true });
   assert.equal(getAiDebugSnapshot().runs[0].status, "dispatched");
+});
+
+test("screenplay persisted SSE creates a live diagnostic Run", () => {
+  clearAiDebugRuns();
+  recordScreenplayAiDebugChunk({
+    runId: "run-live-screenplay",
+    turnId: "turn-live-screenplay",
+    sessionId: 9,
+    prompt: "继续创作下一集",
+    model: "model",
+    chunk: {
+      agentRunStarted: {
+        runId: "run-live-screenplay",
+        status: "running",
+      },
+    },
+  });
+  recordScreenplayAiDebugChunk({
+    runId: "run-live-screenplay",
+    turnId: "turn-live-screenplay",
+    sessionId: 9,
+    prompt: "继续创作下一集",
+    model: "model",
+    chunk: { reasoningDelta: "先检查场景连续性" },
+  });
+
+  const run = getAiDebugSnapshot().runs[0];
+  assert.equal(run.source, "剧本 Agent 对话");
+  assert.equal(run.taskType, "剧本 Agent 任务");
+  assert.equal(run.agentRunId, "run-live-screenplay");
+  assert.equal(run.turnId, "turn-live-screenplay");
+  assert.equal(run.reasoning, "先检查场景连续性");
+
+  recordScreenplayAiDebugChunk({
+    runId: "run-live-screenplay-writer",
+    turnId: "turn-live-screenplay",
+    sessionId: 9,
+    prompt: "继续创作下一集",
+    model: "model",
+    chunk: { commentaryDelta: "开始创作" },
+  });
+  const turns = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(
+    turns[0].runs.map((item) => item.agentRunId),
+    ["run-live-screenplay-writer", "run-live-screenplay"],
+  );
 });
 
 test("durable child activity is accounted under the orchestration root", () => {
@@ -414,7 +531,7 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
           round: 1,
           toolNames: [],
         },
-        thinkingDelta: "检查连续性",
+        reasoningDelta: "检查连续性",
       },
     },
   });
@@ -427,5 +544,5 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
   assert.equal(run.childRuns[0].unitId, "ep05");
   assert.equal(run.childRuns[0].attempt, 2);
   assert.equal(run.childRuns[0].modelCalls.length, 1);
-  assert.equal(run.childRuns[0].thinking, "检查连续性");
+  assert.equal(run.childRuns[0].reasoning, "检查连续性");
 });

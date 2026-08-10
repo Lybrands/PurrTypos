@@ -123,7 +123,6 @@ PurrTypos/
 │   │   ├── ai.py                # /ai/chat/stream（SSE）、/ai/title、/ai/models
 │   │   ├── books.py / outlines.py / chapters.py / characters.py / ...
 │   │   └── conversations.py / sessions.py / settings.py / ...
-│   ├── agent_core/              # 业务无关的规划、状态机、模型轮次、工具与审批内核
 │   ├── application/             # 唯一 Composition Root、请求/SSE 映射和应用用例
 │   ├── domains/writing/         # Writing 业务规则、Planning Policy、上下文与工具契约
 │   ├── infrastructure/          # Provider、SQLite Repository、技能目录和 Writing Handler
@@ -135,6 +134,8 @@ PurrTypos/
 │   ├── utils/                   # 通用纯函数与异步流辅助
 │   ├── schemas/                 # Pydantic 请求体
 │   └── skills/                  # 工具定义（每个工具一个目录 + SKILL.md）
+├── packages/
+│   └── purra/              # 可独立构建的业务无关 Agent 框架包
 ├── src/                         # 渲染进程（React + TypeScript）
 │   ├── App.tsx                  # 路由：首页 / 书架 / 工作台
 │   ├── HomePage/ BookshelfPage/ SettingsPage/

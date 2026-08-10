@@ -1,31 +1,31 @@
-"""Reusable behavioral contracts for Agent Core persistence adapters."""
+"""Reusable behavioral contracts for PurrA persistence adapters."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactClaimLeaseCommand,
     ArtifactWriteClaimCommand,
 )
-from agent_core.artifacts.errors import ArtifactConflictError
-from agent_core.artifacts.ports import ArtifactClaimRepository
-from agent_core.contracts import ToolCall, ToolHandlerResult
-from agent_core.ports import (
+from purra.artifacts.errors import ArtifactConflictError
+from purra.artifacts.ports import ArtifactClaimRepository
+from purra.contracts import ToolCall, ToolHandlerResult
+from purra.ports import (
     CheckpointStore,
     DelegationRepository,
     ExecutionLeaseStore,
     ToolIdempotencyGateway,
 )
-from agent_core.work_items import (
+from purra.work_items import (
     WorkItemCreateCommand,
     WorkItemRunLinkCommand,
     WorkItemRunRelation,
     WorkItemStatus,
     WorkItemTransitionCommand,
 )
-from agent_core.work_items.ports import WorkItemRepository
+from purra.work_items.ports import WorkItemRepository
 
 
 async def assert_execution_lease_store_contract(

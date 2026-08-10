@@ -1,4 +1,4 @@
-"""The sole application composition root for complete Agent Core runs."""
+"""The sole application composition root for complete PurrA runs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunRequest,
     ApprovalDecision,
     ApprovalStatus,
@@ -17,14 +17,15 @@ from agent_core.contracts import (
     ToolExecutionLimits,
     ToolExecutionMode,
 )
-from agent_core.context_budget import resolve_context_budget_claims
-from agent_core.context_orchestration.compaction import (
+from purra.context_budget import resolve_context_budget_claims
+from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
-from agent_core.context_orchestration.contracts import ContextCompressionSettings
-from agent_core.engine import AgentCore
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.ports import (
+from purra.context_orchestration.contracts import ContextCompressionSettings
+from purra.api import AgentCore
+from purra.events import AgentEvent, CoreEventType
+from purra.model_execution import ManagedModelExecutor
+from purra.ports import (
     ApprovalGateway,
     CheckpointStore,
     ContextCompressionHook,
@@ -34,7 +35,7 @@ from agent_core.ports import (
     ExecutionLeaseStore,
     ToolRegistration,
 )
-from agent_core.tools import InMemoryToolCatalog
+from purra.tools import InMemoryToolCatalog
 from application.response_judging import ModelBackedResponseJudge
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
@@ -118,6 +119,7 @@ class AgentComposition:
         skills_dir: Path | None = None,
         writing: WritingDomainAdapter | None = None,
         event_projector=None,
+        profile_registrations: Sequence[AgentProfileRegistration] = (),
         profile_extension_factories: Sequence[Callable[..., Any]] = (),
         provider_capabilities: ProviderCapabilityCache | None = None,
         approval_gateway: ApprovalGateway | None = None,
@@ -208,6 +210,7 @@ class AgentComposition:
                 domain_namespace=WRITING_DOMAIN_NAMESPACE,
                 adapter=self._writing,
             ),
+            *tuple(profile_registrations),
             *extension_registrations,
         ))
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
@@ -360,6 +363,7 @@ class AgentComposition:
                 on_required_tool_choice_unsupported
             ),
         )
+        model_executor = ManagedModelExecutor(model_gateway)
         registration = self._profile_registry.require(agent_profile)
         adapter = registration.adapter
         extension = self._profile_extensions_by_id.get(agent_profile)
@@ -377,7 +381,7 @@ class AgentComposition:
         ):
             context_provider = WritingContextProvider(
                 self._writing_context_source.with_memory_reranker(
-                    ModelBackedMemoryReranker(model_gateway)
+                    ModelBackedMemoryReranker(model_executor)
                 )
             )
         if context_provider is None:
@@ -389,7 +393,7 @@ class AgentComposition:
                 context_compression_hook
                 or ConversationCompactionService(
                     self._conversation_compaction_repository,
-                    ModelBackedConversationSummarizer(model_gateway),
+                    ModelBackedConversationSummarizer(model_executor),
                 ),
                 context_compression_settings,
             )
@@ -494,11 +498,22 @@ class AgentComposition:
             return ()
         return (
             ModelBackedResponseJudge(
-                model_gateway=ProviderModelGateway(api_key),
+                model_executor=self.create_managed_model_executor(api_key),
                 model_request=request.model,
                 policy=judge_policy,
+                context_window_tokens=request.context_window or 128_000,
             ),
         )
+
+    def create_managed_model_executor(
+        self,
+        api_key: str,
+    ) -> ManagedModelExecutor:
+        """Create the only host-visible boundary for bounded model sub-calls."""
+
+        if self._closed:
+            raise RuntimeError("Agent composition has been shut down")
+        return ManagedModelExecutor(ProviderModelGateway(api_key))
 
     def create_execution_session(self, signal) -> RunExecutionSession:
         return RunExecutionSession(

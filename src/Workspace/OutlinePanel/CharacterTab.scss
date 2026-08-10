@@ -185,10 +185,7 @@
 
 .character-edit-profile {
   height: 52vh;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--border-radius);
-  padding: var(--spacing-sm) var(--spacing);
+  min-height: 320px;
 }
 
 .char-options-tab-content {
@@ -248,4 +245,3 @@
 .world-entity-edit-type {
   flex: 0 0 96px;
 }
-

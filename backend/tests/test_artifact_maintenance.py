@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactCreateCommand,
     ArtifactMaintenancePolicy,
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,
 )
-from agent_core.artifacts.ports import ArtifactMaintenanceRepository
+from purra.artifacts.ports import ArtifactMaintenanceRepository
 from application.artifact_maintenance import monitor_artifact_maintenance
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_store

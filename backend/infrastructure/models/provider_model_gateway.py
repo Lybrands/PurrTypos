@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
@@ -18,17 +18,17 @@ from agent_core.contracts import (
     ToolCallDelta,
     ToolChoiceMode,
 )
-from agent_core.errors import ModelGatewayError, UnsupportedModelFeatureError
-from agent_core.json_values import thaw_json_mapping, thaw_json_value
-from agent_core.model_call_parameters import build_model_call_parameters
-from agent_core.ports import CancellationSignal
+from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.json_values import thaw_json_mapping, thaw_json_value
+from purra.model_call_parameters import build_model_call_parameters
+from purra.ports import CancellationSignal
 from infrastructure.models import provider_router
 from infrastructure.models.profiles import resolve_model_profile
 from utils.async_stream import OwnedAsyncIterator
 
 
 class ProviderModelGateway:
-    """Expose OpenAI/Anthropic providers through the Agent Core port."""
+    """Expose OpenAI/Anthropic providers through the PurrA port."""
 
     def __init__(
         self,
@@ -108,6 +108,7 @@ class ProviderModelGateway:
         return ModelCompletion(
             message=AgentMessage.from_mapping(raw_message),
             model=str(result.get("model") or request.model),
+            finish_reason=_normalize_finish_reason(result.get("finish_reason")),
             usage=_normalize_model_usage(result.get("usage")),
         )
 
@@ -185,8 +186,8 @@ def _provider_message(message: AgentMessage) -> dict:
     for host_only_key in (
         "context_name",
         "untrusted",
-        "agent_core_plan",
-        "agent_core_tool_name",
+        "purra_plan",
+        "purra_tool_name",
         "writing_outline_sources",
     ):
         value.pop(host_only_key, None)
@@ -202,8 +203,8 @@ def _provider_message(message: AgentMessage) -> dict:
     value.update(
         {"role": provider_role, "content": thaw_json_value(message.content)}
     )
-    if message.thinking is not None:
-        value["reasoning_content"] = message.thinking
+    if message.reasoning is not None:
+        value["reasoning_content"] = message.reasoning
     if message.tool_calls:
         value["tool_calls"] = [
             {
@@ -266,7 +267,7 @@ def _normalize_openai_stream(raw_stream):
             )
             yield ModelStreamChunk(
                 content_delta=content_delta,
-                thinking_delta=str(
+                reasoning_delta=str(
                     delta.get("reasoning_content")
                     or message.get("reasoning_content")
                     or ""
@@ -432,6 +433,12 @@ def _provider_error_code(error: Exception) -> str:
         return "provider_authentication_failed"
     if 429 in statuses:
         return "provider_rate_limited"
+    if (
+        any(status in {400, 422} for status in statuses)
+        and "reasoning_content" in combined
+        and "thinking" in combined
+    ):
+        return "provider_reasoning_context_invalid"
     if any(status in {400, 422} for status in statuses):
         return "provider_bad_request"
     if any(status >= 500 for status in statuses):

@@ -127,7 +127,7 @@ def build_writing_evidence_policy(
 ) -> str:
     """Return the writing-domain contract for evidence-bound responses.
 
-    This belongs to the Writing Adapter rather than Agent Core: whether an
+    This belongs to the Writing Adapter rather than PurrA: whether an
     outline is a plan or a fact, and what counts as a minimal prose edit, are
     writing-domain semantics.  The provider injects this as trusted developer
     context so it remains present after read-tool rounds as well as on the

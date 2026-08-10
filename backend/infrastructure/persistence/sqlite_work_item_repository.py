@@ -6,8 +6,8 @@ import json
 import sqlite3
 from typing import Any
 
-from agent_core.json_values import thaw_json_mapping
-from agent_core.work_items.contracts import (
+from purra.json_values import thaw_json_mapping
+from purra.work_items.contracts import (
     WorkItemCreateCommand,
     WorkItemRecord,
     WorkItemRunLink,
@@ -16,7 +16,7 @@ from agent_core.work_items.contracts import (
     WorkItemStatus,
     WorkItemTransitionCommand,
 )
-from agent_core.work_items.errors import (
+from purra.work_items.errors import (
     WorkItemConflictError,
     WorkItemNotFoundError,
     WorkItemStateError,

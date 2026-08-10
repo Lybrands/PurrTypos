@@ -8,7 +8,7 @@ from collections.abc import Callable
 from time import time
 from typing import Any
 
-from agent_core.artifacts.contracts import (
+from purra.artifacts.contracts import (
     ArtifactAppendCommand,
     ArtifactBatch,
     ArtifactBatchReceipt,
@@ -18,13 +18,13 @@ from agent_core.artifacts.contracts import (
     ArtifactRecord,
     ArtifactStatus,
 )
-from agent_core.artifacts.errors import (
+from purra.artifacts.errors import (
     ArtifactConflictError,
     ArtifactNotFoundError,
     ArtifactStateError,
 )
-from agent_core.artifacts.scope import ArtifactScope
-from agent_core.json_values import thaw_json_mapping
+from purra.artifacts.scope import ArtifactScope
+from purra.json_values import thaw_json_mapping
 
 
 class SqliteArtifactRepository:
@@ -33,9 +33,20 @@ class SqliteArtifactRepository:
         db,
         *,
         clock: Callable[[], int] | None = None,
+        join_ambient_transaction: bool = False,
     ) -> None:
         self._db = db
         self._clock = clock or (lambda: int(time() * 1_000))
+        self._join_ambient_transaction = bool(join_ambient_transaction)
+
+    def _mutation_transaction(self):
+        if self._join_ambient_transaction:
+            if not self._db.current_task_owns_transaction():
+                raise RuntimeError(
+                    "ambient artifact repository requires an owning transaction"
+                )
+            return self._db.transaction()
+        return self._db.transaction(cancellation_linearizable=True)
 
     async def create(
         self,
@@ -46,7 +57,7 @@ class SqliteArtifactRepository:
         if not normalized_id:
             raise ValueError("artifact id is required")
         try:
-            async with self._db.transaction(cancellation_linearizable=True):
+            async with self._mutation_transaction():
                 if command.scope is ArtifactScope.WORK_ITEM:
                     await self._require_work_item_scope(command)
                 await self._db.execute(
@@ -275,7 +286,7 @@ class SqliteArtifactRepository:
         self,
         command: ArtifactAppendCommand,
     ) -> ArtifactBatchReceipt:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             now = int(self._clock())
             row = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_artifacts WHERE id = ?",
@@ -404,7 +415,7 @@ class SqliteArtifactRepository:
         *,
         coverage_digest: str,
     ) -> ArtifactRecord:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             now = int(self._clock())
             row = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_artifacts WHERE id = ?",
@@ -495,7 +506,7 @@ class SqliteArtifactRepository:
         write_lease: ArtifactMutationLease | None = None,
     ) -> ArtifactRecord:
         normalized_id = str(artifact_id or "").strip()
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             now = int(self._clock())
             row = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_artifacts WHERE id = ?",

@@ -21,12 +21,17 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
         if session_ids:
             placeholders = ",".join("?" for _ in session_ids)
             await db.execute(
-                f"DELETE FROM screenplay_conversation_events "
+                f"DELETE FROM screenplay_agent_events "
                 f"WHERE session_id IN ({placeholders})",
                 session_ids,
             )
             await db.execute(
-                f"DELETE FROM screenplay_conversation_turns "
+                f"DELETE FROM screenplay_agent_chunks "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            )
+            await db.execute(
+                f"DELETE FROM screenplay_agent_turns "
                 f"WHERE session_id IN ({placeholders})",
                 session_ids,
             )
@@ -50,11 +55,6 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
                 session_ids,
             )
 
-        await db.execute(
-            "DELETE FROM screenplay_operation_events WHERE operation_id IN ("
-            "SELECT id FROM screenplay_operations WHERE project_id = ?)",
-            [project_id],
-        )
         for table in (
             "screenplay_revision_inputs",
             "screenplay_revision_parts",
@@ -69,16 +69,14 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             "DELETE FROM screenplay_outbox_events WHERE "
             "(aggregate_type = 'screenplayProject' AND aggregate_id = ?) "
             "OR aggregate_id IN (SELECT id FROM screenplay_revisions "
-            "WHERE project_id = ?) OR aggregate_id IN ("
-            "SELECT id FROM screenplay_operations WHERE project_id = ?)",
-            [project_id, project_id, project_id],
+            "WHERE project_id = ?)",
+            [project_id, project_id],
         )
         for table in (
             "screenplay_acceptance_events",
             "screenplay_project_heads",
             "screenplay_working_copies",
             "screenplay_revisions",
-            "screenplay_operations",
             "screenplay_command_receipts",
             "screenplay_deliverables",
         ):
@@ -111,6 +109,12 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
         await db.execute(
             "DELETE FROM ai_agent_artifacts "
             "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM screenplay_agent_task_outputs WHERE task_id IN ("
+            "SELECT id FROM ai_agent_long_tasks "
+            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
             [project_id],
         )
         await db.execute(

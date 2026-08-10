@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from agent_core.contracts import AgentRunRequest, ExecutionState
+from purra.contracts import AgentRunRequest, ExecutionState
 from domains.writing.contracts import WritingDomainContext
 
 

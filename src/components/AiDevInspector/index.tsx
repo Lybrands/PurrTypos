@@ -6,7 +6,9 @@ import type {
 } from "../../types";
 import {
   clearAiDebugRuns,
+  aiDebugTurnKey,
   getAiDebugSnapshot,
+  groupAiDebugRunsByTurn,
   recordAiDebugErrorReportStatus,
   selectAiDebugRun,
   subscribeAiDebugStore,
@@ -42,7 +44,7 @@ const STATUS_LABELS: Record<AiDebugRunStatus, string> = {
   starting: "正在发起",
   preparing: "准备上下文",
   planning: "制定计划",
-  thinking: "思考中",
+  thinking: "模型推理",
   tool: "调用工具",
   awaiting_approval: "等待审批",
   responding: "生成回答",
@@ -102,6 +104,16 @@ function formatDuration(ms: number): string {
   if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1_000)}s`;
+}
+
+function compactPrompt(value: string, maxLength = 28): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
+}
+
+function compactRunId(run: AiDebugRun): string {
+  const value = run.agentRunId || run.id;
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-5)}` : value;
 }
 
 function formatTokens(value: unknown): string {
@@ -912,10 +924,22 @@ function ChildRunList({
                   <div><dt>工具调用</dt><dd>{child.tools.length} 个</dd></div>
                 </dl>
                 {child.error && <div className="ai-dev-inspector__error">{child.error}</div>}
-                {child.thinking && (
+                {child.commentary && (
                   <details className="ai-dev-inspector__text-block">
-                    <summary>子 Agent 思考 <small>{child.thinking.length} 字符</small></summary>
-                    <pre>{child.thinking}</pre>
+                    <summary>子 Agent 公开说明 <small>{child.commentary.length} 字符</small></summary>
+                    <pre>{child.commentary}</pre>
+                  </details>
+                )}
+                {child.reasoning && (
+                  <details className="ai-dev-inspector__text-block">
+                    <summary>子 Agent 原始 reasoning <small>{child.reasoning.length} 字符</small></summary>
+                    <pre>{child.reasoning}</pre>
+                  </details>
+                )}
+                {child.modelContent && (
+                  <details className="ai-dev-inspector__text-block">
+                    <summary>子 Agent 原始 model content <small>{child.modelContent.length} 字符</small></summary>
+                    <pre>{child.modelContent}</pre>
                   </details>
                 )}
                 {child.output && (
@@ -1081,15 +1105,27 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
         <div className="ai-dev-inspector__empty">本轮尚未调用工具</div>
       )}
 
-      {run.thinking && (
+      {run.commentary && (
         <details className="ai-dev-inspector__text-block">
-          <summary>思考过程 <small>{run.thinking.length} 字符</small></summary>
-          <pre>{run.thinking}</pre>
+          <summary>公开执行说明 <small>{run.commentary.length} 字符</small></summary>
+          <pre>{run.commentary}</pre>
+        </details>
+      )}
+      {run.reasoning && (
+        <details className="ai-dev-inspector__text-block">
+          <summary>供应商原始 reasoning <small>{run.reasoning.length} 字符</small></summary>
+          <pre>{run.reasoning}</pre>
+        </details>
+      )}
+      {run.modelContent && (
+        <details className="ai-dev-inspector__text-block">
+          <summary>供应商原始 model content <small>{run.modelContent.length} 字符</small></summary>
+          <pre>{run.modelContent}</pre>
         </details>
       )}
       <details className="ai-dev-inspector__text-block" open>
-        <summary>模型输出 <small>{run.output.length} 字符</small></summary>
-        <pre>{run.output || "等待模型输出…"}</pre>
+        <summary>最终回答 <small>{run.output.length} 字符</small></summary>
+        <pre>{run.output || "等待最终回答…"}</pre>
       </details>
 
       {run.agentPlan !== undefined && (
@@ -1252,6 +1288,12 @@ export default function AiDevInspector() {
   );
   const selectedRun =
     snapshot.runs.find((run) => run.id === snapshot.selectedRunId) ?? snapshot.runs[0];
+  const turns = React.useMemo(
+    () => groupAiDebugRunsByTurn(snapshot.runs),
+    [snapshot.runs],
+  );
+  const selectedTurnKey = selectedRun ? aiDebugTurnKey(selectedRun) : turns[0]?.key;
+  const selectedTurn = turns.find((turn) => turn.key === selectedTurnKey) ?? turns[0];
   const availableRunIds = React.useMemo(
     () => new Set(snapshot.runs.map((run) => run.id)),
     [snapshot.runs],
@@ -1376,24 +1418,52 @@ export default function AiDevInspector() {
       {!collapsed && (
         <>
           <div className="ai-dev-inspector__runbar">
-            <select
-              value={selectedRun?.id ?? ""}
-              onChange={(event) => selectAiDebugRun(event.target.value)}
-              disabled={snapshot.runs.length === 0}
-              aria-label="选择 AI 运行"
-            >
-              {snapshot.runs.length === 0 ? (
-                <option value="">等待第一次 AI 对话…</option>
-              ) : snapshot.runs.map((run) => (
-                <option value={run.id} key={run.id}>
-                  {formatTime(run.startedAt)} · {run.conversationId != null ? `#${run.conversationId} · ` : ""}{run.source} · {STATUS_LABELS[run.status]}
-                </option>
-              ))}
-            </select>
-            {selectedRun && <StatusPill status={selectedRun.status} />}
-            <button type="button" onClick={clearAiDebugRuns} disabled={snapshot.runs.length === 0}>
-              清空
-            </button>
+            <div className="ai-dev-inspector__selectors">
+              <label>
+                <span>对话</span>
+                <select
+                  value={selectedTurn?.key ?? ""}
+                  onChange={(event) => {
+                    const turn = turns.find((item) => item.key === event.target.value);
+                    const run = turn?.runs.find(isRunActive) ?? turn?.runs[0];
+                    if (run) selectAiDebugRun(run.id);
+                  }}
+                  disabled={turns.length === 0}
+                  aria-label="选择 AI 对话轮次"
+                >
+                  {turns.length === 0 ? (
+                    <option value="">等待第一次 AI 对话…</option>
+                  ) : turns.map((turn) => (
+                    <option value={turn.key} key={turn.key}>
+                      {formatTime(turn.startedAt)} · {turn.conversationId != null ? `#${turn.conversationId} · ` : ""}{turn.source}{turn.prompt ? ` · ${compactPrompt(turn.prompt)}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Run</span>
+                <select
+                  value={selectedRun?.id ?? ""}
+                  onChange={(event) => selectAiDebugRun(event.target.value)}
+                  disabled={!selectedTurn?.runs.length}
+                  aria-label="选择当前对话中的 AI Run"
+                >
+                  {!selectedTurn?.runs.length ? (
+                    <option value="">暂无 Run</option>
+                  ) : selectedTurn.runs.map((run, index) => (
+                    <option value={run.id} key={run.id}>
+                      Run {selectedTurn.runs.length - index} · {run.taskType} · {STATUS_LABELS[run.status]} · {compactRunId(run)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="ai-dev-inspector__runbar-actions">
+              {selectedRun && <StatusPill status={selectedRun.status} />}
+              <button type="button" onClick={clearAiDebugRuns} disabled={snapshot.runs.length === 0}>
+                清空
+              </button>
+            </div>
           </div>
 
           <nav className="ai-dev-inspector__tabs" aria-label="调试信息分类">

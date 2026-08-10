@@ -129,6 +129,9 @@ async def init_schema(db: DatabaseConnection) -> None:
     )
 
     await init_screenplay_v2_schema(db)
+    from database.screenplay_agent_schema import init_screenplay_agent_schema
+
+    await init_screenplay_agent_schema(db)
 
     # ── outlines ─────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS outlines (
@@ -218,16 +221,19 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN session_id INTEGER")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN model TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN commentary TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN tool_call_segments TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_blocks TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN thinking_durations_ms TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN commentary_blocks TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN commentary_durations_ms TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN duration_ms INTEGER DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN task_plan TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_compaction TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN context_budget TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN screenplay_proposal")
     await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN screenplay_revision_ref")
+    await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN thinking")
+    await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN thinking_blocks")
+    await _try_exec(db, "ALTER TABLE ai_conversations DROP COLUMN thinking_durations_ms")
     remaining_conversation_columns = {
         str(column["name"])
         for column in await db.fetch_all("PRAGMA table_info(ai_conversations)")
@@ -235,10 +241,13 @@ async def init_schema(db: DatabaseConnection) -> None:
     retired_conversation_columns = {
         "screenplay_proposal",
         "screenplay_revision_ref",
+        "thinking",
+        "thinking_blocks",
+        "thinking_durations_ms",
     }
     if remaining_conversation_columns & retired_conversation_columns:
         raise RuntimeError(
-            "failed to retire legacy screenplay conversation columns"
+            "failed to retire legacy conversation process columns"
         )
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN agent_process TEXT DEFAULT NULL")
 

@@ -1,4 +1,4 @@
-"""SQLite implementation of the Agent Core RunRepository port."""
+"""SQLite implementation of the PurrA RunRepository port."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 from uuid import uuid4
 from typing import Sequence
 
-from agent_core.contracts import (
+from purra.contracts import (
     RunCreateParams,
     RunId,
     RunStatus,
@@ -15,10 +15,10 @@ from agent_core.contracts import (
     TerminalRunStatus,
     TraceRecord,
 )
-from agent_core.errors import ContractViolationError
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.json_values import thaw_json_mapping
-from agent_core.ports import (
+from purra.errors import ContractViolationError
+from purra.events import AgentEvent, CoreEventType
+from purra.json_values import thaw_json_mapping
+from purra.ports import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     RunBeginResult,
     RunCommit,

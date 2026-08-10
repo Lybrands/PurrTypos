@@ -6,11 +6,11 @@ import {
   handleAgentRunTodosUpdated,
   handleAgentDelegation,
   handleLongTaskDispatched,
+  handleLongTaskProgress,
 } from "./agentRun";
 import {
   handleDelta,
-  handleThinkingDelta,
-  handleThinkingSnapshot,
+  handleCommentaryDelta,
 } from "./streaming";
 import {
   handleChapterCreated,
@@ -48,9 +48,8 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   // 1. 错误终态：合并提示 + cleanup，必须立即停（避免后续分支二次写 state）
   if (handleError(chunk, ctx)) return;
 
-  // 2. 流式正文 / 思考流（无短路）
-  handleThinkingSnapshot(chunk, ctx);
-  handleThinkingDelta(chunk, ctx);
+  // 2. 公开执行说明 / 最终回答（供应商 reasoning 只供诊断，不进入这里）
+  handleCommentaryDelta(chunk, ctx);
   handleDelta(chunk, ctx);
   handleContextCompaction(chunk, ctx);
   handleContextBudget(chunk, ctx);
@@ -66,6 +65,7 @@ export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
   handleAgentRunTodosUpdated(chunk, ctx);
   handleAgentRunTodoUpdated(chunk, ctx);
   handleLongTaskDispatched(chunk, ctx);
+  handleLongTaskProgress(chunk, ctx);
   handleAgentRunTerminal(chunk, ctx);
   handleAgentDelegation(chunk, ctx);
 

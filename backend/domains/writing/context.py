@@ -1,4 +1,4 @@
-"""Writing-specific context assembly behind Agent Core's ContextProvider port."""
+"""Writing-specific context assembly behind PurrA's ContextProvider port."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import json
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from agent_core.context_budget import estimate_json_tokens
-from agent_core.contracts import (
+from purra.context_budget import estimate_json_tokens
+from purra.contracts import (
     AgentRunRequest,
     ContextBlock,
     ContextBudget,
@@ -16,8 +16,8 @@ from agent_core.contracts import (
     MessageRole,
     TaskContextRequest,
 )
-from agent_core.json_values import thaw_json_mapping
-from agent_core.ports import CancellationSignal
+from purra.json_values import thaw_json_mapping
+from purra.ports import CancellationSignal
 from domains.writing.associated_context import AssociatedContextResult
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.memory_context import (
@@ -406,7 +406,7 @@ def _request_with_latest_user_text(
 
 
 def writing_context_claims(request: AgentRunRequest) -> tuple[ContextBudgetClaim, ...]:
-    """Describe writing retrieval demand without exposing it to Agent Core."""
+    """Describe writing retrieval demand without exposing it to PurrA."""
 
     context = WritingDomainContext.from_core_context(request.domain_context)
     desired = _desired_budgets(request, context)
@@ -471,7 +471,7 @@ def build_host_planning_facts(
     memory: MemoryContextBlock | MemoryContextPack | None,
     associated: AssociatedContextResult,
 ) -> dict[str, object]:
-    """Return the ID-free planning manifest consumed by Agent Core."""
+    """Return the ID-free planning manifest consumed by PurrA."""
 
     facts: dict[str, object] = {}
     if current_chapter_bound:

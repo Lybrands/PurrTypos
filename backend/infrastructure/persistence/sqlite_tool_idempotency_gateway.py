@@ -6,8 +6,8 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 
-from agent_core.cancellation import OperationCanceled
-from agent_core.contracts import (
+from purra.cancellation import OperationCanceled
+from purra.contracts import (
     DomainEffect,
     ToolCall,
     ToolEffectState,
@@ -15,8 +15,8 @@ from agent_core.contracts import (
     ToolPlanningDisposition,
     ToolStepDisposition,
 )
-from agent_core.errors import ContractViolationError
-from agent_core.json_values import thaw_json_mapping
+from purra.errors import ContractViolationError
+from purra.json_values import thaw_json_mapping
 from infrastructure.persistence.run_execution_store import now_ms
 
 

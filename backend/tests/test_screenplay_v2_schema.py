@@ -10,13 +10,13 @@ from database.connection import DatabaseConnection
 pytestmark = pytest.mark.asyncio
 
 
-async def test_startup_drops_only_the_incompatible_conversation_experiment(
+async def test_startup_drops_discarded_conversation_and_operation_tables(
     tmp_path: Path,
 ):
     first = DatabaseConnection(tmp_path)
     await first.init()
-    await first.execute("DROP TABLE screenplay_conversation_events")
-    await first.execute("DROP TABLE screenplay_conversation_turns")
+    await first.execute("DROP TABLE IF EXISTS screenplay_conversation_events")
+    await first.execute("DROP TABLE IF EXISTS screenplay_conversation_turns")
     await first.execute("""CREATE TABLE screenplay_conversation_turns (
         id TEXT PRIMARY KEY NOT NULL,
         project_id TEXT NOT NULL,
@@ -27,6 +27,14 @@ async def test_startup_drops_only_the_incompatible_conversation_experiment(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         turn_id TEXT NOT NULL
     )""")
+    await first.execute("""CREATE TABLE screenplay_operations (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL
+    )""")
+    await first.execute("""CREATE TABLE screenplay_operation_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL
+    )""")
     await first.execute(
         "INSERT INTO screenplay_conversation_turns "
         "(id, project_id, session_id, status) "
@@ -35,6 +43,10 @@ async def test_startup_drops_only_the_incompatible_conversation_experiment(
     await first.execute(
         "INSERT INTO screenplay_projects (id, title, source_snapshot_json) "
         "VALUES ('kept-native-project', '保留项目', '{}')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_operations (id, project_id) "
+        "VALUES ('discarded-operation', 'kept-native-project')"
     )
     await first.execute(
         "INSERT INTO screenplay_command_receipts "
@@ -48,15 +60,10 @@ async def test_startup_drops_only_the_incompatible_conversation_experiment(
     reopened = DatabaseConnection(tmp_path)
     await reopened.init()
     try:
-        columns = {
-            row["name"] for row in await reopened.fetch_all(
-                "PRAGMA table_info(screenplay_conversation_turns)"
-            )
-        }
-        assert "attempt" in columns
         assert await reopened.fetch_one(
-            "SELECT COUNT(*) AS count FROM screenplay_conversation_turns"
-        ) == {"count": 0}
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'screenplay_conversation_turns'"
+        ) is None
         assert await reopened.fetch_one(
             "SELECT title FROM screenplay_projects "
             "WHERE id = 'kept-native-project'"
@@ -65,6 +72,51 @@ async def test_startup_drops_only_the_incompatible_conversation_experiment(
             "SELECT COUNT(*) AS count FROM screenplay_command_receipts "
             "WHERE command_type = 'submitConversationTurn'"
         ) == {"count": 0}
+        assert await reopened.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('screenplay_operations', 'screenplay_operation_events')"
+        ) is None
+    finally:
+        await reopened.close()
+
+
+async def test_startup_retires_revision_operation_ownership_without_data_loss(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_projects (id, title, source_snapshot_json) "
+        "VALUES ('revision-migration-project', '保留版本', '{}')"
+    )
+    await first.execute(
+        "ALTER TABLE screenplay_revisions ADD COLUMN operation_id TEXT"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_revisions "
+        "(id, project_id, deliverable_id, revision_no, content_digest, "
+        "summary_json, created_by, operation_id) VALUES "
+        "('kept-revision', 'revision-migration-project', "
+        "'spdel:revision-migration-project:creativeBrief', 1, 'digest', '{}', "
+        "'agent', 'discarded-owner')"
+    )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        columns = {
+            str(column["name"])
+            for column in await reopened.fetch_all(
+                "PRAGMA table_info(screenplay_revisions)"
+            )
+        }
+        assert "operation_id" not in columns
+        assert "agent_task_id" in columns
+        assert await reopened.fetch_one(
+            "SELECT id, content_digest FROM screenplay_revisions "
+            "WHERE id = 'kept-revision'"
+        ) == {"id": "kept-revision", "content_digest": "digest"}
     finally:
         await reopened.close()
 
@@ -180,8 +232,13 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
             )
         }
         assert {
-            "screenplay_conversation_turns",
-            "screenplay_conversation_events",
+            "screenplay_agent_turns",
+            "screenplay_agent_events",
+            "screenplay_agent_chunks",
+            "screenplay_agent_task_outputs",
         }.issubset(native_tables)
+        assert "screenplay_agent_jobs" not in native_tables
+        assert "screenplay_agent_job_steps" not in native_tables
+        assert "screenplay_conversation_turns" not in native_tables
     finally:
         await reopened.close()

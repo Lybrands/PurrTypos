@@ -1,10 +1,15 @@
 import { services } from '@/services'
 import React from 'react'
-import { createPortal } from 'react-dom'
 import AppHeader from '../components/AppHeader'
 import AgentConversation from '../components/AgentConversation'
 import AgentComposer from '../components/AgentComposer'
 import AgentConversationIndex from '../components/AgentConversationIndex'
+import AgentTaskProgress from '../components/AgentTaskProgress'
+import {
+  hydrateAiDebugRunSnapshot,
+  recordScreenplayAiDebugChunk,
+  type AiDebugChunk,
+} from '../components/AiDevInspector/store'
 import ContextUsageIndicator from '../Workspace/AiPanel/components/ContextUsageIndicator'
 import Markdown from '../Workspace/AiPanel/components/Markdown'
 import ModelPicker, {
@@ -60,6 +65,7 @@ import type {
   ScreenplayDocument,
   ScreenplayDocumentEpisode,
   ScreenplayDocumentProposal,
+  ScreenplayAgentTask,
   ScreenplayRevisionRef,
   ScreenplayDraftEpisode,
   ScreenplayFormat,
@@ -68,15 +74,22 @@ import type {
   ScreenplaySourceKind,
   ScreenplaySourceScopeMode,
   ScreenplaySourceScopeRequest,
+  ScreenplayConversationRuntimeInput,
+  ScreenplayConversationTurn,
   ScreenplayV2Workspace,
 } from '../types'
+import {
+  AgentChunkReplay,
+  getAgentConversationCapabilities,
+  type AiStreamChunk,
+  type ChatMessage,
+} from '../agent-runtime'
 import { buildStreamOptions } from '../Workspace/AiPanel/hooks/streamOptions'
+import { getActiveTaskPlan } from '../Workspace/AiPanel/taskPlanSelection'
 import {
   buildDraftBatchActions,
   draftEpisodeCountFromScope,
   draftScopeForEpisodeCount,
-  inferDraftSceneCount,
-  inferDraftScope,
   MAX_SCREENPLAY_DRAFT_BATCH_EPISODES,
   type DraftBatchAction,
   type ScreenplayDraftScope,
@@ -92,20 +105,20 @@ import { selectScreenplayAgentSession } from './sessionRestore'
 import {
   createScreenplayCommandId,
   findWorkspaceRevision,
-  operationIntentForTask,
-  operationRoleForProposal,
-  operationTargetForStage,
+  deliverableRoleForProposal,
   projectFromV2Project,
   projectFromWorkspace,
   screenplayFormatToV2,
   screenplaySourceToV2,
-} from './operationWorkflow'
+} from './screenplayProjectModel'
 import { ScreenplayConversationClient } from './conversationClient'
 import {
-  isScreenplayTurnTerminal,
+  modelRunIds,
+  screenplayTurnReconciliationKey,
   type ScreenplayConversationState,
 } from './conversationState'
 import RevisionLibraryModal from './RevisionLibraryModal'
+import { structuredContentToMarkdown } from './revisionDocumentView'
 import {
   documentEpisodesFromRevision,
   documentFromRevision,
@@ -143,15 +156,12 @@ interface ScreenplayAgentPageProps {
   onBack: () => void
 }
 
-interface ScreenplayConversationDisplayMessage {
-  role: 'user' | 'assistant' | 'system'
+interface ScreenplayQueuedSubmission {
+  id: string
+  projectId: string
+  sessionId: number
   content: string
-  sentAt?: string
-  agentRunId?: string
-  model?: string
-  isError?: boolean
-  error?: string
-  termination?: string
+  runtime: ScreenplayConversationRuntimeInput
 }
 
 const FORMAT_OPTIONS: ScreenplayFormat[] = ['短片', '电影', '单集剧', '连续剧', '竖屏短剧']
@@ -215,6 +225,55 @@ const ORIGINAL_BRIEF_STEPS: PurrStepItem<BriefStepKey>[] = [
 const LAST_OPENED_SCREENPLAY_PROJECT_STORAGE_KEY = 'purr-typos:last-opened-screenplay-project-id'
 const SCREENPLAY_AGENT_MODEL_STORAGE_KEY = 'purr-typos:screenplay-agent-model-id'
 const SCREENPLAY_ACTIVE_SESSION_STORAGE_PREFIX = 'purr-typos:screenplay-active-session:'
+const SCREENPLAY_DIAGNOSTIC_CHUNK_KEYS = new Set([
+  'model',
+  'modelContentDelta',
+  'reasoningDelta',
+])
+
+function screenplayChunkChangesConversation(chunk: AiStreamChunk): boolean {
+  return Object.keys(chunk).some((key) => !SCREENPLAY_DIAGNOSTIC_CHUNK_KEYS.has(key))
+}
+
+function backendTimestampMs(value?: string | null): number | null {
+  const normalized = String(value || '').trim().replace(' ', 'T')
+  if (!normalized) return null
+  const timestamp = Date.parse(
+    /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}Z`,
+  )
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function screenplayTurnDurationMs(
+  turn: ScreenplayConversationTurn,
+  task?: ScreenplayAgentTask,
+): number {
+  const startedAt = backendTimestampMs(turn.createdAt)
+  const finishedAt = backendTimestampMs(task?.updatedAt || turn.updatedAt)
+  return startedAt == null || finishedAt == null
+    ? 0
+    : Math.max(0, finishedAt - startedAt)
+}
+
+function replayTurnStartedAt(
+  turn: ScreenplayConversationTurn,
+  task?: ScreenplayAgentTask,
+): number {
+  const terminal = ['completed', 'failed', 'canceled'].includes(task?.status || turn.status)
+  const elapsed = terminal
+    ? screenplayTurnDurationMs(turn, task)
+    : Math.max(0, Date.now() - (backendTimestampMs(turn.createdAt) ?? Date.now()))
+  return performance.now() - elapsed
+}
+
+function turnTiming(
+  turn: ScreenplayConversationTurn,
+  task?: ScreenplayAgentTask,
+): Pick<ChatMessage, 'durationMs' | 'turnStartedAt'> {
+  return ['completed', 'failed', 'canceled'].includes(task?.status || turn.status)
+    ? { durationMs: screenplayTurnDurationMs(turn, task) }
+    : { turnStartedAt: replayTurnStartedAt(turn, task) }
+}
 
 function getStoredLastOpenedScreenplayProjectId(): EntityId | null {
   try {
@@ -291,8 +350,7 @@ function previousDocumentVersion(
 function stageAgentStarter(
   project: ScreenplayProject,
   documents: ScreenplayDocument[] = [],
-  draftSceneCount = 1,
-  draftScope: ScreenplayDraftScope = 'planner',
+  draftScope: ScreenplayDraftScope = 'next_episode',
 ): string {
   if (project.active_stage === 'completed') {
     return project.delivery_manifest
@@ -322,17 +380,17 @@ function stageAgentStarter(
     const suffix = '保持与当前已接受的场景表和正文版本连贯，并生成可应用的正文提案。'
     if (draftScope === 'all_remaining') return `继续创作全部剩余正文，${suffix}`
     const draftEpisodeCount = draftEpisodeCountFromScope(draftScope)
-    if (draftEpisodeCount === 1) return `继续创作下一集，${suffix}`
+    if (draftEpisodeCount === 1) {
+      return SERIES_FORMATS.has(project.format)
+        ? `继续创作下一集，${suffix}`
+        : `继续创作完整正文，${suffix}`
+    }
     if (draftEpisodeCount != null) {
       return `连续创作接下来 ${draftEpisodeCount} 集，${suffix}`
     }
-    if (draftScope === 'next_scene') return `继续创作下一场，${suffix}`
-    if (draftScope === 'count' && draftSceneCount > 1) {
-      return `继续创作接下来 ${draftSceneCount} 场，${suffix}`
-    }
     return SERIES_FORMATS.has(project.format)
       ? `继续创作下一集，${suffix}`
-      : `继续创作下一场，${suffix}`
+      : `继续创作完整正文，${suffix}`
   }
   if (project.active_stage === 'review') {
     const acceptedDraft = [...documents].reverse().find(
@@ -378,13 +436,11 @@ function screenplayDraftBatchScope(
 ): {
   pendingSceneCount: number
   pendingEpisodeCount: number
-  hasEpisodeNumbers: boolean
 } {
   if (project.active_stage !== 'draft') {
     return {
       pendingSceneCount: 0,
       pendingEpisodeCount: 0,
-      hasEpisodeNumbers: false,
     }
   }
   const sceneList = [...documents].reverse().find(
@@ -402,11 +458,9 @@ function screenplayDraftBatchScope(
   const pendingEpisodeCount = sceneEpisodes.filter((episode) => (
     episode.item_ids.some((sceneId) => !completed.has(String(sceneId)))
   )).length
-  const hasEpisodeNumbers = pendingSceneIds.length > 0 && sceneEpisodes.length > 0
   return {
     pendingSceneCount: pendingSceneIds.length,
     pendingEpisodeCount,
-    hasEpisodeNumbers,
   }
 }
 
@@ -437,14 +491,7 @@ function stagePrimaryActionLabel(
       0,
     )
     if (sceneCount > 0 && completedCount >= sceneCount) return '完成剧本正文'
-    return screenplayDraftBatchScope(
-      project,
-      documents,
-      episodes,
-      documentEpisodes,
-    ).hasEpisodeNumbers
-      ? '创作下一集'
-      : '创作下一场'
+    return SERIES_FORMATS.has(project.format) ? '创作下一集' : '创作正文'
   }
   const acceptedDraft = [...documents].reverse().find(
     (document) => document.kind === 'scene_draft' && document.status === 'accepted',
@@ -486,6 +533,129 @@ function proposalAdvancesProjectStage(
     return proposal.kind === 'review' && proposal.contentJson.verdict === 'ready'
   }
   return false
+}
+
+interface ScreenplayProposalActionPanelProps {
+  proposal: ScreenplayDocumentProposal
+  acceptedRevisionId: EntityId | null
+  savedRevisionId: EntityId | null
+  sourceCount: number
+  showSources: boolean
+  willAdvance: boolean
+  running: boolean
+  saving: boolean
+  accepting: boolean
+  archived: boolean
+  activeStage: ScreenplayProject['active_stage']
+  onView: () => void
+  onApply: () => void
+}
+
+function ScreenplayProposalActionPanel({
+  proposal,
+  acceptedRevisionId,
+  savedRevisionId,
+  sourceCount,
+  showSources,
+  willAdvance,
+  running,
+  saving,
+  accepting,
+  archived,
+  activeStage,
+  onView,
+  onApply,
+}: ScreenplayProposalActionPanelProps) {
+  return (
+    <div className="screenplay-agent-result">
+      <div className="screenplay-agent-result__title">
+        <span>
+          <CheckCircleIcon />
+          本轮产物
+        </span>
+        {showSources && sourceCount > 0 ? (
+          <span className="screenplay-agent-result__sources">
+            {sourceCount} 条可追溯来源
+          </span>
+        ) : null}
+      </div>
+      <article className="screenplay-document-proposal">
+        <header>
+          <div>
+            <span className="screenplay-source-eyebrow">FORMAL PROPOSAL</span>
+            <h3>{proposal.title}</h3>
+            <span>
+              {DOCUMENT_KIND_LABELS[proposal.kind]}
+              {' · '}
+              {acceptedRevisionId
+                ? '已应用到项目'
+                : savedRevisionId
+                  ? '候选已就绪，等待应用'
+                  : '候选提交中'}
+            </span>
+          </div>
+          <span className={`screenplay-document-status ${
+            acceptedRevisionId
+              ? 'is-accepted'
+              : savedRevisionId
+                ? 'is-saved'
+                : ''
+          }`}>
+            {acceptedRevisionId
+              ? '已应用'
+              : savedRevisionId
+                ? '待应用'
+                : '提交中'}
+          </span>
+        </header>
+        <div className="screenplay-document-proposal__handoff">
+          <FileTextIcon />
+          <div>
+            <strong>候选稿内容已写入项目版本库</strong>
+            <span>
+              对话仅展示执行结论；需要审阅时再打开候选稿，不在消息中展开完整正文。
+            </span>
+          </div>
+        </div>
+        <footer>
+          <span>
+            {willAdvance
+              ? 'Agent 已生成唯一候选；应用会原子更新当前版本并推进阶段。'
+              : 'Agent 已生成唯一候选；应用会原子更新当前业务版本。'}
+          </span>
+          <div>
+            <PurrButton
+              icon={<EyeIcon />}
+              disabled={!savedRevisionId}
+              onClick={onView}
+            >
+              查看候选稿
+            </PurrButton>
+            <PurrButton
+              type="primary"
+              icon={<CheckCircleIcon />}
+              loading={accepting}
+              disabled={
+                acceptedRevisionId != null
+                || running
+                || saving
+                || archived
+              }
+              onClick={onApply}
+            >
+              {acceptedRevisionId
+                ? '已应用'
+                : willAdvance
+                  ? activeStage === 'review'
+                    ? '应用并完成'
+                    : '应用并推进'
+                  : '应用当前版本'}
+            </PurrButton>
+          </div>
+        </footer>
+      </article>
+    </div>
+  )
 }
 
 function nextMilestone(project: ScreenplayProject): {
@@ -619,13 +789,17 @@ export default function ScreenplayAgentPage({
   const [agentConversationState, setAgentConversationState] = React.useState<
     ScreenplayConversationState | null
   >(null)
-  const [agentResultHost, setAgentResultHost] = React.useState<HTMLDivElement | null>(null)
+  const [agentChunkVersion, setAgentChunkVersion] = React.useState(0)
+  const [agentQueuedSubmissions, setAgentQueuedSubmissions] = React.useState<
+    ScreenplayQueuedSubmission[]
+  >([])
+  const [agentQueueDraining, setAgentQueueDraining] = React.useState(false)
   const [agentProposal, setAgentProposal] = React.useState<ScreenplayDocumentProposal | null>(null)
   const [agentRevisionRef, setAgentRevisionRef] = React.useState<ScreenplayRevisionRef | null>(null)
-  const [agentOperationId, setAgentOperationId] = React.useState<string | null>(null)
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
+  const [agentChunkHydrating, setAgentChunkHydrating] = React.useState(false)
   const [agentConversationIndexOpen, setAgentConversationIndexOpen] = React.useState(true)
   const [editingAgentSessionId, setEditingAgentSessionId] = React.useState<number | null>(null)
   const [editingAgentSessionTitle, setEditingAgentSessionTitle] = React.useState('')
@@ -638,59 +812,99 @@ export default function ScreenplayAgentPage({
   const [selectedDocument, setSelectedDocument] = React.useState<ScreenplayDocument | null>(null)
   const [comparisonDocument, setComparisonDocument] = React.useState<ScreenplayDocument | null>(null)
   const [updatingProjectStatus, setUpdatingProjectStatus] = React.useState(false)
-  const operationRevision = React.useMemo(() => (
+  const candidateRevision = React.useMemo(() => (
     (agentRevisionRef || agentProposal) && projectWorkspace
       ? findWorkspaceRevision({
           workspace: projectWorkspace,
           role: agentRevisionRef?.role
-            ?? operationRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
+            ?? deliverableRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
           revisionId: agentRevisionRef?.revisionId,
-          operationId: agentRevisionRef?.operationId ?? agentOperationId,
+          taskId: agentRevisionRef?.taskId,
           finalizingRunId: agentRevisionRef?.sourceRunId ?? undefined,
         })
       : null
-  ), [agentOperationId, agentProposal, agentRevisionRef, projectWorkspace])
-  const savedAgentDocumentId = operationRevision?.id ?? agentRevisionRef?.revisionId ?? null
-  const acceptedAgentDocumentId = operationRevision
+  ), [agentProposal, agentRevisionRef, projectWorkspace])
+  const savedAgentDocumentId = candidateRevision?.id ?? agentRevisionRef?.revisionId ?? null
+  const acceptedAgentDocumentId = candidateRevision
     && projectWorkspace
-    && projectWorkspace.workflow.heads[operationRevision.role]?.id === operationRevision.id
-      ? operationRevision.id
+    && projectWorkspace.workflow.heads[candidateRevision.role]?.id === candidateRevision.id
+      ? candidateRevision.id
       : null
   const hydratedAgentRevisionIdRef = React.useRef<string | null>(null)
   const activeAgentSessionRef = React.useRef<number | null>(null)
   const agentConversationStateRef = React.useRef<ScreenplayConversationState | null>(null)
+  const agentChunkReplayRef = React.useRef(new AgentChunkReplay())
+  const agentChunkCursorRef = React.useRef(0)
+  const agentChunkRenderPendingRef = React.useRef(false)
+  const agentChunkReplayCaughtUpRef = React.useRef(true)
   const conversationPollErrorRef = React.useRef('')
-  const resumingTurnIdsRef = React.useRef(new Set<string>())
+  const reconciledConversationTurnRef = React.useRef({ scope: '', key: '' })
+  const diagnosticRunMonitorsRef = React.useRef(new Map<string, () => void>())
+  const completedDiagnosticRunIdsRef = React.useRef(new Set<string>())
   const conversationClient = React.useMemo(
     () => new ScreenplayConversationClient(services.screenplay),
     [],
   )
-  const agentMessages = React.useMemo<ScreenplayConversationDisplayMessage[]>(() => (
-    agentConversationState?.messages.map((entry) => ({
-      role: entry.role,
-      content: entry.content || (
-        entry.status === 'failed'
+  const agentMessages = React.useMemo<ChatMessage[]>(() => (
+    agentConversationState?.messages.map((entry) => {
+      const turn = agentConversationState.turns.find((item) => item.id === entry.turnId)
+      const task = agentConversationState.tasks.find((item) => item.turnId === entry.turnId)
+      const streamed = entry.role === 'assistant'
+        ? agentChunkReplayRef.current.assistant(entry.turnId)
+        : undefined
+      const canonical: ChatMessage = {
+        role: entry.role,
+        content: entry.content || (
+          entry.status === 'failed'
+            ? entry.error?.message || '本轮剧本对话执行失败'
+            : ''
+        ),
+        sentAt: entry.createdAt || undefined,
+        agentRunId: entry.runId || undefined,
+        model: entry.model || undefined,
+        isError: entry.status === 'failed',
+        error: entry.status === 'failed'
           ? entry.error?.message || '本轮剧本对话执行失败'
-          : ''
-      ),
-      sentAt: entry.createdAt || undefined,
-      agentRunId: entry.runId || undefined,
-      model: entry.model || undefined,
-      isError: entry.status === 'failed',
-      error: entry.status === 'failed'
-        ? entry.error?.message || '本轮剧本对话执行失败'
-        : undefined,
-      termination: entry.status === 'canceled' ? '已终止' : undefined,
-    })) ?? []
+          : undefined,
+        termination: entry.status === 'canceled' ? '已终止' : undefined,
+        ...(entry.role === 'assistant' && turn ? turnTiming(turn, task) : {}),
+      }
+      return streamed
+        ? {
+            ...canonical,
+            ...streamed,
+            content: streamed.content.trim() ? streamed.content : canonical.content,
+            agentRunId: canonical.agentRunId || streamed.agentRunId,
+            durationMs: canonical.durationMs ?? streamed.durationMs,
+            turnStartedAt: canonical.durationMs == null
+              ? streamed.turnStartedAt ?? canonical.turnStartedAt
+              : undefined,
+            isError: streamed.isError ?? canonical.isError,
+            error: streamed.error ?? canonical.error,
+            termination: streamed.termination ?? canonical.termination,
+          }
+        : canonical
+    }) ?? []
+  ), [agentChunkVersion, agentConversationState])
+  const activeConversationTask = React.useMemo(() => (
+    [...(agentConversationState?.tasks ?? [])].reverse().find(
+      (task) => task.status === 'queued' || task.status === 'running',
+    ) ?? null
   ), [agentConversationState])
   const activeConversationTurn = React.useMemo(() => (
     [...(agentConversationState?.turns ?? [])].reverse().find(
-      (turn) => turn.status === 'queued' || turn.status === 'running',
+      (turn) => turn.status === 'queued' || turn.status === 'planning',
+    ) ?? agentConversationState?.turns.find(
+      (turn) => turn.id === activeConversationTask?.turnId,
     ) ?? null
-  ), [agentConversationState])
+  ), [activeConversationTask, agentConversationState])
   const latestConversationTurn = agentConversationState?.turns.at(-1) ?? null
-  const agentRunning = activeConversationTurn != null
-  const agentRunId = latestConversationTurn?.runId || ''
+  const latestConversationTask = latestConversationTurn
+    ? agentConversationState?.tasks.find(
+      (task) => task.turnId === latestConversationTurn.id,
+    )
+    : undefined
+  const agentRunning = activeConversationTurn != null || activeConversationTask != null
   const agentResponse = latestConversationTurn?.assistantContent || ''
 
   React.useEffect(() => {
@@ -701,23 +915,102 @@ export default function ScreenplayAgentPage({
     agentConversationStateRef.current = agentConversationState
   }, [agentConversationState])
 
+  const monitorDiagnosticRun = React.useCallback((input: {
+    runId: string
+    turnId: string
+    prompt: string
+  }) => {
+    if (
+      !import.meta.env.DEV
+      || !input.runId
+      || diagnosticRunMonitorsRef.current.has(input.runId)
+      || completedDiagnosticRunIdsRef.current.has(input.runId)
+    ) return
+    let stopped = false
+    let terminal = false
+    const cancel = () => {
+      stopped = true
+    }
+    diagnosticRunMonitorsRef.current.set(input.runId, cancel)
+    void (async () => {
+      let after = 0
+      while (!stopped) {
+        const result = await services.ai.getAgentRunSnapshot({
+          runId: input.runId,
+          after,
+          limit: 500,
+        })
+        if (!result.success || !result.data) {
+          throw new Error(result.error || '读取剧本 Agent 诊断失败')
+        }
+        hydrateAiDebugRunSnapshot({
+          snapshot: result.data,
+          turnId: input.turnId,
+          prompt: input.prompt,
+          source: '剧本 Agent 对话',
+        })
+        if (result.data.nextCursor > after) {
+          after = result.data.nextCursor
+        } else if (result.data.hasMore) {
+          throw new Error('剧本 Agent 诊断事件游标没有前进')
+        }
+        if (result.data.hasMore) continue
+        terminal = ['done', 'failed', 'canceled', 'blocked'].includes(
+          result.data.run.status,
+        )
+        if (terminal) break
+        await new Promise((resolve) => window.setTimeout(resolve, 200))
+      }
+    })().catch(() => undefined).finally(() => {
+      if (diagnosticRunMonitorsRef.current.get(input.runId) === cancel) {
+        diagnosticRunMonitorsRef.current.delete(input.runId)
+      }
+      if (terminal) completedDiagnosticRunIdsRef.current.add(input.runId)
+    })
+  }, [])
+
   React.useEffect(() => {
-    const revisionTurn = [...(agentConversationState?.turns ?? [])]
+    if (!import.meta.env.DEV) return
+    for (const turn of agentConversationState?.turns ?? []) {
+      const task = agentConversationState?.tasks.find((item) => item.turnId === turn.id)
+      const runIds = new Set([
+        turn.plannerRunId,
+        ...modelRunIds(task),
+      ].filter((runId): runId is string => Boolean(runId?.trim())))
+      for (const runId of runIds) {
+        monitorDiagnosticRun({
+          runId,
+          turnId: turn.id,
+          prompt: turn.userContent,
+        })
+      }
+    }
+  }, [agentConversationState, monitorDiagnosticRun])
+
+  React.useEffect(() => () => {
+    diagnosticRunMonitorsRef.current.forEach((cancel) => cancel())
+    diagnosticRunMonitorsRef.current.clear()
+  }, [agentSessionId])
+
+  React.useEffect(() => {
+    const revisionTask = [...(agentConversationState?.tasks ?? [])]
       .reverse()
-      .find((turn) => turn.revisionId && turn.operationId)
-    if (!revisionTurn || openedProject?.id !== revisionTurn.projectId) {
+      .find((task) => task.resultRevisionId)
+    if (!revisionTask || openedProject?.id !== revisionTask.projectId) {
       setAgentRevisionRef(null)
       setAgentProposal(null)
       hydratedAgentRevisionIdRef.current = null
       return undefined
     }
-    if (hydratedAgentRevisionIdRef.current === revisionTurn.revisionId) {
+    if (hydratedAgentRevisionIdRef.current === revisionTask.resultRevisionId) {
       return undefined
     }
+    const revisionTurn = agentConversationState?.turns.find(
+      (turn) => turn.id === revisionTask.turnId,
+    )
     let canceled = false
-    setAgentOperationId(revisionTurn.operationId)
     void services.screenplay.getScreenplayV2Revision({
-      revisionId: revisionTurn.revisionId!,
+      revisionId: revisionTask.resultRevisionId!,
       view: 'full',
     }).then((result) => {
       if (canceled) return
@@ -728,12 +1021,14 @@ export default function ScreenplayAgentPage({
       try {
         const reference: ScreenplayRevisionRef = {
           schemaVersion: 1,
-          projectId: revisionTurn.projectId,
-          operationId: revisionTurn.operationId!,
-          revisionId: revisionTurn.revisionId!,
+          projectId: revisionTask.projectId,
+          taskId: revisionTask.id,
+          revisionId: revisionTask.resultRevisionId!,
           role: result.data.role,
           revisionNo: result.data.revisionNo,
-          sourceRunId: revisionTurn.runId || undefined,
+          sourceRunId: modelRunIds(revisionTask).at(-1)
+            || revisionTurn?.plannerRunId
+            || undefined,
         }
         const proposal = proposalFromRevision(reference, result.data)
         hydratedAgentRevisionIdRef.current = reference.revisionId
@@ -951,11 +1246,16 @@ export default function ScreenplayAgentPage({
         setAgentSessionId(null)
         setAgentConversationState(null)
         agentConversationStateRef.current = null
+        agentChunkReplayRef.current.reset()
+        agentChunkCursorRef.current = 0
+        setAgentChunkVersion((current) => current + 1)
+        setAgentQueuedSubmissions((current) => current.filter(
+          (submission) => submission.projectId !== projectId,
+        ))
         setAgentPrompt('')
         setAgentProposal(null)
         setAgentRevisionRef(null)
         hydratedAgentRevisionIdRef.current = null
-        setAgentOperationId(null)
         setStage('source')
       }
       setDeleteProjectTarget(null)
@@ -1360,11 +1660,13 @@ export default function ScreenplayAgentPage({
     setAgentProposal(null)
     setAgentRevisionRef(null)
     hydratedAgentRevisionIdRef.current = null
-    setAgentOperationId(null)
     setAgentSessionId(null)
     setAgentSessions([])
     setAgentConversationState(null)
     agentConversationStateRef.current = null
+    agentChunkReplayRef.current.reset()
+    agentChunkCursorRef.current = 0
+    setAgentChunkVersion((current) => current + 1)
     conversationPollErrorRef.current = ''
     setAgentPrompt('')
     setSelectedDocument(null)
@@ -1432,9 +1734,6 @@ export default function ScreenplayAgentPage({
 
   const applyProjectWorkspace = React.useCallback((workspace: ScreenplayV2Workspace) => {
     setProjectWorkspace(workspace)
-    setAgentOperationId((current) => (
-      current ?? workspace.activeOperations.at(-1)?.id ?? null
-    ))
     setOpenedProject((current) => (
       current?.id === workspace.project.id
         ? projectFromWorkspace(current, workspace)
@@ -1485,27 +1784,31 @@ export default function ScreenplayAgentPage({
     documents: ScreenplayDocument[],
   ) => {
     setAgentSessionLoading(true)
+    setAgentChunkHydrating(true)
+    agentChunkReplayCaughtUpRef.current = false
+    agentChunkRenderPendingRef.current = false
     activeAgentSessionRef.current = sessionId
     setAgentSessionId(sessionId)
     storeScreenplayAgentSessionId(project.id, sessionId)
     setAgentConversationState(null)
     agentConversationStateRef.current = null
+    agentChunkReplayRef.current.reset()
+    agentChunkCursorRef.current = 0
+    setAgentChunkVersion((current) => current + 1)
     setAgentProposal(null)
     setAgentRevisionRef(null)
-    setAgentOperationId(null)
     hydratedAgentRevisionIdRef.current = null
     try {
       const next = await conversationClient.load(project.id, sessionId)
       if (activeAgentSessionRef.current !== sessionId) return
       agentConversationStateRef.current = next
       setAgentConversationState(next)
-      setAgentOperationId(
-        [...next.turns].reverse().find((turn) => turn.operationId)?.operationId ?? null,
-      )
       setAgentPrompt(
         next.turns.length > 0 ? '' : stageAgentStarter(project, documents),
       )
     } catch (error) {
+      agentChunkReplayCaughtUpRef.current = true
+      setAgentChunkHydrating(false)
       message.error(error instanceof Error ? error.message : '读取剧本 Agent 对话失败')
     } finally {
       setAgentSessionLoading(false)
@@ -1526,11 +1829,16 @@ export default function ScreenplayAgentPage({
     setAgentSessions([])
     setAgentConversationState(null)
     agentConversationStateRef.current = null
+    agentChunkReplayRef.current.reset()
+    agentChunkCursorRef.current = 0
+    agentChunkReplayCaughtUpRef.current = false
+    agentChunkRenderPendingRef.current = false
+    setAgentChunkHydrating(true)
+    setAgentChunkVersion((current) => current + 1)
     setAgentPrompt('')
     setAgentProposal(null)
     setAgentRevisionRef(null)
     hydratedAgentRevisionIdRef.current = null
-    setAgentOperationId(null)
     setProjectLoading(true)
     setStage('project')
     try {
@@ -1568,6 +1876,8 @@ export default function ScreenplayAgentPage({
           await loadAgentSession(targetSession.id, effectiveProject, documents || [])
         }
       } else {
+        agentChunkReplayCaughtUpRef.current = true
+        setAgentChunkHydrating(false)
         message.error(sessionResult.error || '初始化剧本 Agent 会话失败')
       }
       if (documents && !sessionResult.success) {
@@ -1584,15 +1894,23 @@ export default function ScreenplayAgentPage({
     message,
   ])
 
+  const openedProjectId = openedProject?.id ?? null
+
   React.useEffect(() => {
-    if (!openedProject || agentSessionId == null) return undefined
+    if (openedProjectId == null || agentSessionId == null) return undefined
     let stopped = false
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null
     let wakeTimer: ReturnType<typeof setTimeout> | null = null
     let stopWatching: (() => void) | null = null
     let polling = false
     let rerun = false
-    let lastReconciled = ''
+    const reconciliationScope = `${openedProjectId}:${agentSessionId}`
+    if (reconciledConversationTurnRef.current.scope !== reconciliationScope) {
+      reconciledConversationTurnRef.current = {
+        scope: reconciliationScope,
+        key: '',
+      }
+    }
 
     const wake = () => {
       if (stopped) return
@@ -1621,7 +1939,7 @@ export default function ScreenplayAgentPage({
         const current = agentConversationStateRef.current
         const next = current && current.sessionId === agentSessionId
           ? await conversationClient.refresh(current)
-          : await conversationClient.load(openedProject.id, agentSessionId)
+          : await conversationClient.load(openedProjectId, agentSessionId)
         if (stopped || activeAgentSessionRef.current !== agentSessionId) return
         conversationPollErrorRef.current = ''
         if (next !== current) {
@@ -1629,54 +1947,108 @@ export default function ScreenplayAgentPage({
           setAgentConversationState(next)
         }
         if (!stopWatching) {
-          stopWatching = conversationClient.watch(next, wake)
-        }
-        const latestOperation = [...next.turns].reverse().find(
-          (turn) => turn.operationId,
-        )
-        if (latestOperation?.operationId) {
-          setAgentOperationId(latestOperation.operationId)
-        }
-        for (const turnId of [...resumingTurnIdsRef.current]) {
-          const turn = next.turns.find((item) => item.id === turnId)
-          if (turn?.status !== 'queued') {
-            resumingTurnIdsRef.current.delete(turnId)
-          }
-        }
-        const retryable = [...next.turns].reverse().find((turn) => turn.retryable)
-        const model = modelConfigs.find((item) => item.id === selectedModelId)
-          ?? modelConfigs[0]
-        if (
-          retryable
-          && model?.apiKey?.trim()
-          && !resumingTurnIdsRef.current.has(retryable.id)
-        ) {
-          resumingTurnIdsRef.current.add(retryable.id)
-          try {
-            await conversationClient.resume(
-              createScreenplayCommandId('resume-turn'),
-              retryable.id,
-              runtimeForModel(model),
-            )
-          } catch (error) {
-            resumingTurnIdsRef.current.delete(retryable.id)
-            throw error
-          }
+          stopWatching = conversationClient.watch(next, {
+            chunkAfter: agentChunkCursorRef.current,
+            onInvalidate: wake,
+            onChunks: (page) => {
+              if (stopped || activeAgentSessionRef.current !== agentSessionId) return
+              let changed = false
+              for (const event of page.chunks) {
+                if (event.cursor <= agentChunkCursorRef.current) continue
+                const state = agentConversationStateRef.current
+                const turn = state?.turns.find((item) => item.id === event.turnId)
+                const task = state?.tasks.find((item) => item.turnId === event.turnId)
+                const modelName = event.model || turn?.runtimeProfile.model || ''
+                const cfg = modelConfigs.find((item) => item.name === modelName)
+                  || modelConfigs.find((item) => item.id === selectedModelId)
+                  || modelConfigs[0]
+                  || {
+                    id: 'screenplay-agent-stream',
+                    name: modelName || 'screenplay-agent',
+                    supportsThinking: true,
+                    thinkingOnly: false,
+                    apiKey: '',
+                    baseUrl: '',
+                  }
+                const createdAt = backendTimestampMs(
+                  turn?.createdAt || event.turnCreatedAt,
+                )
+                const chunk = event.chunk as AiStreamChunk
+                agentChunkReplayRef.current.dispatch({
+                  turnId: event.turnId,
+                  sessionId: agentSessionId,
+                  userContent: event.userContent || turn?.userContent || '',
+                  model: modelName || undefined,
+                  turnStartedAt: turn
+                    ? replayTurnStartedAt(turn, task)
+                    : performance.now() - Math.max(
+                        0,
+                        Date.now() - (createdAt ?? Date.now()),
+                      ),
+                }, chunk, {
+                  cfg,
+                  appMessage: message,
+                })
+                if (import.meta.env.DEV && event.runId) {
+                  recordScreenplayAiDebugChunk({
+                    runId: event.runId,
+                    turnId: event.turnId,
+                    sessionId: agentSessionId,
+                    prompt: event.userContent || turn?.userContent || '',
+                    model: modelName || undefined,
+                    chunk: event.chunk as AiDebugChunk,
+                  })
+                  monitorDiagnosticRun({
+                    runId: event.runId,
+                    turnId: event.turnId,
+                    prompt: event.userContent || turn?.userContent || '',
+                  })
+                }
+                agentChunkCursorRef.current = event.cursor
+                const terminalReplay = turn && ['completed', 'failed', 'canceled'].includes(
+                  task?.status || turn.status,
+                )
+                changed = (
+                  screenplayChunkChangesConversation(chunk)
+                  && (!terminalReplay || Boolean(chunk.done || chunk.error))
+                ) || changed
+              }
+              agentChunkCursorRef.current = Math.max(
+                agentChunkCursorRef.current,
+                page.nextCursor,
+              )
+              if (!agentChunkReplayCaughtUpRef.current) {
+                agentChunkRenderPendingRef.current = (
+                  agentChunkRenderPendingRef.current || changed
+                )
+                if (!page.hasMore) {
+                  agentChunkReplayCaughtUpRef.current = true
+                  setAgentChunkHydrating(false)
+                  if (agentChunkRenderPendingRef.current) {
+                    setAgentChunkVersion((current) => current + 1)
+                  }
+                  agentChunkRenderPendingRef.current = false
+                }
+                return
+              }
+              if (changed) setAgentChunkVersion((current) => current + 1)
+            },
+          })
         }
         const latest = next.turns.at(-1)
-        const reconciliationKey = latest
-          ? [latest.id, latest.status, latest.revisionId || ''].join(':')
-          : ''
+        const latestTask = latest
+          ? next.tasks.find((task) => task.turnId === latest.id)
+          : undefined
+        const reconciliationKey = screenplayTurnReconciliationKey(latest, latestTask)
         if (
-          latest
-          && reconciliationKey !== lastReconciled
-          && isScreenplayTurnTerminal(latest)
+          reconciliationKey
+          && reconciliationKey !== reconciledConversationTurnRef.current.key
         ) {
-          lastReconciled = reconciliationKey
+          reconciledConversationTurnRef.current.key = reconciliationKey
           void Promise.all([
-            loadProjectWorkspace(openedProject.id),
-            loadProjectDocuments(openedProject.id),
-            loadProjectSourceRefs(openedProject.id),
+            loadProjectWorkspace(openedProjectId),
+            loadProjectDocuments(openedProjectId),
+            loadProjectSourceRefs(openedProjectId),
           ])
         }
       } catch (error) {
@@ -1696,8 +2068,11 @@ export default function ScreenplayAgentPage({
             rerun = false
             wake()
           } else {
-            const active = agentConversationStateRef.current?.turns.some(
-              (turn) => turn.status === 'queued' || turn.status === 'running',
+            const state = agentConversationStateRef.current
+            const active = state?.turns.some(
+              (turn) => turn.status === 'queued' || turn.status === 'planning',
+            ) || state?.tasks.some(
+              (task) => task.status === 'queued' || task.status === 'running',
             )
             fallbackTimer = setTimeout(
               () => void poll(),
@@ -1722,16 +2097,22 @@ export default function ScreenplayAgentPage({
     loadProjectWorkspace,
     message,
     modelConfigs,
-    openedProject,
-    runtimeForModel,
+    monitorDiagnosticRun,
+    openedProjectId,
     selectedModelId,
   ])
 
   const switchAgentSession = React.useCallback((sessionId: number) => {
-    if (!openedProject || agentSessionLoading || sessionId === agentSessionId) return
+    if (
+      !openedProject
+      || agentSessionLoading
+      || agentChunkHydrating
+      || sessionId === agentSessionId
+    ) return
     void loadAgentSession(sessionId, openedProject, projectDocuments)
   }, [
     agentSessionId,
+    agentChunkHydrating,
     agentSessionLoading,
     loadAgentSession,
     openedProject,
@@ -1739,7 +2120,7 @@ export default function ScreenplayAgentPage({
   ])
 
   const createAgentSession = React.useCallback(async () => {
-    if (!openedProject || agentSessionLoading) return
+    if (!openedProject || agentSessionLoading || agentChunkHydrating) return
     if (agentSessions.length > 0 && agentMessages.length === 0) return
     setAgentSessionLoading(true)
     try {
@@ -1758,6 +2139,7 @@ export default function ScreenplayAgentPage({
     }
   }, [
     agentMessages.length,
+    agentChunkHydrating,
     agentSessionLoading,
     agentSessions.length,
     loadAgentSession,
@@ -1767,7 +2149,7 @@ export default function ScreenplayAgentPage({
   ])
 
   const closeAgentSession = React.useCallback(async (session: AiSession) => {
-    if (!openedProject || agentSessionLoading) return
+    if (!openedProject || agentSessionLoading || agentChunkHydrating) return
     setAgentSessionLoading(true)
     try {
       const result = await services.sessions.setSessionClosed({ sessionId: session.id })
@@ -1796,6 +2178,7 @@ export default function ScreenplayAgentPage({
     }
   }, [
     agentSessionId,
+    agentChunkHydrating,
     agentSessionLoading,
     agentSessions,
     loadAgentSession,
@@ -1826,20 +2209,23 @@ export default function ScreenplayAgentPage({
     setEditingAgentSessionId(null)
   }, [editingAgentSessionId, editingAgentSessionTitle, message])
 
-  const stopAgent = React.useCallback(() => {
-    if (!activeConversationTurn || !openedProject || agentSessionId == null) return
-    void conversationClient.cancel(
-      createScreenplayCommandId('cancel-turn'),
-      activeConversationTurn.id,
-    ).then(async () => {
+  const stopAgent = React.useCallback(async (): Promise<boolean> => {
+    if (!activeConversationTurn || !openedProject || agentSessionId == null) return true
+    try {
+      await conversationClient.cancel(
+        createScreenplayCommandId('cancel-turn'),
+        activeConversationTurn.id,
+      )
       const next = await conversationClient.load(openedProject.id, agentSessionId)
-      if (activeAgentSessionRef.current !== agentSessionId) return
+      if (activeAgentSessionRef.current !== agentSessionId) return true
       agentConversationStateRef.current = next
       setAgentConversationState(next)
       void loadProjectWorkspace(openedProject.id)
-    }).catch((error) => {
+      return true
+    } catch (error) {
       message.error(error instanceof Error ? error.message : '终止剧本对话失败')
-    })
+      return false
+    }
   }, [
     activeConversationTurn,
     agentSessionId,
@@ -1851,11 +2237,8 @@ export default function ScreenplayAgentPage({
 
   const runAgent = React.useCallback(async (
     promptOverride?: string,
-    taskIntent: 'chat' | 'stage_deliverable' = 'chat',
-    _editMessageIndex?: number,
-    modelOverrideId?: string,
-    draftSceneCount?: number,
-    draftScope?: ScreenplayDraftScope,
+    editMessageIndex?: number,
+    runtimeOverride?: ScreenplayConversationRuntimeInput,
   ) => {
     if (!openedProject) return
     if (openedProject.status === 'archived') {
@@ -1867,95 +2250,75 @@ export default function ScreenplayAgentPage({
       return
     }
     const prompt = (promptOverride ?? agentPrompt).trim()
+    const consumesComposerPrompt = promptOverride == null
     if (!prompt) {
       message.warning('先告诉 Agent 这轮要解决什么')
       return
     }
-    const resolvedDraftScope = openedProject.active_stage === 'draft'
-      ? draftScope ?? inferDraftScope(prompt)
-      : 'planner'
-    const resolvedDraftSceneCount = openedProject.active_stage === 'draft'
-      && ['planner', 'count', 'next_scene'].includes(resolvedDraftScope)
-      ? draftSceneCount ?? inferDraftSceneCount(
-        prompt,
-        screenplayDraftBatchScope(
-          openedProject,
-          projectDocuments,
-          draftEpisodes,
-          documentEpisodes,
-        ),
-      )
-      : 1
-    const requestedModelId = modelOverrideId || selectedModelId
-    const model = modelConfigs.find((item) => item.id === requestedModelId)
-    if (!model?.apiKey?.trim()) {
+    const model = modelConfigs.find((item) => item.id === selectedModelId)
+    if (!runtimeOverride && !model?.apiKey?.trim()) {
       message.warning('请先在设置中添加可用模型')
       onOpenSettings()
       return
     }
-    if (agentRunning) {
-      message.info('当前对话仍在执行，请等待完成或先停止本轮')
+    const runtime = runtimeOverride || runtimeForModel(model!)
+    if (agentRunning || agentSubmitting) {
+      if (typeof editMessageIndex === 'number') {
+        message.info('当前对话仍在执行，完成后再编辑历史消息')
+        return
+      }
+      setAgentQueuedSubmissions((current) => [...current, {
+        id: createScreenplayCommandId('queued-turn'),
+        projectId: openedProject.id,
+        sessionId: agentSessionId,
+        content: prompt,
+        runtime,
+      }])
+      if (consumesComposerPrompt) setAgentPrompt('')
+      message.info('已加入发送队列')
       return
     }
-    if (agentSubmitting) return
 
     setAgentSubmitting(true)
+    if (consumesComposerPrompt) setAgentPrompt('')
     try {
-      let operation: Parameters<
-        typeof services.screenplay.submitScreenplayConversationTurn
-      >[0]['operation']
-      if (taskIntent === 'stage_deliverable') {
-        const workspace = projectWorkspace
-          ?? await loadProjectWorkspace(openedProject.id)
-        if (!workspace) {
-          message.error('读取剧本项目业务状态失败，请刷新后重试')
+      if (typeof editMessageIndex === 'number') {
+        const editedMessage = agentConversationState?.messages[editMessageIndex]
+        if (!editedMessage || editedMessage.role !== 'user') {
+          message.error('找不到要重新编辑的剧本对话消息')
           return
         }
-        const targetRole = operationTargetForStage(
-          workspace.workflow.stage,
-          openedProject.source_kind,
-        )
-        if (!targetRole) {
-          message.warning('当前项目没有待生成的正式交付物')
-          return
-        }
-        const activeOperation = workspace.activeOperations.find(
-          (item) => item.targetRole === targetRole,
-        )
-        if (activeOperation) {
-          message.warning('当前阶段已有活动任务，请等待恢复完成或先终止任务')
-          return
-        }
-        operation = {
-          expectedProjectRevision: workspace.project.revision,
-          targetRole,
-          intent: operationIntentForTask({
-            stage: workspace.workflow.stage,
-            prompt,
-            draftScope: resolvedDraftScope,
-            draftSceneCount: resolvedDraftSceneCount,
-          }),
-        }
+        await conversationClient.truncateFromTurn(editedMessage.turnId)
       }
-      const turn = await conversationClient.submit({
+      await conversationClient.submit({
         commandId: createScreenplayCommandId('submit-turn'),
         projectId: openedProject.id,
         sessionId: agentSessionId,
         content: prompt,
-        ...(operation ? { operation } : {}),
-        runtime: runtimeForModel(model),
+        runtime,
       })
       if (activeAgentSessionRef.current !== agentSessionId) return
-      setAgentPrompt('')
       setAgentProposal(null)
       setAgentRevisionRef(null)
       hydratedAgentRevisionIdRef.current = null
-      setAgentOperationId(turn.operationId)
       const next = await conversationClient.load(openedProject.id, agentSessionId)
       if (activeAgentSessionRef.current !== agentSessionId) return
       agentConversationStateRef.current = next
       setAgentConversationState(next)
     } catch (error) {
+      if (consumesComposerPrompt) {
+        setAgentPrompt((current) => current.trim() ? current : prompt)
+      }
+      if (typeof editMessageIndex === 'number') {
+        const next = await conversationClient.load(
+          openedProject.id,
+          agentSessionId,
+        ).catch(() => null)
+        if (next && activeAgentSessionRef.current === agentSessionId) {
+          agentConversationStateRef.current = next
+          setAgentConversationState(next)
+        }
+      }
       message.error(error instanceof Error ? error.message : '提交剧本对话失败')
     } finally {
       setAgentSubmitting(false)
@@ -1965,32 +2328,58 @@ export default function ScreenplayAgentPage({
     agentPrompt,
     agentSessionId,
     agentSubmitting,
+    agentConversationState,
     conversationClient,
-    documentEpisodes,
-    draftEpisodes,
-    loadProjectWorkspace,
     message,
     modelConfigs,
     onOpenSettings,
     openedProject,
-    projectDocuments,
-    projectWorkspace,
     runtimeForModel,
     selectedModelId,
   ])
 
+  React.useEffect(() => {
+    if (
+      agentRunning
+      || agentSubmitting
+      || agentQueueDraining
+      || !openedProject
+      || agentSessionId == null
+    ) return
+    const queued = agentQueuedSubmissions.find((submission) => (
+      submission.projectId === openedProject.id
+      && submission.sessionId === agentSessionId
+    ))
+    if (!queued) return
+    setAgentQueueDraining(true)
+    setAgentQueuedSubmissions((current) => current.filter(
+      (submission) => submission.id !== queued.id,
+    ))
+    void runAgent(queued.content, undefined, queued.runtime).finally(() => {
+      setAgentQueueDraining(false)
+    })
+  }, [
+    agentQueueDraining,
+    agentQueuedSubmissions,
+    agentRunning,
+    agentSessionId,
+    agentSubmitting,
+    openedProject,
+    runAgent,
+  ])
+
   const saveAgentProposal = React.useCallback(async (): Promise<EntityId | null> => {
     if (!openedProject || (!agentProposal && !agentRevisionRef)) return null
-    if (operationRevision) return operationRevision.id
+    if (candidateRevision) return candidateRevision.id
     setSavingAgentDraft(true)
     try {
       const refreshed = await loadProjectWorkspace(openedProject.id)
       const revision = findWorkspaceRevision({
         workspace: refreshed,
         role: agentRevisionRef?.role
-          ?? operationRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
+          ?? deliverableRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
         revisionId: agentRevisionRef?.revisionId,
-        operationId: agentRevisionRef?.operationId ?? agentOperationId,
+        taskId: agentRevisionRef?.taskId,
         finalizingRunId: agentRevisionRef?.sourceRunId ?? undefined,
       })
       if (!revision) {
@@ -2004,11 +2393,10 @@ export default function ScreenplayAgentPage({
   }, [
     agentProposal,
     agentRevisionRef,
-    agentOperationId,
     loadProjectWorkspace,
     message,
     openedProject,
-    operationRevision,
+    candidateRevision,
     projectWorkspace,
   ])
 
@@ -2281,22 +2669,8 @@ export default function ScreenplayAgentPage({
     const nextStatus = openedProject.status === 'archived' ? 'active' : 'archived'
     setUpdatingProjectStatus(true)
     try {
-      const activeOperation = nextStatus === 'archived'
-        ? projectWorkspace.activeOperations.find((operation) => (
-            operation.id === agentOperationId
-          )) ?? projectWorkspace.activeOperations.at(-1)
-        : null
-      if (activeOperation) {
-        const canceled = await services.screenplay.cancelScreenplayV2Operation({
-          commandId: createScreenplayCommandId('cancel-before-archive'),
-          operationId: activeOperation.id,
-        })
-        if (!canceled.success) {
-          message.error(canceled.error || '归档前终止活动任务失败')
-          return
-        }
-      } else if (nextStatus === 'archived' && agentRunning) {
-        stopAgent()
+      if (nextStatus === 'archived' && agentRunning) {
+        if (!await stopAgent()) return
       }
       const mutate = nextStatus === 'archived'
         ? services.screenplay.archiveScreenplayV2Project
@@ -2319,8 +2693,6 @@ export default function ScreenplayAgentPage({
     }
   }, [
     agentRunning,
-    agentOperationId,
-    agentSessionId,
     applyProjectWorkspace,
     message,
     openedProject,
@@ -2348,19 +2720,43 @@ export default function ScreenplayAgentPage({
     () => modelConfigs.find((model) => model.id === selectedModelId) ?? null,
     [modelConfigs, selectedModelId],
   )
-  const agentConversationCapabilities = {
-    inputDisabled: openedProject?.status === 'archived' || agentSessionLoading,
-    sessionNavigationDisabled: agentSessionLoading,
-  }
+  const agentConversationCapabilities = getAgentConversationCapabilities({
+    running: agentRunning || agentSubmitting,
+    readOnly: openedProject?.status === 'archived',
+    sessionLoading: agentSessionLoading || agentChunkHydrating,
+  })
+  const activeAgentTaskPlan = React.useMemo(
+    () => getActiveTaskPlan(
+      agentMessages,
+      agentRunning || agentSubmitting,
+    ),
+    [agentMessages, agentRunning, agentSubmitting],
+  )
+  const activeQueuedSubmissions = agentQueuedSubmissions.filter(
+    (submission) => (
+      submission.projectId === openedProject?.id
+      && submission.sessionId === agentSessionId
+    ),
+  )
   const agentSessionActivities = React.useMemo(() => {
     if (agentSessionId == null || !latestConversationTurn) return {}
     return {
       [agentSessionId]: {
-        state: latestConversationTurn.status,
-        queuedCount: latestConversationTurn.status === 'queued' ? 1 : 0,
+        state: latestConversationTurn.status === 'planning'
+          ? 'running'
+          : latestConversationTask?.status || latestConversationTurn.status,
+        queuedCount: activeQueuedSubmissions.length + ((
+          latestConversationTurn.status === 'queued'
+          || latestConversationTask?.status === 'queued'
+        ) ? 1 : 0),
       },
     }
-  }, [agentSessionId, latestConversationTurn])
+  }, [
+    activeQueuedSubmissions.length,
+    agentSessionId,
+    latestConversationTask,
+    latestConversationTurn,
+  ])
   const openedProjectStageIndex = openedProject
     ? Math.max(0, SCREENPLAY_STAGE_ORDER.indexOf(openedProject.active_stage))
     : 0
@@ -2392,18 +2788,42 @@ export default function ScreenplayAgentPage({
     ?? null
   )
   const proposalWillAdvance = proposalAdvancesProjectStage(openedProject, agentProposal)
-  const proposalNewSceneCount = agentProposal?.kind === 'scene_draft'
-    && Array.isArray(agentProposal.contentJson.newSceneIds)
-    ? agentProposal.contentJson.newSceneIds.length
-    : agentProposal?.kind === 'scene_draft'
-      ? 1
-      : 0
+  const proposalTask = [...(agentConversationState?.tasks ?? [])].reverse().find(
+    (task) => (
+      (agentRevisionRef?.taskId && task.id === agentRevisionRef.taskId)
+      || (
+        savedAgentDocumentId != null
+        && task.resultRevisionId === savedAgentDocumentId
+      )
+    ),
+  )
+  const proposalTurnId = proposalTask?.turnId ?? null
+  const proposalRunId = agentRevisionRef?.sourceRunId
+    ?? agentProposal?.sourceRunId
+    ?? ''
+  const proposalSourceCount = proposalRunId
+    ? projectSourceRefs.filter((ref) => ref.agent_run_id === proposalRunId).length
+    : 0
+  const agentProposalAttachment = agentProposal ? (
+    <ScreenplayProposalActionPanel
+      proposal={agentProposal}
+      acceptedRevisionId={acceptedAgentDocumentId}
+      savedRevisionId={savedAgentDocumentId}
+      sourceCount={proposalSourceCount}
+      showSources={!agentRunning && Boolean(proposalRunId)}
+      willAdvance={proposalWillAdvance}
+      running={agentRunning}
+      saving={savingAgentDraft}
+      accepting={acceptingAgentDraft}
+      archived={openedProject?.status === 'archived'}
+      activeStage={openedProject?.active_stage ?? 'completed'}
+      onView={() => setRevisionLibraryOpen(true)}
+      onApply={() => void acceptAgentProposal()}
+    />
+  ) : null
   const hasPendingAgentProposal = (
     agentProposal != null || agentRevisionRef != null
   ) && acceptedAgentDocumentId == null
-  const hasActiveLongTask = projectWorkspace?.activeOperations.some(
-    (operation) => operation.status === 'running',
-  ) ?? false
   // The CURRENT TASK panel always keeps the stage's primary shortcut visible.
   // Runtime/proposal state may temporarily disable it, but must not remove the
   // entry point and make the panel appear to have lost its core action.
@@ -2411,8 +2831,9 @@ export default function ScreenplayAgentPage({
   const stageStartActionDisabled = openedProject?.status === 'archived'
     || !projectWorkspace
     || agentSessionLoading
+    || agentChunkHydrating
     || agentRunning
-    || hasActiveLongTask
+    || agentSubmitting
     || hasPendingAgentProposal
     || (
       openedProject?.active_stage === 'orientation'
@@ -2440,33 +2861,23 @@ export default function ScreenplayAgentPage({
       || !projectWorkspace
       || openedProject.active_stage === 'completed'
       || agentRunning
-      || hasActiveLongTask
+      || agentSubmitting
       || hasPendingAgentProposal
     ) {
       return
     }
-    const defaultDraftScope: ScreenplayDraftScope = openedProject.active_stage === 'draft'
-      && draftBatchScope?.hasEpisodeNumbers
-      ? 'next_episode'
-      : 'next_scene'
+    const defaultDraftScope: ScreenplayDraftScope = 'next_episode'
     runAgent(
       stageAgentStarter(
         openedProject,
         projectDocuments,
-        1,
         defaultDraftScope,
       ),
-      'stage_deliverable',
-      undefined,
-      undefined,
-      undefined,
-      defaultDraftScope,
     )
   }, [
     agentRunning,
-    hasActiveLongTask,
+    agentSubmitting,
     hasPendingAgentProposal,
-    draftBatchScope?.hasEpisodeNumbers,
     openedProject,
     projectDocuments,
     projectWorkspace,
@@ -2478,7 +2889,7 @@ export default function ScreenplayAgentPage({
       || !projectWorkspace
       || openedProject.active_stage !== 'draft'
       || agentRunning
-      || hasActiveLongTask
+      || agentSubmitting
       || hasPendingAgentProposal
     ) {
       return
@@ -2487,18 +2898,12 @@ export default function ScreenplayAgentPage({
       stageAgentStarter(
         openedProject,
         projectDocuments,
-        1,
         scope,
       ),
-      'stage_deliverable',
-      undefined,
-      undefined,
-      undefined,
-      scope,
     )
   }, [
     agentRunning,
-    hasActiveLongTask,
+    agentSubmitting,
     hasPendingAgentProposal,
     openedProject,
     projectDocuments,
@@ -2508,6 +2913,17 @@ export default function ScreenplayAgentPage({
   const handleDraftBatchAction = React.useCallback((action: DraftBatchAction) => {
     startDraftRange(action.key)
   }, [startDraftRange])
+  const editAgentMessage = React.useCallback((
+    messageIndex: number,
+    content: string,
+  ) => {
+    const messageToEdit = agentConversationState?.messages[messageIndex]
+    if (!messageToEdit || messageToEdit.role !== 'user') return
+    void runAgent(
+      content,
+      messageIndex,
+    )
+  }, [agentConversationState, runAgent])
   const openCustomDraftRange = React.useCallback(() => {
     if (maxCustomDraftEpisodeCount < 2) return
     setCustomDraftEpisodeCount(Math.min(3, maxCustomDraftEpisodeCount))
@@ -2526,193 +2942,6 @@ export default function ScreenplayAgentPage({
     setDraftRangeModalOpen(false)
     startDraftRange(draftScopeForEpisodeCount(episodeCount))
   }, [customDraftEpisodeCount, maxCustomDraftEpisodeCount, message, startDraftRange])
-  const proposalReviewIssues = agentProposal?.kind === 'review'
-    && Array.isArray(agentProposal.contentJson.issues)
-    ? agentProposal.contentJson.issues
-    : []
-  const criticalReviewIssueCount = proposalReviewIssues.filter((issue) => (
-    issue
-    && typeof issue === 'object'
-    && (issue as { severity?: unknown }).severity === 'critical'
-  )).length
-  const proposalReviewAffectedSceneCount = new Set(
-    proposalReviewIssues.flatMap((issue) => (
-      issue
-      && typeof issue === 'object'
-      && Array.isArray((issue as { sceneIds?: unknown }).sceneIds)
-        ? (issue as { sceneIds: unknown[] }).sceneIds.map(String)
-        : []
-    )),
-  ).size
-  const proposalReviewExecutionFieldCount = new Set(
-    proposalReviewIssues.flatMap((issue) => (
-      issue
-      && typeof issue === 'object'
-      && Array.isArray((issue as { executionFields?: unknown }).executionFields)
-        ? (issue as { executionFields: unknown[] }).executionFields.map(String)
-        : []
-    )),
-  ).size
-  const proposalVerificationResults = agentProposal?.kind === 'review'
-    && Array.isArray(agentProposal.contentJson.verificationResults)
-    ? agentProposal.contentJson.verificationResults
-    : []
-  const verifiedPriorIssueCount = proposalVerificationResults.filter(
-    (result) => (
-      result
-      && typeof result === 'object'
-      && (result as { status?: unknown }).status === 'verified'
-    ),
-  ).length
-  const failedVerificationCount = (
-    proposalVerificationResults.length - verifiedPriorIssueCount
-  )
-  const proposalIssueResolutions = agentProposal?.kind === 'scene_draft'
-    && Array.isArray(agentProposal.contentJson.issueResolutions)
-    ? agentProposal.contentJson.issueResolutions
-    : []
-  const resolvedReviewIssueCount = proposalIssueResolutions.filter(
-    (resolution) => (
-      resolution
-      && typeof resolution === 'object'
-      && (resolution as { status?: unknown }).status === 'resolved'
-    ),
-  ).length
-  const partiallyResolvedReviewIssueCount = proposalIssueResolutions.filter(
-    (resolution) => (
-      resolution
-      && typeof resolution === 'object'
-      && (resolution as { status?: unknown }).status === 'partially_resolved'
-    ),
-  ).length
-  const reassessedSceneCount = agentProposal?.kind === 'scene_draft'
-    && Array.isArray(agentProposal.contentJson.reassessedSceneIds)
-    ? agentProposal.contentJson.reassessedSceneIds.length
-    : 0
-  const proposalSourceAnalysis = agentProposal?.kind === 'source_analysis'
-    && agentProposal.contentJson.analysis
-    && typeof agentProposal.contentJson.analysis === 'object'
-    ? agentProposal.contentJson.analysis as Record<string, unknown>
-    : null
-  const sourceAnalysisCharacterCount = Array.isArray(
-    proposalSourceAnalysis?.characters,
-  ) ? proposalSourceAnalysis.characters.length : 0
-  const sourceAnalysisEventCount = Array.isArray(
-    proposalSourceAnalysis?.plotEvents,
-  ) ? proposalSourceAnalysis.plotEvents.length : 0
-  const sourceAnalysisEvidenceCount = Array.isArray(
-    proposalSourceAnalysis?.evidence,
-  ) ? proposalSourceAnalysis.evidence.length : 0
-  const sourceAnalysisCoverage = proposalSourceAnalysis?.coverage
-    && typeof proposalSourceAnalysis.coverage === 'object'
-    ? proposalSourceAnalysis.coverage as Record<string, unknown>
-    : null
-  const sourceAnalysisSelectedChapterCount = Number(
-    sourceAnalysisCoverage?.selectedChapterCount || 0,
-  )
-  const sourceAnalysisReadChapterCount = Array.isArray(
-    sourceAnalysisCoverage?.readChapterIds,
-  ) ? sourceAnalysisCoverage.readChapterIds.length : 0
-  const sourceAnalysisSampledChapterCount = Array.isArray(
-    sourceAnalysisCoverage?.sampledChapterIds,
-  ) ? sourceAnalysisCoverage.sampledChapterIds.length : 0
-  const proposalCreativeBrief = agentProposal?.kind === 'creative_brief'
-    && agentProposal.contentJson.brief
-    && typeof agentProposal.contentJson.brief === 'object'
-    ? agentProposal.contentJson.brief as Record<string, unknown>
-    : null
-  const proposalFormatPlan = proposalCreativeBrief?.formatPlan
-    && typeof proposalCreativeBrief.formatPlan === 'object'
-    ? proposalCreativeBrief.formatPlan as Record<string, unknown>
-    : null
-  const proposalAdaptationDecisions = Array.isArray(
-    proposalCreativeBrief?.adaptationDecisions,
-  ) ? proposalCreativeBrief.adaptationDecisions : []
-  const anchoredAdaptationDecisionCount = proposalAdaptationDecisions.filter(
-    (decision) => (
-      decision
-      && typeof decision === 'object'
-      && Array.isArray((decision as { sourceAnchors?: unknown }).sourceAnchors)
-      && (decision as { sourceAnchors: unknown[] }).sourceAnchors.length > 0
-    ),
-  ).length
-  const acknowledgedSourceLimitationCount = Array.isArray(
-    proposalCreativeBrief?.acknowledgedSourceLimitations,
-  ) ? proposalCreativeBrief.acknowledgedSourceLimitations.length : 0
-  const proposalFormatScale = proposalFormatPlan?.episodeCount
-    ? `${String(proposalFormatPlan.episodeCount)} 集 × ${
-      String(proposalFormatPlan.episodeDurationMinutes || '?')
-    } 分钟`
-    : proposalFormatPlan?.targetDurationMinutes
-      ? `${String(proposalFormatPlan.targetDurationMinutes)} 分钟`
-      : '规模待确认'
-  const proposalStructureUnits = agentProposal?.kind === 'beat_sheet'
-    && Array.isArray(agentProposal.contentJson.beats)
-    ? agentProposal.contentJson.beats
-    : agentProposal?.kind === 'episode_outline'
-      && Array.isArray(agentProposal.contentJson.episodes)
-      ? agentProposal.contentJson.episodes
-      : []
-  const proposalDecisionCoverage = (
-    agentProposal?.kind === 'beat_sheet'
-    || agentProposal?.kind === 'episode_outline'
-  ) && Array.isArray(agentProposal.contentJson.decisionCoverage)
-    ? agentProposal.contentJson.decisionCoverage
-    : []
-  const omittedDecisionCoverageCount = proposalDecisionCoverage.filter(
-    (coverage) => (
-      coverage
-      && typeof coverage === 'object'
-      && Array.isArray(
-        (coverage as { structureUnitIds?: unknown }).structureUnitIds,
-      )
-      && (
-        coverage as { structureUnitIds: unknown[] }
-      ).structureUnitIds.length === 0
-    ),
-  ).length
-  const proposalScenes = agentProposal?.kind === 'scene_list'
-    && Array.isArray(agentProposal.contentJson.scenes)
-    ? agentProposal.contentJson.scenes
-    : []
-  const proposalCoveredStructureUnitCount = new Set(
-    proposalScenes.flatMap((scene) => (
-      scene
-      && typeof scene === 'object'
-      && Array.isArray((scene as { structureUnitIds?: unknown }).structureUnitIds)
-        ? (scene as { structureUnitIds: unknown[] }).structureUnitIds.map(String)
-        : []
-    )),
-  ).size
-  const proposalSceneEpisodeCount = new Set(
-    proposalScenes.flatMap((scene) => (
-      scene
-      && typeof scene === 'object'
-      && (scene as { episodeNumber?: unknown }).episodeNumber
-        ? [String((scene as { episodeNumber: unknown }).episodeNumber)]
-        : []
-    )),
-  ).size
-  const proposalSceneExecutions = agentProposal?.kind === 'scene_draft'
-    && Array.isArray(agentProposal.contentJson.sceneExecutions)
-    ? agentProposal.contentJson.sceneExecutions
-    : []
-  const proposalUnresolvedSceneNoteCount = proposalSceneExecutions.reduce(
-    (total, execution) => (
-      total + (
-        execution
-        && typeof execution === 'object'
-        && Array.isArray(
-          (execution as { unresolvedNotes?: unknown }).unresolvedNotes,
-        )
-          ? (
-            execution as { unresolvedNotes: unknown[] }
-          ).unresolvedNotes.length
-          : 0
-      )
-    ),
-    0,
-  )
   const selectedPreviousDocument = selectedDocument
     ? previousDocumentVersion(selectedDocument, projectDocuments)
     : null
@@ -3814,17 +4043,24 @@ export default function ScreenplayAgentPage({
                   <div className="screenplay-agent-studio__chat">
                 <AgentConversation
                   messages={agentMessages}
-                  loading={agentRunning}
+                  loading={agentRunning || agentSubmitting}
+                  initializing={projectLoading || agentSessionLoading || agentChunkHydrating}
                   emptyTitle="从当前任务开始"
-                  emptyDescription="发送后会实时展示思考过程、素材读取和执行结果。"
-                  afterMessagesHostRef={setAgentResultHost}
-                  afterMessagesVersion={agentResultHost
-                    ? [
-                        agentProposal?.title || agentResponse.length,
-                        savedAgentDocumentId || 'unsaved',
-                        acceptedAgentDocumentId || 'unapplied',
-                      ].join(':')
-                    : 'detached'}
+                  emptyDescription="发送后会实时展示执行过程、素材读取和结果。"
+                  afterAssistantMessage={(_message, index) => {
+                    const entry = agentConversationState?.messages[index]
+                    return entry?.role === 'assistant'
+                      && entry.turnId === proposalTurnId
+                      ? agentProposalAttachment
+                      : null
+                  }}
+                  messageAttachmentsVersion={[
+                    proposalTurnId || 'detached',
+                    agentProposal?.title || agentResponse.length,
+                    savedAgentDocumentId || 'unsaved',
+                    acceptedAgentDocumentId || 'unapplied',
+                  ].join(':')}
+                  onEditMessage={editAgentMessage}
                 />
 
                 <AgentComposer
@@ -3838,9 +4074,28 @@ export default function ScreenplayAgentPage({
                     !agentPrompt.trim()
                     || openedProject.status === 'archived'
                     || !selectedModelId
-                    || agentRunning
-                    || agentSubmitting
                   }
+                  floatingContent={activeAgentTaskPlan ? (
+                    <AgentTaskProgress
+                      plan={activeAgentTaskPlan}
+                      placement="topLeft"
+                    />
+                  ) : null}
+                  supplementaryContent={activeQueuedSubmissions.length > 0 ? (
+                    <div className="chat-queued-messages" aria-label="待发送消息">
+                      {activeQueuedSubmissions.slice(0, 3).map((submission, index) => (
+                        <div className="chat-queued-message" key={submission.id}>
+                          <span>待发送 {index + 1}</span>
+                          <span title={submission.content}>{submission.content}</span>
+                        </div>
+                      ))}
+                      {activeQueuedSubmissions.length > 3 ? (
+                        <div className="chat-queued-more">
+                          另有 {activeQueuedSubmissions.length - 3} 条消息排队
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   placeholder="输入希望 Agent 完成的任务"
                   ariaLabel="输入希望剧本 Agent 完成的任务"
                   footer={(
@@ -3893,8 +4148,8 @@ export default function ScreenplayAgentPage({
                             />
                           </PurrTooltip>
                         ) : null}
-                        <PurrTooltip title={agentRunning
-                          ? '请等待当前对话完成'
+                        <PurrTooltip title={agentRunning || agentSubmitting
+                          ? '加入发送队列 (Enter)'
                           : '发送 (Enter)'}>
                           <PurrButton
                             type="primary"
@@ -3905,8 +4160,6 @@ export default function ScreenplayAgentPage({
                               !agentPrompt.trim()
                               || openedProject.status === 'archived'
                               || !selectedModelId
-                              || agentRunning
-                              || agentSubmitting
                             }
                             onClick={() => runAgent()}
                             aria-label="发送"
@@ -3917,273 +4170,6 @@ export default function ScreenplayAgentPage({
                   )}
                 />
 
-                {agentResultHost && createPortal((
-                  agentProposal
-                ) && (
-                  <div className="screenplay-agent-result">
-                    <div className="screenplay-agent-result__title">
-                      <span>
-                        <CheckCircleIcon />
-                        本轮产物
-                      </span>
-                      {!agentRunning && agentRunId && projectSourceRefs.some(
-                        (ref) => ref.agent_run_id === agentRunId,
-                      ) && (
-                        <span className="screenplay-agent-result__sources">
-                          {projectSourceRefs.filter(
-                            (ref) => ref.agent_run_id === agentRunId,
-                          ).length} 条可追溯来源
-                        </span>
-                      )}
-                    </div>
-                    {agentProposal && (
-                      <article className="screenplay-document-proposal">
-                        <header>
-                          <div>
-                            <span className="screenplay-source-eyebrow">FORMAL PROPOSAL</span>
-                            <h3>{agentProposal.title}</h3>
-                            <span>
-                              {DOCUMENT_KIND_LABELS[agentProposal.kind]}
-                              {' · '}
-                              {acceptedAgentDocumentId
-                                ? '已应用到项目'
-                                : savedAgentDocumentId
-                                  ? '候选已就绪，等待应用'
-                                  : '候选提交中'}
-                            </span>
-                          </div>
-                          <span className={`screenplay-document-status ${
-                            acceptedAgentDocumentId
-                              ? 'is-accepted'
-                              : savedAgentDocumentId
-                                ? 'is-saved'
-                                : ''
-                          }`}>
-                            {acceptedAgentDocumentId
-                              ? '已应用'
-                              : savedAgentDocumentId
-                                ? '待应用'
-                                : '提交中'}
-                          </span>
-                        </header>
-                        {proposalSourceAnalysis && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              <strong>{sourceAnalysisCharacterCount}</strong>
-                              个人物
-                            </span>
-                            <span>
-                              <strong>{sourceAnalysisEventCount}</strong>
-                              个关键事件
-                            </span>
-                            <span>
-                              <strong>{sourceAnalysisEvidenceCount}</strong>
-                              条事实证据
-                            </span>
-                            <span>
-                              精读
-                              <strong>{sourceAnalysisReadChapterCount}</strong>
-                              章 · 抽样
-                              <strong>{sourceAnalysisSampledChapterCount}</strong>
-                              章 · 共 {sourceAnalysisSelectedChapterCount} 章
-                            </span>
-                          </div>
-                        )}
-                        {proposalCreativeBrief && proposalFormatPlan && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              目标
-                              <strong>
-                                {String(proposalFormatPlan.targetFormat || '待定')}
-                              </strong>
-                              · {proposalFormatScale}
-                            </span>
-                            <span>
-                              <strong>{proposalAdaptationDecisions.length}</strong>
-                              项改编决策
-                            </span>
-                            <span>
-                              <strong>{anchoredAdaptationDecisionCount}</strong>
-                              项锚定原作证据
-                            </span>
-                            {acknowledgedSourceLimitationCount > 0 && (
-                              <span>
-                                已承接
-                                <strong>{acknowledgedSourceLimitationCount}</strong>
-                                项原作分析局限
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {proposalStructureUnits.length > 0 && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              <strong>{proposalStructureUnits.length}</strong>
-                              {agentProposal.kind === 'episode_outline'
-                                ? ' 集'
-                                : ' 个节拍'}
-                            </span>
-                            <span>
-                              已覆盖
-                              <strong>{proposalDecisionCoverage.length}</strong>
-                              项改编决策
-                            </span>
-                            {omittedDecisionCoverageCount > 0 && (
-                              <span>
-                                其中
-                                <strong>{omittedDecisionCoverageCount}</strong>
-                                项明确删减
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {proposalScenes.length > 0 && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              <strong>{proposalScenes.length}</strong>
-                              个场景
-                            </span>
-                            <span>
-                              已承接
-                              <strong>{proposalCoveredStructureUnitCount}</strong>
-                              个结构单元
-                            </span>
-                            {proposalSceneEpisodeCount > 0 && (
-                              <span>
-                                覆盖
-                                <strong>{proposalSceneEpisodeCount}</strong>
-                                集
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {proposalSceneExecutions.length > 0 && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              <strong>{proposalSceneExecutions.length}</strong>
-                              场已完成执行检查
-                            </span>
-                            <span>
-                              <strong>{proposalUnresolvedSceneNoteCount}</strong>
-                              项未解决连续性事项
-                            </span>
-                            <span>
-                              {agentProposal.contentJson.isComplete === true
-                                ? '完整整稿'
-                                : '滚动整稿'}
-                            </span>
-                          </div>
-                        )}
-                        {agentProposal.kind === 'review' && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span><strong>{proposalReviewIssues.length}</strong> 个审阅问题</span>
-                            <span><strong>{criticalReviewIssueCount}</strong> 个关键问题</span>
-                            <span>
-                              影响
-                              <strong>{proposalReviewAffectedSceneCount}</strong>
-                              个场景
-                            </span>
-                            <span>
-                              覆盖
-                              <strong>{proposalReviewExecutionFieldCount}</strong>
-                              类执行检查
-                            </span>
-                            <span>
-                              结论：
-                              <strong>{String(agentProposal.contentJson.verdict || '待定')}</strong>
-                            </span>
-                            {proposalVerificationResults.length > 0 && (
-                              <>
-                                <span>
-                                  已核验
-                                  <strong>{proposalVerificationResults.length}</strong>
-                                  个历史问题
-                                </span>
-                                <span>
-                                  通过
-                                  <strong>{verifiedPriorIssueCount}</strong>
-                                  个 · 未通过
-                                  <strong>{failedVerificationCount}</strong>
-                                  个
-                                </span>
-                              </>
-                            )}
-                          </div>
-                        )}
-                        {proposalIssueResolutions.length > 0 && (
-                          <div className="screenplay-review-proposal-summary">
-                            <span>
-                              已逐项回应
-                              <strong>{proposalIssueResolutions.length}</strong>
-                              个审阅问题
-                            </span>
-                            <span>
-                              完全解决
-                              <strong>{resolvedReviewIssueCount}</strong>
-                              个
-                            </span>
-                            {partiallyResolvedReviewIssueCount > 0 && (
-                              <span>
-                                部分解决
-                                <strong>{partiallyResolvedReviewIssueCount}</strong>
-                                个
-                              </span>
-                            )}
-                            <span>
-                              已重评
-                              <strong>{reassessedSceneCount}</strong>
-                              个场景
-                            </span>
-                          </div>
-                        )}
-                        <footer>
-                          <span>
-                            {proposalWillAdvance
-                              ? 'Agent 已生成唯一候选；应用会原子更新当前版本并推进阶段。'
-                              : 'Agent 已生成唯一候选；应用会原子更新当前业务版本。'}
-                          </span>
-                          <div>
-                            <PurrButton
-                                type="primary"
-                                icon={<CheckCircleIcon />}
-                                loading={acceptingAgentDraft}
-                                disabled={
-                                  acceptedAgentDocumentId != null
-                                  || agentRunning
-                                  || savingAgentDraft
-                                  || openedProject.status === 'archived'
-                                }
-                                onClick={() => void acceptAgentProposal()}
-                              >
-                                {acceptedAgentDocumentId
-                                  ? proposalWillAdvance
-                                    ? openedProject.active_stage === 'review'
-                                      ? '已应用并完成'
-                                      : '已应用并推进'
-                                    : agentProposal.kind === 'review'
-                                      ? '已应用审阅结论'
-                                      : openedProject.active_stage === 'review'
-                                        ? '已应用修订稿'
-                                        : '已应用为当前整稿'
-                                  : proposalWillAdvance
-                                    ? openedProject.active_stage === 'review'
-                                      ? '应用并完成'
-                                      : '应用并推进'
-                                    : agentProposal.kind === 'review'
-                                      ? '应用审阅结论'
-                                    : agentProposal.kind === 'scene_draft'
-                                      && agentProposal.contentJson.isComplete !== true
-                                      ? proposalNewSceneCount > 1
-                                        ? `应用本批 ${proposalNewSceneCount} 场`
-                                        : '应用本场'
-                                      : '应用当前版本'}
-                              </PurrButton>
-                          </div>
-                        </footer>
-                      </article>
-                    )}
-                  </div>
-                ), agentResultHost)}
                   </div>
                 </div>
               </section>
@@ -4206,11 +4192,11 @@ export default function ScreenplayAgentPage({
                       <HistoryIcon />
                     </span>
                     <span>
-                      <strong>版本历史与编辑</strong>
+                      <strong>打开项目文档</strong>
                       <small>
                         {Object.values(projectWorkspace.workflow.heads).filter(Boolean).length}
-                        {' 个当前版本 · '}
-                        {projectWorkspace.candidates.length} 个候选
+                        {' 份当前文档 · '}
+                        {projectWorkspace.candidates.length} 份待应用
                       </small>
                     </span>
                     <ArrowRightIcon />
@@ -4491,10 +4477,13 @@ export default function ScreenplayAgentPage({
               </div>
               <article className="screenplay-version-document">
                 <h2>{selectedDocumentEpisode.title}</h2>
-                <pre className="screenplay-version-document__body">
+                <Markdown
+                  className="screenplay-version-document__body"
+                  preserveSoftBreaks
+                >
                   {selectedDocumentEpisode.content_text
-                    || JSON.stringify(selectedDocumentEpisode.content_json || {}, null, 2)}
-                </pre>
+                    || structuredContentToMarkdown(selectedDocumentEpisode.content_json)}
+                </Markdown>
               </article>
             </div>
           )}
@@ -4522,9 +4511,12 @@ export default function ScreenplayAgentPage({
               </div>
               <article className="screenplay-version-document">
                 <h2>{selectedDraftEpisode.title}</h2>
-                <pre className="screenplay-version-document__body">
-                  {selectedDraftEpisode.content_text || '暂无正文内容'}
-                </pre>
+                <Markdown
+                  className="screenplay-version-document__body"
+                  preserveSoftBreaks
+                >
+                  {selectedDraftEpisode.content_text || '*暂无正文内容*'}
+                </Markdown>
               </article>
             </div>
           )}

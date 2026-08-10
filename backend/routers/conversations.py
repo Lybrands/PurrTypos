@@ -18,14 +18,14 @@ async def save_conversation(body: SaveConversationRequest):
         if body.toolCallSegments is not None
         else None
     )
-    thinking_blocks_json = (
-        json.dumps(body.thinkingBlocks, ensure_ascii=False)
-        if body.thinkingBlocks is not None
+    commentary_blocks_json = (
+        json.dumps(body.commentaryBlocks, ensure_ascii=False)
+        if body.commentaryBlocks is not None
         else None
     )
-    thinking_durations_ms_json = (
-        json.dumps(body.thinkingDurationsMs, ensure_ascii=False)
-        if body.thinkingDurationsMs is not None
+    commentary_durations_ms_json = (
+        json.dumps(body.commentaryDurationsMs, ensure_ascii=False)
+        if body.commentaryDurationsMs is not None
         else None
     )
     task_plan_json = (
@@ -53,10 +53,10 @@ async def save_conversation(body: SaveConversationRequest):
         body.prompt,
         body.response,
         body.model,
-        body.thinking,
+        body.commentary,
         tool_call_segments_json,
-        thinking_blocks_json,
-        thinking_durations_ms_json,
+        commentary_blocks_json,
+        commentary_durations_ms_json,
         body.durationMs,
         task_plan_json,
         context_compaction_json,
@@ -76,8 +76,8 @@ async def save_conversation(body: SaveConversationRequest):
             conversation_id = int(existing_id)
             await db.execute(
                 "UPDATE ai_conversations SET chapter_id = ?, prompt = ?, "
-                "response = ?, model = ?, thinking = ?, tool_call_segments = ?, "
-                "thinking_blocks = ?, thinking_durations_ms = ?, duration_ms = ?, "
+                "response = ?, model = ?, commentary = ?, tool_call_segments = ?, "
+                "commentary_blocks = ?, commentary_durations_ms = ?, duration_ms = ?, "
                 "task_plan = ?, context_compaction = ?, context_budget = ?, "
                 "agent_process = ? "
                 "WHERE id = ? AND session_id = ?",
@@ -86,8 +86,8 @@ async def save_conversation(body: SaveConversationRequest):
         else:
             conversation_id = await db.execute_and_get_id(
                 """INSERT INTO ai_conversations
-                   (session_id, chapter_id, prompt, response, model, thinking,
-                    tool_call_segments, thinking_blocks, thinking_durations_ms,
+                   (session_id, chapter_id, prompt, response, model, commentary,
+                    tool_call_segments, commentary_blocks, commentary_durations_ms,
                     duration_ms, task_plan, context_compaction, context_budget,
                     agent_process)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -125,8 +125,8 @@ async def get_conversations(sessionId: str):
     db = get_db()
     rows = await db.fetch_all(
         "SELECT c.id, c.session_id, c.chapter_id, c.prompt, c.response, "
-        "c.create_time, c.model, c.thinking, c.tool_call_segments, "
-        "c.thinking_blocks, c.thinking_durations_ms, c.duration_ms, "
+        "c.create_time, c.model, c.commentary, c.tool_call_segments, "
+        "c.commentary_blocks, c.commentary_durations_ms, c.duration_ms, "
         "c.task_plan, c.context_compaction, c.context_budget, c.agent_process, "
         "(SELECT r.id FROM ai_agent_runs AS r "
         "  WHERE r.conversation_id = c.id "

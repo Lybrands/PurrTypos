@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from agent_core.contracts import AgentMessage, MessageRole, ToolCall
-from agent_core.ports import ResponseValidator
+from purra.contracts import AgentMessage, MessageRole, ToolCall
+from purra.ports import ResponseValidator
 from domains.writing.summary_validation import SummaryResponseValidator
 
 

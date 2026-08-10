@@ -686,7 +686,7 @@
   }
 }
 
-/* ─── 助手气泡主体（思考占位与等待点仍属消息布局，见 ThinkingRegion 组件样式） ────────────────────── */
+/* ─── 助手气泡主体（执行过程与等待状态由消息时间线统一布局） ───────────────────────────── */
 .chat-bubble.assistant .bubble-assistant-body {
   display: flex;
   flex-direction: column;
@@ -701,15 +701,6 @@
     margin: 0;
     border: none;
     background: transparent;
-  }
-
-  .bubble-content--thinking-placeholder {
-    display: flex;
-    align-items: center;
-    color: var(--text-muted);
-    gap: 2px;
-    min-height: 24px;
-    font-size: var(--font-size-sm);
   }
 
   .bubble-placeholder-text {

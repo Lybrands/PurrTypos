@@ -29,7 +29,7 @@ def test_runtime_regression_suite_covers_promoted_incidents():
 def test_healthy_runtime_contract_requires_exact_tool_order():
     from dataclasses import replace
 
-    from agent_core.evaluation import evaluate_runtime_regression_case
+    from purra.evaluation import evaluate_runtime_regression_case
     from domains.writing.evaluation import WRITING_RUNTIME_REGRESSION_CASES
 
     healthy = WRITING_RUNTIME_REGRESSION_CASES[0]
@@ -48,7 +48,7 @@ def test_healthy_runtime_contract_requires_exact_tool_order():
 def test_failure_incident_passes_only_when_diagnostics_detect_the_failure():
     from dataclasses import replace
 
-    from agent_core.evaluation import evaluate_runtime_regression_case
+    from purra.evaluation import evaluate_runtime_regression_case
     from domains.writing.evaluation import WRITING_RUNTIME_REGRESSION_CASES
 
     planner_failure = WRITING_RUNTIME_REGRESSION_CASES[1]

@@ -12,7 +12,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 WRITING_DIR = BACKEND_DIR / "domains" / "writing"
 ALLOWED_IMPORT_ROOTS = set(sys.stdlib_module_names) | {
     "__future__",
-    "agent_core",
+    "purra",
     "domains",
 }
 FORBIDDEN_IDENTIFIERS = {

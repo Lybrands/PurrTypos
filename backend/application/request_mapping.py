@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ContextBudgetClaim,
@@ -13,8 +13,8 @@ from agent_core.contracts import (
     RunProvenance,
     RunLineage,
 )
-from agent_core.engine import AgentCoreRunOptions
-from agent_core.ports import ResponseJudge
+from purra.api import AgentCoreRunOptions
+from purra.ports import ResponseJudge
 from application.output_budget_policies import resolve_request_output_budget
 from domains.writing.context import writing_context_claims
 from domains.writing.contracts import (

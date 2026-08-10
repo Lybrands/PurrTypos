@@ -11,7 +11,7 @@ import anyio
 from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 
-from agent_core.contracts import AgentRunResult, RunProvenance
+from purra.contracts import AgentRunResult, RunProvenance
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
@@ -229,7 +229,7 @@ async def resolve_pending_tool_approval(
 @router.get("/ai/agent-runs/{run_id}/diagnostics")
 async def get_agent_run_diagnostics(run_id: str):
     """Return diagnostics for one Run or its durable workflow tree."""
-    from agent_core.evaluation import (
+    from purra.evaluation import (
         classify_agent_run_failures,
         evaluate_agent_run,
         evaluate_agent_run_performance,
@@ -363,7 +363,7 @@ async def get_agent_run_diagnostics(run_id: str):
 async def maintain_agent_artifacts():
     """Safely reap invalid leases without enabling content retention GC."""
 
-    from agent_core.artifacts import ArtifactMaintenancePolicy
+    from purra.artifacts import ArtifactMaintenancePolicy
     from application.artifact_maintenance import (
         artifact_maintenance_report_view,
         artifact_maintenance_snapshot_view,

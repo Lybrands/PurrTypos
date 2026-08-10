@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 import dependencies
-from agent_core.cancellation import await_with_cancellation
-from agent_core.contracts import ExecutionState
+from purra.cancellation import await_with_cancellation
+from purra.contracts import ExecutionState
 from database.connection import DatabaseConnection
 from domains.writing.tools.contracts import _err
 from exceptions import DatabaseNotReadyError

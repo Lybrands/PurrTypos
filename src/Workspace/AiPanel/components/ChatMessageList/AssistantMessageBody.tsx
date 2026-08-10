@@ -39,13 +39,11 @@ function getTimelineActivityKey(
   processingLabel: string,
 ): string {
   const activity = parts.map((part) => {
-    if (part.type === "thinking") return `thinking:${part.text.length}`;
-    if (part.type === "text") return `text:${part.md.length}`;
     if (part.type === "commentary") return `commentary:${part.md.length}`;
+    if (part.type === "text") return `text:${part.md.length}`;
     if (part.type === "tools") {
       return [
         "tools",
-        part.segment.textBefore.length,
         part.segment.labels.length,
         part.segment.completedToolCount ?? 0,
         part.segment.labelOutcomes?.join(",") ?? "",
@@ -117,7 +115,7 @@ function AssistantMessageBodyInner({
 }: AssistantMessageBodyProps) {
   const isStreaming = loading && isLastAssistant;
   const handleWheelUp = () =>
-    setScrolledUpByReason(true, "thinking-region-wheel-up");
+    setScrolledUpByReason(true, "commentary-wheel-up");
 
   const timeline = React.useMemo(
     () =>
@@ -145,19 +143,19 @@ function AssistantMessageBodyInner({
   );
 
   const renderStepPart = (part: TimelineStepPart) => {
-    if (part.type === "thinking") {
+    if (part.type === "commentary") {
       const isActiveStream =
         isStreaming && part.regionKey.includes("-stream-");
       return (
         <div
           key={part.regionKey}
-          className={`work-log__thinking ${isActiveStream ? "work-log__thinking--active" : ""}`}
+          className={`work-log__commentary ${isActiveStream ? "work-log__commentary--active" : ""}`}
           onWheel={(event) => {
             event.stopPropagation();
             if (event.deltaY < 0) handleWheelUp();
           }}
         >
-          <Markdown>{part.text}</Markdown>
+          <Markdown preserveSoftBreaks>{part.md}</Markdown>
         </div>
       );
     }
@@ -222,16 +220,6 @@ function AssistantMessageBodyInner({
                 </div>
               );
             }
-            if (part.type === "commentary") {
-              return (
-                <div
-                  key={`${part.type}-${partIndex}`}
-                  className="work-log__commentary"
-                >
-                  <Markdown>{part.md}</Markdown>
-                </div>
-              );
-            }
             if (part.type === "delegations") {
               return (
                 <SubAgentStatusList
@@ -241,7 +229,7 @@ function AssistantMessageBodyInner({
                 />
               );
             }
-            if (part.type === "thinking" || part.type === "tools") {
+            if (part.type === "commentary" || part.type === "tools") {
               return renderStepPart(part);
             }
             return null;

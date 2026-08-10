@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from agent_core.output_budget import (
+from purra.output_budget import (
     ModelOutputCapabilities,
     ThinkingTokenAccounting,
 )
@@ -18,6 +18,7 @@ class ModelProfile:
     native_anthropic_thinking = False
     max_output_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
+    supports_json_object_output = False
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (

@@ -90,6 +90,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
             "thinking": {"type": "enabled"},
             "temperature": 1.0,
             "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
             "tools": [{"type": "function", "function": {"name": "read"}}],
             "tool_choice": "required",
         },
@@ -102,6 +103,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
         "thinking": {"type": "enabled"},
         "temperature": 1.0,
         "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
         "tools": [{"type": "function", "function": {"name": "read"}}],
         "tool_choice": "required",
     }]
@@ -117,6 +119,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
             }],
         },
         "model": "glm-5.2",
+        "finish_reason": None,
         "usage": {
             "prompt_tokens": 12,
             "completion_tokens": 7,

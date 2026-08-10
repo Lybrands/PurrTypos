@@ -5,8 +5,8 @@ from __future__ import annotations
 from time import time
 from typing import Any
 
-from agent_core.contracts import ApprovalStatus
-from agent_core.events import CoreEventType
+from purra.contracts import ApprovalStatus
+from purra.events import CoreEventType
 from infrastructure.persistence import run_store
 
 

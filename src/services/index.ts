@@ -44,8 +44,8 @@ export const services = {
       backendApi.watchScreenplayConversationEvents,
     cancelScreenplayConversationTurn:
       backendApi.cancelScreenplayConversationTurn,
-    resumeScreenplayConversationTurn:
-      backendApi.resumeScreenplayConversationTurn,
+    truncateScreenplayConversationFromTurn:
+      backendApi.truncateScreenplayConversationFromTurn,
     createScreenplayV2Project: backendApi.createScreenplayV2Project,
     getScreenplayV2Workspace: backendApi.getScreenplayV2Workspace,
     getScreenplayV2Revision: backendApi.getScreenplayV2Revision,
@@ -54,11 +54,6 @@ export const services = {
       backendApi.createScreenplayV2WorkingCopyFromRevision,
     updateScreenplayV2WorkingCopy: backendApi.updateScreenplayV2WorkingCopy,
     publishScreenplayV2WorkingCopy: backendApi.publishScreenplayV2WorkingCopy,
-    startScreenplayV2Operation: backendApi.startScreenplayV2Operation,
-    getScreenplayV2Operation: backendApi.getScreenplayV2Operation,
-    pauseScreenplayV2Operation: backendApi.pauseScreenplayV2Operation,
-    resumeScreenplayV2Operation: backendApi.resumeScreenplayV2Operation,
-    cancelScreenplayV2Operation: backendApi.cancelScreenplayV2Operation,
     acceptScreenplayV2Revision: backendApi.acceptScreenplayV2Revision,
     updateScreenplayV2Project: backendApi.updateScreenplayV2Project,
     archiveScreenplayV2Project: backendApi.archiveScreenplayV2Project,

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import RunCreateParams
+from purra.contracts import RunCreateParams
 from application.run_execution_control import RunExecutionSession
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_execution_store, run_store

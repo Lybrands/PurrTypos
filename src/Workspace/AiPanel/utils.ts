@@ -106,14 +106,16 @@ export function formatModelName(modelKey?: string, modelConfigs?: AiModelConfig[
 export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
   return data
     .map((item) => {
-      let thinkingBlocks: string[] | undefined
-      if (item.thinking_blocks) {
+      let commentaryBlocks: string[] | undefined
+      if (item.commentary_blocks) {
         try {
-          const parsed = JSON.parse(item.thinking_blocks) as unknown
-          if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) thinkingBlocks = parsed
+          const parsed = JSON.parse(item.commentary_blocks) as unknown
+          if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) commentaryBlocks = parsed
         } catch (_) {}
       }
-      if (!thinkingBlocks && item.thinking?.trim()) thinkingBlocks = [item.thinking.trim()]
+      if (!commentaryBlocks && item.commentary?.trim()) {
+        commentaryBlocks = [item.commentary.trim()]
+      }
       let taskPlan: ChatMessage['taskPlan']
       if (item.task_plan) {
         try {
@@ -129,15 +131,15 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
           }
         } catch (_) {}
       }
-      let thinkingDurationsMs: number[] | undefined
-      if (item.thinking_durations_ms) {
+      let commentaryDurationsMs: number[] | undefined
+      if (item.commentary_durations_ms) {
         try {
-          const parsed = JSON.parse(item.thinking_durations_ms) as unknown
+          const parsed = JSON.parse(item.commentary_durations_ms) as unknown
           if (
             Array.isArray(parsed) &&
             parsed.every((x) => typeof x === 'number' && Number.isFinite(x))
           ) {
-            thinkingDurationsMs = parsed
+            commentaryDurationsMs = parsed
           }
         } catch (_) {}
       }
@@ -149,9 +151,9 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         longTaskId: item.long_task_id || undefined,
         model: item.model || undefined,
         durationMs: typeof item.duration_ms === 'number' ? item.duration_ms : undefined,
-        thinking: item.thinking || undefined,
-        thinkingBlocks,
-        thinkingDurationsMs,
+        commentary: item.commentary || undefined,
+        commentaryBlocks,
+        commentaryDurationsMs,
         taskPlan,
         contextCompaction: parseJsonObject<
           NonNullable<ChatMessage['contextCompaction']>
@@ -173,7 +175,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
       const rawSegments = item.tool_call_segments
       if (rawSegments) {
         try {
-          const parsedSegments = JSON.parse(rawSegments) as { textBefore: string; labels: string[] }[]
+          const parsedSegments = JSON.parse(rawSegments) as ChatMessage['toolCallSegments']
           const segments = Array.isArray(parsedSegments)
             ? parsedSegments.map((segment) => ({
                 ...segment,
@@ -183,37 +185,11 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
               }))
             : []
           if (Array.isArray(segments) && segments.length > 0) {
-            const textBeforeJoined = segments.map((s) => s.textBefore || '').join('')
-            const resp = item.response ?? ''
-            if (
-              resp.length > 0 &&
-              textBeforeJoined.length > 0 &&
-              !resp.startsWith(textBeforeJoined)
-            ) {
-              // 存库与片段前缀不一致时若仍走分段渲染，会丢尾文；回退为纯正文以免空白
-              assistantMsg = {
-                ...assistantMsg,
-                content: resp,
-              }
-            } else {
-              const contentAfterToolCalls = resp.startsWith(textBeforeJoined)
-                ? resp.slice(textBeforeJoined.length)
-                : ''
-              assistantMsg = {
-                ...assistantMsg,
-                content: resp,
-                toolCallSegments: segments,
-                contentAfterToolCalls: contentAfterToolCalls || undefined,
-              }
-            }
-            if (isSynthesizedToolOnlyResponse({
-              ...assistantMsg,
-              contentAfterToolCalls: undefined,
-            })) {
+            assistantMsg = { ...assistantMsg, toolCallSegments: segments }
+            if (isSynthesizedToolOnlyResponse(assistantMsg)) {
               assistantMsg = {
                 ...assistantMsg,
                 content: EMPTY_RESPONSE_MESSAGE,
-                contentAfterToolCalls: undefined,
                 isError: true,
               }
             }

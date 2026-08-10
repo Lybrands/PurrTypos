@@ -70,17 +70,17 @@ function ChatMessageBubbleInner({
   const copiedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const hasThinkingBlocks = (message.thinkingBlocks?.length ?? 0) > 0;
-  const hasAnyThinking =
-    hasThinkingBlocks ||
-    (message.thinking !== undefined && message.thinking !== "");
+  const hasCommentaryBlocks = (message.commentaryBlocks?.length ?? 0) > 0;
+  const hasAnyCommentary =
+    hasCommentaryBlocks ||
+    (message.commentary !== undefined && message.commentary !== "");
   const isEmpty =
     !message.content &&
     !message.toolCallSegments?.length &&
     !message.delegations?.length &&
     !message.contextCompaction &&
     !message.error &&
-    !hasAnyThinking;
+    !hasAnyCommentary;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;
   const showPlaceholder = isLastAssistant && isEmpty;

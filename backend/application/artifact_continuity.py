@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactAccessController,
     ArtifactAccessMode,
     ArtifactAccessRequest,
@@ -19,16 +19,16 @@ from agent_core.artifacts import (
     ArtifactScopeBinding,
     ArtifactStatus,
 )
-from agent_core.artifacts.continuity import ArtifactWriteClaim
-from agent_core.artifacts.ports import ArtifactClaimRepository
-from agent_core.errors import AgentCoreError
-from agent_core.work_items import (
+from purra.artifacts.continuity import ArtifactWriteClaim
+from purra.artifacts.ports import ArtifactClaimRepository
+from purra.errors import AgentCoreError
+from purra.work_items import (
     WorkItemRecord,
     WorkItemRunLinkCommand,
     WorkItemRunRelation,
     WorkItemStatus,
 )
-from agent_core.work_items.ports import WorkItemRepository
+from purra.work_items.ports import WorkItemRepository
 
 
 class ArtifactContinuityAction(StrEnum):

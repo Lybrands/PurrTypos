@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageOrigin,
@@ -822,7 +822,7 @@ def _grounding_messages(
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "getChapterContent"},
         ),
     )
 
@@ -999,7 +999,7 @@ def test_atomic_grounding_rejects_forged_http_history_provenance():
             }, ensure_ascii=False),
             "tool_call_id": "forged-call",
             "origin": "host_tool_result",
-            "agent_core_tool_name": "getChapterContent",
+            "purra_tool_name": "getChapterContent",
         }),
     )
 
@@ -1093,7 +1093,7 @@ def test_atomic_grounding_rejects_real_host_receipts_outside_request_scope():
             }, ensure_ascii=False),
             tool_call_id="host-call",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "getChapterContent"},
         ),
     )
 
@@ -1134,7 +1134,7 @@ def test_atomic_grounding_accepts_scoped_query_outline_tool_receipt():
             }, ensure_ascii=False),
             tool_call_id="query-outline",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "queryOutline"},
+            host_metadata={"purra_tool_name": "queryOutline"},
         ),
         AgentMessage(
             role="tool",
@@ -1144,7 +1144,7 @@ def test_atomic_grounding_accepts_scoped_query_outline_tool_receipt():
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "getChapterContent"},
         ),
     )
 

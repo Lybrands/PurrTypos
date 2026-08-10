@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any
 
-from agent_core.contracts import RunProvenance
+from purra.contracts import RunProvenance
 from application.agent_run_input import AgentRunInput
 from application.request_mapping import context_window_tokens
 from utils.url import normalize_base_url

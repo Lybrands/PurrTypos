@@ -7,12 +7,12 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from agent_core.artifacts.continuity import (
+from purra.artifacts.continuity import (
     ArtifactClaimLeaseCommand,
     ArtifactWriteClaim,
     ArtifactWriteClaimCommand,
 )
-from agent_core.artifacts.errors import (
+from purra.artifacts.errors import (
     ArtifactConflictError,
     ArtifactNotFoundError,
     ArtifactStateError,

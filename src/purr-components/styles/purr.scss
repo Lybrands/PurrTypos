@@ -1172,6 +1172,9 @@
   animation: purr-pop-in var(--transition-base);
   backdrop-filter: blur(18px) saturate(1.15);
 }
+.purr-select__positioner {
+  z-index: 1040;
+}
 .purr-popover__inner { padding: 14px; }
 .purr-popover__title {
   margin-bottom: 9px;

@@ -9,23 +9,16 @@ export function synthesizeAssistantTextFromToolSegments(msg: ChatMessage): strin
   if (!segs?.length) return "";
   const parts: string[] = [];
   for (const s of segs) {
-    const tb = (s.textBefore || "").trim();
-    if (tb) parts.push(tb);
     const labels = (s.labels || []).filter(Boolean);
     if (labels.length) parts.push(`[已调用工具] ${labels.join("、")}`);
   }
-  const after = (msg.contentAfterToolCalls || "").trim();
-  if (after) parts.push(after);
   return parts.join("\n");
 }
 
 export function isSynthesizedToolOnlyResponse(msg: ChatMessage): boolean {
   const response = String(msg.content ?? "").trim();
   if (!response || !msg.toolCallSegments?.length) return false;
-  return response === synthesizeAssistantTextFromToolSegments({
-    ...msg,
-    contentAfterToolCalls: undefined,
-  }).trim();
+  return response === synthesizeAssistantTextFromToolSegments(msg).trim();
 }
 
 /**

@@ -8,7 +8,7 @@ PurrTypos 只有一条 Agent 对话路径：
 HTTP /ai/chat/stream
   -> Application request mapping
   -> AgentComposition
-  -> Agent Core
+  -> PurrA
   -> Writing Domain / Infrastructure adapters
   -> Application SSE mapping
 ```
@@ -139,8 +139,8 @@ GET /api/ai/agent-security-redteam
 
 ```bash
 .venv/bin/python -m pytest \
-  backend/tests/test_agent_core_runtime.py \
-  backend/tests/test_agent_core_engine.py \
+  backend/tests/test_purra_runtime.py \
+  backend/tests/test_purra_engine.py \
   backend/tests/test_agent_composition.py \
   backend/tests/test_ai_composed_sse_wire_contract.py \
   backend/tests/test_main_lifespan.py -q
@@ -150,7 +150,7 @@ GET /api/ai/agent-security-redteam
 
 ## 9. 变更原则
 
-- Core 的通用不变量只在 `agent_core/` 修改。
+- Core 的通用不变量只在 `purra/` 修改。
 - Writing 语义和工具政策只在 `domains/writing/` 修改。
 - Provider、SQLite 和具体工具实现放在 `infrastructure/`。
 - Router 只处理 HTTP、SSE 和取消传播。

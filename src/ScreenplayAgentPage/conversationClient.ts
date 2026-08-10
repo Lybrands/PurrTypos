@@ -1,6 +1,7 @@
 import type {
   ElectronAPI,
-  ScreenplayConversationRuntimeInput,
+  ScreenplayAgentChunkPage,
+  ScreenplayConversationEvent,
   ScreenplayConversationTurn,
 } from '../types'
 import {
@@ -14,7 +15,7 @@ type NativeConversationApi = Pick<ElectronAPI,
   | 'listScreenplayConversationEvents'
   | 'watchScreenplayConversationEvents'
   | 'cancelScreenplayConversationTurn'
-  | 'resumeScreenplayConversationTurn'
+  | 'truncateScreenplayConversationFromTurn'
 >
 
 type SubmitInput = Parameters<
@@ -90,17 +91,29 @@ export class ScreenplayConversationClient {
 
   watch(
     state: ScreenplayConversationState,
-    onInvalidate: () => void,
+    options: {
+      chunkAfter: number
+      onInvalidate: (event: ScreenplayConversationEvent) => void
+      onChunks: (page: ScreenplayAgentChunkPage) => void
+    },
   ): () => void {
     let cursor = state.cursor
+    let chunkCursor = Math.max(0, options.chunkAfter)
     return this.api.watchScreenplayConversationEvents({
       projectId: state.projectId,
       sessionId: state.sessionId,
       after: cursor,
+      chunkAfter: chunkCursor,
       onEvent: (event) => {
+        if ('kind' in event) {
+          if (event.nextCursor <= chunkCursor) return
+          chunkCursor = event.nextCursor
+          options.onChunks(event)
+          return
+        }
         if (event.cursor <= cursor) return
         cursor = event.cursor
-        onInvalidate()
+        options.onInvalidate(event)
       },
     })
   }
@@ -112,18 +125,10 @@ export class ScreenplayConversationClient {
     )
   }
 
-  async resume(
-    commandId: string,
-    turnId: string,
-    runtime: ScreenplayConversationRuntimeInput,
-  ): Promise<ScreenplayConversationTurn> {
-    return dataOrThrow(
-      await this.api.resumeScreenplayConversationTurn({
-        commandId,
-        turnId,
-        runtime,
-      }),
-      '恢复剧本对话失败',
+  async truncateFromTurn(turnId: string): Promise<void> {
+    dataOrThrow(
+      await this.api.truncateScreenplayConversationFromTurn({ turnId }),
+      '更新剧本对话历史失败',
     )
   }
 }

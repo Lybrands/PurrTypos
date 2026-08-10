@@ -24,7 +24,6 @@ from schemas.screenplay_v2 import (
     DeleteScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
     ScreenplayV2BookSourceRequest,
-    StartScreenplayV2OperationRequest,
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
@@ -264,128 +263,6 @@ class ScreenplayV2ProjectService:
             role=normalized_role,
             before_revision_no=before_revision_no,
             limit=max(1, min(100, int(limit))),
-        )
-
-    async def get_operation(self, operation_id: str) -> dict[str, Any]:
-        normalized_operation_id = str(operation_id or "").strip()
-        if not normalized_operation_id:
-            raise NotFoundError("剧本 Operation 不存在")
-        return await self._repository.get_operation(normalized_operation_id)
-
-    async def start_operation(
-        self,
-        *,
-        command_id: str,
-        project_id: str,
-        request: StartScreenplayV2OperationRequest,
-    ) -> dict[str, Any]:
-        normalized_command_id = _command_id(command_id)
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            raise NotFoundError("剧本项目不存在")
-        request_payload = request.model_dump(mode="json")
-        result = await self._repository.create_operation(
-            command_id=normalized_command_id,
-            request_digest=_digest({
-                "projectId": normalized_project_id,
-                **request_payload,
-            }),
-            project_id=normalized_project_id,
-            expected_project_revision=request.expectedProjectRevision,
-            target_role=request.targetRole,
-            intent=request.intent.model_dump(mode="json"),
-            conversation=request.conversation.model_dump(mode="json"),
-        )
-        return {
-            **result,
-            "workspace": await self._repository.get_workspace(
-                normalized_project_id
-            ),
-        }
-
-    async def require_executable_operation(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-    ) -> dict[str, Any]:
-        normalized_operation_id = str(operation_id or "").strip()
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_operation_id:
-            raise NotFoundError("剧本 Operation 不存在")
-        if not normalized_project_id:
-            raise NotFoundError("剧本项目不存在")
-        return await self._repository.require_executable_operation(
-            operation_id=normalized_operation_id,
-            project_id=normalized_project_id,
-        )
-
-    async def activate_bound_run(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-        run_id: str,
-    ) -> dict[str, Any]:
-        return await self._repository.activate_bound_run(
-            operation_id=str(operation_id or "").strip(),
-            project_id=str(project_id or "").strip(),
-            run_id=str(run_id or "").strip(),
-        )
-
-    async def settle_operation_from_root_run(
-        self,
-        *,
-        operation_id: str,
-        project_id: str,
-        run_id: str,
-        run_status: str,
-        error: str | None,
-    ) -> dict[str, Any]:
-        return await self._repository.settle_operation_from_root_run(
-            operation_id=str(operation_id or "").strip(),
-            project_id=str(project_id or "").strip(),
-            run_id=str(run_id or "").strip(),
-            run_status=str(run_status or "").strip(),
-            error=error,
-        )
-
-    async def control_operation(
-        self,
-        *,
-        command_id: str,
-        operation_id: str,
-        action: str,
-    ) -> dict[str, Any]:
-        normalized_command_id = _command_id(command_id)
-        normalized_operation_id = str(operation_id or "").strip()
-        if not normalized_operation_id:
-            raise NotFoundError("剧本 Operation 不存在")
-        normalized_action = str(action or "").strip()
-        return await self._repository.control_operation(
-            command_id=normalized_command_id,
-            request_digest=_digest({
-                "operationId": normalized_operation_id,
-                "action": normalized_action,
-            }),
-            operation_id=normalized_operation_id,
-            action=normalized_action,
-        )
-
-    async def list_operation_events(
-        self,
-        operation_id: str,
-        *,
-        after: int,
-        limit: int,
-    ) -> dict[str, Any]:
-        normalized_operation_id = str(operation_id or "").strip()
-        if not normalized_operation_id:
-            raise NotFoundError("剧本 Operation 不存在")
-        return await self._repository.list_operation_events(
-            normalized_operation_id,
-            after=max(0, int(after)),
-            limit=max(1, min(500, int(limit))),
         )
 
     async def update_working_copy(

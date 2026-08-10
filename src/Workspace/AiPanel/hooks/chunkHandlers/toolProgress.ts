@@ -3,11 +3,11 @@ import type { ChunkHandler } from "./types";
 
 const onlyCacheLikeChunk = (chunk: {
   delta?: string;
-  thinkingDelta?: string;
+  commentaryDelta?: string;
   done?: boolean;
   error?: string;
 }): boolean =>
-  !chunk.delta && !chunk.thinkingDelta && !chunk.done && !chunk.error;
+  !chunk.delta && !chunk.commentaryDelta && !chunk.done && !chunk.error;
 
 export const handleToolIndexCompleted: ChunkHandler = (chunk, ctx) => {
   if (typeof chunk.toolIndexCompleted !== "number") return;

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from agent_core.evaluation import TRACE_EVENT_TYPE
-from agent_core.events import CoreEventType
+from purra.evaluation import TRACE_EVENT_TYPE
+from purra.events import CoreEventType
 
 
 _TREND_STATUSES = ("done", "blocked", "failed")

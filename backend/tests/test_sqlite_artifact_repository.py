@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactAppendCommand,
     ArtifactCreateCommand,
     ArtifactFinalizeCommand,
@@ -14,12 +14,12 @@ from agent_core.artifacts import (
     ArtifactStatus,
     ArtifactValidationResult,
 )
-from agent_core.artifacts.errors import (
+from purra.artifacts.errors import (
     ArtifactConflictError,
     ArtifactStateError,
     ArtifactValidationError,
 )
-from agent_core.artifacts.ports import ArtifactRepository, ArtifactValidator
+from purra.artifacts.ports import ArtifactRepository, ArtifactValidator
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_artifact_repository import (
     SqliteArtifactRepository,

@@ -130,8 +130,8 @@ async def test_save_conversation_links_agent_run(temp_db: DatabaseConnection):
 async def test_history_projects_durable_task_only_onto_its_originating_session(
     temp_db: DatabaseConnection,
 ):
-    from agent_core.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
-    from agent_core.work_items import (
+    from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
+    from purra.work_items import (
         WorkItemCreateCommand,
         WorkItemRunLinkCommand,
         WorkItemRunRelation,
@@ -294,10 +294,10 @@ async def test_conversation_schema_and_api_expose_only_current_turn_fields(
         "response",
         "create_time",
         "model",
-        "thinking",
+        "commentary",
         "tool_call_segments",
-        "thinking_blocks",
-        "thinking_durations_ms",
+        "commentary_blocks",
+        "commentary_durations_ms",
         "duration_ms",
         "task_plan",
         "context_compaction",

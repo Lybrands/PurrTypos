@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
-from agent_core.contracts import ModelRequest, SessionId
-from agent_core.json_values import freeze_json_mapping, thaw_json_mapping
-from agent_core.ports import CancellationSignal
+from purra.contracts import ModelRequest, SessionId
+from purra.json_values import freeze_json_mapping, thaw_json_mapping
+from purra.ports import CancellationSignal
 
 
 @dataclass(frozen=True, slots=True)

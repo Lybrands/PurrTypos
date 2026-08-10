@@ -5,14 +5,14 @@ from dataclasses import replace
 
 import pytest
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ModelRequest,
     PlanningCapabilities,
     PlanningConstraints,
 )
-from agent_core.planner import build_planner_messages
+from purra.planner import build_planner_messages
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.execution_state import WritingExecutionStateFactory
 from domains.writing.planning import (
