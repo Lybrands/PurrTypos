@@ -12,7 +12,6 @@ from purra.recovery.contracts import RecoveryCause
 _STANDARD_LIMITS: Mapping[RecoveryCause, int] = MappingProxyType({
     RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED: 1,
     RecoveryCause.PROVIDER_STREAM_INTERRUPTED: 1,
-    RecoveryCause.MODEL_OUTPUT_TRUNCATED: 1,
     RecoveryCause.MALFORMED_TOOL_CALL_BATCH: 1,
     RecoveryCause.MISSING_REQUIRED_TOOL_CALL: 1,
     RecoveryCause.MISSING_REQUIRED_TOOL_CALL_REPLAN: 1,

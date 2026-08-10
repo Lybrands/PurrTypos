@@ -757,7 +757,7 @@ async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body
     )
 
 
-async def test_screenplay_tool_run_retries_without_changing_reasoning_mode(
+async def test_screenplay_tool_length_fails_without_replaying_reasoning_mode(
     screenplay_tool_db,
     monkeypatch,
 ):
@@ -782,37 +782,31 @@ async def test_screenplay_tool_run_retries_without_changing_reasoning_mode(
         "contextWindow": "128k",
     })
     try:
-        result = await ScreenplayToolCallingService(
-            screenplay_tool_db,
-            composition=composition,
-        ).run_candidate(
-            runtime=runtime,
-            session_id=1,
-            prompt="生成创作简报",
-            system_instruction="按需使用工具并写入候选稿。",
-            user_payload={"instruction": "生成创作简报"},
-            domain_context=_context(),
-            conversation_turn_id="turn-reasoning-fallback",
-        )
+        with pytest.raises(ModelGatewayError) as captured:
+            await ScreenplayToolCallingService(
+                screenplay_tool_db,
+                composition=composition,
+            ).run_candidate(
+                runtime=runtime,
+                session_id=1,
+                prompt="生成创作简报",
+                system_instruction="按需使用工具并写入候选稿。",
+                user_payload={"instruction": "生成创作简报"},
+                domain_context=_context(),
+                conversation_turn_id="turn-reasoning-fallback",
+            )
     finally:
         await composition.shutdown()
 
-    assert result.candidate["payload"]["title"] == "重试后生成的简报"
+    assert captured.value.code == "model_output_truncated"
     assert [item.reasoning_mode for item in gateway.invocations] == [
-        ReasoningMode.DEFAULT,
-        ReasoningMode.DEFAULT,
-        ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
     ]
     rows = await screenplay_tool_db.fetch_all(
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
     )
     chunks = [json.loads(row["chunk_json"]) for row in rows]
-    commentary = "".join(
-        str(chunk.get("commentaryDelta") or "") for chunk in chunks
-    )
-    assert "保持用户选择的思考模式并完成结构化写入" in commentary
-    assert "重试成功" not in commentary
+    assert not any("candidate" in chunk for chunk in chunks)
 
 
 async def test_host_prepared_scene_is_host_committed_without_tool_json(

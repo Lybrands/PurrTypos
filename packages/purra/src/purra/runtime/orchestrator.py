@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from hashlib import sha256
 from time import perf_counter
 from typing import Any, AsyncIterator, Mapping, Sequence
 
@@ -68,12 +69,13 @@ from purra.host_planned_tool_gateway import (
 )
 from purra.model_call_parameters import describe_model_call
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
+from purra.json_values import thaw_json_mapping
 from purra.runtime_context import project_intermediate_tool_context
 from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
     PendingProviderAttempt as _PendingProviderAttempt,
-    is_reasoning_only_truncation, provider_retry_round_capacity,
-    retry_provider_attempt, truncation_trace_details,
+    provider_retry_round_capacity,
+    truncation_trace_details,
 )
 from purra.runtime.response_finalization import (
     declined_final_response as _declined_final_response,
@@ -174,19 +176,6 @@ _MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
     "provider's native structured tool-call protocol. Include one stable call id, "
     "one currently exposed tool name, and one complete JSON object for arguments. "
     "Do not emit XML-like tool markup or an argument dump as ordinary text."
-)
-_TRUNCATED_TOOL_CALL_RETRY_GUIDANCE = (
-    "The preceding model output reached its output limit while constructing a "
-    "tool call. Core discarded the entire partial call and no tool was executed. "
-    "Retry the current step once with a bounded structured payload. Return only "
-    "the fields required for the current tool, do not duplicate the same result "
-    "as explanatory prose, and use a host-provided batch or append capability if "
-    "one is exposed."
-)
-_TRUNCATED_MODEL_OUTPUT_RETRY_GUIDANCE = (
-    "The preceding model output reached its output limit and was discarded as "
-    "incomplete. Retry the current step once with a bounded complete response. "
-    "Do not repeat project state or other content that the host already supplied."
 )
 _EMPTY_RESPONSE_RETRY_GUIDANCE = (
     "Your preceding model round ended after internal reasoning without any "
@@ -702,6 +691,10 @@ class AgentRuntime:
                 round_messages,
                 invocation,
             )
+            request_fingerprint = _model_request_fingerprint(
+                round_messages,
+                invocation,
+            )
             host_planned_dispatch = (
                 invocation_parameters.get("executionRoute")
                 == HOST_PLANNED_EXECUTION_ROUTE
@@ -723,6 +716,7 @@ class AgentRuntime:
                     "round": round_number,
                     "logicalRound": provider_attempt.logical_round,
                     "attempt": provider_attempt.attempt,
+                    "requestFingerprint": request_fingerprint,
                     "parameters": invocation_parameters,
                 },
             )
@@ -1236,70 +1230,20 @@ class AgentRuntime:
             )
             if termination.incomplete:
                 error_code = termination.error_code or "model_output_truncated"
-                reasoning_only_truncation = is_reasoning_only_truncation(
-                    accumulator, invocation, error_code
-                )
-                truncation_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.MODEL_OUTPUT_TRUNCATED,
-                        action=(
-                            RecoveryAction.RETRY_MODEL
-                        ),
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        retryable=(
-                            reasoning_only_truncation
-                            or termination.retryable and output_limit is None
-                        ),
-                        cancellation_requested=_is_canceled(signal),
-                        visible_output_emitted=direct_content_released,
-                    ),
-                    round_number=round_number,
-                )
-                can_retry = truncation_decision.allowed
                 await self._trace(
                     "model_output",
-                    (
-                        "truncated_reasoning_retry"
-                        if can_retry and reasoning_only_truncation
-                        else "truncated_retry"
-                        if can_retry
-                        else "truncated"
-                    ),
+                    "truncated",
                     details=truncation_trace_details(
                         accumulator=accumulator,
                         round_number=round_number,
+                        attempt=provider_attempt.attempt,
+                        request_fingerprint=request_fingerprint,
                         finish_reason=finish_reason,
                         error_code=error_code,
-                        can_retry=can_retry,
-                        retry_used=(
-                            truncation_decision.attempt > 1
-                            or truncation_decision.reason_code
-                            is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
-                        ),
-                        reasoning_only=reasoning_only_truncation,
                         emitted_delta_count=emitted_delta_count,
                         output_limit=output_limit,
                     ),
                 )
-                if can_retry:
-                    if reasoning_only_truncation:
-                        round_limit += 1
-                        pending_provider_attempt = retry_provider_attempt(
-                            provider_attempt
-                        )
-                        continue
-                    messages.append(AgentMessage(
-                        role=MessageRole.DEVELOPER,
-                        content=(
-                            _TRUNCATED_TOOL_CALL_RETRY_GUIDANCE
-                            if accumulator.tool_call_count
-                            else _TRUNCATED_MODEL_OUTPUT_RETRY_GUIDANCE
-                        ),
-                    ))
-                    continue
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
@@ -2827,6 +2771,42 @@ def _runtime_result(
         round_count=round_count,
         error_code=error_code,
     )
+
+
+def _model_request_fingerprint(
+    messages: Sequence[AgentMessage],
+    invocation: ModelInvocation,
+) -> str:
+    payload = {
+        "messages": [message.to_mapping() for message in messages],
+        "provider": invocation.request.provider,
+        "model": invocation.request.model,
+        "profileDigest": invocation.request.capability_snapshot.digest(),
+        "options": thaw_json_mapping(invocation.request.options),
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": thaw_json_mapping(tool.parameters),
+            }
+            for tool in invocation.tools
+        ],
+        "toolChoice": invocation.tool_choice.value,
+        "reasoningMode": invocation.reasoning_mode.value,
+        "outputLimit": (
+            invocation.output_limit.to_mapping()
+            if invocation.output_limit is not None
+            else None
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"sha256:{sha256(encoded).hexdigest()}"
 
 
 def _is_retryable_stream_interruption(error: Exception) -> bool:

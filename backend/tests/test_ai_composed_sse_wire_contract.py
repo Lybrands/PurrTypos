@@ -141,6 +141,7 @@ def _normalize_dynamic_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]
     normalized = deepcopy(events)
     run_ids: dict[str, str] = {}
     approval_ids: dict[str, str] = {}
+    request_fingerprints: dict[str, str] = {}
 
     def _walk(value: Any, key: str | None = None) -> Any:
         if key == "runId" and isinstance(value, str):
@@ -149,6 +150,11 @@ def _normalize_dynamic_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]
             return approval_ids.setdefault(
                 value,
                 f"<approval-{len(approval_ids) + 1}>",
+            )
+        if key == "requestFingerprint" and isinstance(value, str):
+            return request_fingerprints.setdefault(
+                value,
+                f"<request-fingerprint-{len(request_fingerprints) + 1}>",
             )
         if isinstance(value, dict):
             return {item_key: _walk(item, item_key) for item_key, item in value.items()}
@@ -532,6 +538,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
         "round": 1,
         "logicalRound": 1,
         "attempt": 1,
+        "requestFingerprint": "<request-fingerprint-1>",
         "parameters": {
             "provider": "openai",
             "model": "wire-model",

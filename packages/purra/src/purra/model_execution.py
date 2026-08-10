@@ -38,7 +38,6 @@ class ManagedModelCall:
     request: ModelRequest
     output_limit: InvocationOutputLimit | None = None
     reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT
-    allow_reasoning_fallback: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ModelRequest):
@@ -54,11 +53,6 @@ class ManagedModelCall:
             self,
             "reasoning_mode",
             ReasoningMode(self.reasoning_mode),
-        )
-        object.__setattr__(
-            self,
-            "allow_reasoning_fallback",
-            bool(self.allow_reasoning_fallback),
         )
 
 
@@ -95,34 +89,26 @@ class ManagedModelExecutor:
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
     ) -> ManagedModelCompletion:
-        attempts: list[Mapping[str, object]] = []
-        for mode in _attempt_modes(call):
-            invocation, output_limit = _resolve_invocation(call, mode)
-            parameters = describe_model_call(
-                self._gateway,
-                messages,
-                invocation,
-            )
-            attempts.append(parameters)
-            if on_attempt is not None:
-                await on_attempt(parameters)
-            try:
-                completion = await await_with_cancellation(
-                    self._gateway.complete(messages, invocation, signal),
-                    signal,
-                )
-            except UnsupportedModelFeatureError:
-                if mode is not ReasoningMode.DISABLED or len(attempts) > 1:
-                    raise
-                continue
-            _validate_completion(completion)
-            return ManagedModelCompletion(
-                completion=completion,
-                output_limit=output_limit,
-                call_parameters=tuple(attempts),
-            )
-        raise UnsupportedModelFeatureError(
-            "model rejected the managed reasoning configuration"
+        invocation, output_limit = _resolve_invocation(
+            call,
+            call.reasoning_mode,
+        )
+        parameters = describe_model_call(
+            self._gateway,
+            messages,
+            invocation,
+        )
+        if on_attempt is not None:
+            await on_attempt(parameters)
+        completion = await await_with_cancellation(
+            self._gateway.complete(messages, invocation, signal),
+            signal,
+        )
+        _validate_completion(completion)
+        return ManagedModelCompletion(
+            completion=completion,
+            output_limit=output_limit,
+            call_parameters=(parameters,),
         )
 
     async def stream(
@@ -135,42 +121,27 @@ class ManagedModelExecutor:
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
     ) -> ManagedModelStream:
-        attempts: list[Mapping[str, object]] = []
-        for mode in _attempt_modes(call):
-            invocation, output_limit = _resolve_invocation(call, mode)
-            parameters = describe_model_call(
-                self._gateway,
-                messages,
-                invocation,
-            )
-            attempts.append(parameters)
-            if on_attempt is not None:
-                await on_attempt(parameters)
-            try:
-                stream = await await_with_cancellation(
-                    self._gateway.stream(messages, invocation, signal),
-                    signal,
-                )
-            except UnsupportedModelFeatureError:
-                if mode is not ReasoningMode.DISABLED or len(attempts) > 1:
-                    raise
-                continue
-            return ManagedModelStream(
-                chunks=_validated_chunks(stream.chunks, signal),
-                model=stream.model,
-                output_limit=output_limit,
-                call_parameters=tuple(attempts),
-            )
-        raise UnsupportedModelFeatureError(
-            "model rejected the managed reasoning configuration"
+        invocation, output_limit = _resolve_invocation(
+            call,
+            call.reasoning_mode,
         )
-
-
-def _attempt_modes(call: ManagedModelCall) -> tuple[ReasoningMode, ...]:
-    primary = call.reasoning_mode
-    if primary is ReasoningMode.DISABLED and call.allow_reasoning_fallback:
-        return primary, ReasoningMode.DEFAULT
-    return (primary,)
+        parameters = describe_model_call(
+            self._gateway,
+            messages,
+            invocation,
+        )
+        if on_attempt is not None:
+            await on_attempt(parameters)
+        stream = await await_with_cancellation(
+            self._gateway.stream(messages, invocation, signal),
+            signal,
+        )
+        return ManagedModelStream(
+            chunks=_validated_chunks(stream.chunks, signal),
+            model=stream.model,
+            output_limit=output_limit,
+            call_parameters=(parameters,),
+        )
 
 
 def _resolve_invocation(
