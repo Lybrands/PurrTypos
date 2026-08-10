@@ -618,11 +618,18 @@ async def init_schema(db: DatabaseConnection) -> None:
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_units (
         task_id TEXT NOT NULL,
         unit_id TEXT NOT NULL,
+        semantic_key TEXT NOT NULL,
         position INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         dependencies_json TEXT NOT NULL DEFAULT '[]',
+        parent_unit_id TEXT DEFAULT NULL,
+        required INTEGER NOT NULL DEFAULT 1,
         input_ref TEXT DEFAULT NULL,
         output_ref TEXT DEFAULT NULL,
+        artifact_digest TEXT DEFAULT NULL,
+        validation_receipt_json TEXT NOT NULL DEFAULT '{}',
+        failure_json TEXT NOT NULL DEFAULT '{}',
+        disposition TEXT DEFAULT NULL,
         attempt INTEGER NOT NULL DEFAULT 0,
         max_attempts INTEGER NOT NULL DEFAULT 3,
         worker_id TEXT DEFAULT NULL,
@@ -635,6 +642,27 @@ async def init_schema(db: DatabaseConnection) -> None:
         PRIMARY KEY (task_id, unit_id),
         UNIQUE (task_id, position)
     )""")
+    for column in (
+        "semantic_key TEXT DEFAULT NULL",
+        "parent_unit_id TEXT DEFAULT NULL",
+        "required INTEGER NOT NULL DEFAULT 1",
+        "artifact_digest TEXT DEFAULT NULL",
+        "validation_receipt_json TEXT NOT NULL DEFAULT '{}'",
+        "failure_json TEXT NOT NULL DEFAULT '{}'",
+        "disposition TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_long_task_units ADD COLUMN {column}",
+        )
+    await db.execute(
+        "UPDATE ai_agent_long_task_units SET semantic_key = unit_id "
+        "WHERE semantic_key IS NULL OR TRIM(semantic_key) = ''"
+    )
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_long_task_units_semantic_key
+        ON ai_agent_long_task_units(task_id, semantic_key)
+    """)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_long_task_units_ready
         ON ai_agent_long_task_units(task_id, status, position)

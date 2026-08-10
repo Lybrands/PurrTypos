@@ -15,6 +15,7 @@ from purra.normalization import (
     unique_text_tuple,
 )
 from purra.json_values import freeze_json_mapping
+from purra.recovery import FailureDisposition
 
 
 class LongTaskStatus(StrEnum):
@@ -39,7 +40,9 @@ class LongTaskUnitStatus(StrEnum):
     WAITING_RETRY = "waiting_retry"
     CLAIMED = "claimed"
     RUNNING = "running"
+    NEEDS_SPLIT = "needs_split"
     BLOCKED = "blocked"
+    EXPANDED = "expanded"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
@@ -48,6 +51,7 @@ class LongTaskUnitStatus(StrEnum):
     def terminal(self) -> bool:
         return self in {
             LongTaskUnitStatus.COMPLETED,
+            LongTaskUnitStatus.EXPANDED,
             LongTaskUnitStatus.FAILED,
             LongTaskUnitStatus.CANCELED,
         }
@@ -57,7 +61,10 @@ class LongTaskUnitStatus(StrEnum):
 class LongTaskUnitSpec:
     id: str
     position: int
+    semantic_key: str | None = None
     dependencies: tuple[str, ...] = ()
+    parent_unit_id: str | None = None
+    required: bool = True
     input_ref: str | None = None
     max_attempts: int = 3
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -73,12 +80,26 @@ class LongTaskUnitSpec:
             "position",
             non_negative_int(self.position, "long task unit position"),
         )
+        object.__setattr__(
+            self,
+            "semantic_key",
+            required_text(
+                self.semantic_key or self.id,
+                "long task unit semantic_key",
+            ),
+        )
         dependencies = unique_text_tuple(
             str(item or "").strip() for item in self.dependencies
         )
         if self.id in dependencies:
             raise ValueError("long task unit cannot depend on itself")
         object.__setattr__(self, "dependencies", dependencies)
+        object.__setattr__(
+            self,
+            "parent_unit_id",
+            optional_text(self.parent_unit_id),
+        )
+        object.__setattr__(self, "required", bool(self.required))
         object.__setattr__(self, "input_ref", optional_text(self.input_ref))
         object.__setattr__(
             self,
@@ -115,10 +136,15 @@ class LongTaskCreateCommand:
         units = tuple(self.units)
         if not units:
             raise ValueError("long task requires at least one execution unit")
+        if not any(unit.required for unit in units):
+            raise ValueError("long task requires at least one required execution unit")
         ids = tuple(item.id for item in units)
+        semantic_keys = tuple(item.semantic_key for item in units)
         positions = tuple(item.position for item in units)
         if len(ids) != len(set(ids)):
             raise ValueError("long task unit ids must be unique")
+        if len(semantic_keys) != len(set(semantic_keys)):
+            raise ValueError("long task unit semantic keys must be unique")
         if len(positions) != len(set(positions)):
             raise ValueError("long task unit positions must be unique")
         known = set(ids)
@@ -208,7 +234,10 @@ class LongTaskUnitRecord:
     id: str
     position: int
     status: LongTaskUnitStatus
+    semantic_key: str | None = None
     dependencies: tuple[str, ...] = ()
+    parent_unit_id: str | None = None
+    required: bool = True
     attempt: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
@@ -216,6 +245,10 @@ class LongTaskUnitRecord:
     run_id: str | None = None
     input_ref: str | None = None
     output_ref: str | None = None
+    artifact_digest: str | None = None
+    validation_receipt: Mapping[str, Any] = field(default_factory=dict)
+    failure: Mapping[str, Any] = field(default_factory=dict)
+    disposition: FailureDisposition | None = None
     error_code: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     create_time: str | None = None
@@ -232,7 +265,21 @@ class LongTaskUnitRecord:
                 ),
             )
         object.__setattr__(self, "status", LongTaskUnitStatus(self.status))
+        object.__setattr__(
+            self,
+            "semantic_key",
+            required_text(
+                self.semantic_key or self.id,
+                "long task unit record semantic_key",
+            ),
+        )
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
+        object.__setattr__(
+            self,
+            "parent_unit_id",
+            optional_text(self.parent_unit_id),
+        )
+        object.__setattr__(self, "required", bool(self.required))
         for name in ("position", "attempt", "max_attempts"):
             normalizer = positive_int if name == "max_attempts" else non_negative_int
             object.__setattr__(
@@ -243,7 +290,14 @@ class LongTaskUnitRecord:
                     f"long task unit record {name}",
                 ),
             )
-        for name in ("worker_id", "run_id", "input_ref", "output_ref", "error_code"):
+        for name in (
+            "worker_id",
+            "run_id",
+            "input_ref",
+            "output_ref",
+            "artifact_digest",
+            "error_code",
+        ):
             object.__setattr__(
                 self,
                 name,
@@ -256,6 +310,18 @@ class LongTaskUnitRecord:
                 int(self.lease_expires_at_ms),
             )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+        object.__setattr__(
+            self,
+            "validation_receipt",
+            freeze_json_mapping(self.validation_receipt),
+        )
+        object.__setattr__(self, "failure", freeze_json_mapping(self.failure))
+        if self.disposition is not None:
+            object.__setattr__(
+                self,
+                "disposition",
+                FailureDisposition(self.disposition),
+            )
         for name in ("create_time", "update_time"):
             object.__setattr__(
                 self,
@@ -268,6 +334,8 @@ class LongTaskUnitRecord:
 class LongTaskUnitResult:
     output_ref: str
     run_id: str | None = None
+    artifact_digest: str | None = None
+    validation_receipt: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -277,7 +345,40 @@ class LongTaskUnitResult:
             required_text(self.output_ref, "long task unit result output_ref"),
         )
         object.__setattr__(self, "run_id", optional_text(self.run_id))
+        object.__setattr__(
+            self,
+            "artifact_digest",
+            optional_text(self.artifact_digest),
+        )
+        object.__setattr__(
+            self,
+            "validation_receipt",
+            freeze_json_mapping(self.validation_receipt),
+        )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class LongTaskSplitResult:
+    children: tuple[LongTaskUnitSpec, ...]
+    replacement_dependency_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        children = tuple(self.children)
+        ids = tuple(child.id for child in children)
+        semantic_keys = tuple(child.semantic_key for child in children)
+        if len(ids) != len(set(ids)):
+            raise ValueError("split child ids must be unique")
+        if len(semantic_keys) != len(set(semantic_keys)):
+            raise ValueError("split child semantic keys must be unique")
+        replacement_ids = unique_text_tuple(self.replacement_dependency_ids)
+        unknown = set(replacement_ids) - set(ids)
+        if unknown:
+            raise ValueError("replacement dependencies must reference split children")
+        if children:
+            _require_acyclic(children)
+        object.__setattr__(self, "children", children)
+        object.__setattr__(self, "replacement_dependency_ids", replacement_ids)
 
 
 def _require_acyclic(units: tuple[LongTaskUnitSpec, ...]) -> None:
@@ -295,6 +396,7 @@ __all__ = [
     "LongTaskCreateCommand",
     "LongTaskRecord",
     "LongTaskStatus",
+    "LongTaskSplitResult",
     "LongTaskUnitRecord",
     "LongTaskUnitResult",
     "LongTaskUnitSpec",

@@ -6,6 +6,7 @@ from purra.recovery.contracts import (
     FailureCategory,
     FailureDecision,
     FailureDisposition,
+    FailureScope,
     FailureSignal,
     RecoveryEffectState,
 )
@@ -29,6 +30,8 @@ def decide_failure(
         disposition = FailureDisposition.CANCEL
     elif signal.category in _PERMANENT_CATEGORIES:
         disposition = FailureDisposition.FAIL_PERMANENT
+    elif signal.scope is FailureScope.SYSTEMIC:
+        disposition = FailureDisposition.PAUSE_RECOVERABLE
     elif signal.effect_state is RecoveryEffectState.UNKNOWN:
         disposition = FailureDisposition.PAUSE_RECOVERABLE
     elif signal.effect_state is RecoveryEffectState.COMMITTED:
@@ -37,6 +40,8 @@ def decide_failure(
             if signal.checkpoint_available
             else FailureDisposition.PAUSE_RECOVERABLE
         )
+    elif signal.checkpoint_available:
+        disposition = FailureDisposition.RESUME_CHECKPOINT
     elif signal.part_splittable:
         disposition = FailureDisposition.SPLIT_PART
     elif signal.retryable and remaining:
@@ -60,6 +65,7 @@ def decide_failure(
         effect_state=signal.effect_state,
         checkpoint_available=signal.checkpoint_available,
         part_splittable=signal.part_splittable,
+        scope=signal.scope,
     )
 
 
