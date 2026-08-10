@@ -56,6 +56,12 @@ class _Resolver:
         return ResolvedScreenplayTask(
             target_role="screenplayDraft",
             episode_numbers=(4, 5, 6),
+            episode_scene_ids={
+                4: ("ep04_s01",),
+                5: ("ep05_s01",),
+                6: ("ep06_s01",),
+            },
+            source_revision_refs=("sprev-scenes", "sprev-brief"),
         )
 
 
@@ -78,7 +84,7 @@ class _UnitExecutor:
         elif context.unit.id == "publish-candidate":
             output = {"revisionId": "sprev-durable-candidate"}
         else:
-            output = {"episodeNumber": int(context.unit.id.rsplit("-", 1)[1])}
+            output = {"partId": context.unit.id}
         output_ref = await self._outputs.put(
             task_id=context.task.id,
             unit_id=context.unit.id,
@@ -318,68 +324,53 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     }
     assert task["status"] == "completed"
     assert task["resultRevision"] is None
-    assert [unit["id"] for unit in task["units"]] == [
-        "collect-evidence-episode-4",
-        "generate-candidate-episode-4",
-        "validate-candidate-episode-4",
-        "collect-evidence-episode-5",
-        "generate-candidate-episode-5",
-        "validate-candidate-episode-5",
-        "collect-evidence-episode-6",
-        "generate-candidate-episode-6",
-        "validate-candidate-episode-6",
+    expected_ids = [
+        "evidence:4",
+        "draft:4:ep04_s01",
+        "episode:4:metadata",
+        "episode:4:validation",
+        "evidence:5",
+        "draft:5:ep05_s01",
+        "episode:5:metadata",
+        "episode:5:validation",
+        "evidence:6",
+        "draft:6:ep06_s01",
+        "episode:6:metadata",
+        "episode:6:validation",
         "compose-final-response",
         "publish-candidate",
     ]
+    assert [unit["id"] for unit in task["units"]] == expected_ids
+    def output_ref(unit_id: str) -> str:
+        return f"screenplay-task-output://{task['id']}/{unit_id}"
     assert executor.calls == [
-        ("collect-evidence-episode-4", {}),
-        (
-            "generate-candidate-episode-4",
-            {"collect-evidence-episode-4": f"screenplay-task-output://{task['id']}/collect-evidence-episode-4"},
-        ),
-        (
-            "validate-candidate-episode-4",
-            {"generate-candidate-episode-4": f"screenplay-task-output://{task['id']}/generate-candidate-episode-4"},
-        ),
-        (
-            "collect-evidence-episode-5",
-            {"validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4"},
-        ),
-        (
-            "generate-candidate-episode-5",
-            {"collect-evidence-episode-5": f"screenplay-task-output://{task['id']}/collect-evidence-episode-5"},
-        ),
-        (
-            "validate-candidate-episode-5",
-            {"generate-candidate-episode-5": f"screenplay-task-output://{task['id']}/generate-candidate-episode-5"},
-        ),
-        (
-            "collect-evidence-episode-6",
-            {"validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5"},
-        ),
-        (
-            "generate-candidate-episode-6",
-            {"collect-evidence-episode-6": f"screenplay-task-output://{task['id']}/collect-evidence-episode-6"},
-        ),
-        (
-            "validate-candidate-episode-6",
-            {"generate-candidate-episode-6": f"screenplay-task-output://{task['id']}/generate-candidate-episode-6"},
-        ),
+        ("evidence:4", {}),
+        ("draft:4:ep04_s01", {"evidence:4": output_ref("evidence:4")}),
+        ("episode:4:metadata", {"draft:4:ep04_s01": output_ref("draft:4:ep04_s01")}),
+        ("episode:4:validation", {"episode:4:metadata": output_ref("episode:4:metadata")}),
+        ("evidence:5", {"episode:4:validation": output_ref("episode:4:validation")}),
+        ("draft:5:ep05_s01", {"evidence:5": output_ref("evidence:5")}),
+        ("episode:5:metadata", {"draft:5:ep05_s01": output_ref("draft:5:ep05_s01")}),
+        ("episode:5:validation", {"episode:5:metadata": output_ref("episode:5:metadata")}),
+        ("evidence:6", {"episode:5:validation": output_ref("episode:5:validation")}),
+        ("draft:6:ep06_s01", {"evidence:6": output_ref("evidence:6")}),
+        ("episode:6:metadata", {"draft:6:ep06_s01": output_ref("draft:6:ep06_s01")}),
+        ("episode:6:validation", {"episode:6:metadata": output_ref("episode:6:metadata")}),
         (
             "compose-final-response",
             {
-                "validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4",
-                "validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5",
-                "validate-candidate-episode-6": f"screenplay-task-output://{task['id']}/validate-candidate-episode-6",
+                f"episode:{number}:validation": output_ref(f"episode:{number}:validation")
+                for number in (4, 5, 6)
             },
         ),
         (
             "publish-candidate",
             {
-                "validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4",
-                "validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5",
-                "validate-candidate-episode-6": f"screenplay-task-output://{task['id']}/validate-candidate-episode-6",
-                "compose-final-response": f"screenplay-task-output://{task['id']}/compose-final-response",
+                **{
+                    f"episode:{number}:validation": output_ref(f"episode:{number}:validation")
+                    for number in (4, 5, 6)
+                },
+                "compose-final-response": output_ref("compose-final-response"),
             },
         ),
     ]
@@ -404,17 +395,20 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     ]
     assert progress
     assert progress[-1]["status"] == "completed"
-    assert progress[-1]["completedUnits"] == 11
+    assert progress[-1]["completedUnits"] == 14
     assert [unit["title"] for unit in progress[-1]["units"]] == [
         "整理第 4 集创作依据",
-        "创作第 4 集候选稿",
-        "校验第 4 集候选稿",
+        "创作第 4 集场景 ep04_s01",
+        "整理第 4 集连续性",
+        "校验第 4 集完整性",
         "整理第 5 集创作依据",
-        "创作第 5 集候选稿",
-        "校验第 5 集候选稿",
+        "创作第 5 集场景 ep05_s01",
+        "整理第 5 集连续性",
+        "校验第 5 集完整性",
         "整理第 6 集创作依据",
-        "创作第 6 集候选稿",
-        "校验第 6 集候选稿",
+        "创作第 6 集场景 ep06_s01",
+        "整理第 6 集连续性",
+        "校验第 6 集完整性",
         "整理最终答复",
         "整理并发布候选稿",
     ]

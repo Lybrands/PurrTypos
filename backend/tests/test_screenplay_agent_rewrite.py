@@ -41,6 +41,10 @@ from application.screenplay_agent_task_executor import (
     _unit_result,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.screenplay_manifest_compiler import (
+    REVIEW_DIMENSIONS,
+    compile_screenplay_manifest,
+)
 from application.screenplay_agent_planner import (
     ModelScreenplayIntentPlanner,
     SqliteScreenplayTaskResolver,
@@ -62,7 +66,6 @@ from domains.screenplay_agent import (
 )
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
-from domains.screenplay_agent.recipe_compiler import compile_screenplay_task
 from exceptions import AppError
 from infrastructure.persistence.sqlite_screenplay_agent_repository import (
     SqliteScreenplayAgentRepository,
@@ -80,49 +83,90 @@ _TEST_OUTPUT_LIMIT = InvocationOutputLimit(
 )
 
 
-async def test_formal_recipe_separates_evidence_generation_validation_and_publish():
-    compiled = compile_screenplay_task(
+async def test_draft_manifest_has_stable_scene_parts_and_digest():
+    arguments = dict(
         intent=ScreenplayIntent(
             action=ScreenplayIntentAction.CREATE,
             instruction="创作第 4 集",
             requested_deliverable="screenplayDraft",
         ),
         target_role="screenplayDraft",
-        episode_numbers=(4,),
+        source_revision_refs=("sprev-scenes", "sprev-brief"),
+        episode_scene_ids={4: ("ep04_s01", "ep04_s02")},
         original_request="请创作第 4 集，并保留上一集的结尾伏笔。",
     )
+    compiled = compile_screenplay_manifest(**arguments)
+    repeated = compile_screenplay_manifest(**arguments)
 
     steps = compiled.recipe.steps
     assert [step.id for step in steps] == [
-        "collect-evidence-episode-4",
-        "generate-candidate-episode-4",
-        "validate-candidate-episode-4",
+        "evidence:4",
+        "draft:4:ep04_s01",
+        "draft:4:ep04_s02",
+        "episode:4:metadata",
+        "episode:4:validation",
         "compose-final-response",
         "publish-candidate",
     ]
     assert [step.kind for step in steps] == [
         "collect_evidence",
-        "generate_candidate",
-        "validate_candidate",
+        "generate_draft_scene",
+        "generate_draft_scene",
+        "generate_episode_metadata",
+        "validate_manifest_part",
         "compose_final_response",
         "publish_candidate_revision",
     ]
     assert steps[0].metadata["effectClass"] == "read_only"
     assert steps[1].metadata["effectClass"] == "idempotent_write"
-    assert steps[2].metadata["effectClass"] == "read_only"
-    assert steps[3].metadata["effectClass"] == "read_only"
     assert steps[1].depends_on == (steps[0].id,)
     assert steps[2].depends_on == (steps[1].id,)
     assert steps[3].depends_on == (steps[2].id,)
-    assert steps[4].depends_on == (steps[2].id, steps[3].id)
-    assert steps[3].metadata["input"] == {
+    assert steps[4].depends_on == (steps[3].id,)
+    assert steps[5].depends_on == (steps[4].id,)
+    assert steps[6].depends_on == (steps[4].id, steps[5].id)
+    assert steps[5].metadata["input"] == {
         "targetRole": "screenplayDraft",
         "instruction": "创作第 4 集",
         "userRequest": "请创作第 4 集，并保留上一集的结尾伏笔。",
         "constraints": [],
         "preserve": [],
+        "baseRevisionId": None,
     }
-    assert compiled.recipe.metadata["recipeVersion"] == 3
+    assert compiled.recipe.metadata["recipeVersion"] == 4
+    assert compiled.manifest.digest == repeated.manifest.digest
+    assert [part.id for part in compiled.manifest.parts] == [
+        part.id for part in repeated.manifest.parts
+    ]
+
+
+async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.REVIEW,
+            instruction="审阅完整剧本",
+            requested_deliverable="review",
+        ),
+        target_role="review",
+        source_revision_refs=("sprev-draft",),
+        episode_scene_ids={1: ("ep01_s01", "ep01_s02")},
+        reviewed_draft_id="sprev-draft",
+    )
+
+    dimension_parts = [
+        part for part in compiled.manifest.parts
+        if part.kind.value == "review_dimension"
+    ]
+    assert [part.metadata["reviewDimension"] for part in dimension_parts] == list(
+        REVIEW_DIMENSIONS
+    )
+    assert all(part.dependencies == ("review-input:1",) for part in dimension_parts)
+    validation = next(
+        part for part in compiled.manifest.parts
+        if part.id == "review:1:validation"
+    )
+    assert validation.dependencies == tuple(part.id for part in dimension_parts)
+    assert compiled.recipe.max_parallelism == 5
 
 
 async def test_execution_progress_is_projected_before_the_json_is_complete():
@@ -413,7 +457,7 @@ async def test_final_response_composition_receives_only_public_candidate_facts(
         "units": [
             {
                 "id": "validate-candidate-episode-4",
-                "kind": "validate_candidate",
+                "kind": "validate_manifest_part",
                 "status": "completed",
                 "output": {
                     "executionSummary": "承接上一集选择并完成本集转折。",
@@ -433,7 +477,7 @@ async def test_final_response_composition_receives_only_public_candidate_facts(
             },
             {
                 "id": "validate-candidate-episode-5",
-                "kind": "validate_candidate",
+                "kind": "validate_manifest_part",
                 "status": "completed",
                 "output": {
                     "executionSummary": "推进新冲突并留下后续问题。",
@@ -1255,17 +1299,24 @@ class _StructuredDraftModels:
             })
             return StructuredModelResult(value, "run-final-response")
         number = int(payload["episodeNumber"])
-        return StructuredModelResult({
+        if kwargs["phase"] == "screenplay_scene_generation":
+            scene = payload["scenePlan"]
+            value = kwargs["validate"]({
+                "sceneId": payload["sceneId"],
+                "processSummary": (
+                    f"场景 {payload['sceneId']} 推演：完成目标与转折。"
+                ),
+                "sceneText": f"{scene['heading']}\n\n第 {number} 集正文",
+            })
+            return StructuredModelResult(value, f"run-scene-{payload['sceneId']}")
+        assert kwargs["phase"] == "screenplay_episode_metadata"
+        value = kwargs["validate"]({
             "episodeNumber": number,
             "title": f"第 {number} 集",
             "executionSummary": f"完成第 {number} 集场景推进与连续性校验。",
             "continuitySummary": f"第 {number} 集连续性",
-            "scenes": [{
-                "sceneId": scene["id"],
-                "processSummary": f"场景 {scene['id']} 推演：完成目标与转折。",
-                "sceneText": f"{scene['heading']}\n\n第 {number} 集正文",
-            } for scene in payload["scenePlan"]["scenes"]],
-        }, f"run-draft-{number}")
+        })
+        return StructuredModelResult(value, f"run-metadata-{number}")
 
 
 class _CheckpointingToolCalls:
@@ -1280,7 +1331,11 @@ class _CheckpointingToolCalls:
         context = kwargs["domain_context"]
         part_type = context.expected_part_type
         part_key = context.expected_part_key
-        self.calls.append((part_type, part_key, kwargs["reasoning_mode"]))
+        self.calls.append((
+            part_type,
+            part_key,
+            kwargs.get("reasoning_mode", ReasoningMode.DEFAULT),
+        ))
         self.user_payloads.append(dict(kwargs["user_payload"]))
         self.system_instructions.append(str(kwargs["system_instruction"]))
         if part_key == self.fail_once_key and not self.failed:
@@ -1314,27 +1369,32 @@ class _CheckpointingToolCalls:
                 },
                 "contentText": "",
             }
-        elif part_type == "review_episode":
-            episode_number = int(part_key)
+        elif part_type == "review_dimension":
+            episode_text, dimension = part_key.split(":", 1)
+            episode_number = int(episode_text)
             candidate = {
                 "artifactId": f"artifact-review-{part_key}",
                 "payload": {
-                    "title": f"第 {part_key} 集审阅",
-                    "executionSummary": "核对本集场景目标、冲突和连续性。",
+                    "title": f"第 {episode_number} 集 {dimension} 审阅",
+                    "executionSummary": f"核对本集 {dimension} 维度。",
                     "contentJson": {
-                        "verdict": "revise" if episode_number == 1 else "ready",
+                        "verdict": (
+                            "revise"
+                            if episode_number == 1 and dimension == "continuity"
+                            else "ready"
+                        ),
                         "issues": ([{
                             "id": "issue-1",
                             "severity": "major",
                             "description": "场景转折需要更明确。",
                             "sceneIds": [f"scene-{episode_number}"],
-                        }] if episode_number == 1 else []),
+                        }] if episode_number == 1 and dimension == "continuity" else []),
                     },
                 },
-                "contentText": f"第 {part_key} 集审阅正文",
+                "contentText": f"第 {episode_number} 集 {dimension} 审阅正文",
             }
-        elif part_type == "scene_list_episode":
-            episode_number = int(part_key)
+        elif part_type == "document_section" and part_key.startswith("episode-"):
+            episode_number = int(part_key.removeprefix("episode-"))
             candidate = {
                 "artifactId": f"artifact-scene-list-{part_key}",
                 "payload": {
@@ -1351,6 +1411,16 @@ class _CheckpointingToolCalls:
                     }]},
                 },
                 "contentText": f"第 {part_key} 集场景表正文",
+            }
+        elif part_type == "document_section":
+            candidate = {
+                "artifactId": f"artifact-document-{part_key}",
+                "payload": {
+                    "title": part_key,
+                    "executionSummary": f"完成 {part_key} 章节。",
+                    "contentJson": {part_key: {"summary": f"{part_key} 内容"}},
+                },
+                "contentText": f"## {part_key}\n\n{part_key} 内容",
             }
         else:
             raise AssertionError(f"unexpected part type: {part_type}")
@@ -1441,7 +1511,7 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
         },
         "acceptedDeliverables": [],
     }
-    task = {
+    task: dict[str, object] = {
         "id": "task-formal-evidence-checkpoint",
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
@@ -1449,43 +1519,74 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
         "targetRole": "screenplayDraft",
         "units": [
             {
-                "id": "collect-evidence-episode-1",
+                "id": "evidence:1",
                 "kind": "collect_evidence",
                 "status": "completed",
                 "input": {"episodeNumber": 1},
                 "output": {"evidence": evidence, "evidenceReceipt": "receipt-1"},
             },
             {
-                "id": "generate-candidate-episode-1",
-                "kind": "generate_candidate",
+                "id": "draft:1:scene-1",
+                "kind": "generate_draft_scene",
                 "status": "pending",
-                "dependsOn": ["collect-evidence-episode-1"],
+                "dependsOn": ["evidence:1"],
                 "input": {
                     "episodeNumber": 1,
+                    "sceneId": "scene-1",
+                    "sceneIds": ["scene-1", "scene-2"],
                     "instruction": "创作第一集",
                     "baseRevisionId": None,
+                },
+            },
+            {
+                "id": "draft:1:scene-2",
+                "kind": "generate_draft_scene",
+                "status": "pending",
+                "dependsOn": ["draft:1:scene-1"],
+                "input": {
+                    "episodeNumber": 1,
+                    "sceneId": "scene-2",
+                    "sceneIds": ["scene-1", "scene-2"],
+                    "instruction": "创作第一集",
+                    "baseRevisionId": None,
+                },
+            },
+            {
+                "id": "episode:1:metadata",
+                "kind": "generate_episode_metadata",
+                "status": "pending",
+                "dependsOn": ["draft:1:scene-2"],
+                "input": {
+                    "episodeNumber": 1,
+                    "sceneIds": ["scene-1", "scene-2"],
+                },
+            },
+            {
+                "id": "episode:1:validation",
+                "kind": "validate_manifest_part",
+                "status": "pending",
+                "dependsOn": ["episode:1:metadata"],
+                "input": {
+                    "validationKind": "draft_episode",
+                    "episodeNumber": 1,
+                    "sceneIds": ["scene-1", "scene-2"],
                 },
             },
         ],
     }
 
-    generated = await executor.execute(
-        task=task,
-        unit=task["units"][1],
-        runtime=object(),
-    )
-    task["units"][1].update({"status": "completed", "output": generated})
-    validation_unit = {
-        "id": "validate-candidate-episode-1",
-        "kind": "validate_candidate",
-        "status": "pending",
-        "dependsOn": ["generate-candidate-episode-1"],
-        "input": {"episodeNumber": 1},
-    }
-    task["units"].append(validation_unit)
+    units = task["units"]
+    assert isinstance(units, list)
+    for index in (1, 2, 3):
+        output = await executor.execute(
+            task=task,
+            unit=units[index],
+            runtime=object(),
+        )
+        units[index].update({"status": "completed", "output": output})
     validated = await executor.execute(
         task=task,
-        unit=validation_unit,
+        unit=units[4],
         runtime=object(),
     )
 
@@ -1494,7 +1595,7 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     assert [key for _, key, _ in tool_calls.calls] == ["scene-1", "scene-2", "1"]
 
 
-async def test_episode_generation_checkpoints_scenes_and_resumes_after_truncation(
+async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
@@ -1503,23 +1604,61 @@ async def test_episode_generation_checkpoints_scenes_and_resumes_after_truncatio
         temp_db,
         tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
-    executor._context = _IncrementalEpisodeContext()
+    executor._context = _EvidenceCheckpointOnlyContext()
+    evidence = {
+        "manifest": {"sceneListId": "scene-list-head"},
+        "writingContext": {
+            "scenePlans": {
+                "scene-1": {"id": "scene-1", "objective": "建立危机"},
+                "scene-2": {"id": "scene-2", "objective": "完成转折"},
+            },
+            "currentDraftScenes": {},
+            "reviewIssues": [],
+        },
+    }
     task = {
-        "id": "task-incremental-episode",
+        "id": "task-visible-scene-parts",
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
-        "turnId": "turn-incremental-episode",
+        "turnId": "turn-visible-scene-parts",
         "targetRole": "screenplayDraft",
+        "units": [{
+            "id": "evidence:1",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"episodeNumber": 1},
+            "output": {"evidence": evidence},
+        }, {
+            "id": "draft:1:scene-1",
+            "kind": "generate_draft_scene",
+            "status": "completed",
+            "input": {
+                "episodeNumber": 1,
+                "sceneId": "scene-1",
+                "sceneIds": ["scene-1", "scene-2"],
+            },
+            "output": {
+                "episodeNumber": 1,
+                "sceneId": "scene-1",
+                "sceneText": "scene-1 正文",
+                "processSummary": "场景 scene-1 推演：建立危机。",
+                "sceneListId": "scene-list-head",
+            },
+        }],
     }
     unit = {
-        "id": "draft-episode-1",
-        "kind": "generate_episode_draft",
+        "id": "draft:1:scene-2",
+        "kind": "generate_draft_scene",
+        "dependsOn": ["draft:1:scene-1"],
         "input": {
             "episodeNumber": 1,
+            "sceneId": "scene-2",
+            "sceneIds": ["scene-1", "scene-2"],
             "instruction": "创作第一集",
             "baseRevisionId": "draft-head",
         },
     }
+    task["units"].append(unit)
 
     with pytest.raises(ModelGatewayError, match="output limit"):
         await executor.execute(
@@ -1527,62 +1666,9 @@ async def test_episode_generation_checkpoints_scenes_and_resumes_after_truncatio
             unit=unit,
             runtime=object(),
         )
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_agent_task_outputs "
-        "WHERE task_id = ?",
-        [task["id"]],
-    ) == {"count": 1}
-
-    # Simulate a backend restart: the second executor has no in-memory state
-    # from the interrupted attempt and must discover scene-1 in SQLite.
-    resumed_tool_calls = _CheckpointingToolCalls()
-    resumed_executor = ScreenplayTaskModelCalls(
-        temp_db,
-        tool_calling_service=resumed_tool_calls,  # type: ignore[arg-type]
-    )
-    resumed_executor._context = _IncrementalEpisodeContext()
-    result = await resumed_executor.execute(
-        task=task,
-        unit=unit,
-        runtime=object(),
-    )
-
-    assert result["episodeDraft"]["sceneIds"] == ["scene-1", "scene-2"]
-    assert result["episodeDraft"]["contentText"] == (
-        'scene-1 的完整正文，保留英文引号 "台词" 和花括号 {线索}\n\n'
-        'scene-2 的完整正文，保留英文引号 "台词" 和花括号 {线索}'
-    )
-    assert [key for _, key, _ in tool_calls.calls] == [
-        "scene-1",
-        "scene-2",
-    ]
-    assert [key for _, key, _ in resumed_tool_calls.calls] == [
-        "scene-2",
-        "1",
-    ]
-    assert all(
-        mode is ReasoningMode.DISABLED
-        for _, _, mode in tool_calls.calls + resumed_tool_calls.calls
-    )
-    first_scene_payload = tool_calls.user_payloads[0]
-    assert first_scene_payload["scenePlan"]["id"] == "scene-1"
-    assert first_scene_payload["currentDraftScene"] == "scene-1 的旧稿"
-    assert first_scene_payload["reviewRevisionId"] == "review-head"
-    assert first_scene_payload["revisionIssues"][0] == {
-        "id": "issue-1",
-        "severity": "major",
-        "description": "本集需要统一格式并压缩篇幅。",
-        "relatedSceneIds": ["scene-1"],
-        "crossEpisodeSceneIds": [],
-        "directlyReferencesCurrentScene": True,
-    }
-    assert "acceptedGuidance" in first_scene_payload
-    assert len(result["sourceRunIds"]) == 3
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_agent_task_outputs "
-        "WHERE task_id = ?",
-        [task["id"]],
-    ) == {"count": 3}
+    assert [key for _, key, _ in tool_calls.calls] == ["scene-2"]
+    assert task["units"][1]["output"]["sceneText"] == "scene-1 正文"
+    assert unit.get("output") is None
 
 
 class _IncrementalReviewContext:
@@ -1615,7 +1701,7 @@ class _IncrementalReviewContext:
         }
 
 
-async def test_review_generation_checkpoints_each_episode_and_aggregates_host_side(
+async def test_review_dimension_parts_aggregate_host_side(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
@@ -1624,28 +1710,75 @@ async def test_review_generation_checkpoints_each_episode_and_aggregates_host_si
         temp_db,
         tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
-    executor._context = _IncrementalReviewContext()
+    executor._context = _EvidenceCheckpointOnlyContext()
+    review_input = {
+        "contractVersion": 2,
+        "draftRevisionId": "draft-head",
+        "episodeNumber": 1,
+        "sceneIds": ["scene-1"],
+        "draftContentText": "第 1 集真实正文",
+        "scenePlan": {"scenes": [{"id": "scene-1"}]},
+        "requiredContext": {"previousEpisode": None},
+        "contentDigest": "digest-episode-1",
+    }
     task = {
-        "id": "task-incremental-review",
+        "id": "task-review-dimensions",
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
-        "turnId": "turn-incremental-review",
+        "turnId": "turn-review-dimensions",
         "targetRole": "review",
+        "units": [{
+            "id": "review-input:1",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"episodeNumber": 1, "evidenceKind": "review_input"},
+            "output": {"evidence": {"reviewInput": review_input}},
+        }],
     }
-    unit = {"id": "generate-deliverable", "input": {"instruction": "审阅全剧"}}
-
-    result = await executor._generate_review_incrementally(
+    for dimension in REVIEW_DIMENSIONS:
+        unit = {
+            "id": f"review:1:{dimension}",
+            "kind": "generate_review_dimension",
+            "status": "pending",
+            "dependsOn": ["review-input:1"],
+            "input": {
+                "episodeNumber": 1,
+                "sceneIds": ["scene-1"],
+                "reviewDimension": dimension,
+                "reviewedDraftId": "draft-head",
+                "instruction": "审阅全剧",
+            },
+        }
+        task["units"].append(unit)
+        output = await executor.execute(
+            task=task,
+            unit=unit,
+            runtime=object(),
+        )
+        unit.update({"status": "completed", "output": output})
+    validation = {
+        "id": "review:1:validation",
+        "kind": "validate_manifest_part",
+        "status": "pending",
+        "dependsOn": [f"review:1:{value}" for value in REVIEW_DIMENSIONS],
+        "input": {
+            "validationKind": "review_episode",
+            "episodeNumber": 1,
+        },
+    }
+    task["units"].append(validation)
+    result = await executor.execute(
         task=task,
-        unit=unit,
+        unit=validation,
         runtime=object(),
-        signal=None,
-        reviewed_draft_id="draft-head",
     )
 
-    assert result["contentJson"]["reviewedEpisodes"] == [1, 2]
+    assert result["contentJson"]["reviewDimensions"] == list(REVIEW_DIMENSIONS)
     assert result["contentJson"]["verdict"] == "revise"
-    assert result["contentJson"]["issues"][0]["id"] == "episode-1:issue-1"
-    assert len(result["sourceRunIds"]) == 2
+    assert result["contentJson"]["issues"][0]["id"] == (
+        "episode-1:continuity:issue-1"
+    )
+    assert len(result["sourceRunIds"]) == 5
     review_input = tool_calls.user_payloads[0]["reviewInput"]
     assert review_input["contractVersion"] == 2
     assert review_input["draftRevisionId"] == "draft-head"
@@ -1653,108 +1786,68 @@ async def test_review_generation_checkpoints_each_episode_and_aggregates_host_si
     assert review_input["sceneIds"] == ["scene-1"]
     assert "第 1 集真实正文" in review_input["draftContentText"]
     assert review_input["scenePlan"]["scenes"][0]["id"] == "scene-1"
-    assert len(review_input["contentDigest"]) == 64
+    assert review_input["contentDigest"] == "digest-episode-1"
     assert "按需调用工具读取" not in tool_calls.system_instructions[0]
 
 
-async def test_review_generation_keeps_execution_failures_out_of_findings(
+async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
-    tool_calls = _CheckpointingToolCalls(fail_once_key="2")
+    tool_calls = _CheckpointingToolCalls(fail_once_key="1:dialogue")
     executor = ScreenplayTaskModelCalls(
         temp_db,
         tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
-    executor._context = _IncrementalReviewContext()
+    executor._context = _EvidenceCheckpointOnlyContext()
     task = {
-        "id": "task-partial-review",
+        "id": "task-failed-review-dimension",
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
-        "turnId": "turn-partial-review",
+        "turnId": "turn-failed-review-dimension",
         "targetRole": "review",
+        "units": [{
+            "id": "review-input:1",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"episodeNumber": 1},
+            "output": {"evidence": {"reviewInput": {
+                "contractVersion": 2,
+                "draftRevisionId": "draft-head",
+                "episodeNumber": 1,
+                "sceneIds": ["scene-1"],
+                "draftContentText": "真实正文",
+                "scenePlan": {"scenes": [{"id": "scene-1"}]},
+                "contentDigest": "digest-1",
+            }}},
+        }],
     }
-    unit = {"id": "generate-deliverable", "input": {"instruction": "审阅全剧"}}
-
-    result = await executor._generate_review_incrementally(
-        task=task,
-        unit=unit,
-        runtime=object(),
-        signal=None,
-        reviewed_draft_id="draft-head",
-    )
-
-    assert result["contentJson"]["completedEpisodes"] == [1]
-    assert result["contentJson"]["reviewedEpisodes"] == [1, 2]
-    assert result["contentJson"]["failedEpisodes"] == [{
-        "episodeNumber": 2,
-        "code": "model_output_truncated",
-        "message": "第 2 集审阅失败",
-        "retryable": False,
-    }]
-    assert [item["id"] for item in result["contentJson"]["issues"]] == [
-        "episode-1:issue-1",
-    ]
-    assert "output limit" not in result["contentText"]
-    assert "正文不可读" not in result["contentText"]
-
-
-async def test_review_retry_reuses_completed_episodes_and_only_reruns_failures(
-    temp_db: DatabaseConnection,
-):
-    _, workspace, session = await _project_and_session(temp_db)
-    first_calls = _CheckpointingToolCalls(fail_once_key="2")
-    first_executor = ScreenplayTaskModelCalls(
-        temp_db,
-        tool_calling_service=first_calls,  # type: ignore[arg-type]
-    )
-    first_executor._context = _IncrementalReviewContext()
-    first = await first_executor._generate_review_incrementally(
-        task={
-            "id": "task-partial-review-first",
-            "projectId": workspace["project"]["id"],
-            "sessionId": session["id"],
-            "turnId": "turn-partial-review-first",
-            "targetRole": "review",
+    unit = {
+        "id": "review:1:dialogue",
+        "kind": "generate_review_dimension",
+        "dependsOn": ["review-input:1"],
+        "input": {
+            "episodeNumber": 1,
+            "sceneIds": ["scene-1"],
+            "reviewDimension": "dialogue",
+            "reviewedDraftId": "draft-head",
+            "instruction": "审阅对白",
         },
-        unit={"id": "generate-deliverable", "input": {"instruction": "审阅全剧"}},
-        runtime=object(),
-        signal=None,
-        reviewed_draft_id="draft-head",
-    )
+    }
+    task["units"].append(unit)
 
-    retry_calls = _CheckpointingToolCalls()
-    retry_executor = ScreenplayTaskModelCalls(
-        temp_db,
-        tool_calling_service=retry_calls,  # type: ignore[arg-type]
-    )
-    retry_executor._context = _IncrementalReviewContext()
-    retried = await retry_executor._generate_review_incrementally(
-        task={
-            "id": "task-partial-review-retry",
-            "projectId": workspace["project"]["id"],
-            "sessionId": session["id"],
-            "turnId": "turn-partial-review-retry",
-            "targetRole": "review",
-        },
-        unit={"id": "generate-deliverable", "input": {"instruction": "重新审阅失败集"}},
-        runtime=object(),
-        signal=None,
-        reviewed_draft_id="draft-head",
-        previous_review=first["contentJson"],
-    )
+    with pytest.raises(ModelGatewayError, match="output limit"):
+        await executor.execute(
+            task=task,
+            unit=unit,
+            runtime=object(),
+        )
 
-    assert [key for _, key, _ in retry_calls.calls] == ["2"]
-    assert retried["contentJson"]["completedEpisodes"] == [1, 2]
-    assert retried["contentJson"]["failedEpisodes"] == []
-    assert [item["id"] for item in retried["contentJson"]["issues"]] == [
-        "episode-1:issue-1",
-    ]
-    assert "第 1 集" in retried["contentText"]
-    assert "第 2 集" in retried["contentText"]
+    assert [key for _, key, _ in tool_calls.calls] == ["1:dialogue"]
+    assert unit.get("output") is None
 
 
-async def test_scene_list_generation_checkpoints_each_structure_episode(
+async def test_scene_list_uses_visible_episode_sections_and_host_validation(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
@@ -1764,21 +1857,57 @@ async def test_scene_list_generation_checkpoints_each_structure_episode(
         tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     task = {
-        "id": "task-incremental-scene-list",
+        "id": "task-scene-list-sections",
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
-        "turnId": "turn-incremental-scene-list",
+        "turnId": "turn-scene-list-sections",
         "targetRole": "sceneList",
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "sceneList"},
+            "output": {"evidence": {"acceptedDeliverables": [{
+                "role": "structure",
+                "revisionId": "structure-head",
+                "content": {"episodes": [{"number": 1}, {"number": 2}]},
+            }]}},
+        }],
     }
-    unit = {"id": "generate-deliverable", "input": {"instruction": "生成场景表"}}
-
-    result = await executor._generate_scene_list_incrementally(
+    for number in (1, 2):
+        unit = {
+            "id": f"section:sceneList:episode-{number}",
+            "kind": "generate_document_section",
+            "status": "pending",
+            "dependsOn": ["document:evidence"],
+            "input": {
+                "targetRole": "sceneList",
+                "sectionKey": f"episode-{number}",
+                "instruction": "生成场景表",
+            },
+        }
+        task["units"].append(unit)
+        output = await executor.execute(
+            task=task,
+            unit=unit,
+            runtime=object(),
+        )
+        unit.update({"status": "completed", "output": output})
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "status": "pending",
+        "dependsOn": [
+            "section:sceneList:episode-1",
+            "section:sceneList:episode-2",
+        ],
+        "input": {"validationKind": "document", "targetRole": "sceneList"},
+    }
+    task["units"].append(validation)
+    result = await executor.execute(
         task=task,
-        unit=unit,
+        unit=validation,
         runtime=object(),
-        signal=None,
-        structure_id="structure-head",
-        episode_numbers=(1, 2),
     )
 
     assert result["contentJson"]["structureId"] == "structure-head"
@@ -1859,7 +1988,11 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
         session_id=session["id"],
     )
     task = snapshot["tasks"][0]
-    assert task["status"] == "completed"
+    assert task["status"] == "completed", json.dumps(
+        task,
+        ensure_ascii=False,
+        default=str,
+    )
     result_revision = task["resultRevision"]
     assert result_revision["id"] == task["resultRevisionId"]
     assert result_revision["role"] == "screenplayDraft"
