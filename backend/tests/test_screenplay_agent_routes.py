@@ -216,6 +216,81 @@ async def test_cancel_turn_reuses_receipt_for_the_same_idempotency_key(monkeypat
     ]
 
 
+async def test_resume_operation_preflights_then_dispatches_selected_runtime(monkeypatch):
+    class ResumeService:
+        def __init__(self) -> None:
+            self.prepared = []
+            self.dispatched = []
+
+        async def prepare_resume(self, operation_id, *, idempotency_key, request):
+            self.prepared.append((
+                operation_id,
+                idempotency_key,
+                request.expectedOperationRevision,
+                request.runtime.options["model"],
+            ))
+            return {
+                "operationId": operation_id,
+                "status": "running",
+                "revision": request.expectedOperationRevision + 1,
+            }
+
+        def dispatch_resumed_operation(self, operation_id, runtime):
+            self.dispatched.append((operation_id, runtime.options["model"]))
+
+    service = ResumeService()
+    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+
+    result = await conversation_routes.resume_screenplay_operation(
+        "operation-1",
+        conversation_routes.ResumeScreenplayOperationRequest.model_validate({
+            "expectedOperationRevision": 4,
+            "runtime": _body()["runtime"],
+        }),
+        "resume-command-1",
+    )
+
+    assert result["data"]["revision"] == 5
+    assert service.prepared == [(
+        "operation-1", "resume-command-1", 4, "route-model",
+    )]
+    assert service.dispatched == [("operation-1", "route-model")]
+
+
+async def test_resume_operation_replay_does_not_redispatch_terminal_operation(
+    monkeypatch,
+):
+    class ResumeService:
+        dispatched = False
+
+        async def prepare_resume(self, operation_id, *, idempotency_key, request):
+            del idempotency_key, request
+            return {
+                "operationId": operation_id,
+                "status": "succeeded",
+                "revision": 8,
+            }
+
+        def dispatch_resumed_operation(self, operation_id, runtime):
+            del operation_id, runtime
+            self.dispatched = True
+
+    service = ResumeService()
+    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+
+    result = await conversation_routes.resume_screenplay_operation(
+        "operation-1",
+        conversation_routes.ResumeScreenplayOperationRequest.model_validate({
+            "expectedOperationRevision": 4,
+            "runtime": _body()["runtime"],
+        }),
+        "resume-command-1",
+    )
+
+    assert result["data"]["status"] == "succeeded"
+    assert service.dispatched is False
+
+
 async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
     monkeypatch,
 ):

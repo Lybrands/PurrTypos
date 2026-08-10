@@ -20,7 +20,10 @@ from application.screenplay_agent_service import ScreenplayAgentService
 from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
-from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
+from schemas.screenplay_agent import (
+    ResumeScreenplayOperationRequest,
+    SubmitScreenplayAgentTurnRequest,
+)
 
 
 router = APIRouter()
@@ -219,6 +222,23 @@ async def cancel_screenplay_conversation_turn(
         turn_id,
         idempotency_key=idempotency_key,
     )
+    return {"success": True, "data": receipt}
+
+
+@router.post("/conversation/operations/{operation_id}/resume", status_code=202)
+async def resume_screenplay_operation(
+    operation_id: str,
+    body: ResumeScreenplayOperationRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+):
+    service = _service()
+    receipt = await service.prepare_resume(
+        operation_id,
+        idempotency_key=idempotency_key,
+        request=body,
+    )
+    if receipt.get("status") == "running":
+        service.dispatch_resumed_operation(operation_id, body.runtime)
     return {"success": True, "data": receipt}
 
 

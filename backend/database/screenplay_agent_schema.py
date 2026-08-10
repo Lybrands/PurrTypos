@@ -23,6 +23,7 @@ async def init_screenplay_agent_schema(db) -> None:
         project_id TEXT NOT NULL,
         session_id INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
+        revision INTEGER NOT NULL DEFAULT 1,
         long_task_id TEXT DEFAULT NULL UNIQUE,
         target_role TEXT NOT NULL,
         requirements_json TEXT NOT NULL DEFAULT '{}',
@@ -31,6 +32,8 @@ async def init_screenplay_agent_schema(db) -> None:
         finalization_receipt_id TEXT DEFAULT NULL UNIQUE,
         cancel_receipt_id TEXT DEFAULT NULL UNIQUE,
         cancel_requested_at_ms INTEGER DEFAULT NULL,
+        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+        active_capability_snapshot_json TEXT DEFAULT NULL,
         error_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -46,6 +49,33 @@ async def init_screenplay_agent_schema(db) -> None:
             "ALTER TABLE screenplay_agent_operations ADD COLUMN "
             "cancel_requested_at_ms INTEGER DEFAULT NULL"
         )
+    if "revision" not in operation_columns:
+        await db.execute(
+            "ALTER TABLE screenplay_agent_operations ADD COLUMN "
+            "revision INTEGER NOT NULL DEFAULT 1"
+        )
+    if "usage_json" not in operation_columns:
+        await db.execute(
+            "ALTER TABLE screenplay_agent_operations ADD COLUMN usage_json "
+            "TEXT NOT NULL DEFAULT '{\"invocationCount\":0,\"inputTokens\":0,"
+            "\"outputTokens\":0,\"reasoningTokens\":0}'"
+        )
+    if "active_capability_snapshot_json" not in operation_columns:
+        await db.execute(
+            "ALTER TABLE screenplay_agent_operations ADD COLUMN "
+            "active_capability_snapshot_json TEXT DEFAULT NULL"
+        )
+    await db.execute("""CREATE TABLE IF NOT EXISTS
+        screenplay_agent_operation_usage (
+        operation_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        invocation_count INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (operation_id, run_id)
+    )""")
     await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
         idx_screenplay_agent_one_active_operation
         ON screenplay_agent_operations(project_id, session_id)
@@ -412,7 +442,7 @@ async def _migrate_legacy_task_outputs(db) -> None:
             )
             await db.execute(
                 "UPDATE screenplay_agent_operations SET status = 'paused', "
-                "error_json = ? WHERE long_task_id = ? "
+                "error_json = ?, revision = revision + 1 WHERE long_task_id = ? "
                 "AND status IN ('queued','running','paused')",
                 [error, task_id],
             )

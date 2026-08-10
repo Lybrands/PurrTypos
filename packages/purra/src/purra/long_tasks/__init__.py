@@ -9,6 +9,7 @@ from purra.long_tasks.contracts import (
     LongTaskUnitResult,
     LongTaskUnitSpec,
     LongTaskUnitStatus,
+    LongTaskUsage,
 )
 from purra.long_tasks.coordinator import LongTaskCoordinator
 from purra.long_tasks.dispatcher import (
@@ -38,5 +39,6 @@ __all__ = [
     "LongTaskUnitRunner",
     "LongTaskUnitSpec",
     "LongTaskUnitStatus",
+    "LongTaskUsage",
     "RecipeLongTaskDispatcher",
 ]

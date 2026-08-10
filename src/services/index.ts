@@ -44,6 +44,8 @@ export const services = {
       backendApi.watchScreenplayConversationEvents,
     cancelScreenplayConversationTurn:
       backendApi.cancelScreenplayConversationTurn,
+    resumeScreenplayConversationOperation:
+      backendApi.resumeScreenplayConversationOperation,
     truncateScreenplayConversationFromTurn:
       backendApi.truncateScreenplayConversationFromTurn,
     createScreenplayV2Project: backendApi.createScreenplayV2Project,

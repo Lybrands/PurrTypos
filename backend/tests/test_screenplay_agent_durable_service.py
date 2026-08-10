@@ -19,6 +19,7 @@ from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from domains.screenplay_agent import (
+    OperationUsage,
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayIntentScope,
@@ -36,7 +37,11 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
 from purra.long_tasks import LongTaskUnitResult
 from purra.errors import ModelGatewayError
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
-from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
+from exceptions import AppError
+from schemas.screenplay_agent import (
+    ResumeScreenplayOperationRequest,
+    SubmitScreenplayAgentTurnRequest,
+)
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
@@ -74,6 +79,7 @@ class _Resolver:
 
 class _UnitExecutor:
     def __init__(self, db) -> None:
+        self._db = db
         self._parts = ScreenplayPartArtifactQuery(db)
         self.calls = []
         self.output_refs = {}
@@ -117,6 +123,22 @@ class _UnitExecutor:
             output=output,
         )
         self.output_refs[context.unit.id] = ref.output_ref
+        await self._db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) VALUES (?, 'agentRunTrace', ?)",
+            [
+                ref.run_id,
+                json.dumps({
+                    "stage": "model_usage",
+                    "outcome": "provider_reported",
+                    "details": {
+                        "actualInputTokens": 10,
+                        "actualOutputTokens": 5,
+                        "reasoningOutputTokens": 2,
+                    },
+                }),
+            ],
+        )
         return LongTaskUnitResult(
             output_ref=ref.output_ref,
             run_id=ref.run_id,
@@ -314,6 +336,101 @@ async def test_operation_finalization_replay_returns_the_same_receipt(screenplay
 
 
 @pytest.mark.asyncio
+async def test_operation_usage_is_run_idempotent_and_revisioned(screenplay_db):
+    operation, _turn_id, _command, _finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    operation = await operations.load(operation.id)
+    assert operation is not None
+
+    first = await operations.record_usage(
+        operation.id,
+        run_id="run-usage-1",
+        usage=OperationUsage(
+            invocation_count=1,
+            input_tokens=300,
+            output_tokens=60,
+            reasoning_tokens=12,
+        ),
+        expected_revision=operation.revision,
+    )
+    replay = await operations.record_usage(
+        operation.id,
+        run_id="run-usage-1",
+        usage=OperationUsage(
+            invocation_count=1,
+            input_tokens=300,
+            output_tokens=60,
+            reasoning_tokens=12,
+        ),
+        expected_revision=operation.revision,
+    )
+
+    assert replay == first
+    assert first.revision == operation.revision + 1
+    assert first.usage == OperationUsage(
+        invocation_count=1,
+        input_tokens=300,
+        output_tokens=60,
+        reasoning_tokens=12,
+    )
+
+
+@pytest.mark.asyncio
+async def test_incompatible_model_resume_keeps_operation_paused(screenplay_db):
+    operation, _turn_id, _command, _finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    paused = await operations.pause(
+        operation.id,
+        code="model_task_mode_incompatible",
+        message="change model",
+        command_id="pause-before-model-change",
+    )
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="resume-preflight-test",
+        planner=_Planner(ScreenplayIntent(
+            action=ScreenplayIntentAction.ANSWER,
+            instruction="unused",
+            reply="unused",
+        )),
+        resolver=_Resolver(),
+        unit_executor_factory=lambda _runtime: _PausedUnitExecutor(),
+        projects=ScreenplayV2ProjectService(screenplay_db),
+    )
+    request = ResumeScreenplayOperationRequest.model_validate({
+        "expectedOperationRevision": paused.revision,
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://api.moonshot.cn/v1",
+            "options": {
+                "model": "kimi-k3",
+                "model_profile": "moonshot:kimi-k3",
+                "thinking": {"type": "enabled"},
+            },
+            "contextWindow": "1m",
+        },
+    })
+
+    with pytest.raises(AppError, match="model_capability_incompatible") as error:
+        await service.prepare_resume(
+            paused.id,
+            idempotency_key="resume-incompatible-model",
+            request=request,
+        )
+
+    assert error.value.status_code == 409
+    unchanged = await operations.load(paused.id)
+    assert unchanged is not None
+    assert unchanged.status.value == "paused"
+    assert unchanged.revision == paused.revision
+
+
+@pytest.mark.asyncio
 async def test_cancel_request_is_durable_canonical_and_idempotent(screenplay_db):
     operation, turn_id, _command, _finalizer = await _finalization_fixture(
         screenplay_db
@@ -440,6 +557,20 @@ class _PausedUnitExecutor:
             code="provider_bad_request",
             retryable=False,
         )
+
+    def classify_failure(self, error):
+        return classify_screenplay_run_failure(error)
+
+
+class _PauseAfterFirstUnitExecutor(_UnitExecutor):
+    async def execute(self, context, signal=None):
+        if context.unit.id == "draft:4:ep04_s01":
+            raise ModelGatewayError(
+                "selected protocol is incompatible",
+                code="provider_bad_request",
+                retryable=False,
+            )
+        return await super().execute(context, signal)
 
     def classify_failure(self, error):
         return classify_screenplay_run_failure(error)
@@ -784,6 +915,12 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
         "error_json": None,
     }
     assert task["status"] == "completed"
+    assert task["usage"] == {
+        "invocationCount": 13,
+        "inputTokens": 130,
+        "outputTokens": 65,
+        "reasoningTokens": 26,
+    }
     assert task["resultRevision"]["id"] == revision_id
     assert task["resultRevision"]["agentTaskId"] == task["id"]
     projected_operation = snapshot["operations"][0]
@@ -792,6 +929,7 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert projected_operation["resultRevisionId"] == revision_id
     assert projected_operation["finalizationReceiptId"]
     assert projected_operation["cancelReceiptId"] is None
+    assert projected_operation["usage"] == task["usage"]
     assert projected_operation["resultRevision"]["id"] == revision_id
     assert projected_operation["parts"] == task["units"]
     expected_ids = [
@@ -878,11 +1016,18 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
 
     removed = await service.truncate_from_turn(turn["id"])
     assert removed["deletedTaskIds"] == [task["id"]]
+    assert removed["deletedOperationIds"] == [operation["id"]]
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
     ) == {"count": 0}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_work_items"
+    ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_task_usage"
+    ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operation_usage"
     ) == {"count": 0}
 
 
@@ -914,7 +1059,9 @@ async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final
             requested_deliverable="screenplayDraft",
         )),
         resolver=_Resolver(),
-        unit_executor_factory=lambda _runtime: _PausedUnitExecutor(),
+        unit_executor_factory=lambda _runtime: _PauseAfterFirstUnitExecutor(
+            screenplay_db
+        ),
         projects=projects,
     )
     request = SubmitScreenplayAgentTurnRequest.model_validate({
@@ -943,7 +1090,8 @@ async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final
     assert snapshot["turns"][0]["status"] == "paused"
     assert snapshot["turns"][0]["assistantContent"] == ""
     assert snapshot["tasks"][0]["status"] == "paused"
-    assert snapshot["tasks"][0]["units"][0]["status"] == "blocked"
+    assert snapshot["tasks"][0]["units"][0]["status"] == "completed"
+    assert snapshot["tasks"][0]["units"][1]["status"] == "blocked"
     events = await service.list_events(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
@@ -969,3 +1117,73 @@ async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final
         "done": True,
         "finalResponseExpected": False,
     }
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    operation = await operations.load_for_turn(turn["id"])
+    assert operation is not None
+    completed_before = await screenplay_db.fetch_all(
+        "SELECT unit_id, output_ref FROM ai_agent_long_task_units "
+        "WHERE task_id = ? AND status = 'completed' ORDER BY position",
+        [operation.long_task_id],
+    )
+    resume_request = ResumeScreenplayOperationRequest.model_validate({
+        "expectedOperationRevision": operation.revision,
+        "runtime": request.runtime.model_dump(),
+    })
+    resume_receipt = await service.prepare_resume(
+        operation.id,
+        idempotency_key="resume-paused-operation",
+        request=resume_request,
+    )
+    replay = await service.prepare_resume(
+        operation.id,
+        idempotency_key="resume-paused-operation",
+        request=resume_request,
+    )
+    assert replay == resume_receipt
+    resumed = await operations.load(operation.id)
+    assert resumed is not None
+    assert resumed.status.value == "running"
+    assert resumed.revision == operation.revision + 1
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_tasks WHERE id = ?",
+        [operation.long_task_id],
+    ) == {"status": "running"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_task_units "
+        "WHERE task_id = ? AND unit_id = 'draft:4:ep04_s01'",
+        [operation.long_task_id],
+    ) == {"status": "pending"}
+    assert await screenplay_db.fetch_all(
+        "SELECT unit_id, output_ref FROM ai_agent_long_task_units "
+        "WHERE task_id = ? AND status = 'completed' ORDER BY position",
+        [operation.long_task_id],
+    ) == completed_before
+    resumed_service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="screenplay-resume-test",
+        planner=_Planner(ScreenplayIntent(
+            action=ScreenplayIntentAction.ANSWER,
+            instruction="unused",
+            reply="unused",
+        )),
+        resolver=_Resolver(),
+        unit_executor_factory=lambda _runtime: _UnitExecutor(screenplay_db),
+        projects=projects,
+    )
+    await resumed_service.execute_resumed_operation(
+        operation.id,
+        request.runtime,
+    )
+    completed = await resumed_service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert completed["operations"][0]["status"] == "succeeded"
+    assert completed["operations"][0]["finalizationReceiptId"]
+    assert completed["operations"][0]["resultRevisionId"]
+    assert completed["turns"][0]["assistantContent"]
+    assert await screenplay_db.fetch_one(
+        "SELECT output_ref FROM ai_agent_long_task_units "
+        "WHERE task_id = ? AND unit_id = 'evidence:4'",
+        [operation.long_task_id],
+    ) == {"output_ref": completed_before[0]["output_ref"]}

@@ -437,6 +437,7 @@ export interface ScreenplayAgentTask {
   plannerRunId: string | null;
   totalUnits: number;
   completedUnits: number;
+  usage: ScreenplayOperationUsage;
   resultRevisionId: string | null;
   resultRevision: ScreenplayV2RevisionSummary | null;
   error: { code?: string; message?: string } | null;
@@ -458,6 +459,7 @@ export interface ScreenplayOperationProjection {
   turnId: string;
   taskId: string | null;
   status: ScreenplayOperationStatus;
+  revision: number;
   targetRole: ScreenplayV2DeliverableRole;
   parts: ScreenplayAgentTaskUnit[];
   resultRevisionId: string | null;
@@ -465,9 +467,25 @@ export interface ScreenplayOperationProjection {
   cancelReceiptId: string | null;
   cancelRequestedAt: string | null;
   error: { code?: string; message?: string } | null;
+  usage: ScreenplayOperationUsage;
   resultRevision?: ScreenplayV2RevisionSummary | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+}
+
+export interface ScreenplayOperationUsage {
+  invocationCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number | null;
+}
+
+export interface ScreenplayResumeOperationReceipt {
+  operationId: string;
+  turnId: string;
+  status: ScreenplayOperationStatus;
+  revision: number;
+  capabilitySnapshotDigest: string;
 }
 
 export interface ScreenplayCancelOperationReceipt {
@@ -1611,6 +1629,12 @@ export interface ElectronAPI {
     commandId: string;
     turnId: string;
   }) => Promise<ApiResult<ScreenplayCancelOperationReceipt>>;
+  resumeScreenplayConversationOperation: (data: {
+    commandId: string;
+    operationId: string;
+    expectedOperationRevision: number;
+    runtime: ScreenplayConversationRuntimeInput;
+  }) => Promise<ApiResult<ScreenplayResumeOperationReceipt>>;
   truncateScreenplayConversationFromTurn: (data: {
     turnId: string;
   }) => Promise<ApiResult<{
@@ -1618,6 +1642,7 @@ export interface ElectronAPI {
     sessionId: number;
     deletedTurnIds: string[];
     deletedTaskIds: string[];
+    deletedOperationIds?: string[];
   }>>;
   createScreenplayV2Project: (data: {
     commandId: string;
