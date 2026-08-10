@@ -44,12 +44,19 @@ BANNED_SCREENPLAY_TEXT_FRAGMENTS = {
     "continuity_review",
     "durableexecutionplan",
     "episodes",
+    "episode",
     "proposescenedraft",
     "scenes",
     "scene_generation",
     "screenplay",
     "taskadmissionvocabulary",
     "剧本",
+}
+BANNED_PROVIDER_TEXT_FRAGMENTS = {
+    "deepseek",
+    "kimi",
+    "mimo",
+    "zai",
 }
 
 
@@ -143,3 +150,16 @@ def test_purra_does_not_embed_screenplay_business_protocols():
                 )
 
     assert not violations, "PurrA screenplay leaks:\n" + "\n".join(violations)
+
+
+def test_purra_does_not_embed_provider_identities():
+    violations: list[str] = []
+    for path in _source_files():
+        source = path.read_text(encoding="utf-8").casefold()
+        for fragment in sorted(BANNED_PROVIDER_TEXT_FRAGMENTS):
+            if fragment in source:
+                violations.append(
+                    f"{path.relative_to(CORE_SRC_DIR)} contains {fragment!r}"
+                )
+
+    assert not violations, "PurrA provider leaks:\n" + "\n".join(violations)

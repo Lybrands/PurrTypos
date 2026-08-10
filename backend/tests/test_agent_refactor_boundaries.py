@@ -471,6 +471,37 @@ def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
     )
 
 
+def test_legacy_task_budgets_and_truncation_replay_stay_removed():
+    forbidden = {
+        "OutputBudgetPolicy",
+        "ResolvedOutputBudget",
+        "resolve_output_budget",
+        "safety_factor",
+        "reasoning_reserve_tokens",
+        "hard_cap_tokens",
+        "retry_provider_attempt",
+        "_TRUNCATED_TOOL_CALL_RETRY_GUIDANCE",
+        "_TRUNCATED_MODEL_OUTPUT_RETRY_GUIDANCE",
+    }
+    boundary_test = Path(__file__).resolve()
+    paths = (
+        *sorted(PURRA_DIR.rglob("*.py")),
+        *sorted((BACKEND_DIR / "application").rglob("*.py")),
+        *sorted((BACKEND_DIR / "infrastructure" / "models").rglob("*.py")),
+    )
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
+        for path in paths
+        if path != boundary_test
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8")
+    ]
+
+    assert not violations, "Legacy output control returned:\n" + "\n".join(
+        violations
+    )
+
+
 def test_screenplay_paused_result_cannot_fall_through_to_failure():
     source = (
         BACKEND_DIR / "application" / "screenplay_agent_service.py"

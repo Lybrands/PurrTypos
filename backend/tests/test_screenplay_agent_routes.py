@@ -178,6 +178,44 @@ async def test_turn_endpoint_rejects_the_removed_frontend_operation_contract(mon
     assert service.submissions == []
 
 
+async def test_cancel_turn_reuses_receipt_for_the_same_idempotency_key(monkeypatch):
+    class CancelService:
+        def __init__(self) -> None:
+            self.receipts = {}
+            self.calls = []
+
+        async def cancel_turn(self, turn_id, *, idempotency_key):
+            self.calls.append((turn_id, idempotency_key))
+            receipt = self.receipts.setdefault(
+                (turn_id, idempotency_key),
+                f"cancel-receipt-{len(self.receipts) + 1}",
+            )
+            return {
+                "id": turn_id,
+                "status": "canceled",
+                "cancelReceiptId": receipt,
+            }
+
+    service = CancelService()
+    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+
+    first = await conversation_routes.cancel_screenplay_conversation_turn(
+        "spaturn-route",
+        "cancel-command-1",
+    )
+    second = await conversation_routes.cancel_screenplay_conversation_turn(
+        "spaturn-route",
+        "cancel-command-1",
+    )
+
+    assert first["data"]["cancelReceiptId"] == "cancel-receipt-1"
+    assert second == first
+    assert service.calls == [
+        ("spaturn-route", "cancel-command-1"),
+        ("spaturn-route", "cancel-command-1"),
+    ]
+
+
 async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
     monkeypatch,
 ):
