@@ -5,11 +5,15 @@ import type {
   ScreenplayConversationSnapshot,
   ScreenplayConversationTurn,
   ScreenplayConversationTurnStatus,
+  ScreenplayOperationProjection,
+  ScreenplayOperationStatus,
   ScreenplayV2DeliverableRole,
   ScreenplayV2Workspace,
 } from '../types'
 
-type DisplayStatus = ScreenplayConversationTurnStatus | ScreenplayAgentTaskStatus
+type DisplayStatus = ScreenplayConversationTurnStatus
+  | ScreenplayAgentTaskStatus
+  | ScreenplayOperationStatus
 
 export interface ScreenplayConversationMessage {
   id: string
@@ -31,6 +35,7 @@ export interface ScreenplayConversationState {
   cursor: number
   turns: ScreenplayConversationTurn[]
   tasks: ScreenplayAgentTask[]
+  operations: ScreenplayOperationProjection[]
   messages: ScreenplayConversationMessage[]
 }
 
@@ -66,52 +71,63 @@ const ROLE_LABELS: Record<ScreenplayV2DeliverableRole, string> = {
 }
 
 function artifactStatus(
-  task: ScreenplayAgentTask,
+  task: ScreenplayAgentTask | undefined,
+  operation: ScreenplayOperationProjection,
   workspace: Pick<ScreenplayV2Workspace, 'workflow' | 'candidates'> | null,
 ): ScreenplayTurnArtifact['status'] {
-  const revisionId = task.resultRevisionId
+  const revisionId = operation.resultRevisionId
   if (!revisionId) return 'candidate'
-  if (workspace?.workflow.heads[task.targetRole]?.id === revisionId) {
+  if (workspace?.workflow.heads[operation.targetRole]?.id === revisionId) {
     return 'current'
   }
   if (workspace?.candidates.some((revision) => revision.id === revisionId)) {
     return 'candidate'
   }
-  if (workspace && task.resultRevision?.status === 'current') {
+  if (workspace && task?.resultRevision?.status === 'current') {
     return 'historical'
   }
-  return task.resultRevision?.status ?? 'candidate'
+  return task?.resultRevision?.status ?? 'candidate'
 }
 
 export function screenplayTurnArtifacts(
+  operations: ScreenplayOperationProjection[],
   tasks: ScreenplayAgentTask[],
   workspace: Pick<ScreenplayV2Workspace, 'workflow' | 'candidates'> | null,
 ): Map<string, ScreenplayTurnArtifact> {
   const artifacts = new Map<string, ScreenplayTurnArtifact>()
-  for (const task of tasks) {
-    const revisionId = task.resultRevisionId
-    if (task.status !== 'completed' || !revisionId) continue
-    const revision = task.resultRevision?.id === revisionId
-      && task.resultRevision.role === task.targetRole
-        ? task.resultRevision
+  const tasksById = new Map(tasks.map((task) => [task.id, task]))
+  for (const operation of operations) {
+    const revisionId = operation.resultRevisionId
+    if (
+      operation.status !== 'succeeded'
+      || !revisionId
+      || !operation.finalizationReceiptId
+    ) continue
+    const task = operation.taskId ? tasksById.get(operation.taskId) : undefined
+    const hydratedRevision = operation.resultRevision || task?.resultRevision
+    const revision = hydratedRevision?.id === revisionId
+      && hydratedRevision.role === operation.targetRole
+        ? hydratedRevision
         : null
     const proposalKind = String(revision?.summary.proposalKind || '')
     const kind = DOCUMENT_KINDS.has(proposalKind as ScreenplayDocumentKind)
       ? proposalKind as ScreenplayDocumentKind
       : null
-    artifacts.set(task.turnId, {
-      turnId: task.turnId,
-      taskId: task.id,
+    if (!operation.taskId) continue
+    artifacts.set(operation.turnId, {
+      turnId: operation.turnId,
+      taskId: operation.taskId,
       revisionId,
-      role: task.targetRole,
+      role: operation.targetRole,
       revisionNo: revision?.revisionNo ?? null,
-      title: String(revision?.summary.title || `${ROLE_LABELS[task.targetRole]}候选稿`),
+      title: String(revision?.summary.title || `${ROLE_LABELS[operation.targetRole]}候选稿`),
       kind,
-      status: artifactStatus(task, workspace),
+      status: artifactStatus(task, operation, workspace),
       sourceRunId: revision?.finalizingRunId
         || revision?.rootRunId
         || modelRunIds(task).at(-1)
-        || task.plannerRunId,
+        || task?.plannerRunId
+        || null,
     })
   }
   return artifacts
@@ -121,14 +137,17 @@ export function stateFromScreenplayConversationSnapshot(
   snapshot: ScreenplayConversationSnapshot,
 ): ScreenplayConversationState {
   const tasksByTurn = new Map(snapshot.tasks.map((task) => [task.turnId, task]))
+  const operationsByTurn = new Map(snapshot.operations.map((item) => [item.turnId, item]))
   return {
     projectId: String(snapshot.projectId),
     sessionId: snapshot.sessionId,
     cursor: snapshot.cursor,
     turns: snapshot.turns,
     tasks: snapshot.tasks,
+    operations: snapshot.operations,
     messages: snapshot.turns.flatMap((turn) => messagesFromTurn(
       turn,
+      operationsByTurn.get(turn.id),
       tasksByTurn.get(turn.id),
     )),
   }
@@ -142,39 +161,59 @@ export function isScreenplayTurnTerminal(
 
 export function screenplayTurnReconciliationKey(
   turn: ScreenplayConversationTurn | undefined,
+  operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
 ): string | null {
-  if (!turn || !isScreenplayTurnTerminal(turn)) return null
-  if (turn.status === 'paused') return null
-  if (task && !['completed', 'failed', 'canceled'].includes(task.status)) return null
+  if (!turn || !operation || !isScreenplayTurnTerminal(turn)) return null
+  if (
+    operation.status !== 'succeeded'
+    || !operation.resultRevisionId
+    || !operation.finalizationReceiptId
+  ) return null
+  if (task?.status !== 'completed') return null
   return [
     turn.id,
-    task?.status || turn.status,
-    task?.resultRevisionId || '',
+    operation.status,
+    operation.resultRevisionId,
+    operation.finalizationReceiptId,
   ].join(':')
+}
+
+export function isScreenplayOperationCancellable(
+  operation: ScreenplayOperationProjection | null | undefined,
+): boolean {
+  return Boolean(
+    operation
+    && ['queued', 'running', 'paused'].includes(operation.status)
+    && !operation.cancelRequestedAt
+    && !operation.cancelReceiptId,
+  )
 }
 
 export function modelRunIds(task: ScreenplayAgentTask | undefined): string[] {
   if (!task) return []
   return [...new Set([
     task.plannerRunId,
-    ...task.units.map((unit) => String(unit.output.runId || '') || null),
+    ...task.units.map((unit) => (
+      String(unit.validationReceipt.runId || '') || null
+    )),
   ].filter((value): value is string => Boolean(value)))]
 }
 
 function messagesFromTurn(
   turn: ScreenplayConversationTurn,
+  operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
 ): ScreenplayConversationMessage[] {
-  const status = task?.status || turn.status
-  const error = task?.error || turn.error
+  const status = operation?.status || task?.status || turn.status
+  const error = operation?.error || task?.error || turn.error
   const runId = modelRunIds(task).at(-1) || turn.plannerRunId
   const shared = {
     turnId: turn.id,
     status,
     taskId: task?.id || turn.taskId,
     runId,
-    revisionId: task?.resultRevisionId || null,
+    revisionId: operation?.resultRevisionId || task?.resultRevisionId || null,
     model: turn.runtimeProfile.model || null,
     error,
     createdAt: turn.createdAt || null,
@@ -191,20 +230,19 @@ function messagesFromTurn(
       ...shared,
       id: `${turn.id}:assistant`,
       role: 'assistant' as const,
-      content: assistantContent(turn, task),
+      content: assistantContent(turn, operation),
     },
   ]
 }
 
 function assistantContent(
   turn: ScreenplayConversationTurn,
-  task?: ScreenplayAgentTask,
+  operation?: ScreenplayOperationProjection,
 ): string {
-  if (!task) return turn.assistantContent
-  if (task.status === 'completed') {
-    return turn.assistantContent
-  }
-  if (task.status === 'failed') return task.error?.message || '剧本任务执行失败。'
-  if (task.status === 'canceled') return '剧本任务已终止。'
-  return ''
+  if (!operation) return turn.status === 'completed' ? turn.assistantContent : ''
+  return operation.status === 'succeeded'
+    && Boolean(operation.resultRevisionId)
+    && Boolean(operation.finalizationReceiptId)
+    ? turn.assistantContent
+    : ''
 }

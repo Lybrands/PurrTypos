@@ -76,6 +76,7 @@ import type {
   ScreenplaySourceScopeRequest,
   ScreenplayConversationRuntimeInput,
   ScreenplayConversationTurn,
+  ScreenplayOperationProjection,
   ScreenplayV2ReviewFindingStatus,
   ScreenplayV2Workspace,
 } from '../types'
@@ -114,6 +115,7 @@ import {
 } from './screenplayProjectModel'
 import { ScreenplayConversationClient } from './conversationClient'
 import {
+  isScreenplayOperationCancellable,
   modelRunIds,
   screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
@@ -262,10 +264,13 @@ function backendTimestampMs(value?: string | null): number | null {
 
 function screenplayTurnDurationMs(
   turn: ScreenplayConversationTurn,
+  operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
 ): number {
   const startedAt = backendTimestampMs(turn.createdAt)
-  const finishedAt = backendTimestampMs(task?.updatedAt || turn.updatedAt)
+  const finishedAt = backendTimestampMs(
+    operation?.updatedAt || task?.updatedAt || turn.updatedAt,
+  )
   return startedAt == null || finishedAt == null
     ? 0
     : Math.max(0, finishedAt - startedAt)
@@ -273,26 +278,33 @@ function screenplayTurnDurationMs(
 
 function replayTurnStartedAt(
   turn: ScreenplayConversationTurn,
+  operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
 ): number {
-  const terminal = ['paused', 'completed', 'failed', 'canceled'].includes(
-    task?.status || turn.status,
-  )
+  const terminal = operation
+    ? ['paused', 'succeeded', 'failed', 'canceled'].includes(operation.status)
+    : ['paused', 'completed', 'failed', 'canceled'].includes(
+      task?.status || turn.status,
+    )
   const elapsed = terminal
-    ? screenplayTurnDurationMs(turn, task)
+    ? screenplayTurnDurationMs(turn, operation, task)
     : Math.max(0, Date.now() - (backendTimestampMs(turn.createdAt) ?? Date.now()))
   return performance.now() - elapsed
 }
 
 function turnTiming(
   turn: ScreenplayConversationTurn,
+  operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
 ): Pick<ChatMessage, 'durationMs' | 'turnStartedAt'> {
-  return ['paused', 'completed', 'failed', 'canceled'].includes(
-    task?.status || turn.status,
-  )
-    ? { durationMs: screenplayTurnDurationMs(turn, task) }
-    : { turnStartedAt: replayTurnStartedAt(turn, task) }
+  const terminal = operation
+    ? ['paused', 'succeeded', 'failed', 'canceled'].includes(operation.status)
+    : ['paused', 'completed', 'failed', 'canceled'].includes(
+      task?.status || turn.status,
+    )
+  return terminal
+    ? { durationMs: screenplayTurnDurationMs(turn, operation, task) }
+    : { turnStartedAt: replayTurnStartedAt(turn, operation, task) }
 }
 
 function getStoredLastOpenedScreenplayProjectId(): EntityId | null {
@@ -783,6 +795,7 @@ export default function ScreenplayAgentPage({
   )
   const [agentPrompt, setAgentPrompt] = React.useState('')
   const [agentSubmitting, setAgentSubmitting] = React.useState(false)
+  const [agentCancelSubmitting, setAgentCancelSubmitting] = React.useState(false)
   const [agentConversationState, setAgentConversationState] = React.useState<
     ScreenplayConversationState | null
   >(null)
@@ -828,16 +841,15 @@ export default function ScreenplayAgentPage({
     agentConversationState?.messages.map((entry) => {
       const turn = agentConversationState.turns.find((item) => item.id === entry.turnId)
       const task = agentConversationState.tasks.find((item) => item.turnId === entry.turnId)
+      const operation = agentConversationState.operations.find(
+        (item) => item.turnId === entry.turnId,
+      )
       const streamed = entry.role === 'assistant'
         ? agentChunkReplayRef.current.assistant(entry.turnId)
         : undefined
       const canonical: ChatMessage = {
         role: entry.role,
-        content: entry.content || (
-          entry.status === 'failed'
-            ? entry.error?.message || '本轮剧本对话执行失败'
-            : ''
-        ),
+        content: entry.content,
         sentAt: entry.createdAt || undefined,
         agentRunId: entry.runId || undefined,
         model: entry.model || undefined,
@@ -846,21 +858,27 @@ export default function ScreenplayAgentPage({
           ? entry.error?.message || '本轮剧本对话执行失败'
           : undefined,
         termination: entry.status === 'canceled' ? '已终止' : undefined,
-        ...(entry.role === 'assistant' && turn ? turnTiming(turn, task) : {}),
+        ...(entry.role === 'assistant' && turn
+          ? turnTiming(turn, operation, task)
+          : {}),
       }
       return streamed
         ? {
             ...canonical,
             ...streamed,
-            content: streamed.content.trim() ? streamed.content : canonical.content,
+            // Durable Operations publish their formal answer only through the
+            // atomic finalization projection. Stream replay remains a work log.
+            content: operation
+              ? canonical.content
+              : streamed.content.trim() ? streamed.content : canonical.content,
             agentRunId: canonical.agentRunId || streamed.agentRunId,
             durationMs: canonical.durationMs ?? streamed.durationMs,
             turnStartedAt: canonical.durationMs == null
               ? streamed.turnStartedAt ?? canonical.turnStartedAt
               : undefined,
-            isError: streamed.isError ?? canonical.isError,
-            error: streamed.error ?? canonical.error,
-            termination: streamed.termination ?? canonical.termination,
+            isError: canonical.isError,
+            error: canonical.error,
+            termination: canonical.termination,
           }
         : canonical
     }) ?? []
@@ -870,20 +888,46 @@ export default function ScreenplayAgentPage({
       (task) => task.status === 'queued' || task.status === 'running',
     ) ?? null
   ), [agentConversationState])
+  const activeConversationOperation = React.useMemo(() => (
+    [...(agentConversationState?.operations ?? [])].reverse().find(
+      (operation) => operation.status === 'queued' || operation.status === 'running',
+    ) ?? null
+  ), [agentConversationState])
+  const cancellableConversationOperation = React.useMemo(() => (
+    [...(agentConversationState?.operations ?? [])].reverse().find(
+      isScreenplayOperationCancellable,
+    ) ?? null
+  ), [agentConversationState])
+  const cancelPendingConversationOperation = React.useMemo(() => (
+    [...(agentConversationState?.operations ?? [])].reverse().find(
+      (operation) => Boolean(
+        operation.cancelRequestedAt
+        && ['queued', 'running', 'paused'].includes(operation.status),
+      ),
+    ) ?? null
+  ), [agentConversationState])
   const activeConversationTurn = React.useMemo(() => (
     [...(agentConversationState?.turns ?? [])].reverse().find(
       (turn) => turn.status === 'queued' || turn.status === 'planning',
     ) ?? agentConversationState?.turns.find(
-      (turn) => turn.id === activeConversationTask?.turnId,
+      (turn) => turn.id === (
+        activeConversationOperation?.turnId || activeConversationTask?.turnId
+      ),
     ) ?? null
-  ), [activeConversationTask, agentConversationState])
+  ), [activeConversationOperation, activeConversationTask, agentConversationState])
   const latestConversationTurn = agentConversationState?.turns.at(-1) ?? null
   const latestConversationTask = latestConversationTurn
     ? agentConversationState?.tasks.find(
       (task) => task.turnId === latestConversationTurn.id,
     )
     : undefined
-  const agentRunning = activeConversationTurn != null || activeConversationTask != null
+  const latestConversationOperation = latestConversationTurn
+    ? agentConversationState?.operations.find(
+      (operation) => operation.turnId === latestConversationTurn.id,
+    )
+    : undefined
+  const agentRunning = activeConversationTurn != null
+    || activeConversationOperation != null
 
   React.useEffect(() => {
     activeAgentSessionRef.current = agentSessionId
@@ -1872,6 +1916,9 @@ export default function ScreenplayAgentPage({
                 const state = agentConversationStateRef.current
                 const turn = state?.turns.find((item) => item.id === event.turnId)
                 const task = state?.tasks.find((item) => item.turnId === event.turnId)
+                const operation = state?.operations.find(
+                  (item) => item.turnId === event.turnId,
+                )
                 const modelName = event.model || turn?.runtimeProfile.model || ''
                 const cfg = modelConfigs.find((item) => item.name === modelName)
                   || modelConfigs.find((item) => item.id === selectedModelId)
@@ -1894,7 +1941,7 @@ export default function ScreenplayAgentPage({
                   userContent: event.userContent || turn?.userContent || '',
                   model: modelName || undefined,
                   turnStartedAt: turn
-                    ? replayTurnStartedAt(turn, task)
+                    ? replayTurnStartedAt(turn, operation, task)
                     : performance.now() - Math.max(
                         0,
                         Date.now() - (createdAt ?? Date.now()),
@@ -1919,11 +1966,13 @@ export default function ScreenplayAgentPage({
                   })
                 }
                 agentChunkCursorRef.current = event.cursor
-                const terminalReplay = turn && [
-                  'paused', 'completed', 'failed', 'canceled',
-                ].includes(
-                  task?.status || turn.status,
-                )
+                const terminalReplay = operation
+                  ? ['paused', 'succeeded', 'failed', 'canceled'].includes(
+                    operation.status,
+                  )
+                  : turn && ['paused', 'completed', 'failed', 'canceled'].includes(
+                    task?.status || turn.status,
+                  )
                 changed = (
                   screenplayChunkChangesConversation(chunk)
                   && (!terminalReplay || Boolean(chunk.done || chunk.error))
@@ -1955,7 +2004,14 @@ export default function ScreenplayAgentPage({
         const latestTask = latest
           ? next.tasks.find((task) => task.turnId === latest.id)
           : undefined
-        const reconciliationKey = screenplayTurnReconciliationKey(latest, latestTask)
+        const latestOperation = latest
+          ? next.operations.find((operation) => operation.turnId === latest.id)
+          : undefined
+        const reconciliationKey = screenplayTurnReconciliationKey(
+          latest,
+          latestOperation,
+          latestTask,
+        )
         if (
           reconciliationKey
           && reconciliationKey !== reconciledConversationTurnRef.current.key
@@ -1987,8 +2043,11 @@ export default function ScreenplayAgentPage({
             const state = agentConversationStateRef.current
             const active = state?.turns.some(
               (turn) => turn.status === 'queued' || turn.status === 'planning',
-            ) || state?.tasks.some(
-              (task) => task.status === 'queued' || task.status === 'running',
+            ) || state?.operations.some(
+              (operation) => ['queued', 'running'].includes(operation.status)
+                || Boolean(
+                  operation.cancelRequestedAt && operation.status === 'paused',
+                ),
             )
             fallbackTimer = setTimeout(
               () => void poll(),
@@ -2126,12 +2185,19 @@ export default function ScreenplayAgentPage({
   }, [editingAgentSessionId, editingAgentSessionTitle, message])
 
   const stopAgent = React.useCallback(async (): Promise<boolean> => {
-    if (!activeConversationTurn || !openedProject || agentSessionId == null) return true
+    const targetTurnId = cancellableConversationOperation?.turnId
+      || cancelPendingConversationOperation?.turnId
+      || activeConversationTurn?.id
+    if (!targetTurnId || !openedProject || agentSessionId == null) return true
+    if (agentCancelSubmitting) return false
+    setAgentCancelSubmitting(true)
     try {
-      await conversationClient.cancel(
-        createScreenplayCommandId('cancel-turn'),
-        activeConversationTurn.id,
-      )
+      if (!cancelPendingConversationOperation) {
+        await conversationClient.cancel(
+          createScreenplayCommandId('cancel-turn'),
+          targetTurnId,
+        )
+      }
       const next = await conversationClient.load(openedProject.id, agentSessionId)
       if (activeAgentSessionRef.current !== agentSessionId) return true
       agentConversationStateRef.current = next
@@ -2141,10 +2207,15 @@ export default function ScreenplayAgentPage({
     } catch (error) {
       message.error(error instanceof Error ? error.message : '终止剧本对话失败')
       return false
+    } finally {
+      setAgentCancelSubmitting(false)
     }
   }, [
     activeConversationTurn,
     agentSessionId,
+    agentCancelSubmitting,
+    cancelPendingConversationOperation,
+    cancellableConversationOperation,
     conversationClient,
     loadProjectWorkspace,
     message,
@@ -2713,28 +2784,28 @@ export default function ScreenplayAgentPage({
   )
   const agentSessionActivities = React.useMemo(() => {
     if (agentSessionId == null || !latestConversationTurn) return {}
-    const durableStatus = latestConversationTask?.status
+    const durableStatus = latestConversationOperation?.status
     const state: AgentConversationActivity['state'] = (
       latestConversationTurn.status === 'planning'
       || latestConversationTurn.status === 'running'
     )
       ? 'running'
-      : durableStatus === 'pending'
-        ? 'queued'
+      : durableStatus === 'succeeded'
+        ? 'completed'
         : durableStatus || latestConversationTurn.status
     return {
       [agentSessionId]: {
         state,
         queuedCount: activeQueuedSubmissions.length + ((
           latestConversationTurn.status === 'queued'
-          || latestConversationTask?.status === 'queued'
+          || latestConversationOperation?.status === 'queued'
         ) ? 1 : 0),
       },
     }
   }, [
     activeQueuedSubmissions.length,
     agentSessionId,
-    latestConversationTask,
+    latestConversationOperation,
     latestConversationTurn,
   ])
   const openedProjectStageIndex = openedProject
@@ -2768,9 +2839,10 @@ export default function ScreenplayAgentPage({
     ?? null
   )
   const agentTurnArtifacts = React.useMemo(() => screenplayTurnArtifacts(
+    agentConversationState?.operations ?? [],
     agentConversationState?.tasks ?? [],
     projectWorkspace,
-  ), [agentConversationState?.tasks, projectWorkspace])
+  ), [agentConversationState?.operations, agentConversationState?.tasks, projectWorkspace])
   const openRevisionLibrary = React.useCallback((
     target: RevisionLibraryTarget | null,
   ) => {
@@ -4154,14 +4226,24 @@ export default function ScreenplayAgentPage({
                           selectedModelConfig={selectedAgentModelConfig}
                           draft={agentPrompt}
                         />
-                        {agentRunning ? (
-                          <PurrTooltip title="停止生成">
+                        {agentRunning
+                          || cancellableConversationOperation
+                          || cancelPendingConversationOperation
+                          || agentCancelSubmitting ? (
+                          <PurrTooltip title={
+                            cancelPendingConversationOperation || agentCancelSubmitting
+                              ? '正在停止'
+                              : '停止生成'
+                          }>
                             <PurrButton
                               type="text"
                               shape="circle"
                               className="agent-composer__stop"
                               icon={<StopCircleIcon size={18} />}
                               onClick={stopAgent}
+                              disabled={Boolean(
+                                cancelPendingConversationOperation || agentCancelSubmitting,
+                              )}
                               aria-label="停止生成"
                             />
                           </PurrTooltip>

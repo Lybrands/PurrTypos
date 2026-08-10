@@ -404,6 +404,7 @@ export type ScreenplayAgentTaskStatus =
 
 export interface ScreenplayAgentTaskUnit {
   id: string;
+  semanticKey: string;
   position: number;
   kind: string;
   status:
@@ -412,11 +413,15 @@ export interface ScreenplayAgentTaskUnit {
     | 'running'
     | 'waiting_retry'
     | 'blocked'
+    | 'needs_split'
+    | 'expanded'
     | 'completed'
     | 'failed'
     | 'canceled';
   input: Record<string, unknown>;
-  output: Record<string, unknown>;
+  outputRef: string | null;
+  artifactDigest: string | null;
+  validationReceipt: Record<string, unknown>;
   error: { code?: string; message?: string } | null;
   attempt: number;
 }
@@ -440,6 +445,40 @@ export interface ScreenplayAgentTask {
   updatedAt?: string | null;
 }
 
+export type ScreenplayOperationStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+export interface ScreenplayOperationProjection {
+  id: string;
+  turnId: string;
+  taskId: string | null;
+  status: ScreenplayOperationStatus;
+  targetRole: ScreenplayV2DeliverableRole;
+  parts: ScreenplayAgentTaskUnit[];
+  resultRevisionId: string | null;
+  finalizationReceiptId: string | null;
+  cancelReceiptId: string | null;
+  cancelRequestedAt: string | null;
+  error: { code?: string; message?: string } | null;
+  resultRevision?: ScreenplayV2RevisionSummary | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ScreenplayCancelOperationReceipt {
+  id: string;
+  cancelReceiptId: string;
+  operationId: string | null;
+  turnId: string;
+  requestedAt: string;
+  terminalStatus: 'cancel_requested' | 'succeeded' | 'failed' | 'canceled';
+}
+
 export interface ScreenplayConversationEvent {
   cursor: number;
   turnId: string | null;
@@ -454,6 +493,7 @@ export interface ScreenplayConversationSnapshot {
   sessionId: number;
   turns: ScreenplayConversationTurn[];
   tasks: ScreenplayAgentTask[];
+  operations: ScreenplayOperationProjection[];
   cursor: number;
 }
 
@@ -1570,7 +1610,7 @@ export interface ElectronAPI {
   cancelScreenplayConversationTurn: (data: {
     commandId: string;
     turnId: string;
-  }) => Promise<ApiResult<ScreenplayConversationTurn>>;
+  }) => Promise<ApiResult<ScreenplayCancelOperationReceipt>>;
   truncateScreenplayConversationFromTurn: (data: {
     turnId: string;
   }) => Promise<ApiResult<{
