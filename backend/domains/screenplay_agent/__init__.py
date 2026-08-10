@@ -5,9 +5,17 @@ from domains.screenplay_agent.contracts import (
     ScreenplayIntentAction,
     ScreenplayIntentScope,
 )
+from domains.screenplay_agent.operation import (
+    ScreenplayOperationCreateCommand,
+    ScreenplayOperationRecord,
+    ScreenplayOperationStatus,
+)
 
 __all__ = [
     "ScreenplayIntent",
     "ScreenplayIntentAction",
     "ScreenplayIntentScope",
+    "ScreenplayOperationCreateCommand",
+    "ScreenplayOperationRecord",
+    "ScreenplayOperationStatus",
 ]

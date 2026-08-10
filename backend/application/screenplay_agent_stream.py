@@ -156,7 +156,8 @@ class ScreenplayAgentChunkProjector:
         status = _effective_status(turn, task)
         if status == "failed":
             error = _error_message(
-                (task or {}).get("error_json") or turn.get("error_json")
+                (task or {}).get("error_json")
+                or turn.get("operation_error_json")
             )
             await self._append(turn, {"error": error or "剧本任务执行失败。"}, task_id=(
                 str((task or {}).get("id") or "") or None
@@ -186,12 +187,22 @@ class ScreenplayAgentChunkProjector:
 
     async def _state(self, turn_id: str):
         turn = await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_turns WHERE id = ?",
+            "SELECT t.*, o.status AS operation_status, "
+            "o.long_task_id AS authoritative_task_id, "
+            "o.target_role AS operation_target_role, "
+            "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
+            "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
+            "AND e.event_type IN ('screenplay.agent.turn.failed', "
+            "'screenplay.agent.task.failed', 'screenplay.agent.task.paused') "
+            "ORDER BY e.id DESC LIMIT 1)) AS operation_error_json "
+            "FROM screenplay_agent_turns AS t "
+            "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+            "WHERE t.id = ?",
             [turn_id],
         )
         if turn is None:
             raise RuntimeError("screenplay Agent Turn does not exist")
-        task_id = str(turn.get("task_id") or "").strip()
+        task_id = str(turn.get("authoritative_task_id") or "").strip()
         if task_id:
             task = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_long_tasks WHERE id = ?",
@@ -202,7 +213,16 @@ class ScreenplayAgentChunkProjector:
             metadata = _object(task.get("metadata_json"))
             task_view = {
                 **task,
-                "target_role": metadata.get("targetRole"),
+                "status": (
+                    "completed"
+                    if turn.get("operation_status") == "succeeded"
+                    else str(turn.get("operation_status") or task["status"])
+                ),
+                "target_role": (
+                    turn.get("operation_target_role")
+                    or metadata.get("targetRole")
+                ),
+                "error_json": turn.get("operation_error_json"),
             }
             unit_rows = await self._db.fetch_all(
                 "SELECT * FROM ai_agent_long_task_units "
