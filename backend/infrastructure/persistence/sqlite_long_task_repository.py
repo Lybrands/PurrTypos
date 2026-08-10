@@ -338,7 +338,12 @@ class SqliteLongTaskRepository:
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
             if unit.status is LongTaskUnitStatus.COMPLETED:
-                if unit.output_ref == result.output_ref:
+                if (
+                    unit.output_ref == result.output_ref
+                    and unit.artifact_digest == result.artifact_digest
+                    and thaw_json_mapping(unit.validation_receipt)
+                    == thaw_json_mapping(result.validation_receipt)
+                ):
                     return task
                 raise ValueError("long task unit completion conflicts")
             if task.status is not LongTaskStatus.RUNNING:

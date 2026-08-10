@@ -115,12 +115,6 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             [project_id],
         )
         await db.execute(
-            "DELETE FROM screenplay_agent_task_outputs WHERE task_id IN ("
-            "SELECT id FROM ai_agent_long_tasks "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
-            [project_id],
-        )
-        await db.execute(
             "DELETE FROM ai_agent_long_task_units WHERE task_id IN ("
             "SELECT id FROM ai_agent_long_tasks "
             "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",

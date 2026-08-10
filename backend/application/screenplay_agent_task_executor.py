@@ -12,6 +12,7 @@ from purra.contracts import ReasoningMode
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_tool_calling import ScreenplayToolCallingService
@@ -20,9 +21,6 @@ from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from exceptions import AppError
 from infrastructure.persistence.sqlite_screenplay_v2_repository import (
     SqliteScreenplayV2Repository,
-)
-from infrastructure.persistence.sqlite_screenplay_task_output_store import (
-    SqliteScreenplayTaskOutputStore,
 )
 
 
@@ -67,7 +65,6 @@ class ScreenplayTaskModelCalls:
         if self._models is None and self._tool_calls is None:
             raise ValueError("screenplay task requires a model execution service")
         self._revisions = SqliteScreenplayV2Repository(db)
-        self._outputs = SqliteScreenplayTaskOutputStore(db)
 
     async def execute(
         self,
@@ -108,76 +105,178 @@ class ScreenplayTaskModelCalls:
         unit_input = dict(unit.get("input") or {})
         base_revision_id = str(unit_input.get("baseRevisionId") or "") or None
         episode_number = int(unit_input.get("episodeNumber") or 0)
-        heads = await self._context.heads(project_id, text_limit=18_000)
-        evidence: dict[str, Any] = {
+        source_revision_refs = tuple(
+            str(value) for value in task.get("sourceRevisionRefs") or ()
+        )
+        accepted = await self._context.revisions(
+            source_revision_refs,
+            text_limit=0,
+        )
+        by_role = {str(item["role"]): item for item in accepted}
+        scene_list_revision_id = str(
+            (by_role.get("sceneList") or {}).get("revisionId") or ""
+        ) or None
+        descriptor: dict[str, Any] = {
             "projectId": project_id,
             "targetRole": role,
-            "acceptedDeliverables": heads,
+            "sourceRevisionRefs": list(source_revision_refs),
+            "baseRevisionId": base_revision_id,
+            "structureRevisionId": str(
+                (by_role.get("structure") or {}).get("revisionId") or ""
+            ) or None,
+            "structureEpisodeNumbers": [
+                int(item.get("number") or 0)
+                for item in (
+                    (by_role.get("structure") or {}).get("content", {}).get(
+                        "episodes", ()
+                    )
+                )
+                if isinstance(item, Mapping) and int(item.get("number") or 0) > 0
+            ],
+            "currentDraftRevisionId": str(
+                (by_role.get("screenplayDraft") or {}).get("revisionId") or ""
+            ) or None,
         }
         if episode_number:
             reviewed_draft_id = str(
                 unit_input.get("reviewedDraftId") or ""
             ) or None
-            manifest = await self._context.episode_manifest(
-                project_id,
-                episode_number,
-            )
             episode_context = await self._context.episode_context(
                 project_id,
                 episode_number,
                 draft_revision_id=reviewed_draft_id or base_revision_id,
+                scene_list_revision_id=scene_list_revision_id,
             )
-            evidence.update({
+            scene_ids = tuple(unit_input.get("sceneIds") or ())
+            plan_ids = tuple(
+                str(item.get("id") or "")
+                for item in (episode_context.get("episode") or {}).get("scenes", ())
+                if isinstance(item, Mapping)
+            )
+            if scene_ids and scene_ids != plan_ids:
+                raise ValueError("evidence Revision does not match the Manifest scene ids")
+            descriptor.update({
                 "episodeNumber": episode_number,
-                "manifest": manifest,
-                "episodeContext": episode_context,
+                "sceneIds": list(scene_ids or plan_ids),
+                "sceneListRevisionId": scene_list_revision_id,
+                "reviewedDraftId": reviewed_draft_id,
+                "evidenceKind": str(unit_input.get("evidenceKind") or "writing"),
             })
             if unit_input.get("evidenceKind") == "review_input":
                 if reviewed_draft_id is None:
                     raise ValueError("review input requires an immutable Draft Revision")
-                evidence["reviewInput"] = _review_episode_input(
+                review_input = _review_episode_input(
                     reviewed_draft_id=reviewed_draft_id,
                     episode_number=episode_number,
                     episode_context=episode_context,
                 )
-            else:
-                evidence["writingContext"] = (
-                    await self._context.episode_writing_context(
-                        project_id,
-                        episode_number,
-                        draft_revision_id=base_revision_id,
-                    )
-                )
-        else:
-            if base_revision_id:
-                evidence["baseCandidate"] = await self._context.revision(
-                    base_revision_id,
-                    text_limit=18_000,
-                )
-            if role == "sourceAnalysis":
-                evidence["sourceMaterial"] = await self._context.source_context(
-                    project_id
-                )
+                descriptor["reviewInputRef"] = {
+                    "draftRevisionId": reviewed_draft_id,
+                    "episodeNumber": episode_number,
+                    "sceneIds": list(review_input["sceneIds"]),
+                    "scenePlanRevisionId": scene_list_revision_id,
+                    "contentDigest": review_input["contentDigest"],
+                }
         encoded = json.dumps(
-            evidence,
+            descriptor,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
         return {
-            "evidence": evidence,
+            "evidenceDescriptor": descriptor,
             "evidenceReceipt": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         }
+
+    async def _hydrate_evidence(
+        self,
+        task: Mapping[str, Any],
+        unit: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        checkpoint = _dependency_output(task, unit, "collect_evidence")
+        legacy = checkpoint.get("evidence")
+        if isinstance(legacy, Mapping):
+            return dict(legacy)
+        descriptor = checkpoint.get("evidenceDescriptor")
+        if not isinstance(descriptor, Mapping):
+            raise RuntimeError("screenplay evidence Artifact is missing")
+        project_id = str(descriptor.get("projectId") or task["projectId"])
+        refs = tuple(str(value) for value in descriptor.get("sourceRevisionRefs") or ())
+        accepted = await self._context.revisions(refs, text_limit=18_000)
+        evidence: dict[str, Any] = {
+            "projectId": project_id,
+            "targetRole": str(descriptor.get("targetRole") or task["targetRole"]),
+            "acceptedDeliverables": accepted,
+        }
+        episode_number = int(descriptor.get("episodeNumber") or 0)
+        if episode_number:
+            scene_list_revision_id = str(
+                descriptor.get("sceneListRevisionId") or ""
+            ) or None
+            reviewed_draft_id = str(
+                descriptor.get("reviewedDraftId") or ""
+            ) or None
+            base_revision_id = str(
+                descriptor.get("baseRevisionId") or ""
+            ) or None
+            episode_context = await self._context.episode_context(
+                project_id,
+                episode_number,
+                draft_revision_id=reviewed_draft_id or base_revision_id,
+                scene_list_revision_id=scene_list_revision_id,
+            )
+            evidence.update({
+                "episodeNumber": episode_number,
+                "manifest": {
+                    "sceneListId": scene_list_revision_id,
+                    "sceneIds": tuple(descriptor.get("sceneIds") or ()),
+                },
+                "episodeContext": episode_context,
+            })
+            if descriptor.get("evidenceKind") == "review_input":
+                if reviewed_draft_id is None:
+                    raise RuntimeError("review evidence has no immutable Draft Revision")
+                review_input = _review_episode_input(
+                    reviewed_draft_id=reviewed_draft_id,
+                    episode_number=episode_number,
+                    episode_context=episode_context,
+                )
+                expected = descriptor.get("reviewInputRef")
+                if (
+                    not isinstance(expected, Mapping)
+                    or str(expected.get("contentDigest") or "")
+                    != str(review_input["contentDigest"])
+                ):
+                    raise RuntimeError("review evidence digest changed")
+                evidence["reviewInput"] = review_input
+            else:
+                evidence["writingContext"] = (
+                    await self._context.episode_writing_context(
+                        project_id,
+                        episode_number,
+                        draft_revision_id=base_revision_id,
+                        source_revision_refs=refs,
+                    )
+                )
+        else:
+            base_revision_id = str(descriptor.get("baseRevisionId") or "") or None
+            if base_revision_id:
+                evidence["baseCandidate"] = await self._context.revision(
+                    base_revision_id,
+                    text_limit=18_000,
+                )
+            if task["targetRole"] == "sourceAnalysis":
+                evidence["sourceMaterial"] = await self._context.source_context(
+                    project_id
+                )
+        return evidence
 
     async def _generate_draft_scene(self, task, unit, runtime, signal):
         unit_input = dict(unit.get("input") or {})
         episode_number = int(unit_input.get("episodeNumber") or 0)
         scene_id = str(unit_input.get("sceneId") or "").strip()
-        evidence = dict(
-            _dependency_output(task, unit, "collect_evidence").get("evidence")
-            or {}
-        )
+        evidence = await self._hydrate_evidence(task, unit)
         writing = dict(evidence.get("writingContext") or {})
         scene_plans = dict(writing.get("scenePlans") or {})
         if not scene_id or scene_id not in scene_plans:
@@ -362,10 +461,7 @@ class ScreenplayTaskModelCalls:
         episode_number = int(unit_input.get("episodeNumber") or 0)
         dimension = str(unit_input.get("reviewDimension") or "")
         reviewed_draft_id = str(unit_input.get("reviewedDraftId") or "")
-        evidence = dict(
-            _dependency_output(task, unit, "collect_evidence").get("evidence")
-            or {}
-        )
+        evidence = await self._hydrate_evidence(task, unit)
         review_input = dict(evidence.get("reviewInput") or {})
         if not review_input:
             raise RuntimeError("review dimension has no immutable input packet")
@@ -422,10 +518,7 @@ class ScreenplayTaskModelCalls:
         unit_input = dict(unit.get("input") or {})
         role = str(task["targetRole"])
         section_key = str(unit_input.get("sectionKey") or "")
-        evidence = dict(
-            _dependency_output(task, unit, "collect_evidence").get("evidence")
-            or {}
-        )
+        evidence = await self._hydrate_evidence(task, unit)
         episode_number = (
             int(section_key.removeprefix("episode-"))
             if role == "sceneList" and section_key.startswith("episode-")
@@ -692,20 +785,13 @@ class ScreenplayTaskUnitExecutor:
             model_executor_factory=model_executor_factory,
             tool_calling_service=tool_calling_service,
         )
-        self._outputs = SqliteScreenplayTaskOutputStore(db)
+        self._parts = ScreenplayPartArtifactQuery(db)
 
     async def execute(
         self,
         context: DurableUnitExecutionContext,
         signal=None,
     ) -> LongTaskUnitResult:
-        cached = await self._outputs.load_unit(
-            context.task.id,
-            context.unit.id,
-        )
-        if cached is not None:
-            output_ref, output = cached
-            return _unit_result(output_ref, output)
         task = await self._task_view(context)
         unit = next(
             item for item in task["units"]
@@ -717,12 +803,25 @@ class ScreenplayTaskUnitExecutor:
             runtime=self._runtime,
             signal=signal,
         ))
-        output_ref = await self._outputs.put(
-            task_id=context.task.id,
-            unit_id=context.unit.id,
-            output=output,
-        )
-        return _unit_result(output_ref, output)
+        artifact_id = str(output.get("artifactId") or "").strip()
+        run_id = str(output.get("runId") or "").strip()
+        semantic_key = str(context.unit.semantic_key or context.unit.id)
+        if artifact_id and run_id:
+            ref = await self._parts.validated_ref(
+                artifact_id=artifact_id,
+                run_id=run_id,
+                semantic_key=semantic_key,
+            )
+        else:
+            ref = await self._parts.write_host_part(
+                project_id=str(task["projectId"]),
+                task_id=context.task.id,
+                unit_id=context.unit.id,
+                semantic_key=semantic_key,
+                part_kind=str(unit["kind"]),
+                output=output,
+            )
+        return _unit_result(ref, output)
 
     def classify_failure(self, error: Exception):
         return classify_screenplay_run_failure(error)
@@ -733,7 +832,7 @@ class ScreenplayTaskUnitExecutor:
     ) -> dict[str, Any]:
         metadata = thaw_json_mapping(context.task.metadata)
         recipe = metadata.get("recipe") or {}
-        outputs = await self._outputs.list_for_task(context.task.id)
+        outputs = await self._parts.list_task_outputs(context.task.id)
         units = []
         for raw in recipe.get("steps") or ():
             unit = dict(raw)
@@ -753,15 +852,18 @@ class ScreenplayTaskUnitExecutor:
             "turnId": str(metadata["turnId"]),
             "targetRole": str(metadata["targetRole"]),
             "plannerRunId": str(metadata.get("plannerRunId") or "") or None,
+            "sourceRevisionRefs": list(metadata.get("sourceRevisionRefs") or ()),
             "units": units,
         }
 
 
-def _unit_result(output_ref: str, output: Mapping[str, Any]) -> LongTaskUnitResult:
+def _unit_result(ref, output: Mapping[str, Any]) -> LongTaskUnitResult:
     revision_id = str(output.get("revisionId") or "").strip()
     return LongTaskUnitResult(
-        output_ref=output_ref,
-        run_id=str(output.get("runId") or "").strip() or None,
+        output_ref=ref.output_ref,
+        run_id=ref.run_id,
+        artifact_digest=ref.content_digest,
+        validation_receipt=ref.validation_receipt,
         metadata=({"revisionId": revision_id} if revision_id else {}),
     )
 
@@ -856,7 +958,16 @@ def _completed_part_outputs(
         output = unit.get("output")
         if not isinstance(output, Mapping):
             raise RuntimeError(f"completed screenplay Part {unit.get('id')} has no output")
-        outputs.append(dict(output))
+        enriched = dict(output)
+        for key in (
+            "episodeNumber",
+            "sceneId",
+            "reviewDimension",
+            "sectionKey",
+        ):
+            if key not in enriched and key in unit_input:
+                enriched[key] = unit_input[key]
+        outputs.append(enriched)
     return outputs
 
 
@@ -976,7 +1087,7 @@ def _review_dimension_tool_instruction(
     return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
 宿主已在 reviewInput 中完整提供指定不可变版本的本集正文、场景计划和必要上下文。只能依据这些材料审阅，不得另行检索、声称材料不可读或把系统错误写成审阅意见。
 完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"title":"第 {episode_number} 集 {dimension} 审阅","executionSummary":"简短公开审阅说明","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
+{{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","executionSummary":"简短公开审阅说明","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
 问题只能引用这些场景 ID：{list(scene_ids)}。没有问题时 issues=[] 且 verdict=ready。"""
 
 
@@ -989,6 +1100,12 @@ def _validate_review_dimension_candidate(
     reviewed_draft_id: str,
     reviewed_content_digest: str,
 ) -> dict[str, Any]:
+    raw = candidate.get("payload")
+    if not isinstance(raw, Mapping) or (
+        int(raw.get("episodeNumber") or 0) != episode_number
+        or str(raw.get("reviewDimension") or "") != dimension
+    ):
+        raise ValueError("review dimension candidate identity does not match")
     normalized = _validate_deliverable_candidate(
         "review",
         candidate,
@@ -1029,14 +1146,14 @@ def _validate_review_dimension_candidate(
 def _document_section_tool_instruction(role: str, section_key: str) -> str:
     return f"""你只生成 {role} 文档中的 {section_key} 章节。
 宿主已提供本章节需要的项目证据。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"title":"章节标题","executionSummary":"简短公开说明","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
+{{"sectionKey":"{section_key}","title":"章节标题","executionSummary":"简短公开说明","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
 contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。"""
 
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
     return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
 完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"title":"第 {episode_number} 集场景表","executionSummary":"简短公开规划说明","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
+{{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","executionSummary":"简短公开规划说明","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
 只提交当前集，场景顺序必须可直接用于后续剧本创作。"""
 
 
@@ -1048,7 +1165,13 @@ def _validate_document_section_candidate(
     title = str(value.get("title") or "").strip()
     text = str(candidate.get("contentText") or "").strip()
     content = value.get("contentJson")
-    if not section_key or not title or not text or not isinstance(content, Mapping):
+    if (
+        not section_key
+        or str(value.get("sectionKey") or "") != section_key
+        or not title
+        or not text
+        or not isinstance(content, Mapping)
+    ):
         raise ValueError("document section candidate is incomplete")
     return {
         **dict(candidate),
@@ -1140,7 +1263,20 @@ def _validate_draft_episode_parts(
         raise ValueError("draft validation requires every ordered scene Part")
     if len(metadata) != 1:
         raise ValueError("draft validation requires one episode metadata Part")
-    scene_list_ids = {str(scene.get("sceneListId") or "") for scene in scenes}
+    evidence_output = _dependency_output(task, unit, "collect_evidence")
+    descriptor = evidence_output.get("evidenceDescriptor")
+    legacy_evidence = evidence_output.get("evidence")
+    evidence_scene_list_id = (
+        str(descriptor.get("sceneListRevisionId") or "")
+        if isinstance(descriptor, Mapping)
+        else str((legacy_evidence or {}).get("manifest", {}).get("sceneListId") or "")
+        if isinstance(legacy_evidence, Mapping)
+        else ""
+    )
+    scene_list_ids = {
+        str(scene.get("sceneListId") or evidence_scene_list_id)
+        for scene in scenes
+    }
     if len(scene_list_ids) != 1 or "" in scene_list_ids:
         raise ValueError("draft scene Parts do not share one accepted scene list")
     meta = metadata[0]
@@ -1182,7 +1318,60 @@ def _validate_review_episode_parts(
     )
     if tuple(str(part.get("reviewDimension") or "") for part in parts) != expected_dimensions:
         raise ValueError("review validation requires all five dimension Parts")
-    content_values = [dict(part.get("contentJson") or {}) for part in parts]
+    evidence_output = _dependency_output(task, unit, "collect_evidence")
+    descriptor = evidence_output.get("evidenceDescriptor")
+    review_ref = (
+        descriptor.get("reviewInputRef")
+        if isinstance(descriptor, Mapping)
+        else None
+    )
+    legacy_evidence = evidence_output.get("evidence")
+    legacy_input = (
+        legacy_evidence.get("reviewInput")
+        if isinstance(legacy_evidence, Mapping)
+        else None
+    )
+    reviewed_draft_id = str(
+        (review_ref or {}).get("draftRevisionId")
+        or (legacy_input or {}).get("draftRevisionId")
+        or unit_input.get("reviewedDraftId")
+        or ""
+    )
+    reviewed_digest = str(
+        (review_ref or {}).get("contentDigest")
+        or (legacy_input or {}).get("contentDigest")
+        or ""
+    )
+    allowed_scene_ids = tuple(unit_input.get("sceneIds") or ())
+    content_values = []
+    for part in parts:
+        dimension = str(part.get("reviewDimension") or "")
+        content = dict(part.get("contentJson") or {})
+        if (
+            content.get("reviewDimension") == dimension
+            and content.get("reviewedContentDigest") == reviewed_digest
+        ):
+            content_values.append(content)
+            continue
+        normalized = _validate_review_dimension_candidate(
+            {
+                "artifactId": part.get("artifactId"),
+                "payload": {
+                    "episodeNumber": number,
+                    "reviewDimension": dimension,
+                    "title": part.get("title"),
+                    "executionSummary": part.get("executionSummary"),
+                    "contentJson": content,
+                },
+                "contentText": part.get("contentText"),
+            },
+            episode_number=number,
+            dimension=dimension,
+            allowed_scene_ids=allowed_scene_ids,
+            reviewed_draft_id=reviewed_draft_id,
+            reviewed_content_digest=reviewed_digest,
+        )
+        content_values.append(dict(normalized["payload"]["contentJson"]))
     digests = {str(value.get("reviewedContentDigest") or "") for value in content_values}
     draft_ids = {str(value.get("reviewedDraftId") or "") for value in content_values}
     if len(digests) != 1 or "" in digests or len(draft_ids) != 1 or "" in draft_ids:
@@ -1230,21 +1419,35 @@ def _validate_document_parts(
     merged: dict[str, Any] = {}
     for section in sections:
         merged = _merge_document_json(merged, dict(section.get("contentJson") or {}))
-    evidence = dict(
-        _dependency_output(task, unit, "collect_evidence").get("evidence") or {}
-    )
+    evidence_output = _dependency_output(task, unit, "collect_evidence")
+    descriptor = evidence_output.get("evidenceDescriptor")
+    evidence = dict(evidence_output.get("evidence") or {})
     heads = {
         str(item.get("role") or ""): item
         for item in evidence.get("acceptedDeliverables") or ()
         if isinstance(item, Mapping)
     }
     structure = heads.get("structure") or {}
-    structure_numbers = tuple(
-        int(item.get("number") or 0)
-        for item in structure.get("content", {}).get("episodes", [])
-        if isinstance(item, Mapping)
+    structure_numbers = (
+        tuple(int(value) for value in descriptor.get("structureEpisodeNumbers") or ())
+        if isinstance(descriptor, Mapping)
+        else tuple(
+            int(item.get("number") or 0)
+            for item in structure.get("content", {}).get("episodes", [])
+            if isinstance(item, Mapping)
+        )
+    )
+    structure_revision_id = (
+        str(descriptor.get("structureRevisionId") or "") or None
+        if isinstance(descriptor, Mapping)
+        else str(structure.get("revisionId") or "") or None
     )
     draft = heads.get("screenplayDraft") or {}
+    reviewed_draft_id = (
+        str(descriptor.get("currentDraftRevisionId") or "") or None
+        if isinstance(descriptor, Mapping)
+        else str(draft.get("revisionId") or "") or None
+    )
     value = _validate_deliverable(
         role,
         {
@@ -1253,9 +1456,9 @@ def _validate_document_parts(
             "contentText": "\n\n".join(str(section["contentText"]) for section in sections),
             "contentJson": merged,
         },
-        structure_id=str(structure.get("revisionId") or "") or None,
+        structure_id=structure_revision_id,
         structure_episode_numbers=structure_numbers,
-        reviewed_draft_id=str(draft.get("revisionId") or "") or None,
+        reviewed_draft_id=reviewed_draft_id,
     )
     return _with_validation_receipt({
         **value,

@@ -41,6 +41,10 @@ from application.screenplay_agent_task_executor import (
     _unit_result,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.screenplay_part_artifacts import (
+    ScreenplayPartArtifactQuery,
+    ValidatedPartArtifactRef,
+)
 from application.screenplay_manifest_compiler import (
     REVIEW_DIMENSIONS,
     compile_screenplay_manifest,
@@ -418,11 +422,55 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
 
 async def test_published_unit_metadata_does_not_invent_a_final_answer():
     result = _unit_result(
-        "screenplay-task-output://task-1/publish-candidate",
+        ValidatedPartArtifactRef(
+            artifact_id="artifact-publish",
+            run_id="screenplay-host:task-1:publish-candidate",
+            semantic_key="publish-candidate",
+            content_digest="sha256:publish",
+            validation_receipt={"valid": True},
+        ),
         {"revisionId": "sprev-1"},
     )
 
     assert result.metadata == {"revisionId": "sprev-1"}
+    assert result.output_ref == (
+        "screenplay-part-artifact://artifact-publish"
+    )
+
+
+async def test_host_part_output_is_a_finalized_artifact_without_shadow_json(
+    temp_db: DatabaseConnection,
+):
+    parts = ScreenplayPartArtifactQuery(temp_db)
+    ref = await parts.write_host_part(
+        project_id="project-artifact-only",
+        task_id="task-artifact-only",
+        unit_id="evidence:4",
+        semantic_key="evidence:4",
+        part_kind="evidence",
+        output={
+            "evidenceDescriptor": {
+                "sourceRevisionRefs": ["sprev-brief", "sprev-scenes"],
+            },
+            "evidenceReceipt": "receipt-4",
+        },
+    )
+
+    assert ref.output_ref.startswith("screenplay-part-artifact://")
+    loaded = await parts.require(ref)
+    assert loaded["evidenceDescriptor"]["sourceRevisionRefs"] == [
+        "sprev-brief",
+        "sprev-scenes",
+    ]
+    artifact = await temp_db.fetch_one(
+        "SELECT status FROM ai_agent_artifacts WHERE id = ?",
+        [ref.artifact_id],
+    )
+    assert artifact == {"status": "finalized"}
+    assert await temp_db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'screenplay_agent_task_outputs'"
+    ) is None
 
 
 async def test_final_response_composition_receives_only_public_candidate_facts(
@@ -1375,6 +1423,8 @@ class _CheckpointingToolCalls:
             candidate = {
                 "artifactId": f"artifact-review-{part_key}",
                 "payload": {
+                    "episodeNumber": episode_number,
+                    "reviewDimension": dimension,
                     "title": f"第 {episode_number} 集 {dimension} 审阅",
                     "executionSummary": f"核对本集 {dimension} 维度。",
                     "contentJson": {
@@ -1398,6 +1448,7 @@ class _CheckpointingToolCalls:
             candidate = {
                 "artifactId": f"artifact-scene-list-{part_key}",
                 "payload": {
+                    "sectionKey": part_key,
                     "title": f"第 {part_key} 集场景表",
                     "executionSummary": "按本集结构目标规划场景推进。",
                     "contentJson": {"scenes": [{
@@ -1416,6 +1467,7 @@ class _CheckpointingToolCalls:
             candidate = {
                 "artifactId": f"artifact-document-{part_key}",
                 "payload": {
+                    "sectionKey": part_key,
                     "title": part_key,
                     "executionSummary": f"完成 {part_key} 章节。",
                     "contentJson": {part_key: {"summary": f"{part_key} 内容"}},
@@ -2013,6 +2065,31 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
         "SELECT agent_task_id FROM screenplay_revisions WHERE id = ?",
         [revision["id"]],
     ) == {"agent_task_id": task["id"]}
+    unit_rows = await temp_db.fetch_all(
+        "SELECT unit_id, output_ref, artifact_digest, validation_receipt_json "
+        "FROM ai_agent_long_task_units WHERE task_id = ? ORDER BY position",
+        [task["id"]],
+    )
+    assert all(
+        str(row["output_ref"]).startswith("screenplay-part-artifact://")
+        and str(row["artifact_digest"]).strip()
+        and json.loads(str(row["validation_receipt_json"]))["valid"] is True
+        for row in unit_rows
+    )
+    evidence = await ScreenplayPartArtifactQuery(temp_db).require(
+        str(unit_rows[0]["output_ref"])
+    )
+    assert set(evidence["evidenceDescriptor"]) >= {
+        "sourceRevisionRefs",
+        "sceneListRevisionId",
+        "episodeNumber",
+    }
+    assert "acceptedDeliverables" not in evidence["evidenceDescriptor"]
+    assert "writingContext" not in evidence["evidenceDescriptor"]
+    assert await temp_db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'screenplay_agent_task_outputs'"
+    ) is None
     continuation = await SqliteScreenplayTaskResolver(temp_db).resolve(
         workspace=await projects.get_workspace(project_id),
         intent=ScreenplayIntent(
