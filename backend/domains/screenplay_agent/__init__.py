@@ -10,6 +10,11 @@ from domains.screenplay_agent.operation import (
     ScreenplayOperationRecord,
     ScreenplayOperationStatus,
 )
+from domains.screenplay_agent.manifest import (
+    ScreenplayArtifactManifest,
+    ScreenplayPartKind,
+    ScreenplayPartSpec,
+)
 
 __all__ = [
     "ScreenplayIntent",
@@ -18,4 +23,7 @@ __all__ = [
     "ScreenplayOperationCreateCommand",
     "ScreenplayOperationRecord",
     "ScreenplayOperationStatus",
+    "ScreenplayArtifactManifest",
+    "ScreenplayPartKind",
+    "ScreenplayPartSpec",
 ]

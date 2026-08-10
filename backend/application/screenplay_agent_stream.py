@@ -362,22 +362,31 @@ def _unit_label(unit: Mapping[str, Any], task: Mapping[str, Any] | None) -> str:
             if episode_number
             else f"整理{target}创作依据"
         )
-    if kind == "generate_candidate":
-        return (
-            f"创作第 {episode_number} 集候选稿"
-            if episode_number
-            else f"生成{target}候选稿"
+    if kind == "generate_draft_scene":
+        return f"创作第 {episode_number} 集场景 {payload.get('sceneId') or ''}".strip()
+    if kind == "generate_episode_metadata":
+        return f"整理第 {episode_number} 集连续性"
+    if kind == "generate_review_dimension":
+        dimensions = {
+            "continuity": "连贯性",
+            "character_arc": "人物弧光",
+            "structure_rhythm": "结构节奏",
+            "dialogue": "对白",
+            "format": "格式",
+        }
+        dimension = dimensions.get(
+            str(payload.get("reviewDimension") or ""),
+            "专项",
         )
-    if kind == "validate_candidate":
+        return f"审阅第 {episode_number} 集{dimension}"
+    if kind == "generate_document_section":
+        return f"生成{target}章节 {payload.get('sectionKey') or ''}".strip()
+    if kind == "validate_manifest_part":
         return (
-            f"校验第 {episode_number} 集候选稿"
+            f"校验第 {episode_number} 集完整性"
             if episode_number
-            else f"校验{target}候选稿"
+            else f"校验{target}完整性"
         )
-    if kind == "generate_episode_draft":
-        return f"创作第 {episode_number} 集正文"
-    if kind == "generate_deliverable":
-        return f"生成{target}"
     if kind == "publish_candidate_revision":
         return "整理并发布候选稿"
     return "执行剧本任务"

@@ -143,10 +143,41 @@ class SqliteScreenplayTaskResolver:
             if target == "screenplayDraft"
             else ()
         )
+        source_revision_refs = await self._context.head_revision_refs(project_id)
+        episode_scene_ids: dict[int, tuple[str, ...]] = {}
+        reviewed_draft_id = None
+        document_sections: tuple[str, ...] = ()
+        if target == "screenplayDraft":
+            for number in episodes:
+                manifest = await self._context.episode_manifest(project_id, number)
+                episode_scene_ids[number] = tuple(manifest["sceneIds"])
+        elif target == "review":
+            draft_head = (workflow.get("heads") or {}).get("screenplayDraft")
+            reviewed_draft_id = (
+                str((draft_head or {}).get("id") or "")
+                if isinstance(draft_head, Mapping) else ""
+            ) or None
+            if reviewed_draft_id is None:
+                raise AppError("审阅需要已采纳的剧本正文", 409)
+            episode_scene_ids = await self._context.draft_revision_manifest(
+                project_id,
+                reviewed_draft_id,
+            )
+        elif target == "sceneList":
+            structure_numbers = await self._context.structure_episode_numbers(
+                project_id
+            )
+            document_sections = tuple(
+                f"episode-{number}" for number in structure_numbers
+            )
         return ResolvedScreenplayTask(
             target_role=target,
             episode_numbers=episodes,
             base_revision_id=base_revision_id,
+            episode_scene_ids=episode_scene_ids,
+            source_revision_refs=source_revision_refs,
+            reviewed_draft_id=reviewed_draft_id,
+            document_sections=document_sections,
         )
 
     @staticmethod

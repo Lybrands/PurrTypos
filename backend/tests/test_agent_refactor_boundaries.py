@@ -520,9 +520,12 @@ def test_screenplay_paused_result_cannot_fall_through_to_failure():
     assert "return" in paused_branch
 
 
-def test_screenplay_recipe_never_emits_the_obsolete_coarse_units():
+def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
     source = (
-        BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
+        BACKEND_DIR / "application" / "screenplay_manifest_compiler.py"
     ).read_text(encoding="utf-8")
     assert 'kind="generate_episode_draft"' not in source
     assert 'kind="generate_deliverable"' not in source
+    assert not (
+        BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
+    ).exists()

@@ -202,6 +202,39 @@ class ScreenplayAgentContextQuery:
             "sceneIds": scene_ids,
         }
 
+    async def head_revision_refs(self, project_id: str) -> tuple[str, ...]:
+        rows = await self._db.fetch_all(
+            "SELECT h.revision_id FROM screenplay_project_heads AS h "
+            "JOIN screenplay_deliverables AS d ON d.id = h.deliverable_id "
+            "WHERE h.project_id = ? ORDER BY d.role",
+            [project_id],
+        )
+        return tuple(str(row["revision_id"]) for row in rows)
+
+    async def draft_revision_manifest(
+        self,
+        project_id: str,
+        draft_revision_id: str,
+    ) -> dict[int, tuple[str, ...]]:
+        numbers = await self._revision_episode_numbers(draft_revision_id)
+        result: dict[int, tuple[str, ...]] = {}
+        for number in numbers:
+            episode = await self._revision_episode(draft_revision_id, number)
+            if episode is None:
+                raise AppError(f"剧本正文缺少第 {number} 集", 409)
+            payload = episode.get("payload")
+            scene_ids = _draft_episode_scene_ids(payload)
+            if not scene_ids:
+                raise AppError(f"剧本正文第 {number} 集场景身份不完整", 409)
+            result[number] = scene_ids
+        return result
+
+    async def structure_episode_numbers(
+        self,
+        project_id: str,
+    ) -> tuple[int, ...]:
+        return await self._head_episode_numbers(project_id, "structure")
+
     async def episode_writing_context(
         self,
         project_id: str,
@@ -442,6 +475,16 @@ def _draft_scene_texts(value: object) -> dict[str, str]:
         if scene_id and text:
             result[scene_id] = _clip(text, 8_000)
     return result
+
+
+def _draft_episode_scene_ids(value: object) -> tuple[str, ...]:
+    draft = value if isinstance(value, Mapping) else {}
+    raw_ids = draft.get("sceneIds")
+    if isinstance(raw_ids, list):
+        result = tuple(str(value or "").strip() for value in raw_ids)
+    else:
+        result = tuple(_draft_scene_texts(draft))
+    return result if result and all(result) and len(result) == len(set(result)) else ()
 
 
 def _episode_continuity(value: object) -> dict[str, Any] | None:
