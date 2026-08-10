@@ -8,12 +8,12 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
     ResponseValidationResult,
 )
-from agent_core.errors import ResponseJudgeContractError
+from purra.errors import ResponseJudgeContractError
 from domains.writing.continuity_validation import (
     ATOMIC_CONTINUITY_SINGLE_DIMENSION_GUIDANCE,
     ATOMIC_CONTINUITY_VISIBLE_ORDER_GUIDANCE,

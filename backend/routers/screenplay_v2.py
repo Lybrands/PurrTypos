@@ -14,7 +14,6 @@ from schemas.screenplay_v2 import (
     CreateScreenplayV2WorkingCopyFromRevisionRequest,
     DeleteScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
-    StartScreenplayV2OperationRequest,
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
@@ -184,91 +183,6 @@ async def list_screenplay_v2_revision_history(
     return {"success": True, "data": history}
 
 
-@router.get("/operations/{operation_id}")
-async def get_screenplay_v2_operation(operation_id: str):
-    operation = await ScreenplayV2ProjectService(get_db()).get_operation(
-        operation_id
-    )
-    return {"success": True, "data": operation}
-
-
-@router.post("/projects/{project_id}/operations", status_code=202)
-async def start_screenplay_v2_operation(
-    project_id: str,
-    body: StartScreenplayV2OperationRequest,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-):
-    result = await ScreenplayV2ProjectService(get_db()).start_operation(
-        command_id=idempotency_key,
-        project_id=project_id,
-        request=body,
-    )
-    return {"success": True, "data": result}
-
-
-async def _control_screenplay_v2_operation(
-    operation_id: str,
-    action: str,
-    idempotency_key: str,
-):
-    result = await ScreenplayV2ProjectService(get_db()).control_operation(
-        command_id=idempotency_key,
-        operation_id=operation_id,
-        action=action,
-    )
-    return {"success": True, "data": result}
-
-
-@router.post("/operations/{operation_id}/pause")
-async def pause_screenplay_v2_operation(
-    operation_id: str,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-):
-    return await _control_screenplay_v2_operation(
-        operation_id,
-        "pause",
-        idempotency_key,
-    )
-
-
-@router.post("/operations/{operation_id}/resume")
-async def resume_screenplay_v2_operation(
-    operation_id: str,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-):
-    return await _control_screenplay_v2_operation(
-        operation_id,
-        "resume",
-        idempotency_key,
-    )
-
-
-@router.post("/operations/{operation_id}/cancel")
-async def cancel_screenplay_v2_operation(
-    operation_id: str,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-):
-    return await _control_screenplay_v2_operation(
-        operation_id,
-        "cancel",
-        idempotency_key,
-    )
-
-
-@router.get("/operations/{operation_id}/events")
-async def list_screenplay_v2_operation_events(
-    operation_id: str,
-    after: int = 0,
-    limit: int = 100,
-):
-    events = await ScreenplayV2ProjectService(get_db()).list_operation_events(
-        operation_id,
-        after=after,
-        limit=limit,
-    )
-    return {"success": True, "data": events}
-
-
 @router.patch("/working-copies/{working_copy_id}")
 async def update_screenplay_v2_working_copy(
     working_copy_id: str,
@@ -334,25 +248,19 @@ async def accept_screenplay_v2_revision(
 __all__ = [
     "accept_screenplay_v2_revision",
     "archive_screenplay_v2_project",
-    "cancel_screenplay_v2_operation",
     "create_screenplay_v2_project",
     "create_screenplay_v2_session",
     "create_screenplay_v2_working_copy_from_revision",
     "delete_screenplay_v2_project",
     "ensure_current_screenplay_v2_session",
-    "get_screenplay_v2_operation",
     "get_screenplay_v2_revision",
     "get_screenplay_v2_workspace",
     "list_screenplay_v2_projects",
     "list_screenplay_v2_sessions",
     "list_screenplay_v2_revision_history",
-    "list_screenplay_v2_operation_events",
-    "pause_screenplay_v2_operation",
     "publish_screenplay_v2_working_copy",
     "restore_screenplay_v2_project",
-    "resume_screenplay_v2_operation",
     "router",
-    "start_screenplay_v2_operation",
     "update_screenplay_v2_project",
     "update_screenplay_v2_working_copy",
 ]

@@ -24,3 +24,7 @@ export {
   type AgentConversationCapabilities,
   type AgentSubmitMode,
 } from './conversationCapabilities'
+export {
+  AgentChunkReplay,
+  type AgentChunkTurnSeed,
+} from './chunkReplay'

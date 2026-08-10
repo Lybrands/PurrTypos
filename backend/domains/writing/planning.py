@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunRequest,
     PlanningCapabilities,
     PlanningConstraints,

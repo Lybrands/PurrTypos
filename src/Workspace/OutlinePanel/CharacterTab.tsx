@@ -2,34 +2,16 @@ import { services } from '@/services'
 import React from 'react'
 import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
 import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import type { Editor } from '@tiptap/core'
-import { Extension } from '@tiptap/core'
-import { useEditor, EditorContent } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
+import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
 import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { getBookCharacters } from '../utils'
-import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import CharacterOptionsModal from './CharacterOptionsModal'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
 import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
-
-/** Tab 键：列表内缩进，非列表插入制表符（与小说背景编辑器一致） */
-const LiteralTab = Extension.create({
-  name: 'literalTab',
-  addKeyboardShortcuts() {
-    return {
-      Tab: () => {
-        if (this.editor.commands.sinkListItem('listItem')) return true
-        this.editor.commands.insertContent('\t')
-        return true
-      },
-    }
-  },
-})
 
 /** 新建人物时的档案脚手架：提供引导但不强制，小节可按需增删 */
 const PROFILE_TEMPLATE = `## 基本信息
@@ -94,41 +76,8 @@ export default function CharacterTab({
 
   const [draftName, setDraftName] = React.useState('')
   const [draftTags, setDraftTags] = React.useState<string[]>([])
+  const [draftProfileMd, setDraftProfileMd] = React.useState('')
   const [tagOptions, setTagOptions] = React.useState<CharacterOption[]>([])
-
-  const editorRef = React.useRef<Editor | null>(null)
-  const editor = useEditor({
-    immediatelyRender: true,
-    extensions: [
-      LiteralTab,
-      StarterKit.configure({
-        heading: { levels: [1, 2, 3, 4] },
-      }),
-    ],
-    content: '<p></p>',
-    editorProps: {
-      attributes: {
-        class: 'story-background-tiptap-editable',
-        spellcheck: 'false',
-      },
-      handlePaste: (_view, event) => {
-        const text = event.clipboardData?.getData('text/plain') ?? ''
-        if (!text.trim()) return false
-        const looksLikeMarkdown =
-          /^#+\s|^\s*[-*+]\s|^\s*\d+\.\s|\*\*[^*]+|\n\s*[-*+]\s|\n#+\s|^>\s|^\s*\|.+\|/m.test(text)
-        if (looksLikeMarkdown) {
-          event.preventDefault()
-          editorRef.current?.commands.insertContent(markdownToHtml(text))
-          return true
-        }
-        return false
-      },
-    },
-  }, [editModalOpen])
-
-  React.useEffect(() => {
-    editorRef.current = editor ?? null
-  }, [editor])
 
   const loadCharacters = React.useCallback(async () => {
     if (bookId == null) return
@@ -156,13 +105,6 @@ export default function CharacterTab({
     return () => window.removeEventListener('setting-updated', handler)
   }, [loadCharacters])
 
-  // 打开编辑弹窗时灌入草稿（新建给模板脚手架）
-  React.useEffect(() => {
-    if (!editModalOpen || !editor) return
-    const md = editTarget ? (editTarget.profile_md ?? '') : PROFILE_TEMPLATE
-    editor.commands.setContent(markdownToHtml(md))
-  }, [editModalOpen, editTarget, editor])
-
   React.useEffect(() => {
     onActionActiveChange?.(editModalOpen || !!deleteTarget || configOpen)
   }, [editModalOpen, deleteTarget, configOpen, onActionActiveChange])
@@ -180,6 +122,7 @@ export default function CharacterTab({
     setEditTarget(null)
     setDraftName('')
     setDraftTags([])
+    setDraftProfileMd(PROFILE_TEMPLATE)
     setEditModalOpen(true)
   }, [])
 
@@ -188,6 +131,7 @@ export default function CharacterTab({
     setEditTarget(c)
     setDraftName(c.name ?? '')
     setDraftTags(splitToArray(c.tags))
+    setDraftProfileMd(c.profile_md ?? '')
     setEditModalOpen(true)
   }, [diff])
 
@@ -203,11 +147,10 @@ export default function CharacterTab({
       return
     }
     if (bookId == null) return
-    const ed = editorRef.current
     const data: Partial<Character> = {
       name,
       tags: draftTags.join(', '),
-      profile_md: ed ? htmlToMarkdown(ed.getHTML()) : '',
+      profile_md: draftProfileMd,
     }
     setSaving(true)
     try {
@@ -224,7 +167,7 @@ export default function CharacterTab({
     } finally {
       setSaving(false)
     }
-  }, [bookId, draftName, draftTags, editTarget, closeModal, loadCharacters, message])
+  }, [bookId, draftName, draftTags, draftProfileMd, editTarget, closeModal, loadCharacters, message])
 
   /** 打开 AI 全局对话并携带人物上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((c: Character) => {
@@ -403,9 +346,13 @@ export default function CharacterTab({
             className="character-edit-tags"
           />
         </div>
-        <div className="character-edit-profile story-background-tiptap-wrap">
-          <EditorContent editor={editor} className="story-background-tiptap-container" />
-        </div>
+        <KnowledgeMarkdownEditor
+          documentKey={`character:${editTarget?.id ?? 'new'}`}
+          value={draftProfileMd}
+          onChange={setDraftProfileMd}
+          ariaLabel="人物档案"
+          className="character-edit-profile"
+        />
       </PurrModal>
 
       <CharacterOptionsModal

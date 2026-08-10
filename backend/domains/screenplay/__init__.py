@@ -1,13 +1,5 @@
-"""Screenplay-domain adapters for the shared Agent Core."""
+"""Screenplay project business rules.
 
-from domains.screenplay.adapter import ScreenplayDomainAdapter
-from domains.screenplay.contracts import (
-    SCREENPLAY_DOMAIN_NAMESPACE,
-    ScreenplayDomainContext,
-)
-
-__all__ = [
-    "SCREENPLAY_DOMAIN_NAMESPACE",
-    "ScreenplayDomainAdapter",
-    "ScreenplayDomainContext",
-]
+AI intent and Job contracts live in :mod:`domains.screenplay_agent`; this
+package no longer installs a screenplay-specific adapter into shared Core.
+"""

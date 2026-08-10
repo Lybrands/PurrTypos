@@ -7,15 +7,15 @@ from contextlib import suppress
 from dataclasses import dataclass
 from uuid import uuid4
 
-from agent_core.contracts import (
+from purra.contracts import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalResult,
     ApprovalStatus,
     RunId,
 )
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.ports import CancellationSignal, EventSink
+from purra.events import AgentEvent, CoreEventType
+from purra.ports import CancellationSignal, EventSink
 from infrastructure.persistence import approval_store
 
 

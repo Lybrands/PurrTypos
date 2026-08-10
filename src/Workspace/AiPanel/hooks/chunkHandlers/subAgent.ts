@@ -105,7 +105,7 @@ function childAccumulator(
   }
   const created: AccState = {
     response: "",
-    thinking: "",
+    commentary: "",
     bookId: ctx.acc.bookId,
     sessionId: ctx.acc.sessionId,
     chapterId: ctx.acc.chapterId,
@@ -114,9 +114,8 @@ function childAccumulator(
     model: ctx.acc.model,
     turnStartedAt: performance.now(),
     agentRunId: envelope.childRunId || undefined,
-    thinkingBlocks: [],
-    thinkingDurationsMs: [],
-    contentAfterToolCalls: "",
+    commentaryBlocks: [],
+    commentaryDurationsMs: [],
   };
   accumulators[envelope.delegationId] = created;
   return created;
@@ -128,13 +127,12 @@ function messageFromAccumulator(
 ): ChatMessage {
   return {
     ...message,
-    content: acc.response || message.content,
+    content: acc.response || acc.pendingFinalResponse || message.content,
     agentRunId: acc.agentRunId || message.agentRunId,
-    thinking: acc.thinking || message.thinking,
-    thinkingBlocks: acc.thinkingBlocks,
-    thinkingDurationsMs: acc.thinkingDurationsMs,
+    commentary: acc.commentary || message.commentary,
+    commentaryBlocks: acc.commentaryBlocks,
+    commentaryDurationsMs: acc.commentaryDurationsMs,
     toolCallSegments: acc.toolCallSegments,
-    contentAfterToolCalls: acc.contentAfterToolCalls,
     taskPlan: acc.taskPlan,
     delegations: acc.delegations,
     contextCompaction: acc.contextCompaction,
@@ -236,14 +234,22 @@ export function handleAgentSubRunEvent(
     cleanup: () => undefined,
   };
   dispatchNested(childChunk, childCtx);
+  const reflectAccumulator = (activity: AiSubAgentActivity) => ({
+    ...activity,
+    status: activityStatus(childChunk),
+    message: messageFromAccumulator(activity.message, acc),
+  });
   ctx.acc.subAgentActivities = upsertActivity(
     ctx.acc.subAgentActivities,
     envelope,
-    (activity) => ({
-      ...activity,
-      status: activityStatus(childChunk),
-      message: messageFromAccumulator(activity.message, acc),
-    }),
+    reflectAccumulator,
+  );
+  // Final-answer deltas are intentionally buffered by the shared reducer.
+  // Mirror the child accumulator into its scoped state so it becomes visible
+  // when the delegation itself reaches done, while the active timeline gate
+  // keeps it hidden during execution.
+  ctx.scheduleCommit((messages) =>
+    updateLastAssistantActivity(messages, envelope, reflectAccumulator),
   );
   return true;
 }

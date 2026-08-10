@@ -59,7 +59,13 @@ def _build_chat_params(
             ),
         },
     }
-    for key in ("temperature", "max_tokens", "tools", "tool_choice"):
+    for key in (
+        "temperature",
+        "max_tokens",
+        "response_format",
+        "tools",
+        "tool_choice",
+    ):
         value = options.get(key)
         if value is not None and value != []:
             params[key] = value
@@ -128,6 +134,11 @@ async def chat_no_stream(
         return {
             "message": message,
             "model": str(payload.get("model") or model),
+            "finish_reason": (
+                choice.get("finish_reason")
+                if isinstance(choice, Mapping)
+                else None
+            ),
             "usage": dict(usage) if isinstance(usage, Mapping) else None,
         }
     finally:

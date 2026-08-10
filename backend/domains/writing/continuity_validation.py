@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageOrigin,
     MessageRole,
@@ -839,7 +839,7 @@ def _host_tool_payloads(
         if (
             message.role is MessageRole.TOOL
             and message.origin is MessageOrigin.HOST_TOOL_RESULT
-            and message.host_metadata.get("agent_core_tool_name") == tool_name
+            and message.host_metadata.get("purra_tool_name") == tool_name
         ):
             values.append(_decode_json_content(message.content))
     return tuple(values)

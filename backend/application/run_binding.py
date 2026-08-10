@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from agent_core.contracts import AgentRunResult
+from purra.contracts import AgentRunResult
 
 
 @runtime_checkable

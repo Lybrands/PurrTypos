@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from agent_core.evaluation import (
+from purra.evaluation import (
     AgentRuntimeRegressionCase,
     evaluate_runtime_regression_case,
     get_core_security_redteam_cases,

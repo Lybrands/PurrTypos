@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_core.contracts import AgentDelegation, DelegationAggregation
-from agent_core.events import AgentEvent
-from agent_core.ports import CheckpointStore
-from agent_core.json_values import thaw_json_mapping
+from purra.contracts import AgentDelegation, DelegationAggregation
+from purra.events import AgentEvent
+from purra.ports import CheckpointStore
+from purra.json_values import thaw_json_mapping
 from application.sse_mapping import core_event_to_sse_chunk
 from domains.agent_roles import AgentRoleRegistry
 

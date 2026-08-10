@@ -1,5 +1,9 @@
 import type { AiAgentDelegation } from "../../../../types";
-import type { AiTaskPlan, AiTaskStep, ChatMessage } from "../chat.types";
+import type {
+  AiTaskPlan,
+  AiTaskStep,
+  ChatMessage,
+} from "../chat.types";
 import type { ChunkHandler } from "./types";
 
 function updateLastAssistant(
@@ -16,7 +20,7 @@ function updateLastAssistant(
   });
 }
 
-function normalizePlan(payload: unknown): (AiTaskPlan & { runId?: string }) | null {
+function normalizePlan(payload: unknown): AiTaskPlan | null {
   if (!payload || typeof payload !== "object") return null;
   const raw = payload as {
     runId?: unknown;
@@ -67,6 +71,8 @@ function normalizePlanStatus(status: unknown): AiTaskPlan["status"] {
 export const handleAgentRunStarted: ChunkHandler = (chunk, ctx) => {
   const started = chunk.agentRunStarted;
   if (!started?.runId) return;
+  const ownerRunId = ctx.acc.taskPlan?.runId || ctx.acc.agentRunId;
+  if (ownerRunId && ownerRunId !== started.runId) return;
   ctx.acc.agentRunId = started.runId;
   updateLastAssistant(ctx, (message) => ({
     ...message,
@@ -77,25 +83,29 @@ export const handleAgentRunStarted: ChunkHandler = (chunk, ctx) => {
 export const handleAgentRunTodosUpdated: ChunkHandler = (chunk, ctx) => {
   const plan = normalizePlan(chunk.agentRunTodosUpdated);
   if (!plan) return;
-  const { runId, ...taskPlan } = plan;
-  ctx.acc.agentRunId = runId || ctx.acc.agentRunId;
-  ctx.acc.taskPlan = taskPlan;
+  const ownerRunId = ctx.acc.taskPlan?.runId || ctx.acc.agentRunId;
+  if (ownerRunId && plan.runId && ownerRunId !== plan.runId) return;
+  ctx.acc.agentRunId = plan.runId || ctx.acc.agentRunId;
+  ctx.acc.taskPlan = plan;
   updateLastAssistant(ctx, (message) => ({
     ...message,
-    agentRunId: runId || message.agentRunId,
-    taskPlan,
+    agentRunId: plan.runId || message.agentRunId,
+    taskPlan: plan,
   }));
 };
 
 export const handleAgentRunTodoUpdated: ChunkHandler = (chunk, ctx) => {
   const updated = chunk.agentRunTodoUpdated;
   if (!updated?.stepId || !updated.step) return;
+  const ownerRunId = ctx.acc.taskPlan?.runId || ctx.acc.agentRunId;
+  if (ownerRunId && updated.runId && ownerRunId !== updated.runId) return;
   const nextStep = normalizeStep(updated.step);
   if (!nextStep) return;
   const apply = (plan: AiTaskPlan | undefined): AiTaskPlan | undefined => {
     if (!plan) return plan;
     return {
       ...plan,
+      runId: plan.runId || updated.runId,
       status: normalizePlanStatus(updated.status || plan.status),
       steps: plan.steps.map((step) =>
         step.id === updated.stepId ? { ...step, ...nextStep } : step,
@@ -116,9 +126,19 @@ export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
   const terminal =
     completed || chunk.agentRunFailed || chunk.agentRunBlocked || chunk.agentRunCanceled;
   if (!terminal?.runId) return;
+  const ownerRunId = ctx.acc.taskPlan?.runId || ctx.acc.agentRunId;
+  if (ownerRunId && ownerRunId !== terminal.runId) {
+    // Business streams may expose fragment/child Run lifecycles alongside the
+    // root plan. A child terminal is not a root task terminal and must not
+    // change plan state or become the root final-response fallback.
+    return;
+  }
   const terminalResponse = completed?.finalResponse?.trim() || "";
-  if (terminalResponse && !ctx.acc.response.trim()) {
-    ctx.acc.response = terminalResponse;
+  if (terminalResponse) {
+    // A Run terminal is lifecycle state. The enclosing conversation stream
+    // may still have task-plan/progress events to project, so retain this only
+    // as a fallback for the root `done` commit.
+    ctx.acc.pendingFinalResponse = terminalResponse;
   }
   const status = normalizePlanStatus(terminal.status);
   ctx.acc.agentRunId = terminal.runId;
@@ -128,9 +148,6 @@ export const handleAgentRunTerminal: ChunkHandler = (chunk, ctx) => {
   updateLastAssistant(ctx, (message) => ({
     ...message,
     agentRunId: terminal.runId,
-    content: terminalResponse && !message.content.trim()
-      ? terminalResponse
-      : message.content,
     taskPlan: message.taskPlan ? { ...message.taskPlan, status } : message.taskPlan,
   }));
 };
@@ -140,6 +157,9 @@ export const handleLongTaskDispatched: ChunkHandler = (chunk, ctx) => {
   if (!dispatched?.taskId) return;
   ctx.acc.longTaskId = dispatched.taskId;
   ctx.acc.agentRunId = dispatched.runId || ctx.acc.agentRunId;
+  if (ctx.acc.taskPlan) {
+    ctx.acc.taskPlan = { ...ctx.acc.taskPlan, status: "running" };
+  }
   updateLastAssistant(ctx, (message) => ({
     ...message,
     agentRunId: dispatched.runId || message.agentRunId,
@@ -147,6 +167,18 @@ export const handleLongTaskDispatched: ChunkHandler = (chunk, ctx) => {
     taskPlan: message.taskPlan
       ? { ...message.taskPlan, status: "running" }
       : message.taskPlan,
+  }));
+};
+
+export const handleLongTaskProgress: ChunkHandler = (chunk, ctx) => {
+  const progress = chunk.longTaskProgress;
+  if (!progress?.taskId) return;
+  ctx.acc.agentRunId = progress.runId || ctx.acc.agentRunId;
+  ctx.acc.longTaskId = progress.taskId;
+  updateLastAssistant(ctx, (message) => ({
+    ...message,
+    agentRunId: progress.runId || message.agentRunId,
+    longTaskId: progress.taskId,
   }));
 };
 

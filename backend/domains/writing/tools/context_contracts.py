@@ -6,7 +6,7 @@ grant authority; scope validators and tool policies remain authoritative.
 
 from __future__ import annotations
 
-from agent_core.contracts import ToolContextContract, ToolResultProjection
+from purra.contracts import ToolContextContract, ToolResultProjection
 from domains.writing.planning import WRITING_TOOL_PLANNING_DEPENDENCIES
 from domains.writing.policies import WRITING_TOOL_POLICIES
 

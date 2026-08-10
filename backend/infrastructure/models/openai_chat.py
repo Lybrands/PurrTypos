@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
@@ -58,6 +59,7 @@ async def chat_no_stream(
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
+    response_format = opts.get("response_format")
 
     client = _create_client(api_key, base_url)
 
@@ -69,6 +71,8 @@ async def chat_no_stream(
     )
     if max_tokens:
         params["max_tokens"] = max_tokens
+    if isinstance(response_format, Mapping):
+        params["response_format"] = dict(response_format)
     if tools:
         params["tools"] = tools
         if tool_choice is not None:
@@ -91,6 +95,7 @@ async def chat_no_stream(
         return {
             "message": message,
             "model": res.model or model,
+            "finish_reason": getattr(choice, "finish_reason", None),
             "usage": usage,
         }
     finally:
@@ -116,6 +121,7 @@ async def chat_stream(
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     top_k: Any = opts.get("top_k")
+    response_format = opts.get("response_format")
 
     tool_names = (
         ", ".join(t.get("function", {}).get("name", "") for t in tools if t.get("function", {}).get("name"))
@@ -136,6 +142,8 @@ async def chat_stream(
     )
     if max_tokens:
         params["max_tokens"] = max_tokens
+    if isinstance(response_format, Mapping):
+        params["response_format"] = dict(response_format)
     if tools:
         params["tools"] = tools
         if tool_choice is not None:

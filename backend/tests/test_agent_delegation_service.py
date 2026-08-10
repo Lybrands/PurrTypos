@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunResult,
     ExecutionState,
     RunCreateParams,
     RunStatus,
     ToolExecutionMode,
 )
-from agent_core.events import CoreEventType
+from purra.events import CoreEventType
 from application.agent_delegation_tool import build_delegation_tool_registration
 from application.agent_delegation_service import AgentDelegationService
 from application.agent_orchestrator import AgentOrchestrator

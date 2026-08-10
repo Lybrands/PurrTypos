@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
-from agent_core.events import CoreEventType
+from purra.events import CoreEventType
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
@@ -163,7 +163,7 @@ def _event_name(event: dict[str, Any]) -> str:
             "modelInvocation",
                 "contextBudget",
             "delta",
-            "thinkingDelta",
+            "reasoningDelta",
             "toolCalls",
         "toolApprovalRequired",
         "toolApprovalResolved",
@@ -258,6 +258,7 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
                 "content": json.dumps(content, ensure_ascii=False),
             },
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     async def _runtime(_key, messages, options, _provider, signal=None):
@@ -404,7 +405,7 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
         item["payload"]["event"]["type"]
         for item in persisted_child_events
     ]
-    assert CoreEventType.MODEL_DELTA not in persisted_child_types
+    assert CoreEventType.ASSISTANT_FINAL_DELTA not in persisted_child_types
     assert CoreEventType.RUN_STARTED in persisted_child_types
     assert CoreEventType.RUN_COMPLETED in persisted_child_types
 
@@ -548,8 +549,6 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
                 "modelMaxOutputTokens": None,
                 "contextMaxOutputTokens": 100_000,
                 "limitingFactor": "task_estimate",
-                "executionMode": "single",
-                "lengthStrategy": "fail",
             },
             "reasoningMode": "default",
             "toolChoice": "none",
@@ -658,6 +657,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
         return {
             "message": {"role": "assistant", "content": "not-json"},
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     async def _model_fallback(_key, _messages, options, _provider, signal=None):
@@ -759,6 +759,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     model_calls = 0
@@ -831,11 +832,11 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
-        "thinkingDelta",
-        "thinkingDelta",
+        "reasoningDelta",
+        "reasoningDelta",
         "agentRunTodoUpdated",
         "agentRunTodosUpdated",
-        "thinkingDelta",
+        "reasoningDelta",
         "agentRunTodoUpdated",
         "agentRunFailed",
         "error",
@@ -881,9 +882,9 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
     }
     assert [
-        event["thinkingDelta"]
+        event["reasoningDelta"]
         for event in events
-        if "thinkingDelta" in event
+        if "reasoningDelta" in event
     ] == ["PRIVATE", "PRIVATE", "PRIVATE"]
     assert not any("delta" in event for event in events)
     _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
@@ -951,6 +952,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     model_round = 0
@@ -1283,6 +1285,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     }, ensure_ascii=False),
                 },
                 "model": "judge-model",
+                "finish_reason": "stop",
             }
         planner_round += 1
         assert signal is not None
@@ -1376,6 +1379,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                 "content": json.dumps(content, ensure_ascii=False),
             },
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     runtime_round = 0
@@ -1670,6 +1674,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
+            "finish_reason": "stop",
         }
 
     async def _model_stream(
@@ -1856,6 +1861,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         "toolIndexCompleted",
         "toolResults",
         "agentRunTodoUpdated",
+        "reasoningDelta",
         "agentRunTodoUpdated",
         "delta",
         "agentRunTodoUpdated",
@@ -1880,13 +1886,18 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    assert events[14]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[14]["agentRunTodoUpdated"]["step"]["status"] == "running"
-    assert events[15] == {
+    assert events[14] == {
+        "reasoningDelta": (
+            "正在删除并重试 <tool_call><function=deleteCharacter>"
+        ),
+    }
+    assert events[15]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[15]["agentRunTodoUpdated"]["step"]["status"] == "running"
+    assert events[16] == {
         "delta": "您已拒绝审批；操作未执行，相关数据仍保留。",
     }
-    assert events[16]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[16]["agentRunTodoUpdated"]["step"]["status"] == "done"
+    assert events[17]["agentRunTodoUpdated"]["stepId"] == "report-result"
+    assert events[17]["agentRunTodoUpdated"]["step"]["status"] == "done"
     delete_statuses = [
         event["agentRunTodoUpdated"]["step"]["status"]
         for event in events
@@ -1905,7 +1916,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "删除失败" not in visible_text
     assert "权限" not in visible_text
     assert "联系管理员" not in visible_text
-    assert not any("thinkingDelta" in event for event in events)
+    assert not any("commentaryDelta" in event for event in events)
     assert events[-1] == {"done": True, "model": "wire-model"}
     assert model_round == 4
     character = await db.fetch_one(

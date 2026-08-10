@@ -7,17 +7,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
-    ModelInvocation,
     ModelRequest,
     ReasoningMode,
-    ToolChoiceMode,
 )
-from agent_core.errors import UnsupportedModelFeatureError
-from agent_core.json_values import thaw_json_mapping
-from agent_core.ports import CancellationSignal, ModelGateway
+from purra.json_values import thaw_json_mapping
+from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.output_budget import OutputBudgetPolicy
+from purra.ports import CancellationSignal
 from domains.writing.memory_reranking import (
     MemoryCandidateCard,
     MemoryRerankDecision,
@@ -53,17 +52,22 @@ _CONNECTION_OPTION_KEYS = frozenset({"baseURL"})
 class ModelBackedMemoryReranker:
     """Batch candidate cards through the request's configured chat model."""
 
-    model_gateway: ModelGateway
+    model_executor: ManagedModelExecutor
     batch_size: int = 40
     max_output_tokens: int = 1_800
+    context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model_gateway, ModelGateway):
-            raise TypeError("story-memory reranker requires a ModelGateway")
+        if not isinstance(self.model_executor, ManagedModelExecutor):
+            raise TypeError(
+                "story-memory reranker requires a ManagedModelExecutor"
+            )
         if not 4 <= int(self.batch_size) <= 40:
             raise ValueError("story-memory rerank batch size must be between 4 and 40")
         if int(self.max_output_tokens) <= 0:
             raise ValueError("story-memory reranker output budget must be positive")
+        if int(self.context_window_tokens) <= 0:
+            raise ValueError("story-memory reranker context window must be positive")
 
     async def rerank(
         self,
@@ -203,24 +207,23 @@ class ModelBackedMemoryReranker:
         reasoning_mode: ReasoningMode,
         signal: CancellationSignal | None,
     ):
-        invocation = ModelInvocation(
-            request=_deterministic_request(model_request),
-            tools=(),
-            tool_choice=ToolChoiceMode.NONE,
-            max_output_tokens=int(self.max_output_tokens),
-            reasoning_mode=reasoning_mode,
+        result = await self.model_executor.complete(
+            messages,
+            ManagedModelCall(
+                request=_deterministic_request(model_request),
+                output_policy=OutputBudgetPolicy(
+                    key="story_memory_reranker",
+                    base_tokens=int(self.max_output_tokens),
+                    per_work_unit_tokens=0,
+                    safety_factor=1,
+                    hard_cap_tokens=int(self.max_output_tokens),
+                ),
+                context_window_tokens=self.context_window_tokens,
+                reasoning_mode=reasoning_mode,
+            ),
+            signal,
         )
-        try:
-            return await self.model_gateway.complete(messages, invocation, signal)
-        except UnsupportedModelFeatureError:
-            if reasoning_mode is not ReasoningMode.DISABLED:
-                raise
-            return await self._complete(
-                messages,
-                model_request=model_request,
-                reasoning_mode=ReasoningMode.DEFAULT,
-                signal=signal,
-            )
+        return result.completion
 
 
 def _candidate_card(item: MemoryCandidateCard) -> dict[str, Any]:
@@ -356,6 +359,7 @@ def _deterministic_request(request: ModelRequest) -> ModelRequest:
         provider=request.provider,
         model=request.model,
         profile_id=request.profile_id,
+        output_capabilities=request.output_capabilities,
         options=options,
     )
 

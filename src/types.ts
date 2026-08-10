@@ -192,11 +192,10 @@ export interface ScreenplayDocumentProposal {
 export interface ScreenplayRevisionRef {
   schemaVersion: 1;
   projectId: EntityId;
-  operationId: string;
+  taskId: string;
   revisionId: string;
   role: ScreenplayV2DeliverableRole;
   revisionNo: number;
-  taskId?: string;
   /** Live transport provenance; persisted conversations resolve by Revision id. */
   sourceRunId?: string;
 }
@@ -233,20 +232,6 @@ export type ScreenplayV2DeliverableRole =
   | 'sceneList'
   | 'screenplayDraft'
   | 'review';
-export type ScreenplayV2OperationStatus =
-  | 'queued'
-  | 'running'
-  | 'paused'
-  | 'succeeded'
-  | 'failed'
-  | 'canceled';
-export type ScreenplayV2OperationIntentType =
-  | 'generate'
-  | 'regenerate'
-  | 'continue'
-  | 'review'
-  | 'revise';
-
 export interface ScreenplayV2RevisionSummary {
   id: string;
   deliverableId: string;
@@ -255,7 +240,7 @@ export interface ScreenplayV2RevisionSummary {
   parentRevisionId: string | null;
   contentDigest: string;
   summary: Record<string, unknown>;
-  operationId: string | null;
+  agentTaskId: string | null;
   rootRunId?: string | null;
   finalizingRunId?: string | null;
   applicability?: 'current' | 'stale';
@@ -297,25 +282,6 @@ export interface ScreenplayV2WorkingCopy {
   updatedAt?: string | null;
 }
 
-export interface ScreenplayV2OperationSummary {
-  id: string;
-  targetRole: ScreenplayV2DeliverableRole;
-  status: ScreenplayV2OperationStatus;
-  progress: Record<string, unknown>;
-  resultRevisionId: string | null;
-  updatedAt?: string | null;
-}
-
-export interface ScreenplayV2Operation extends ScreenplayV2OperationSummary {
-  projectId: string;
-  commandId: string;
-  intent: Record<string, unknown>;
-  baseProjectRevision: number;
-  baseHeads: Partial<Record<ScreenplayV2DeliverableRole, string>>;
-  error: { code?: string; message?: string; runId?: string } | null;
-  createdAt?: string | null;
-}
-
 export interface ScreenplayV2Project {
   id: string;
   revision: number;
@@ -349,13 +315,12 @@ export interface ScreenplayV2Workspace {
     headRevisionId: string | null;
   }>;
   candidates: ScreenplayV2RevisionSummary[];
-  activeOperations: ScreenplayV2OperationSummary[];
   workingCopies: ScreenplayV2WorkingCopy[];
 }
 
 export type ScreenplayConversationTurnStatus =
   | 'queued'
-  | 'running'
+  | 'planning'
   | 'completed'
   | 'failed'
   | 'canceled';
@@ -364,10 +329,7 @@ export interface ScreenplayConversationTurn {
   id: string;
   projectId: EntityId;
   sessionId: number;
-  commandId: string;
-  route: 'read_only' | 'operation';
   status: ScreenplayConversationTurnStatus;
-  attempt: number;
   userContent: string;
   assistantContent: string;
   runtimeProfile: {
@@ -378,19 +340,54 @@ export interface ScreenplayConversationTurn {
     locale?: string;
     contextWindow?: string | null;
   };
-  operationId: string | null;
-  runId: string | null;
-  revisionId: string | null;
+  intent: Record<string, unknown> | null;
+  plannerRunId: string | null;
+  taskId: string | null;
   error: { code?: string; message?: string } | null;
-  retryable: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export type ScreenplayAgentTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+export interface ScreenplayAgentTaskUnit {
+  id: string;
+  position: number;
+  kind: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  error: { code?: string; message?: string } | null;
+  attempt: number;
+}
+
+export interface ScreenplayAgentTask {
+  id: string;
+  projectId: EntityId;
+  sessionId: number;
+  turnId: string;
+  status: ScreenplayAgentTaskStatus;
+  targetRole: ScreenplayV2DeliverableRole;
+  intent: Record<string, unknown>;
+  plannerRunId: string | null;
+  totalUnits: number;
+  completedUnits: number;
+  resultRevisionId: string | null;
+  error: { code?: string; message?: string } | null;
+  units: ScreenplayAgentTaskUnit[];
   createdAt?: string | null;
   updatedAt?: string | null;
 }
 
 export interface ScreenplayConversationEvent {
   cursor: number;
-  turnId: string;
-  sequence: number;
+  turnId: string | null;
+  taskId: string | null;
   type: string;
   payload: Record<string, unknown>;
   createdAt?: string | null;
@@ -400,6 +397,7 @@ export interface ScreenplayConversationSnapshot {
   projectId: EntityId;
   sessionId: number;
   turns: ScreenplayConversationTurn[];
+  tasks: ScreenplayAgentTask[];
   cursor: number;
 }
 
@@ -408,6 +406,29 @@ export interface ScreenplayConversationEventPage {
   nextCursor: number;
   hasMore: boolean;
 }
+
+export interface ScreenplayAgentChunkEvent {
+  cursor: number;
+  turnId: string;
+  taskId: string | null;
+  runId: string | null;
+  userContent: string;
+  model: string | null;
+  turnCreatedAt?: string | null;
+  chunk: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface ScreenplayAgentChunkPage {
+  kind: 'agent_chunks';
+  chunks: ScreenplayAgentChunkEvent[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export type ScreenplayConversationStreamEvent =
+  | ScreenplayConversationEvent
+  | ScreenplayAgentChunkPage;
 
 export interface ScreenplayConversationRuntimeInput {
   apiKey: string;
@@ -826,10 +847,10 @@ export interface Conversation {
   prompt: string;
   response: string;
   model?: string;
-  thinking?: string;
+  commentary?: string;
   tool_call_segments?: string | null;
-  thinking_blocks?: string | null;
-  thinking_durations_ms?: string | null;
+  commentary_blocks?: string | null;
+  commentary_durations_ms?: string | null;
   duration_ms?: number | null;
   task_plan?: string | null;
   context_compaction?: string | null;
@@ -1471,15 +1492,6 @@ export interface ElectronAPI {
     projectId: EntityId;
     sessionId: number;
     content: string;
-    operation?: {
-      expectedProjectRevision: number;
-      targetRole: ScreenplayV2DeliverableRole;
-      intent: {
-        type: ScreenplayV2OperationIntentType;
-        scope?: Record<string, unknown>;
-        instruction?: string;
-      };
-    };
     runtime: ScreenplayConversationRuntimeInput;
   }) => Promise<ApiResult<ScreenplayConversationTurn>>;
   getScreenplayConversationSnapshot: (data: {
@@ -1496,17 +1508,21 @@ export interface ElectronAPI {
     projectId: EntityId;
     sessionId: number;
     after: number;
-    onEvent: (event: ScreenplayConversationEvent) => void;
+    chunkAfter?: number;
+    onEvent: (event: ScreenplayConversationStreamEvent) => void;
   }) => () => void;
   cancelScreenplayConversationTurn: (data: {
     commandId: string;
     turnId: string;
   }) => Promise<ApiResult<ScreenplayConversationTurn>>;
-  resumeScreenplayConversationTurn: (data: {
-    commandId: string;
+  truncateScreenplayConversationFromTurn: (data: {
     turnId: string;
-    runtime: ScreenplayConversationRuntimeInput;
-  }) => Promise<ApiResult<ScreenplayConversationTurn>>;
+  }) => Promise<ApiResult<{
+    projectId: EntityId;
+    sessionId: number;
+    deletedTurnIds: string[];
+    deletedTaskIds: string[];
+  }>>;
   createScreenplayV2Project: (data: {
     commandId: string;
     title: string;
@@ -1563,37 +1579,6 @@ export interface ElectronAPI {
     revision: ScreenplayV2RevisionSummary;
     workspace: ScreenplayV2Workspace;
   }>>;
-  startScreenplayV2Operation: (data: {
-    commandId: string;
-    projectId: EntityId;
-    expectedProjectRevision: number;
-    targetRole: ScreenplayV2DeliverableRole;
-    intent: {
-      type: ScreenplayV2OperationIntentType;
-      scope?: Record<string, unknown>;
-      instruction?: string;
-    };
-    conversation?: { sessionId?: number; userMessageId?: string };
-  }) => Promise<ApiResult<{
-    operation: ScreenplayV2Operation;
-    projectRevision: number;
-    workspace: ScreenplayV2Workspace;
-  }>>;
-  getScreenplayV2Operation: (data: {
-    operationId: string;
-  }) => Promise<ApiResult<ScreenplayV2Operation>>;
-  pauseScreenplayV2Operation: (data: {
-    commandId: string;
-    operationId: string;
-  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
-  resumeScreenplayV2Operation: (data: {
-    commandId: string;
-    operationId: string;
-  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
-  cancelScreenplayV2Operation: (data: {
-    commandId: string;
-    operationId: string;
-  }) => Promise<ApiResult<{ operation: ScreenplayV2Operation }>>;
   acceptScreenplayV2Revision: (data: {
     commandId: string;
     projectId: EntityId;
@@ -1896,14 +1881,14 @@ export interface ElectronAPI {
     prompt: string;
     response: string;
     model?: string;
-    thinking?: string;
+    commentary?: string;
     toolCallSegments?: {
-      textBefore: string;
       labels: string[];
+      commentaryBlockIndex: number | null;
       completedToolCount?: number;
     }[];
-    thinkingBlocks?: string[];
-    thinkingDurationsMs?: number[];
+    commentaryBlocks?: string[];
+    commentaryDurationsMs?: number[];
     durationMs?: number;
     taskPlan?: AiTaskPlanChunk;
     contextCompaction?: AiContextCompactionState;
@@ -2132,7 +2117,11 @@ export interface ElectronAPI {
     callback: (chunk: {
       streamId?: string;
       delta?: string;
-      thinkingDelta?: string;
+      commentaryDelta?: string;
+      /** Provider raw model content; diagnostics only. */
+      modelContentDelta?: string;
+      /** Provider raw reasoning; diagnostics only, never conversation UI. */
+      reasoningDelta?: string;
       done?: boolean;
       aborted?: boolean;
       error?: string;
@@ -2151,10 +2140,6 @@ export interface ElectronAPI {
         name?: string;
         content: string;
       }[];
-      partialContent?: string;
-      partialThinking?: string;
-      /** Final thinking state used when replaying a durable Run. */
-      thinkingSnapshot?: string;
       chapterCreated?: {
         chapterId: EntityId;
         title: string;
@@ -2285,6 +2270,9 @@ export interface ElectronAPI {
         units: Array<{
           id: string;
           position: number;
+          plannerStepId?: string;
+          kind?: string;
+          title?: string;
           status: AiLongTaskUnitStatus;
           attempt: number;
           maxAttempts: number;

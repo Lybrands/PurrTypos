@@ -34,7 +34,7 @@ export function getDefaultModelContextWindow(config?: AiModelConfig | null): AiC
   return config?.contextWindow ?? getModelPreset(config?.presetId)?.contextWindow ?? '128k'
 }
 
-/** 返回供应商已登记的模型能力上限；任务预算由后端 Agent Core 决定。 */
+/** 返回供应商已登记的模型能力上限；任务预算由后端 PurrA 决定。 */
 export function getModelMaxOutputTokens(config?: AiModelConfig | null): number | undefined {
   return getModelPreset(config?.presetId)?.maxOutputTokens
 }

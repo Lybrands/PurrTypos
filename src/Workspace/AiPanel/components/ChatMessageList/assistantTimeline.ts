@@ -1,9 +1,9 @@
 import { getAssistantRenderableMarkdown } from "../../rendering";
 import type { ChatMessage, ToolCallSegment } from "../../hooks/chat.types";
 
-export type TimelineThinkingPart = {
-  type: "thinking";
-  text: string;
+export type TimelineCommentaryPart = {
+  type: "commentary";
+  md: string;
   durationMs?: number;
   startedAt?: number;
   regionKey: string;
@@ -13,39 +13,27 @@ export type TimelineToolsPart = {
   type: "tools";
   segment: ToolCallSegment;
   segmentIndex: number;
-  /** 本段工具是否仍在执行（仅最后一条助手消息流式时有效） */
   isLive?: boolean;
 };
 
-export type TimelineTextPart = {
-  type: "text";
-  md: string;
-};
-
-export type TimelineCommentaryPart = {
-  type: "commentary";
-  md: string;
-};
-
+export type TimelineTextPart = { type: "text"; md: string };
 export type TimelineDelegationsPart = {
   type: "delegations";
   items: NonNullable<ChatMessage["delegations"]>;
 };
-
 export type TimelineContextCompactionPart = {
   type: "contextCompaction";
   state: NonNullable<ChatMessage["contextCompaction"]>;
 };
 
 export type AssistantTimelinePart =
-  | TimelineThinkingPart
+  | TimelineCommentaryPart
   | TimelineToolsPart
   | TimelineTextPart
-  | TimelineCommentaryPart
   | TimelineDelegationsPart
   | TimelineContextCompactionPart;
 
-export type TimelineStepPart = TimelineThinkingPart | TimelineToolsPart;
+export type TimelineStepPart = TimelineCommentaryPart | TimelineToolsPart;
 
 export type WorkLogTimelineItem =
   | AssistantTimelinePart
@@ -70,27 +58,16 @@ export function getAssistantProcessingLabel(message: ChatMessage): string {
   ) {
     return "等待确认";
   }
-  if (message.contextCompaction?.status === "running") {
-    return "整理上下文";
-  }
-  if (message.toolCalling) {
-    return "执行操作";
-  }
+  if (message.contextCompaction?.status === "running") return "整理上下文";
+  if (message.toolCalling) return "执行操作";
   if (
     message.delegations?.some((item) =>
-      item.status === "queued" ||
-      item.status === "claimed" ||
-      item.status === "running"
+      ["queued", "claimed", "running"].includes(item.status)
     )
   ) {
     return "协调任务";
   }
-  if ((message.thinking ?? "").trim()) {
-    return "推演方案";
-  }
-  if ((message.contentAfterToolCalls ?? "").trim()) {
-    return "组织回复";
-  }
+  if ((message.commentary ?? "").trim()) return "推进任务";
   if (
     message.taskPlan?.status === "planned" ||
     message.taskPlan?.status === "running"
@@ -102,20 +79,11 @@ export function getAssistantProcessingLabel(message: ChatMessage): string {
   if (message.toolCallSegments?.some((segment) => segment.labels.length > 0)) {
     return "核对结果";
   }
-  if (message.content.trim()) {
-    return "组织回复";
-  }
-  if (message.contextBudget) {
-    return "准备上下文";
-  }
+  if (message.content.trim()) return "组织回复";
+  if (message.contextBudget) return "准备上下文";
   return "理解请求";
 }
 
-function visibleToolSegment(seg: ToolCallSegment): boolean {
-  return seg.labels.length > 0 || Boolean(seg.textBefore?.trim());
-}
-
-/** 将连续的思考与工具调用聚合为工作日志中的二级步骤组。 */
 export function groupConsecutiveWorkSteps(
   parts: AssistantTimelinePart[],
   messageIndex: number,
@@ -126,15 +94,15 @@ export function groupConsecutiveWorkSteps(
 
   const flushSteps = () => {
     if (stepParts.length === 0) return;
-    if (stepParts.length === 1) {
-      items.push(stepParts[0]);
-    } else {
-      items.push({
-        type: "stepGroup",
-        groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
-        parts: stepParts,
-      });
-    }
+    items.push(
+      stepParts.length === 1
+        ? stepParts[0]
+        : {
+            type: "stepGroup",
+            groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
+            parts: stepParts,
+          },
+    );
     stepParts = [];
   };
 
@@ -147,7 +115,7 @@ export function groupConsecutiveWorkSteps(
     ) {
       return;
     }
-    if (part.type === "thinking" || part.type === "tools") {
+    if (part.type === "commentary" || part.type === "tools") {
       if (stepParts.length === 0) groupStartIndex = partIndex;
       stepParts.push(part);
       return;
@@ -156,108 +124,75 @@ export function groupConsecutiveWorkSteps(
     items.push(part);
   });
   flushSteps();
-
   return items;
 }
 
-/** 将助手消息拆成有序渲染片段：思考 / 工具 / 正文 */
 export function buildAssistantTimeline(
   message: ChatMessage,
   opts: BuildAssistantTimelineOptions,
 ): AssistantTimelinePart[] {
   const parts: AssistantTimelinePart[] = [];
   const segments = message.toolCallSegments ?? [];
-  const blocks = message.thinkingBlocks ?? [];
-  const durations = message.thinkingDurationsMs ?? [];
+  const blocks = message.commentaryBlocks ?? [];
+  const durations = message.commentaryDurationsMs ?? [];
   const { messageIndex, isStreaming, isLastAssistant, loading } = opts;
-  const emittedThinkingBlocks = new Set<number>();
-  const hasExplicitThinkingOrder = segments.some((segment) =>
-    Object.prototype.hasOwnProperty.call(segment, "thinkingBlockIndex"),
-  );
-  // 旧版工具轮会吞掉工具前思考；当思考块少于工具段时，现存块实际来自
-  // 最终回答阶段，应统一放到工具之后，不能再按数组下标硬配。
-  const legacyBlocksAreTail =
-    !hasExplicitThinkingOrder &&
-    segments.length > 0 &&
-    blocks.length < segments.length;
-  const appendThinkingBlock = (
+  const emittedBlocks = new Set<number>();
+
+  const appendCommentary = (
     blockIndex: number | null | undefined,
     region: string,
   ) => {
-    if (
-      typeof blockIndex !== "number" ||
-      emittedThinkingBlocks.has(blockIndex)
-    ) {
-      return;
-    }
-    const block = blocks[blockIndex]?.trim();
-    if (!block) return;
-    emittedThinkingBlocks.add(blockIndex);
+    if (typeof blockIndex !== "number" || emittedBlocks.has(blockIndex)) return;
+    const md = blocks[blockIndex]?.trim();
+    if (!md) return;
+    emittedBlocks.add(blockIndex);
     parts.push({
-      type: "thinking",
-      text: block,
+      type: "commentary",
+      md,
       durationMs: durations[blockIndex],
       regionKey: `${messageIndex}-${region}-${blockIndex}`,
     });
   };
 
   if (message.contextCompaction) {
-    parts.push({
-      type: "contextCompaction",
-      state: message.contextCompaction,
-    });
+    parts.push({ type: "contextCompaction", state: message.contextCompaction });
   }
   if (message.delegations?.length) {
     parts.push({ type: "delegations", items: message.delegations });
   }
 
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    appendThinkingBlock(
-      hasExplicitThinkingOrder
-        ? seg.thinkingBlockIndex
-        : legacyBlocksAreTail
-          ? undefined
-          : i,
-      `seg-${i}`,
-    );
-    const textBefore = seg.textBefore?.trim();
-    if (textBefore) {
-      parts.push({ type: "commentary", md: textBefore });
-    }
-
-    if (visibleToolSegment(seg) && seg.labels.length > 0) {
-      const isToolLive =
+  segments.forEach((segment, segmentIndex) => {
+    appendCommentary(segment.commentaryBlockIndex, `tool-${segmentIndex}`);
+    if (segment.labels.length === 0) return;
+    parts.push({
+      type: "tools",
+      segment,
+      segmentIndex,
+      isLive:
         Boolean(isLastAssistant) &&
         Boolean(loading) &&
-        i === segments.length - 1 &&
-        Boolean(message.toolCalling) &&
-        seg.labels.length > 0;
-      parts.push({
-        type: "tools",
-        segment: seg,
-        segmentIndex: i,
-        isLive: isToolLive,
-      });
-    }
-  }
+        segmentIndex === segments.length - 1 &&
+        Boolean(message.toolCalling),
+    });
+  });
 
-  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
-    appendThinkingBlock(blockIndex, "tail");
-  }
+  blocks.forEach((_block, blockIndex) => {
+    appendCommentary(blockIndex, "tail");
+  });
 
   const assistantMarkdown = getAssistantRenderableMarkdown(message);
-  if (assistantMarkdown.trim()) {
+  // Defense in depth: even stale/replayed state must not expose answer text
+  // while the root turn is still receiving process events.
+  if (!isStreaming && assistantMarkdown.trim()) {
     parts.push({ type: "text", md: assistantMarkdown });
   }
 
-  if (isStreaming && (message.thinking ?? "").trim()) {
-    const streamBlockIndex = blocks.length;
+  if (isStreaming && message.commentary?.trim()) {
     parts.push({
-      type: "thinking",
-      text: message.thinking!.trim(),
-      startedAt: message.thinkingStartedAt,
-      regionKey: `${messageIndex}-stream-${streamBlockIndex}`,
+      type: "commentary",
+      md: message.commentary.trim(),
+      startedAt: message.commentaryStartedAt,
+      regionKey: `${messageIndex}-stream-${blocks.length}`,
     });
   }
 

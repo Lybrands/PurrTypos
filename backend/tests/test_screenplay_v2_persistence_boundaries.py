@@ -13,11 +13,11 @@ V2_REPOSITORY = (
     / "persistence"
     / "sqlite_screenplay_v2_repository.py"
 )
-CONVERSATION_REPOSITORY = (
+AGENT_REPOSITORY = (
     BACKEND_DIR
     / "infrastructure"
     / "persistence"
-    / "sqlite_screenplay_conversation_repository.py"
+    / "sqlite_screenplay_agent_repository.py"
 )
 REMOVED_RUNTIME_FILES = (
     BACKEND_DIR / "database" / "crud" / "screenplay_read_model.py",
@@ -55,8 +55,12 @@ def test_removed_screenplay_runtime_files_are_not_restored():
     assert [path for path in REMOVED_RUNTIME_FILES if path.exists()] == []
 
 
-def test_native_conversation_repository_owns_turn_and_cursor_persistence():
-    source = CONVERSATION_REPOSITORY.read_text(encoding="utf-8")
-    assert "screenplay_conversation_turns" in source
-    assert "screenplay_conversation_events" in source
+def test_screenplay_agent_repository_does_not_duplicate_purra_task_state():
+    source = AGENT_REPOSITORY.read_text(encoding="utf-8")
+    assert "screenplay_agent_turns" in source
+    assert "screenplay_agent_jobs" not in source
+    assert "screenplay_agent_job_steps" not in source
+    assert "ai_agent_long_tasks" in source
+    assert "screenplay_agent_events" in source
+    assert "screenplay_agent_chunks" in source
     assert "screenplay_operations" not in source

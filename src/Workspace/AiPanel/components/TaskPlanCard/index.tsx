@@ -9,6 +9,7 @@ import {
 import React from "react";
 import type { AiTaskPlan, AiTaskStep } from "../../hooks/chat.types";
 import {
+  getTaskPlanCountLabel,
   getTaskPlanProgress,
   getVisibleTaskPlanSteps,
 } from "../../taskPlanSelection";
@@ -90,11 +91,8 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   const manuallySetRef = React.useRef(storedState?.manuallySet ?? false);
   const previousTerminalRef = React.useRef(terminal);
   const {
-    total,
-    completed,
     runningSteps,
     currentStep,
-    currentStepNumber,
     percent,
   } = getTaskPlanProgress(plan);
   const parallel = runningSteps.length > 1;
@@ -135,11 +133,7 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
         <ChevronRightIcon className="task-plan-card__chevron" />
         <span className="task-plan-card__label">{getTaskPlanLabel(plan)}</span>
         <span className="task-plan-card__count">
-          {!terminal && parallel
-            ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
-            : !terminal && currentStepNumber != null
-              ? `第 ${currentStepNumber}/${total} 步`
-            : `已完成 ${completed}/${total}`}
+          {getTaskPlanCountLabel(plan)}
         </span>
         {currentStep && !terminal ? (
           <span className="task-plan-card__current">

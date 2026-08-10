@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from time import time
 
-from agent_core.artifacts.maintenance import (
+from purra.artifacts.maintenance import (
     ArtifactMaintenancePolicy,
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 def test_writing_domain_supplies_cases_to_content_free_core_regression_harness():
-    from agent_core.evaluation import AgentRuntimeRegressionCase
+    from purra.evaluation import AgentRuntimeRegressionCase
     from domains.writing.evaluation.cases import (
         WRITING_RUNTIME_REGRESSION_CASES,
     )

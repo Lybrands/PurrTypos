@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from agent_core.contracts import AgentRunRequest, ResponseConstraints
-from agent_core.ports import ResponseValidator
+from purra.contracts import AgentRunRequest, ResponseConstraints
+from purra.ports import ResponseValidator
 from domains.writing.continuity_validation import (
     AtomicContinuityGroundingValidator,
 )

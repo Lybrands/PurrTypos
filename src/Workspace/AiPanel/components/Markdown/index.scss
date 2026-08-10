@@ -163,3 +163,10 @@
     border-radius: var(--radius-md);
   }
 }
+
+.agent-markdown--preserve-soft-breaks {
+  p,
+  li {
+    white-space: pre-wrap;
+  }
+}

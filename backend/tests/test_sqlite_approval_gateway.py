@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import (
+from purra.contracts import (
     ApprovalRequest,
     ApprovalStatus,
     ToolCall,
     ToolRiskLevel,
 )
-from agent_core.events import CoreEventType
+from purra.events import CoreEventType
 from database.connection import DatabaseConnection
 from infrastructure.persistence import approval_store, run_store
 from infrastructure.persistence.sqlite_approval_gateway import (

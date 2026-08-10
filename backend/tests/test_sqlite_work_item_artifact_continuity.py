@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactAppendCommand,
     ArtifactClaimLeaseCommand,
     ArtifactCreateCommand,
@@ -16,17 +16,17 @@ from agent_core.artifacts import (
     ArtifactScope,
     ArtifactWriteClaimCommand,
 )
-from agent_core.artifacts.errors import (
+from purra.artifacts.errors import (
     ArtifactConflictError,
     ArtifactStateError,
 )
-from agent_core.artifacts.ports import ArtifactClaimRepository
-from agent_core.work_items import (
+from purra.artifacts.ports import ArtifactClaimRepository
+from purra.work_items import (
     WorkItemCreateCommand,
     WorkItemRunLinkCommand,
     WorkItemRunRelation,
 )
-from agent_core.work_items.ports import WorkItemRepository
+from purra.work_items.ports import WorkItemRepository
 from database.connection import DatabaseConnection
 from tests.support import screenplay_v2_driver as screenplay_crud
 from infrastructure.persistence.sqlite_artifact_claim_repository import (

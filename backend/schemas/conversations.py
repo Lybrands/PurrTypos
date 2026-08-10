@@ -13,10 +13,10 @@ class SaveConversationRequest(BaseModel):
     prompt: str
     response: str
     model: Optional[str] = None
-    thinking: Optional[str] = None
+    commentary: Optional[str] = None
     toolCallSegments: Optional[List[Any]] = None
-    thinkingBlocks: Optional[List[Any]] = None
-    thinkingDurationsMs: Optional[List[Any]] = None
+    commentaryBlocks: Optional[List[Any]] = None
+    commentaryDurationsMs: Optional[List[Any]] = None
     durationMs: Optional[int] = None
     taskPlan: Optional[Any] = None
     contextCompaction: Optional[Any] = None

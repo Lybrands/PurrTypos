@@ -7,15 +7,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunRequest,
     DomainEffect,
     ExecutionState,
     ToolHandlerResult,
     ToolSchema,
 )
-from agent_core.ports import CancellationSignal, ToolRegistration
-from agent_core.tools import InMemoryToolCatalog
+from purra.ports import CancellationSignal, ToolRegistration
+from purra.tools import InMemoryToolCatalog
 from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE, WritingDomainContext
 from domains.writing.policies import WRITING_TOOL_POLICIES, policy_coverage
 from domains.writing.planning import WRITING_TOOL_PLANNING_DEPENDENCIES

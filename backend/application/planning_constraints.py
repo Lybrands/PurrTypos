@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import replace
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunRequest,
     PlanningCapabilities,
     PlanningConstraints,
     TaskSpec,
 )
-from agent_core.ports import TaskPlanningConstraintProvider
+from purra.ports import TaskPlanningConstraintProvider
 
 
 class RequiredToolPlanningPolicy:

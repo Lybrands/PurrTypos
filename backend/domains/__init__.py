@@ -1,1 +1,1 @@
-"""Application domain adapters for Agent Core."""
+"""Application domain adapters for PurrA."""

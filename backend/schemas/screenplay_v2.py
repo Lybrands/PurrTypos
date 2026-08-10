@@ -33,13 +33,6 @@ ScreenplayV2DeliverableRole = Literal[
     "screenplayDraft",
     "review",
 ]
-ScreenplayV2OperationIntentType = Literal[
-    "generate",
-    "regenerate",
-    "continue",
-    "review",
-    "revise",
-]
 
 
 class ScreenplayV2SourceScopeRequest(ScreenplayV2Model):
@@ -151,37 +144,6 @@ class AcceptScreenplayV2RevisionRequest(ScreenplayV2Model):
     confirmInvalidation: bool = False
 
 
-class ScreenplayV2OperationIntentRequest(ScreenplayV2Model):
-    type: ScreenplayV2OperationIntentType
-    scope: dict[str, object] = Field(default_factory=dict)
-    instruction: str = Field(default="", max_length=20_000)
-
-    @model_validator(mode="after")
-    def normalize_instruction(self):
-        self.instruction = self.instruction.strip()
-        return self
-
-
-class ScreenplayV2OperationConversationRequest(ScreenplayV2Model):
-    sessionId: int | None = Field(default=None, ge=1)
-    userMessageId: str | None = Field(default=None, max_length=200)
-
-    @model_validator(mode="after")
-    def normalize_user_message_id(self):
-        normalized = str(self.userMessageId or "").strip()
-        self.userMessageId = normalized or None
-        return self
-
-
-class StartScreenplayV2OperationRequest(ScreenplayV2Model):
-    expectedProjectRevision: int = Field(..., ge=1)
-    targetRole: ScreenplayV2DeliverableRole
-    intent: ScreenplayV2OperationIntentRequest
-    conversation: ScreenplayV2OperationConversationRequest = Field(
-        default_factory=ScreenplayV2OperationConversationRequest
-    )
-
-
 __all__ = [
     "AcceptScreenplayV2RevisionRequest",
     "ChangeScreenplayV2ProjectLifecycleRequest",
@@ -193,7 +155,6 @@ __all__ = [
     "ScreenplayV2BriefRequest",
     "ScreenplayV2OriginalSourceRequest",
     "ScreenplayV2SourceScopeRequest",
-    "StartScreenplayV2OperationRequest",
     "UpdateScreenplayV2ProjectRequest",
     "UpdateScreenplayV2WorkingCopyRequest",
 ]

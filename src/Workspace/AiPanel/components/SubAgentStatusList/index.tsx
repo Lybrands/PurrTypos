@@ -2,7 +2,6 @@ import React from "react";
 import type { AiAgentDelegation } from "../../../../types";
 import type { AiSubAgentActivity, ChatMessage } from "../../hooks/chat.types";
 import Markdown from "../Markdown";
-import ThinkingRegion from "../ThinkingRegion";
 import ToolCallStatus from "../ToolCallStatus";
 import { buildAssistantTimeline } from "../ChatMessageList/assistantTimeline";
 import { presentableStructuredResponse } from "./presentation";
@@ -20,9 +19,6 @@ function presentableChildMessage(message: ChatMessage): ChatMessage {
   return {
     ...message,
     content: presentableStructuredResponse(message.content),
-    contentAfterToolCalls: presentableStructuredResponse(
-      message.contentAfterToolCalls,
-    ),
   };
 }
 
@@ -87,18 +83,6 @@ export default function SubAgentStatusList({
                   <div className="work-log__subagent-objective">{item.objective}</div>
                 )}
                 {timeline.map((part, partIndex) => {
-                  if (part.type === "thinking") {
-                    return (
-                      <ThinkingRegion
-                        key={`${item.delegationId}-thinking-${partIndex}`}
-                        regionKey={`${item.delegationId}-${part.regionKey}`}
-                        content={part.text}
-                        streaming={Boolean(active && part.startedAt != null)}
-                        startedAt={part.startedAt}
-                        durationMs={part.durationMs}
-                      />
-                    );
-                  }
                   if (part.type === "tools") {
                     return (
                       <ToolCallStatus

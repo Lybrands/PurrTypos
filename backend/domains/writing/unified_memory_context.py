@@ -6,10 +6,10 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
-from agent_core.context_budget import estimate_json_tokens
-from agent_core.contracts import ModelRequest, TaskContextRequest
-from agent_core.json_values import thaw_json_mapping
-from agent_core.ports import CancellationSignal
+from purra.context_budget import estimate_json_tokens
+from purra.contracts import ModelRequest, TaskContextRequest
+from purra.json_values import thaw_json_mapping
+from purra.ports import CancellationSignal
 from domains.writing.memory_context import (
     MemoryContextBlock,
     MemoryContextRequest,

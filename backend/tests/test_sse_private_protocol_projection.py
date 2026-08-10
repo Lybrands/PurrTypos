@@ -1,5 +1,5 @@
 from application.sse_mapping import core_event_to_sse_chunk
-from agent_core.events import AgentEvent, CoreEventType
+from purra.events import AgentEvent, CoreEventType
 
 
 def test_task_plan_hides_private_protocol_and_exposes_business_capability():

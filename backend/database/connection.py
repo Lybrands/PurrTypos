@@ -89,6 +89,18 @@ class DatabaseConnection:
             raise RuntimeError("database operation must run inside an asyncio Task")
         return task
 
+    def current_task_owns_transaction(self) -> bool:
+        """Return whether the caller is already inside this connection's transaction.
+
+        Persistence adapters normally own their cancellation-linearizable
+        transaction. A host projection that is deliberately part of another
+        repository commit must instead join that ambient transaction so all
+        effects share one COMMIT or ROLLBACK.
+        """
+
+        task = asyncio.current_task()
+        return task is not None and self._tx_owner is task
+
     @asynccontextmanager
     async def _connection_access(
         self,

@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from agent_core.contracts import ModelRequest
-from agent_core.ports import CancellationSignal
+from purra.contracts import ModelRequest
+from purra.ports import CancellationSignal
 
 
 @dataclass(frozen=True, slots=True)

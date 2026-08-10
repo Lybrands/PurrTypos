@@ -1,7 +1,15 @@
-"""Infrastructure adapters for screenplay Agent capabilities."""
+"""Screenplay infrastructure adapters."""
 
-from infrastructure.screenplay.tool_catalog import (
+from infrastructure.screenplay.candidate_completion_projector import (
+    ScreenplayCandidateCompletionProjector,
+)
+from infrastructure.screenplay.tools import (
+    ScreenplayCandidateArtifacts,
     build_screenplay_tool_catalog,
 )
 
-__all__ = ["build_screenplay_tool_catalog"]
+__all__ = [
+    "ScreenplayCandidateArtifacts",
+    "ScreenplayCandidateCompletionProjector",
+    "build_screenplay_tool_catalog",
+]

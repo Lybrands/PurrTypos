@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_core.contracts import RunCheckpoint
+from purra.contracts import RunCheckpoint
 from infrastructure.persistence.run_store import (
     get_run,
     get_run_events_page,

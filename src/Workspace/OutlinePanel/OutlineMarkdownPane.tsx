@@ -3,21 +3,15 @@ import React, { forwardRef, useImperativeHandle } from 'react'
 import { EditIcon, HistoryIcon, ImportIcon, UserIcon } from '@/purr-components'
 import { PurrButton, PurrEmpty, PurrTooltip, usePurrToast } from '@/purr-components'
 import { PurrFloatingPanel } from '@/purr-components'
+import KnowledgeMarkdownEditor, {
+  appendImportedMarkdown,
+  type KnowledgeMarkdownEditorHandle,
+} from '@/components/KnowledgeMarkdownEditor'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import OutlineHistoryDrawer from './OutlineHistoryDrawer'
 import { useWorkspace } from '../WorkspaceContext'
-import type { Editor } from '@tiptap/core'
-import { useEditor, EditorContent } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
-import { TableKit } from '@tiptap/extension-table'
-import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import type { EntityId } from '../../types'
 import CharacterTab from './CharacterTab'
-import {
-  appendImportedMarkdown,
-  handleMarkdownPaste,
-  LiteralTab,
-} from './markdownEditorShared'
 import './StoryBackgroundTab.scss'
 import './OutlineMarkdownPane.scss'
 
@@ -46,34 +40,13 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       editingRef.current = editing
     }, [editing])
 
-    const initialDraftRef = React.useRef('')
+    const [draftMarkdown, setDraftMarkdown] = React.useState('')
     const baselineSavedRef = React.useRef(markdownContent ?? '')
     React.useEffect(() => {
       baselineSavedRef.current = markdownContent ?? ''
     }, [markdownContent])
 
-    const editorRef = React.useRef<Editor | null>(null)
-
-    const editor = useEditor({
-      immediatelyRender: true,
-      extensions: [
-        LiteralTab,
-        StarterKit.configure({
-          heading: { levels: [1, 2, 3, 4] },
-        }),
-        TableKit,
-      ],
-      content: '<p></p>',
-      editorProps: {
-        attributes: {
-          class: 'story-background-tiptap-editable',
-          spellcheck: 'false',
-        },
-        handlePaste: (_view, event) => handleMarkdownPaste(editorRef.current, event),
-      },
-    }, [editing])
-
-    const [editorIsEmpty, setEditorIsEmpty] = React.useState(true)
+    const editorRef = React.useRef<KnowledgeMarkdownEditorHandle | null>(null)
     const [characterPanelOpen, setCharacterPanelOpen] = React.useState(false)
     const [characterPanelInitialPos, setCharacterPanelInitialPos] = React.useState<{ x: number; y: number } | undefined>(undefined)
     const [characterPanelPinned, setCharacterPanelPinned] = React.useState(false)
@@ -99,34 +72,12 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       }
     }, [characterPanelPinned])
 
-    React.useEffect(() => {
-      editorRef.current = editor ?? null
-    }, [editor])
-
-    React.useEffect(() => {
-      if (editing && editor) {
-        editor.commands.setContent(markdownToHtml(initialDraftRef.current))
-      }
-    }, [editing, editor])
-
-    React.useEffect(() => {
-      if (!editor) return
-      const syncEmpty = () => setEditorIsEmpty(editor.isEmpty)
-      syncEmpty()
-      editor.on('update', syncEmpty)
-      editor.on('transaction', syncEmpty)
-      return () => {
-        editor.off('update', syncEmpty)
-        editor.off('transaction', syncEmpty)
-      }
-    }, [editor])
-
     useImperativeHandle(
       ref,
       () => ({
         async flushSave() {
           if (!editingRef.current || !editorRef.current) return
-          const md = htmlToMarkdown(editorRef.current.getHTML())
+          const md = editorRef.current.getMarkdown()
           if (md === baselineSavedRef.current) return
           const res = await services.outlines.updateOutline({
             outlineId,
@@ -143,14 +94,12 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
     )
 
     const handleEdit = () => {
-      initialDraftRef.current = markdownContent ?? ''
+      setDraftMarkdown(markdownContent ?? '')
       setEditing(true)
     }
 
     const handleSave = React.useCallback(async () => {
-      const ed = editorRef.current
-      if (!ed) return
-      const md = htmlToMarkdown(ed.getHTML())
+      const md = editorRef.current?.getMarkdown() ?? draftMarkdown
       const res = await services.outlines.updateOutline({
         outlineId,
         markdown_content: md,
@@ -163,7 +112,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
       } else {
         appMessage.error(res.error || '保存失败')
       }
-    }, [outlineId, onSaved, appMessage])
+    }, [outlineId, onSaved, appMessage, draftMarkdown])
 
     const handleCancel = () => {
       setEditing(false)
@@ -172,12 +121,7 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
     const handleImportFile = React.useCallback(async () => {
       const res = await services.files.openAndReadTextFile()
       if (res.success && res.data != null) {
-        const ed = editorRef.current
-        if (ed) {
-          const currentMd = htmlToMarkdown(ed.getHTML())
-          const appended = appendImportedMarkdown(currentMd, res.data)
-          ed.commands.setContent(markdownToHtml(appended))
-        }
+        setDraftMarkdown((current) => appendImportedMarkdown(current, res.data ?? ''))
         appMessage.success('已追加导入内容')
       } else if (res.error !== 'canceled') {
         appMessage.error(res.error || '读取文件失败')
@@ -307,9 +251,14 @@ const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPa
             </PurrTooltip>
           </div>
         </div>
-        <div className="story-background-editor-wrap story-background-tiptap-wrap">
-          <EditorContent editor={editor} className="story-background-tiptap-container" />
-        </div>
+        <KnowledgeMarkdownEditor
+          ref={editorRef}
+          documentKey={`outline:${outlineId}`}
+          value={draftMarkdown}
+          onChange={setDraftMarkdown}
+          ariaLabel="章节大纲"
+          className="story-background-editor-wrap"
+        />
         <div className="story-background-toolbar story-background-toolbar-bottom">
           <PurrButton type="primary" size="small" onClick={handleSave}>
             保存

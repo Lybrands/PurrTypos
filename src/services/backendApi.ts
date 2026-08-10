@@ -107,7 +107,6 @@ export const backendApi: BackendApi = {
     {
       sessionId: data.sessionId,
       content: data.content,
-      ...(data.operation ? { operation: data.operation } : {}),
       runtime: data.runtime,
     },
     data.commandId,
@@ -130,6 +129,8 @@ export const backendApi: BackendApi = {
     const params = new URLSearchParams({
       sessionId: String(data.sessionId),
       after: String(Math.max(0, data.after)),
+      chunkAfter: String(Math.max(0, data.chunkAfter ?? 0)),
+      limit: '500',
       follow: 'true',
     })
     const source = new EventSource(
@@ -138,11 +139,14 @@ export const backendApi: BackendApi = {
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data)
-        if (
-          event
-          && typeof event === 'object'
-          && Number.isFinite(Number(event.cursor))
-        ) {
+        if (event && typeof event === 'object' && (
+          Number.isFinite(Number(event.cursor))
+          || (
+            event.kind === 'agent_chunks'
+            && Number.isFinite(Number(event.nextCursor))
+            && Array.isArray(event.chunks)
+          )
+        )) {
           data.onEvent(event)
         }
       } catch {
@@ -156,10 +160,8 @@ export const backendApi: BackendApi = {
     {},
     data.commandId,
   ),
-  resumeScreenplayConversationTurn: (data) => apiPostIdempotent(
-    `/screenplay/v2/conversation/turns/${data.turnId}/resume`,
-    { runtime: data.runtime },
-    data.commandId,
+  truncateScreenplayConversationFromTurn: (data) => apiDelete(
+    `/screenplay/v2/conversation/turns/${data.turnId}/and-after`,
   ),
   createScreenplayV2Project: (data) => apiPostIdempotent(
     '/screenplay/v2/projects',
@@ -207,33 +209,6 @@ export const backendApi: BackendApi = {
       expectedProjectRevision: data.expectedProjectRevision,
       expectedWorkingCopyRevision: data.expectedWorkingCopyRevision,
     },
-    data.commandId,
-  ),
-  startScreenplayV2Operation: (data) => apiPostIdempotent(
-    `/screenplay/v2/projects/${data.projectId}/operations`,
-    {
-      expectedProjectRevision: data.expectedProjectRevision,
-      targetRole: data.targetRole,
-      intent: data.intent,
-      conversation: data.conversation || {},
-    },
-    data.commandId,
-  ),
-  getScreenplayV2Operation: (data) =>
-    apiGet(`/screenplay/v2/operations/${data.operationId}`),
-  pauseScreenplayV2Operation: (data) => apiPostIdempotent(
-    `/screenplay/v2/operations/${data.operationId}/pause`,
-    {},
-    data.commandId,
-  ),
-  resumeScreenplayV2Operation: (data) => apiPostIdempotent(
-    `/screenplay/v2/operations/${data.operationId}/resume`,
-    {},
-    data.commandId,
-  ),
-  cancelScreenplayV2Operation: (data) => apiPostIdempotent(
-    `/screenplay/v2/operations/${data.operationId}/cancel`,
-    {},
     data.commandId,
   ),
   acceptScreenplayV2Revision: (data) => apiPostIdempotent(

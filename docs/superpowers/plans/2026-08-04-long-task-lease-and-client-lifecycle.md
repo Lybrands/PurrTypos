@@ -91,15 +91,15 @@ Import `close_async_resource`. Wrap stream establishment in `try/except BaseExce
 
 - [ ] **Step 4: Run adapter tests to verify GREEN**
 
-Run: `.venv/bin/python -m pytest -q backend/tests/test_tool_choice_adapters.py backend/tests/test_async_stream.py backend/tests/test_agent_core_adapters.py`
+Run: `.venv/bin/python -m pytest -q backend/tests/test_tool_choice_adapters.py backend/tests/test_async_stream.py backend/tests/test_purra_adapters.py`
 
 Expected: all selected tests pass and existing raw-stream close behavior remains unchanged.
 
 ### Task 3: Persist sanitized exception-chain diagnostics
 
 **Files:**
-- Modify: `backend/agent_core/runtime.py`
-- Modify: `backend/tests/test_agent_core_runtime.py`
+- Modify: `packages/purra/src/purra/runtime.py`
+- Modify: `backend/tests/test_purra_runtime.py`
 
 **Interfaces:**
 - Consumes: exception `__cause__`/`__context__` links.
@@ -121,7 +121,7 @@ Assert no exception messages occur in the trace.
 
 - [ ] **Step 2: Run the trace test to verify RED**
 
-Run: `.venv/bin/python -m pytest -q backend/tests/test_agent_core_runtime.py -k error_chain`
+Run: `.venv/bin/python -m pytest -q backend/tests/test_purra_runtime.py -k error_chain`
 
 Expected: trace lacks `errorChainTypes`.
 
@@ -131,7 +131,7 @@ Add `_error_chain_types(error, limit=8)` that follows `__cause__`, then `__conte
 
 - [ ] **Step 4: Run runtime tests to verify GREEN**
 
-Run: `.venv/bin/python -m pytest -q backend/tests/test_agent_core_runtime.py backend/tests/test_agent_core_engine.py`
+Run: `.venv/bin/python -m pytest -q backend/tests/test_purra_runtime.py backend/tests/test_purra_engine.py`
 
 Expected: all selected tests pass without storing raw exception text.
 
@@ -146,7 +146,7 @@ Expected: all selected tests pass without storing raw exception text.
 
 - [ ] **Step 1: Run focused long-task and lifecycle regressions**
 
-Run: `.venv/bin/python -m pytest -q backend/tests/test_run_execution_control.py backend/tests/test_main_lifespan.py backend/tests/test_agent_composition.py backend/tests/test_tool_choice_adapters.py backend/tests/test_async_stream.py backend/tests/test_agent_core_adapters.py backend/tests/test_agent_core_runtime.py backend/tests/test_agent_core_engine.py backend/tests/test_agent_core_long_tasks.py backend/tests/test_screenplay_long_task_execution.py`
+Run: `.venv/bin/python -m pytest -q backend/tests/test_run_execution_control.py backend/tests/test_main_lifespan.py backend/tests/test_agent_composition.py backend/tests/test_tool_choice_adapters.py backend/tests/test_async_stream.py backend/tests/test_purra_adapters.py backend/tests/test_purra_runtime.py backend/tests/test_purra_engine.py backend/tests/test_purra_long_tasks.py backend/tests/test_screenplay_long_task_execution.py`
 
 - [ ] **Step 2: Run the full backend suite**
 

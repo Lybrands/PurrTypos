@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import (
+from purra.contracts import (
     DomainEffect,
     RunCreateParams,
     ToolCall,
@@ -15,7 +15,7 @@ from agent_core.contracts import (
     ToolPlanningDisposition,
     ToolStepDisposition,
 )
-from agent_core.errors import ContractViolationError
+from purra.errors import ContractViolationError
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_tool_idempotency_gateway import (

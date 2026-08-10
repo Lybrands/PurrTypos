@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from agent_core.contracts import RunBinding, RunProvenance
+    from purra.contracts import RunBinding, RunProvenance
     from database.connection import DatabaseConnection
 
 
@@ -15,7 +15,7 @@ TRACE_EVENT_TYPE = "agentRunTrace"
 
 
 def _thaw_mapping(value) -> dict[str, Any]:
-    from agent_core.json_values import thaw_json_mapping
+    from purra.json_values import thaw_json_mapping
 
     return thaw_json_mapping(value)
 

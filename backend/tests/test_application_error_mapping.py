@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agent_core.contracts import AgentRunResult, RunStatus
-from agent_core.events import AgentEvent, CoreEventType
+from purra.contracts import AgentRunResult, RunStatus
+from purra.events import AgentEvent, CoreEventType
 from application.sse_mapping import core_update_to_sse_chunk
 
 

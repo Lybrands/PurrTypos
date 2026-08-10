@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agent_core.contracts import AgentMessage, MessageOrigin, ToolCall
+from purra.contracts import AgentMessage, MessageOrigin, ToolCall
 from domains.writing.continuity_judging import (
     AtomicContinuityJudgeContractError,
     AtomicContinuityJudgePolicy,
@@ -64,7 +64,7 @@ def _source_messages() -> tuple[AgentMessage, ...]:
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "getChapterContent"},
         ),
     )
 

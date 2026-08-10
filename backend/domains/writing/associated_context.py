@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from agent_core.context_budget import estimate_text_tokens
+from purra.context_budget import estimate_text_tokens
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.repositories import AssociatedContextRepository
 

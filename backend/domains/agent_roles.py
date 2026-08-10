@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from agent_core.contracts import ToolExecutionMode
+from purra.contracts import ToolExecutionMode
 
 
 @dataclass(frozen=True, slots=True)

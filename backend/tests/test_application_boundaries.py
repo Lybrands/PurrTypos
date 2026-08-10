@@ -35,7 +35,7 @@ def test_agent_run_service_has_no_http_or_sse_dependency():
     assert not violations, "RunService transport leaks:\n" + "\n".join(violations)
 
 
-def test_ai_router_does_not_assemble_agent_core():
+def test_ai_router_does_not_assemble_purra():
     tree = ast.parse(AI_ROUTER.read_text(encoding="utf-8"))
     forbidden_names = {
         "create_core",

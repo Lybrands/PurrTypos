@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from agent_core.ports import CancellationSignal
-from agent_core.ports import ExecutionLeaseStore
+from purra.ports import CancellationSignal
+from purra.ports import ExecutionLeaseStore
 
 
 class DurableCancellationSignal:

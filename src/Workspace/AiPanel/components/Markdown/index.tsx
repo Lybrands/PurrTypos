@@ -16,11 +16,20 @@ const MARKDOWN_COMPONENTS: Components = {
 export interface MarkdownProps {
   children: string;
   className?: string;
+  preserveSoftBreaks?: boolean;
 }
 
-function MarkdownInner({ children, className }: MarkdownProps) {
+function MarkdownInner({
+  children,
+  className,
+  preserveSoftBreaks = false,
+}: MarkdownProps) {
   return (
-    <div className={['agent-markdown', className || ''].filter(Boolean).join(' ')}>
+    <div className={[
+      'agent-markdown',
+      preserveSoftBreaks ? 'agent-markdown--preserve-soft-breaks' : '',
+      className || '',
+    ].filter(Boolean).join(' ')}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         components={MARKDOWN_COMPONENTS}
@@ -34,5 +43,7 @@ function MarkdownInner({ children, className }: MarkdownProps) {
 export default React.memo(
   MarkdownInner,
   (prev, next) =>
-    prev.children === next.children && prev.className === next.className,
+    prev.children === next.children
+    && prev.className === next.className
+    && prev.preserveSoftBreaks === next.preserveSoftBreaks,
 );

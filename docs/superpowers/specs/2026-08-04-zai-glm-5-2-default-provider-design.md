@@ -57,7 +57,7 @@ All request-building paths must preserve `apiProvider: "zai"` instead of collaps
 - generate session titles through the same SDK;
 - close SDK response/client resources on success, cancellation, and failure.
 
-The official examples expose a synchronous iterator. Blocking creation and iteration therefore run through `asyncio.to_thread`, one iterator step at a time, so the FastAPI event loop remains responsive. The adapter keeps this thread bridge private; Agent Core continues to use its existing asynchronous, provider-neutral gateway.
+The official examples expose a synchronous iterator. Blocking creation and iteration therefore run through `asyncio.to_thread`, one iterator step at a time, so the FastAPI event loop remains responsive. The adapter keeps this thread bridge private; PurrA continues to use its existing asynchronous, provider-neutral gateway.
 
 ## Request and Response Flow
 
@@ -68,11 +68,11 @@ The official examples expose a synchronous iterator. Blocking creation and itera
 5. The adapter invokes `ZhipuAiClient.chat.completions.create`.
 6. Non-stream responses become `{message, model, usage}`.
 7. Streaming chunks become the existing `{choices, usage}` shape, including `content`, `reasoning_content`, `tool_calls`, `finish_reason`, and final usage when supplied.
-8. `ProviderModelGateway` performs the existing provider-neutral normalization and emits Agent Core chunks.
+8. `ProviderModelGateway` performs the existing provider-neutral normalization and emits PurrA chunks.
 
 ## Tool Calling
 
-The existing function-tool schema is forwarded through the SDK `tools` argument. `tool_choice` is forwarded only when present. Streaming tool-call fragments retain their SDK-provided index, ID, function name, and arguments so the existing Agent Core accumulator can assemble calls without Z.ai-specific logic.
+The existing function-tool schema is forwarded through the SDK `tools` argument. `tool_choice` is forwarded only when present. Streaming tool-call fragments retain their SDK-provided index, ID, function name, and arguments so the existing PurrA accumulator can assemble calls without Z.ai-specific logic.
 
 If GLM-5.2 rejects `tool_choice="required"`, the existing unsupported-required-tool-choice compatibility path remains authoritative. No provider-specific retry silently weakens a required tool contract.
 

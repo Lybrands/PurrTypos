@@ -12,7 +12,10 @@ import {
   getTaskPlanLabel,
   TaskPlanSteps,
 } from '../../Workspace/AiPanel/components/TaskPlanCard'
-import { getTaskPlanProgress } from '../../Workspace/AiPanel/taskPlanSelection'
+import {
+  getTaskPlanCountLabel,
+  getTaskPlanProgress,
+} from '../../Workspace/AiPanel/taskPlanSelection'
 import { localizeTaskPlan } from './localization'
 import './index.scss'
 
@@ -34,26 +37,15 @@ export default function AgentTaskProgress({
 }: AgentTaskProgressProps) {
   const displayPlan = localizeTaskPlan(plan)
   const {
-    completed,
-    total,
     runningSteps,
     currentStep,
-    currentStepNumber,
     percent,
   } = getTaskPlanProgress(displayPlan)
   const label = displayPlan.status === 'running' || displayPlan.status === 'planned'
     ? '执行中'
     : getTaskPlanLabel(displayPlan)
-  const terminal = displayPlan.status === 'done'
-    || displayPlan.status === 'blocked'
-    || displayPlan.status === 'failed'
-    || displayPlan.status === 'canceled'
   const parallel = runningSteps.length > 1
-  const countLabel = !terminal && parallel
-    ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
-    : !terminal && currentStepNumber != null
-      ? `第 ${currentStepNumber}/${total} 步`
-    : `已完成 ${completed}/${total}`
+  const countLabel = getTaskPlanCountLabel(displayPlan)
   const currentLabel = currentStep
     ? parallel ? `${currentStep.title} 等` : currentStep.title
     : ''

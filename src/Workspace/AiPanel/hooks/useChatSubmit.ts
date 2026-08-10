@@ -15,7 +15,7 @@ import {
   type ChunkCtx,
 } from "../../../agent-runtime";
 import { buildStreamOptions } from "./streamOptions";
-import { isModelThinkingEnabled, normalizeApiProvider } from "../../../modelCatalog";
+import { normalizeApiProvider } from "../../../modelCatalog";
 import {
   countQueuedForSession,
   getSettledSessionActivity,
@@ -151,14 +151,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.selectedModel ?? selectedModel;
       const requestAgentEnabled =
         queuedContext?.agentEnabled ?? agentEnabled;
-      const expectThinking = isModelThinkingEnabled(cfg);
       const turnStartedAt = performance.now();
       const userSentAt = new Date().toISOString();
       const assistantPlaceholder = {
         role: "assistant" as const,
         content: "",
         turnStartedAt,
-        ...(expectThinking ? { thinking: "" } : {}),
+        commentary: "",
       };
 
       if (!cfg?.apiKey?.trim()) {
@@ -297,7 +296,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       !hasHistoryBeforeThisQuestion && isUntitledSession;
     const acc: AccState = {
       response: "",
-      thinking: "",
+      commentary: "",
       bookId,
       sessionId,
       chapterId,
@@ -306,9 +305,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       model: "",
       turnStartedAt,
       toolCallSegments: undefined,
-      thinkingBlocks: [],
-      thinkingDurationsMs: [],
-      contentAfterToolCalls: "",
+      commentaryBlocks: [],
+      commentaryDurationsMs: [],
       agentRunId: undefined,
       taskPlan: undefined,
       delegations: undefined,

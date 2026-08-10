@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.context_budget import allocate_context_budget, estimate_json_tokens
-from agent_core.contracts import (
+from purra.context_budget import allocate_context_budget, estimate_json_tokens
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ContextBudget,

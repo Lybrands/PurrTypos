@@ -5,22 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
     ModelCompletion,
-    ModelInvocation,
     ModelRequest,
     ReasoningMode,
     ResponseValidationResult,
-    ToolChoiceMode,
 )
-from agent_core.errors import (
-    ResponseJudgeContractError,
-    UnsupportedModelFeatureError,
-)
-from agent_core.json_values import thaw_json_mapping
-from agent_core.ports import CancellationSignal, ModelGateway
+from purra.errors import ResponseJudgeContractError
+from purra.json_values import thaw_json_mapping
+from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.output_budget import OutputBudgetPolicy
+from purra.ports import CancellationSignal
 
 
 _JUDGE_CONNECTION_OPTION_KEYS = frozenset({"baseURL"})
@@ -48,19 +45,22 @@ class ModelJudgePolicy(Protocol):
 class ModelBackedResponseJudge:
     """Use a no-tool, deterministic model completion for one judge policy."""
 
-    model_gateway: ModelGateway
+    model_executor: ManagedModelExecutor
     model_request: ModelRequest
     policy: ModelJudgePolicy
     max_output_tokens: int = 1_200
+    context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model_gateway, ModelGateway):
-            raise TypeError("model-backed judge requires a ModelGateway")
+        if not isinstance(self.model_executor, ManagedModelExecutor):
+            raise TypeError("model-backed judge requires a ManagedModelExecutor")
         if not isinstance(self.model_request, ModelRequest):
             raise TypeError("model-backed judge requires a ModelRequest")
         maximum = self.max_output_tokens
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
             raise ValueError("judge max output tokens must be a positive integer")
+        if int(self.context_window_tokens) <= 0:
+            raise ValueError("judge context window must be positive")
 
     async def judge(
         self,
@@ -98,23 +98,23 @@ class ModelBackedResponseJudge:
         reasoning_mode: ReasoningMode,
         signal: CancellationSignal | None,
     ) -> ModelCompletion:
-        invocation = ModelInvocation(
-            request=_deterministic_request(self.model_request),
-            tools=(),
-            tool_choice=ToolChoiceMode.NONE,
-            max_output_tokens=self.max_output_tokens,
-            reasoning_mode=reasoning_mode,
+        result = await self.model_executor.complete(
+            messages,
+            ManagedModelCall(
+                request=_deterministic_request(self.model_request),
+                output_policy=OutputBudgetPolicy(
+                    key="response_judge",
+                    base_tokens=self.max_output_tokens,
+                    per_work_unit_tokens=0,
+                    safety_factor=1,
+                    hard_cap_tokens=self.max_output_tokens,
+                ),
+                context_window_tokens=self.context_window_tokens,
+                reasoning_mode=reasoning_mode,
+            ),
+            signal,
         )
-        try:
-            return await self.model_gateway.complete(messages, invocation, signal)
-        except UnsupportedModelFeatureError:
-            if reasoning_mode is not ReasoningMode.DISABLED:
-                raise
-            return await self._complete(
-                messages,
-                reasoning_mode=ReasoningMode.DEFAULT,
-                signal=signal,
-            )
+        return result.completion
 
 
 def _deterministic_request(request: ModelRequest) -> ModelRequest:
@@ -132,5 +132,6 @@ def _deterministic_request(request: ModelRequest) -> ModelRequest:
         provider=request.provider,
         model=request.model,
         profile_id=request.profile_id,
+        output_capabilities=request.output_capabilities,
         options=options,
     )

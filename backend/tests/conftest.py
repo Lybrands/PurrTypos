@@ -9,6 +9,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = ROOT_DIR / "backend"
+PURRA_SRC_DIR = ROOT_DIR / "packages" / "purra" / "src"
+
+for source_dir in (BACKEND_DIR, PURRA_SRC_DIR):
+    source = str(source_dir)
+    if source not in sys.path:
+        sys.path.insert(0, source)

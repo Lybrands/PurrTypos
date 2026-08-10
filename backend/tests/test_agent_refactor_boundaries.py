@@ -1,4 +1,4 @@
-"""Ratchet guards for the Agent Core and screenplay conversation rebuild.
+"""Ratchet guards for the PurrA and screenplay conversation rebuild.
 
 The allowlists in this file describe *known architectural debt*, not approved
 design.  A refactor may remove any listed occurrence without updating the
@@ -33,7 +33,9 @@ PHASE_FOUR_REMOVED_PATHS = (
     / "sqlite_screenplay_proposal_source.py",
 )
 PHASE_FIVE_REMOVED_PATHS = (
-    BACKEND_DIR / "schemas" / "screenplay_agent.py",
+    BACKEND_DIR / "schemas" / "screenplay_agent_run.py",
+    BACKEND_DIR / "schemas" / "screenplay_conversation.py",
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "screenplayConversationRuntime.ts",
 )
 GENERIC_RUNTIME_PERSISTENCE_FILES = (
     BACKEND_DIR / "infrastructure" / "persistence" / "sqlite_run_repository.py",
@@ -213,7 +215,7 @@ def test_generic_frontend_screenplay_debt_can_only_shrink():
     )
 
 
-def test_phase_three_native_screenplay_conversation_routes_are_complete():
+def test_rewritten_screenplay_agent_routes_are_complete():
     routes = _router_paths(
         BACKEND_DIR / "routers" / "screenplay_conversations.py"
     )
@@ -221,15 +223,15 @@ def test_phase_three_native_screenplay_conversation_routes_are_complete():
         "/projects/{project_id}/conversation/turns",
         "/projects/{project_id}/conversation/snapshot",
         "/projects/{project_id}/conversation/events",
+        "/conversation/turns/{turn_id}/and-after",
         "/conversation/turns/{turn_id}/cancel",
-        "/conversation/turns/{turn_id}/resume",
     }
     assert required <= routes, "Missing native Conversation routes: " + ", ".join(
         sorted(required - routes)
     )
 
 
-def test_phase_three_frontend_does_not_reuse_writing_chat_runtime():
+def test_screenplay_transport_does_not_parse_or_aggregate_model_runs():
     forbidden = {
         "agent-runtime",
         "AiPanel/hooks/chunkHandlers",
@@ -237,6 +239,9 @@ def test_phase_three_frontend_does_not_reuse_writing_chat_runtime():
         "onAiChunk",
         "dispatchChunk",
         "parseConversationsFromApi",
+        "ScreenplayAgentRunEvent",
+        "agent_run_events",
+        "JSON.parse",
     }
     violations: list[str] = []
     for path in SCREENPLAY_CONVERSATION_FRONTEND_FILES:
@@ -244,12 +249,12 @@ def test_phase_three_frontend_does_not_reuse_writing_chat_runtime():
         for token in forbidden:
             if token in source:
                 violations.append(f"{path.name} contains {token}")
-    assert not violations, "Native screenplay frontend reused Writing chat:\n" + "\n".join(
+    assert not violations, "Screenplay transport owns model stream logic:\n" + "\n".join(
         violations
     )
 
 
-def test_phase_four_screenplay_page_uses_only_native_conversation_runtime():
+def test_screenplay_page_consumes_the_shared_agent_chunk_runtime():
     forbidden = {
         "aiChatStream",
         "startScreenplayV2Operation",
@@ -267,6 +272,10 @@ def test_phase_four_screenplay_page_uses_only_native_conversation_runtime():
     assert not violations, "Legacy screenplay page runtime returned: " + ", ".join(
         violations
     )
+    assert "AgentChunkReplay" in source
+    assert "onChunks:" in source
+    assert "onEditMessage={editAgentMessage}" in source
+    assert "truncateFromTurn" in source
 
 
 def test_phase_four_removed_compatibility_modules_stay_deleted():

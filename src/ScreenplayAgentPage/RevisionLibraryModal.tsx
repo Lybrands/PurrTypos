@@ -4,16 +4,17 @@ import {
   CheckCircleIcon,
   EditIcon,
   FileTextIcon,
-  HistoryIcon,
   LoadingIcon,
   PurrButton,
-  PurrInput,
   PurrModal,
+  PurrSelect,
   RefreshIcon,
   SaveIcon,
   usePurrConfirm,
 } from '@/purr-components'
 import { useAppFeedback } from '../hooks/useAppFeedback'
+import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
+import Markdown from '../Workspace/AiPanel/components/Markdown'
 import type {
   EntityId,
   ScreenplayV2DeliverableRole,
@@ -23,12 +24,18 @@ import type {
   ScreenplayV2WorkingCopy,
   ScreenplayV2Workspace,
 } from '../types'
-import { createScreenplayCommandId } from './operationWorkflow'
+import { createScreenplayCommandId } from './screenplayProjectModel'
 import {
   buildWorkingCopyContent as buildWorkingCopyEditorContent,
   canApplyRevision,
   workingCopyEditorDraft,
 } from './revisionLibraryModel'
+import {
+  revisionPartKey,
+  revisionPartKindLabel,
+  revisionPartMarkdown,
+  revisionPartTitle,
+} from './revisionDocumentView'
 
 const ROLE_LABELS: Record<ScreenplayV2DeliverableRole, string> = {
   sourceAnalysis: '原作分析',
@@ -68,11 +75,6 @@ function defaultRole(workspace: ScreenplayV2Workspace): ScreenplayV2DeliverableR
   )) ?? roles[0] ?? 'creativeBrief'
 }
 
-function createdByLabel(createdBy: ScreenplayV2RevisionDetail['createdBy']): string {
-  if (createdBy === 'agent') return 'Agent 生成'
-  return '用户编辑'
-}
-
 function formatTime(value?: string | null): string {
   if (!value) return '时间未知'
   const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`
@@ -86,11 +88,29 @@ function formatTime(value?: string | null): string {
   }).format(date)
 }
 
-function partLabel(part: ScreenplayV2RevisionPart, index: number): string {
-  if (part.type === 'episode') return `第 ${part.key} 集`
-  if (part.type === 'scene') return `场景 ${part.key}`
-  if (part.type === 'reviewIssueGroup') return `问题组 ${part.key}`
-  return index === 0 ? '主文档' : part.key
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function workingCopyPart(
+  part: Record<string, unknown>,
+  index: number,
+): ScreenplayV2RevisionPart {
+  const rawType = String(part.type || 'document')
+  const type: ScreenplayV2RevisionPart['type'] = (
+    rawType === 'episode'
+    || rawType === 'scene'
+    || rawType === 'reviewIssueGroup'
+  ) ? rawType : 'document'
+  const rawPosition = Number(part.position ?? index + 1)
+  return {
+    type,
+    key: String(part.key || index + 1),
+    position: Number.isFinite(rawPosition) ? rawPosition : index + 1,
+    payload: isRecord(part.payload) ? part.payload : {},
+    contentText: String(part.contentText || ''),
+    contentDigest: '',
+  }
 }
 
 export default function RevisionLibraryModal({
@@ -114,14 +134,14 @@ export default function RevisionLibraryModal({
   const [historyLoadingMore, setHistoryLoadingMore] = React.useState(false)
   const [selectedRevisionId, setSelectedRevisionId] = React.useState<string | null>(null)
   const [revisionDetail, setRevisionDetail] = React.useState<ScreenplayV2RevisionDetail | null>(null)
+  const [selectedPartKey, setSelectedPartKey] = React.useState<string | null>(null)
   const [detailLoading, setDetailLoading] = React.useState(false)
   const [applyingRevisionId, setApplyingRevisionId] = React.useState<string | null>(null)
   const [seedingRevisionId, setSeedingRevisionId] = React.useState<string | null>(null)
   const [workingCopy, setWorkingCopy] = React.useState<ScreenplayV2WorkingCopy | null>(null)
-  const [mainJsonDraft, setMainJsonDraft] = React.useState('{}')
   const [mainTextDraft, setMainTextDraft] = React.useState('')
-  const [partJsonDrafts, setPartJsonDrafts] = React.useState<string[]>([])
   const [partTextDrafts, setPartTextDrafts] = React.useState<string[]>([])
+  const [selectedWorkingCopyPartKey, setSelectedWorkingCopyPartKey] = React.useState<string | null>(null)
   const [savingWorkingCopy, setSavingWorkingCopy] = React.useState(false)
   const [publishingWorkingCopy, setPublishingWorkingCopy] = React.useState(false)
 
@@ -260,6 +280,21 @@ export default function RevisionLibraryModal({
     workspace,
   ])
 
+  const showWorkingCopyEditor = React.useCallback((copy: ScreenplayV2WorkingCopy) => {
+    const draft = workingCopyEditorDraft(copy)
+    const initialParts = Array.isArray(copy.content.parts)
+      ? copy.content.parts.filter(isRecord)
+      : []
+    setWorkingCopy(copy)
+    setMainTextDraft(draft.mainText)
+    setPartTextDrafts(draft.partText)
+    setSelectedWorkingCopyPartKey(
+      initialParts[0]
+        ? revisionPartKey(workingCopyPart(initialParts[0], 0))
+        : 'document:main:0',
+    )
+  }, [])
+
   const openWorkingCopy = React.useCallback(async (
     revision: ScreenplayV2RevisionSummary,
   ) => {
@@ -268,11 +303,15 @@ export default function RevisionLibraryModal({
     const existing = latestWorkspace.workingCopies.find(
       (copy) => copy.role === revision.role,
     )
+    if (existing?.baseRevisionId === revision.id) {
+      showWorkingCopyEditor(existing)
+      return
+    }
     if (existing) {
       const decision = await confirm({
-        title: '用这个版本重置 Working Copy？',
-        content: '该交付物当前未发布的编辑内容会被替换；已经发布的 Revision 和当前版本不会被删除。',
-        confirmText: '重置并编辑',
+        title: '替换未发布的编辑内容？',
+        content: '当前未发布的修改将被这个版本覆盖，已发布版本不受影响。',
+        confirmText: '替换并编辑',
         confirmVariant: 'primary',
         cancelText: '取消',
       })
@@ -288,16 +327,11 @@ export default function RevisionLibraryModal({
     })
     setSeedingRevisionId(null)
     if (!result.success || !result.data) {
-      message.error(result.error || '创建 Working Copy 失败')
+      message.error(result.error || '创建编辑草稿失败')
       return
     }
     const copy = result.data
-    const draft = workingCopyEditorDraft(copy)
-    setWorkingCopy(copy)
-    setMainJsonDraft(draft.mainJson)
-    setMainTextDraft(draft.mainText)
-    setPartJsonDrafts(draft.partJson)
-    setPartTextDrafts(draft.partText)
+    showWorkingCopyEditor(copy)
     await refreshWorkspace()
   }, [
     confirm,
@@ -306,18 +340,17 @@ export default function RevisionLibraryModal({
     readOnly,
     refreshWorkspace,
     seedingRevisionId,
+    showWorkingCopyEditor,
     workspace,
   ])
 
   const buildWorkingCopyContent = React.useCallback(() => {
-    if (!workingCopy) throw new Error('Working Copy 不存在')
+    if (!workingCopy) throw new Error('编辑草稿不存在')
     return buildWorkingCopyEditorContent(workingCopy, {
-      mainJson: mainJsonDraft,
       mainText: mainTextDraft,
-      partJson: partJsonDrafts,
       partText: partTextDrafts,
     })
-  }, [mainJsonDraft, mainTextDraft, partJsonDrafts, partTextDrafts, workingCopy])
+  }, [mainTextDraft, partTextDrafts, workingCopy])
 
   const saveWorkingCopy = React.useCallback(async (): Promise<ScreenplayV2WorkingCopy | null> => {
     if (!workingCopy || savingWorkingCopy) return null
@@ -325,7 +358,7 @@ export default function RevisionLibraryModal({
     try {
       content = buildWorkingCopyContent()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : 'Working Copy 内容无效')
+      message.error(error instanceof Error ? error.message : '编辑内容无效')
       return null
     }
     setSavingWorkingCopy(true)
@@ -336,12 +369,12 @@ export default function RevisionLibraryModal({
     })
     setSavingWorkingCopy(false)
     if (!result.success || !result.data) {
-      message.error(result.error || '保存 Working Copy 失败')
+      message.error(result.error || '保存编辑草稿失败')
       return null
     }
     setWorkingCopy(result.data)
     await refreshWorkspace()
-    message.success('Working Copy 已保存')
+    message.success('编辑草稿已保存')
     return result.data
   }, [
     buildWorkingCopyContent,
@@ -390,44 +423,98 @@ export default function RevisionLibraryModal({
   const mainPart = revisionDetail?.parts.find(
     (part) => part.type === 'document' && part.key === 'main',
   )
-  const extraParts = revisionDetail?.parts.filter((part) => part !== mainPart) ?? []
+  const orderedParts = revisionDetail && mainPart && revisionDetail.parts.length > 1
+    ? [...revisionDetail.parts.filter((part) => part !== mainPart), mainPart]
+    : revisionDetail?.parts ?? []
+  const selectedPart = revisionDetail?.parts.find(
+    (part) => revisionPartKey(part) === selectedPartKey,
+  ) ?? orderedParts[0] ?? null
   const copyParts = workingCopy && Array.isArray(workingCopy.content.parts)
-    ? workingCopy.content.parts.filter((item): item is Record<string, unknown> => (
-        Boolean(item) && typeof item === 'object' && !Array.isArray(item)
-      ))
+    ? workingCopy.content.parts.filter(isRecord)
     : []
+  const copyRevisionParts = copyParts.map(workingCopyPart)
+  const workingCopyMainPart: ScreenplayV2RevisionPart | null = workingCopy ? {
+    type: 'document',
+    key: 'main',
+    position: 0,
+    payload: isRecord(workingCopy.content.contentJson)
+      ? workingCopy.content.contentJson
+      : {},
+    contentText: String(workingCopy.content.contentText || ''),
+    contentDigest: '',
+  } : null
+  const workingCopyEditorParts = workingCopyMainPart
+    ? [...copyRevisionParts, workingCopyMainPart]
+    : copyRevisionParts
+  const selectedWorkingCopyPart = workingCopyEditorParts.find(
+    (part) => revisionPartKey(part) === selectedWorkingCopyPartKey,
+  ) ?? workingCopyEditorParts[0] ?? null
+  const selectedWorkingCopyPartIndex = selectedWorkingCopyPart
+    ? copyRevisionParts.findIndex(
+        (part) => revisionPartKey(part) === revisionPartKey(selectedWorkingCopyPart),
+      )
+    : -1
+  const roleOptions = workspace.deliverables.map((deliverable) => ({
+    value: deliverable.role,
+    label: ROLE_LABELS[deliverable.role],
+  }))
+  const revisionOptions = history.items.map((revision) => ({
+    value: revision.id,
+    label: `v${revision.revisionNo} · ${STATUS_LABELS[revision.status || 'candidate']} · ${formatTime(revision.createdAt)}`,
+  }))
+
+  React.useEffect(() => {
+    if (!revisionDetail) {
+      setSelectedPartKey(null)
+      return
+    }
+    const defaultPart = revisionDetail.parts.length > 1
+      ? revisionDetail.parts.find((part) => part !== mainPart)
+      : mainPart ?? revisionDetail.parts[0]
+    if (!defaultPart) {
+      setSelectedPartKey(null)
+      return
+    }
+    setSelectedPartKey((current) => (
+      revisionDetail.parts.some((part) => revisionPartKey(part) === current)
+        ? current
+        : revisionPartKey(defaultPart)
+    ))
+  }, [mainPart, revisionDetail])
 
   return (
     <>
       <PurrModal
-        title="版本历史"
+        title="项目文档"
         open={open}
-        width="min(1120px, calc(100vw - 40px))"
+        width="min(1280px, calc(100vw - 48px))"
         footer={null}
         destroyOnHidden
         onCancel={onClose}
         className="screenplay-revision-library-modal"
       >
         <div className="screenplay-revision-library">
-          <nav className="screenplay-revision-library__roles" aria-label="交付物版本分类">
-            {workspace.deliverables.map((deliverable) => (
-              <button
-                type="button"
-                className={deliverable.role === role ? 'is-active' : ''}
-                aria-pressed={deliverable.role === role}
-                onClick={() => selectRole(deliverable.role)}
-                key={deliverable.role}
-              >
-                <span>{ROLE_LABELS[deliverable.role]}</span>
-                {workspace.workflow.heads[deliverable.role] && <small>有当前版本</small>}
-              </button>
-            ))}
-          </nav>
-          <section className="screenplay-revision-library__history">
-            <header>
-              <div>
-                <HistoryIcon />
-                <strong>{ROLE_LABELS[role]}</strong>
+          <header className="screenplay-revision-library__toolbar">
+            <div className="screenplay-revision-library__selectors">
+              <div className="screenplay-revision-library__field">
+                <span>文档</span>
+                <PurrSelect<ScreenplayV2DeliverableRole>
+                  value={role}
+                  options={roleOptions}
+                  className="screenplay-revision-library__role-select"
+                  onChange={(value) => selectRole(value)}
+                />
+              </div>
+              <div className="screenplay-revision-library__field">
+                <span>版本</span>
+                <PurrSelect<string>
+                  value={selectedRevisionId}
+                  options={revisionOptions}
+                  placeholder={historyLoading ? '读取版本…' : '暂无版本'}
+                  disabled={historyLoading && history.items.length === 0}
+                  className="screenplay-revision-library__version-select"
+                  onChange={(value) => setSelectedRevisionId(value)}
+                />
               </div>
               <PurrButton
                 type="text"
@@ -435,122 +522,137 @@ export default function RevisionLibraryModal({
                 icon={<RefreshIcon />}
                 loading={historyLoading}
                 onClick={() => void loadHistory(role)}
+                aria-label="刷新版本列表"
+                title="刷新版本列表"
               >
                 刷新
               </PurrButton>
-            </header>
-            {historyLoading && history.items.length === 0 ? (
-              <div className="screenplay-revision-library__loading"><LoadingIcon />读取版本…</div>
-            ) : history.items.length === 0 ? (
-              <div className="screenplay-revision-library__empty">这个交付物还没有发布版本</div>
-            ) : (
-              <div className="screenplay-revision-list">
-                {history.items.map((revision) => (
-                  <button
-                    type="button"
-                    className={revision.id === selectedRevisionId ? 'is-selected' : ''}
-                    onClick={() => setSelectedRevisionId(revision.id)}
-                    key={revision.id}
-                  >
-                    <span className={`is-${revision.status || 'candidate'}`}>
-                      {STATUS_LABELS[revision.status || 'candidate']}
-                    </span>
-                    <strong>v{revision.revisionNo}</strong>
-                    <small>{formatTime(revision.createdAt)}</small>
-                    {revision.applicability === 'stale' && <em>上游已变化</em>}
-                  </button>
-                ))}
-                {history.nextCursor && (
+              {history.nextCursor && (
+                <PurrButton
+                  type="text"
+                  size="small"
+                  loading={historyLoadingMore}
+                  onClick={() => void loadHistory(role, history.nextCursor || undefined)}
+                >
+                  更早版本
+                </PurrButton>
+              )}
+            </div>
+            {revisionDetail && selectedSummary && !readOnly && (
+              <div className="screenplay-revision-library__actions">
+                <PurrButton
+                  icon={<EditIcon />}
+                  loading={seedingRevisionId === revisionDetail.id}
+                  disabled={seedingRevisionId != null || applyingRevisionId != null}
+                  onClick={() => void openWorkingCopy(revisionDetail)}
+                >
+                  基于此版本编辑
+                </PurrButton>
+                {selectedSummary.status !== 'current' && (
                   <PurrButton
-                    type="text"
-                    size="small"
-                    loading={historyLoadingMore}
-                    onClick={() => void loadHistory(role, history.nextCursor || undefined)}
+                    type="primary"
+                    icon={<CheckCircleIcon />}
+                    loading={applyingRevisionId === revisionDetail.id}
+                    disabled={
+                      !canApplyRevision(selectedSummary)
+                      || applyingRevisionId != null
+                      || seedingRevisionId != null
+                    }
+                    onClick={() => void applyRevision(selectedSummary)}
                   >
-                    加载更早版本
+                    应用此版本
                   </PurrButton>
                 )}
               </div>
             )}
-          </section>
-          <section className="screenplay-revision-library__detail">
-            {detailLoading ? (
-              <div className="screenplay-revision-library__loading"><LoadingIcon />读取内容…</div>
-            ) : !revisionDetail || !selectedSummary ? (
-              <div className="screenplay-revision-library__empty">
-                <FileTextIcon />选择一个版本查看完整内容
-              </div>
-            ) : (
-              <>
-                <header>
+          </header>
+          {historyLoading && history.items.length === 0 ? (
+            <div className="screenplay-revision-library__loading"><LoadingIcon />读取版本…</div>
+          ) : history.items.length === 0 ? (
+            <div className="screenplay-revision-library__empty">这个文档还没有发布版本</div>
+          ) : detailLoading ? (
+            <div className="screenplay-revision-library__loading"><LoadingIcon />读取内容…</div>
+          ) : !revisionDetail || !selectedSummary ? (
+            <div className="screenplay-revision-library__empty">
+              <FileTextIcon />选择一个版本查看内容
+            </div>
+          ) : (
+            <>
+              {selectedSummary.applicability === 'stale' && (
+                <div className="screenplay-revision-library__stale">
+                  该版本的上游内容已经变化，不能直接应用；可以基于它创建编辑草稿。
+                </div>
+              )}
+              <div className="screenplay-revision-document-browser">
+                <nav
+                  className="screenplay-revision-document-browser__list"
+                  aria-label="当前版本的内容目录"
+                >
+                  <header>
+                    <strong>内容目录</strong>
+                    <span>{revisionDetail.parts.length}</span>
+                  </header>
                   <div>
-                    <span>{STATUS_LABELS[selectedSummary.status || 'candidate']}</span>
-                    <h3>{ROLE_LABELS[revisionDetail.role]} · v{revisionDetail.revisionNo}</h3>
-                    <small>
-                      {createdByLabel(revisionDetail.createdBy)} · {formatTime(revisionDetail.createdAt)}
-                    </small>
-                  </div>
-                  {!readOnly && (
-                    <div>
-                      <PurrButton
-                        icon={<EditIcon />}
-                        loading={seedingRevisionId === revisionDetail.id}
-                        disabled={seedingRevisionId != null || applyingRevisionId != null}
-                        onClick={() => void openWorkingCopy(revisionDetail)}
-                      >
-                        基于此版本编辑
-                      </PurrButton>
-                      {selectedSummary.status !== 'current' && (
-                        <PurrButton
-                          type="primary"
-                          icon={<CheckCircleIcon />}
-                          loading={applyingRevisionId === revisionDetail.id}
-                          disabled={
-                            !canApplyRevision(selectedSummary)
-                            || applyingRevisionId != null
-                            || seedingRevisionId != null
-                          }
-                          onClick={() => void applyRevision(selectedSummary)}
+                    {orderedParts.map((part, index) => {
+                      const partKey = revisionPartKey(part)
+                      const selected = selectedPart
+                        ? partKey === revisionPartKey(selectedPart)
+                        : index === 0
+                      const title = part === mainPart && orderedParts.length > 1
+                        ? '文档概览'
+                        : revisionPartTitle(part, index)
+                      return (
+                        <button
+                          type="button"
+                          className={selected ? 'is-selected' : ''}
+                          aria-pressed={selected}
+                          onClick={() => setSelectedPartKey(partKey)}
+                          key={partKey}
                         >
-                          应用此版本
-                        </PurrButton>
-                      )}
+                          <FileTextIcon />
+                          <span>
+                            <strong>{title}</strong>
+                            <small>{revisionPartKindLabel(part)}</small>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </nav>
+                <article className="screenplay-revision-document-browser__reader">
+                  {selectedPart ? (
+                    <>
+                      <header>
+                        <span>{revisionPartKindLabel(selectedPart)}</span>
+                        <h4>
+                          {selectedPart === mainPart && orderedParts.length > 1
+                            ? '文档概览'
+                            : revisionPartTitle(
+                                selectedPart,
+                                orderedParts.indexOf(selectedPart),
+                              )}
+                        </h4>
+                      </header>
+                      <Markdown preserveSoftBreaks>
+                        {revisionPartMarkdown(selectedPart)}
+                      </Markdown>
+                    </>
+                  ) : (
+                    <div className="screenplay-revision-library__empty">
+                      暂无可阅读的文档内容
                     </div>
                   )}
-                </header>
-                {selectedSummary.applicability === 'stale' && (
-                  <div className="screenplay-revision-library__stale">
-                    该版本绑定的上游已经变化，不能直接应用；可以基于它建立 Working Copy，发布时会绑定当前上游。
-                  </div>
-                )}
-                <div className="screenplay-revision-library__meta">
-                  <span>{revisionDetail.parts.length} 个 Part</span>
-                  <span>{revisionDetail.sources.length} 条来源</span>
-                  <span>{Object.keys(revisionDetail.inputRevisions).length} 个上游输入</span>
-                </div>
-                <article className="screenplay-revision-library__content">
-                  <pre>{mainPart?.contentText || JSON.stringify(mainPart?.payload || {}, null, 2)}</pre>
                 </article>
-                {extraParts.length > 0 && (
-                  <div className="screenplay-revision-library__parts">
-                    {extraParts.map((part, index) => (
-                      <details key={`${part.type}-${part.key}`}>
-                        <summary>{partLabel(part, index + 1)}</summary>
-                        <pre>{part.contentText || JSON.stringify(part.payload, null, 2)}</pre>
-                      </details>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-          </section>
+              </div>
+            </>
+          )}
         </div>
       </PurrModal>
 
       <PurrModal
-        title={workingCopy ? `${ROLE_LABELS[workingCopy.role]} Working Copy` : 'Working Copy'}
+        title={workingCopy ? `编辑${ROLE_LABELS[workingCopy.role]}` : '编辑项目文档'}
         open={workingCopy != null}
-        width="min(920px, calc(100vw - 40px))"
+        width="min(1100px, calc(100vw - 40px))"
         destroyOnHidden
         onCancel={() => {
           if (savingWorkingCopy || publishingWorkingCopy) return
@@ -570,7 +672,7 @@ export default function RevisionLibraryModal({
               disabled={publishingWorkingCopy}
               onClick={() => void saveWorkingCopy()}
             >
-              保存编辑
+              保存草稿
             </PurrButton>
             <PurrButton
               type="primary"
@@ -579,71 +681,78 @@ export default function RevisionLibraryModal({
               disabled={savingWorkingCopy}
               onClick={() => void publishWorkingCopy()}
             >
-              发布为候选
+              发布候选版本
             </PurrButton>
           </>
         ) : null}
         className="screenplay-working-copy-modal"
       >
-        {workingCopy && (
+        {workingCopy && selectedWorkingCopyPart && (
           <div className="screenplay-working-copy-editor">
-            <div className="screenplay-working-copy-editor__notice">
-              Working Copy 可反复保存，不会增加正式版本号；只有“发布为候选”才创建新的 Revision。
-            </div>
-            <label>
-              <span>主文档结构化内容</span>
-              <PurrInput.TextArea
-                value={mainJsonDraft}
-                autoSize={{ minRows: 8, maxRows: 18 }}
-                spellCheck={false}
-                onChange={(event) => setMainJsonDraft(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>主文档正文</span>
-              <PurrInput.TextArea
-                value={mainTextDraft}
-                autoSize={{ minRows: 8, maxRows: 22 }}
-                onChange={(event) => setMainTextDraft(event.target.value)}
-              />
-            </label>
-            {copyParts.map((part, index) => (
-              <details className="screenplay-working-copy-editor__part" key={`${part.type}-${part.key}`}>
-                <summary>{partLabel({
-                  type: String(part.type || 'document') as ScreenplayV2RevisionPart['type'],
-                  key: String(part.key || index + 1),
-                  position: Number(part.position || index + 1),
-                  payload: {},
-                  contentText: '',
-                  contentDigest: '',
-                }, index + 1)}</summary>
-                <label>
-                  <span>结构化内容</span>
-                  <PurrInput.TextArea
-                    value={partJsonDrafts[index] || '{}'}
-                    autoSize={{ minRows: 6, maxRows: 16 }}
-                    spellCheck={false}
-                    onChange={(event) => setPartJsonDrafts((current) => (
-                      current.map((value, itemIndex) => (
-                        itemIndex === index ? event.target.value : value
-                      ))
-                    ))}
-                  />
-                </label>
-                <label>
-                  <span>正文</span>
-                  <PurrInput.TextArea
-                    value={partTextDrafts[index] || ''}
-                    autoSize={{ minRows: 5, maxRows: 18 }}
-                    onChange={(event) => setPartTextDrafts((current) => (
-                      current.map((value, itemIndex) => (
-                        itemIndex === index ? event.target.value : value
-                      ))
-                    ))}
-                  />
-                </label>
-              </details>
-            ))}
+            <nav
+              className="screenplay-working-copy-editor__directory"
+              aria-label="可编辑内容目录"
+            >
+              <header>
+                <strong>编辑内容</strong>
+                <span>{workingCopyEditorParts.length}</span>
+              </header>
+              <div>
+                {workingCopyEditorParts.map((part, index) => {
+                  const partKey = revisionPartKey(part)
+                  const selected = partKey === revisionPartKey(selectedWorkingCopyPart)
+                  const title = part === workingCopyMainPart && workingCopyEditorParts.length > 1
+                    ? '文档概览'
+                    : revisionPartTitle(part, index)
+                  return (
+                    <button
+                      type="button"
+                      className={selected ? 'is-selected' : ''}
+                      aria-pressed={selected}
+                      onClick={() => setSelectedWorkingCopyPartKey(partKey)}
+                      key={partKey}
+                    >
+                      <FileTextIcon />
+                      <span>
+                        <strong>{title}</strong>
+                        <small>{revisionPartKindLabel(part)}</small>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </nav>
+            <section className="screenplay-working-copy-editor__content">
+              <header>
+                <span>{revisionPartKindLabel(selectedWorkingCopyPart)}</span>
+                <h3>
+                  {selectedWorkingCopyPart === workingCopyMainPart && workingCopyEditorParts.length > 1
+                    ? '文档概览'
+                    : revisionPartTitle(
+                        selectedWorkingCopyPart,
+                        workingCopyEditorParts.indexOf(selectedWorkingCopyPart),
+                      )}
+                </h3>
+              </header>
+              <div className="screenplay-working-copy-editor__field">
+                <span>内容</span>
+                <KnowledgeMarkdownEditor
+                  documentKey={revisionPartKey(selectedWorkingCopyPart)}
+                  value={selectedWorkingCopyPartIndex === -1
+                    ? mainTextDraft
+                    : partTextDrafts[selectedWorkingCopyPartIndex] || ''}
+                  onChange={(value) => {
+                    if (selectedWorkingCopyPartIndex === -1) {
+                      setMainTextDraft(value)
+                      return
+                    }
+                    setPartTextDrafts((current) => current.map((item, index) => (
+                      index === selectedWorkingCopyPartIndex ? value : item
+                    )))
+                  }}
+                />
+              </div>
+            </section>
           </div>
         )}
       </PurrModal>
