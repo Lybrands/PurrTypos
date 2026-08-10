@@ -9,6 +9,7 @@ import pytest_asyncio
 from purra.long_tasks import (
     LongTaskCoordinator,
     LongTaskCreateCommand,
+    LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitResult,
     LongTaskUnitSpec,
@@ -17,6 +18,7 @@ from purra.long_tasks import (
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
+    FailureScope,
     FailureSignal,
     RecoveryEffectState,
     decide_failure,
@@ -129,6 +131,77 @@ def test_long_task_contract_rejects_dependency_cycles():
                 ),
             ),
         )
+
+
+def test_long_task_contract_uses_stable_unique_semantic_keys():
+    implicit = LongTaskUnitSpec(id="chapter-1", position=0)
+    assert implicit.semantic_key == "chapter-1"
+
+    with pytest.raises(ValueError, match="semantic keys must be unique"):
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-1",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(
+                    id="part-a",
+                    semantic_key="chapter:1",
+                    position=0,
+                ),
+                LongTaskUnitSpec(
+                    id="part-b",
+                    semantic_key="chapter:1",
+                    position=1,
+                ),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_manifest_create_is_idempotent_by_part_id_and_semantic_key(
+    long_task_db,
+):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-idempotent-manifest",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    command = LongTaskCreateCommand(
+        namespace="test",
+        kind="large_write",
+        owner_id="owner-1",
+        work_item_id="work-idempotent-manifest",
+        created_by_run_id="run-parent",
+        units=(LongTaskUnitSpec(
+            id="part-1",
+            semantic_key="chapter:1",
+            position=0,
+        ),),
+    )
+
+    first = await repository.create("task-idempotent-manifest", command)
+    second = await repository.create("task-idempotent-manifest", command)
+
+    assert second == first
+    units = await repository.list_units(first.id)
+    assert [(unit.id, unit.semantic_key) for unit in units] == [
+        ("part-1", "chapter:1"),
+    ]
+    indexes = await long_task_db.fetch_all(
+        "PRAGMA index_list(ai_agent_long_task_units)"
+    )
+    assert any(
+        row["name"] == "idx_ai_agent_long_task_units_semantic_key"
+        and int(row["unique"]) == 1
+        for row in indexes
+    )
 
 
 @pytest.mark.asyncio
@@ -736,7 +809,6 @@ async def test_exhausted_recoverable_unit_pauses_without_canceling_completed_uni
             code="model_output_truncated",
             retryable=True,
             effect_state=RecoveryEffectState.NOT_STARTED,
-            checkpoint_available=True,
         ),
         attempts_remaining=0,
     )
@@ -841,3 +913,304 @@ async def test_permanent_unit_failure_still_terminalizes_task(long_task_db):
     assert failed.status is LongTaskStatus.FAILED
     unit = (await repository.list_units(task.id))[0]
     assert unit.status is LongTaskUnitStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_local_blocked_part_does_not_prevent_independent_sibling_completion(
+    long_task_db,
+):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-local-block",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-local-block",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-local-block",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(id="blocked", position=0, max_attempts=1),
+                LongTaskUnitSpec(id="sibling", position=1),
+            ),
+        ),
+    )
+
+    class _Runner:
+        def __init__(self):
+            self.calls = []
+
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code="model_output_truncated",
+                retryable=True,
+                scope=FailureScope.LOCAL,
+            )
+
+        async def run_unit(self, task, unit, signal=None):
+            self.calls.append(unit.id)
+            if unit.id == "blocked":
+                raise RuntimeError("model_output_truncated")
+            return LongTaskUnitResult(output_ref="artifact://sibling")
+
+    runner = _Runner()
+    paused = await LongTaskCoordinator(
+        repository,
+        worker_id="worker-local-block",
+    ).run(task.id, runner)
+
+    assert paused.status is LongTaskStatus.PAUSED
+    assert runner.calls == ["blocked", "sibling"]
+    units = {unit.id: unit for unit in await repository.list_units(task.id)}
+    assert units["blocked"].status is LongTaskUnitStatus.BLOCKED
+    assert units["blocked"].disposition is FailureDisposition.PAUSE_RECOVERABLE
+    assert units["blocked"].failure["scope"] == FailureScope.LOCAL.value
+    assert units["sibling"].status is LongTaskUnitStatus.COMPLETED
+    assert units["sibling"].output_ref == "artifact://sibling"
+
+
+@pytest.mark.asyncio
+async def test_systemic_failure_stops_new_unit_claims_immediately(long_task_db):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-systemic",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-systemic",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-systemic",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(id="first", position=0),
+                LongTaskUnitSpec(id="must-not-start", position=1),
+            ),
+        ),
+    )
+
+    class _Runner:
+        def __init__(self):
+            self.calls = []
+
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.TRANSIENT_PROVIDER,
+                code="provider_region_unavailable",
+                retryable=True,
+                scope=FailureScope.SYSTEMIC,
+            )
+
+        async def run_unit(self, task, unit, signal=None):
+            self.calls.append(unit.id)
+            raise RuntimeError("provider_region_unavailable")
+
+    runner = _Runner()
+    paused = await LongTaskCoordinator(
+        repository,
+        worker_id="worker-systemic",
+    ).run(task.id, runner)
+
+    assert paused.status is LongTaskStatus.PAUSED
+    assert runner.calls == ["first"]
+    units = {unit.id: unit for unit in await repository.list_units(task.id)}
+    assert units["first"].status is LongTaskUnitStatus.BLOCKED
+    assert units["must-not-start"].status is LongTaskUnitStatus.PENDING
+
+
+def test_length_failure_resumes_checkpoint_before_splitting_part():
+    checkpoint = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="model_output_truncated",
+            retryable=False,
+            checkpoint_available=True,
+            part_splittable=True,
+        ),
+        attempts_remaining=0,
+    )
+    splittable = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="model_output_truncated",
+            retryable=False,
+            part_splittable=True,
+        ),
+        attempts_remaining=0,
+    )
+
+    assert checkpoint.disposition is FailureDisposition.RESUME_CHECKPOINT
+    assert splittable.disposition is FailureDisposition.SPLIT_PART
+
+
+@pytest.mark.asyncio
+async def test_coordinator_expands_splittable_part_and_rewrites_dependencies(
+    long_task_db,
+):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-expand",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-expand",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-expand",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(
+                    id="chapter",
+                    semantic_key="chapter:1",
+                    position=0,
+                ),
+                LongTaskUnitSpec(
+                    id="assemble",
+                    semantic_key="assemble",
+                    position=100,
+                    dependencies=("chapter",),
+                ),
+            ),
+        ),
+    )
+
+    class _Runner:
+        def __init__(self):
+            self.calls = []
+            self.split_calls = 0
+
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code="model_output_truncated",
+                retryable=False,
+                part_splittable=True,
+            )
+
+        def split_unit(self, task, unit, error):
+            self.split_calls += 1
+            return LongTaskSplitResult(
+                children=(
+                    LongTaskUnitSpec(
+                        id="chapter-a",
+                        semantic_key="chapter:1:a",
+                        position=10,
+                    ),
+                    LongTaskUnitSpec(
+                        id="chapter-b",
+                        semantic_key="chapter:1:b",
+                        position=20,
+                        dependencies=("chapter-a",),
+                    ),
+                ),
+                replacement_dependency_ids=("chapter-b",),
+            )
+
+        async def run_unit(self, task, unit, signal=None):
+            self.calls.append(unit.id)
+            if unit.id == "chapter":
+                raise RuntimeError("model_output_truncated")
+            return LongTaskUnitResult(
+                output_ref=f"artifact://{unit.id}",
+                artifact_digest=f"sha256:{unit.id}",
+                validation_receipt={"valid": True, "unitId": unit.id},
+            )
+
+    runner = _Runner()
+    completed = await LongTaskCoordinator(
+        repository,
+        worker_id="worker-expand",
+    ).run(task.id, runner)
+
+    assert completed.status is LongTaskStatus.COMPLETED
+    assert completed.total_units == 3
+    assert completed.completed_units == 3
+    assert runner.split_calls == 1
+    assert runner.calls == ["chapter", "chapter-a", "chapter-b", "assemble"]
+    units = {unit.id: unit for unit in await repository.list_units(task.id)}
+    assert units["chapter"].status is LongTaskUnitStatus.EXPANDED
+    assert units["chapter"].required is False
+    assert units["assemble"].dependencies == ("chapter-b",)
+    assert units["chapter-a"].artifact_digest == "sha256:chapter-a"
+    assert units["chapter-a"].validation_receipt["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_minimum_part_without_checkpoint_pauses_as_mode_incompatible(
+    long_task_db,
+):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-minimum-part",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-minimum-part",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-minimum-part",
+            created_by_run_id="run-parent",
+            units=(LongTaskUnitSpec(id="minimum", position=0),),
+        ),
+    )
+
+    class _Runner:
+        def __init__(self):
+            self.calls = 0
+
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code="model_output_truncated",
+                retryable=False,
+                part_splittable=True,
+            )
+
+        def split_unit(self, task, unit, error):
+            return LongTaskSplitResult(children=(), replacement_dependency_ids=())
+
+        async def run_unit(self, task, unit, signal=None):
+            self.calls += 1
+            raise RuntimeError("model_output_truncated")
+
+    runner = _Runner()
+    paused = await LongTaskCoordinator(
+        repository,
+        worker_id="worker-minimum-part",
+    ).run(task.id, runner)
+
+    assert paused.status is LongTaskStatus.PAUSED
+    assert runner.calls == 1
+    unit = (await repository.list_units(task.id))[0]
+    assert unit.status is LongTaskUnitStatus.BLOCKED
+    assert unit.error_code == "model_task_mode_incompatible"

@@ -9,6 +9,7 @@ from purra.long_tasks.ports import LongTaskRepository, LongTaskUnitRunner
 from purra.ports import CancellationSignal
 from purra.recovery import (
     FailureCategory,
+    FailureDisposition,
     FailureSignal,
     decide_failure,
 )
@@ -140,6 +141,33 @@ class LongTaskCoordinator:
                 failure,
                 attempts_remaining=max(0, unit.max_attempts - unit.attempt),
             )
+            if decision.disposition is FailureDisposition.SPLIT_PART:
+                splitter = getattr(runner, "split_unit", None)
+                split = None
+                if callable(splitter):
+                    try:
+                        split = splitter(task, unit, error)
+                    except Exception:
+                        split = None
+                if split is not None and split.children:
+                    settled = await self._repository.expand_unit(
+                        task.id,
+                        unit.id,
+                        worker_id=self._worker_id,
+                        split=split,
+                        decision=decision,
+                    )
+                    await self._notify_settled(runner, task.id)
+                    return settled
+                decision = decide_failure(
+                    FailureSignal(
+                        category=FailureCategory.PROTOCOL_INCOMPATIBLE,
+                        code="model_task_mode_incompatible",
+                        retryable=False,
+                        scope=failure.scope,
+                    ),
+                    attempts_remaining=0,
+                )
             settled = await self._repository.settle_unit_failure(
                 task.id,
                 unit.id,

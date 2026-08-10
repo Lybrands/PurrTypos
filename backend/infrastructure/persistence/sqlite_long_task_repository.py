@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Mapping
+from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from purra.contracts import SessionId
@@ -13,6 +14,7 @@ from purra.json_values import thaw_json_mapping
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitRecord,
     LongTaskUnitResult,
@@ -21,6 +23,7 @@ from purra.long_tasks.contracts import (
 from purra.recovery import (
     FailureDecision,
     FailureDisposition,
+    FailureScope,
 )
 
 
@@ -60,7 +63,7 @@ class SqliteLongTaskRepository:
                         command.kind,
                         command.owner_id,
                         command.created_by_run_id,
-                        len(command.units),
+                        sum(1 for unit in command.units if unit.required),
                         command.max_parallelism,
                         _json_dump(command.metadata),
                     ],
@@ -68,13 +71,17 @@ class SqliteLongTaskRepository:
                 for unit in command.units:
                     await self._db.execute(
                         "INSERT INTO ai_agent_long_task_units "
-                        "(task_id, unit_id, position, dependencies_json, input_ref, "
-                        "max_attempts, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "(task_id, unit_id, semantic_key, position, dependencies_json, "
+                        "parent_unit_id, required, input_ref, max_attempts, metadata_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [
                             normalized_id,
                             unit.id,
+                            unit.semantic_key,
                             unit.position,
                             json.dumps(list(unit.dependencies), separators=(",", ":")),
+                            unit.parent_unit_id,
+                            int(unit.required),
                             unit.input_ref,
                             unit.max_attempts,
                             _json_dump(unit.metadata),
@@ -342,12 +349,16 @@ class SqliteLongTaskRepository:
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'completed', "
                 "output_ref = ?, run_id = COALESCE(?, run_id), worker_id = NULL, "
-                "lease_expires_at_ms = NULL, error_code = NULL, "
+                "artifact_digest = ?, validation_receipt_json = ?, "
+                "lease_expires_at_ms = NULL, error_code = NULL, failure_json = '{}', "
+                "disposition = NULL, "
                 "metadata_json = ?, update_time = CURRENT_TIMESTAMP "
                 "WHERE task_id = ? AND unit_id = ?",
                 [
                     result.output_ref,
                     result.run_id,
+                    result.artifact_digest,
+                    _json_dump(result.validation_receipt),
                     _json_dump({
                         **thaw_json_mapping(unit.metadata),
                         **thaw_json_mapping(result.metadata),
@@ -356,11 +367,7 @@ class SqliteLongTaskRepository:
                     unit.id,
                 ],
             )
-            await self._db.execute(
-                "UPDATE ai_agent_long_tasks SET completed_units = completed_units + 1, "
-                "revision = revision + 1, update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [task.id],
-            )
+            await self._refresh_task_totals(task.id)
             return await self._require(task.id)
 
     async def settle_unit_failure(
@@ -383,6 +390,8 @@ class SqliteLongTaskRepository:
                 FailureDisposition.RESUME_CHECKPOINT,
             }:
                 target = LongTaskUnitStatus.WAITING_RETRY
+            elif disposition is FailureDisposition.SPLIT_PART:
+                target = LongTaskUnitStatus.NEEDS_SPLIT
             elif disposition is FailureDisposition.PAUSE_RECOVERABLE:
                 target = LongTaskUnitStatus.BLOCKED
             elif disposition is FailureDisposition.CANCEL:
@@ -392,13 +401,32 @@ class SqliteLongTaskRepository:
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = ?, worker_id = NULL, "
                 "lease_expires_at_ms = NULL, error_code = ?, "
+                "failure_json = ?, disposition = ?, "
+                "max_attempts = max_attempts + ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
-                [target.value, decision.code[:240], unit.task_id, unit.id],
+                [
+                    target.value,
+                    decision.code[:240],
+                    _json_dump(_failure_payload(decision)),
+                    disposition.value,
+                    int(
+                        disposition is FailureDisposition.RESUME_CHECKPOINT
+                        and unit.attempt >= unit.max_attempts
+                    ),
+                    unit.task_id,
+                    unit.id,
+                ],
             )
-            if target is LongTaskUnitStatus.WAITING_RETRY:
+            if target in {
+                LongTaskUnitStatus.WAITING_RETRY,
+                LongTaskUnitStatus.NEEDS_SPLIT,
+            }:
                 await self._touch_task(task)
             elif target is LongTaskUnitStatus.BLOCKED:
-                await self._update_task_status(task, LongTaskStatus.PAUSED)
+                if decision.scope is FailureScope.SYSTEMIC:
+                    await self._update_task_status(task, LongTaskStatus.PAUSED)
+                else:
+                    await self._pause_if_no_runnable_work(task)
             elif target is LongTaskUnitStatus.CANCELED:
                 await self._update_task_status(task, LongTaskStatus.CANCELED)
             else:
@@ -420,6 +448,144 @@ class SqliteLongTaskRepository:
                     "('pending', 'claimed', 'running')",
                     [task.id, unit.id],
                 )
+            return await self._require(task.id)
+
+    async def expand_unit(
+        self,
+        task_id: str,
+        unit_id: str,
+        *,
+        worker_id: str,
+        split: LongTaskSplitResult,
+        decision: FailureDecision,
+    ) -> LongTaskRecord:
+        """Replace one required Part with stable child Parts atomically."""
+
+        if not isinstance(split, LongTaskSplitResult):
+            raise TypeError("long task expansion requires a LongTaskSplitResult")
+        if not split.children:
+            raise ValueError("long task expansion requires at least one child")
+        if not isinstance(decision, FailureDecision):
+            raise TypeError("long task expansion requires a FailureDecision")
+        if decision.disposition is not FailureDisposition.SPLIT_PART:
+            raise ValueError("long task expansion requires split_part disposition")
+        async with self._db.transaction(cancellation_linearizable=True):
+            task = await self._require(task_id)
+            unit = await self._require_unit(task.id, unit_id)
+            if unit.status is LongTaskUnitStatus.EXPANDED:
+                return task
+            if task.status is not LongTaskStatus.RUNNING:
+                raise ValueError("long task is not running")
+            _require_worker(unit, worker_id)
+            if unit.status not in {
+                LongTaskUnitStatus.CLAIMED,
+                LongTaskUnitStatus.RUNNING,
+                LongTaskUnitStatus.NEEDS_SPLIT,
+            }:
+                raise ValueError("long task unit is not active")
+
+            existing_rows = await self._db.fetch_all(
+                "SELECT unit_id, semantic_key, position FROM ai_agent_long_task_units "
+                "WHERE task_id = ?",
+                [task.id],
+            )
+            existing_ids = {str(row["unit_id"]) for row in existing_rows}
+            existing_keys = {str(row["semantic_key"]) for row in existing_rows}
+            existing_positions = {int(row["position"]) for row in existing_rows}
+            child_ids = {child.id for child in split.children}
+            if existing_ids & child_ids:
+                raise ValueError("split child id conflicts with task manifest")
+            if existing_keys & {str(child.semantic_key) for child in split.children}:
+                raise ValueError("split child semantic key conflicts with task manifest")
+            if existing_positions & {child.position for child in split.children}:
+                raise ValueError("split child position conflicts with task manifest")
+            known_ids = existing_ids | child_ids
+            for child in split.children:
+                dependencies = _unique_ordered((*unit.dependencies, *child.dependencies))
+                if unit.id in dependencies:
+                    raise ValueError("split child cannot depend on expanded parent")
+                unknown = set(dependencies) - known_ids
+                if unknown:
+                    raise ValueError("split child dependency is unknown")
+                await self._db.execute(
+                    "INSERT INTO ai_agent_long_task_units "
+                    "(task_id, unit_id, semantic_key, position, status, "
+                    "dependencies_json, parent_unit_id, required, input_ref, "
+                    "max_attempts, metadata_json) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                    [
+                        task.id,
+                        child.id,
+                        child.semantic_key,
+                        child.position,
+                        json.dumps(list(dependencies), separators=(",", ":")),
+                        child.parent_unit_id or unit.id,
+                        int(child.required),
+                        child.input_ref,
+                        child.max_attempts,
+                        _json_dump(child.metadata),
+                    ],
+                )
+
+            downstream = await self._db.fetch_all(
+                "SELECT unit_id, dependencies_json FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND unit_id <> ?",
+                [task.id, unit.id],
+            )
+            for row in downstream:
+                dependencies = tuple(_json_load(row.get("dependencies_json"), []))
+                if unit.id not in dependencies:
+                    continue
+                if not split.replacement_dependency_ids:
+                    raise ValueError(
+                        "split must replace dependencies on the expanded parent"
+                    )
+                rewritten: list[str] = []
+                for dependency in dependencies:
+                    if dependency == unit.id:
+                        rewritten.extend(split.replacement_dependency_ids)
+                    else:
+                        rewritten.append(str(dependency))
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET dependencies_json = ?, "
+                    "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
+                    [
+                        json.dumps(list(_unique_ordered(rewritten)), separators=(",", ":")),
+                        task.id,
+                        str(row["unit_id"]),
+                    ],
+                )
+
+            manifest_rows = await self._db.fetch_all(
+                "SELECT unit_id, dependencies_json FROM ai_agent_long_task_units "
+                "WHERE task_id = ?",
+                [task.id],
+            )
+            _require_acyclic_dependencies({
+                str(row["unit_id"]): tuple(
+                    _json_load(row.get("dependencies_json"), [])
+                )
+                for row in manifest_rows
+            })
+
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'needs_split', "
+                "error_code = ?, failure_json = ?, disposition = 'split_part', "
+                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
+                [
+                    decision.code[:240],
+                    _json_dump(_failure_payload(decision)),
+                    task.id,
+                    unit.id,
+                ],
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'expanded', "
+                "required = 0, worker_id = NULL, lease_expires_at_ms = NULL, "
+                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
+                [task.id, unit.id],
+            )
+            await self._refresh_task_totals(task.id)
             return await self._require(task.id)
 
     async def interrupt_unit(
@@ -596,16 +762,23 @@ class SqliteLongTaskRepository:
                 return task
             counts = await self._db.fetch_one(
                 "SELECT SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS done, "
-                "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed "
-                "FROM ai_agent_long_task_units WHERE task_id = ?",
+                "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed, "
+                "SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked, "
+                "SUM(CASE WHEN status IN ('claimed', 'running') THEN 1 ELSE 0 END) "
+                "AS active FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND required = 1",
                 [task.id],
             )
             done = int((counts or {}).get("done") or 0)
             failed = int((counts or {}).get("failed") or 0)
+            blocked = int((counts or {}).get("blocked") or 0)
+            active = int((counts or {}).get("active") or 0)
             if failed:
                 await self._update_task_status(task, LongTaskStatus.FAILED)
             elif done == task.total_units:
                 await self._update_task_status(task, LongTaskStatus.COMPLETED)
+            elif blocked and not active:
+                await self._update_task_status(task, LongTaskStatus.PAUSED)
             return await self._require(task.id)
 
     async def _simple_transition(self, task_id, allowed, target):
@@ -650,6 +823,42 @@ class SqliteLongTaskRepository:
             [task.id],
         )
 
+    async def _refresh_task_totals(self, task_id: str) -> None:
+        await self._db.execute(
+            "UPDATE ai_agent_long_tasks SET "
+            "total_units = (SELECT COUNT(*) FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND required = 1), "
+            "completed_units = (SELECT COUNT(*) FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND required = 1 AND status = 'completed'), "
+            "failed_units = (SELECT COUNT(*) FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND required = 1 AND status = 'failed'), "
+            "revision = revision + 1, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            [task_id, task_id, task_id, task_id],
+        )
+
+    async def _pause_if_no_runnable_work(self, task: LongTaskRecord) -> None:
+        work = await self._db.fetch_one(
+            "SELECT "
+            "SUM(CASE WHEN u.status IN ('claimed', 'running') THEN 1 ELSE 0 END) "
+            "AS active, "
+            "SUM(CASE WHEN u.attempt < u.max_attempts "
+            "AND u.status IN ('pending', 'waiting_retry') AND NOT EXISTS ("
+            "SELECT 1 FROM json_each(u.dependencies_json) AS dep "
+            "LEFT JOIN ai_agent_long_task_units AS prerequisite "
+            "ON prerequisite.task_id = u.task_id "
+            "AND prerequisite.unit_id = dep.value "
+            "WHERE prerequisite.status IS NULL "
+            "OR prerequisite.status <> 'completed') THEN 1 ELSE 0 END) AS ready "
+            "FROM ai_agent_long_task_units AS u WHERE u.task_id = ?",
+            [task.id],
+        )
+        active = int((work or {}).get("active") or 0)
+        ready = int((work or {}).get("ready") or 0)
+        if active or ready:
+            await self._touch_task(task)
+            return
+        await self._update_task_status(task, LongTaskStatus.PAUSED)
+
 
 def _task(row: dict[str, Any] | None) -> LongTaskRecord:
     if row is None:
@@ -681,7 +890,10 @@ def _unit(row: dict[str, Any] | None) -> LongTaskUnitRecord:
         id=str(row["unit_id"]),
         position=int(row["position"]),
         status=str(row["status"]),
+        semantic_key=row.get("semantic_key") or row["unit_id"],
         dependencies=tuple(_json_load(row.get("dependencies_json"), [])),
+        parent_unit_id=row.get("parent_unit_id"),
+        required=bool(row.get("required", 1)),
         attempt=int(row.get("attempt") or 0),
         max_attempts=int(row.get("max_attempts") or 3),
         worker_id=row.get("worker_id"),
@@ -689,6 +901,10 @@ def _unit(row: dict[str, Any] | None) -> LongTaskUnitRecord:
         run_id=row.get("run_id"),
         input_ref=row.get("input_ref"),
         output_ref=row.get("output_ref"),
+        artifact_digest=row.get("artifact_digest"),
+        validation_receipt=_json_load(row.get("validation_receipt_json"), {}),
+        failure=_json_load(row.get("failure_json"), {}),
+        disposition=row.get("disposition"),
         error_code=row.get("error_code"),
         metadata=_json_load(row.get("metadata_json"), {}),
         create_time=row.get("create_time"),
@@ -748,14 +964,46 @@ def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
         return False
     return all(
         persisted.id == requested.id
+        and persisted.semantic_key == requested.semantic_key
         and persisted.position == requested.position
         and persisted.dependencies == requested.dependencies
+        and persisted.parent_unit_id == requested.parent_unit_id
+        and persisted.required == requested.required
         and persisted.input_ref == requested.input_ref
         and persisted.max_attempts == requested.max_attempts
         and thaw_json_mapping(persisted.metadata)
         == thaw_json_mapping(requested.metadata)
         for persisted, requested in zip(units, command.units)
     )
+
+
+def _failure_payload(decision: FailureDecision) -> dict[str, object]:
+    return {
+        "category": decision.category.value,
+        "code": decision.code,
+        "scope": decision.scope.value,
+        "effectState": decision.effect_state.value,
+        "checkpointAvailable": decision.checkpoint_available,
+        "partSplittable": decision.part_splittable,
+    }
+
+
+def _unique_ordered(values) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return tuple(result)
+
+
+def _require_acyclic_dependencies(graph: Mapping[str, tuple[str, ...]]) -> None:
+    try:
+        tuple(TopologicalSorter(graph).static_order())
+    except CycleError as error:
+        raise ValueError("expanded long task dependencies contain a cycle") from error
 
 
 __all__ = ["SqliteLongTaskRepository"]

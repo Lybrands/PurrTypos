@@ -70,11 +70,19 @@ class FailureDisposition(StrEnum):
     CANCEL = "cancel"
 
 
+class FailureScope(StrEnum):
+    """How broadly a failed Part invalidates further task execution."""
+
+    LOCAL = "local"
+    SYSTEMIC = "systemic"
+
+
 @dataclass(frozen=True, slots=True)
 class FailureSignal:
     category: FailureCategory
     code: str
     retryable: bool
+    scope: FailureScope = FailureScope.LOCAL
     effect_state: RecoveryEffectState = RecoveryEffectState.NOT_STARTED
     checkpoint_available: bool = False
     part_splittable: bool = False
@@ -86,6 +94,7 @@ class FailureSignal:
             "failure signal code",
         ))
         object.__setattr__(self, "retryable", bool(self.retryable))
+        object.__setattr__(self, "scope", FailureScope(self.scope))
         object.__setattr__(
             self,
             "effect_state",
@@ -108,6 +117,7 @@ class FailureDecision:
     effect_state: RecoveryEffectState
     checkpoint_available: bool
     part_splittable: bool = False
+    scope: FailureScope = FailureScope.LOCAL
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "category", FailureCategory(self.category))
@@ -139,6 +149,7 @@ class FailureDecision:
             bool(self.checkpoint_available),
         )
         object.__setattr__(self, "part_splittable", bool(self.part_splittable))
+        object.__setattr__(self, "scope", FailureScope(self.scope))
 
 
 class RecoveryReason(StrEnum):

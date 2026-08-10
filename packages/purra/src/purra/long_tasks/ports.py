@@ -8,6 +8,7 @@ from purra.contracts import SessionId
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskSplitResult,
     LongTaskUnitRecord,
     LongTaskUnitResult,
 )
@@ -92,6 +93,15 @@ class LongTaskRepository(Protocol):
         decision: FailureDecision,
     ) -> LongTaskRecord: ...
 
+    async def expand_unit(
+        self,
+        task_id: str,
+        unit_id: str,
+        *,
+        worker_id: str,
+        split: LongTaskSplitResult,
+    ) -> LongTaskRecord: ...
+
     async def interrupt_unit(
         self,
         task_id: str,
@@ -130,6 +140,13 @@ class LongTaskUnitRunner(Protocol):
         unit: LongTaskUnitRecord,
         error: Exception,
     ) -> FailureSignal: ...
+
+    def split_unit(
+        self,
+        task: LongTaskRecord,
+        unit: LongTaskUnitRecord,
+        error: Exception,
+    ) -> LongTaskSplitResult: ...
 
 
 __all__ = ["LongTaskRepository", "LongTaskUnitRunner"]
