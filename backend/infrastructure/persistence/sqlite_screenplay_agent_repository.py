@@ -101,7 +101,7 @@ class SqliteScreenplayAgentRepository:
                     [turn["id"]],
                 )
                 turn_status = "failed"
-                assistant_content = error["message"]
+                assistant_content = ""
                 if operation is not None and str(operation["status"]) in {
                     "queued", "running", "paused",
                 }:
@@ -229,7 +229,7 @@ class SqliteScreenplayAgentRepository:
                 raise AppError("剧本任务已不在运行状态", 409)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'completed', "
-                "assistant_content = ?, "
+                "assistant_content = '', "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                 [assistant_content, turn_id],
             )
@@ -308,11 +308,11 @@ class SqliteScreenplayAgentRepository:
             error = {"code": code, "message": message}
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'failed', "
-                "assistant_content = ?, "
+                "assistant_content = '', "
                 "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
                 "heartbeat_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
                 "WHERE id = ?",
-                [message, turn_id],
+                [turn_id],
             )
             task_id = str((operation or {}).get("long_task_id") or "") or None
             await self._event_for_turn(
@@ -334,10 +334,10 @@ class SqliteScreenplayAgentRepository:
                 return _turn_view(turn)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'canceled', "
-                "assistant_content = ?, execution_owner_id = NULL, "
+                "assistant_content = '', execution_owner_id = NULL, "
                 "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                ["剧本任务已终止。", turn_id],
+                [turn_id],
             )
             await self._event_for_turn(
                 turn,

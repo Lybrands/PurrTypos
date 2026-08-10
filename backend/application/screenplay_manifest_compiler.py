@@ -292,13 +292,6 @@ def _append_terminal_parts(parts, *, target_role, common, original_request):
             **common,
         },
     ))
-    parts.append(_part(
-        "publish-candidate",
-        ScreenplayPartKind.PUBLISH,
-        len(parts),
-        (*terminal_dependencies, final_id),
-        metadata={"targetRole": target_role, **common},
-    ))
     return tuple(parts)
 
 
@@ -336,7 +329,6 @@ def _recipe_step(part):
         ScreenplayPartKind.DOCUMENT_SECTION: "generate_document_section",
         ScreenplayPartKind.VALIDATION: "validate_manifest_part",
         ScreenplayPartKind.FINAL_RESPONSE: "compose_final_response",
-        ScreenplayPartKind.PUBLISH: "publish_candidate_revision",
     }[part.kind]
     metadata = thaw_json_mapping(part.metadata)
     return ExecutionRecipeStep(
@@ -345,10 +337,11 @@ def _recipe_step(part):
         executor="screenplay",
         depends_on=part.dependencies,
         input_ref=part.input_ref,
-        plan_step_id=("publish" if part.kind in {
-            ScreenplayPartKind.FINAL_RESPONSE,
-            ScreenplayPartKind.PUBLISH,
-        } else "create"),
+        plan_step_id=(
+            "publish"
+            if part.kind is ScreenplayPartKind.FINAL_RESPONSE
+            else "create"
+        ),
         max_attempts=(4 if part.kind in {
             ScreenplayPartKind.DRAFT_SCENE,
             ScreenplayPartKind.REVIEW_DIMENSION,
@@ -364,7 +357,6 @@ def _recipe_step(part):
                     ScreenplayPartKind.DRAFT_SCENE,
                     ScreenplayPartKind.REVIEW_DIMENSION,
                     ScreenplayPartKind.DOCUMENT_SECTION,
-                    ScreenplayPartKind.PUBLISH,
                 }
                 else "read_only"
             ),

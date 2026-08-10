@@ -6,6 +6,7 @@ import json
 import hashlib
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from domains.screenplay.project_aggregate import (
@@ -46,6 +47,17 @@ def _nullable_object(value: object) -> dict[str, Any] | None:
     if value is None or str(value).strip() == "":
         return None
     return _object(value)
+
+
+@asynccontextmanager
+async def _agent_candidate_transaction(db):
+    """Join the Operation finalizer transaction or own a standalone commit."""
+
+    if db.current_task_owns_transaction():
+        yield db
+        return
+    async with db.transaction(cancellation_linearizable=True):
+        yield db
 
 
 def _head_content_map(
@@ -743,7 +755,7 @@ class SqliteScreenplayV2Repository:
     ) -> dict[str, Any]:
         """Publish one idempotent candidate owned by a PurrA task."""
 
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with _agent_candidate_transaction(self._db):
             existing = await self._db.fetch_one(
                 "SELECT r.*, d.role FROM screenplay_revisions AS r "
                 "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "

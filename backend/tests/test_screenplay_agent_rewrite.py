@@ -39,8 +39,10 @@ from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
-    _aggregate_review_validations,
     _unit_result,
+)
+from application.screenplay_candidate_assembler import (
+    aggregate_review_validations,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_part_artifacts import (
@@ -113,7 +115,6 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "episode:4:metadata",
         "episode:4:validation",
         "compose-final-response",
-        "publish-candidate",
     ]
     assert [step.kind for step in steps] == [
         "collect_evidence",
@@ -122,7 +123,6 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "generate_episode_metadata",
         "validate_manifest_part",
         "compose_final_response",
-        "publish_candidate_revision",
     ]
     assert steps[0].metadata["effectClass"] == "read_only"
     assert steps[1].metadata["effectClass"] == "idempotent_write"
@@ -131,7 +131,6 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
     assert steps[3].depends_on == (steps[2].id,)
     assert steps[4].depends_on == (steps[3].id,)
     assert steps[5].depends_on == (steps[4].id,)
-    assert steps[6].depends_on == (steps[4].id, steps[5].id)
     assert steps[5].metadata["input"] == {
         "targetRole": "screenplayDraft",
         "instruction": "创作第 4 集",
@@ -423,21 +422,21 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
     assert visible == "确认当前阶段后直接回答，不创建交付物。\n"
 
 
-async def test_published_unit_metadata_does_not_invent_a_final_answer():
+async def test_final_response_unit_metadata_does_not_duplicate_the_response():
     result = _unit_result(
         ValidatedPartArtifactRef(
-            artifact_id="artifact-publish",
-            run_id="screenplay-host:task-1:publish-candidate",
-            semantic_key="publish-candidate",
-            content_digest="sha256:publish",
+            artifact_id="artifact-final-response",
+            run_id="screenplay-host:task-1:compose-final-response",
+            semantic_key="compose-final-response",
+            content_digest="sha256:final-response",
             validation_receipt={"valid": True},
         ),
-        {"revisionId": "sprev-1"},
+        {"finalResponse": "任务已经完成。"},
     )
 
-    assert result.metadata == {"revisionId": "sprev-1"}
+    assert result.metadata == {}
     assert result.output_ref == (
-        "screenplay-part-artifact://artifact-publish"
+        "screenplay-part-artifact://artifact-final-response"
     )
 
 
@@ -805,7 +804,7 @@ async def test_review_aggregate_requires_every_episode_and_rejects_execution_met
         }
 
     with pytest.raises(ValueError, match="required episode validations"):
-        _aggregate_review_validations(
+        aggregate_review_validations(
             [episode(1)],
             required_episode_numbers=(1, 2),
         )
@@ -813,12 +812,12 @@ async def test_review_aggregate_requires_every_episode_and_rejects_execution_met
     contaminated = episode(1)
     contaminated["contentJson"]["failedEpisodes"] = [{"episodeNumber": 1}]
     with pytest.raises(ValueError, match="execution metadata"):
-        _aggregate_review_validations(
+        aggregate_review_validations(
             [contaminated],
             required_episode_numbers=(1,),
         )
 
-    _, content, _ = _aggregate_review_validations(
+    _, content, _ = aggregate_review_validations(
         [episode(1), episode(2)],
         required_episode_numbers=(1, 2),
     )
@@ -1360,6 +1359,7 @@ async def test_restart_exposes_an_abandoned_turn_as_a_terminal_failure(
     assert recovered == (turn["id"],)
     assert snapshot["turns"][0]["status"] == "failed"
     assert snapshot["turns"][0]["error"]["code"] == "screenplay_agent_restarted"
+    assert snapshot["turns"][0]["assistantContent"] == ""
 
 
 async def _install_head(db, project_id: str, role: str, content: dict) -> str:

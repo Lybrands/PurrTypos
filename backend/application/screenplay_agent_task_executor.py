@@ -23,12 +23,7 @@ from application.screenplay_tool_calling import ScreenplayToolCallingService
 from domains.screenplay.source_scope import parse_source_scope
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from exceptions import AppError
-from infrastructure.persistence.sqlite_screenplay_v2_repository import (
-    SqliteScreenplayV2Repository,
-)
-
-
-_PROPOSAL_KIND = {
+_DOCUMENT_KIND = {
     "sourceAnalysis": "source_analysis",
     "creativeBrief": "creative_brief",
     "structure": "episode_outline",
@@ -36,7 +31,6 @@ _PROPOSAL_KIND = {
     "screenplayDraft": "scene_draft",
     "review": "review",
 }
-_DOCUMENT_KIND = dict(_PROPOSAL_KIND)
 _ROLE_LABELS = {
     "sourceAnalysis": "原作分析",
     "creativeBrief": "创作简报",
@@ -68,7 +62,6 @@ class ScreenplayTaskModelCalls:
         self._tool_calls = tool_calling_service
         if self._models is None and self._tool_calls is None:
             raise ValueError("screenplay task requires a model execution service")
-        self._revisions = SqliteScreenplayV2Repository(db)
 
     async def execute(
         self,
@@ -95,8 +88,6 @@ class ScreenplayTaskModelCalls:
             return await self._compose_final_response(
                 task, unit, runtime, signal
             )
-        if kind == "publish_candidate_revision":
-            return await self._publish(task)
         raise RuntimeError(f"unsupported screenplay task unit: {kind}")
 
     async def _collect_evidence(
@@ -689,95 +680,6 @@ class ScreenplayTaskModelCalls:
                 else "all"
             ),
         )
-
-    async def _publish(self, task: Mapping[str, Any]) -> dict[str, Any]:
-        role = str(task["targetRole"])
-        publish_unit = next((
-            unit for unit in task.get("units") or ()
-            if unit.get("kind") == "publish_candidate_revision"
-        ), None)
-        if publish_unit is None:
-            raise RuntimeError("screenplay task has no publish unit")
-        base_revision_id = str(
-            (publish_unit.get("input") or {}).get("baseRevisionId") or ""
-        ) or None
-        generated = [
-            unit.get("output") or {}
-            for unit in task.get("units") or ()
-            if str(unit.get("kind") or "") in {
-                "validate_manifest_part",
-            }
-            and unit.get("status") == "completed"
-        ]
-        if not generated:
-            raise RuntimeError("screenplay task has no generated output")
-        if role == "screenplayDraft":
-            title, content, text = await self._draft_candidate(
-                task,
-                generated,
-                base_revision_id=base_revision_id,
-            )
-        elif role == "review":
-            title, content, text = _aggregate_review_validations(
-                generated,
-                required_episode_numbers=_required_review_episodes(task),
-            )
-        else:
-            output = generated[-1]
-            title = str(output.get("title") or "")
-            content = dict(output.get("contentJson") or {})
-            text = str(output.get("contentText") or "")
-        final_run_id = str(generated[-1].get("runId") or "") or None
-        result = await self._revisions.publish_screenplay_agent_task_candidate(
-            task_id=str(task["id"]),
-            project_id=str(task["projectId"]),
-            target_role=role,
-            proposal_kind=_PROPOSAL_KIND[role],
-            title=title,
-            content_json=content,
-            content_text=text,
-            planner_run_id=str(task.get("plannerRunId") or "") or None,
-            finalizing_run_id=final_run_id,
-            base_revision_id=base_revision_id,
-            source_run_ids=_source_run_ids(generated),
-        )
-        return {"revisionId": result["revisionId"]}
-
-    async def _draft_candidate(
-        self,
-        task: Mapping[str, Any],
-        generated: Sequence[Mapping[str, Any]],
-        *,
-        base_revision_id: str | None,
-    ) -> tuple[str, dict[str, Any], str]:
-        drafts = [dict(output["episodeDraft"]) for output in generated]
-        scene_list_ids = {str(output.get("sceneListId") or "") for output in generated}
-        if len(scene_list_ids) != 1 or "" in scene_list_ids:
-            raise RuntimeError("generated episodes do not share one scene list")
-        available = await self._context.available_episode_numbers(
-            str(task["projectId"]),
-            draft_revision_id=base_revision_id,
-        )
-        complete_numbers = set(available["draft"]).union(
-            int(draft["episodeNumber"]) for draft in drafts
-        )
-        content = {
-            "schemaVersion": 1,
-            "documentKind": "scene_draft",
-            "sceneListId": next(iter(scene_list_ids)),
-            "completedSceneIds": [
-                scene_id for draft in drafts for scene_id in draft["sceneIds"]
-            ],
-            "isComplete": set(available["sceneList"]).issubset(complete_numbers),
-            "episodeDrafts": drafts,
-        }
-        numbers = [int(draft["episodeNumber"]) for draft in drafts]
-        title = (
-            f"第 {min(numbers)}–{max(numbers)} 集剧本"
-            if len(numbers) > 1
-            else f"第 {numbers[0]} 集剧本"
-        )
-        return title, content, "\n\n".join(str(draft["contentText"]) for draft in drafts)
 
 
 class ScreenplayTaskUnitExecutor:
@@ -1522,64 +1424,6 @@ def _merge_document_json(
         elif result[key] != value:
             raise ValueError(f"document sections conflict at {key}")
     return result
-
-
-def _aggregate_review_validations(
-    generated: Sequence[Mapping[str, Any]],
-    *,
-    required_episode_numbers: Sequence[int],
-) -> tuple[str, dict[str, Any], str]:
-    ordered = sorted(
-        (dict(item) for item in generated),
-        key=lambda item: int((item.get("contentJson") or {}).get("reviewedEpisode") or 0),
-    )
-    results = []
-    for item in ordered:
-        raw = item.get("contentJson")
-        if not isinstance(raw, Mapping):
-            raise ValueError("review aggregation requires ReviewEpisodeResult")
-        receipt = item.get("validationReceipt")
-        receipts = tuple(str(value) for value in raw.get("partReceipts") or ())
-        if not receipts and isinstance(receipt, Mapping):
-            receipts = (str(receipt.get("contentDigest") or ""),)
-        results.append(ReviewEpisodeResult.from_mapping(
-            raw,
-            part_receipts=receipts,
-        ))
-    reviewed = [item.episode_number for item in results]
-    required = [int(value) for value in required_episode_numbers]
-    if reviewed != required:
-        raise ValueError("review aggregation requires all required episode validations")
-    draft_ids = {item.reviewed_revision_id for item in results}
-    if not reviewed or len(draft_ids) != 1 or "" in draft_ids:
-        raise ValueError("review aggregation requires one immutable Draft Revision")
-    episode_reviews = [item.to_mapping() for item in results]
-    issues = [dict(issue) for item in results for issue in item.issues]
-    content = {
-        "schemaVersion": 1,
-        "inputContractVersion": 2,
-        "documentKind": _DOCUMENT_KIND["review"],
-        "verdict": _aggregate_review_verdict(item.verdict for item in results),
-        "issues": issues,
-        "issueCount": len(issues),
-        "criticalIssueCount": sum(issue["severity"] == "critical" for issue in issues),
-        "reviewedDraftId": next(iter(draft_ids)),
-        "reviewedEpisodes": reviewed,
-        "completedEpisodes": reviewed,
-        "episodeReviews": episode_reviews,
-    }
-    return "剧本审阅报告", content, "\n\n".join(str(item["contentText"]) for item in ordered)
-
-
-def _required_review_episodes(task: Mapping[str, Any]) -> tuple[int, ...]:
-    return tuple(
-        int(unit.get("input", {}).get("episodeNumber") or 0)
-        for unit in task.get("units") or ()
-        if isinstance(unit, Mapping)
-        and str(unit.get("kind") or "") == "validate_manifest_part"
-        and isinstance(unit.get("input"), Mapping)
-        and unit["input"].get("validationKind") == "review_episode"
-    )
 
 
 def _with_validation_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
