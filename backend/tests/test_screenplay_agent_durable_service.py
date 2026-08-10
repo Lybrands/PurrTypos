@@ -628,6 +628,17 @@ async def test_service_cancel_settles_active_task_operation_and_turn(screenplay_
             [bound_run_id],
         )
     )["cancel_requested_at_ms"] is not None
+    canceled_snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    projected_operation = canceled_snapshot["operations"][0]
+    assert projected_operation["status"] == "canceled"
+    assert projected_operation["cancelReceiptId"] == first["cancelReceiptId"]
+    assert projected_operation["cancelRequestedAt"] is not None
+    assert projected_operation["resultRevisionId"] is None
+    assert projected_operation["finalizationReceiptId"] is None
+    assert projected_operation["resultRevision"] is None
 
 
 @pytest.mark.asyncio
@@ -775,6 +786,14 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert task["status"] == "completed"
     assert task["resultRevision"]["id"] == revision_id
     assert task["resultRevision"]["agentTaskId"] == task["id"]
+    projected_operation = snapshot["operations"][0]
+    assert projected_operation["status"] == "succeeded"
+    assert projected_operation["taskId"] == task["id"]
+    assert projected_operation["resultRevisionId"] == revision_id
+    assert projected_operation["finalizationReceiptId"]
+    assert projected_operation["cancelReceiptId"] is None
+    assert projected_operation["resultRevision"]["id"] == revision_id
+    assert projected_operation["parts"] == task["units"]
     expected_ids = [
         "evidence:4",
         "draft:4:ep04_s01",

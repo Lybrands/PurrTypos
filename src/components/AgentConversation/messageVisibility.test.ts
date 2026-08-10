@@ -26,3 +26,13 @@ test('the active empty Assistant turn remains visible while loading', () => {
     loading: true,
   }), true)
 })
+
+test('a failure or cancellation status stays visible without formal content', () => {
+  assert.equal(assistantMessageVisible({
+    hasVisibleContent: false,
+    hasAttachment: false,
+    hasStatus: true,
+    isLast: false,
+    loading: false,
+  }), true)
+})

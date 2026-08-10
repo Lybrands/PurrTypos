@@ -7,6 +7,7 @@ import type {
   ScreenplayConversationStreamEvent,
   ScreenplayConversationSnapshot,
   ScreenplayConversationTurn,
+  ScreenplayOperationProjection,
   ScreenplayV2RevisionSummary,
   ScreenplayV2Workspace,
 } from '../types'
@@ -14,6 +15,7 @@ import {
   isScreenplayTurnTerminal,
   screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
+  isScreenplayOperationCancellable,
   stateFromScreenplayConversationSnapshot,
 } from './conversationState.ts'
 import { ScreenplayConversationClient } from './conversationClient.ts'
@@ -54,14 +56,36 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     error: null,
     units: [{
       id: 'draft-episode-1',
+      semanticKey: 'episode:1',
       position: 0,
       kind: 'generate_episode_draft',
       status: 'completed',
       input: {},
-      output: { runId: 'run-draft-1' },
+      outputRef: 'screenplay-part-artifact://draft-1',
+      artifactDigest: 'digest-draft-1',
+      validationReceipt: { runId: 'run-draft-1' },
       error: null,
       attempt: 1,
     }],
+    ...overrides,
+  }
+}
+
+function operation(
+  overrides: Partial<ScreenplayOperationProjection> = {},
+): ScreenplayOperationProjection {
+  return {
+    id: 'operation-1',
+    turnId: 'turn-1',
+    taskId: 'task-1',
+    status: 'running',
+    targetRole: 'screenplayDraft',
+    parts: task().units,
+    resultRevisionId: null,
+    finalizationReceiptId: null,
+    cancelReceiptId: null,
+    cancelRequestedAt: null,
+    error: null,
     ...overrides,
   }
 }
@@ -89,6 +113,24 @@ function snapshot(
   currentTurn = turn(),
   currentTask: ScreenplayAgentTask | null = task(),
   cursor = 12,
+  currentOperation: ScreenplayOperationProjection | null = currentTask
+    ? operation({
+      turnId: currentTurn.id,
+      taskId: currentTask.id,
+      status: currentTask.status === 'completed'
+        ? 'succeeded'
+        : currentTask.status === 'pending'
+          ? 'queued'
+        : currentTask.status,
+      resultRevisionId: currentTask.resultRevisionId,
+      finalizationReceiptId: currentTask.status === 'completed'
+        && currentTask.resultRevisionId
+        ? 'finalization-1'
+        : null,
+      parts: currentTask.units,
+      error: currentTask.error,
+    })
+    : null,
 ): ScreenplayConversationSnapshot {
   return {
     projectId: 'project-1',
@@ -96,6 +138,7 @@ function snapshot(
     cursor,
     turns: [currentTurn],
     tasks: currentTask ? [currentTask] : [],
+    operations: currentOperation ? [currentOperation] : [],
   }
 }
 
@@ -131,13 +174,25 @@ test('Turn and Task must both be terminal before reconciliation', () => {
   assert.equal(isScreenplayTurnTerminal(turn()), false)
   assert.equal(isScreenplayTurnTerminal(turn({ status: 'failed' })), true)
   const completedTurn = turn({ status: 'completed', taskId: 'task-1' })
-  assert.equal(screenplayTurnReconciliationKey(completedTurn, task()), null)
+  assert.equal(screenplayTurnReconciliationKey(
+    completedTurn,
+    operation(),
+    task(),
+  ), null)
   assert.equal(
-    screenplayTurnReconciliationKey(completedTurn, task({
-      status: 'completed',
-      resultRevisionId: 'revision-1',
-    })),
-    'turn-1:completed:revision-1',
+    screenplayTurnReconciliationKey(
+      completedTurn,
+      operation({
+        status: 'succeeded',
+        resultRevisionId: 'revision-1',
+        finalizationReceiptId: 'finalization-1',
+      }),
+      task({
+        status: 'completed',
+        resultRevisionId: 'revision-1',
+      }),
+    ),
+    'turn-1:succeeded:revision-1:finalization-1',
   )
 })
 
@@ -158,6 +213,24 @@ test('every completed Task result is projected onto its own conversation turn', 
   })
 
   const artifacts = screenplayTurnArtifacts([
+    operation({
+      id: 'operation-scenes',
+      turnId: 'turn-scenes',
+      taskId: 'task-scenes',
+      status: 'succeeded',
+      targetRole: 'sceneList',
+      resultRevisionId: sceneRevision.id,
+      finalizationReceiptId: 'finalization-scenes',
+    }),
+    operation({
+      id: 'operation-draft',
+      turnId: 'turn-draft',
+      taskId: 'task-draft',
+      status: 'succeeded',
+      resultRevisionId: draftRevision.id,
+      finalizationReceiptId: 'finalization-draft',
+    }),
+  ], [
     task({
       id: 'task-scenes',
       turnId: 'turn-scenes',
@@ -208,6 +281,24 @@ test('every completed Task result is projected onto its own conversation turn', 
 
 test('artifact projection keeps exact Revision targets without optional summaries', () => {
   const artifacts = screenplayTurnArtifacts([
+    operation({
+      id: 'operation-legacy',
+      turnId: 'turn-legacy',
+      taskId: 'task-legacy',
+      status: 'succeeded',
+      targetRole: 'review',
+      resultRevisionId: 'revision-legacy',
+      finalizationReceiptId: 'finalization-legacy',
+    }),
+    operation({
+      id: 'operation-running',
+      turnId: 'turn-running',
+      taskId: 'task-running',
+      status: 'running',
+      resultRevisionId: 'revision-uncommitted',
+      finalizationReceiptId: null,
+    }),
+  ], [
     task({
       id: 'task-legacy',
       turnId: 'turn-legacy',
@@ -264,6 +355,24 @@ test('current Workspace truth overrides stale artifact status snapshots', () => 
   } as ScreenplayV2Workspace
 
   const artifacts = screenplayTurnArtifacts([
+    operation({
+      id: 'operation-scenes',
+      turnId: 'turn-scenes',
+      taskId: 'task-scenes',
+      status: 'succeeded',
+      targetRole: 'sceneList',
+      resultRevisionId: sceneRevision.id,
+      finalizationReceiptId: 'finalization-scenes',
+    }),
+    operation({
+      id: 'operation-draft',
+      turnId: 'turn-draft',
+      taskId: 'task-draft',
+      status: 'succeeded',
+      resultRevisionId: draftRevision.id,
+      finalizationReceiptId: 'finalization-draft',
+    }),
+  ], [
     task({
       id: 'task-scenes',
       turnId: 'turn-scenes',
@@ -305,7 +414,95 @@ test('paused execution settles streaming without fabricating assistant content',
 
   assert.equal(isScreenplayTurnTerminal(pausedTurn), true)
   assert.equal(state.messages[1].content, '')
-  assert.equal(screenplayTurnReconciliationKey(pausedTurn, pausedTask), null)
+  assert.equal(screenplayTurnReconciliationKey(
+    pausedTurn,
+    operation({ status: 'paused' }),
+    pausedTask,
+  ), null)
+})
+
+test('failed and canceled Operations never become formal Assistant content', () => {
+  for (const status of ['failed', 'canceled'] as const) {
+    const currentTurn = turn({
+      status,
+      taskId: 'task-1',
+      assistantContent: '这段内容不应显示',
+    })
+    const currentTask = task({
+      status,
+      error: status === 'failed'
+        ? { code: 'provider_failed', message: '执行失败' }
+        : null,
+    })
+    const state = stateFromScreenplayConversationSnapshot(snapshot(
+      currentTurn,
+      currentTask,
+      12,
+      operation({ status, error: currentTask.error }),
+    ))
+
+    assert.equal(state.messages[1].content, '')
+  }
+})
+
+test('artifact and final answer require one succeeded finalization receipt', () => {
+  const completedTurn = turn({
+    status: 'completed',
+    assistantContent: '候选稿已经完成。',
+    taskId: 'task-1',
+  })
+  const completedTask = task({
+    status: 'completed',
+    resultRevisionId: 'revision-1',
+    resultRevision: revision('revision-1', 'screenplayDraft'),
+  })
+  const withoutReceipt = operation({
+    status: 'succeeded',
+    resultRevisionId: 'revision-1',
+    finalizationReceiptId: null,
+  })
+  const invalid = stateFromScreenplayConversationSnapshot(snapshot(
+    completedTurn,
+    completedTask,
+    12,
+    withoutReceipt,
+  ))
+  assert.equal(invalid.messages[1].content, '')
+  assert.equal(screenplayTurnArtifacts(
+    invalid.operations,
+    invalid.tasks,
+    null,
+  ).size, 0)
+
+  const finalized = operation({
+    status: 'succeeded',
+    resultRevisionId: 'revision-1',
+    finalizationReceiptId: 'finalization-1',
+  })
+  const restored = stateFromScreenplayConversationSnapshot(snapshot(
+    completedTurn,
+    completedTask,
+    13,
+    finalized,
+  ))
+  assert.equal(restored.messages.filter((item) => (
+    item.role === 'assistant' && item.content === '候选稿已经完成。'
+  )).length, 1)
+  assert.equal(screenplayTurnArtifacts(
+    restored.operations,
+    restored.tasks,
+    null,
+  ).size, 1)
+})
+
+test('cancel is available only before a durable request is pending', () => {
+  assert.equal(isScreenplayOperationCancellable(operation()), true)
+  assert.equal(isScreenplayOperationCancellable(operation({ status: 'paused' })), true)
+  assert.equal(isScreenplayOperationCancellable(operation({
+    cancelRequestedAt: '1234',
+    cancelReceiptId: 'cancel-1',
+  })), false)
+  assert.equal(isScreenplayOperationCancellable(operation({ status: 'succeeded' })), false)
 })
 
 test('screenplay client refreshes canonical snapshot after cursor events', async () => {
@@ -337,7 +534,17 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
       },
     }),
     watchScreenplayConversationEvents: () => () => undefined,
-    cancelScreenplayConversationTurn: async () => ({ success: true, data: completedTurn }),
+    cancelScreenplayConversationTurn: async () => ({
+      success: true,
+      data: {
+        id: 'cancel-1',
+        cancelReceiptId: 'cancel-1',
+        operationId: 'operation-1',
+        turnId: 'turn-1',
+        requestedAt: '2026-08-09T00:00:02Z',
+        terminalStatus: 'succeeded',
+      },
+    }),
     truncateScreenplayConversationFromTurn: async ({ turnId }) => {
       truncatedTurnId = turnId
       return {
@@ -379,7 +586,17 @@ test('screenplay SSE routes business invalidation and shared Agent chunks indepe
       onEvent = input.onEvent
       return () => { closed = true }
     },
-    cancelScreenplayConversationTurn: async () => ({ success: true, data: turn() }),
+    cancelScreenplayConversationTurn: async () => ({
+      success: true,
+      data: {
+        id: 'cancel-1',
+        cancelReceiptId: 'cancel-1',
+        operationId: 'operation-1',
+        turnId: 'turn-1',
+        requestedAt: '2026-08-09T00:00:02Z',
+        terminalStatus: 'cancel_requested',
+      },
+    }),
     truncateScreenplayConversationFromTurn: async () => ({
       success: true,
       data: {

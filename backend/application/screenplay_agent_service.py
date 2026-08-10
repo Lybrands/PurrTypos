@@ -505,6 +505,14 @@ class ScreenplayAgentService:
                 # reference after the Revision itself has been removed. Keep
                 # the reference visible without inventing replacement metadata.
                 continue
+        revisions_by_task = {
+            str(task["id"]): task.get("resultRevision")
+            for task in snapshot["tasks"]
+        }
+        for operation in snapshot.get("operations", ()):
+            operation["resultRevision"] = revisions_by_task.get(
+                str(operation.get("taskId") or "")
+            )
         return snapshot
 
     async def list_events(

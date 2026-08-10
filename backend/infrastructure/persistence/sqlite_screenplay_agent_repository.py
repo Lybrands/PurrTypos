@@ -543,6 +543,9 @@ class SqliteScreenplayAgentRepository:
             "o.target_role AS operation_target_role, "
             "o.requirements_json AS operation_requirements_json, "
             "o.result_revision_id AS operation_result_revision_id, "
+            "o.finalization_receipt_id AS operation_finalization_receipt_id, "
+            "o.cancel_receipt_id AS operation_cancel_receipt_id, "
+            "o.cancel_requested_at_ms AS operation_cancel_requested_at_ms, "
             "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
             "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
             "AND e.event_type IN ('screenplay.agent.turn.failed', "
@@ -560,15 +563,22 @@ class SqliteScreenplayAgentRepository:
             "WHERE project_id = ? AND session_id = ?",
             [project_id, int(session_id)],
         )
+        tasks = [
+            await self._task_view(turn)
+            for turn in turns
+            if turn.get("authoritative_task_id")
+        ]
+        tasks_by_turn = {str(task["turnId"]): task for task in tasks}
         return {
             "projectId": project_id,
             "sessionId": int(session_id),
             "cursor": int((cursor or {}).get("cursor") or 0),
             "turns": [_turn_view(row) for row in turns],
-            "tasks": [
-                await self._task_view(turn)
+            "tasks": tasks,
+            "operations": [
+                _operation_view(turn, tasks_by_turn.get(str(turn["id"])))
                 for turn in turns
-                if turn.get("authoritative_task_id")
+                if turn.get("authoritative_operation_id")
             ],
         }
 
@@ -796,6 +806,7 @@ def _unit_view(
     )
     return {
         "id": str(row["unit_id"]),
+        "semanticKey": str(row.get("semantic_key") or row["unit_id"]),
         "position": int(row["position"]),
         "kind": unit_kind,
         "status": str(row["status"]),
@@ -815,6 +826,37 @@ def _unit_view(
 def _operation_task_status(value: object) -> str:
     status = str(value or "")
     return "completed" if status == "succeeded" else status
+
+
+def _operation_view(
+    turn: Mapping[str, Any],
+    task: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "id": str(turn["authoritative_operation_id"]),
+        "turnId": str(turn["id"]),
+        "taskId": str(turn.get("authoritative_task_id") or "") or None,
+        "status": str(turn.get("operation_status") or ""),
+        "targetRole": str(turn.get("operation_target_role") or ""),
+        "parts": list((task or {}).get("units") or ()),
+        "resultRevisionId": str(
+            turn.get("operation_result_revision_id") or ""
+        ) or None,
+        "finalizationReceiptId": str(
+            turn.get("operation_finalization_receipt_id") or ""
+        ) or None,
+        "cancelReceiptId": str(
+            turn.get("operation_cancel_receipt_id") or ""
+        ) or None,
+        "cancelRequestedAt": (
+            str(turn["operation_cancel_requested_at_ms"])
+            if turn.get("operation_cancel_requested_at_ms") is not None
+            else None
+        ),
+        "error": _object(turn.get("operation_error_json")) or None,
+        "createdAt": turn.get("operation_create_time"),
+        "updatedAt": turn.get("operation_update_time"),
+    }
 
 
 def _event_view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -865,6 +907,9 @@ _TURN_WITH_OPERATION_SQL = (
     "o.long_task_id AS authoritative_task_id, "
     "o.target_role AS operation_target_role, "
     "o.result_revision_id AS operation_result_revision_id, "
+    "o.finalization_receipt_id AS operation_finalization_receipt_id, "
+    "o.cancel_receipt_id AS operation_cancel_receipt_id, "
+    "o.cancel_requested_at_ms AS operation_cancel_requested_at_ms, "
     "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
     "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
     "AND e.event_type IN ('screenplay.agent.turn.failed', "

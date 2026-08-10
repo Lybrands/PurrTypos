@@ -1,5 +1,6 @@
 import type {
   ElectronAPI,
+  ScreenplayCancelOperationReceipt,
   ScreenplayAgentChunkPage,
   ScreenplayConversationEvent,
   ScreenplayConversationTurn,
@@ -118,7 +119,7 @@ export class ScreenplayConversationClient {
     })
   }
 
-  async cancel(commandId: string, turnId: string): Promise<ScreenplayConversationTurn> {
+  async cancel(commandId: string, turnId: string): Promise<ScreenplayCancelOperationReceipt> {
     return dataOrThrow(
       await this.api.cancelScreenplayConversationTurn({ commandId, turnId }),
       '终止剧本对话失败',
