@@ -995,6 +995,19 @@ class SqliteScreenplayV2Repository:
     ) -> list[dict[str, Any]]:
         """Project a whole-review report into stable per-episode Parts."""
 
+        if any(
+            key in content_json
+            for key in (
+                "error",
+                "errorCode",
+                "executionError",
+                "failedEpisodes",
+                "failure",
+                "failureCode",
+            )
+        ):
+            return current_parts
+
         rows = await self._db.fetch_all(
             "SELECT d.role, p.part_key, p.payload_json "
             "FROM screenplay_project_heads AS h "
@@ -1028,19 +1041,12 @@ class SqliteScreenplayV2Repository:
             for item in content_json.get("issues", [])
             if isinstance(item, Mapping)
         ]
-        failed_by_episode = {
-            str(_positive_int(item.get("episodeNumber"))): dict(item)
-            for item in content_json.get("failedEpisodes", [])
-            if isinstance(item, Mapping)
-            and _positive_int(item.get("episodeNumber")) is not None
-        }
         completed_by_episode = {
             str(_positive_int(item.get("episodeNumber"))): dict(item)
             for item in content_json.get("episodeReviews", [])
             if isinstance(item, Mapping)
             and _positive_int(item.get("episodeNumber")) is not None
         }
-        episode_keys.update(failed_by_episode)
         episode_keys.update(completed_by_episode)
         issue_episode: dict[str, set[str]] = {}
         for issue in issues:
@@ -1112,22 +1118,20 @@ class SqliteScreenplayV2Repository:
             start=1,
         ):
             values = grouped[episode_key]
-            failure = failed_by_episode.get(episode_key)
             completed = completed_by_episode.get(episode_key, {})
             payload = {
                 "episodeNumber": _positive_int(episode_key) or position,
                 "reviewedDraftId": str(
                     content_json.get("reviewedDraftId") or ""
                 ),
-                "reviewStatus": "failed" if failure else "completed",
+                "reviewStatus": "completed",
                 "verdict": str(
                     completed.get("verdict")
                     or content_json.get("verdict")
                     or ""
                 ),
-                "issues": [] if failure else values["issues"],
+                "issues": values["issues"],
                 "verificationResults": values["verificationResults"],
-                "failure": failure,
                 "reviewedContentDigest": str(
                     completed.get("reviewedContentDigest") or ""
                 ),
@@ -1142,9 +1146,7 @@ class SqliteScreenplayV2Repository:
                 part_key=episode_key,
                 position=position,
                 payload=payload,
-                content_text=(
-                    "" if failure else str(completed.get("contentText") or "")
-                ),
+                content_text=str(completed.get("contentText") or ""),
             ))
         return [current_parts[0], *episode_parts]
 

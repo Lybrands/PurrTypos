@@ -232,6 +232,7 @@ class ScreenplayAgentChunkProjector:
             units = []
             for unit in unit_rows:
                 unit_metadata = _object(unit.get("metadata_json"))
+                error_code = str(unit.get("error_code") or "")
                 units.append({
                     "unit_id": unit["unit_id"],
                     "kind": unit_metadata.get("unitKind"),
@@ -242,10 +243,13 @@ class ScreenplayAgentChunkProjector:
                     ),
                     "error_json": (
                         json.dumps({
-                            "code": unit.get("error_code"),
-                            "message": unit.get("error_code"),
+                            "code": error_code,
+                            "message": _unit_failure_message(
+                                unit_metadata,
+                                error_code,
+                            ),
                         }, ensure_ascii=False)
-                        if unit.get("error_code")
+                        if error_code
                         else None
                     ),
                 })
@@ -390,6 +394,23 @@ def _unit_label(unit: Mapping[str, Any], task: Mapping[str, Any] | None) -> str:
     if kind == "publish_candidate_revision":
         return "整理并发布候选稿"
     return "执行剧本任务"
+
+
+def _unit_failure_message(metadata: Mapping[str, Any], error_code: str) -> str:
+    unit_input = metadata.get("input")
+    episode_number = (
+        int(unit_input.get("episodeNumber") or 0)
+        if isinstance(unit_input, Mapping)
+        else 0
+    )
+    kind = str(metadata.get("unitKind") or "")
+    if episode_number > 0 and kind in {
+        "generate_review_dimension",
+        "validate_manifest_part",
+    }:
+        return f"第 {episode_number} 集审阅失败"
+    return error_code
+
 
 def _error_message(value: object) -> str:
     try:

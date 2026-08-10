@@ -82,18 +82,6 @@ export function reviewComparisonForPart(
     }
   }
   if (selectedPart.type === 'document' && selectedPart.key === 'main') {
-    const failed = Array.isArray(reviewMain?.payload.failedEpisodes)
-      ? reviewMain.payload.failedEpisodes
-      : []
-    if (failed.length > 0) {
-      return {
-        kind: 'failed',
-        episodeNumber: Number(
-          (failed[0] as Record<string, unknown>).episodeNumber || 0,
-        ),
-        message: `${failed.length} 集审阅失败`,
-      }
-    }
     const markdown = String(reviewMain?.contentText || '').trim()
     return markdown
       ? { kind: 'issues', markdown, reviewRevisionId: review.id }

@@ -414,16 +414,8 @@ function stageAgentStarter(
       : `继续创作完整正文，${suffix}`
   }
   if (project.active_stage === 'review') {
-    if ((reviewState?.failedEpisodes.length ?? 0) > 0) {
-      const numbers = reviewState?.failedEpisodes
-        .map((item) => item.episodeNumber)
-        .join('、')
-      return `重新审阅第 ${numbers} 集。只处理上次执行失败的分集，基于当前完整正文生成新的正式审阅报告，不要把系统执行错误写成审阅意见。`
-    }
-    if (reviewState?.hardChecks.some(
-      (check) => check.code === 'review_input_unverified',
-    )) {
-      return '重新审阅当前完整剧本。上一份报告没有可验证的正文输入，不得沿用其中的意见；请基于当前完整正文重新检查连贯性、人物弧光、结构节奏、对白和剧本格式，并生成新的正式审阅报告。'
+    if (reviewRequiresRerun(reviewState ?? {})) {
+      return '重新审阅当前完整剧本。上一份报告不可用于定稿，不得沿用其中的意见；请基于当前完整正文重新检查连贯性、人物弧光、结构节奏、对白和剧本格式，并生成新的正式审阅报告。'
     }
     const acceptedDraft = [...documents].reverse().find(
       (document) => document.kind === 'scene_draft'
@@ -2895,7 +2887,6 @@ export default function ScreenplayAgentPage({
     projectDocuments,
     projectWorkspace,
     reviewMutationPending,
-    reviewState?.failedEpisodes,
     reviewState?.hardChecks,
     reviewState?.phase,
     runAgent,

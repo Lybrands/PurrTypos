@@ -13,6 +13,10 @@ from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
+from domains.screenplay_agent.contracts import (
+    ReviewEpisodeInputRef,
+    ReviewEpisodeResult,
+)
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_tool_calling import ScreenplayToolCallingService
@@ -170,13 +174,13 @@ class ScreenplayTaskModelCalls:
                     episode_number=episode_number,
                     episode_context=episode_context,
                 )
-                descriptor["reviewInputRef"] = {
-                    "draftRevisionId": reviewed_draft_id,
-                    "episodeNumber": episode_number,
-                    "sceneIds": list(review_input["sceneIds"]),
-                    "scenePlanRevisionId": scene_list_revision_id,
-                    "contentDigest": review_input["contentDigest"],
-                }
+                descriptor["reviewInputRef"] = _review_input_ref(
+                    reviewed_draft_id=reviewed_draft_id,
+                    episode_number=episode_number,
+                    scene_ids=tuple(review_input["sceneIds"]),
+                    scene_plan_revision_id=scene_list_revision_id,
+                    content_digest=str(review_input["contentDigest"]),
+                ).to_mapping()
         encoded = json.dumps(
             descriptor,
             ensure_ascii=False,
@@ -243,10 +247,15 @@ class ScreenplayTaskModelCalls:
                     episode_context=episode_context,
                 )
                 expected = descriptor.get("reviewInputRef")
-                if (
-                    not isinstance(expected, Mapping)
-                    or str(expected.get("contentDigest") or "")
-                    != str(review_input["contentDigest"])
+                actual_ref = _review_input_ref(
+                    reviewed_draft_id=reviewed_draft_id,
+                    episode_number=episode_number,
+                    scene_ids=tuple(review_input["sceneIds"]),
+                    scene_plan_revision_id=scene_list_revision_id,
+                    content_digest=str(review_input["contentDigest"]),
+                )
+                if not isinstance(expected, Mapping) or (
+                    ReviewEpisodeInputRef.from_mapping(expected) != actual_ref
                 ):
                     raise RuntimeError("review evidence digest changed")
                 evidence["reviewInput"] = review_input
@@ -709,7 +718,10 @@ class ScreenplayTaskModelCalls:
                 base_revision_id=base_revision_id,
             )
         elif role == "review":
-            title, content, text = _aggregate_review_validations(generated)
+            title, content, text = _aggregate_review_validations(
+                generated,
+                required_episode_numbers=_required_review_episodes(task),
+            )
         else:
             output = generated[-1]
             title = str(output.get("title") or "")
@@ -1207,6 +1219,26 @@ def _review_episode_input(
     return {**packet, "contentDigest": _canonical_digest(packet)}
 
 
+def _review_input_ref(
+    *,
+    reviewed_draft_id: str,
+    episode_number: int,
+    scene_ids: Sequence[str],
+    scene_plan_revision_id: str | None,
+    content_digest: str,
+) -> ReviewEpisodeInputRef:
+    return ReviewEpisodeInputRef(
+        reviewed_revision_id=reviewed_draft_id,
+        episode_number=episode_number,
+        scene_part_refs=tuple(
+            f"{reviewed_draft_id}#scene:{scene_id}"
+            for scene_id in scene_ids
+        ),
+        scene_plan_revision_id=str(scene_plan_revision_id or ""),
+        content_digest=content_digest,
+    )
+
+
 def _review_scene_ids(
     current_draft: Mapping[str, Any],
     scene_plan: Mapping[str, Any],
@@ -1332,7 +1364,7 @@ def _validate_review_episode_parts(
         else None
     )
     reviewed_draft_id = str(
-        (review_ref or {}).get("draftRevisionId")
+        (review_ref or {}).get("reviewedRevisionId")
         or (legacy_input or {}).get("draftRevisionId")
         or unit_input.get("reviewedDraftId")
         or ""
@@ -1377,22 +1409,30 @@ def _validate_review_episode_parts(
     if len(digests) != 1 or "" in digests or len(draft_ids) != 1 or "" in draft_ids:
         raise ValueError("review dimension Parts do not share one immutable input")
     issues = [dict(issue) for value in content_values for issue in value["issues"]]
+    part_receipts = tuple(
+        str(
+            (part.get("validationReceipt") or {}).get("contentDigest")
+            or part.get("artifactDigest")
+            or part.get("artifactId")
+            or ""
+        )
+        for part in parts
+    )
+    episode_result = ReviewEpisodeResult(
+        episode_number=number,
+        reviewed_revision_id=next(iter(draft_ids)),
+        reviewed_content_digest=next(iter(digests)),
+        issues=tuple(issues),
+        verdict=_aggregate_review_verdict(
+            value["verdict"] for value in content_values
+        ),
+        part_receipts=part_receipts,
+    )
     result = {
         "title": f"第 {number} 集审阅",
         "executionSummary": f"已完成第 {number} 集五个审阅维度并校验同一正文版本。",
         "contentText": "\n\n".join(str(part.get("contentText") or "") for part in parts),
-        "contentJson": {
-            "verdict": _aggregate_review_verdict(value["verdict"] for value in content_values),
-            "issues": issues,
-            "issueCount": len(issues),
-            "criticalIssueCount": sum(issue["severity"] == "critical" for issue in issues),
-            "reviewedEpisode": number,
-            "reviewedDraftId": next(iter(draft_ids)),
-            "reviewedContentDigest": next(iter(digests)),
-            "reviewDimensions": list(expected_dimensions),
-            "reviewStatus": "completed",
-            "inputContractVersion": 2,
-        },
+        "contentJson": episode_result.to_mapping(),
         "sourceRunIds": _source_run_ids(parts),
         "runId": str(parts[-1].get("runId") or "") or None,
     }
@@ -1486,31 +1526,60 @@ def _merge_document_json(
 
 def _aggregate_review_validations(
     generated: Sequence[Mapping[str, Any]],
+    *,
+    required_episode_numbers: Sequence[int],
 ) -> tuple[str, dict[str, Any], str]:
     ordered = sorted(
         (dict(item) for item in generated),
         key=lambda item: int((item.get("contentJson") or {}).get("reviewedEpisode") or 0),
     )
-    episode_reviews = [dict(item["contentJson"]) for item in ordered]
-    reviewed = [int(item["reviewedEpisode"]) for item in episode_reviews]
-    draft_ids = {str(item.get("reviewedDraftId") or "") for item in episode_reviews}
+    results = []
+    for item in ordered:
+        raw = item.get("contentJson")
+        if not isinstance(raw, Mapping):
+            raise ValueError("review aggregation requires ReviewEpisodeResult")
+        receipt = item.get("validationReceipt")
+        receipts = tuple(str(value) for value in raw.get("partReceipts") or ())
+        if not receipts and isinstance(receipt, Mapping):
+            receipts = (str(receipt.get("contentDigest") or ""),)
+        results.append(ReviewEpisodeResult.from_mapping(
+            raw,
+            part_receipts=receipts,
+        ))
+    reviewed = [item.episode_number for item in results]
+    required = [int(value) for value in required_episode_numbers]
+    if reviewed != required:
+        raise ValueError("review aggregation requires all required episode validations")
+    draft_ids = {item.reviewed_revision_id for item in results}
     if not reviewed or len(draft_ids) != 1 or "" in draft_ids:
         raise ValueError("review aggregation requires one immutable Draft Revision")
-    issues = [dict(issue) for item in episode_reviews for issue in item["issues"]]
+    episode_reviews = [item.to_mapping() for item in results]
+    issues = [dict(issue) for item in results for issue in item.issues]
     content = {
         "schemaVersion": 1,
+        "inputContractVersion": 2,
         "documentKind": _DOCUMENT_KIND["review"],
-        "verdict": _aggregate_review_verdict(item["verdict"] for item in episode_reviews),
+        "verdict": _aggregate_review_verdict(item.verdict for item in results),
         "issues": issues,
         "issueCount": len(issues),
         "criticalIssueCount": sum(issue["severity"] == "critical" for issue in issues),
         "reviewedDraftId": next(iter(draft_ids)),
         "reviewedEpisodes": reviewed,
         "completedEpisodes": reviewed,
-        "failedEpisodes": [],
         "episodeReviews": episode_reviews,
     }
     return "剧本审阅报告", content, "\n\n".join(str(item["contentText"]) for item in ordered)
+
+
+def _required_review_episodes(task: Mapping[str, Any]) -> tuple[int, ...]:
+    return tuple(
+        int(unit.get("input", {}).get("episodeNumber") or 0)
+        for unit in task.get("units") or ()
+        if isinstance(unit, Mapping)
+        and str(unit.get("kind") or "") == "validate_manifest_part"
+        and isinstance(unit.get("input"), Mapping)
+        and unit["input"].get("validationKind") == "review_episode"
+    )
 
 
 def _with_validation_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1648,6 +1717,18 @@ def _validate_deliverable(
         _validate_scene_list(normalized, structure_episode_numbers)
         normalized["structureId"] = structure_id
     elif role == "review":
+        if any(
+            key in normalized
+            for key in (
+                "error",
+                "errorCode",
+                "executionError",
+                "failedEpisodes",
+                "failure",
+                "failureCode",
+            )
+        ):
+            raise ValueError("review content cannot contain execution metadata")
         if normalized.get("verdict") not in {"ready", "revise", "major_rework"}:
             raise ValueError("review verdict is invalid")
         issues = _validate_review_issues(normalized.get("issues"))

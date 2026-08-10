@@ -6,6 +6,7 @@ import {
   finalizationDisabledReason,
   pendingReviewFindingIds,
   reviewPrimaryAction,
+  reviewRequiresRerun,
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel.ts'
 
@@ -60,8 +61,11 @@ test('review phase selects a user action without trusting the Agent recommendati
   assert.deepEqual(reviewPrimaryAction({
     phase: 'readyToFinalize',
     recommendation: 'revise',
-    failedEpisodes: [{ episodeNumber: 2 }],
-  }), { kind: 'startReview', label: '重新审阅失败集' })
+    hardChecks: [{
+      code: 'review_execution_contaminated',
+      message: '当前审阅报告混入了执行故障，需要重新审阅',
+    }],
+  }), { kind: 'startReview', label: '重新审阅' })
   assert.deepEqual(reviewPrimaryAction({
     phase: 'readyToFinalize',
     recommendation: 'revise',
@@ -96,7 +100,10 @@ test('review workspace entry never duplicates the Agent rerun action', () => {
   assert.equal(reviewWorkspaceEntry({
     phase: 'readyToFinalize',
     counts: { pending: 0 },
-    failedEpisodes: [{ episodeNumber: 2 }],
+    hardChecks: [{
+      code: 'review_execution_contaminated',
+      message: '当前审阅报告混入了执行故障，需要重新审阅',
+    }],
   }), null)
   assert.equal(reviewWorkspaceEntry({
     phase: 'readyToFinalize',
@@ -126,4 +133,13 @@ test('review workspace entry never duplicates the Agent rerun action', () => {
     phase: 'completed',
     counts: { pending: 0 },
   }), { label: '查看定稿记录', emphasis: 'secondary' })
+})
+
+test('review rerun is driven by validation checks, not formal review findings', () => {
+  assert.equal(reviewRequiresRerun({
+    hardChecks: [{
+      code: 'review_execution_contaminated',
+      message: '当前审阅报告混入了执行故障，需要重新审阅',
+    }],
+  }), true)
 })

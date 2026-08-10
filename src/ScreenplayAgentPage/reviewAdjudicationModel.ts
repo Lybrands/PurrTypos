@@ -52,30 +52,27 @@ export type ReviewPrimaryAction = {
   label: string
 }
 
-function hasUnverifiedReviewInput(
+function hasReviewRerunCheck(
   hardChecks: ReadonlyArray<{ code: string }> | undefined,
 ): boolean {
-  return hardChecks?.some((check) => check.code === 'review_input_unverified') ?? false
+  return hardChecks?.some((check) => (
+    check.code === 'review_input_unverified'
+    || check.code === 'review_execution_contaminated'
+  )) ?? false
 }
 
 export function reviewRequiresRerun(input: {
-  failedEpisodes?: ReadonlyArray<{ episodeNumber: number }>
   hardChecks?: ReadonlyArray<{ code: string; message: string }>
 }): boolean {
-  return (input.failedEpisodes?.length ?? 0) > 0
-    || hasUnverifiedReviewInput(input.hardChecks)
+  return hasReviewRerunCheck(input.hardChecks)
 }
 
 export function reviewPrimaryAction(input: {
   phase: ScreenplayV2ReviewPhase
   recommendation: 'ready' | 'revise' | 'major_rework' | null
-  failedEpisodes?: ReadonlyArray<{ episodeNumber: number }>
   hardChecks?: ReadonlyArray<{ code: string; message: string }>
 }): ReviewPrimaryAction {
-  if ((input.failedEpisodes?.length ?? 0) > 0) {
-    return { kind: 'startReview', label: '重新审阅失败集' }
-  }
-  if (hasUnverifiedReviewInput(input.hardChecks)) {
+  if (hasReviewRerunCheck(input.hardChecks)) {
     return { kind: 'startReview', label: '重新审阅' }
   }
   const actions: Record<ScreenplayV2ReviewPhase, ReviewPrimaryAction> = {
@@ -96,7 +93,6 @@ export type ReviewWorkspaceEntry = {
 export function reviewWorkspaceEntry(input: {
   phase: ScreenplayV2ReviewPhase
   counts: { pending: number }
-  failedEpisodes?: ReadonlyArray<{ episodeNumber: number }>
   hardChecks?: ReadonlyArray<{ code: string; message: string }>
 }): ReviewWorkspaceEntry | null {
   if (reviewRequiresRerun(input)) return null

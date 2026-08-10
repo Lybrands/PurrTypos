@@ -330,13 +330,6 @@ export interface ScreenplayV2ReviewState {
   reviewRevisionId: string | null;
   recommendation: 'ready' | 'revise' | 'major_rework' | null;
   findings: ScreenplayV2ReviewFinding[];
-  failedEpisodes: Array<{
-    episodeNumber: number;
-    code: string;
-    message: string;
-    retryable: boolean;
-    runId?: string | null;
-  }>;
   counts: {
     total: number;
     pending: number;
