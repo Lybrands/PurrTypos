@@ -49,8 +49,8 @@ def build_model_call_parameters(
         or capabilities.thinking_token_accounting.value != "unknown"
     ):
         result["modelOutputCapabilities"] = capabilities.to_mapping()
-    if invocation.output_budget is not None:
-        result["outputBudget"] = invocation.output_budget.to_mapping()
+    if invocation.output_limit is not None:
+        result["outputLimit"] = invocation.output_limit.to_mapping()
     return result
 
 

@@ -146,7 +146,6 @@ class ConversationSummarizer(Protocol):
         self,
         *,
         request: ModelRequest,
-        max_output_tokens: int,
         existing: ConversationSummary | None,
         turns: Sequence[ConversationTurn],
         signal: CancellationSignal | None = None,

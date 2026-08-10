@@ -1,9 +1,8 @@
 """Managed provider calls for host hooks and bounded framework operations.
 
-Applications declare a task policy; PurrA alone resolves the provider output
-allowance, creates ``ModelInvocation``, applies safe capability fallback, and
-classifies the terminal provider reason. A resolved-budget call is never
-replayed after truncation.
+Applications supply a versioned model snapshot and optional user override.
+PurrA resolves the exact provider output limit, creates ``ModelInvocation``,
+and classifies the terminal provider reason.
 """
 
 from __future__ import annotations
@@ -24,11 +23,10 @@ from purra.contracts import (
 )
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.model_call_parameters import describe_model_call
-from purra.model_protocol import classify_model_termination
-from purra.output_budget import (
-    OutputBudgetPolicy,
-    ResolvedOutputBudget,
-    resolve_output_budget,
+from purra.model_protocol import (
+    InvocationOutputLimit,
+    classify_model_termination,
+    resolve_invocation_output_limit,
 )
 from purra.ports import CancellationSignal, ModelGateway
 
@@ -38,25 +36,20 @@ class ManagedModelCall:
     """Host-declared intent for one no-tool model operation."""
 
     request: ModelRequest
-    output_policy: OutputBudgetPolicy
-    context_window_tokens: int
-    work_units: int = 1
+    output_limit: InvocationOutputLimit | None = None
     reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT
     allow_reasoning_fallback: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ModelRequest):
             raise TypeError("managed model call requires a ModelRequest")
-        if not isinstance(self.output_policy, OutputBudgetPolicy):
-            raise TypeError("managed model call requires an OutputBudgetPolicy")
-        window = int(self.context_window_tokens)
-        if window <= 0:
-            raise ValueError("managed model context window must be positive")
-        units = int(self.work_units)
-        if units <= 0:
-            raise ValueError("managed model work units must be positive")
-        object.__setattr__(self, "context_window_tokens", window)
-        object.__setattr__(self, "work_units", units)
+        limit = self.output_limit or resolve_invocation_output_limit(
+            self.request.capability_snapshot,
+            self.request.options.get("max_tokens"),
+        )
+        if not isinstance(limit, InvocationOutputLimit):
+            raise TypeError("managed model call requires an InvocationOutputLimit")
+        object.__setattr__(self, "output_limit", limit)
         object.__setattr__(
             self,
             "reasoning_mode",
@@ -72,7 +65,7 @@ class ManagedModelCall:
 @dataclass(frozen=True, slots=True)
 class ManagedModelCompletion:
     completion: ModelCompletion
-    output_budget: ResolvedOutputBudget
+    output_limit: InvocationOutputLimit
     call_parameters: tuple[Mapping[str, object], ...]
 
 
@@ -80,7 +73,7 @@ class ManagedModelCompletion:
 class ManagedModelStream:
     chunks: AsyncIterator[ModelStreamChunk]
     model: str
-    output_budget: ResolvedOutputBudget
+    output_limit: InvocationOutputLimit
     call_parameters: tuple[Mapping[str, object], ...]
 
 
@@ -104,7 +97,7 @@ class ManagedModelExecutor:
     ) -> ManagedModelCompletion:
         attempts: list[Mapping[str, object]] = []
         for mode in _attempt_modes(call):
-            invocation, budget = _resolve_invocation(call, mode)
+            invocation, output_limit = _resolve_invocation(call, mode)
             parameters = describe_model_call(
                 self._gateway,
                 messages,
@@ -125,7 +118,7 @@ class ManagedModelExecutor:
             _validate_completion(completion)
             return ManagedModelCompletion(
                 completion=completion,
-                output_budget=budget,
+                output_limit=output_limit,
                 call_parameters=tuple(attempts),
             )
         raise UnsupportedModelFeatureError(
@@ -144,7 +137,7 @@ class ManagedModelExecutor:
     ) -> ManagedModelStream:
         attempts: list[Mapping[str, object]] = []
         for mode in _attempt_modes(call):
-            invocation, budget = _resolve_invocation(call, mode)
+            invocation, output_limit = _resolve_invocation(call, mode)
             parameters = describe_model_call(
                 self._gateway,
                 messages,
@@ -165,7 +158,7 @@ class ManagedModelExecutor:
             return ManagedModelStream(
                 chunks=_validated_chunks(stream.chunks, signal),
                 model=stream.model,
-                output_budget=budget,
+                output_limit=output_limit,
                 call_parameters=tuple(attempts),
             )
         raise UnsupportedModelFeatureError(
@@ -183,39 +176,21 @@ def _attempt_modes(call: ManagedModelCall) -> tuple[ReasoningMode, ...]:
 def _resolve_invocation(
     call: ManagedModelCall,
     mode: ReasoningMode,
-) -> tuple[ModelInvocation, ResolvedOutputBudget]:
+) -> tuple[ModelInvocation, InvocationOutputLimit]:
     if not call.request.protocol_capabilities.reasoning_mode_is_supported(mode):
         raise UnsupportedModelFeatureError(
             "selected reasoning mode is incompatible with model capabilities"
         )
-    budget = resolve_output_budget(
-        policy=call.output_policy,
-        capabilities=call.request.output_capabilities,
-        context_window_tokens=call.context_window_tokens,
-        work_units=call.work_units,
-        thinking_enabled=(
-            mode is not ReasoningMode.DISABLED
-            and _request_enables_thinking(call.request)
-        ),
-    )
+    output_limit = call.output_limit
+    if output_limit is None:  # normalized by ManagedModelCall.__post_init__
+        raise TypeError("managed model call output limit was not resolved")
     return ModelInvocation(
         request=call.request,
         tools=(),
         tool_choice=ToolChoiceMode.NONE,
-        output_budget=budget,
+        output_limit=output_limit,
         reasoning_mode=mode,
-    ), budget
-
-
-def _request_enables_thinking(request: ModelRequest) -> bool:
-    thinking = request.options.get("thinking")
-    return bool(
-        request.options.get("thinking_enabled") is True
-        or (
-            isinstance(thinking, Mapping)
-            and thinking.get("type") == "enabled"
-        )
-    )
+    ), output_limit
 
 
 def _validate_completion(completion: ModelCompletion) -> None:

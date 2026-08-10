@@ -25,9 +25,12 @@ from purra.contracts import (
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.model_protocol import (
     generic_capability_snapshot,
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
     ModelProtocolCapabilities,
     ReasoningControl,
     ReasoningReplayPolicy,
+    resolve_invocation_output_limit,
 )
 from purra.ports import ModelGateway
 from purra.runtime import AgentRuntime
@@ -40,7 +43,16 @@ def _snapshot(*, profile_id="generic", protocol=None):
     return replace(
         generic_capability_snapshot(),
         profile_id=profile_id,
+        max_output_tokens=393_216,
         protocol=protocol or ModelProtocolCapabilities(),
+    )
+
+
+def _limit(max_tokens: int) -> InvocationOutputLimit:
+    return InvocationOutputLimit(
+        max_tokens=max_tokens,
+        source=InvocationOutputLimitSource.USER_OVERRIDE,
+        profile_max_tokens=393_216,
     )
 
 
@@ -84,6 +96,43 @@ def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
     assert options["thinking"] == {"type": "disabled"}
 
 
+@pytest.mark.parametrize(
+    ("explicit_limit", "expected_limit"),
+    [(None, 393_216), (256_000, 256_000)],
+)
+@pytest.mark.parametrize(
+    "reasoning_mode",
+    [ReasoningMode.DEFAULT, ReasoningMode.DISABLED],
+)
+def test_provider_receives_the_exact_profile_or_user_output_limit(
+    explicit_limit,
+    expected_limit,
+    reasoning_mode,
+):
+    snapshot = resolve_model_profile(
+        "deepseek:deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "https://api.deepseek.com",
+    ).capability_snapshot(context_window_tokens=1_000_000)
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="deepseek-v4-pro",
+            capability_snapshot=snapshot,
+            options={"baseURL": "https://api.deepseek.com"},
+        ),
+        output_limit=resolve_invocation_output_limit(
+            snapshot,
+            explicit_user_override=explicit_limit,
+        ),
+        reasoning_mode=reasoning_mode,
+    )
+
+    assert provider_model_gateway._provider_options(invocation)[
+        "max_tokens"
+    ] == expected_limit
+
+
 def test_incompatible_reasoning_selection_fails_before_provider_invocation():
     invocation = ModelInvocation(
         request=ModelRequest(
@@ -115,7 +164,7 @@ def test_always_enabled_reasoning_profile_rejects_disabled_invocation():
             ).capability_snapshot(context_window_tokens=1_000_000),
             options={"baseURL": "https://api.moonshot.cn/v1"},
         ),
-        max_output_tokens=1_200,
+        output_limit=_limit(1_200),
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
@@ -174,7 +223,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             parameters={"type": "object"},
         ),),
         tool_choice=ToolChoiceMode.AUTO,
-        max_output_tokens=2_048,
+        output_limit=_limit(2_048),
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
@@ -209,8 +258,17 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
         "toolNames": ["readThing"],
         "messageCount": 1,
         "messageRoles": ["user"],
-        "profileId": "profile",
-    }
+            "profileId": "profile",
+            "modelOutputCapabilities": {
+                "maxOutputTokens": 393_216,
+                "thinkingTokenAccounting": "unknown",
+            },
+            "outputLimit": {
+                "maxTokens": 2_048,
+                "source": "user_override",
+                "profileMaxTokens": 393_216,
+            },
+        }
     assert "private message" not in json.dumps(parameters)
     assert "private-provider-key" not in json.dumps(parameters)
     assert "caller-owned" not in json.dumps(parameters)
@@ -338,7 +396,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
                 },
             ),),
             tool_choice=ToolChoiceMode.REQUIRED,
-            max_output_tokens=2_048,
+            output_limit=_limit(2_048),
             reasoning_mode=ReasoningMode.DISABLED,
         ),
     )

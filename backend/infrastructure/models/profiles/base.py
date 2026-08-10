@@ -60,11 +60,6 @@ class ModelProfile:
             ),
         )
 
-    def internal_output_token_floor(self) -> int:
-        """Minimum output budget for narrow host-controlled model calls."""
-
-        return 0
-
     def output_capabilities(self) -> ModelOutputCapabilities:
         return ModelOutputCapabilities(
             max_output_tokens=self.max_output_tokens,

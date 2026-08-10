@@ -12,15 +12,13 @@ from purra.json_values import (
     thaw_json_mapping,
     thaw_json_value,
 )
-from purra.output_budget import (
-    ResolvedOutputBudget,
-)
 from purra.model_protocol.capabilities import (
     ModelCapabilitySnapshot,
     ModelOutputCapabilities,
     ModelProtocolCapabilities,
     generic_capability_snapshot,
 )
+from purra.model_protocol.output_limits import InvocationOutputLimit
 from purra.contracts.enums import (
     ApprovalDecision,
     ApprovalStatus,
@@ -197,32 +195,26 @@ class ModelInvocation:
     request: ModelRequest
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: ToolChoiceMode = ToolChoiceMode.AUTO
-    max_output_tokens: int | None = None
-    output_budget: ResolvedOutputBudget | None = None
+    output_limit: InvocationOutputLimit | None = None
     reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "tool_choice", ToolChoiceMode(self.tool_choice))
         object.__setattr__(self, "reasoning_mode", ReasoningMode(self.reasoning_mode))
-        if self.output_budget is not None:
-            if not isinstance(self.output_budget, ResolvedOutputBudget):
-                raise TypeError("model output budget must be ResolvedOutputBudget")
-            if self.max_output_tokens is None:
-                object.__setattr__(
-                    self,
-                    "max_output_tokens",
-                    self.output_budget.effective_tokens,
-                )
-            elif int(self.max_output_tokens) != self.output_budget.effective_tokens:
-                raise ValueError(
-                    "max output tokens must match the resolved output budget"
-                )
-        object.__setattr__(self, "max_output_tokens", optional_positive_int(
-            self.max_output_tokens, "max output tokens"
-        ))
+        if self.output_limit is not None and not isinstance(
+            self.output_limit,
+            InvocationOutputLimit,
+        ):
+            raise TypeError(
+                "model output limit must be InvocationOutputLimit"
+            )
         if not self.tools and self.tool_choice is ToolChoiceMode.REQUIRED:
             raise ValueError("required tool choice needs at least one tool")
+
+    @property
+    def max_output_tokens(self) -> int | None:
+        return self.output_limit.max_tokens if self.output_limit is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -812,7 +804,6 @@ class TaskPlan:
 @dataclass(frozen=True, slots=True)
 class PlannerLimits:
     max_steps: int = 8
-    max_output_tokens: int = 2_400
     max_step_id_chars: int = 48
     max_title_chars: int = 48
     max_goal_chars: int = 160
@@ -833,9 +824,6 @@ class PlannerLimits:
         if max_tool_steps < 0 or max_tool_steps > self.max_steps:
             raise ValueError("max_tool_steps must be between zero and max_steps")
         object.__setattr__(self, "max_tool_steps", max_tool_steps)
-        object.__setattr__(self, "max_output_tokens", positive_int(
-            self.max_output_tokens, "max_output_tokens"
-        ))
         max_repair_attempts = int(self.max_repair_attempts)
         if max_repair_attempts < 0 or max_repair_attempts > 3:
             raise ValueError(

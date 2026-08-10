@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from purra.model_execution import ManagedModelExecutor
-from application.output_budget_policies import SCREENPLAY_INTENT_OUTPUT_POLICY
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_agent_service import (
     PlannedScreenplayIntent,
@@ -93,7 +92,6 @@ class ModelScreenplayIntentPlanner:
             binding_command_id=turn_id,
             conversation_turn_id=turn_id,
             phase="screenplay_intent_planning",
-            output_policy=SCREENPLAY_INTENT_OUTPUT_POLICY,
             repair_instruction=_PLANNER_REPAIR,
             validate=_validate_intent,
             execution_progress_fields={

@@ -67,6 +67,7 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
                 capability_snapshot=replace(
                     generic_capability_snapshot(),
                     profile_id="fixture:writer-model",
+                    max_output_tokens=4_096,
                 ),
             options={
                 "temperature": 0.8,
@@ -98,7 +99,7 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     assert invocation.tools == ()
     assert invocation.tool_choice is ToolChoiceMode.NONE
     assert invocation.reasoning_mode is ReasoningMode.DISABLED
-    assert invocation.max_output_tokens == 1_200
+    assert invocation.max_output_tokens == 4_096
     assert invocation.request.options["temperature"] == 0
     assert invocation.request.options["baseURL"] == "https://provider.test/v1"
     assert invocation.request.profile_id == "fixture:writer-model"
@@ -136,7 +137,14 @@ async def test_model_backed_judge_fails_closed_on_an_unexpected_tool_call():
     with pytest.raises(ModelGatewayError) as captured:
         await ModelBackedResponseJudge(
             model_executor=ManagedModelExecutor(_ToolCallingGateway()),
-            model_request=ModelRequest(provider="fixture", model="model"),
+            model_request=ModelRequest(
+                provider="fixture",
+                model="model",
+                capability_snapshot=replace(
+                    generic_capability_snapshot(),
+                    max_output_tokens=4_096,
+                ),
+            ),
             policy=_Policy(),
         ).judge(
             content="candidate",

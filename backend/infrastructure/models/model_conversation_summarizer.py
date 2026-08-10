@@ -16,7 +16,6 @@ from application.conversation_compaction_contracts import (
     ConversationTurn,
 )
 from purra.model_execution import ManagedModelCall, ManagedModelExecutor
-from purra.output_budget import OutputBudgetPolicy
 from purra.ports import CancellationSignal
 from purra.structured_output import (
     StructuredOutputParseError,
@@ -54,7 +53,6 @@ class ModelBackedConversationSummarizer:
         self,
         *,
         request: ModelRequest,
-        max_output_tokens: int,
         existing: ConversationSummary | None,
         turns: Sequence[ConversationTurn],
         signal: CancellationSignal | None = None,
@@ -81,17 +79,8 @@ class ModelBackedConversationSummarizer:
                 ),
             ),
         )
-        maximum = max(1, int(max_output_tokens))
         call = ManagedModelCall(
             request=request,
-            output_policy=OutputBudgetPolicy(
-                key="conversation_summary",
-                base_tokens=maximum,
-                per_work_unit_tokens=0,
-                safety_factor=1,
-                hard_cap_tokens=maximum,
-            ),
-            context_window_tokens=max(32_000, maximum * 4),
             reasoning_mode=ReasoningMode.DISABLED,
         )
         completion = (
