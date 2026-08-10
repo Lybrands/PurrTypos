@@ -8,13 +8,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from purra.model_execution import ManagedModelExecutor
-from purra.errors import ModelGatewayError
+from purra.contracts import ReasoningMode
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
-from application.screenplay_incremental_generation import (
-    ScreenplayIncrementalGeneration,
-)
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_tool_calling import ScreenplayToolCallingService
@@ -83,20 +80,20 @@ class ScreenplayTaskModelCalls:
         kind = str(unit.get("kind") or "")
         if kind == "collect_evidence":
             return await self._collect_evidence(task, unit)
-        if kind == "generate_candidate":
-            return await self._generate_candidate(
-                task, unit, runtime, signal
-            )
-        if kind == "validate_candidate":
-            return self._validate_candidate(task, unit)
+        if kind == "generate_draft_scene":
+            return await self._generate_draft_scene(task, unit, runtime, signal)
+        if kind == "generate_episode_metadata":
+            return await self._generate_episode_metadata(task, unit, runtime, signal)
+        if kind == "generate_review_dimension":
+            return await self._generate_review_dimension(task, unit, runtime, signal)
+        if kind == "generate_document_section":
+            return await self._generate_document_section(task, unit, runtime, signal)
+        if kind == "validate_manifest_part":
+            return self._validate_manifest_part(task, unit)
         if kind == "compose_final_response":
             return await self._compose_final_response(
                 task, unit, runtime, signal
             )
-        if kind == "generate_episode_draft":
-            return await self._generate_episode(task, unit, runtime, signal)
-        if kind == "generate_deliverable":
-            return await self._generate_deliverable(task, unit, runtime, signal)
         if kind == "publish_candidate_revision":
             return await self._publish(task)
         raise RuntimeError(f"unsupported screenplay task unit: {kind}")
@@ -118,24 +115,39 @@ class ScreenplayTaskModelCalls:
             "acceptedDeliverables": heads,
         }
         if episode_number:
+            reviewed_draft_id = str(
+                unit_input.get("reviewedDraftId") or ""
+            ) or None
             manifest = await self._context.episode_manifest(
                 project_id,
                 episode_number,
             )
+            episode_context = await self._context.episode_context(
+                project_id,
+                episode_number,
+                draft_revision_id=reviewed_draft_id or base_revision_id,
+            )
             evidence.update({
                 "episodeNumber": episode_number,
                 "manifest": manifest,
-                "episodeContext": await self._context.episode_context(
-                    project_id,
-                    episode_number,
-                    draft_revision_id=base_revision_id,
-                ),
-                "writingContext": await self._context.episode_writing_context(
-                    project_id,
-                    episode_number,
-                    draft_revision_id=base_revision_id,
-                ),
+                "episodeContext": episode_context,
             })
+            if unit_input.get("evidenceKind") == "review_input":
+                if reviewed_draft_id is None:
+                    raise ValueError("review input requires an immutable Draft Revision")
+                evidence["reviewInput"] = _review_episode_input(
+                    reviewed_draft_id=reviewed_draft_id,
+                    episode_number=episode_number,
+                    episode_context=episode_context,
+                )
+            else:
+                evidence["writingContext"] = (
+                    await self._context.episode_writing_context(
+                        project_id,
+                        episode_number,
+                        draft_revision_id=base_revision_id,
+                    )
+                )
         else:
             if base_revision_id:
                 evidence["baseCandidate"] = await self._context.revision(
@@ -158,83 +170,324 @@ class ScreenplayTaskModelCalls:
             "evidenceReceipt": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         }
 
-    async def _generate_candidate(self, task, unit, runtime, signal):
-        evidence_output = _dependency_output(task, unit, "collect_evidence")
-        evidence = dict(evidence_output.get("evidence") or {})
-        if not evidence:
-            raise RuntimeError("screenplay evidence checkpoint is missing")
-        if int((unit.get("input") or {}).get("episodeNumber") or 0):
-            return await self._generate_episode(
-                task,
-                unit,
-                runtime,
-                signal,
-                evidence=evidence,
-            )
-        return await self._generate_deliverable(
-            task,
-            unit,
-            runtime,
-            signal,
-            evidence=evidence,
+    async def _generate_draft_scene(self, task, unit, runtime, signal):
+        unit_input = dict(unit.get("input") or {})
+        episode_number = int(unit_input.get("episodeNumber") or 0)
+        scene_id = str(unit_input.get("sceneId") or "").strip()
+        evidence = dict(
+            _dependency_output(task, unit, "collect_evidence").get("evidence")
+            or {}
         )
-
-    def _validate_candidate(self, task, unit) -> dict[str, Any]:
-        generated = dict(_dependency_output(task, unit, "generate_candidate"))
-        if not generated:
-            raise RuntimeError("screenplay candidate checkpoint is missing")
-        role = str(task["targetRole"])
-        if role == "screenplayDraft":
-            draft = generated.get("episodeDraft")
-            if not isinstance(draft, Mapping):
-                raise ValueError("screenplay episode candidate is missing")
-            if not str(generated.get("sceneListId") or "").strip():
-                raise ValueError("screenplay episode scene list is missing")
-            if not str(draft.get("contentText") or "").strip():
-                raise ValueError("screenplay episode text is empty")
-            if not tuple(draft.get("sceneIds") or ()):
-                raise ValueError("screenplay episode scenes are empty")
-        else:
-            evidence = dict(
-                _dependency_output(task, unit, "collect_evidence").get(
-                    "evidence"
-                ) or {}
+        writing = dict(evidence.get("writingContext") or {})
+        scene_plans = dict(writing.get("scenePlans") or {})
+        if not scene_id or scene_id not in scene_plans:
+            raise ValueError("draft scene is absent from the accepted scene Manifest")
+        completed_scenes = _completed_part_outputs(
+            task,
+            kind="generate_draft_scene",
+            episode_number=episode_number,
+        )
+        payload = {
+            "task": "create_screenplay_scene",
+            "episodeNumber": episode_number,
+            "sceneId": scene_id,
+            "scenePosition": list(unit_input.get("sceneIds") or ()).index(scene_id) + 1,
+            "sceneCount": len(tuple(unit_input.get("sceneIds") or ())),
+            "instruction": unit_input.get("instruction"),
+            "constraints": unit_input.get("constraints") or [],
+            "preserve": unit_input.get("preserve") or [],
+            "baseRevisionId": unit_input.get("baseRevisionId"),
+            "scenePlan": scene_plans[scene_id],
+            "currentDraftScene": dict(
+                writing.get("currentDraftScenes") or {}
+            ).get(scene_id),
+            "revisionIssues": [
+                {
+                    **dict(issue),
+                    "directlyReferencesCurrentScene": (
+                        scene_id in issue.get("relatedSceneIds", ())
+                    ),
+                }
+                for issue in writing.get("reviewIssues") or ()
+                if isinstance(issue, Mapping)
+            ],
+            "reviewRevisionId": writing.get("reviewRevisionId"),
+            "acceptedGuidance": writing.get("acceptedGuidance"),
+            "previousEpisodeContinuity": (
+                _previous_episode_validation(task, episode_number)
+                or writing.get("previousEpisodeContinuity")
+            ),
+            "completedSceneSummaries": [
+                {
+                    "sceneId": str(output.get("sceneId") or ""),
+                    "processSummary": str(output.get("processSummary") or ""),
+                }
+                for output in completed_scenes
+            ],
+            "previousSceneTail": str(
+                (completed_scenes[-1] if completed_scenes else {}).get("sceneText")
+                or ""
+            )[-1_200:],
+        }
+        if self._tool_calls is not None:
+            result = await self._tool_calls.run_candidate(
+                runtime=runtime,
+                session_id=int(task["sessionId"]),
+                prompt=str(unit_input.get("instruction") or "创作剧本场景"),
+                system_instruction=_scene_tool_instruction(episode_number, scene_id),
+                user_payload=payload,
+                domain_context=await self._domain_context(
+                    task,
+                    unit,
+                    expected_part_type="scene",
+                    expected_part_key=scene_id,
+                    runtime=runtime,
+                ),
+                conversation_turn_id=str(task["turnId"]),
+                reasoning_mode=ReasoningMode.DISABLED,
+                host_candidate_template=_host_scene_candidate_template(
+                    scene_id,
+                    scene_plans[scene_id],
+                ),
+                validate_candidate=lambda candidate: _validate_scene_candidate(
+                    candidate,
+                    scene_id,
+                ),
+                signal=signal,
             )
-            heads = {
-                str(item.get("role") or ""): item
-                for item in evidence.get("acceptedDeliverables") or ()
-                if isinstance(item, Mapping)
+            candidate = result.candidate
+            scene = dict(candidate["payload"])
+            return {
+                **scene,
+                "episodeNumber": episode_number,
+                "sceneListId": str(evidence["manifest"]["sceneListId"]),
+                "runId": result.run_id,
+                "artifactId": str(candidate["artifactId"]),
             }
-            structure = heads.get("structure")
-            structure_numbers = tuple(
-                int(item.get("number") or 0)
-                for item in (
-                    (structure or {}).get("content", {}).get("episodes", [])
-                )
-                if isinstance(item, Mapping)
-            )
-            draft = heads.get("screenplayDraft")
-            normalized = _validate_deliverable(
-                role,
-                generated,
-                structure_id=(structure or {}).get("revisionId"),
-                structure_episode_numbers=structure_numbers,
-                reviewed_draft_id=(draft or {}).get("revisionId"),
-            )
-            generated.update(normalized)
-        digest_source = json.dumps(
-            generated,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
+        assert self._models is not None
+        result = await self._models.run_json(
+            runtime=runtime,
+            session_id=int(task["sessionId"]),
+            prompt=str(unit_input.get("instruction") or "创作剧本场景"),
+            system_instruction=_scene_json_instruction(episode_number, scene_id),
+            user_payload=payload,
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id=str(task["projectId"]),
+            binding_command_id=f"{task['id']}:{unit['id']}",
+            conversation_turn_id=str(task["turnId"]),
+            task_id=str(task["id"]),
+            phase="screenplay_scene_generation",
+            validate=lambda value: _validate_scene_json(value, scene_id),
+            signal=signal,
         )
         return {
-            **generated,
-            "validationReceipt": hashlib.sha256(
-                digest_source.encode("utf-8")
-            ).hexdigest(),
+            **result.value,
+            "episodeNumber": episode_number,
+            "sceneListId": str(evidence["manifest"]["sceneListId"]),
+            "runId": result.run_id,
         }
+
+    async def _generate_episode_metadata(self, task, unit, runtime, signal):
+        unit_input = dict(unit.get("input") or {})
+        episode_number = int(unit_input.get("episodeNumber") or 0)
+        scenes = _completed_part_outputs(
+            task,
+            kind="generate_draft_scene",
+            episode_number=episode_number,
+        )
+        expected_ids = tuple(unit_input.get("sceneIds") or ())
+        if tuple(str(scene.get("sceneId") or "") for scene in scenes) != expected_ids:
+            raise RuntimeError("episode metadata requires every ordered scene Part")
+        user_payload = {
+            "task": "finalize_screenplay_episode_metadata",
+            "episodeNumber": episode_number,
+            "sceneSummaries": [
+                {
+                    "sceneId": scene["sceneId"],
+                    "processSummary": scene["processSummary"],
+                }
+                for scene in scenes
+            ],
+            "finalSceneTail": str(scenes[-1]["sceneText"])[-1_200:],
+        }
+        if self._tool_calls is not None:
+            result = await self._tool_calls.run_candidate(
+                runtime=runtime,
+                session_id=int(task["sessionId"]),
+                prompt=f"整理第 {episode_number} 集标题和连续性摘要",
+                system_instruction=_episode_metadata_tool_instruction(episode_number),
+                user_payload=user_payload,
+                domain_context=await self._domain_context(
+                    task,
+                    unit,
+                    expected_part_type="episode_metadata",
+                    expected_part_key=str(episode_number),
+                    runtime=runtime,
+                ),
+                conversation_turn_id=str(task["turnId"]),
+                reasoning_mode=ReasoningMode.DISABLED,
+                validate_candidate=lambda candidate: (
+                    _validate_episode_metadata_candidate(candidate, episode_number)
+                ),
+                signal=signal,
+            )
+            return {
+                **dict(result.candidate["payload"]),
+                "runId": result.run_id,
+                "artifactId": str(result.candidate["artifactId"]),
+            }
+        assert self._models is not None
+        result = await self._models.run_json(
+            runtime=runtime,
+            session_id=int(task["sessionId"]),
+            prompt=f"整理第 {episode_number} 集标题和连续性摘要",
+            system_instruction=_episode_metadata_json_instruction(episode_number),
+            user_payload=user_payload,
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id=str(task["projectId"]),
+            binding_command_id=f"{task['id']}:{unit['id']}",
+            conversation_turn_id=str(task["turnId"]),
+            task_id=str(task["id"]),
+            phase="screenplay_episode_metadata",
+            validate=lambda value: _validate_episode_metadata_json(
+                value,
+                episode_number,
+            ),
+            signal=signal,
+        )
+        return {**result.value, "runId": result.run_id}
+
+    async def _generate_review_dimension(self, task, unit, runtime, signal):
+        unit_input = dict(unit.get("input") or {})
+        episode_number = int(unit_input.get("episodeNumber") or 0)
+        dimension = str(unit_input.get("reviewDimension") or "")
+        reviewed_draft_id = str(unit_input.get("reviewedDraftId") or "")
+        evidence = dict(
+            _dependency_output(task, unit, "collect_evidence").get("evidence")
+            or {}
+        )
+        review_input = dict(evidence.get("reviewInput") or {})
+        if not review_input:
+            raise RuntimeError("review dimension has no immutable input packet")
+        if self._tool_calls is None:
+            raise RuntimeError("review dimension requires screenplay candidate tools")
+        result = await self._tool_calls.run_candidate(
+            runtime=runtime,
+            session_id=int(task["sessionId"]),
+            prompt=str(unit_input.get("instruction") or "审阅剧本"),
+            system_instruction=_review_dimension_tool_instruction(
+                episode_number,
+                dimension,
+                tuple(unit_input.get("sceneIds") or ()),
+            ),
+            user_payload={
+                "task": "review_screenplay_dimension",
+                "episodeNumber": episode_number,
+                "dimension": dimension,
+                "reviewedDraftId": reviewed_draft_id,
+                "instruction": unit_input.get("instruction"),
+                "reviewInput": review_input,
+            },
+            domain_context=await self._domain_context(
+                task,
+                unit,
+                expected_part_type="review_dimension",
+                expected_part_key=f"{episode_number}:{dimension}",
+                runtime=runtime,
+            ),
+            conversation_turn_id=str(task["turnId"]),
+            validate_candidate=lambda candidate: _validate_review_dimension_candidate(
+                candidate,
+                episode_number=episode_number,
+                dimension=dimension,
+                allowed_scene_ids=tuple(unit_input.get("sceneIds") or ()),
+                reviewed_draft_id=reviewed_draft_id,
+                reviewed_content_digest=str(review_input.get("contentDigest") or ""),
+            ),
+            signal=signal,
+        )
+        payload = dict(result.candidate["payload"])
+        return {
+            **payload,
+            "contentText": str(result.candidate.get("contentText") or ""),
+            "episodeNumber": episode_number,
+            "reviewDimension": dimension,
+            "runId": result.run_id,
+            "artifactId": str(result.candidate["artifactId"]),
+        }
+
+    async def _generate_document_section(self, task, unit, runtime, signal):
+        if self._tool_calls is None:
+            raise RuntimeError("document section requires screenplay candidate tools")
+        unit_input = dict(unit.get("input") or {})
+        role = str(task["targetRole"])
+        section_key = str(unit_input.get("sectionKey") or "")
+        evidence = dict(
+            _dependency_output(task, unit, "collect_evidence").get("evidence")
+            or {}
+        )
+        episode_number = (
+            int(section_key.removeprefix("episode-"))
+            if role == "sceneList" and section_key.startswith("episode-")
+            else 0
+        )
+        result = await self._tool_calls.run_candidate(
+            runtime=runtime,
+            session_id=int(task["sessionId"]),
+            prompt=str(unit_input.get("instruction") or "生成剧本交付物章节"),
+            system_instruction=(
+                _scene_list_fragment_tool_instruction(episode_number)
+                if episode_number
+                else _document_section_tool_instruction(role, section_key)
+            ),
+            user_payload={
+                "task": "create_screenplay_document_section",
+                "targetRole": role,
+                "sectionKey": section_key,
+                "episodeNumber": episode_number or None,
+                "instruction": unit_input.get("instruction"),
+                "constraints": unit_input.get("constraints") or [],
+                "preserve": unit_input.get("preserve") or [],
+                "evidence": evidence,
+            },
+            domain_context=await self._domain_context(
+                task,
+                unit,
+                expected_part_type="document_section",
+                expected_part_key=section_key,
+                runtime=runtime,
+            ),
+            conversation_turn_id=str(task["turnId"]),
+            validate_candidate=(
+                lambda candidate: _validate_scene_list_fragment_candidate(
+                    candidate,
+                    episode_number,
+                )
+                if episode_number
+                else _validate_document_section_candidate(
+                    candidate,
+                    section_key,
+                )
+            ),
+            signal=signal,
+        )
+        return {
+            **dict(result.candidate["payload"]),
+            "contentText": str(result.candidate.get("contentText") or ""),
+            "sectionKey": section_key,
+            "runId": result.run_id,
+            "artifactId": str(result.candidate["artifactId"]),
+        }
+
+    def _validate_manifest_part(self, task, unit) -> dict[str, Any]:
+        validation_kind = str((unit.get("input") or {}).get("validationKind") or "")
+        if validation_kind == "draft_episode":
+            return _validate_draft_episode_parts(task, unit)
+        if validation_kind == "review_episode":
+            return _validate_review_episode_parts(task, unit)
+        if validation_kind == "document":
+            return _validate_document_parts(task, unit)
+        raise RuntimeError("unsupported screenplay Manifest validation kind")
 
     async def _compose_final_response(
         self,
@@ -246,7 +499,7 @@ class ScreenplayTaskModelCalls:
         validated = [
             dict(item.get("output") or {})
             for item in task.get("units") or ()
-            if str(item.get("kind") or "") == "validate_candidate"
+            if str(item.get("kind") or "") == "validate_manifest_part"
             and item.get("status") == "completed"
         ]
         if not validated:
@@ -296,343 +549,6 @@ class ScreenplayTaskModelCalls:
             "runId": result.run_id,
         }
 
-    async def _generate_episode(
-        self,
-        task,
-        unit,
-        runtime,
-        signal,
-        evidence: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        project_id = str(task["projectId"])
-        episode_number = int(unit["input"]["episodeNumber"])
-        base_revision_id = str(unit["input"].get("baseRevisionId") or "") or None
-        manifest = (
-            dict(evidence.get("manifest") or {})
-            if evidence is not None
-            else await self._context.episode_manifest(project_id, episode_number)
-        )
-        scene_ids = tuple(manifest["sceneIds"])
-        if self._tool_calls is not None:
-            return await self._generate_episode_incrementally(
-                task=task,
-                unit=unit,
-                runtime=runtime,
-                signal=signal,
-                episode_number=episode_number,
-                base_revision_id=base_revision_id,
-                scene_ids=scene_ids,
-                scene_list_id=str(manifest["sceneListId"]),
-                writing_context=(
-                    dict(evidence.get("writingContext") or {})
-                    if evidence is not None else None
-                ),
-            )
-        context = (
-            dict(evidence.get("episodeContext") or {})
-            if evidence is not None
-            else await self._context.episode_context(
-                project_id,
-                episode_number,
-                draft_revision_id=base_revision_id,
-            )
-        )
-        heads = (
-            list(evidence.get("acceptedDeliverables") or ())
-            if evidence is not None
-            else await self._context.heads(
-                project_id,
-                roles=("creativeBrief", "structure"),
-                text_limit=8_000,
-            )
-        )
-        previous = _last_generated_episode(task.get("units") or (), episode_number)
-        payload = {
-            "projectId": project_id,
-            "episodeNumber": episode_number,
-            "instruction": unit["input"].get("instruction"),
-            "constraints": unit["input"].get("constraints") or [],
-            "preserve": unit["input"].get("preserve") or [],
-            "acceptedGuidance": heads,
-            "scenePlan": context["episode"],
-            "continuity": previous or context.get("previousEpisode"),
-            "currentDraft": context.get("currentDraft"),
-        }
-        assert self._models is not None
-        result = await self._models.run_json(
-            runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=str(unit["input"].get("instruction") or "创作剧本正文"),
-            system_instruction=_episode_instruction(episode_number, scene_ids),
-            user_payload=payload,
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id=project_id,
-            binding_command_id=f"{task['id']}:{unit['id']}",
-            conversation_turn_id=str(task["turnId"]),
-            task_id=str(task["id"]),
-            phase="screenplay_episode_generation",
-            repair_instruction="严格按指定 JSON 协议重写；集数和 sceneId 必须与场景表完全一致，每场 processSummary 和 sceneText 都不能为空。",
-            validate=lambda value: _validate_episode(value, episode_number, scene_ids),
-            execution_progress_fields={
-                "executionSummary": "",
-                "processSummary": "",
-            },
-            project_execution=lambda value: (
-                value["executionSummary"],
-            ),
-            signal=signal,
-        )
-        episode = result.value
-        scene_texts = [{
-            "sceneId": str(scene["sceneId"]),
-            "contentText": str(scene["sceneText"]),
-        } for scene in episode["scenes"]]
-        content_text = "\n\n".join(item["contentText"] for item in scene_texts)
-        return {
-            "runId": result.run_id,
-            "executionSummary": episode["executionSummary"],
-            "sceneListId": context["sceneListId"],
-            "episodeDraft": {
-                "episodeNumber": episode_number,
-                "title": episode["title"],
-                "sceneIds": list(scene_ids),
-                "sceneTexts": scene_texts,
-                "sceneExecutions": [{
-                    "sceneId": scene_id,
-                    "status": "completed",
-                } for scene_id in scene_ids],
-                "contentText": content_text,
-                "continuitySummary": episode["continuitySummary"],
-            },
-        }
-
-    def _incremental(self) -> ScreenplayIncrementalGeneration:
-        if self._tool_calls is None:
-            raise RuntimeError("incremental generation requires screenplay tools")
-        return ScreenplayIncrementalGeneration(
-            context=self._context,
-            outputs=self._outputs,
-            tool_calls=self._tool_calls,
-            domain_context_factory=self._domain_context,
-        )
-
-    async def _generate_episode_incrementally(
-        self,
-        **kwargs,
-    ) -> dict[str, Any]:
-        return await self._incremental().generate_episode(
-            **kwargs,
-            validate_scene=_validate_scene_candidate,
-            validate_metadata=_validate_episode_metadata_candidate,
-        )
-
-    async def _generate_review_incrementally(
-        self,
-        **kwargs,
-    ) -> dict[str, Any]:
-        return await self._incremental().generate_review(
-            **kwargs,
-            draft_scene_ids=_draft_scene_ids,
-            validate_fragment=lambda candidate, number, scene_ids, draft_id, digest: (
-                _validate_review_fragment_candidate(
-                    candidate,
-                    episode_number=number,
-                    allowed_scene_ids=scene_ids,
-                    reviewed_draft_id=draft_id,
-                    reviewed_content_digest=digest,
-                )
-            ),
-            aggregate_verdict=_aggregate_review_verdict,
-            document_kind=_DOCUMENT_KIND["review"],
-            classify_failure=classify_screenplay_run_failure,
-        )
-
-    async def _generate_scene_list_incrementally(
-        self,
-        **kwargs,
-    ) -> dict[str, Any]:
-        return await self._incremental().generate_scene_list(
-            **kwargs,
-            validate_fragment=_validate_scene_list_fragment_candidate,
-            finalize_document=lambda scenes, text, structure_id, numbers: (
-                _validate_deliverable(
-                    "sceneList",
-                    {
-                        "title": "分集场景表",
-                        "executionSummary": (
-                            f"已按 {len(numbers)} 集分别规划场景并完成全量覆盖校验。"
-                        ),
-                        "contentText": text,
-                        "contentJson": {"scenes": scenes},
-                    },
-                    structure_id=structure_id,
-                    structure_episode_numbers=numbers,
-                    reviewed_draft_id=None,
-                )
-            ),
-        )
-
-    async def _generate_deliverable(
-        self,
-        task,
-        unit,
-        runtime,
-        signal,
-        evidence: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        project_id = str(task["projectId"])
-        role = str(task["targetRole"])
-        base_revision_id = str(unit["input"].get("baseRevisionId") or "") or None
-        heads = (
-            list(evidence.get("acceptedDeliverables") or ())
-            if evidence is not None
-            else await self._context.heads(
-                project_id,
-                roles=("structure", "screenplayDraft", "review"),
-                text_limit=0,
-            )
-        )
-        heads_by_role = {head["role"]: head for head in heads}
-        structure = heads_by_role.get("structure")
-        structure_id = structure["revisionId"] if structure else None
-        structure_episodes = (
-            structure["content"].get("episodes", [])
-            if structure
-            else []
-        )
-        structure_episode_numbers = tuple(
-            int(episode.get("number") or 0)
-            for episode in structure_episodes
-            if isinstance(episode, Mapping)
-        )
-        draft = heads_by_role.get("screenplayDraft")
-        reviewed_draft_id = draft["revisionId"] if draft else None
-        previous_review = heads_by_role.get("review")
-        previous_review_content = (
-            previous_review.get("content")
-            if isinstance(previous_review, Mapping)
-            and isinstance(previous_review.get("content"), Mapping)
-            else None
-        )
-        if self._tool_calls is not None:
-            if role == "review":
-                return await self._generate_review_incrementally(
-                    task=task,
-                    unit=unit,
-                    runtime=runtime,
-                    signal=signal,
-                    reviewed_draft_id=reviewed_draft_id,
-                    previous_review=previous_review_content,
-                )
-            if role == "sceneList":
-                return await self._generate_scene_list_incrementally(
-                    task=task,
-                    unit=unit,
-                    runtime=runtime,
-                    signal=signal,
-                    structure_id=structure_id,
-                    episode_numbers=structure_episode_numbers,
-                )
-            result = await self._tool_calls.run_candidate(
-                runtime=runtime,
-                session_id=int(task["sessionId"]),
-                prompt=str(unit["input"].get("instruction") or "生成剧本交付物"),
-                system_instruction=_deliverable_tool_instruction(role),
-                user_payload={
-                    "task": "create_screenplay_deliverable",
-                    "targetRole": role,
-                    "instruction": unit["input"].get("instruction"),
-                    "constraints": unit["input"].get("constraints") or [],
-                    "preserve": unit["input"].get("preserve") or [],
-                    "baseRevisionId": base_revision_id,
-                    **({"evidence": dict(evidence)} if evidence else {}),
-                },
-                domain_context=await self._domain_context(
-                    task,
-                    unit,
-                    expected_part_type="document",
-                    expected_part_key="main",
-                    runtime=runtime,
-                ),
-                conversation_turn_id=str(task["turnId"]),
-                validate_candidate=(
-                    None
-                    if str(unit.get("kind") or "") == "generate_candidate"
-                    else lambda candidate: _validate_deliverable_candidate(
-                        role,
-                        candidate,
-                        structure_id=structure_id,
-                        structure_episode_numbers=structure_episode_numbers,
-                        reviewed_draft_id=reviewed_draft_id,
-                    )
-                ),
-                signal=signal,
-            )
-            return {
-                **dict(result.candidate["payload"]),
-                "contentText": str(result.candidate["contentText"]),
-                "runId": result.run_id,
-                "artifactId": result.candidate["artifactId"],
-            }
-        heads = (
-            list(evidence.get("acceptedDeliverables") or ())
-            if evidence is not None
-            else await self._context.heads(project_id, text_limit=18_000)
-        )
-        base_candidate = (
-            evidence.get("baseCandidate")
-            if evidence is not None
-            else await self._context.revision(base_revision_id, text_limit=18_000)
-            if base_revision_id
-            else None
-        )
-        source = (
-            evidence.get("sourceMaterial")
-            if evidence is not None
-            else await self._context.source_context(project_id)
-            if role == "sourceAnalysis"
-            else None
-        )
-        assert self._models is not None
-        result = await self._models.run_json(
-            runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=str(unit["input"].get("instruction") or "生成剧本交付物"),
-            system_instruction=_deliverable_instruction(role),
-            user_payload={
-                "projectId": project_id,
-                "targetRole": role,
-                "instruction": unit["input"].get("instruction"),
-                "constraints": unit["input"].get("constraints") or [],
-                "preserve": unit["input"].get("preserve") or [],
-                "acceptedDeliverables": heads,
-                **({"baseCandidate": base_candidate} if base_candidate else {}),
-                **({"sourceMaterial": source} if source else {}),
-            },
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id=project_id,
-            binding_command_id=f"{task['id']}:{unit['id']}",
-            conversation_turn_id=str(task["turnId"]),
-            task_id=str(task["id"]),
-            phase=f"screenplay_{role}_generation",
-            repair_instruction="上一个输出不符合目标交付物协议。只输出完整合法 JSON，title、contentText 和 contentJson 都不能为空。",
-            validate=lambda value: _validate_deliverable(
-                role,
-                value,
-                structure_id=structure_id,
-                structure_episode_numbers=structure_episode_numbers,
-                reviewed_draft_id=reviewed_draft_id,
-            ),
-            execution_progress_fields={
-                "executionSummary": "",
-            },
-            project_execution=lambda value: (
-                value["executionSummary"],
-            ),
-            signal=signal,
-        )
-        return {**result.value, "runId": result.run_id}
-
     async def _domain_context(
         self,
         task: Mapping[str, Any],
@@ -662,7 +578,12 @@ class ScreenplayTaskModelCalls:
             locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
             tool_access=(
                 "candidate_write"
-                if str(unit.get("kind") or "") == "generate_candidate"
+                if str(unit.get("kind") or "") in {
+                    "generate_draft_scene",
+                    "generate_episode_metadata",
+                    "generate_review_dimension",
+                    "generate_document_section",
+                }
                 else "all"
             ),
         )
@@ -682,9 +603,7 @@ class ScreenplayTaskModelCalls:
             unit.get("output") or {}
             for unit in task.get("units") or ()
             if str(unit.get("kind") or "") in {
-                "validate_candidate",
-                "generate_episode_draft",
-                "generate_deliverable",
+                "validate_manifest_part",
             }
             and unit.get("status") == "completed"
         ]
@@ -696,6 +615,8 @@ class ScreenplayTaskModelCalls:
                 generated,
                 base_revision_id=base_revision_id,
             )
+        elif role == "review":
+            title, content, text = _aggregate_review_validations(generated)
         else:
             output = generated[-1]
             title = str(output.get("title") or "")
@@ -911,25 +832,498 @@ def _same_recipe_target(
     )
 
 
-def _episode_instruction(episode_number: int, scene_ids: Sequence[str]) -> str:
-    return f"""你是专业剧本编剧。按照已采纳场景表创作第 {episode_number} 集完整可拍摄正文。
-只输出 JSON：
-{{"episodeNumber":{episode_number},"title":"集标题","executionSummary":"用 2 至 4 句说明如何承接前文、落实本集场景目标并控制节奏，不得复述剧本正文","continuitySummary":"供下一集续写的简要连续性摘要","scenes":[{{"sceneId":"场景ID","processSummary":"以‘场景 场景ID 推演：’开头，用 1 至 3 句说明本场人物目标、冲突推进和承接关系，不得复述剧本正文","sceneText":"该场完整剧本文本"}}]}}
-scenes 必须严格按顺序且恰好覆盖这些 ID：{list(scene_ids)}。每场必须先输出 processSummary，再输出 sceneText；不得增删、合并或改写 sceneId。"""
+def _completed_part_outputs(
+    task: Mapping[str, Any],
+    *,
+    kind: str,
+    episode_number: int | None = None,
+) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    for unit in task.get("units") or ():
+        if not isinstance(unit, Mapping):
+            continue
+        unit_input = unit.get("input")
+        if (
+            str(unit.get("kind") or "") != kind
+            or unit.get("status") != "completed"
+            or not isinstance(unit_input, Mapping)
+            or (
+                episode_number is not None
+                and int(unit_input.get("episodeNumber") or 0) != episode_number
+            )
+        ):
+            continue
+        output = unit.get("output")
+        if not isinstance(output, Mapping):
+            raise RuntimeError(f"completed screenplay Part {unit.get('id')} has no output")
+        outputs.append(dict(output))
+    return outputs
 
 
-def _deliverable_instruction(role: str) -> str:
-    requirements = {
-        "sourceAnalysis": "contentJson 总结人物、情节、世界观、主题、改编风险及证据；documentKind=source_analysis。",
-        "creativeBrief": "contentJson 至少包含 fields，其中 approach 与 premise 明确；documentKind=creative_brief。",
-        "structure": "contentJson 必须包含非空 episodes；每项含唯一正整数 number、唯一 id、title、summary；documentKind=episode_outline。",
-        "sceneList": "contentJson 必须包含非空 scenes；每项含唯一 id、合法 episodeNumber、heading、objective、conflict、turn、synopsis；documentKind=scene_list。",
-        "review": "contentJson 必须含 verdict=ready|revise|major_rework 和 issues 数组；每个问题含唯一 id、severity=critical|major|minor、description、sceneIds；documentKind=review。",
-    }[role]
-    return f"""你是专业剧本开发 Agent，生成一个可审阅、可采纳的 {role} 候选交付物。
-只输出 JSON：{{"title":"标题","executionSummary":"用 2 至 4 句说明本次分析、取舍和校验，不得复述交付物正文","contentText":"完整 Markdown 文档","contentJson":{{...结构化内容...}}}}。
-{requirements}
-只依据提供的项目事实与已采纳交付物；用户要求修改时，保留 preserve 指定内容。"""
+def _previous_episode_validation(
+    task: Mapping[str, Any],
+    episode_number: int,
+) -> dict[str, Any] | None:
+    candidates = []
+    for unit in task.get("units") or ():
+        if not isinstance(unit, Mapping) or unit.get("status") != "completed":
+            continue
+        unit_input = unit.get("input")
+        output = unit.get("output")
+        if (
+            str(unit.get("kind") or "") != "validate_manifest_part"
+            or not isinstance(unit_input, Mapping)
+            or unit_input.get("validationKind") != "draft_episode"
+            or not isinstance(output, Mapping)
+        ):
+            continue
+        number = int(unit_input.get("episodeNumber") or 0)
+        if 0 < number < episode_number:
+            draft = output.get("episodeDraft")
+            if isinstance(draft, Mapping):
+                candidates.append((number, {
+                    "episodeNumber": number,
+                    "title": str(draft.get("title") or ""),
+                    "continuitySummary": str(
+                        draft.get("continuitySummary") or ""
+                    )[:2_000],
+                    "finalSceneTail": str(draft.get("contentText") or "")[-1_200:],
+                }))
+    return max(candidates, default=(0, None), key=lambda item: item[0])[1]
+
+
+def _scene_tool_instruction(episode_number: int, scene_id: str) -> str:
+    return f"""你是专业剧本编剧，只创作第 {episode_number} 集中的场景 {scene_id}。
+当前任务、场景计划、对应旧稿、审阅问题和已采纳创作依据均已由宿主完整提供。不得扩大到其他场景或重新规划任务。
+最终回复只输出当前场景的完整可拍摄剧本文本。不得输出 JSON、Markdown 代码块、过程说明、整集或其他场景。场景身份和写入由宿主负责。"""
+
+
+def _host_scene_candidate_template(
+    scene_id: str,
+    scene_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = "；".join(
+        str(scene_plan.get(key) or "").strip()
+        for key in ("objective", "conflict", "turn")
+        if str(scene_plan.get(key) or "").strip()
+    )
+    summary = " ".join(summary.replace("{", "").replace("}", "").split())
+    if not summary:
+        summary = "按已采纳场景计划推进人物目标、冲突与转折。"
+    return {
+        "sceneId": scene_id,
+        "processSummary": f"场景 {scene_id} 推演：{summary}"[:600],
+    }
+
+
+def _scene_json_instruction(episode_number: int, scene_id: str) -> str:
+    return f"""只创作第 {episode_number} 集场景 {scene_id}，只输出 JSON：
+{{"sceneId":"{scene_id}","processSummary":"简短公开创作说明","sceneText":"完整场景正文"}}
+不得生成其他场景，sceneId 必须保持不变。"""
+
+
+def _validate_scene_json(
+    value: dict[str, Any],
+    expected_scene_id: str,
+) -> dict[str, Any]:
+    scene_id = str(value.get("sceneId") or "").strip()
+    scene_text = str(value.get("sceneText") or "").strip()
+    if scene_id != expected_scene_id or not scene_text:
+        raise ValueError("scene output does not match the requested Manifest Part")
+    return {
+        "sceneId": scene_id,
+        "processSummary": _scene_process_summary(value),
+        "sceneText": scene_text,
+    }
+
+
+def _episode_metadata_tool_instruction(episode_number: int) -> str:
+    return f"""你只负责整理第 {episode_number} 集的短元数据，不生成或复述剧本正文。
+完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须严格为：
+{{"episodeNumber":{episode_number},"title":"简洁集标题","executionSummary":"2 至 4 句公开创作说明","continuitySummary":"供下一集续写的连续性摘要"}}
+写入成功后只回复一句简短确认。"""
+
+
+def _episode_metadata_json_instruction(episode_number: int) -> str:
+    return f"""只整理第 {episode_number} 集元数据，只输出 JSON：
+{{"episodeNumber":{episode_number},"title":"简洁集标题","executionSummary":"简短公开创作说明","continuitySummary":"连续性摘要"}}
+不得输出或复述剧本正文。"""
+
+
+def _validate_episode_metadata_json(
+    value: dict[str, Any],
+    episode_number: int,
+) -> dict[str, Any]:
+    if int(value.get("episodeNumber") or 0) != episode_number:
+        raise ValueError("episode metadata number does not match")
+    title = str(value.get("title") or "").strip()
+    continuity = str(value.get("continuitySummary") or "").strip()
+    if not title or not continuity:
+        raise ValueError("episode metadata title and continuity are required")
+    return {
+        "episodeNumber": episode_number,
+        "title": title,
+        "executionSummary": _execution_summary(value),
+        "continuitySummary": continuity,
+    }
+
+
+def _review_dimension_tool_instruction(
+    episode_number: int,
+    dimension: str,
+    scene_ids: Sequence[str],
+) -> str:
+    return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
+宿主已在 reviewInput 中完整提供指定不可变版本的本集正文、场景计划和必要上下文。只能依据这些材料审阅，不得另行检索、声称材料不可读或把系统错误写成审阅意见。
+完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+{{"title":"第 {episode_number} 集 {dimension} 审阅","executionSummary":"简短公开审阅说明","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
+问题只能引用这些场景 ID：{list(scene_ids)}。没有问题时 issues=[] 且 verdict=ready。"""
+
+
+def _validate_review_dimension_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    episode_number: int,
+    dimension: str,
+    allowed_scene_ids: Sequence[str],
+    reviewed_draft_id: str,
+    reviewed_content_digest: str,
+) -> dict[str, Any]:
+    normalized = _validate_deliverable_candidate(
+        "review",
+        candidate,
+        structure_id=None,
+        structure_episode_numbers=(),
+        reviewed_draft_id=reviewed_draft_id,
+    )
+    payload = dict(normalized["payload"])
+    content = dict(payload["contentJson"])
+    allowed = set(allowed_scene_ids)
+    issues = []
+    for issue in content["issues"]:
+        scene_ids = tuple(str(value) for value in issue["sceneIds"])
+        if not set(scene_ids).issubset(allowed):
+            raise ValueError("review dimension references another episode")
+        issues.append({
+            **dict(issue),
+            "id": f"episode-{episode_number}:{dimension}:{issue['id']}",
+            "sceneIds": list(scene_ids),
+            "dimension": dimension,
+        })
+    content.update({
+        "issues": issues,
+        "issueCount": len(issues),
+        "criticalIssueCount": sum(
+            issue["severity"] == "critical" for issue in issues
+        ),
+        "reviewedEpisode": episode_number,
+        "reviewDimension": dimension,
+        "reviewedDraftId": reviewed_draft_id,
+        "reviewedContentDigest": reviewed_content_digest,
+        "inputContractVersion": 2,
+    })
+    payload["contentJson"] = content
+    return {**normalized, "payload": payload}
+
+
+def _document_section_tool_instruction(role: str, section_key: str) -> str:
+    return f"""你只生成 {role} 文档中的 {section_key} 章节。
+宿主已提供本章节需要的项目证据。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+{{"title":"章节标题","executionSummary":"简短公开说明","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
+contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。"""
+
+
+def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
+    return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
+完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+{{"title":"第 {episode_number} 集场景表","executionSummary":"简短公开规划说明","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
+只提交当前集，场景顺序必须可直接用于后续剧本创作。"""
+
+
+def _validate_document_section_candidate(
+    candidate: Mapping[str, Any],
+    section_key: str,
+) -> dict[str, Any]:
+    value = dict(candidate.get("payload") or {})
+    title = str(value.get("title") or "").strip()
+    text = str(candidate.get("contentText") or "").strip()
+    content = value.get("contentJson")
+    if not section_key or not title or not text or not isinstance(content, Mapping):
+        raise ValueError("document section candidate is incomplete")
+    return {
+        **dict(candidate),
+        "payload": {
+            "title": title,
+            "executionSummary": _execution_summary(value),
+            "contentJson": dict(content),
+        },
+        "contentText": text,
+    }
+
+
+def _review_episode_input(
+    *,
+    reviewed_draft_id: str,
+    episode_number: int,
+    episode_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    current_draft = dict(episode_context.get("currentDraft") or {})
+    scene_plan = dict(episode_context.get("episode") or {})
+    scene_ids = _review_scene_ids(current_draft, scene_plan)
+    packet = {
+        "contractVersion": 2,
+        "draftRevisionId": reviewed_draft_id,
+        "episodeNumber": episode_number,
+        "sceneIds": list(scene_ids),
+        "draftContentText": _review_draft_text(current_draft),
+        "scenePlan": scene_plan,
+        "requiredContext": {
+            "previousEpisode": episode_context.get("previousEpisode"),
+        },
+    }
+    return {**packet, "contentDigest": _canonical_digest(packet)}
+
+
+def _review_scene_ids(
+    current_draft: Mapping[str, Any],
+    scene_plan: Mapping[str, Any],
+) -> tuple[str, ...]:
+    direct = current_draft.get("sceneIds")
+    draft_ids = (
+        tuple(str(value or "").strip() for value in direct)
+        if isinstance(direct, list)
+        else tuple(
+            str(item.get("sceneId") or item.get("id") or "").strip()
+            for item in current_draft.get("sceneTexts") or ()
+            if isinstance(item, Mapping)
+        )
+    )
+    plan_ids = tuple(
+        str(item.get("id") or "").strip()
+        for item in scene_plan.get("scenes") or ()
+        if isinstance(item, Mapping)
+    )
+    if not draft_ids or any(not value for value in draft_ids) or draft_ids != plan_ids:
+        raise ValueError("review episode scene identity is incomplete")
+    return draft_ids
+
+
+def _review_draft_text(current_draft: Mapping[str, Any]) -> str:
+    text = "\n\n".join(
+        str(item.get("contentText") or "").strip()
+        for item in current_draft.get("sceneTexts") or ()
+        if isinstance(item, Mapping) and str(item.get("contentText") or "").strip()
+    ) or str(current_draft.get("contentText") or "").strip()
+    if not text:
+        raise ValueError("review episode draft text is empty")
+    return text
+
+
+def _validate_draft_episode_parts(
+    task: Mapping[str, Any],
+    unit: Mapping[str, Any],
+) -> dict[str, Any]:
+    unit_input = dict(unit.get("input") or {})
+    number = int(unit_input.get("episodeNumber") or 0)
+    expected_ids = tuple(str(value) for value in unit_input.get("sceneIds") or ())
+    scenes = _completed_part_outputs(
+        task,
+        kind="generate_draft_scene",
+        episode_number=number,
+    )
+    metadata = _completed_part_outputs(
+        task,
+        kind="generate_episode_metadata",
+        episode_number=number,
+    )
+    if tuple(str(scene.get("sceneId") or "") for scene in scenes) != expected_ids:
+        raise ValueError("draft validation requires every ordered scene Part")
+    if len(metadata) != 1:
+        raise ValueError("draft validation requires one episode metadata Part")
+    scene_list_ids = {str(scene.get("sceneListId") or "") for scene in scenes}
+    if len(scene_list_ids) != 1 or "" in scene_list_ids:
+        raise ValueError("draft scene Parts do not share one accepted scene list")
+    meta = metadata[0]
+    scene_texts = [{
+        "sceneId": str(scene["sceneId"]),
+        "contentText": str(scene["sceneText"]),
+    } for scene in scenes]
+    result = {
+        "executionSummary": str(meta["executionSummary"]),
+        "sceneListId": next(iter(scene_list_ids)),
+        "episodeDraft": {
+            "episodeNumber": number,
+            "title": str(meta["title"]),
+            "sceneIds": list(expected_ids),
+            "sceneTexts": scene_texts,
+            "sceneExecutions": [{"sceneId": value, "status": "completed"} for value in expected_ids],
+            "contentText": "\n\n".join(item["contentText"] for item in scene_texts),
+            "continuitySummary": str(meta["continuitySummary"]),
+        },
+        "sourceRunIds": _source_run_ids((*scenes, meta)),
+        "runId": str(meta.get("runId") or "") or None,
+    }
+    return _with_validation_receipt(result)
+
+
+def _validate_review_episode_parts(
+    task: Mapping[str, Any],
+    unit: Mapping[str, Any],
+) -> dict[str, Any]:
+    unit_input = dict(unit.get("input") or {})
+    number = int(unit_input.get("episodeNumber") or 0)
+    expected_dimensions = (
+        "continuity", "character_arc", "structure_rhythm", "dialogue", "format",
+    )
+    parts = _completed_part_outputs(
+        task,
+        kind="generate_review_dimension",
+        episode_number=number,
+    )
+    if tuple(str(part.get("reviewDimension") or "") for part in parts) != expected_dimensions:
+        raise ValueError("review validation requires all five dimension Parts")
+    content_values = [dict(part.get("contentJson") or {}) for part in parts]
+    digests = {str(value.get("reviewedContentDigest") or "") for value in content_values}
+    draft_ids = {str(value.get("reviewedDraftId") or "") for value in content_values}
+    if len(digests) != 1 or "" in digests or len(draft_ids) != 1 or "" in draft_ids:
+        raise ValueError("review dimension Parts do not share one immutable input")
+    issues = [dict(issue) for value in content_values for issue in value["issues"]]
+    result = {
+        "title": f"第 {number} 集审阅",
+        "executionSummary": f"已完成第 {number} 集五个审阅维度并校验同一正文版本。",
+        "contentText": "\n\n".join(str(part.get("contentText") or "") for part in parts),
+        "contentJson": {
+            "verdict": _aggregate_review_verdict(value["verdict"] for value in content_values),
+            "issues": issues,
+            "issueCount": len(issues),
+            "criticalIssueCount": sum(issue["severity"] == "critical" for issue in issues),
+            "reviewedEpisode": number,
+            "reviewedDraftId": next(iter(draft_ids)),
+            "reviewedContentDigest": next(iter(digests)),
+            "reviewDimensions": list(expected_dimensions),
+            "reviewStatus": "completed",
+            "inputContractVersion": 2,
+        },
+        "sourceRunIds": _source_run_ids(parts),
+        "runId": str(parts[-1].get("runId") or "") or None,
+    }
+    return _with_validation_receipt(result)
+
+
+def _validate_document_parts(
+    task: Mapping[str, Any],
+    unit: Mapping[str, Any],
+) -> dict[str, Any]:
+    unit_input = dict(unit.get("input") or {})
+    role = str(task["targetRole"])
+    sections = _completed_part_outputs(task, kind="generate_document_section")
+    if not sections:
+        raise ValueError("document validation requires section Parts")
+    expected_keys = tuple(
+        str(item.get("input", {}).get("sectionKey") or "")
+        for item in task.get("units") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "generate_document_section"
+    )
+    if tuple(str(section.get("sectionKey") or "") for section in sections) != expected_keys:
+        raise ValueError("document section Parts are incomplete or out of order")
+    merged: dict[str, Any] = {}
+    for section in sections:
+        merged = _merge_document_json(merged, dict(section.get("contentJson") or {}))
+    evidence = dict(
+        _dependency_output(task, unit, "collect_evidence").get("evidence") or {}
+    )
+    heads = {
+        str(item.get("role") or ""): item
+        for item in evidence.get("acceptedDeliverables") or ()
+        if isinstance(item, Mapping)
+    }
+    structure = heads.get("structure") or {}
+    structure_numbers = tuple(
+        int(item.get("number") or 0)
+        for item in structure.get("content", {}).get("episodes", [])
+        if isinstance(item, Mapping)
+    )
+    draft = heads.get("screenplayDraft") or {}
+    value = _validate_deliverable(
+        role,
+        {
+            "title": _ROLE_LABELS.get(role, "剧本交付物"),
+            "executionSummary": f"已按 {len(sections)} 个独立章节完成生成与全量校验。",
+            "contentText": "\n\n".join(str(section["contentText"]) for section in sections),
+            "contentJson": merged,
+        },
+        structure_id=str(structure.get("revisionId") or "") or None,
+        structure_episode_numbers=structure_numbers,
+        reviewed_draft_id=str(draft.get("revisionId") or "") or None,
+    )
+    return _with_validation_receipt({
+        **value,
+        "sourceRunIds": _source_run_ids(sections),
+        "runId": str(sections[-1].get("runId") or "") or None,
+    })
+
+
+def _merge_document_json(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = dict(left)
+    for key, value in right.items():
+        if key not in result:
+            result[key] = value
+        elif isinstance(result[key], Mapping) and isinstance(value, Mapping):
+            result[key] = _merge_document_json(result[key], value)
+        elif isinstance(result[key], list) and isinstance(value, list):
+            result[key] = [*result[key], *value]
+        elif result[key] != value:
+            raise ValueError(f"document sections conflict at {key}")
+    return result
+
+
+def _aggregate_review_validations(
+    generated: Sequence[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any], str]:
+    ordered = sorted(
+        (dict(item) for item in generated),
+        key=lambda item: int((item.get("contentJson") or {}).get("reviewedEpisode") or 0),
+    )
+    episode_reviews = [dict(item["contentJson"]) for item in ordered]
+    reviewed = [int(item["reviewedEpisode"]) for item in episode_reviews]
+    draft_ids = {str(item.get("reviewedDraftId") or "") for item in episode_reviews}
+    if not reviewed or len(draft_ids) != 1 or "" in draft_ids:
+        raise ValueError("review aggregation requires one immutable Draft Revision")
+    issues = [dict(issue) for item in episode_reviews for issue in item["issues"]]
+    content = {
+        "schemaVersion": 1,
+        "documentKind": _DOCUMENT_KIND["review"],
+        "verdict": _aggregate_review_verdict(item["verdict"] for item in episode_reviews),
+        "issues": issues,
+        "issueCount": len(issues),
+        "criticalIssueCount": sum(issue["severity"] == "critical" for issue in issues),
+        "reviewedDraftId": next(iter(draft_ids)),
+        "reviewedEpisodes": reviewed,
+        "completedEpisodes": reviewed,
+        "failedEpisodes": [],
+        "episodeReviews": episode_reviews,
+    }
+    return "剧本审阅报告", content, "\n\n".join(str(item["contentText"]) for item in ordered)
+
+
+def _with_validation_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    result["validationReceipt"] = _canonical_digest(result)
+    return result
+
+
+def _canonical_digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
 
 
 def _final_response_instruction() -> str:
@@ -979,56 +1373,6 @@ def _validate_final_response(value: dict[str, Any]) -> dict[str, Any]:
     )):
         raise ValueError("finalResponse contains internal candidate data")
     return {"finalResponse": response}
-
-
-def _deliverable_tool_instruction(role: str) -> str:
-    requirements = {
-        "sourceAnalysis": "contentJson 总结人物、情节、世界观、主题、改编风险及章节证据；documentKind=source_analysis。",
-        "creativeBrief": "contentJson 至少包含 fields，其中 approach 与 premise 明确；documentKind=creative_brief。",
-        "structure": "contentJson 包含非空 episodes；每项含唯一正整数 number、唯一 id、title、summary；documentKind=episode_outline。",
-        "sceneList": "contentJson 包含非空 scenes；每项含唯一 id、合法 episodeNumber、heading、objective、conflict、turn、synopsis；documentKind=scene_list。",
-        "review": "contentJson 含 verdict=ready|revise|major_rework 和 issues 数组；问题含唯一 id、severity、description、sceneIds；documentKind=review。",
-    }[role]
-    return f"""你是专业剧本开发 Agent，负责生成可审阅的 {role} 候选交付物。
-当前任务已经由宿主规划完成，不要重新制定任务计划。按需调用工具读取项目、已采纳交付物和原作证据，只读取完成当前判断真正需要的内容。
-
-每次工具调用前，先用简短 Markdown 写一段面向用户的操作说明，说明正在查询、比对或校验什么。只写公开执行依据，不输出隐藏思维链，不粘贴交付物正文。
-
-完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须是 {{"title":"标题","executionSummary":"2 至 4 句公开分析和取舍说明","contentText":"完整 Markdown 文档","contentJson":{{...}}}}。{requirements}
-修改任务必须遵守 preserve；事实性内容必须来自工具返回的项目状态或来源证据。
-
-候选稿写入成功后只回复一句简短确认，不要在对话中再次输出完整交付物。"""
-
-
-def _validate_episode(
-    value: dict[str, Any],
-    episode_number: int,
-    expected_scene_ids: Sequence[str],
-) -> dict[str, Any]:
-    if int(value.get("episodeNumber") or 0) != episode_number:
-        raise ValueError("episodeNumber does not match")
-    title = str(value.get("title") or "").strip()
-    execution_summary = _execution_summary(value)
-    summary = str(value.get("continuitySummary") or "").strip()
-    scenes = value.get("scenes")
-    if not title or not summary or not isinstance(scenes, list):
-        raise ValueError("episode title, continuitySummary and scenes are required")
-    normalized = [{
-        "sceneId": str(scene.get("sceneId") or "").strip(),
-        "processSummary": _scene_process_summary(scene),
-        "sceneText": str(scene.get("sceneText") or "").strip(),
-    } for scene in scenes if isinstance(scene, Mapping)]
-    if tuple(scene["sceneId"] for scene in normalized) != tuple(expected_scene_ids):
-        raise ValueError("scene ids do not match the accepted scene list")
-    if any(not scene["sceneText"] for scene in normalized):
-        raise ValueError("scene text must not be empty")
-    return {
-        "episodeNumber": episode_number,
-        "title": title,
-        "executionSummary": execution_summary,
-        "continuitySummary": summary,
-        "scenes": normalized,
-    }
 
 
 def _validate_scene_candidate(
@@ -1146,49 +1490,6 @@ def _validate_deliverable_candidate(
     }
 
 
-def _validate_review_fragment_candidate(
-    candidate: Mapping[str, Any],
-    *,
-    episode_number: int,
-    allowed_scene_ids: Sequence[str],
-    reviewed_draft_id: str,
-    reviewed_content_digest: str,
-) -> dict[str, Any]:
-    normalized = _validate_deliverable_candidate(
-        "review",
-        candidate,
-        structure_id=None,
-        structure_episode_numbers=(),
-        reviewed_draft_id=reviewed_draft_id,
-    )
-    payload = dict(normalized["payload"])
-    content = dict(payload["contentJson"])
-    allowed = set(allowed_scene_ids)
-    issues = []
-    for issue in content["issues"]:
-        scene_ids = tuple(str(value) for value in issue["sceneIds"])
-        if not set(scene_ids).issubset(allowed):
-            raise ValueError("review fragment references another episode")
-        issues.append({
-            **dict(issue),
-            "id": f"episode-{episode_number}:{issue['id']}",
-            "sceneIds": list(scene_ids),
-        })
-    content.update({
-        "issues": issues,
-        "issueCount": len(issues),
-        "criticalIssueCount": sum(
-            issue["severity"] == "critical" for issue in issues
-        ),
-        "reviewedEpisode": episode_number,
-        "reviewStatus": "completed",
-        "reviewedContentDigest": reviewed_content_digest,
-        "inputContractVersion": 2,
-    })
-    payload["contentJson"] = content
-    return {**normalized, "payload": payload}
-
-
 def _validate_scene_list_fragment_candidate(
     candidate: Mapping[str, Any],
     episode_number: int,
@@ -1218,23 +1519,6 @@ def _validate_scene_list_fragment_candidate(
         },
         "contentText": text,
     }
-
-
-def _draft_scene_ids(value: object) -> tuple[str, ...]:
-    draft = value if isinstance(value, Mapping) else {}
-    direct = draft.get("sceneIds")
-    if isinstance(direct, list):
-        result = tuple(str(item or "").strip() for item in direct)
-    else:
-        scenes = draft.get("sceneTexts") or draft.get("scenes") or ()
-        result = tuple(
-            str(scene.get("sceneId") or scene.get("id") or "").strip()
-            for scene in scenes
-            if isinstance(scene, Mapping)
-        )
-    if not result or any(not scene_id for scene_id in result):
-        raise ValueError("draft episode scene identity is incomplete")
-    return result
 
 
 def _aggregate_review_verdict(values) -> str:
@@ -1350,18 +1634,6 @@ def _validate_review_issues(value: object) -> list[dict[str, Any]]:
             "sceneIds": [str(scene_id) for scene_id in scene_ids],
         })
     return issues
-
-
-def _last_generated_episode(units: Sequence[Mapping[str, Any]], number: int):
-    candidates = [
-        output.get("episodeDraft")
-        for unit in units
-        if unit.get("status") == "completed"
-        and isinstance((output := unit.get("output") or {}), Mapping)
-        and isinstance(output.get("episodeDraft"), Mapping)
-        and int(output["episodeDraft"].get("episodeNumber") or 0) < number
-    ]
-    return candidates[-1] if candidates else None
 
 
 def _source_run_ids(outputs: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:

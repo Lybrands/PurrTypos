@@ -8,11 +8,9 @@ execution to PurrA.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from purra.contracts import (
@@ -27,7 +25,6 @@ from purra.contracts import (
     TaskStep,
 )
 from purra.errors import ModelGatewayError
-from purra.json_values import thaw_json_mapping
 from purra.long_tasks import (
     DurableExecutorRegistry,
     DurableTaskDescriptor,
@@ -46,7 +43,9 @@ from domains.screenplay_agent import (
     ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
 )
-from domains.screenplay_agent.recipe_compiler import compile_screenplay_task
+from application.screenplay_manifest_compiler import (
+    compile_screenplay_manifest,
+)
 from exceptions import NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
@@ -80,6 +79,10 @@ class ResolvedScreenplayTask:
     target_role: str
     episode_numbers: tuple[int, ...] = ()
     base_revision_id: str | None = None
+    episode_scene_ids: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    source_revision_refs: tuple[str, ...] = ()
+    reviewed_draft_id: str | None = None
+    document_sections: tuple[str, ...] = ()
 
 
 class ScreenplayIntentPlanner(Protocol):
@@ -211,11 +214,14 @@ class ScreenplayAgentService:
                 workspace=workspace,
                 intent=planned.intent,
             )
-            compiled = compile_screenplay_task(
+            compiled = compile_screenplay_manifest(
                 intent=planned.intent,
                 target_role=resolved.target_role,
-                episode_numbers=resolved.episode_numbers,
+                source_revision_refs=resolved.source_revision_refs,
+                episode_scene_ids=resolved.episode_scene_ids,
+                reviewed_draft_id=resolved.reviewed_draft_id,
                 base_revision_id=resolved.base_revision_id,
+                document_sections=resolved.document_sections,
                 original_request=str(turn["userContent"]),
             )
             requirements = {
@@ -223,6 +229,15 @@ class ScreenplayAgentService:
                 "targetRole": compiled.target_role,
                 "episodeNumbers": list(resolved.episode_numbers),
                 "baseRevisionId": resolved.base_revision_id,
+                "sourceRevisionRefs": list(resolved.source_revision_refs),
+                "manifestId": compiled.manifest.id,
+                "manifest": {
+                    "artifactKind": compiled.manifest.artifact_kind,
+                    "assemblyStrategy": compiled.manifest.assembly_strategy,
+                    "partSemanticKeys": [
+                        part.semantic_key for part in compiled.manifest.parts
+                    ],
+                },
                 "recipe": compiled.recipe.to_metadata(),
             }
             operation = await self._operations.create(
@@ -232,7 +247,7 @@ class ScreenplayAgentService:
                     session_id=int(turn["sessionId"]),
                     target_role=compiled.target_role,
                     requirements_json=requirements,
-                    manifest_digest=_manifest_digest(requirements),
+                    manifest_digest=compiled.manifest.digest,
                 )
             )
             plan = _durable_plan(planned.intent)
@@ -483,17 +498,6 @@ def _task_failure(error: Exception) -> tuple[str, str]:
     if message.startswith("剧本任务执行失败") and str(error):
         message = str(error)
     return error.code, message
-
-
-def _manifest_digest(requirements: Mapping[str, Any]) -> str:
-    canonical = json.dumps(
-        thaw_json_mapping(requirements),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _task_failure_message(code: str) -> str:
