@@ -60,6 +60,8 @@ def derive_stage(
     source_kind: str,
     head_roles: Iterable[str],
     head_contents: Mapping[str, Mapping[str, object]] | None = None,
+    has_current_finalization: bool = False,
+    legacy_completed: bool = False,
 ) -> str:
     heads = {str(role) for role in head_roles}
     if source_kind == "book" and "sourceAnalysis" not in heads:
@@ -78,26 +80,24 @@ def derive_stage(
             return "draft"
     if "review" not in heads:
         return "review"
-    if head_contents is not None:
-        review = head_contents.get("review", {})
-        if str(review.get("verdict") or "") != "ready":
-            return "review"
-    return "completed"
+    if has_current_finalization or legacy_completed:
+        return "completed"
+    return "review"
 
 
 def next_actions(
     stage: str,
     *,
     head_contents: Mapping[str, Mapping[str, object]] | None = None,
+    review_state: Mapping[str, object] | None = None,
 ) -> list[dict[str, str]]:
     role = STAGE_TARGET_ROLE.get(str(stage))
-    if str(stage) == "review" and head_contents is not None:
-        review = head_contents.get("review", {})
-        if review and str(review.get("verdict") or "") in {
-            "revise",
-            "major_rework",
-        }:
-            role = "screenplayDraft"
+    if str(stage) == "review":
+        if review_state is not None:
+            action = review_state.get("nextAction")
+            return [dict(action)] if isinstance(action, Mapping) else []
+        if head_contents is not None and head_contents.get("review"):
+            return []
     if role is None:
         return []
     return [{

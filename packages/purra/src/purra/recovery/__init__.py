@@ -1,6 +1,10 @@
 """Run-scoped, provider-neutral recovery policy and attempt accounting."""
 
 from purra.recovery.contracts import (
+    FailureCategory,
+    FailureDecision,
+    FailureDisposition,
+    FailureSignal,
     RecoveryAction,
     RecoveryCause,
     RecoveryDecision,
@@ -8,10 +12,15 @@ from purra.recovery.contracts import (
     RecoveryReason,
     RecoveryRequest,
 )
+from purra.recovery.disposition import decide_failure
 from purra.recovery.ledger import RecoveryLedger
 from purra.recovery.policy import RecoveryPolicy
 
 __all__ = [
+    "FailureCategory",
+    "FailureDecision",
+    "FailureDisposition",
+    "FailureSignal",
     "RecoveryAction",
     "RecoveryCause",
     "RecoveryDecision",
@@ -20,4 +29,5 @@ __all__ = [
     "RecoveryPolicy",
     "RecoveryReason",
     "RecoveryRequest",
+    "decide_failure",
 ]

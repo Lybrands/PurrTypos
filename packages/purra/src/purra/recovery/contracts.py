@@ -47,6 +47,96 @@ class RecoveryEffectState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class FailureCategory(StrEnum):
+    """Provider- and product-neutral cause family for durable settlement."""
+
+    CANCELED = "canceled"
+    TRANSIENT_PROVIDER = "transient_provider"
+    PERMANENT_EXTERNAL = "permanent_external"
+    PROTOCOL_INCOMPATIBLE = "protocol_incompatible"
+    MODEL_OUTPUT_INVALID = "model_output_invalid"
+    TOOL_INPUT_INVALID = "tool_input_invalid"
+    TOOL_EXECUTION = "tool_execution"
+    BUSINESS_INVARIANT = "business_invariant"
+
+
+class FailureDisposition(StrEnum):
+    """The durable owner action selected after one execution attempt fails."""
+
+    RETRY_ATTEMPT = "retry_attempt"
+    RESUME_CHECKPOINT = "resume_checkpoint"
+    PAUSE_RECOVERABLE = "pause_recoverable"
+    FAIL_PERMANENT = "fail_permanent"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True, slots=True)
+class FailureSignal:
+    category: FailureCategory
+    code: str
+    retryable: bool
+    effect_state: RecoveryEffectState = RecoveryEffectState.NOT_STARTED
+    checkpoint_available: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "category", FailureCategory(self.category))
+        object.__setattr__(self, "code", required_text(
+            self.code,
+            "failure signal code",
+        ))
+        object.__setattr__(self, "retryable", bool(self.retryable))
+        object.__setattr__(
+            self,
+            "effect_state",
+            RecoveryEffectState(self.effect_state),
+        )
+        object.__setattr__(
+            self,
+            "checkpoint_available",
+            bool(self.checkpoint_available),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FailureDecision:
+    category: FailureCategory
+    code: str
+    disposition: FailureDisposition
+    attempts_remaining: int
+    effect_state: RecoveryEffectState
+    checkpoint_available: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "category", FailureCategory(self.category))
+        object.__setattr__(self, "code", required_text(
+            self.code,
+            "failure decision code",
+        ))
+        object.__setattr__(
+            self,
+            "disposition",
+            FailureDisposition(self.disposition),
+        )
+        object.__setattr__(
+            self,
+            "attempts_remaining",
+            non_negative_int(
+                self.attempts_remaining,
+                "failure decision attempts_remaining",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "effect_state",
+            RecoveryEffectState(self.effect_state),
+        )
+        object.__setattr__(
+            self,
+            "checkpoint_available",
+            bool(self.checkpoint_available),
+        )
+
+
 class RecoveryReason(StrEnum):
     """Stable reasons for allowing or denying a recovery action."""
 

@@ -1,6 +1,7 @@
 """DeepSeek V4 request profiles for the OpenAI-compatible API."""
 
 from purra.output_budget import ThinkingTokenAccounting
+from purra.model_protocol import ReasoningReplayPolicy
 from infrastructure.models.profiles.base import ModelProfile
 
 
@@ -14,6 +15,7 @@ class DeepSeekV4ProProfile(ModelProfile):
     max_output_tokens = 393_216
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True
+    reasoning_replay = ReasoningReplayPolicy.REQUIRED
 
 
 class DeepSeekV4FlashProfile(ModelProfile):
@@ -26,6 +28,7 @@ class DeepSeekV4FlashProfile(ModelProfile):
     max_output_tokens = 393_216
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True
+    reasoning_replay = ReasoningReplayPolicy.REQUIRED
 
 
 DEEPSEEK_V4_PRO_PROFILE = DeepSeekV4ProProfile()

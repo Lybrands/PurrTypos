@@ -27,6 +27,8 @@ from domains.writing.response import (
 )
 from schemas.ai import ChatStreamRequest
 from infrastructure.models.profiles.registry import resolve_model_profile
+from application.model_runtime import reasoning_mode_from_options
+from purra.errors import UnsupportedModelFeatureError
 
 
 CONTEXT_WINDOW_TOKENS: dict[str, int] = {
@@ -105,6 +107,17 @@ def to_writing_agent_request(
         selected_foreshadowing_ids=tuple(body.selectedForeshadowingIds or ()),
         context_window_label=str(window_label) if window_label else None,
     )
+    profile = resolve_model_profile(
+        profile_id,
+        model,
+        str(options.get("baseURL") or ""),
+    )
+    reasoning_mode = reasoning_mode_from_options(options)
+    protocol_capabilities = profile.protocol_capabilities()
+    if not protocol_capabilities.reasoning_mode_is_supported(reasoning_mode):
+        raise UnsupportedModelFeatureError(
+            "selected reasoning mode is incompatible with the model profile"
+        )
     return AgentRunRequest(
         messages=tuple(
             AgentMessage.from_mapping(message)
@@ -115,11 +128,8 @@ def to_writing_agent_request(
             provider=body.apiProvider,
             model=model,
             profile_id=profile_id,
-            output_capabilities=resolve_model_profile(
-                profile_id,
-                model,
-                str(options.get("baseURL") or ""),
-            ).output_capabilities(),
+            output_capabilities=profile.output_capabilities(),
+            protocol_capabilities=protocol_capabilities,
             options=options,
         ),
         domain_context=context.to_core_context(),
@@ -171,6 +181,7 @@ def writing_run_options(
         output_budget=output_budget,
         default_context_window_tokens=request.context_window or 200_000,
         force_planned_tool_choice=force_planned_tool_choice,
+        reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,
         lineage=lineage,
         response_constraints=writing_response_constraints(request),

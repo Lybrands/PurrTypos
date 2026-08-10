@@ -144,17 +144,70 @@ class AcceptScreenplayV2RevisionRequest(ScreenplayV2Model):
     confirmInvalidation: bool = False
 
 
+class ScreenplayV2ReviewDecisionRequest(ScreenplayV2Model):
+    issueId: str = Field(..., min_length=1, max_length=200)
+    status: Literal[
+        "pending",
+        "planned",
+        "resolved",
+        "dismissed",
+        "riskAccepted",
+    ]
+    note: str = Field(default="", max_length=2_000)
+
+    @model_validator(mode="after")
+    def normalize_text(self):
+        self.issueId = self.issueId.strip()
+        self.note = self.note.strip()
+        if not self.issueId:
+            raise ValueError("审阅意见 ID 不能为空")
+        return self
+
+
+class AdjudicateScreenplayV2ReviewRequest(ScreenplayV2Model):
+    expectedProjectRevision: int = Field(..., ge=1)
+    reviewRevisionId: str = Field(..., min_length=1, max_length=200)
+    decisions: list[ScreenplayV2ReviewDecisionRequest] = Field(
+        ...,
+        min_length=1,
+        max_length=1_000,
+    )
+
+    @model_validator(mode="after")
+    def normalize_and_validate_decisions(self):
+        self.reviewRevisionId = self.reviewRevisionId.strip()
+        issue_ids = [decision.issueId for decision in self.decisions]
+        if len(issue_ids) != len(set(issue_ids)):
+            raise ValueError("同一批审阅意见不能重复")
+        return self
+
+
+class FinalizeScreenplayV2ProjectRequest(ScreenplayV2Model):
+    expectedProjectRevision: int = Field(..., ge=1)
+    draftRevisionId: str = Field(..., min_length=1, max_length=200)
+    reviewRevisionId: str = Field(..., min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def normalize_revision_ids(self):
+        self.draftRevisionId = self.draftRevisionId.strip()
+        self.reviewRevisionId = self.reviewRevisionId.strip()
+        return self
+
+
 __all__ = [
+    "AdjudicateScreenplayV2ReviewRequest",
     "AcceptScreenplayV2RevisionRequest",
     "ChangeScreenplayV2ProjectLifecycleRequest",
     "CreateScreenplayV2ProjectRequest",
     "CreateScreenplayV2WorkingCopyFromRevisionRequest",
     "DeleteScreenplayV2ProjectRequest",
+    "FinalizeScreenplayV2ProjectRequest",
     "PublishScreenplayV2WorkingCopyRequest",
     "ScreenplayV2BookSourceRequest",
     "ScreenplayV2BriefRequest",
     "ScreenplayV2OriginalSourceRequest",
     "ScreenplayV2SourceScopeRequest",
+    "ScreenplayV2ReviewDecisionRequest",
     "UpdateScreenplayV2ProjectRequest",
     "UpdateScreenplayV2WorkingCopyRequest",
 ]

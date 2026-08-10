@@ -246,6 +246,36 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         return await self._fail(turn_id, code=code, message=message)
 
+    async def pause_task(
+        self,
+        turn_id: str,
+        *,
+        code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        async with self._db.transaction(cancellation_linearizable=True):
+            turn = await self._require_turn(turn_id)
+            if str(turn["status"]) == "paused":
+                return _turn_view(turn)
+            if str(turn["status"]) in {"completed", "failed", "canceled"}:
+                return _turn_view(turn)
+            error = {"code": code, "message": message}
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET status = 'paused', "
+                "assistant_content = '', error_json = ?, "
+                "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
+                "heartbeat_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                [_dump(error), turn_id],
+            )
+            await self._event_for_turn(
+                turn,
+                "screenplay.agent.task.paused",
+                {"taskId": turn.get("task_id"), "error": error},
+                task_id=str(turn.get("task_id") or "") or None,
+            )
+            return _turn_view(await self._require_turn(turn_id))
+
     async def _fail(
         self,
         turn_id: str,
@@ -255,7 +285,9 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            if str(turn["status"]) in {"completed", "failed", "canceled"}:
+            if str(turn["status"]) in {
+                "completed", "paused", "failed", "canceled",
+            }:
                 return _turn_view(turn)
             error = {"code": code, "message": message}
             await self._db.execute(
@@ -278,7 +310,9 @@ class SqliteScreenplayAgentRepository:
     async def cancel_turn(self, turn_id: str) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
-            if str(turn["status"]) not in {"queued", "planning", "running"}:
+            if str(turn["status"]) not in {
+                "queued", "planning", "running", "paused",
+            }:
                 return _turn_view(turn)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'canceled', "

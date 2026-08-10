@@ -9,6 +9,7 @@ import AgentConversationTurnIndex, {
 } from '../AgentConversationTurnIndex'
 import AgentMessageEditor from './MessageEditor'
 import AgentUserMessageBody from './UserMessageBody'
+import { assistantMessageVisible } from './messageVisibility'
 import {
   createScrollFollowState,
   detachScrollFollow,
@@ -208,8 +209,13 @@ export default function AgentConversation({
               || message.termination
               || message.error,
             )
-            if (!hasVisibleContent && !(isLast && loading)) return null
             const attachment = afterAssistantMessage?.(message, index)
+            if (!assistantMessageVisible({
+              hasVisibleContent,
+              hasAttachment: Boolean(attachment),
+              isLast,
+              loading,
+            })) return null
             return (
               <article className="agent-conversation__message is-assistant" key={`message-${index}`}>
                 {message.isError ? (

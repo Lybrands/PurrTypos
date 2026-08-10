@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
+PURRA_DIR = ROOT_DIR / "packages" / "purra" / "src" / "purra"
 SCREENPLAY_DOMAIN_DIR = BACKEND_DIR / "domains" / "screenplay"
 GENERIC_CHUNK_HANDLER_DIR = (
     ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chunkHandlers"
@@ -23,6 +24,28 @@ SCREENPLAY_CONVERSATION_FRONTEND_FILES = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
 )
 SCREENPLAY_PAGE = ROOT_DIR / "src" / "ScreenplayAgentPage" / "index.tsx"
+SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
+    BACKEND_DIR / "application" / "screenplay_agent_planner.py",
+    BACKEND_DIR / "application" / "screenplay_agent_service.py",
+    BACKEND_DIR / "application" / "screenplay_agent_stream.py",
+    BACKEND_DIR / "application" / "screenplay_agent_task_executor.py",
+    BACKEND_DIR / "application" / "screenplay_structured_call.py",
+    ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
+    ROOT_DIR
+    / "src"
+    / "Workspace"
+    / "AiPanel"
+    / "components"
+    / "ChatMessageList"
+    / "AssistantMessageBody.tsx",
+    ROOT_DIR
+    / "src"
+    / "Workspace"
+    / "AiPanel"
+    / "components"
+    / "ChatMessageList"
+    / "assistantTimeline.ts",
+)
 PHASE_FOUR_REMOVED_PATHS = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "proposalProvenance.ts",
@@ -254,6 +277,33 @@ def test_screenplay_transport_does_not_parse_or_aggregate_model_runs():
     )
 
 
+def test_screenplay_conversation_never_invents_assistant_copy():
+    forbidden = {
+        "请求理解：",
+        "结构化剧本任务已完成。",
+        "剧本任务已完成，候选稿已生成。请在下方预览并应用。",
+        "剧本创作任务",
+        "Durable task completed.",
+        "理解请求",
+        "拆解任务",
+        "组织回复",
+    }
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {text}"
+        for path in SCREENPLAY_CONVERSATION_PRODUCTION_PATHS
+        for text in forbidden
+        if text in path.read_text(encoding="utf-8")
+    ]
+    assert not violations, "Host-authored assistant copy returned:\n" + "\n".join(
+        violations
+    )
+
+    service = (
+        BACKEND_DIR / "application" / "screenplay_agent_service.py"
+    ).read_text(encoding="utf-8")
+    assert "assistant_content=result.final_response" not in service
+
+
 def test_screenplay_page_consumes_the_shared_agent_chunk_runtime():
     forbidden = {
         "aiChatStream",
@@ -382,3 +432,66 @@ def test_phase_five_generic_runtime_has_no_product_operation_ownership():
     assert not violations, "Generic runtime owns screenplay Operation: " + ", ".join(
         violations
     )
+
+
+def test_purra_has_no_product_or_model_identity_branches():
+    forbidden = {"deepseek", "kimi", "glm", "zhipu", "minimax", "mimo"}
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
+        for path in sorted(PURRA_DIR.rglob("*.py"))
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8").casefold()
+    ]
+    assert not violations, "PurrA branches on concrete model identity:\n" + "\n".join(
+        violations
+    )
+
+
+def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
+    forbidden = {
+        "pinned_disabled_after_truncation",
+        "reasoning_disabled_attempt",
+        "is_retryable_unit_error",
+        "is_retryable_screenplay_run_error",
+        ".fail_unit(",
+    }
+    boundary_test = Path(__file__).resolve()
+    paths = (
+        *sorted(PURRA_DIR.rglob("*.py")),
+        *(path for path in sorted(BACKEND_DIR.rglob("*.py")) if path != boundary_test),
+    )
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
+        for path in paths
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8")
+    ]
+    assert not violations, "Removed recovery path returned:\n" + "\n".join(
+        violations
+    )
+
+
+def test_screenplay_paused_result_cannot_fall_through_to_failure():
+    source = (
+        BACKEND_DIR / "application" / "screenplay_agent_service.py"
+    ).read_text(encoding="utf-8")
+    paused_start = source.index(
+        "if result.status is LongTaskExecutionStatus.PAUSED:"
+    )
+    canceled_start = source.index(
+        "if result.status is LongTaskExecutionStatus.CANCELED:",
+        paused_start,
+    )
+    paused_branch = source[paused_start:canceled_start]
+
+    assert "pause_task(" in paused_branch
+    assert "fail_task(" not in paused_branch
+    assert "return" in paused_branch
+
+
+def test_screenplay_recipe_never_emits_the_obsolete_coarse_units():
+    source = (
+        BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
+    ).read_text(encoding="utf-8")
+    assert 'kind="generate_episode_draft"' not in source
+    assert 'kind="generate_deliverable"' not in source

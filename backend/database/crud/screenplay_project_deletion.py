@@ -73,6 +73,9 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             [project_id, project_id],
         )
         for table in (
+            "screenplay_review_decision_events",
+            "screenplay_review_decisions",
+            "screenplay_finalization_events",
             "screenplay_acceptance_events",
             "screenplay_project_heads",
             "screenplay_working_copies",

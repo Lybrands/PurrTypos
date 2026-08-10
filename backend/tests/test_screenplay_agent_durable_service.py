@@ -23,6 +23,8 @@ from infrastructure.persistence.sqlite_screenplay_task_output_store import (
     SqliteScreenplayTaskOutputStore,
 )
 from purra.long_tasks import LongTaskUnitResult
+from purra.errors import ModelGatewayError
+from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
@@ -61,7 +63,15 @@ class _UnitExecutor:
     async def execute(self, context, signal=None):
         del signal
         self.calls.append((context.unit.id, dict(context.dependency_outputs)))
-        if context.unit.id == "publish-candidate":
+        if context.unit.id == "compose-final-response":
+            output = {
+                "finalResponse": (
+                    "第 4 至 6 集候选稿已经完成。"
+                    "可以在候选稿区域查看并继续编辑。"
+                ),
+                "runId": "run-compose-final-response",
+            }
+        elif context.unit.id == "publish-candidate":
             output = {"revisionId": "sprev-durable-candidate"}
         else:
             output = {"episodeNumber": int(context.unit.id.rsplit("-", 1)[1])}
@@ -72,17 +82,25 @@ class _UnitExecutor:
         )
         return LongTaskUnitResult(
             output_ref=output_ref,
+            run_id=str(output.get("runId") or "") or None,
             metadata=(
-                {
-                    "revisionId": output["revisionId"],
-                    "finalResponse": (
-                        "剧本任务已完成，候选稿已生成。请在下方预览并应用。"
-                    ),
-                }
-                if "revisionId" in output
-                else {}
+                {"revisionId": output["revisionId"]}
+                if "revisionId" in output else {}
             ),
         )
+
+
+class _PausedUnitExecutor:
+    async def execute(self, context, signal=None):
+        del context, signal
+        raise ModelGatewayError(
+            "selected protocol is incompatible",
+            code="provider_bad_request",
+            retryable=False,
+        )
+
+    def classify_failure(self, error):
+        return classify_screenplay_run_failure(error)
 
 
 @pytest.mark.asyncio
@@ -199,29 +217,73 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert snapshot["turns"][0]["resultRevisionId"] == (
         "sprev-durable-candidate"
     )
+    assert snapshot["turns"][0]["assistantContent"] == (
+        "第 4 至 6 集候选稿已经完成。可以在候选稿区域查看并继续编辑。"
+    )
     assert task["status"] == "completed"
+    assert task["resultRevision"] is None
     assert [unit["id"] for unit in task["units"]] == [
-        "draft-episode-4",
-        "draft-episode-5",
-        "draft-episode-6",
+        "collect-evidence-episode-4",
+        "generate-candidate-episode-4",
+        "validate-candidate-episode-4",
+        "collect-evidence-episode-5",
+        "generate-candidate-episode-5",
+        "validate-candidate-episode-5",
+        "collect-evidence-episode-6",
+        "generate-candidate-episode-6",
+        "validate-candidate-episode-6",
+        "compose-final-response",
         "publish-candidate",
     ]
     assert executor.calls == [
-        ("draft-episode-4", {}),
+        ("collect-evidence-episode-4", {}),
         (
-            "draft-episode-5",
-            {"draft-episode-4": f"screenplay-task-output://{task['id']}/draft-episode-4"},
+            "generate-candidate-episode-4",
+            {"collect-evidence-episode-4": f"screenplay-task-output://{task['id']}/collect-evidence-episode-4"},
         ),
         (
-            "draft-episode-6",
-            {"draft-episode-5": f"screenplay-task-output://{task['id']}/draft-episode-5"},
+            "validate-candidate-episode-4",
+            {"generate-candidate-episode-4": f"screenplay-task-output://{task['id']}/generate-candidate-episode-4"},
+        ),
+        (
+            "collect-evidence-episode-5",
+            {"validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4"},
+        ),
+        (
+            "generate-candidate-episode-5",
+            {"collect-evidence-episode-5": f"screenplay-task-output://{task['id']}/collect-evidence-episode-5"},
+        ),
+        (
+            "validate-candidate-episode-5",
+            {"generate-candidate-episode-5": f"screenplay-task-output://{task['id']}/generate-candidate-episode-5"},
+        ),
+        (
+            "collect-evidence-episode-6",
+            {"validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5"},
+        ),
+        (
+            "generate-candidate-episode-6",
+            {"collect-evidence-episode-6": f"screenplay-task-output://{task['id']}/collect-evidence-episode-6"},
+        ),
+        (
+            "validate-candidate-episode-6",
+            {"generate-candidate-episode-6": f"screenplay-task-output://{task['id']}/generate-candidate-episode-6"},
+        ),
+        (
+            "compose-final-response",
+            {
+                "validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4",
+                "validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5",
+                "validate-candidate-episode-6": f"screenplay-task-output://{task['id']}/validate-candidate-episode-6",
+            },
         ),
         (
             "publish-candidate",
             {
-                "draft-episode-4": f"screenplay-task-output://{task['id']}/draft-episode-4",
-                "draft-episode-5": f"screenplay-task-output://{task['id']}/draft-episode-5",
-                "draft-episode-6": f"screenplay-task-output://{task['id']}/draft-episode-6",
+                "validate-candidate-episode-4": f"screenplay-task-output://{task['id']}/validate-candidate-episode-4",
+                "validate-candidate-episode-5": f"screenplay-task-output://{task['id']}/validate-candidate-episode-5",
+                "validate-candidate-episode-6": f"screenplay-task-output://{task['id']}/validate-candidate-episode-6",
+                "compose-final-response": f"screenplay-task-output://{task['id']}/compose-final-response",
             },
         ),
     ]
@@ -246,11 +308,18 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     ]
     assert progress
     assert progress[-1]["status"] == "completed"
-    assert progress[-1]["completedUnits"] == 4
+    assert progress[-1]["completedUnits"] == 11
     assert [unit["title"] for unit in progress[-1]["units"]] == [
-        "创作第 4 集正文",
-        "创作第 5 集正文",
-        "创作第 6 集正文",
+        "整理第 4 集创作依据",
+        "创作第 4 集候选稿",
+        "校验第 4 集候选稿",
+        "整理第 5 集创作依据",
+        "创作第 5 集候选稿",
+        "校验第 5 集候选稿",
+        "整理第 6 集创作依据",
+        "创作第 6 集候选稿",
+        "校验第 6 集候选稿",
+        "整理最终答复",
         "整理并发布候选稿",
     ]
     assert any(
@@ -267,3 +336,88 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_work_items"
     ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final(
+    screenplay_db,
+):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-paused-screenplay-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Paused screenplay",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="screenplay-paused-test",
+        planner=_Planner(ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="完成接下来三集",
+            scope=ScreenplayIntentScope(
+                kind=ScreenplayScopeKind.NEXT_EPISODES,
+                count=3,
+            ),
+            requested_deliverable="screenplayDraft",
+        )),
+        resolver=_Resolver(),
+        unit_executor_factory=lambda _runtime: _PausedUnitExecutor(),
+        projects=projects,
+    )
+    request = SubmitScreenplayAgentTurnRequest.model_validate({
+        "sessionId": session["id"],
+        "content": "连续写完后面三集。",
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://provider.example/v1",
+            "options": {"model": "fixture-model"},
+            "contextWindow": "128k",
+        },
+    })
+    turn = await service.submit_turn(
+        command_id="pause-incompatible-protocol",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert snapshot["turns"][0]["status"] == "paused"
+    assert snapshot["turns"][0]["assistantContent"] == ""
+    assert snapshot["tasks"][0]["status"] == "paused"
+    assert snapshot["tasks"][0]["units"][0]["status"] == "blocked"
+    events = await service.list_events(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        after=0,
+        limit=100,
+    )
+    assert any(
+        event["type"] == "screenplay.agent.task.paused"
+        for event in events["events"]
+    )
+    assert not any(
+        event["type"] == "screenplay.agent.task.failed"
+        for event in events["events"]
+    )
+    chunks = [
+        json.loads(row["chunk_json"])
+        for row in await screenplay_db.fetch_all(
+            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+        )
+    ]
+    assert not any(chunk.get("delta") for chunk in chunks)
+    assert chunks[-1] == {
+        "done": True,
+        "finalResponseExpected": False,
+    }

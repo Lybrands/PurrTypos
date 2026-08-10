@@ -14,6 +14,7 @@ from domains.screenplay.project_aggregate import (
     next_actions,
     public_format,
 )
+from domains.screenplay.review_adjudication import derive_review_state
 from database.crud.screenplay_project_deletion import (
     delete_screenplay_project_data,
 )
@@ -1027,6 +1028,20 @@ class SqliteScreenplayV2Repository:
             for item in content_json.get("issues", [])
             if isinstance(item, Mapping)
         ]
+        failed_by_episode = {
+            str(_positive_int(item.get("episodeNumber"))): dict(item)
+            for item in content_json.get("failedEpisodes", [])
+            if isinstance(item, Mapping)
+            and _positive_int(item.get("episodeNumber")) is not None
+        }
+        completed_by_episode = {
+            str(_positive_int(item.get("episodeNumber"))): dict(item)
+            for item in content_json.get("episodeReviews", [])
+            if isinstance(item, Mapping)
+            and _positive_int(item.get("episodeNumber")) is not None
+        }
+        episode_keys.update(failed_by_episode)
+        episode_keys.update(completed_by_episode)
         issue_episode: dict[str, set[str]] = {}
         for issue in issues:
             issue_id = str(issue.get("id") or "").strip()
@@ -1097,21 +1112,39 @@ class SqliteScreenplayV2Repository:
             start=1,
         ):
             values = grouped[episode_key]
+            failure = failed_by_episode.get(episode_key)
+            completed = completed_by_episode.get(episode_key, {})
             payload = {
                 "episodeNumber": _positive_int(episode_key) or position,
                 "reviewedDraftId": str(
                     content_json.get("reviewedDraftId") or ""
                 ),
-                "verdict": str(content_json.get("verdict") or ""),
-                "issues": values["issues"],
+                "reviewStatus": "failed" if failure else "completed",
+                "verdict": str(
+                    completed.get("verdict")
+                    or content_json.get("verdict")
+                    or ""
+                ),
+                "issues": [] if failure else values["issues"],
                 "verificationResults": values["verificationResults"],
+                "failure": failure,
+                "reviewedContentDigest": str(
+                    completed.get("reviewedContentDigest") or ""
+                ),
+                "inputContractVersion": int(
+                    completed.get("inputContractVersion")
+                    or content_json.get("inputContractVersion")
+                    or 0
+                ),
             }
             episode_parts.append(_candidate_part(
                 part_type="episode",
                 part_key=episode_key,
                 position=position,
                 payload=payload,
-                content_text="",
+                content_text=(
+                    "" if failure else str(completed.get("contentText") or "")
+                ),
             ))
         return [current_parts[0], *episode_parts]
 
@@ -1266,6 +1299,11 @@ class SqliteScreenplayV2Repository:
             )
             current_heads = await self._head_rows(project_id)
             head_contents = _head_content_map(current_heads)
+            review_state = await self._review_state(
+                project_id=project_id,
+                project={**dict(project), "completion_source": None},
+                heads=current_heads,
+            )
             stage = derive_stage(
                 source_kind=str(project.get("source_kind") or "original"),
                 head_roles=(str(row["role"]) for row in current_heads),
@@ -1274,6 +1312,7 @@ class SqliteScreenplayV2Repository:
             next_project_revision = actual_project_revision + 1
             await self._db.execute(
                 "UPDATE screenplay_projects SET revision = ?, active_stage = ?, "
+                "completion_source = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                 [next_project_revision, stage, project_id],
             )
@@ -1289,7 +1328,9 @@ class SqliteScreenplayV2Repository:
                     "nextActions": next_actions(
                         stage,
                         head_contents=head_contents,
+                        review_state=review_state,
                     ),
+                    "review": review_state,
                 },
             }
             await self._record_command_receipt(
@@ -1304,6 +1345,282 @@ class SqliteScreenplayV2Repository:
                 aggregate_type="screenplayProject",
                 aggregate_id=project_id,
                 event_type="screenplay.revision.accepted",
+                payload=response,
+            )
+            return response
+
+    async def adjudicate_review(
+        self,
+        *,
+        command_id: str,
+        request_digest: str,
+        project_id: str,
+        expected_project_revision: int,
+        review_revision_id: str,
+        decisions: Sequence[Mapping[str, object]],
+        actor: str,
+    ) -> dict[str, Any]:
+        async with self._db.transaction(cancellation_linearizable=True):
+            replay = await self.find_command_receipt(
+                command_id=command_id,
+                command_type="adjudicateReview",
+                request_digest=request_digest,
+            )
+            if replay is not None:
+                return replay
+
+            project = await self._db.fetch_one(
+                "SELECT * FROM screenplay_projects WHERE id = ? "
+                "AND source_snapshot_json IS NOT NULL",
+                [project_id],
+            )
+            if project is None:
+                raise NotFoundError("剧本项目不存在")
+            if str(project.get("status") or "") == "archived":
+                raise AppError("项目已归档，不能处理审阅意见", 409)
+            if str(project.get("completion_source") or "") in {
+                "user",
+                "legacyAgentVerdict",
+            }:
+                raise AppError("项目已经定稿，不能修改审阅裁决", 409)
+            actual_revision = int(project.get("revision") or 1)
+            if actual_revision != int(expected_project_revision):
+                raise AppError("项目已被其他操作更新，请刷新后重试", 409)
+
+            heads = await self._head_rows(project_id)
+            review_head = next(
+                (row for row in heads if str(row["role"]) == "review"),
+                None,
+            )
+            draft_head = next(
+                (row for row in heads if str(row["role"]) == "screenplayDraft"),
+                None,
+            )
+            if (
+                review_head is None
+                or str(review_head["revision_id"]) != review_revision_id
+            ):
+                raise AppError("当前审阅版本已变化，请刷新后重试", 409)
+            if draft_head is None:
+                raise AppError("当前剧本正文不存在，不能处理审阅意见", 409)
+            review_content = _object(review_head.get("content_json"))
+            draft_revision_id = str(draft_head["revision_id"])
+            if str(review_content.get("reviewedDraftId") or "") != draft_revision_id:
+                raise AppError("当前审阅报告对应的不是当前剧本版本", 409)
+            valid_issue_ids = {
+                str(item.get("id") or "").strip()
+                for item in review_content.get("issues", [])
+                if isinstance(item, Mapping)
+            }
+            requested_issue_ids = [
+                str(decision.get("issueId") or "").strip()
+                for decision in decisions
+            ]
+            if (
+                not requested_issue_ids
+                or any(issue_id not in valid_issue_ids for issue_id in requested_issue_ids)
+            ):
+                raise AppError("提交的审阅意见不属于当前审阅报告", 409)
+
+            for decision in decisions:
+                issue_id = str(decision.get("issueId") or "").strip()
+                status = str(decision.get("status") or "").strip()
+                note = str(decision.get("note") or "").strip()
+                previous = await self._db.fetch_one(
+                    "SELECT status FROM screenplay_review_decisions "
+                    "WHERE review_revision_id = ? AND issue_id = ?",
+                    [review_revision_id, issue_id],
+                )
+                await self._db.execute(
+                    "INSERT INTO screenplay_review_decisions "
+                    "(project_id, review_revision_id, draft_revision_id, issue_id, "
+                    "status, note, actor) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(review_revision_id, issue_id) DO UPDATE SET "
+                    "draft_revision_id = excluded.draft_revision_id, "
+                    "status = excluded.status, note = excluded.note, "
+                    "actor = excluded.actor, decided_at = CURRENT_TIMESTAMP, "
+                    "update_time = CURRENT_TIMESTAMP",
+                    [
+                        project_id,
+                        review_revision_id,
+                        draft_revision_id,
+                        issue_id,
+                        status,
+                        note,
+                        actor,
+                    ],
+                )
+                await self._db.execute(
+                    "INSERT INTO screenplay_review_decision_events "
+                    "(id, project_id, command_id, review_revision_id, "
+                    "draft_revision_id, issue_id, previous_status, status, "
+                    "note, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        f"sprevd_{uuid.uuid4().hex}",
+                        project_id,
+                        command_id,
+                        review_revision_id,
+                        draft_revision_id,
+                        issue_id,
+                        (previous or {}).get("status"),
+                        status,
+                        note,
+                        actor,
+                    ],
+                )
+
+            next_project_revision = actual_revision + 1
+            await self._db.execute(
+                "UPDATE screenplay_projects SET revision = ?, "
+                "active_stage = 'review', completion_source = NULL, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                [next_project_revision, project_id],
+            )
+            response = {
+                "projectId": project_id,
+                "projectRevision": next_project_revision,
+                "reviewRevisionId": review_revision_id,
+                "decisionCount": len(decisions),
+            }
+            await self._record_command_receipt(
+                command_id=command_id,
+                command_type="adjudicateReview",
+                project_id=project_id,
+                request_digest=request_digest,
+                result_ref=f"screenplay-review://{review_revision_id}",
+                response=response,
+            )
+            await self._record_outbox(
+                aggregate_type="screenplayReview",
+                aggregate_id=review_revision_id,
+                event_type="screenplay.review.adjudicated",
+                payload=response,
+            )
+            return response
+
+    async def finalize_project(
+        self,
+        *,
+        command_id: str,
+        request_digest: str,
+        project_id: str,
+        expected_project_revision: int,
+        draft_revision_id: str,
+        review_revision_id: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        async with self._db.transaction(cancellation_linearizable=True):
+            replay = await self.find_command_receipt(
+                command_id=command_id,
+                command_type="finalizeProject",
+                request_digest=request_digest,
+            )
+            if replay is not None:
+                return replay
+
+            project = await self._db.fetch_one(
+                "SELECT * FROM screenplay_projects WHERE id = ? "
+                "AND source_snapshot_json IS NOT NULL",
+                [project_id],
+            )
+            if project is None:
+                raise NotFoundError("剧本项目不存在")
+            if str(project.get("status") or "") == "archived":
+                raise AppError("项目已归档，不能确认定稿", 409)
+            actual_revision = int(project.get("revision") or 1)
+            if actual_revision != int(expected_project_revision):
+                raise AppError("项目已被其他操作更新，请刷新后重试", 409)
+
+            heads = await self._head_rows(project_id)
+            current_draft_id = next(
+                (str(row["revision_id"]) for row in heads if str(row["role"]) == "screenplayDraft"),
+                None,
+            )
+            current_review_id = next(
+                (str(row["revision_id"]) for row in heads if str(row["role"]) == "review"),
+                None,
+            )
+            if current_draft_id != draft_revision_id or current_review_id != review_revision_id:
+                raise AppError("当前剧本或审阅版本已变化，请刷新后重试", 409)
+
+            review_state = await self._review_state(
+                project_id=project_id,
+                project={**dict(project), "completion_source": None},
+                heads=heads,
+            )
+            counts = dict(review_state.get("counts") or {})
+            pending_count = int(counts.get("pending") or 0)
+            planned_count = int(counts.get("planned") or 0)
+            if pending_count:
+                raise AppError(f"还有 {pending_count} 条审阅意见待处理", 409)
+            if planned_count:
+                raise AppError(f"还有 {planned_count} 条审阅意见等待修订", 409)
+            hard_checks = list(review_state.get("hardChecks") or [])
+            if hard_checks:
+                first = hard_checks[0]
+                message = (
+                    str(first.get("message") or "当前剧本未通过定稿校验")
+                    if isinstance(first, Mapping)
+                    else "当前剧本未通过定稿校验"
+                )
+                raise AppError(message, 409)
+            if review_state.get("canFinalize") is not True:
+                raise AppError("当前剧本尚未满足定稿条件", 409)
+
+            decision_rows = await self._db.fetch_all(
+                "SELECT issue_id, status, note FROM screenplay_review_decisions "
+                "WHERE project_id = ? AND review_revision_id = ? "
+                "ORDER BY issue_id ASC",
+                [project_id, review_revision_id],
+            )
+            decision_snapshot_hash = hashlib.sha256(_dump({
+                "draftRevisionId": draft_revision_id,
+                "reviewRevisionId": review_revision_id,
+                "decisions": [dict(row) for row in decision_rows],
+            }).encode("utf-8")).hexdigest()
+            finalization_id = f"spfinal_{uuid.uuid4().hex}"
+            await self._db.execute(
+                "INSERT INTO screenplay_finalization_events "
+                "(id, project_id, command_id, draft_revision_id, "
+                "review_revision_id, decision_snapshot_hash, actor) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    finalization_id,
+                    project_id,
+                    command_id,
+                    draft_revision_id,
+                    review_revision_id,
+                    decision_snapshot_hash,
+                    actor,
+                ],
+            )
+            next_project_revision = actual_revision + 1
+            await self._db.execute(
+                "UPDATE screenplay_projects SET revision = ?, "
+                "active_stage = 'completed', completion_source = 'user', "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                [next_project_revision, project_id],
+            )
+            response = {
+                "projectId": project_id,
+                "projectRevision": next_project_revision,
+                "draftRevisionId": draft_revision_id,
+                "reviewRevisionId": review_revision_id,
+                "finalizationEventId": finalization_id,
+                "decisionSnapshotHash": decision_snapshot_hash,
+            }
+            await self._record_command_receipt(
+                command_id=command_id,
+                command_type="finalizeProject",
+                project_id=project_id,
+                request_digest=request_digest,
+                result_ref=f"screenplay-finalization://{finalization_id}",
+                response=response,
+            )
+            await self._record_outbox(
+                aggregate_type="screenplayProject",
+                aggregate_id=project_id,
+                event_type="screenplay.project.finalized",
                 payload=response,
             )
             return response
@@ -1427,6 +1744,78 @@ class SqliteScreenplayV2Repository:
             ],
         )
 
+    async def _review_state(
+        self,
+        *,
+        project_id: str,
+        project: Mapping[str, Any],
+        heads: Sequence[Mapping[str, Any]],
+    ) -> dict[str, object]:
+        draft = next(
+            (row for row in heads if str(row.get("role") or "") == "screenplayDraft"),
+            None,
+        )
+        review = next(
+            (row for row in heads if str(row.get("role") or "") == "review"),
+            None,
+        )
+        draft_revision_id = str((draft or {}).get("id") or (draft or {}).get("revision_id") or "").strip() or None
+        review_revision_id = str((review or {}).get("id") or (review or {}).get("revision_id") or "").strip() or None
+
+        decisions: list[dict[str, Any]] = []
+        if review_revision_id:
+            rows = await self._db.fetch_all(
+                "SELECT issue_id, status, note, actor, decided_at "
+                "FROM screenplay_review_decisions "
+                "WHERE project_id = ? AND review_revision_id = ? "
+                "ORDER BY issue_id ASC",
+                [project_id, review_revision_id],
+            )
+            decisions = [{
+                "issueId": str(row["issue_id"]),
+                "status": str(row["status"]),
+                "note": str(row.get("note") or ""),
+                "actor": row.get("actor"),
+                "decidedAt": row.get("decided_at"),
+            } for row in rows]
+
+        matching_finalization = None
+        if draft_revision_id and review_revision_id:
+            matching_finalization = await self._db.fetch_one(
+                "SELECT id FROM screenplay_finalization_events "
+                "WHERE project_id = ? AND draft_revision_id = ? "
+                "AND review_revision_id = ? ORDER BY create_time DESC LIMIT 1",
+                [project_id, draft_revision_id, review_revision_id],
+            )
+        stored_completion = str(project.get("completion_source") or "").strip()
+        completion_source = (
+            "user"
+            if matching_finalization is not None and stored_completion == "user"
+            else "legacyAgentVerdict"
+            if stored_completion == "legacyAgentVerdict"
+            and str(project.get("active_stage") or "") == "completed"
+            else None
+        )
+
+        def head_content(row: Mapping[str, Any] | None) -> dict[str, Any]:
+            if row is None:
+                return {}
+            return _object(
+                row.get("head_content_json")
+                if "head_content_json" in row
+                else row.get("content_json")
+            )
+
+        return derive_review_state(
+            draft_revision_id=draft_revision_id,
+            draft_content=head_content(draft),
+            review_revision_id=review_revision_id,
+            review_content=head_content(review),
+            decisions=decisions,
+            hard_checks=[],
+            completion_source=completion_source,
+        )
+
     async def get_workspace(self, project_id: str) -> dict[str, Any]:
         project = await self._require_native_project(project_id)
 
@@ -1489,10 +1878,21 @@ class SqliteScreenplayV2Repository:
             str(row["role"]): _object(row.get("head_content_json"))
             for row in heads
         }
+        review_state = await self._review_state(
+            project_id=project_id,
+            project=project,
+            heads=heads,
+        )
         stage = derive_stage(
             source_kind=source_kind,
             head_roles=head_by_role,
             head_contents=head_contents,
+            has_current_finalization=(
+                review_state.get("completionSource") == "user"
+            ),
+            legacy_completed=(
+                review_state.get("completionSource") == "legacyAgentVerdict"
+            ),
         )
 
         source_snapshot = _nullable_object(project.get("source_snapshot_json"))
@@ -1526,7 +1926,12 @@ class SqliteScreenplayV2Repository:
                     role: head_by_role.get(role)
                     for role in roles
                 },
-                "nextActions": next_actions(stage, head_contents=head_contents),
+                "nextActions": next_actions(
+                    stage,
+                    head_contents=head_contents,
+                    review_state=review_state,
+                ),
+                "review": review_state,
             },
             "deliverables": [{
                 "id": str(row["id"]),
@@ -1593,6 +1998,17 @@ class SqliteScreenplayV2Repository:
         if row is None:
             raise NotFoundError("剧本版本不存在")
         heads = await self._head_rows(str(row["project_id"]))
+        accepted = await self._db.fetch_one(
+            "SELECT id FROM screenplay_acceptance_events "
+            "WHERE project_id = ? AND revision_id = ? LIMIT 1",
+            [str(row["project_id"]), revision_id],
+        )
+        status = (
+            "current"
+            if any(str(item["revision_id"]) == revision_id for item in heads)
+            else "historical" if accepted is not None
+            else "candidate"
+        )
         view = {
             **_revision_summary(row),
             "projectId": str(row["project_id"]),
@@ -1609,6 +2025,7 @@ class SqliteScreenplayV2Repository:
                 role=str(row["role"]),
                 source_kind=str(row.get("source_kind") or "original"),
             ),
+            "status": status,
         }
         if not include_content:
             return view
@@ -1719,6 +2136,29 @@ class SqliteScreenplayV2Repository:
                 else None
             ),
         }
+
+    async def get_latest_review_for_draft(
+        self,
+        *,
+        project_id: str,
+        draft_revision_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self._db.fetch_one(
+            "SELECT r.id FROM screenplay_revisions AS r "
+            "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "
+            "JOIN screenplay_revision_inputs AS i ON i.revision_id = r.id "
+            "WHERE r.project_id = ? AND d.role = 'review' "
+            "AND i.input_role = 'screenplayDraft' "
+            "AND i.input_revision_id = ? "
+            "ORDER BY r.revision_no DESC LIMIT 1",
+            [project_id, draft_revision_id],
+        )
+        if row is None:
+            return None
+        return await self.get_revision(
+            str(row["id"]),
+            include_content=True,
+        )
 
 def _revision_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     return {

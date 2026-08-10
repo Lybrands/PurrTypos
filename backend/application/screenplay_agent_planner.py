@@ -97,7 +97,7 @@ class ModelScreenplayIntentPlanner:
             repair_instruction=_PLANNER_REPAIR,
             validate=_validate_intent,
             execution_progress_fields={
-                "executionSummary": "请求理解：",
+                "executionSummary": "",
             },
         )
         return PlannedScreenplayIntent(

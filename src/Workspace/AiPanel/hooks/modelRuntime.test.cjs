@@ -46,6 +46,7 @@ const {
 const {
   buildAssistantTimeline,
   getAssistantProcessingLabel,
+  groupConsecutiveWorkSteps,
 } = loadTypeScriptModule(
   path.join(__dirname, '../components/ChatMessageList/assistantTimeline.ts'),
 )
@@ -288,6 +289,65 @@ test('unassigned commentary stays after all recorded tools', () => {
       loading: true,
     }).map((part) => part.type),
     ['tools', 'tools', 'commentary'],
+  )
+})
+
+test('visible narrative is the only boundary between operation groups', () => {
+  const message = {
+    role: 'assistant',
+    content: '最终答复',
+    commentaryBlocks: ['这里是模型真实输出的阶段说明。'],
+    toolCallSegments: [
+      { commentaryBlockIndex: null, labels: ['读取人物'] },
+      { commentaryBlockIndex: null, labels: ['读取场景'] },
+      { commentaryBlockIndex: 0, labels: ['写入候选稿'] },
+      { commentaryBlockIndex: null, labels: ['校验候选稿'] },
+    ],
+  }
+  const timeline = buildAssistantTimeline(message, { messageIndex: 7 })
+  const workLog = timeline.filter((part) => part.type !== 'text')
+  const grouped = groupConsecutiveWorkSteps(workLog, 7)
+
+  assert.deepEqual(grouped.map((part) => part.type), [
+    'stepGroup',
+    'commentary',
+    'stepGroup',
+  ])
+  assert.deepEqual(
+    grouped.filter((part) => part.type === 'stepGroup')
+      .map((part) => part.parts.map((item) => item.type)),
+    [['tools', 'tools'], ['tools', 'tools']],
+  )
+})
+
+test('displayable operations merge across their technical event types', () => {
+  const parts = [
+    {
+      type: 'contextCompaction',
+      state: { status: 'completed', selectedTurnCount: 3 },
+    },
+    {
+      type: 'delegations',
+      items: [{
+        delegationId: 'delegation-1',
+        agentRole: 'researcher',
+        status: 'completed',
+      }],
+    },
+    {
+      type: 'tools',
+      segmentIndex: 0,
+      segment: { commentaryBlockIndex: null, labels: ['读取原作'] },
+    },
+  ]
+
+  const grouped = groupConsecutiveWorkSteps(parts, 3)
+
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0].type, 'stepGroup')
+  assert.deepEqual(
+    grouped[0].parts.map((part) => part.type),
+    ['contextCompaction', 'delegations', 'tools'],
   )
 })
 
@@ -1180,29 +1240,20 @@ test('queued chat activity stays pending until the final queued turn completes',
   )
 })
 
-test('assistant processing label follows the actual runtime phase', () => {
-  assert.equal(
-    getAssistantProcessingLabel({ role: 'assistant', content: '' }),
-    '理解请求',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+test('runtime state never becomes host-authored assistant copy', () => {
+  const states = [
+    { role: 'assistant', content: '' },
+    {
       role: 'assistant',
       content: '',
       contextCompaction: { status: 'running' },
-    }),
-    '整理上下文',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       commentary: '正在核对范围',
-    }),
-    '推进任务',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       taskPlan: {
@@ -1215,64 +1266,46 @@ test('assistant processing label follows the actual runtime phase', () => {
           status: 'running',
         }],
       },
-    }),
-    '推进任务',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: 'tool commentary',
       toolCalling: true,
-    }),
-    '执行操作',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: 'final answer',
-    }),
-    '组织回复',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       toolApprovals: [{ status: 'pending' }],
-    }),
-    '等待确认',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       delegations: [{ status: 'running' }],
-    }),
-    '协调任务',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       taskPlan: { title: 'plan', status: 'planned', steps: [] },
-    }),
-    '拆解任务',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       toolCallSegments: [{ labels: ['tool'], commentaryBlockIndex: null }],
-    }),
-    '核对结果',
-  )
-  assert.equal(
-    getAssistantProcessingLabel({
+    },
+    {
       role: 'assistant',
       content: '',
       contextBudget: {},
-    }),
-    '准备上下文',
-  )
+    },
+  ]
+
+  for (const state of states) {
+    assert.equal(getAssistantProcessingLabel(state), '')
+  }
 })
 
 test('chat runtime keeps concurrent sessions isolated across panel lifecycles', () => {

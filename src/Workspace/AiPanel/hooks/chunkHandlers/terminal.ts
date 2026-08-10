@@ -102,7 +102,10 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   }
   const finalModelResponse = acc.response || acc.pendingFinalResponse || "";
   const hasVisibleModelResponse = Boolean(finalModelResponse.trim());
-  const emptyResponse = !chunk.aborted && !hasVisibleModelResponse;
+  const finalResponseExpected = chunk.finalResponseExpected !== false;
+  const emptyResponse = (
+    finalResponseExpected && !chunk.aborted && !hasVisibleModelResponse
+  );
 
   const finalCommentary = (acc.commentary || "").trim();
   let savedCommentaryBlocks = acc.commentaryBlocks ?? [];
@@ -113,7 +116,9 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
     savedCommentaryDurations = finalized.durations;
   }
 
-  let resolvedAssistantContent = emptyResponse
+  let resolvedAssistantContent = !finalResponseExpected
+    ? finalModelResponse
+    : emptyResponse
     ? EMPTY_RESPONSE_MESSAGE
     : finalModelResponse ||
       synthesizeAssistantTextFromToolSegments({
@@ -139,7 +144,9 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
         const accContent = finalModelResponse.trim();
         let finalContent = currentContent;
         if (!currentContent.trim()) {
-          if (emptyResponse) {
+          if (!finalResponseExpected) {
+            finalContent = finalModelResponse;
+          } else if (emptyResponse) {
             finalContent = EMPTY_RESPONSE_MESSAGE;
           } else if (accContent) {
             finalContent = finalModelResponse;
@@ -189,7 +196,13 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   }
 
   ctx.cleanup(
-    chunk.aborted ? "canceled" : emptyResponse ? "failed" : "completed",
+    !finalResponseExpected
+      ? "paused"
+      : chunk.aborted
+        ? "canceled"
+        : emptyResponse
+          ? "failed"
+          : "completed",
   );
   acc.response = resolvedAssistantContent;
   acc.pendingFinalResponse = undefined;

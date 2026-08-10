@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from infrastructure.models.profiles.registry import resolve_model_profile
+from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 
 
 def test_registry_resolves_each_builtin_profile_and_generic_fallback():
@@ -91,13 +92,30 @@ def test_kimi_k3_profile_forces_currently_supported_max_reasoning():
     assert profile.internal_output_token_floor() == 8_192
 
 
-def test_generic_profile_preserves_advanced_custom_thinking_contract():
+def test_generic_profile_omits_undeclared_thinking_extensions():
     profile = resolve_model_profile(
         None,
         "custom-model",
         "https://proxy.example/v1",
     )
 
-    assert profile.build_openai_extra_body(False) == {
-        "thinking": {"type": "disabled"},
-    }
+    assert profile.build_openai_extra_body(False) == {}
+    assert profile.build_openai_extra_body(True) == {}
+    assert profile.protocol_capabilities().reasoning_control is (
+        ReasoningControl.UNAVAILABLE
+    )
+
+
+def test_replay_required_profile_declares_protocol_without_core_model_checks():
+    profile = resolve_model_profile(
+        "deepseek:deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+    )
+
+    assert profile.protocol_capabilities().reasoning_control is (
+        ReasoningControl.SELECTABLE
+    )
+    assert profile.protocol_capabilities().reasoning_replay is (
+        ReasoningReplayPolicy.REQUIRED
+    )
