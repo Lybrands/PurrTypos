@@ -74,7 +74,7 @@ from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
     PendingProviderAttempt as _PendingProviderAttempt,
     is_reasoning_only_truncation, provider_retry_round_capacity,
-    reasoning_disabled_attempt, truncation_trace_details,
+    retry_provider_attempt, truncation_trace_details,
 )
 from purra.runtime.response_finalization import (
     declined_final_response as _declined_final_response,
@@ -261,6 +261,17 @@ class AgentRuntime:
         signal: CancellationSignal | None = None,
     ) -> AsyncIterator[RuntimeUpdate]:
         messages = list(request.messages)
+        if not request.model.protocol_capabilities.reasoning_mode_is_supported(
+            reasoning_mode
+        ):
+            yield _runtime_result(
+                run_id,
+                RuntimeOutcome.FAILED,
+                request.model.model,
+                0,
+                error_code="unsupported_reasoning_selection",
+            )
+            return
         validators = tuple(response_validators)
         judges = tuple(response_judges)
         state = execution_state or ExecutionState()
@@ -301,7 +312,6 @@ class AgentRuntime:
         declined_response_pending = False
         response_repair_pending = False
         pending_provider_attempt: _PendingProviderAttempt | None = None
-        effective_reasoning_mode = reasoning_mode
         logical_round_number = 0
         dynamic_replan_pending = False
         last_tool_outcome = ToolBatchOutcome.COMPLETED
@@ -668,7 +678,7 @@ class AgentRuntime:
                         ),
                         max_output_tokens=maximum_output_tokens,
                         output_budget=output_budget,
-                        reasoning_mode=effective_reasoning_mode,
+                        reasoning_mode=reasoning_mode,
                     ),
                     allowed_names=allowed_names,
                     future_names=future_names,
@@ -1237,9 +1247,7 @@ class AgentRuntime:
                     RecoveryRequest(
                         cause=RecoveryCause.MODEL_OUTPUT_TRUNCATED,
                         action=(
-                            RecoveryAction.FALLBACK_PROVIDER_MODE
-                            if reasoning_only_truncation
-                            else RecoveryAction.RETRY_MODEL
+                            RecoveryAction.RETRY_MODEL
                         ),
                         remaining_model_rounds=remaining_model_rounds(
                             round_number
@@ -1257,7 +1265,7 @@ class AgentRuntime:
                 await self._trace(
                     "model_output",
                     (
-                        "truncated_reasoning_fallback"
+                        "truncated_reasoning_retry"
                         if can_retry and reasoning_only_truncation
                         else "truncated_retry"
                         if can_retry
@@ -1282,16 +1290,7 @@ class AgentRuntime:
                 if can_retry:
                     if reasoning_only_truncation:
                         round_limit += 1
-                        effective_reasoning_mode = ReasoningMode.DISABLED
-                        await self._trace(
-                            "reasoning_mode",
-                            "pinned_disabled_after_truncation",
-                            details={
-                                "round": round_number,
-                                "logicalRound": provider_attempt.logical_round,
-                            },
-                        )
-                        pending_provider_attempt = reasoning_disabled_attempt(
+                        pending_provider_attempt = retry_provider_attempt(
                             provider_attempt
                         )
                         continue

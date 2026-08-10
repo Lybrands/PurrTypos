@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from purra.contracts import ModelFinishReason
+from purra.contracts.enums import ModelFinishReason
 from purra.normalization import non_negative_int, optional_text
 
 

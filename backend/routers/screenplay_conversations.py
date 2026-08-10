@@ -84,6 +84,7 @@ def _service() -> ScreenplayAgentService:
         unit_executor_factory=lambda runtime: ScreenplayTaskUnitExecutor(
             db,
             runtime=runtime,
+            model_executor_factory=composition.create_managed_model_executor,
             tool_calling_service=ScreenplayToolCallingService(
                 db,
                 composition=composition,

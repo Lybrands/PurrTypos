@@ -1,6 +1,7 @@
 """Kimi K3 max-reasoning request profile."""
 
 from typing import Any
+from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 
 from infrastructure.models.profiles.base import ModelProfile
 
@@ -12,6 +13,8 @@ class KimiK3Profile(ModelProfile):
         "https://api.moonshot.ai/v1",
         "https://api.moonshot.cn/v1",
     })
+    reasoning_control = ReasoningControl.ALWAYS_ENABLED
+    reasoning_replay = ReasoningReplayPolicy.REQUIRED
 
     def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
         # K3 currently exposes max reasoning only.  Unknown or lower efforts

@@ -12,6 +12,7 @@ from purra.long_tasks.contracts import (
     LongTaskUnitResult,
 )
 from purra.ports import CancellationSignal
+from purra.recovery import FailureDecision, FailureSignal
 
 
 @runtime_checkable
@@ -82,14 +83,13 @@ class LongTaskRepository(Protocol):
         result: LongTaskUnitResult,
     ) -> LongTaskRecord: ...
 
-    async def fail_unit(
+    async def settle_unit_failure(
         self,
         task_id: str,
         unit_id: str,
         *,
         worker_id: str,
-        error_code: str,
-        retryable: bool,
+        decision: FailureDecision,
     ) -> LongTaskRecord: ...
 
     async def interrupt_unit(
@@ -124,12 +124,12 @@ class LongTaskUnitRunner(Protocol):
         signal: CancellationSignal | None = None,
     ) -> LongTaskUnitResult: ...
 
-    def is_retryable_unit_error(
+    def classify_unit_failure(
         self,
         task: LongTaskRecord,
         unit: LongTaskUnitRecord,
         error: Exception,
-    ) -> bool: ...
+    ) -> FailureSignal: ...
 
 
 __all__ = ["LongTaskRepository", "LongTaskUnitRunner"]

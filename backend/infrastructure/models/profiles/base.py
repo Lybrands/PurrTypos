@@ -9,6 +9,12 @@ from purra.output_budget import (
     ModelOutputCapabilities,
     ThinkingTokenAccounting,
 )
+from purra.model_protocol import (
+    FeatureSupport,
+    ModelProtocolCapabilities,
+    ReasoningControl,
+    ReasoningReplayPolicy,
+)
 
 
 class ModelProfile:
@@ -19,6 +25,11 @@ class ModelProfile:
     max_output_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
     supports_json_object_output = False
+    reasoning_control = ReasoningControl.SELECTABLE
+    reasoning_replay = ReasoningReplayPolicy.IGNORED
+    tool_calling = FeatureSupport.SUPPORTED
+    required_tool_choice = FeatureSupport.SUPPORTED
+    parallel_tool_calls = FeatureSupport.SUPPORTED
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (
@@ -27,11 +38,25 @@ class ModelProfile:
         )
 
     def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
+        if self.reasoning_control is ReasoningControl.UNAVAILABLE:
+            return {}
         return {
             "thinking": {
                 "type": "enabled" if thinking_enabled else "disabled",
             },
         }
+
+    def protocol_capabilities(self) -> ModelProtocolCapabilities:
+        return ModelProtocolCapabilities(
+            reasoning_control=self.reasoning_control,
+            reasoning_replay=self.reasoning_replay,
+            tool_calling=self.tool_calling,
+            required_tool_choice=self.required_tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
+            json_schema_level=(
+                "json_object" if self.supports_json_object_output else "unknown"
+            ),
+        )
 
     def internal_output_token_floor(self) -> int:
         """Minimum output budget for narrow host-controlled model calls."""
@@ -70,7 +95,11 @@ class ModelProfile:
 
 
 class GenericModelProfile(ModelProfile):
-    pass
+    reasoning_control = ReasoningControl.UNAVAILABLE
+    reasoning_replay = ReasoningReplayPolicy.FORBIDDEN
+    tool_calling = FeatureSupport.UNKNOWN
+    required_tool_choice = FeatureSupport.UNKNOWN
+    parallel_tool_calls = FeatureSupport.UNKNOWN
 
 
 def _normalize_base_url(value: str | None) -> str:

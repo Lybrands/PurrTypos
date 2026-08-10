@@ -280,6 +280,11 @@ async def init_schema(db: DatabaseConnection) -> None:
         context_window INTEGER DEFAULT NULL,
         endpoint_digest TEXT DEFAULT NULL,
         request_profile_digest TEXT DEFAULT NULL,
+        requested_reasoning_mode TEXT DEFAULT NULL,
+        output_contract TEXT DEFAULT NULL,
+        tool_protocol_contract TEXT DEFAULT NULL,
+        recovery_policy_id TEXT DEFAULT NULL,
+        capability_snapshot_digest TEXT DEFAULT NULL,
         binding_namespace TEXT DEFAULT NULL,
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
@@ -307,6 +312,11 @@ async def init_schema(db: DatabaseConnection) -> None:
         "context_window INTEGER DEFAULT NULL",
         "endpoint_digest TEXT DEFAULT NULL",
         "request_profile_digest TEXT DEFAULT NULL",
+        "requested_reasoning_mode TEXT DEFAULT NULL",
+        "output_contract TEXT DEFAULT NULL",
+        "tool_protocol_contract TEXT DEFAULT NULL",
+        "recovery_policy_id TEXT DEFAULT NULL",
+        "capability_snapshot_digest TEXT DEFAULT NULL",
         "binding_namespace TEXT DEFAULT NULL",
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
@@ -335,7 +345,12 @@ async def init_schema(db: DatabaseConnection) -> None:
             model_name,
             context_window,
             endpoint_digest,
-            request_profile_digest
+            request_profile_digest,
+            requested_reasoning_mode,
+            output_contract,
+            tool_protocol_contract,
+            recovery_policy_id,
+            capability_snapshot_digest
         ON ai_agent_runs
         WHEN
             OLD.model_provider IS NOT NEW.model_provider
@@ -343,6 +358,11 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.context_window IS NOT NEW.context_window
             OR OLD.endpoint_digest IS NOT NEW.endpoint_digest
             OR OLD.request_profile_digest IS NOT NEW.request_profile_digest
+            OR OLD.requested_reasoning_mode IS NOT NEW.requested_reasoning_mode
+            OR OLD.output_contract IS NOT NEW.output_contract
+            OR OLD.tool_protocol_contract IS NOT NEW.tool_protocol_contract
+            OR OLD.recovery_policy_id IS NOT NEW.recovery_policy_id
+            OR OLD.capability_snapshot_digest IS NOT NEW.capability_snapshot_digest
         BEGIN
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END

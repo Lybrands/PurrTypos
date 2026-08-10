@@ -8,6 +8,12 @@ from hashlib import sha256
 from typing import Any
 
 from purra.contracts import RunProvenance
+from application.model_runtime import (
+    reasoning_mode_from_options,
+    run_execution_intent,
+)
+from infrastructure.models.profiles.registry import resolve_model_profile
+from purra.contracts import ModelRequest
 from application.agent_run_input import AgentRunInput
 from application.request_mapping import context_window_tokens
 from utils.url import normalize_base_url
@@ -65,12 +71,35 @@ def build_chat_run_provenance(
         "request": profile,
     }
     request_profile_digest = _canonical_digest(profile)
+    model_profile_id = str(options.get("model_profile") or "").strip() or None
+    model_profile = resolve_model_profile(
+        model_profile_id,
+        model_name,
+        body.baseURL,
+    )
+    model_request = ModelRequest(
+        provider=model_provider,
+        model=model_name,
+        profile_id=model_profile_id,
+        output_capabilities=model_profile.output_capabilities(),
+        protocol_capabilities=model_profile.protocol_capabilities(),
+        options=options,
+    )
+    requested_mode = reasoning_mode_from_options(options)
     return RunProvenance(
         model_provider=model_provider,
         model_name=model_name,
         context_window=context_window,
         endpoint_digest=endpoint_digest,
         request_profile_digest=request_profile_digest,
+        execution_intent=run_execution_intent(
+            model_request,
+            requested_mode,
+            output_contract="assistant_text",
+            tool_protocol_contract=(
+                "host_tools" if body.enableAgentTools else "no_tools"
+            ),
+        ),
     )
 
 

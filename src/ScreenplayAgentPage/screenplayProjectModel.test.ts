@@ -5,6 +5,7 @@ import {
   findWorkspaceRevision,
   deliverableRoleForProposal,
   projectFromWorkspace,
+  revisionLibraryTarget,
   screenplayFormatToV2,
   screenplaySourceToV2,
 } from './screenplayProjectModel.ts'
@@ -28,7 +29,31 @@ test('projects native lifecycle and CAS revision from the workspace', () => {
       brief: { approach: '人物优先', premise: '公开真相' },
       stage: 'structure',
     },
-    workflow: { stage: 'structure', heads: {}, nextActions: [] },
+    workflow: {
+      stage: 'structure',
+      heads: {},
+      nextActions: [],
+      review: {
+        phase: 'awaitingReview',
+        draftRevisionId: null,
+        reviewRevisionId: null,
+        recommendation: null,
+        findings: [],
+        failedEpisodes: [],
+        counts: {
+          total: 0,
+          pending: 0,
+          planned: 0,
+          resolved: 0,
+          dismissed: 0,
+          riskAccepted: 0,
+        },
+        hardChecks: [],
+        canFinalize: false,
+        completionSource: null,
+        nextAction: null,
+      },
+    },
     deliverables: [],
     candidates: [],
     workingCopies: [],
@@ -80,6 +105,17 @@ test('maps project creation values to v2 wire enums', () => {
 test('maps proposal kinds to stable deliverable roles', () => {
   assert.equal(deliverableRoleForProposal('episode_outline'), 'structure')
   assert.equal(deliverableRoleForProposal('scene_draft'), 'screenplayDraft')
+})
+
+test('project-document navigation keeps the clicked artifact role and Revision together', () => {
+  assert.deepEqual(revisionLibraryTarget({
+    role: 'sceneList',
+    revisionId: 'revision-scenes-turn-3',
+  }), {
+    role: 'sceneList',
+    revisionId: 'revision-scenes-turn-3',
+  })
+  assert.equal(revisionLibraryTarget(null), null)
 })
 
 test('reconciles a proposal to its Agent Task revision across candidate and head views', () => {

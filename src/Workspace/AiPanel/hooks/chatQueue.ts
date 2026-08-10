@@ -1,6 +1,6 @@
 import type { AiModelConfig, EntityId } from "../../../types";
 
-export type ChatRunOutcome = "completed" | "failed" | "canceled";
+export type ChatRunOutcome = "completed" | "paused" | "failed" | "canceled";
 
 export interface QueuedChatSubmission {
   content: string;

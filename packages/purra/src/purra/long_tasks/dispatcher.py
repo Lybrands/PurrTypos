@@ -27,6 +27,7 @@ from purra.long_tasks.coordinator import LongTaskCoordinator
 from purra.long_tasks.ports import LongTaskRepository
 from purra.normalization import non_negative_int, optional_text, required_text
 from purra.ports import CancellationSignal
+from purra.recovery import FailureCategory, FailureSignal
 from purra.task_admission.contracts import (
     LongTaskDispatchReceipt,
     LongTaskExecutionResult,
@@ -471,18 +472,21 @@ class _RecipeUnitRunner:
             raise TypeError("durable unit executor returned an invalid result")
         return result
 
-    def is_retryable_unit_error(self, task, unit, error: Exception) -> bool:
+    def classify_unit_failure(self, task, unit, error: Exception) -> FailureSignal:
         del task
         executor = self._executors.get(str(unit.metadata.get("executor") or ""))
         if executor is None:
-            return False
-        classifier = getattr(executor, "is_retryable", None)
+            return _permanent_execution_failure(error)
+        classifier = getattr(executor, "classify_failure", None)
         if not callable(classifier):
-            return False
+            return _permanent_execution_failure(error)
         try:
-            return bool(classifier(error))
+            failure = classifier(error)
         except Exception:
-            return False
+            return _permanent_execution_failure(error)
+        if not isinstance(failure, FailureSignal):
+            return _permanent_execution_failure(error)
+        return failure
 
     async def on_unit_settled(self, task_id: str) -> None:
         await self.emit_progress(task_id)
@@ -597,6 +601,15 @@ def _same_optional_text(left: object, right: object) -> bool:
         None if left is None else str(left).strip()
     ) == (
         None if right is None else str(right).strip()
+    )
+
+
+def _permanent_execution_failure(error: Exception) -> FailureSignal:
+    code = str(getattr(error, "code", "") or "").strip()
+    return FailureSignal(
+        category=FailureCategory.BUSINESS_INVARIANT,
+        code=(code or str(error) or type(error).__name__)[:240],
+        retryable=False,
     )
 
 

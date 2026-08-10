@@ -37,6 +37,7 @@ from purra.structured_output import parse_json_object
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
+    run_execution_intent,
 )
 from application.request_mapping import context_window_tokens
 from application.run_execution_control import RunExecutionSession
@@ -279,7 +280,7 @@ class ScreenplayStructuredCallService:
                                 )
                     if reply:
                         await emit_public_text("delta", reply)
-                    await controller.complete(reply or "结构化剧本任务已完成。")
+                    await controller.complete(reply)
                     return StructuredModelResult(value, controller.run_id)
                 if attempt == 1:
                     raise last_error or ValueError(
@@ -403,6 +404,7 @@ def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
         sort_keys=True,
         separators=(",", ":"),
     )
+    request = model_request_from_runtime(runtime, json_object_output=True)
     return RunProvenance(
         model_provider=str(runtime.apiProvider or "openai").strip().lower(),
         model_name=model,
@@ -411,6 +413,12 @@ def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
         ),
         endpoint_digest=digest_model_endpoint(runtime.baseURL),
         request_profile_digest=hashlib.sha256(profile.encode("utf-8")).hexdigest(),
+        execution_intent=run_execution_intent(
+            request,
+            reasoning_mode_from_options(runtime.options),
+            output_contract="json_object",
+            tool_protocol_contract="no_tools",
+        ),
     )
 
 

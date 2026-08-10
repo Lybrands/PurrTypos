@@ -251,10 +251,24 @@ class ScreenplayAgentContextQuery:
             and str(review_content.get("reviewedDraftId") or "")
             == draft_revision_id
         )
+        planned_issue_ids: frozenset[str] = frozenset()
+        if review_matches_base and isinstance(review, Mapping):
+            decision_rows = await self._db.fetch_all(
+                "SELECT issue_id FROM screenplay_review_decisions "
+                "WHERE project_id = ? AND review_revision_id = ? "
+                "AND status = 'planned' ORDER BY issue_id ASC",
+                [project_id, str(review.get("revisionId") or "")],
+            )
+            planned_issue_ids = frozenset(
+                str(row.get("issue_id") or "").strip()
+                for row in decision_rows
+                if str(row.get("issue_id") or "").strip()
+            )
         review_issues = (
             _episode_review_issues(
                 review_content,
                 frozenset(normalized_scenes),
+                allowed_issue_ids=planned_issue_ids,
             )
             if review_matches_base
             else []
@@ -450,6 +464,8 @@ def _episode_continuity(value: object) -> dict[str, Any] | None:
 def _episode_review_issues(
     value: object,
     episode_scene_ids: frozenset[str],
+    *,
+    allowed_issue_ids: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     review = value if isinstance(value, Mapping) else {}
     raw_issues = review.get("issues")
@@ -458,6 +474,9 @@ def _episode_review_issues(
     result = []
     for raw in raw_issues:
         if not isinstance(raw, Mapping):
+            continue
+        issue_id = str(raw.get("id") or "").strip()
+        if allowed_issue_ids is not None and issue_id not in allowed_issue_ids:
             continue
         issue_scene_ids = tuple(
             str(scene_id or "").strip()
@@ -471,7 +490,7 @@ def _episode_review_issues(
         if issue_scene_ids and not related:
             continue
         result.append({
-            "id": str(raw.get("id") or ""),
+            "id": issue_id,
             "severity": str(raw.get("severity") or ""),
             "description": _clip(str(raw.get("description") or ""), 2_000),
             "relatedSceneIds": list(related),

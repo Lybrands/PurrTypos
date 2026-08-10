@@ -16,6 +16,7 @@ from purra.output_budget import (
     ModelOutputCapabilities,
     ResolvedOutputBudget,
 )
+from purra.model_protocol.capabilities import ModelProtocolCapabilities
 from purra.contracts.enums import (
     ApprovalDecision,
     ApprovalStatus,
@@ -156,6 +157,7 @@ class ModelRequest:
     model: str
     profile_id: str | None = None
     output_capabilities: ModelOutputCapabilities = ModelOutputCapabilities()
+    protocol_capabilities: ModelProtocolCapabilities = ModelProtocolCapabilities()
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -169,6 +171,10 @@ class ModelRequest:
         if not isinstance(self.output_capabilities, ModelOutputCapabilities):
             raise TypeError(
                 "model output capabilities must be ModelOutputCapabilities"
+            )
+        if not isinstance(self.protocol_capabilities, ModelProtocolCapabilities):
+            raise TypeError(
+                "model protocol capabilities must be ModelProtocolCapabilities"
             )
         object.__setattr__(self, "options", freeze_json_mapping(self.options))
 
@@ -1487,6 +1493,39 @@ class ApprovalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RunExecutionIntent:
+    """Immutable user and host intent shared by every attempt of one Run."""
+
+    requested_reasoning_mode: Literal["enabled", "disabled"]
+    output_contract: str
+    tool_protocol_contract: str
+    recovery_policy_id: str
+    capability_snapshot_digest: str
+
+    def __post_init__(self) -> None:
+        mode = str(self.requested_reasoning_mode or "").strip().lower()
+        if mode not in {"enabled", "disabled"}:
+            raise ValueError("requested reasoning mode must be enabled or disabled")
+        object.__setattr__(self, "requested_reasoning_mode", mode)
+        for name in (
+            "output_contract",
+            "tool_protocol_contract",
+            "recovery_policy_id",
+        ):
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"run execution intent {name}"
+            ))
+        digest = str(self.capability_snapshot_digest or "").strip().lower()
+        if len(digest) != 64 or any(
+            char not in "0123456789abcdef" for char in digest
+        ):
+            raise ValueError(
+                "run execution intent capability snapshot must be a SHA-256 digest"
+            )
+        object.__setattr__(self, "capability_snapshot_digest", digest)
+
+
+@dataclass(frozen=True, slots=True)
 class RunProvenance:
     """Immutable, non-secret identity of the model request behind a Run."""
 
@@ -1495,6 +1534,7 @@ class RunProvenance:
     context_window: int
     endpoint_digest: str
     request_profile_digest: str
+    execution_intent: RunExecutionIntent | None = None
 
     def __post_init__(self) -> None:
         for name in ("model_provider", "model_name"):
@@ -1512,6 +1552,13 @@ class RunProvenance:
             ):
                 raise ValueError(f"run provenance {name} must be a SHA-256 digest")
             object.__setattr__(self, name, value)
+        if self.execution_intent is not None and not isinstance(
+            self.execution_intent,
+            RunExecutionIntent,
+        ):
+            raise TypeError(
+                "run provenance execution_intent must be a RunExecutionIntent"
+            )
 
 
 @dataclass(frozen=True, slots=True)

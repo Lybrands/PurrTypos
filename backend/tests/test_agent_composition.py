@@ -83,7 +83,11 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
         apiProvider="openai",
-        options={"model": "model", "model_profile": "minimax:MiniMax-M3"},
+        options={
+            "model": "model",
+            "model_profile": "minimax:MiniMax-M3",
+            "thinking": {"type": "enabled"},
+        },
         enableAgentTools=True,
         bookId="book-1",
         chapterId="chapter-1",
@@ -512,7 +516,8 @@ def test_caller_output_limit_cannot_override_host_task_policy():
         bookId="book-1",
     )
     provider_options = {
-        "model": "model",
+        "model": "deepseek-v4-flash",
+        "model_profile": "deepseek:deepseek-v4-flash",
         "max_tokens": 1_000,
         "thinking": {"type": "enabled"},
     }

@@ -259,3 +259,61 @@ test('reset removes replay state when the project or session changes', () => {
 
   assert.equal(replay.assistant('turn-1'), undefined)
 })
+
+test('paused durable task emits no formal answer and resume commits once', () => {
+  const replay = new AgentChunkReplay()
+  const dependencies = { cfg: model, appMessage }
+  const seed = {
+    turnId: 'turn-paused',
+    sessionId: 7,
+    userContent: '继续完成剧本',
+    turnStartedAt: performance.now(),
+  }
+
+  replay.dispatch(seed, {
+    agentRunTodosUpdated: {
+      runId: 'turn-paused',
+      title: '剧本创作任务',
+      status: 'paused',
+      steps: [{
+        id: 'generate',
+        title: '生成候选稿',
+        type: 'write',
+        status: 'blocked',
+      }],
+    },
+  }, dependencies)
+  replay.dispatch(seed, { commentaryDelta: '已保留完成的检查点。' }, dependencies)
+  replay.dispatch(seed, {
+    done: true,
+    finalResponseExpected: false,
+  }, dependencies)
+
+  const paused = replay.assistant('turn-paused')
+  assert.equal(paused?.content, '')
+  assert.equal(paused?.taskPlan?.status, 'paused')
+
+  replay.dispatch(seed, {
+    agentRunTodosUpdated: {
+      runId: 'turn-paused',
+      title: '剧本创作任务',
+      status: 'running',
+      steps: [{
+        id: 'generate',
+        title: '生成候选稿',
+        type: 'write',
+        status: 'running',
+      }],
+    },
+  }, dependencies)
+  replay.dispatch(seed, {
+    agentRunCompleted: {
+      runId: 'turn-paused',
+      status: 'done',
+      finalResponse: '候选稿已发布。',
+    },
+  }, dependencies)
+  replay.dispatch(seed, { done: true }, dependencies)
+
+  assert.equal(replay.assistant('turn-paused')?.content, '候选稿已发布。')
+})

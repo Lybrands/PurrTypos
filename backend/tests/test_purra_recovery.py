@@ -3,12 +3,16 @@ from __future__ import annotations
 import pytest
 
 from purra.recovery import (
+    FailureCategory,
+    FailureDisposition,
+    FailureSignal,
     RecoveryAction,
     RecoveryCause,
     RecoveryEffectState,
     RecoveryLedger,
     RecoveryPolicy,
     RecoveryRequest,
+    decide_failure,
 )
 
 
@@ -103,3 +107,69 @@ def test_recovery_policy_stores_one_immutable_attempt_mapping():
 
     with pytest.raises(ValueError, match="non-negative"):
         policy.with_overrides({RecoveryCause.PROVIDER_STREAM_INTERRUPTED: -1})
+
+
+def test_retryable_failure_with_checkpoint_resumes_current_unit():
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="tool_call_truncated",
+            retryable=True,
+            effect_state=RecoveryEffectState.NOT_STARTED,
+            checkpoint_available=True,
+        ),
+        attempts_remaining=1,
+    )
+
+    assert decision.disposition is FailureDisposition.RESUME_CHECKPOINT
+    assert decision.attempts_remaining == 1
+
+
+def test_retryable_failure_without_budget_pauses_instead_of_failing():
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="max_model_rounds",
+            retryable=True,
+            effect_state=RecoveryEffectState.NOT_STARTED,
+        ),
+        attempts_remaining=0,
+    )
+
+    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+
+
+def test_unknown_effect_pauses_without_retry():
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.TOOL_EXECUTION,
+            code="tool_execution_failed",
+            retryable=True,
+            effect_state=RecoveryEffectState.UNKNOWN,
+        ),
+        attempts_remaining=3,
+    )
+
+    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+
+
+def test_permanent_and_canceled_failures_keep_distinct_terminal_meanings():
+    permanent = decide_failure(
+        FailureSignal(
+            category=FailureCategory.BUSINESS_INVARIANT,
+            code="candidate_schema_invalid",
+            retryable=False,
+        ),
+        attempts_remaining=3,
+    )
+    canceled = decide_failure(
+        FailureSignal(
+            category=FailureCategory.CANCELED,
+            code="user_canceled",
+            retryable=False,
+        ),
+        attempts_remaining=3,
+    )
+
+    assert permanent.disposition is FailureDisposition.FAIL_PERMANENT
+    assert canceled.disposition is FailureDisposition.CANCEL

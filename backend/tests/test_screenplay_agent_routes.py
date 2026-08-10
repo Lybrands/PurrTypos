@@ -4,6 +4,7 @@ from fastapi import FastAPI
 import pytest
 
 import routers.screenplay_conversations as conversation_routes
+import application.agent_composition as agent_composition
 from routers.screenplay_v2 import router as screenplay_router
 from tests.support.asgi_sse import start_asgi_request
 
@@ -62,6 +63,79 @@ def _body(**extra):
         },
         **extra,
     }
+
+
+async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
+    monkeypatch,
+):
+    captured_service = {}
+    captured_executor = {}
+
+    class Composition:
+        execution_owner_id = "route-composition-owner"
+
+        @staticmethod
+        def create_managed_model_executor(_api_key):
+            return object()
+
+        @staticmethod
+        def track_background_run(_task):
+            return None
+
+    composition = Composition()
+
+    class CapturingService:
+        def __init__(self, _db, **kwargs):
+            captured_service.update(kwargs)
+
+    class CapturingExecutor:
+        def __init__(self, _db, **kwargs):
+            captured_executor.update(kwargs)
+
+    monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
+    monkeypatch.setattr(
+        agent_composition,
+        "get_agent_composition",
+        lambda: composition,
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayAgentService",
+        CapturingService,
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ModelScreenplayIntentPlanner",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "SqliteScreenplayTaskResolver",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayV2ProjectService",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayToolCallingService",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayTaskUnitExecutor",
+        CapturingExecutor,
+    )
+
+    conversation_routes._service()
+    captured_service["unit_executor_factory"](object())
+
+    assert captured_executor["model_executor_factory"] is (
+        composition.create_managed_model_executor
+    )
+    assert captured_executor["tool_calling_service"] is not None
 
 
 async def _post(app, body):

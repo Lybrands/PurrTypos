@@ -1,6 +1,7 @@
 """MiniMax M3 native reasoning profile."""
 
 from typing import Any
+from purra.model_protocol import ReasoningControl
 
 from infrastructure.models.profiles.base import ModelProfile
 
@@ -15,6 +16,7 @@ class MiniMaxM3Profile(ModelProfile):
         "https://api.minimaxi.com/anthropic",
     })
     native_anthropic_thinking = True
+    reasoning_control = ReasoningControl.ALWAYS_ENABLED
 
     def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
         # MiniMax reasons natively.  reasoning_split exposes the stream as

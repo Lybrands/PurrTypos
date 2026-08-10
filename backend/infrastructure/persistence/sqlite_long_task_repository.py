@@ -18,6 +18,10 @@ from purra.long_tasks.contracts import (
     LongTaskUnitResult,
     LongTaskUnitStatus,
 )
+from purra.recovery import (
+    FailureDecision,
+    FailureDisposition,
+)
 
 
 class SqliteLongTaskRepository:
@@ -212,7 +216,8 @@ class SqliteLongTaskRepository:
             row = await self._db.fetch_one(
                 "SELECT u.* FROM ai_agent_long_task_units AS u "
                 "WHERE u.task_id = ? AND u.attempt < u.max_attempts AND ("
-                "u.status = 'pending' OR (u.status IN ('claimed', 'running') "
+                "u.status IN ('pending', 'waiting_retry') OR "
+                "(u.status IN ('claimed', 'running') "
                 "AND COALESCE(u.lease_expires_at_ms, 0) <= ?)) "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM json_each(u.dependencies_json) AS dep "
@@ -358,29 +363,44 @@ class SqliteLongTaskRepository:
             )
             return await self._require(task.id)
 
-    async def fail_unit(
+    async def settle_unit_failure(
         self,
         task_id: str,
         unit_id: str,
         *,
         worker_id: str,
-        error_code: str,
-        retryable: bool,
+        decision: FailureDecision,
     ) -> LongTaskRecord:
+        if not isinstance(decision, FailureDecision):
+            raise TypeError("long task failure settlement requires a FailureDecision")
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
             _require_worker(unit, worker_id)
-            can_retry = bool(retryable and unit.attempt < unit.max_attempts)
-            target = LongTaskUnitStatus.PENDING if can_retry else LongTaskUnitStatus.FAILED
+            disposition = decision.disposition
+            if disposition in {
+                FailureDisposition.RETRY_ATTEMPT,
+                FailureDisposition.RESUME_CHECKPOINT,
+            }:
+                target = LongTaskUnitStatus.WAITING_RETRY
+            elif disposition is FailureDisposition.PAUSE_RECOVERABLE:
+                target = LongTaskUnitStatus.BLOCKED
+            elif disposition is FailureDisposition.CANCEL:
+                target = LongTaskUnitStatus.CANCELED
+            else:
+                target = LongTaskUnitStatus.FAILED
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = ?, worker_id = NULL, "
                 "lease_expires_at_ms = NULL, error_code = ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
-                [target.value, str(error_code or "unit_failed")[:240], unit.task_id, unit.id],
+                [target.value, decision.code[:240], unit.task_id, unit.id],
             )
-            if can_retry:
+            if target is LongTaskUnitStatus.WAITING_RETRY:
                 await self._touch_task(task)
+            elif target is LongTaskUnitStatus.BLOCKED:
+                await self._update_task_status(task, LongTaskStatus.PAUSED)
+            elif target is LongTaskUnitStatus.CANCELED:
+                await self._update_task_status(task, LongTaskStatus.CANCELED)
             else:
                 await self._db.execute(
                     "UPDATE ai_agent_long_tasks SET status = 'failed', "
@@ -527,9 +547,27 @@ class SqliteLongTaskRepository:
                 return await self._require(task.id)
             if task.status is not LongTaskStatus.PAUSED:
                 raise ValueError(f"long task cannot transition from {task.status.value}")
-            if extra_attempts:
+            blocked = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND status = 'blocked'",
+                [task.id],
+            )
+            blocked_count = int((blocked or {}).get("count") or 0)
+            if blocked_count and extra_attempts == 0:
                 raise ValueError(
-                    "paused long task resume cannot add retry attempts"
+                    "blocked long task resume requires additional attempts"
+                )
+            if blocked_count:
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET status = 'pending', "
+                    "max_attempts = max_attempts + ?, worker_id = NULL, "
+                    "lease_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
+                    "WHERE task_id = ? AND status = 'blocked'",
+                    [extra_attempts, task.id],
+                )
+            elif extra_attempts:
+                raise ValueError(
+                    "paused long task has no blocked unit requiring attempts"
                 )
             await self._update_task_status(task, LongTaskStatus.RUNNING)
             return await self._require(task.id)

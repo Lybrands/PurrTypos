@@ -31,6 +31,7 @@ class ScreenplayExecutionStateFactory:
             "targetRole": context.target_role,
             "expectedPartType": context.expected_part_type,
             "expectedPartKey": context.expected_part_key,
+            "toolAccess": context.tool_access,
             "sourceBookId": context.source_book_id,
             "sourceScope": dict(context.source_scope or {}),
             "locale": context.locale,

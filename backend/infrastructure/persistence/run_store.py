@@ -43,6 +43,9 @@ async def create_run(
 ) -> str:
     run_id = new_run_id()
     normalized_root_run_id = str(root_run_id or "").strip() or run_id
+    execution_intent = (
+        provenance.execution_intent if provenance is not None else None
+    )
     provenance_values = (
         [
             provenance.model_provider,
@@ -50,9 +53,23 @@ async def create_run(
             provenance.context_window,
             provenance.endpoint_digest,
             provenance.request_profile_digest,
+            (
+                execution_intent.requested_reasoning_mode
+                if execution_intent is not None else None
+            ),
+            execution_intent.output_contract if execution_intent else None,
+            (
+                execution_intent.tool_protocol_contract
+                if execution_intent else None
+            ),
+            execution_intent.recovery_policy_id if execution_intent else None,
+            (
+                execution_intent.capability_snapshot_digest
+                if execution_intent else None
+            ),
         ]
         if provenance is not None
-        else [None, None, None, None, None]
+        else [None, None, None, None, None, None, None, None, None, None]
     )
     binding_values = (
         [
@@ -72,12 +89,14 @@ async def create_run(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "request_profile_digest, requested_reasoning_mode, output_contract, "
+        "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             run_id,
             session_id,
@@ -199,7 +218,9 @@ async def get_run(
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "request_profile_digest, requested_reasoning_mode, output_contract, "
+        "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
@@ -217,7 +238,9 @@ async def get_latest_run_for_session(
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
         "model_provider, model_name, context_window, endpoint_digest, "
-        "request_profile_digest, binding_namespace, binding_aggregate_id, "
+        "request_profile_digest, requested_reasoning_mode, output_contract, "
+        "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "

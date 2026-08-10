@@ -30,10 +30,11 @@ from purra.output_budget import OutputBudgetPolicy, resolve_output_budget
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
+    run_execution_intent,
 )
 from application.request_mapping import context_window_tokens
 from application.run_provenance import digest_model_endpoint
-from domains.screenplay_agent.recovery import is_retryable_screenplay_run_error
+from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from domains.screenplay_agent.candidate_projection import (
     candidate_completion_projection,
 )
@@ -202,10 +203,11 @@ class ScreenplayToolCallingService:
             raise asyncio.CancelledError
         if result.status is not RunStatus.DONE:
             code = str(result.error or "screenplay_tool_run_failed")
+            failure = classify_screenplay_run_failure(code)
             raise ModelGatewayError(
                 code,
                 code=code,
-                retryable=is_retryable_screenplay_run_error(code),
+                retryable=failure.retryable,
             )
         candidate = await self._candidates.load_run(run_id)
         artifact = candidate.get("_artifact")
@@ -310,12 +312,19 @@ def _provenance(runtime, payload: Mapping[str, Any], window: int) -> RunProvenan
         sort_keys=True,
         separators=(",", ":"),
     )
+    request = model_request_from_runtime(runtime)
     return RunProvenance(
         model_provider=str(runtime.apiProvider or "openai").strip().lower(),
         model_name=model,
         context_window=window,
         endpoint_digest=digest_model_endpoint(runtime.baseURL),
         request_profile_digest=hashlib.sha256(profile.encode("utf-8")).hexdigest(),
+        execution_intent=run_execution_intent(
+            request,
+            reasoning_mode_from_options(runtime.options),
+            output_contract="screenplay_candidate_artifact",
+            tool_protocol_contract="screenplay_host_tools",
+        ),
     )
 
 

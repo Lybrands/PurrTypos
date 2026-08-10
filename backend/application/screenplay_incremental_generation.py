@@ -8,6 +8,8 @@ whole deliverable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -47,11 +49,16 @@ class ScreenplayIncrementalGeneration:
         scene_list_id: str,
         validate_scene,
         validate_metadata,
+        writing_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        writing_context = await self._context.episode_writing_context(
-            str(task["projectId"]),
-            episode_number,
-            draft_revision_id=base_revision_id,
+        writing_context = (
+            dict(writing_context)
+            if writing_context is not None
+            else await self._context.episode_writing_context(
+                str(task["projectId"]),
+                episode_number,
+                draft_revision_id=base_revision_id,
+            )
         )
         scene_plans = dict(writing_context["scenePlans"])
         if tuple(scene_plans) != tuple(scene_ids):
@@ -172,6 +179,7 @@ class ScreenplayIncrementalGeneration:
         episode_metadata = dict(metadata["payload"])
         return {
             "runId": metadata["runId"],
+            "executionSummary": episode_metadata["executionSummary"],
             "sourceRunIds": [item["runId"] for item in checkpoints],
             "artifactId": metadata["artifactId"],
             "artifactIds": [item["artifactId"] for item in checkpoints],
@@ -203,6 +211,8 @@ class ScreenplayIncrementalGeneration:
         validate_fragment,
         aggregate_verdict,
         document_kind: str,
+        classify_failure,
+        previous_review: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not reviewed_draft_id:
             raise ValueError("review requires an accepted screenplay draft")
@@ -213,56 +223,125 @@ class ScreenplayIncrementalGeneration:
         episode_numbers = tuple(available["draft"])
         if not episode_numbers:
             raise ValueError("review requires at least one draft episode")
-        checkpoints: list[dict[str, Any]] = []
-        for episode_number in episode_numbers:
-            episode = await self._context.episode_context(
-                str(task["projectId"]),
-                episode_number,
-                draft_revision_id=reviewed_draft_id,
+        previous_records = _review_retry_records(
+            previous_review,
+            reviewed_draft_id=reviewed_draft_id,
+            available_episode_numbers=episode_numbers,
+        )
+        retry_episode_numbers = (
+            tuple(
+                number
+                for number in episode_numbers
+                if number not in previous_records
             )
-            scene_ids = draft_scene_ids(episode.get("currentDraft"))
-            checkpoint = await self._checkpoint_candidate(
-                task=task,
-                unit=unit,
-                checkpoint_id=f"review-episode-{episode_number}",
-                runtime=runtime,
-                signal=signal,
-                prompt=str(unit["input"].get("instruction") or "审阅剧本"),
-                system_instruction=_review_fragment_tool_instruction(
+            if previous_records else episode_numbers
+        )
+        checkpoints: list[tuple[int, dict[str, Any]]] = []
+        failed_episodes: list[dict[str, Any]] = []
+        for episode_number in retry_episode_numbers:
+            try:
+                episode = await self._context.episode_context(
+                    str(task["projectId"]),
                     episode_number,
-                    scene_ids,
-                ),
-                user_payload={
-                    "task": "review_screenplay_episode",
+                    draft_revision_id=reviewed_draft_id,
+                )
+                scene_ids = draft_scene_ids(episode.get("currentDraft"))
+                review_input = _review_episode_input(
+                    reviewed_draft_id=reviewed_draft_id,
+                    episode_number=episode_number,
+                    episode_context=episode,
+                )
+                checkpoint = await self._checkpoint_candidate(
+                    task=task,
+                    unit=unit,
+                    checkpoint_id=f"review-episode-{episode_number}",
+                    runtime=runtime,
+                    signal=signal,
+                    prompt=str(unit["input"].get("instruction") or "审阅剧本"),
+                    system_instruction=_review_fragment_tool_instruction(
+                        episode_number,
+                        scene_ids,
+                    ),
+                    user_payload={
+                        "task": "review_screenplay_episode",
+                        "episodeNumber": episode_number,
+                        "reviewedDraftId": reviewed_draft_id,
+                        "instruction": unit["input"].get("instruction"),
+                        "constraints": unit["input"].get("constraints") or [],
+                        "preserve": unit["input"].get("preserve") or [],
+                        "reviewInput": review_input,
+                    },
+                    expected_part_type="review_episode",
+                    expected_part_key=str(episode_number),
+                    output_policy=SCREENPLAY_FRAGMENT_OUTPUT_POLICY,
+                    validate_candidate=lambda candidate, number=episode_number, ids=scene_ids, digest=review_input["contentDigest"]: (
+                        validate_fragment(
+                            candidate,
+                            number,
+                            ids,
+                            reviewed_draft_id,
+                            digest,
+                        )
+                    ),
+                )
+            except Exception as error:
+                failure = classify_failure(error)
+                failed_episodes.append({
                     "episodeNumber": episode_number,
-                    "reviewedDraftId": reviewed_draft_id,
-                    "instruction": unit["input"].get("instruction"),
-                    "constraints": unit["input"].get("constraints") or [],
-                    "preserve": unit["input"].get("preserve") or [],
-                },
-                expected_part_type="review_episode",
-                expected_part_key=str(episode_number),
-                output_policy=SCREENPLAY_FRAGMENT_OUTPUT_POLICY,
-                validate_candidate=lambda candidate, number=episode_number, ids=scene_ids: (
-                    validate_fragment(candidate, number, ids, reviewed_draft_id)
+                    "code": (
+                        "review_input_invalid"
+                        if isinstance(error, ValueError)
+                        else str(failure.code)
+                    ),
+                    "message": f"第 {episode_number} 集审阅失败",
+                    "retryable": (
+                        False
+                        if isinstance(error, ValueError)
+                        else bool(failure.retryable)
+                    ),
+                })
+                continue
+            checkpoints.append((episode_number, checkpoint))
+        completed_records = dict(previous_records)
+        for number, checkpoint in checkpoints:
+            fragment = checkpoint["payload"]["contentJson"]
+            completed_records[number] = {
+                "episodeNumber": number,
+                "reviewStatus": "completed",
+                "verdict": str(fragment["verdict"]),
+                "issues": [dict(issue) for issue in fragment["issues"]],
+                "contentText": str(checkpoint["contentText"]),
+                "reviewedContentDigest": str(
+                    fragment.get("reviewedContentDigest") or ""
                 ),
-            )
-            checkpoints.append(checkpoint)
+                "inputContractVersion": int(
+                    fragment.get("inputContractVersion") or 0
+                ),
+            }
+        ordered_records = [
+            completed_records[number]
+            for number in episode_numbers
+            if number in completed_records
+        ]
         issues = [
             dict(issue)
-            for checkpoint in checkpoints
-            for issue in checkpoint["payload"]["contentJson"]["issues"]
+            for record in ordered_records
+            for issue in record["issues"]
         ]
-        verdict = aggregate_verdict(
-            str(checkpoint["payload"]["contentJson"]["verdict"])
-            for checkpoint in checkpoints
+        verdict = (
+            aggregate_verdict(
+                str(record["verdict"])
+                for record in ordered_records
+            )
+            if ordered_records else "major_rework"
         )
-        content_text = "\n\n".join(
-            f"## 第 {number} 集\n\n{checkpoint['contentText']}"
-            for number, checkpoint in zip(episode_numbers, checkpoints)
+        completed_text = "\n\n".join(
+            f"## 第 {record['episodeNumber']} 集\n\n{record['contentText']}"
+            for record in ordered_records
         )
+        content_text = completed_text or "本次审阅未能完成任何分集。"
         content_json = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "documentKind": document_kind,
             "verdict": verdict,
             "issues": issues,
@@ -272,19 +351,31 @@ class ScreenplayIncrementalGeneration:
             ),
             "reviewedDraftId": reviewed_draft_id,
             "reviewedEpisodes": list(episode_numbers),
+            "completedEpisodes": [
+                int(record["episodeNumber"])
+                for record in ordered_records
+            ],
+            "failedEpisodes": failed_episodes,
+            "episodeReviews": ordered_records,
+            "inputContractVersion": 2,
         }
+        completed_count = len(ordered_records)
+        failed_count = len(failed_episodes)
+        last_checkpoint = checkpoints[-1][1] if checkpoints else None
         return {
             "title": "剧本审阅报告",
             "executionSummary": (
-                f"已按 {len(episode_numbers)} 集分别审阅并汇总问题，"
-                "各集结果已独立保存。"
+                f"已完成 {completed_count}/{len(episode_numbers)} 集审阅。"
+                + (f"另有 {failed_count} 集审阅失败。" if failed_count else "")
             ),
             "contentText": content_text,
             "contentJson": content_json,
-            "runId": checkpoints[-1]["runId"],
-            "sourceRunIds": [item["runId"] for item in checkpoints],
-            "artifactId": checkpoints[-1]["artifactId"],
-            "artifactIds": [item["artifactId"] for item in checkpoints],
+            "runId": last_checkpoint["runId"] if last_checkpoint else None,
+            "sourceRunIds": [item["runId"] for _, item in checkpoints],
+            "artifactId": (
+                last_checkpoint["artifactId"] if last_checkpoint else None
+            ),
+            "artifactIds": [item["artifactId"] for _, item in checkpoints],
         }
 
     async def generate_scene_list(
@@ -483,9 +574,143 @@ def _review_fragment_tool_instruction(
     scene_ids: Sequence[str],
 ) -> str:
     return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集，不生成全剧报告。
-按需调用工具读取指定版本的该集正文、场景计划和必要上下文。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+宿主已在 reviewInput 中完整提供指定版本的本集正文、场景计划和必要上下文。只能依据这些材料审阅，不得另行检索、声称材料不可读或臆造缺失内容。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
 {{"title":"第 {episode_number} 集审阅","executionSummary":"2 至 4 句公开审阅说明","contentText":"当前集的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"集内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
 问题只能引用这些场景 ID：{list(scene_ids)}。没有问题时 issues=[] 且 verdict=ready。不得输出其他集或全剧正文。"""
+
+
+def _review_retry_records(
+    previous_review: Mapping[str, Any] | None,
+    *,
+    reviewed_draft_id: str,
+    available_episode_numbers: Sequence[int],
+) -> dict[int, dict[str, Any]]:
+    """Return reusable completed episode records from a compatible partial review."""
+
+    if not isinstance(previous_review, Mapping):
+        return {}
+    if (
+        str(previous_review.get("reviewedDraftId") or "")
+        != reviewed_draft_id
+        or int(previous_review.get("inputContractVersion") or 0) < 2
+    ):
+        return {}
+    available = frozenset(int(number) for number in available_episode_numbers)
+    failed = {
+        int(item.get("episodeNumber") or 0)
+        for item in previous_review.get("failedEpisodes") or ()
+        if isinstance(item, Mapping)
+    }
+    if not failed or not failed.issubset(available):
+        return {}
+    records: dict[int, dict[str, Any]] = {}
+    for item in previous_review.get("episodeReviews") or ():
+        if not isinstance(item, Mapping):
+            return {}
+        number = int(item.get("episodeNumber") or 0)
+        if (
+            number not in available
+            or number in failed
+            or item.get("reviewStatus") != "completed"
+            or int(item.get("inputContractVersion") or 0) < 2
+            or not isinstance(item.get("issues"), list)
+            or "contentText" not in item
+        ):
+            return {}
+        records[number] = {
+            "episodeNumber": number,
+            "reviewStatus": "completed",
+            "verdict": str(item.get("verdict") or "ready"),
+            "issues": [
+                dict(issue)
+                for issue in item.get("issues") or ()
+                if isinstance(issue, Mapping)
+            ],
+            "contentText": str(item.get("contentText") or ""),
+            "reviewedContentDigest": str(
+                item.get("reviewedContentDigest") or ""
+            ),
+            "inputContractVersion": int(
+                item.get("inputContractVersion") or 0
+            ),
+        }
+    completed = available - failed
+    return records if set(records) == completed else {}
+
+
+def _review_episode_input(
+    *,
+    reviewed_draft_id: str,
+    episode_number: int,
+    episode_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    current_draft = dict(episode_context.get("currentDraft") or {})
+    scene_plan = dict(episode_context.get("episode") or {})
+    scene_ids = _review_scene_ids(current_draft, scene_plan)
+    packet = {
+        "contractVersion": 2,
+        "draftRevisionId": reviewed_draft_id,
+        "episodeNumber": episode_number,
+        "sceneIds": list(scene_ids),
+        "draftContentText": _review_draft_text(current_draft),
+        "scenePlan": scene_plan,
+        "requiredContext": {
+            "previousEpisode": episode_context.get("previousEpisode"),
+        },
+    }
+    return {**packet, "contentDigest": _review_content_digest(packet)}
+
+
+def _review_scene_ids(
+    current_draft: Mapping[str, Any],
+    scene_plan: Mapping[str, Any],
+) -> tuple[str, ...]:
+    raw_draft_ids = current_draft.get("sceneIds")
+    if isinstance(raw_draft_ids, list):
+        draft_ids = tuple(str(value or "").strip() for value in raw_draft_ids)
+    else:
+        draft_ids = tuple(
+            str(item.get("sceneId") or item.get("id") or "").strip()
+            for item in current_draft.get("sceneTexts") or ()
+            if isinstance(item, Mapping)
+        )
+    plan_ids = tuple(
+        str(item.get("id") or "").strip()
+        for item in scene_plan.get("scenes") or ()
+        if isinstance(item, Mapping)
+    )
+    if (
+        not draft_ids
+        or any(not value for value in draft_ids)
+        or draft_ids != plan_ids
+    ):
+        raise ValueError("review episode scene identity is incomplete")
+    return draft_ids
+
+
+def _review_draft_text(current_draft: Mapping[str, Any]) -> str:
+    text = "\n\n".join(
+        str(item.get("contentText") or "").strip()
+        for item in current_draft.get("sceneTexts") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("contentText") or "").strip()
+    )
+    if not text:
+        text = str(current_draft.get("contentText") or "").strip()
+    if not text:
+        raise ValueError("review episode draft text is empty")
+    return text
+
+
+def _review_content_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:

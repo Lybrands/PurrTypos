@@ -5,11 +5,15 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import routers.screenplay_v2 as screenplay_v2_routes
 
+from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
 from exceptions import AppError
 from routers.screenplay_v2 import (
+    adjudicate_screenplay_v2_review,
     accept_screenplay_v2_revision,
     archive_screenplay_v2_project,
     create_screenplay_v2_project,
@@ -17,6 +21,8 @@ from routers.screenplay_v2 import (
     create_screenplay_v2_working_copy_from_revision,
     delete_screenplay_v2_project,
     ensure_current_screenplay_v2_session,
+    finalize_screenplay_v2_project,
+    get_screenplay_v2_revision,
     get_screenplay_v2_workspace,
     list_screenplay_v2_projects,
     list_screenplay_v2_sessions,
@@ -27,15 +33,18 @@ from routers.screenplay_v2 import (
     update_screenplay_v2_working_copy,
 )
 from schemas.screenplay_v2 import (
+    AdjudicateScreenplayV2ReviewRequest,
     AcceptScreenplayV2RevisionRequest,
     ChangeScreenplayV2ProjectLifecycleRequest,
     CreateScreenplayV2ProjectRequest,
     CreateScreenplayV2WorkingCopyFromRevisionRequest,
     DeleteScreenplayV2ProjectRequest,
+    FinalizeScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
+from tests.support.screenplay_v2_driver import accept_document, create_document
 
 
 pytestmark = pytest.mark.asyncio
@@ -77,6 +86,179 @@ def _original_request(*, title: str = "原创 v2"):
             "premise": "一个人必须决定是否公开真相。",
         },
     })
+
+
+async def _seed_project_with_review(
+    db: DatabaseConnection,
+    *,
+    issues: list[dict[str, object]],
+    verdict: str = "major_rework",
+    failed_episodes: list[dict[str, object]] | None = None,
+) -> tuple[str, str, str, dict[str, object]]:
+    created = await create_screenplay_v2_project(
+        _original_request(title="人工审阅定稿"),
+        idempotency_key="create-review-adjudication-project",
+    )
+    project_id = str(created["data"]["project"]["id"])
+    chain = [
+        (
+            "creative_brief",
+            {"approach": "人物驱动", "premise": "公开真相"},
+        ),
+        (
+            "beat_sheet",
+            {"beats": [{"id": "beat-1", "summary": "真相浮现"}]},
+        ),
+        (
+            "scene_list",
+            {
+                "scenes": [{
+                    "id": "scene-1",
+                    "episodeNumber": 1,
+                    "heading": "审讯室",
+                    "objective": "逼问真相",
+                    "conflict": "双方对峙",
+                    "turn": "证据出现",
+                    "synopsis": "主角看到关键证据。",
+                }],
+            },
+        ),
+    ]
+    accepted_ids: list[str] = []
+    for kind, content in chain:
+        document = await create_document(
+            db,
+            project_id=project_id,
+            kind=kind,
+            title=kind,
+            content_json=content,
+            content_text=kind,
+            derived_from_ids=accepted_ids[-1:],
+        )
+        accepted_ids.append(str(document["id"]))
+        await accept_document(db, str(document["id"]))
+
+    draft = await create_document(
+        db,
+        project_id=project_id,
+        kind="scene_draft",
+        title="完整剧本",
+        content_json={
+            "isComplete": True,
+            "episodeDrafts": [{
+                "episodeNumber": 1,
+                "title": "第一集",
+                "sceneIds": ["scene-1"],
+                "contentText": "INT. 审讯室 - 日",
+            }],
+        },
+        content_text="INT. 审讯室 - 日",
+        derived_from_ids=accepted_ids[-1:],
+    )
+    draft_id = str(draft["id"])
+    await accept_document(db, draft_id)
+    review = await create_document(
+        db,
+        project_id=project_id,
+        kind="review",
+        title="审阅报告",
+        content_json={
+            "reviewedDraftId": draft_id,
+            "verdict": verdict,
+            "issues": issues,
+            "issueCount": len(issues),
+            "completedEpisodes": [] if failed_episodes else [1],
+            "failedEpisodes": failed_episodes or [],
+            "inputContractVersion": 2,
+        },
+        content_text="# 审阅报告",
+        derived_from_ids=[draft_id],
+    )
+    review_id = str(review["id"])
+    await accept_document(db, review_id)
+    workspace = (await get_screenplay_v2_workspace(project_id))["data"]
+    return project_id, draft_id, review_id, workspace
+
+
+async def test_review_failure_materializes_as_episode_status_not_issue(
+    temp_db: DatabaseConnection,
+):
+    _, _, review_id, _ = await _seed_project_with_review(
+        temp_db,
+        issues=[],
+        failed_episodes=[{
+            "episodeNumber": 1,
+            "code": "model_output_truncated",
+            "message": "第 1 集审阅失败",
+            "retryable": True,
+        }],
+    )
+
+    result = await get_screenplay_v2_revision(review_id, view="full")
+    episode = next(
+        part for part in result["data"]["parts"]
+        if part["type"] == "episode" and part["key"] == "1"
+    )
+
+    assert episode["payload"]["reviewStatus"] == "failed"
+    assert episode["payload"]["issues"] == []
+    assert episode["payload"]["failure"] == {
+        "episodeNumber": 1,
+        "code": "model_output_truncated",
+        "message": "第 1 集审阅失败",
+        "retryable": True,
+    }
+
+
+async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
+    temp_db: DatabaseConnection,
+):
+    project_id, draft_id, first_review_id, _ = await _seed_project_with_review(
+        temp_db,
+        issues=[],
+        verdict="ready",
+    )
+    second_review = await create_document(
+        temp_db,
+        project_id=project_id,
+        kind="review",
+        title="第二次审阅",
+        content_json={
+            "reviewedDraftId": draft_id,
+            "verdict": "ready",
+            "issues": [],
+            "completedEpisodes": [1],
+            "failedEpisodes": [],
+            "inputContractVersion": 2,
+        },
+        content_text="# 第二次审阅",
+        derived_from_ids=[draft_id],
+    )
+
+    service = ScreenplayV2ProjectService(temp_db)
+    latest = await service.get_latest_review_for_draft(
+        project_id=project_id,
+        draft_revision_id=draft_id,
+    )
+    missing = await service.get_latest_review_for_draft(
+        project_id=project_id,
+        draft_revision_id="draft-without-review",
+    )
+
+    assert latest is not None
+    assert latest["id"] == second_review["id"]
+    assert latest["id"] != first_review_id
+    assert latest["role"] == "review"
+    assert latest["inputRevisions"]["screenplayDraft"] == draft_id
+    assert missing is None
+
+    route = getattr(
+        screenplay_v2_routes,
+        "get_latest_screenplay_v2_review_for_draft",
+    )
+    response = await route(project_id, draft_id)
+    assert response["success"] is True
+    assert response["data"]["id"] == second_review["id"]
 
 
 async def test_v2_project_creation_starts_with_working_copy_not_fake_revision(
@@ -730,3 +912,234 @@ async def test_revision_can_seed_a_working_copy_without_losing_parts_or_sources(
         "WHERE revision_id = ? AND input_role = 'structure'",
         [revision_id],
     ) == {"input_revision_id": "structure-current"}
+
+
+async def test_review_workspace_requires_user_decisions_before_finalization(
+    temp_db: DatabaseConnection,
+):
+    issues = [
+        {
+            "id": "pace-1",
+            "severity": "major",
+            "description": "中段节奏偏慢",
+            "sceneIds": ["scene-1"],
+        },
+        {
+            "id": "dialogue-1",
+            "severity": "minor",
+            "description": "对白存在重复",
+            "sceneIds": ["scene-1"],
+        },
+    ]
+    project_id, draft_id, review_id, workspace = await _seed_project_with_review(
+        temp_db,
+        issues=issues,
+    )
+
+    assert workspace["project"]["stage"] == "review"
+    assert workspace["workflow"]["review"]["phase"] == "adjudicating"
+    assert workspace["workflow"]["review"]["counts"]["pending"] == 2
+    assert workspace["workflow"]["nextActions"] == []
+
+    with pytest.raises(AppError, match="还有 2 条审阅意见待处理") as blocked:
+        await finalize_screenplay_v2_project(
+            project_id,
+            FinalizeScreenplayV2ProjectRequest(
+                expectedProjectRevision=workspace["project"]["revision"],
+                draftRevisionId=draft_id,
+                reviewRevisionId=review_id,
+            ),
+            idempotency_key="finalize-with-pending-findings",
+        )
+    assert blocked.value.status_code == 409
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_finalization_events "
+        "WHERE project_id = ?",
+        [project_id],
+    ) == {"count": 0}
+
+
+async def test_batch_review_decisions_enable_explicit_replay_safe_finalization(
+    temp_db: DatabaseConnection,
+):
+    issues = [
+        {
+            "id": f"issue-{index}",
+            "severity": "major",
+            "description": f"审阅意见 {index}",
+            "sceneIds": ["scene-1"],
+        }
+        for index in range(1, 7)
+    ]
+    project_id, draft_id, review_id, workspace = await _seed_project_with_review(
+        temp_db,
+        issues=issues,
+    )
+    decisions_request = AdjudicateScreenplayV2ReviewRequest.model_validate({
+        "expectedProjectRevision": workspace["project"]["revision"],
+        "reviewRevisionId": review_id,
+        "decisions": [
+            *[
+                {
+                    "issueId": f"issue-{index}",
+                    "status": "riskAccepted",
+                    "note": "用户明确接受风险",
+                }
+                for index in range(1, 6)
+            ],
+            {
+                "issueId": "issue-6",
+                "status": "dismissed",
+                "note": "用户判断为误报",
+            },
+        ],
+    })
+    adjudicated = await adjudicate_screenplay_v2_review(
+        project_id,
+        decisions_request,
+        idempotency_key="batch-adjudicate-six-findings",
+    )
+    review_state = adjudicated["data"]["workflow"]["review"]
+    assert review_state["phase"] == "readyToFinalize"
+    assert review_state["counts"] == {
+        "total": 6,
+        "pending": 0,
+        "planned": 0,
+        "resolved": 0,
+        "dismissed": 1,
+        "riskAccepted": 5,
+    }
+    assert review_state["canFinalize"] is True
+    assert adjudicated["data"]["project"]["stage"] == "review"
+
+    replayed_decisions = await adjudicate_screenplay_v2_review(
+        project_id,
+        decisions_request,
+        idempotency_key="batch-adjudicate-six-findings",
+    )
+    assert replayed_decisions["data"]["project"]["revision"] == (
+        adjudicated["data"]["project"]["revision"]
+    )
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_review_decision_events "
+        "WHERE project_id = ?",
+        [project_id],
+    ) == {"count": 6}
+
+    finalize_request = FinalizeScreenplayV2ProjectRequest(
+        expectedProjectRevision=adjudicated["data"]["project"]["revision"],
+        draftRevisionId=draft_id,
+        reviewRevisionId=review_id,
+    )
+    finalized = await finalize_screenplay_v2_project(
+        project_id,
+        finalize_request,
+        idempotency_key="user-finalize-reviewed-project",
+    )
+    assert finalized["data"]["project"]["stage"] == "completed"
+    assert finalized["data"]["workflow"]["review"]["phase"] == "completed"
+    assert finalized["data"]["workflow"]["review"]["completionSource"] == "user"
+
+    replayed_finalization = await finalize_screenplay_v2_project(
+        project_id,
+        finalize_request,
+        idempotency_key="user-finalize-reviewed-project",
+    )
+    assert replayed_finalization["data"]["project"]["revision"] == (
+        finalized["data"]["project"]["revision"]
+    )
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_finalization_events "
+        "WHERE project_id = ?",
+        [project_id],
+    ) == {"count": 1}
+
+    with pytest.raises(AppError, match="项目已经定稿"):
+        await adjudicate_screenplay_v2_review(
+            project_id,
+            AdjudicateScreenplayV2ReviewRequest.model_validate({
+                "expectedProjectRevision": finalized["data"]["project"]["revision"],
+                "reviewRevisionId": review_id,
+                "decisions": [{
+                    "issueId": "issue-6",
+                    "status": "riskAccepted",
+                    "note": "定稿后不能改写裁决快照",
+                }],
+            }),
+            idempotency_key="reject-changing-finalized-decisions",
+        )
+
+
+async def test_planned_review_decision_selects_revision_not_finalization(
+    temp_db: DatabaseConnection,
+):
+    project_id, draft_id, review_id, workspace = await _seed_project_with_review(
+        temp_db,
+        issues=[
+            {
+                "id": "arc-1",
+                "severity": "critical",
+                "description": "人物弧光需要补足",
+                "sceneIds": ["scene-1"],
+            },
+            {
+                "id": "pace-1",
+                "severity": "major",
+                "description": "节奏问题可以保留",
+                "sceneIds": ["scene-1"],
+            },
+        ],
+    )
+    adjudicated = await adjudicate_screenplay_v2_review(
+        project_id,
+        AdjudicateScreenplayV2ReviewRequest.model_validate({
+            "expectedProjectRevision": workspace["project"]["revision"],
+            "reviewRevisionId": review_id,
+            "decisions": [
+                {"issueId": "arc-1", "status": "planned", "note": "进入修订"},
+                {"issueId": "pace-1", "status": "riskAccepted", "note": "保留"},
+            ],
+        }),
+        idempotency_key="plan-selected-review-finding",
+    )
+    review_state = adjudicated["data"]["workflow"]["review"]
+    assert review_state["phase"] == "readyToRevise"
+    assert adjudicated["data"]["workflow"]["nextActions"] == [{
+        "type": "generateDeliverable",
+        "targetRole": "screenplayDraft",
+    }]
+    assert review_state["canFinalize"] is False
+
+    writing_context = await ScreenplayAgentContextQuery(
+        temp_db
+    ).episode_writing_context(
+        project_id,
+        1,
+        draft_revision_id=draft_id,
+    )
+    assert [issue["id"] for issue in writing_context["reviewIssues"]] == [
+        "arc-1",
+    ]
+
+    with pytest.raises(AppError, match="还有 1 条审阅意见等待修订"):
+        await finalize_screenplay_v2_project(
+            project_id,
+            FinalizeScreenplayV2ProjectRequest(
+                expectedProjectRevision=adjudicated["data"]["project"]["revision"],
+                draftRevisionId=draft_id,
+                reviewRevisionId=review_id,
+            ),
+            idempotency_key="reject-finalize-with-planned-finding",
+        )
+
+
+async def test_review_decision_request_rejects_duplicate_issue_ids():
+    with pytest.raises(ValueError, match="不能重复"):
+        AdjudicateScreenplayV2ReviewRequest.model_validate({
+            "expectedProjectRevision": 1,
+            "reviewRevisionId": "review-v1",
+            "decisions": [
+                {"issueId": "issue-1", "status": "resolved", "note": "完成"},
+                {"issueId": "issue-1", "status": "dismissed", "note": "误报"},
+            ],
+        })

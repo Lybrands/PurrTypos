@@ -242,3 +242,37 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         assert "screenplay_conversation_turns" not in native_tables
     finally:
         await reopened.close()
+
+
+async def test_startup_adds_review_adjudication_schema_and_marks_legacy_completion(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_projects "
+        "(id, title, source_kind, source_snapshot_json, active_stage) "
+        "VALUES ('legacy-completed-project', '旧流程成片', 'original', '{}', 'completed')"
+    )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        tables = {
+            str(row["name"])
+            for row in await reopened.fetch_all(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "screenplay_review_decisions",
+            "screenplay_review_decision_events",
+            "screenplay_finalization_events",
+        }.issubset(tables)
+        assert await reopened.fetch_one(
+            "SELECT completion_source FROM screenplay_projects "
+            "WHERE id = 'legacy-completed-project'"
+        ) == {"completion_source": "legacyAgentVerdict"}
+    finally:
+        await reopened.close()

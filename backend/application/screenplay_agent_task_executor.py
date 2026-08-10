@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -12,13 +14,14 @@ from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.output_budget_policies import (
     SCREENPLAY_DELIVERABLE_OUTPUT_POLICY,
     SCREENPLAY_EPISODE_OUTPUT_POLICY,
+    SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY,
     SCREENPLAY_REVIEW_OUTPUT_POLICY,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_incremental_generation import (
     ScreenplayIncrementalGeneration,
 )
-from domains.screenplay_agent.recovery import is_retryable_screenplay_run_error
+from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_tool_calling import ScreenplayToolCallingService
 from domains.screenplay.source_scope import parse_source_scope
@@ -84,6 +87,18 @@ class ScreenplayTaskModelCalls:
         signal=None,
     ) -> Mapping[str, Any]:
         kind = str(unit.get("kind") or "")
+        if kind == "collect_evidence":
+            return await self._collect_evidence(task, unit)
+        if kind == "generate_candidate":
+            return await self._generate_candidate(
+                task, unit, runtime, signal
+            )
+        if kind == "validate_candidate":
+            return self._validate_candidate(task, unit)
+        if kind == "compose_final_response":
+            return await self._compose_final_response(
+                task, unit, runtime, signal
+            )
         if kind == "generate_episode_draft":
             return await self._generate_episode(task, unit, runtime, signal)
         if kind == "generate_deliverable":
@@ -92,19 +107,217 @@ class ScreenplayTaskModelCalls:
             return await self._publish(task)
         raise RuntimeError(f"unsupported screenplay task unit: {kind}")
 
+    async def _collect_evidence(
+        self,
+        task: Mapping[str, Any],
+        unit: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        project_id = str(task["projectId"])
+        role = str(task["targetRole"])
+        unit_input = dict(unit.get("input") or {})
+        base_revision_id = str(unit_input.get("baseRevisionId") or "") or None
+        episode_number = int(unit_input.get("episodeNumber") or 0)
+        heads = await self._context.heads(project_id, text_limit=18_000)
+        evidence: dict[str, Any] = {
+            "projectId": project_id,
+            "targetRole": role,
+            "acceptedDeliverables": heads,
+        }
+        if episode_number:
+            manifest = await self._context.episode_manifest(
+                project_id,
+                episode_number,
+            )
+            evidence.update({
+                "episodeNumber": episode_number,
+                "manifest": manifest,
+                "episodeContext": await self._context.episode_context(
+                    project_id,
+                    episode_number,
+                    draft_revision_id=base_revision_id,
+                ),
+                "writingContext": await self._context.episode_writing_context(
+                    project_id,
+                    episode_number,
+                    draft_revision_id=base_revision_id,
+                ),
+            })
+        else:
+            if base_revision_id:
+                evidence["baseCandidate"] = await self._context.revision(
+                    base_revision_id,
+                    text_limit=18_000,
+                )
+            if role == "sourceAnalysis":
+                evidence["sourceMaterial"] = await self._context.source_context(
+                    project_id
+                )
+        encoded = json.dumps(
+            evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return {
+            "evidence": evidence,
+            "evidenceReceipt": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        }
+
+    async def _generate_candidate(self, task, unit, runtime, signal):
+        evidence_output = _dependency_output(task, unit, "collect_evidence")
+        evidence = dict(evidence_output.get("evidence") or {})
+        if not evidence:
+            raise RuntimeError("screenplay evidence checkpoint is missing")
+        if int((unit.get("input") or {}).get("episodeNumber") or 0):
+            return await self._generate_episode(
+                task,
+                unit,
+                runtime,
+                signal,
+                evidence=evidence,
+            )
+        return await self._generate_deliverable(
+            task,
+            unit,
+            runtime,
+            signal,
+            evidence=evidence,
+        )
+
+    def _validate_candidate(self, task, unit) -> dict[str, Any]:
+        generated = dict(_dependency_output(task, unit, "generate_candidate"))
+        if not generated:
+            raise RuntimeError("screenplay candidate checkpoint is missing")
+        role = str(task["targetRole"])
+        if role == "screenplayDraft":
+            draft = generated.get("episodeDraft")
+            if not isinstance(draft, Mapping):
+                raise ValueError("screenplay episode candidate is missing")
+            if not str(generated.get("sceneListId") or "").strip():
+                raise ValueError("screenplay episode scene list is missing")
+            if not str(draft.get("contentText") or "").strip():
+                raise ValueError("screenplay episode text is empty")
+            if not tuple(draft.get("sceneIds") or ()):
+                raise ValueError("screenplay episode scenes are empty")
+        else:
+            evidence = dict(
+                _dependency_output(task, unit, "collect_evidence").get(
+                    "evidence"
+                ) or {}
+            )
+            heads = {
+                str(item.get("role") or ""): item
+                for item in evidence.get("acceptedDeliverables") or ()
+                if isinstance(item, Mapping)
+            }
+            structure = heads.get("structure")
+            structure_numbers = tuple(
+                int(item.get("number") or 0)
+                for item in (
+                    (structure or {}).get("content", {}).get("episodes", [])
+                )
+                if isinstance(item, Mapping)
+            )
+            draft = heads.get("screenplayDraft")
+            normalized = _validate_deliverable(
+                role,
+                generated,
+                structure_id=(structure or {}).get("revisionId"),
+                structure_episode_numbers=structure_numbers,
+                reviewed_draft_id=(draft or {}).get("revisionId"),
+            )
+            generated.update(normalized)
+        digest_source = json.dumps(
+            generated,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return {
+            **generated,
+            "validationReceipt": hashlib.sha256(
+                digest_source.encode("utf-8")
+            ).hexdigest(),
+        }
+
+    async def _compose_final_response(
+        self,
+        task: Mapping[str, Any],
+        unit: Mapping[str, Any],
+        runtime,
+        signal,
+    ) -> dict[str, Any]:
+        validated = [
+            dict(item.get("output") or {})
+            for item in task.get("units") or ()
+            if str(item.get("kind") or "") == "validate_candidate"
+            and item.get("status") == "completed"
+        ]
+        if not validated:
+            raise RuntimeError("screenplay final response has no validated candidates")
+        unit_input = dict(unit.get("input") or {})
+        role = str(task["targetRole"])
+        payload = {
+            "request": str(
+                unit_input.get("userRequest")
+                or unit_input.get("instruction")
+                or ""
+            ),
+            "instruction": str(unit_input.get("instruction") or ""),
+            "target": {
+                "role": role,
+                "label": _ROLE_LABELS.get(role, "剧本交付物"),
+            },
+            "constraints": list(unit_input.get("constraints") or ()),
+            "preserve": list(unit_input.get("preserve") or ()),
+            "candidates": [
+                _public_candidate_fact(role, output)
+                for output in validated
+            ],
+        }
+        assert self._models is not None
+        result = await self._models.run_json(
+            runtime=runtime,
+            session_id=int(task["sessionId"]),
+            prompt=payload["request"] or payload["instruction"],
+            system_instruction=_final_response_instruction(),
+            user_payload=payload,
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id=str(task["projectId"]),
+            binding_command_id=f"{task['id']}:{unit['id']}",
+            conversation_turn_id=str(task["turnId"]),
+            task_id=str(task["id"]),
+            phase="screenplay_final_response_composition",
+            output_policy=SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY,
+            repair_instruction=(
+                "只返回包含非空 finalResponse 的 JSON 对象；"
+                "答复保持简短，不得加入候选正文或内部字段。"
+            ),
+            validate=_validate_final_response,
+            signal=signal,
+        )
+        return {
+            "finalResponse": result.value["finalResponse"],
+            "runId": result.run_id,
+        }
+
     async def _generate_episode(
         self,
         task,
         unit,
         runtime,
         signal,
+        evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         project_id = str(task["projectId"])
         episode_number = int(unit["input"]["episodeNumber"])
         base_revision_id = str(unit["input"].get("baseRevisionId") or "") or None
-        manifest = await self._context.episode_manifest(
-            project_id,
-            episode_number,
+        manifest = (
+            dict(evidence.get("manifest") or {})
+            if evidence is not None
+            else await self._context.episode_manifest(project_id, episode_number)
         )
         scene_ids = tuple(manifest["sceneIds"])
         if self._tool_calls is not None:
@@ -117,16 +330,28 @@ class ScreenplayTaskModelCalls:
                 base_revision_id=base_revision_id,
                 scene_ids=scene_ids,
                 scene_list_id=str(manifest["sceneListId"]),
+                writing_context=(
+                    dict(evidence.get("writingContext") or {})
+                    if evidence is not None else None
+                ),
             )
-        context = await self._context.episode_context(
-            project_id,
-            episode_number,
-            draft_revision_id=base_revision_id,
+        context = (
+            dict(evidence.get("episodeContext") or {})
+            if evidence is not None
+            else await self._context.episode_context(
+                project_id,
+                episode_number,
+                draft_revision_id=base_revision_id,
+            )
         )
-        heads = await self._context.heads(
-            project_id,
-            roles=("creativeBrief", "structure"),
-            text_limit=8_000,
+        heads = (
+            list(evidence.get("acceptedDeliverables") or ())
+            if evidence is not None
+            else await self._context.heads(
+                project_id,
+                roles=("creativeBrief", "structure"),
+                text_limit=8_000,
+            )
         )
         previous = _last_generated_episode(task.get("units") or (), episode_number)
         payload = {
@@ -158,11 +383,11 @@ class ScreenplayTaskModelCalls:
             repair_instruction="严格按指定 JSON 协议重写；集数和 sceneId 必须与场景表完全一致，每场 processSummary 和 sceneText 都不能为空。",
             validate=lambda value: _validate_episode(value, episode_number, scene_ids),
             execution_progress_fields={
-                "executionSummary": f"第 {episode_number} 集创作推演：",
+                "executionSummary": "",
                 "processSummary": "",
             },
             project_execution=lambda value: (
-                f"第 {episode_number} 集创作推演：{value['executionSummary']}",
+                value["executionSummary"],
             ),
             signal=signal,
         )
@@ -174,6 +399,7 @@ class ScreenplayTaskModelCalls:
         content_text = "\n\n".join(item["contentText"] for item in scene_texts)
         return {
             "runId": result.run_id,
+            "executionSummary": episode["executionSummary"],
             "sceneListId": context["sceneListId"],
             "episodeDraft": {
                 "episodeNumber": episode_number,
@@ -216,16 +442,18 @@ class ScreenplayTaskModelCalls:
         return await self._incremental().generate_review(
             **kwargs,
             draft_scene_ids=_draft_scene_ids,
-            validate_fragment=lambda candidate, number, scene_ids, draft_id: (
+            validate_fragment=lambda candidate, number, scene_ids, draft_id, digest: (
                 _validate_review_fragment_candidate(
                     candidate,
                     episode_number=number,
                     allowed_scene_ids=scene_ids,
                     reviewed_draft_id=draft_id,
+                    reviewed_content_digest=digest,
                 )
             ),
             aggregate_verdict=_aggregate_review_verdict,
             document_kind=_DOCUMENT_KIND["review"],
+            classify_failure=classify_screenplay_run_failure,
         )
 
     async def _generate_scene_list_incrementally(
@@ -259,14 +487,19 @@ class ScreenplayTaskModelCalls:
         unit,
         runtime,
         signal,
+        evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         project_id = str(task["projectId"])
         role = str(task["targetRole"])
         base_revision_id = str(unit["input"].get("baseRevisionId") or "") or None
-        heads = await self._context.heads(
-            project_id,
-            roles=("structure", "screenplayDraft"),
-            text_limit=0,
+        heads = (
+            list(evidence.get("acceptedDeliverables") or ())
+            if evidence is not None
+            else await self._context.heads(
+                project_id,
+                roles=("structure", "screenplayDraft", "review"),
+                text_limit=0,
+            )
         )
         heads_by_role = {head["role"]: head for head in heads}
         structure = heads_by_role.get("structure")
@@ -283,6 +516,13 @@ class ScreenplayTaskModelCalls:
         )
         draft = heads_by_role.get("screenplayDraft")
         reviewed_draft_id = draft["revisionId"] if draft else None
+        previous_review = heads_by_role.get("review")
+        previous_review_content = (
+            previous_review.get("content")
+            if isinstance(previous_review, Mapping)
+            and isinstance(previous_review.get("content"), Mapping)
+            else None
+        )
         if self._tool_calls is not None:
             if role == "review":
                 return await self._generate_review_incrementally(
@@ -291,6 +531,7 @@ class ScreenplayTaskModelCalls:
                     runtime=runtime,
                     signal=signal,
                     reviewed_draft_id=reviewed_draft_id,
+                    previous_review=previous_review_content,
                 )
             if role == "sceneList":
                 return await self._generate_scene_list_incrementally(
@@ -313,6 +554,7 @@ class ScreenplayTaskModelCalls:
                     "constraints": unit["input"].get("constraints") or [],
                     "preserve": unit["input"].get("preserve") or [],
                     "baseRevisionId": base_revision_id,
+                    **({"evidence": dict(evidence)} if evidence else {}),
                 },
                 domain_context=await self._domain_context(
                     task,
@@ -327,12 +569,16 @@ class ScreenplayTaskModelCalls:
                     if role == "review"
                     else SCREENPLAY_DELIVERABLE_OUTPUT_POLICY
                 ),
-                validate_candidate=lambda candidate: _validate_deliverable_candidate(
-                    role,
-                    candidate,
-                    structure_id=structure_id,
-                    structure_episode_numbers=structure_episode_numbers,
-                    reviewed_draft_id=reviewed_draft_id,
+                validate_candidate=(
+                    None
+                    if str(unit.get("kind") or "") == "generate_candidate"
+                    else lambda candidate: _validate_deliverable_candidate(
+                        role,
+                        candidate,
+                        structure_id=structure_id,
+                        structure_episode_numbers=structure_episode_numbers,
+                        reviewed_draft_id=reviewed_draft_id,
+                    )
                 ),
                 signal=signal,
             )
@@ -342,14 +588,22 @@ class ScreenplayTaskModelCalls:
                 "runId": result.run_id,
                 "artifactId": result.candidate["artifactId"],
             }
-        heads = await self._context.heads(project_id, text_limit=18_000)
+        heads = (
+            list(evidence.get("acceptedDeliverables") or ())
+            if evidence is not None
+            else await self._context.heads(project_id, text_limit=18_000)
+        )
         base_candidate = (
-            await self._context.revision(base_revision_id, text_limit=18_000)
+            evidence.get("baseCandidate")
+            if evidence is not None
+            else await self._context.revision(base_revision_id, text_limit=18_000)
             if base_revision_id
             else None
         )
         source = (
-            await self._context.source_context(project_id)
+            evidence.get("sourceMaterial")
+            if evidence is not None
+            else await self._context.source_context(project_id)
             if role == "sourceAnalysis"
             else None
         )
@@ -389,10 +643,10 @@ class ScreenplayTaskModelCalls:
                 reviewed_draft_id=reviewed_draft_id,
             ),
             execution_progress_fields={
-                "executionSummary": f"{_ROLE_LABELS[role]}创作推演：",
+                "executionSummary": "",
             },
             project_execution=lambda value: (
-                f"{_ROLE_LABELS[role]}创作推演：{value['executionSummary']}",
+                value["executionSummary"],
             ),
             signal=signal,
         )
@@ -425,6 +679,11 @@ class ScreenplayTaskModelCalls:
             source_book_id=str(project.get("source_book_id") or "") or None,
             source_scope=parse_source_scope(project.get("source_scope_json")),
             locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
+            tool_access=(
+                "candidate_write"
+                if str(unit.get("kind") or "") == "generate_candidate"
+                else "all"
+            ),
         )
 
     async def _publish(self, task: Mapping[str, Any]) -> dict[str, Any]:
@@ -441,7 +700,11 @@ class ScreenplayTaskModelCalls:
         generated = [
             unit.get("output") or {}
             for unit in task.get("units") or ()
-            if str(unit.get("kind") or "").startswith("generate_")
+            if str(unit.get("kind") or "") in {
+                "validate_candidate",
+                "generate_episode_draft",
+                "generate_deliverable",
+            }
             and unit.get("status") == "completed"
         ]
         if not generated:
@@ -559,12 +822,8 @@ class ScreenplayTaskUnitExecutor:
         )
         return _unit_result(output_ref, output)
 
-    def is_retryable(self, error: Exception) -> bool:
-        return (
-            isinstance(error, ModelGatewayError)
-            and error.retryable
-            and is_retryable_screenplay_run_error(error.code)
-        )
+    def classify_failure(self, error: Exception):
+        return classify_screenplay_run_failure(error)
 
     async def _task_view(
         self,
@@ -581,6 +840,7 @@ class ScreenplayTaskUnitExecutor:
                 "id": unit_id,
                 "kind": str(unit.get("kind") or ""),
                 "input": dict(unit.get("input") or {}),
+                "dependsOn": list(unit.get("dependsOn") or ()),
                 "status": "completed" if unit_id in outputs else "pending",
                 "output": outputs.get(unit_id, {}),
             })
@@ -600,14 +860,73 @@ def _unit_result(output_ref: str, output: Mapping[str, Any]) -> LongTaskUnitResu
     return LongTaskUnitResult(
         output_ref=output_ref,
         run_id=str(output.get("runId") or "").strip() or None,
-        metadata={
-            **({"revisionId": revision_id} if revision_id else {}),
-            **(
-                {"finalResponse": "剧本任务已完成，候选稿已生成。请在下方预览并应用。"}
-                if revision_id
-                else {}
-            ),
-        },
+        metadata=({"revisionId": revision_id} if revision_id else {}),
+    )
+
+
+def _dependency_output(
+    task: Mapping[str, Any],
+    unit: Mapping[str, Any],
+    expected_kind: str,
+) -> Mapping[str, Any]:
+    """Resolve a completed checkpoint for the same recipe target.
+
+    Generate directly depends on evidence. Validation directly depends on the
+    generated candidate, so its evidence checkpoint is an ancestor rather
+    than a direct dependency. Match the stable target identity instead of
+    relying on list position.
+    """
+
+    units = tuple(
+        item
+        for item in task.get("units") or ()
+        if isinstance(item, Mapping)
+    )
+    dependencies = {
+        str(value)
+        for value in unit.get("dependsOn") or ()
+        if str(value).strip()
+    }
+    direct = tuple(
+        item
+        for item in units
+        if str(item.get("id") or "") in dependencies
+        and str(item.get("kind") or "") == expected_kind
+        and item.get("status") == "completed"
+    )
+    candidates = direct or tuple(
+        item
+        for item in units
+        if str(item.get("kind") or "") == expected_kind
+        and item.get("status") == "completed"
+        and _same_recipe_target(item, unit)
+    )
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"screenplay checkpoint {expected_kind!r} is missing or ambiguous"
+        )
+    output = candidates[0].get("output")
+    if not isinstance(output, Mapping):
+        raise RuntimeError(
+            f"screenplay checkpoint {expected_kind!r} has no durable output"
+        )
+    return output
+
+
+def _same_recipe_target(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    left_input = left.get("input")
+    right_input = right.get("input")
+    if not isinstance(left_input, Mapping) or not isinstance(right_input, Mapping):
+        return False
+    left_episode = int(left_input.get("episodeNumber") or 0)
+    right_episode = int(right_input.get("episodeNumber") or 0)
+    if left_episode or right_episode:
+        return left_episode > 0 and left_episode == right_episode
+    return str(left_input.get("targetRole") or "") == str(
+        right_input.get("targetRole") or ""
     )
 
 
@@ -630,6 +949,55 @@ def _deliverable_instruction(role: str) -> str:
 只输出 JSON：{{"title":"标题","executionSummary":"用 2 至 4 句说明本次分析、取舍和校验，不得复述交付物正文","contentText":"完整 Markdown 文档","contentJson":{{...结构化内容...}}}}。
 {requirements}
 只依据提供的项目事实与已采纳交付物；用户要求修改时，保留 preserve 指定内容。"""
+
+
+def _final_response_instruction() -> str:
+    return """你负责为已经完成校验、但尚未向用户公布的剧本候选稿撰写最终答复。
+只输出 JSON：{"finalResponse":"自然语言答复"}。
+finalResponse 使用 2 至 4 句，先准确说明完成了哪些候选内容，再说明用户可以在候选稿区域查看和继续编辑。
+只能依据输入中的公开事实，不得声称候选稿已经采纳，不得编造版本号、链接或未提供的结果。
+不得复述剧本正文，不得输出 JSON 字段解释、工具过程、内部协议、推理过程或固定套话。"""
+
+
+def _public_candidate_fact(
+    role: str,
+    output: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = " ".join(str(output.get("executionSummary") or "").split())
+    if role == "screenplayDraft":
+        draft = output.get("episodeDraft")
+        if not isinstance(draft, Mapping):
+            raise ValueError("validated screenplay episode fact is missing")
+        fact: dict[str, Any] = {
+            "episodeNumber": int(draft.get("episodeNumber") or 0),
+            "title": str(draft.get("title") or "").strip(),
+            "sceneCount": len(tuple(draft.get("sceneIds") or ())),
+        }
+    else:
+        fact = {"title": str(output.get("title") or "").strip()}
+    if not fact.get("title"):
+        raise ValueError("validated screenplay candidate title is missing")
+    if role == "screenplayDraft" and int(fact["episodeNumber"]) <= 0:
+        raise ValueError("validated screenplay episode number is missing")
+    if summary:
+        fact["executionSummary"] = _execution_summary({
+            "executionSummary": summary,
+        })
+    return fact
+
+
+def _validate_final_response(value: dict[str, Any]) -> dict[str, Any]:
+    response = " ".join(str(value.get("finalResponse") or "").split())
+    if not response or len(response) > 1_200:
+        raise ValueError("finalResponse must be non-empty and concise")
+    if any(marker in response for marker in (
+        "```",
+        "contentText",
+        "contentJson",
+        "sceneText",
+    )):
+        raise ValueError("finalResponse contains internal candidate data")
+    return {"finalResponse": response}
 
 
 def _deliverable_tool_instruction(role: str) -> str:
@@ -803,6 +1171,7 @@ def _validate_review_fragment_candidate(
     episode_number: int,
     allowed_scene_ids: Sequence[str],
     reviewed_draft_id: str,
+    reviewed_content_digest: str,
 ) -> dict[str, Any]:
     normalized = _validate_deliverable_candidate(
         "review",
@@ -831,6 +1200,9 @@ def _validate_review_fragment_candidate(
             issue["severity"] == "critical" for issue in issues
         ),
         "reviewedEpisode": episode_number,
+        "reviewStatus": "completed",
+        "reviewedContentDigest": reviewed_content_digest,
+        "inputContractVersion": 2,
     })
     payload["contentJson"] = content
     return {**normalized, "payload": payload}

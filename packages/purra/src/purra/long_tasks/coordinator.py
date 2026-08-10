@@ -7,6 +7,11 @@ import asyncio
 from purra.long_tasks.contracts import LongTaskStatus
 from purra.long_tasks.ports import LongTaskRepository, LongTaskUnitRunner
 from purra.ports import CancellationSignal
+from purra.recovery import (
+    FailureCategory,
+    FailureSignal,
+    decide_failure,
+)
 
 
 class LongTaskCoordinator:
@@ -116,19 +121,30 @@ class LongTaskCoordinator:
                 return current
             if signal is not None and signal.is_set():
                 return await self._checkpoint_interrupted(task.id, unit.id)
-            classifier = getattr(runner, "is_retryable_unit_error", None)
-            retryable = False
+            classifier = getattr(runner, "classify_unit_failure", None)
+            failure = None
             if callable(classifier):
                 try:
-                    retryable = bool(classifier(task, unit, error))
+                    candidate = classifier(task, unit, error)
+                    if isinstance(candidate, FailureSignal):
+                        failure = candidate
                 except Exception:
-                    retryable = False
-            settled = await self._repository.fail_unit(
+                    failure = None
+            if failure is None:
+                failure = FailureSignal(
+                    category=FailureCategory.BUSINESS_INVARIANT,
+                    code=_error_code(error),
+                    retryable=False,
+                )
+            decision = decide_failure(
+                failure,
+                attempts_remaining=max(0, unit.max_attempts - unit.attempt),
+            )
+            settled = await self._repository.settle_unit_failure(
                 task.id,
                 unit.id,
                 worker_id=self._worker_id,
-                error_code=_error_code(error),
-                retryable=retryable,
+                decision=decision,
             )
             await self._notify_settled(runner, task.id)
             return settled

@@ -34,13 +34,17 @@ export type AssistantTimelinePart =
   | TimelineContextCompactionPart;
 
 export type TimelineStepPart = TimelineCommentaryPart | TimelineToolsPart;
+export type TimelineOperationPart =
+  | TimelineToolsPart
+  | TimelineDelegationsPart
+  | TimelineContextCompactionPart;
 
 export type WorkLogTimelineItem =
   | AssistantTimelinePart
   | {
       type: "stepGroup";
       groupKey: string;
-      parts: TimelineStepPart[];
+      parts: TimelineOperationPart[];
     };
 
 export interface BuildAssistantTimelineOptions {
@@ -50,38 +54,8 @@ export interface BuildAssistantTimelineOptions {
   loading?: boolean;
 }
 
-export function getAssistantProcessingLabel(message: ChatMessage): string {
-  if (
-    message.toolApprovals?.some(
-      (approval) => !approval.status || approval.status === "pending",
-    )
-  ) {
-    return "等待确认";
-  }
-  if (message.contextCompaction?.status === "running") return "整理上下文";
-  if (message.toolCalling) return "执行操作";
-  if (
-    message.delegations?.some((item) =>
-      ["queued", "claimed", "running"].includes(item.status)
-    )
-  ) {
-    return "协调任务";
-  }
-  if ((message.commentary ?? "").trim()) return "推进任务";
-  if (
-    message.taskPlan?.status === "planned" ||
-    message.taskPlan?.status === "running"
-  ) {
-    return message.taskPlan.steps.some((step) => step.status === "running")
-      ? "推进任务"
-      : "拆解任务";
-  }
-  if (message.toolCallSegments?.some((segment) => segment.labels.length > 0)) {
-    return "核对结果";
-  }
-  if (message.content.trim()) return "组织回复";
-  if (message.contextBudget) return "准备上下文";
-  return "理解请求";
+export function getAssistantProcessingLabel(_message: ChatMessage): string {
+  return "";
 }
 
 export function groupConsecutiveWorkSteps(
@@ -89,7 +63,7 @@ export function groupConsecutiveWorkSteps(
   messageIndex: number,
 ): WorkLogTimelineItem[] {
   const items: WorkLogTimelineItem[] = [];
-  let stepParts: TimelineStepPart[] = [];
+  let stepParts: TimelineOperationPart[] = [];
   let groupStartIndex = 0;
 
   const flushSteps = () => {
@@ -115,7 +89,11 @@ export function groupConsecutiveWorkSteps(
     ) {
       return;
     }
-    if (part.type === "commentary" || part.type === "tools") {
+    if (
+      part.type === "tools" ||
+      part.type === "delegations" ||
+      part.type === "contextCompaction"
+    ) {
       if (stepParts.length === 0) groupStartIndex = partIndex;
       stepParts.push(part);
       return;

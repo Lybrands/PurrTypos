@@ -9,7 +9,7 @@ import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
 import ToolApprovalCard from "../ToolApprovalCard";
-import WorkLog from "../WorkLog";
+import WorkLog, { WorkLogStepGroup } from "../WorkLog";
 import SubAgentStatusList from "../SubAgentStatusList";
 import StructuredQuestionCard from "../StructuredQuestionCard";
 import ErrorReportNotice from "./ErrorReportNotice";
@@ -17,7 +17,9 @@ import { parseStructuredQuestions } from "../../structuredQuestions";
 import {
   buildAssistantTimeline,
   getAssistantProcessingLabel,
+  groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
+  type TimelineOperationPart,
   type TimelineStepPart,
 } from "./assistantTimeline";
 import "./AssistantMessageBody.scss";
@@ -104,6 +106,24 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   });
 }
 
+function operationIsActive(part: TimelineOperationPart): boolean {
+  if (part.type === "tools") return Boolean(part.isLive);
+  if (part.type === "contextCompaction") {
+    return part.state.status === "running";
+  }
+  return part.items.some((item) =>
+    ["queued", "claimed", "running"].includes(item.status),
+  );
+}
+
+function operationStepCount(part: TimelineOperationPart): number {
+  if (part.type === "contextCompaction") return 1;
+  if (part.type === "delegations") return Math.max(1, part.items.length);
+  return part.segment.labels.filter(
+    (_label, labelIndex) => !part.segment.cachedFlags?.[labelIndex],
+  ).length;
+}
+
 function AssistantMessageBodyInner({
   index,
   message,
@@ -130,17 +150,22 @@ function AssistantMessageBodyInner({
 
   const answerParts = timeline.filter((part) => part.type === "text");
   const workLogParts = timeline.filter(isVisibleWorkLogPart);
+  const workLogItems = React.useMemo(
+    () => groupConsecutiveWorkSteps(workLogParts, index),
+    [workLogParts, index],
+  );
   const hasAnswerContent = answerParts.length > 0;
-  const hasWorkLog = workLogParts.length > 0;
+  const hasWorkLog = workLogItems.length > 0;
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
     [timeline, processingLabel],
   );
-  const showProcessingStandby = useProcessingStandby(
+  const processingStandbyReady = useProcessingStandby(
     isStreaming,
     activityKey,
   );
+  const showProcessingStandby = Boolean(processingLabel) && processingStandbyReady;
 
   const renderStepPart = (part: TimelineStepPart) => {
     if (part.type === "commentary") {
@@ -178,6 +203,51 @@ function AssistantMessageBodyInner({
     );
   };
 
+  const renderOperationPart = (
+    part: TimelineOperationPart,
+    key: React.Key,
+  ) => {
+    if (part.type === "contextCompaction") {
+      const running = part.state.status === "running";
+      const failed = part.state.status === "failed";
+      const turnCount =
+        part.state.compactedTurnCount ?? part.state.selectedTurnCount;
+      return (
+        <div
+          key={key}
+          className={`work-log__context-compaction ${failed ? "work-log__context-compaction--failed" : ""}`}
+        >
+          {running ? (
+            <LoadingIcon spin />
+          ) : failed ? (
+            <AlertCircleIcon />
+          ) : (
+            <CheckCircleIcon />
+          )}
+          <span>
+            {running
+              ? "正在压缩上下文"
+              : failed
+                ? "上下文压缩未完成，已使用安全回退"
+                : "已压缩上下文"}
+            {turnCount && !failed ? ` · ${turnCount} 个较早回合` : ""}
+          </span>
+          {running ? <span className="a-blink-dots">...</span> : null}
+        </div>
+      );
+    }
+    if (part.type === "delegations") {
+      return (
+        <SubAgentStatusList
+          key={key}
+          items={part.items}
+          activities={message.subAgentActivities}
+        />
+      );
+    }
+    return renderStepPart(part);
+  };
+
   return (
     <div className="bubble-assistant-body">
       {isStreaming || hasWorkLog ? (
@@ -189,48 +259,56 @@ function AssistantMessageBodyInner({
           durationMs={message.durationMs}
           hasError={workLogHasError(workLogParts)}
         >
-          {workLogParts.map((part, partIndex) => {
-            if (part.type === "contextCompaction") {
-              const running = part.state.status === "running";
-              const failed = part.state.status === "failed";
-              const turnCount =
-                part.state.compactedTurnCount ??
-                part.state.selectedTurnCount;
+          {workLogItems.map((part, partIndex) => {
+            if (part.type === "stepGroup") {
+              const activePart = part.parts.find(operationIsActive);
+              const completedDurationMs = part.parts.reduce(
+                (total, item) =>
+                  total + (
+                    item.type === "tools" && !item.isLive
+                      ? item.segment.durationMs ?? 0
+                      : 0
+                  ),
+                0,
+              );
               return (
-                <div
-                  key={`context-compaction-${partIndex}`}
-                  className={`work-log__context-compaction ${failed ? "work-log__context-compaction--failed" : ""}`}
-                >
-                  {running ? (
-                    <LoadingIcon spin />
-                  ) : failed ? (
-                    <AlertCircleIcon />
-                  ) : (
-                    <CheckCircleIcon />
+                <WorkLogStepGroup
+                  key={part.groupKey}
+                  groupKey={part.groupKey}
+                  stepCount={part.parts.reduce(
+                    (total, item) => total + operationStepCount(item),
+                    0,
                   )}
-                  <span>
-                    {running
-                      ? "正在压缩上下文"
-                      : failed
-                        ? "上下文压缩未完成，已使用安全回退"
-                        : "已压缩上下文"}
-                    {turnCount && !failed ? ` · ${turnCount} 个较早回合` : ""}
-                  </span>
-                  {running ? <span className="a-blink-dots">...</span> : null}
-                </div>
+                  completedDurationMs={completedDurationMs}
+                  activeStartedAt={
+                    activePart?.type === "tools"
+                      ? activePart.segment.startedAt
+                      : undefined
+                  }
+                  active={Boolean(activePart)}
+                  hasError={workLogHasError(part.parts)}
+                >
+                  {part.parts.map((item, itemIndex) =>
+                    renderOperationPart(
+                      item,
+                      `${part.groupKey}-${item.type}-${itemIndex}`,
+                    ),
+                  )}
+                </WorkLogStepGroup>
               );
             }
-            if (part.type === "delegations") {
-              return (
-                <SubAgentStatusList
-                  key={`delegations-${partIndex}`}
-                  items={part.items}
-                  activities={message.subAgentActivities}
-                />
-              );
-            }
-            if (part.type === "commentary" || part.type === "tools") {
+            if (part.type === "commentary") {
               return renderStepPart(part);
+            }
+            if (
+              part.type === "tools" ||
+              part.type === "delegations" ||
+              part.type === "contextCompaction"
+            ) {
+              return renderOperationPart(
+                part,
+                `${index}-operation-${part.type}-${partIndex}`,
+              );
             }
             return null;
           })}

@@ -16,6 +16,7 @@ from purra.contracts import (
     ModelRequest,
     PlanningConstraints,
     ResponseConstraints,
+    RunExecutionIntent,
     RunBinding,
     RunStatus,
     StepExecutor,
@@ -28,6 +29,12 @@ from purra.contracts import (
     ToolPolicy,
     ToolRiskLevel,
     ToolSchema,
+)
+from purra.model_protocol import (
+    FeatureSupport,
+    ModelProtocolCapabilities,
+    ReasoningControl,
+    ReasoningReplayPolicy,
 )
 from purra.events import AgentCommand, AgentEvent, CoreCommandType, CoreEventType
 from purra.task_admission import ExecutionMode, TaskAdmissionDecision
@@ -55,6 +62,31 @@ def test_run_request_snapshots_opaque_context_and_finds_latest_user_text():
     assert request.tools_enabled is True
     with pytest.raises(TypeError):
         request.domain_context.payload["scope"] = "forbidden"  # type: ignore[index]
+
+
+def test_model_protocol_capability_digest_and_run_intent_are_stable():
+    capabilities = ModelProtocolCapabilities(
+        reasoning_control=ReasoningControl.SELECTABLE,
+        reasoning_replay=ReasoningReplayPolicy.REQUIRED,
+        tool_calling=FeatureSupport.SUPPORTED,
+        required_tool_choice=FeatureSupport.UNAVAILABLE,
+    )
+    intent = RunExecutionIntent(
+        requested_reasoning_mode="enabled",
+        output_contract="assistant_text",
+        tool_protocol_contract="host_tools",
+        recovery_policy_id="purra.default.v1",
+        capability_snapshot_digest=capabilities.digest(),
+    )
+
+    assert capabilities.digest() == ModelProtocolCapabilities(
+        reasoning_control="selectable",
+        reasoning_replay="required",
+        tool_calling="supported",
+        required_tool_choice="unavailable",
+    ).digest()
+    assert intent.requested_reasoning_mode == "enabled"
+    assert intent.capability_snapshot_digest == capabilities.digest()
 
 
 def test_execution_state_is_run_scoped_but_has_no_core_authorization_field():

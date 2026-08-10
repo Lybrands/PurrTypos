@@ -12,6 +12,14 @@ from purra.long_tasks import (
     LongTaskStatus,
     LongTaskUnitResult,
     LongTaskUnitSpec,
+    LongTaskUnitStatus,
+)
+from purra.recovery import (
+    FailureCategory,
+    FailureDisposition,
+    FailureSignal,
+    RecoveryEffectState,
+    decide_failure,
 )
 from purra.work_items.contracts import WorkItemCreateCommand
 from database.connection import DatabaseConnection
@@ -64,8 +72,12 @@ async def test_long_task_runs_dependency_order_and_retries_one_unit(long_task_db
         def __init__(self):
             self.calls = []
 
-        def is_retryable_unit_error(self, task, unit, error):
-            return str(error) == "temporary_provider_failure"
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.TRANSIENT_PROVIDER,
+                code=str(error),
+                retryable=str(error) == "temporary_provider_failure",
+            )
 
         async def run_unit(self, task, unit, signal=None):
             self.calls.append((unit.id, unit.attempt))
@@ -313,8 +325,12 @@ async def test_long_task_retry_backoff_waits_without_spending_all_attempts_at_on
     monkeypatch.setattr("purra.long_tasks.coordinator.asyncio.sleep", _sleep)
 
     class _Runner:
-        def is_retryable_unit_error(self, task, unit, error):
-            return str(error) == "temporary_connection_failure"
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.TRANSIENT_PROVIDER,
+                code=str(error),
+                retryable=str(error) == "temporary_connection_failure",
+            )
 
         async def run_unit(self, task, unit, signal=None):
             if unit.attempt < 3:
@@ -374,6 +390,56 @@ async def test_long_task_does_not_retry_an_unclassified_failure(long_task_db):
     unit = (await repository.list_units(task.id))[0]
     assert unit.error_code == "model_output_truncated"
     assert unit.attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_pauses_exhausted_recoverable_unit(long_task_db):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-exhausted-recoverable",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-exhausted-recoverable",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-exhausted-recoverable",
+            created_by_run_id="run-parent",
+            units=(LongTaskUnitSpec(
+                id="batch-1",
+                position=0,
+                max_attempts=1,
+            ),),
+        ),
+    )
+
+    class _Runner:
+        def classify_unit_failure(self, task, unit, error):
+            return FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code=str(error),
+                retryable=True,
+            )
+
+        async def run_unit(self, task, unit, signal=None):
+            raise RuntimeError("model_output_truncated")
+
+    paused = await LongTaskCoordinator(
+        repository,
+        worker_id="worker-exhausted-recoverable",
+    ).run(task.id, _Runner())
+
+    assert paused.status is LongTaskStatus.PAUSED
+    unit = (await repository.list_units(task.id))[0]
+    assert unit.status is LongTaskUnitStatus.BLOCKED
+    assert unit.error_code == "model_output_truncated"
 
 
 @pytest.mark.asyncio
@@ -518,12 +584,18 @@ async def test_failed_long_task_can_be_explicitly_retried(long_task_db):
         lease_duration_ms=30_000,
     )
     assert unit is not None
-    failed = await repository.fail_unit(
+    failed = await repository.settle_unit_failure(
         task.id,
         unit.id,
         worker_id="worker-1",
-        error_code="provider_failed",
-        retryable=False,
+        decision=decide_failure(
+            FailureSignal(
+                category=FailureCategory.BUSINESS_INVARIANT,
+                code="provider_failed",
+                retryable=False,
+            ),
+            attempts_remaining=0,
+        ),
     )
     assert failed.status is LongTaskStatus.FAILED
 
@@ -572,12 +644,18 @@ async def test_retry_claim_preserves_previous_failure_reason(long_task_db):
         lease_duration_ms=30_000,
     )
     assert first is not None
-    await repository.fail_unit(
+    await repository.settle_unit_failure(
         task.id,
         first.id,
         worker_id="worker-1",
-        error_code="screenplay.batch.invalid_json",
-        retryable=True,
+        decision=decide_failure(
+            FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code="screenplay.batch.invalid_json",
+                retryable=True,
+            ),
+            attempts_remaining=2,
+        ),
     )
 
     second = await repository.claim_ready_unit(
@@ -589,3 +667,177 @@ async def test_retry_claim_preserves_previous_failure_reason(long_task_db):
     assert second is not None
     assert second.attempt == 2
     assert second.error_code == "screenplay.batch.invalid_json"
+
+
+async def _task_with_completed_and_active_unit(db, suffix: str):
+    work_items = SqliteWorkItemRepository(db)
+    await work_items.create(
+        f"work-blocked-{suffix}",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(db)
+    task = await repository.create(
+        f"task-blocked-{suffix}",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id=f"work-blocked-{suffix}",
+            created_by_run_id="run-parent",
+            units=(
+                LongTaskUnitSpec(id="completed", position=0),
+                LongTaskUnitSpec(
+                    id="recoverable",
+                    position=1,
+                    dependencies=("completed",),
+                    max_attempts=1,
+                ),
+            ),
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    completed = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-1",
+        lease_duration_ms=30_000,
+    )
+    assert completed is not None
+    await repository.complete_unit(
+        task.id,
+        completed.id,
+        worker_id="worker-1",
+        result=LongTaskUnitResult(output_ref="artifact://completed"),
+    )
+    active = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-1",
+        lease_duration_ms=30_000,
+    )
+    assert active is not None
+    return repository, task, active
+
+
+@pytest.mark.asyncio
+async def test_exhausted_recoverable_unit_pauses_without_canceling_completed_units(
+    long_task_db,
+):
+    repository, task, active = await _task_with_completed_and_active_unit(
+        long_task_db,
+        "preserve",
+    )
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="model_output_truncated",
+            retryable=True,
+            effect_state=RecoveryEffectState.NOT_STARTED,
+            checkpoint_available=True,
+        ),
+        attempts_remaining=0,
+    )
+    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+
+    paused = await repository.settle_unit_failure(
+        task.id,
+        active.id,
+        worker_id="worker-1",
+        decision=decision,
+    )
+
+    assert paused.status is LongTaskStatus.PAUSED
+    assert paused.completed_units == 1
+    assert paused.failed_units == 0
+    units = await repository.list_units(task.id)
+    assert units[0].status is LongTaskUnitStatus.COMPLETED
+    assert units[0].output_ref == "artifact://completed"
+    assert units[1].status is LongTaskUnitStatus.BLOCKED
+    assert units[1].error_code == "model_output_truncated"
+
+
+@pytest.mark.asyncio
+async def test_resume_only_requeues_blocked_units(long_task_db):
+    repository, task, active = await _task_with_completed_and_active_unit(
+        long_task_db,
+        "resume",
+    )
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code="max_model_rounds",
+            retryable=True,
+            effect_state=RecoveryEffectState.NOT_STARTED,
+        ),
+        attempts_remaining=0,
+    )
+    await repository.settle_unit_failure(
+        task.id,
+        active.id,
+        worker_id="worker-1",
+        decision=decision,
+    )
+
+    resumed = await repository.resume(task.id, additional_attempts=1)
+
+    assert resumed.status is LongTaskStatus.RUNNING
+    units = await repository.list_units(task.id)
+    assert units[0].status is LongTaskUnitStatus.COMPLETED
+    assert units[0].output_ref == "artifact://completed"
+    assert units[0].max_attempts == 3
+    assert units[1].status is LongTaskUnitStatus.PENDING
+    assert units[1].max_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_permanent_unit_failure_still_terminalizes_task(long_task_db):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-permanent",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create(
+        "task-permanent",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-1",
+            work_item_id="work-permanent",
+            created_by_run_id="run-parent",
+            units=(LongTaskUnitSpec(id="invalid", position=0),),
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    active = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-1",
+        lease_duration_ms=30_000,
+    )
+    assert active is not None
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.BUSINESS_INVARIANT,
+            code="candidate_schema_invalid",
+            retryable=False,
+        ),
+        attempts_remaining=2,
+    )
+
+    failed = await repository.settle_unit_failure(
+        task.id,
+        active.id,
+        worker_id="worker-1",
+        decision=decision,
+    )
+
+    assert failed.status is LongTaskStatus.FAILED
+    unit = (await repository.list_units(task.id))[0]
+    assert unit.status is LongTaskUnitStatus.FAILED
