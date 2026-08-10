@@ -10,9 +10,20 @@ even when a provider has already streamed a tool-call id and function name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from purra.contracts.enums import ModelFinishReason
 from purra.normalization import non_negative_int, optional_text
+
+
+class InvocationTermination(StrEnum):
+    COMPLETED = "completed"
+    LENGTH = "length"
+    CANCELED = "canceled"
+    TRANSPORT_INTERRUPTED = "transport_interrupted"
+    PROTOCOL_INVALID = "protocol_invalid"
+    PROVIDER_REJECTED = "provider_rejected"
+    TOOL_EFFECT_UNKNOWN = "tool_effect_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +31,10 @@ class ModelTermination:
     """Execution-facing interpretation of one terminal model stream."""
 
     finish_reason: ModelFinishReason
+    termination: InvocationTermination
     tool_call_count: int
     incomplete: bool
     authorizes_tool_calls: bool
-    retryable: bool = False
     error_code: str | None = None
 
     def __post_init__(self) -> None:
@@ -37,15 +48,17 @@ class ModelTermination:
         object.__setattr__(self, "incomplete", bool(self.incomplete))
         object.__setattr__(
             self,
+            "termination",
+            InvocationTermination(self.termination),
+        )
+        object.__setattr__(
+            self,
             "authorizes_tool_calls",
             bool(self.authorizes_tool_calls),
         )
-        object.__setattr__(self, "retryable", bool(self.retryable))
         object.__setattr__(self, "error_code", optional_text(self.error_code))
         if self.incomplete and self.authorizes_tool_calls:
             raise ValueError("incomplete output cannot authorize tool calls")
-        if self.retryable and not self.incomplete:
-            raise ValueError("only incomplete output can be retryable")
         if self.authorizes_tool_calls and count == 0:
             raise ValueError("tool authorization requires at least one call")
 
@@ -66,6 +79,11 @@ def classify_model_termination(
 
     reason = ModelFinishReason(finish_reason)
     count = int(tool_call_count)
+    termination = {
+        ModelFinishReason.LENGTH: InvocationTermination.LENGTH,
+        ModelFinishReason.FILTERED: InvocationTermination.PROVIDER_REJECTED,
+        ModelFinishReason.OTHER: InvocationTermination.PROTOCOL_INVALID,
+    }.get(reason, InvocationTermination.COMPLETED)
     incomplete = reason in {
         ModelFinishReason.LENGTH,
         ModelFinishReason.FILTERED,
@@ -79,6 +97,7 @@ def classify_model_termination(
         error_code = "tool_call_truncated" if count else "model_output_truncated"
     return ModelTermination(
         finish_reason=reason,
+        termination=termination,
         tool_call_count=count,
         incomplete=incomplete,
         authorizes_tool_calls=bool(
@@ -89,9 +108,12 @@ def classify_model_termination(
                 ModelFinishReason.STOP,
             }
         ),
-        retryable=reason is ModelFinishReason.LENGTH,
         error_code=error_code,
     )
 
 
-__all__ = ["ModelTermination", "classify_model_termination"]
+__all__ = [
+    "InvocationTermination",
+    "ModelTermination",
+    "classify_model_termination",
+]

@@ -74,7 +74,7 @@ def test_complete_resolves_the_exact_provider_output_limit():
     asyncio.run(run())
 
 
-def test_reasoning_compatibility_fallback_is_bounded_to_one_attempt():
+def test_reasoning_incompatibility_is_not_replayed_with_another_mode():
     class Gateway(_Gateway):
         async def complete(self, messages, invocation, signal=None):
             if not self.invocations:
@@ -84,12 +84,11 @@ def test_reasoning_compatibility_fallback_is_bounded_to_one_attempt():
 
     async def run():
         gateway = Gateway()
-        result = await ManagedModelExecutor(gateway).complete((), _call())
+        with pytest.raises(UnsupportedModelFeatureError):
+            await ManagedModelExecutor(gateway).complete((), _call())
         assert [item.reasoning_mode for item in gateway.invocations] == [
             ReasoningMode.DISABLED,
-            ReasoningMode.DEFAULT,
         ]
-        assert len(result.call_parameters) == 2
 
     asyncio.run(run())
 

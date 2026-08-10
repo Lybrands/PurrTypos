@@ -2948,7 +2948,76 @@ async def test_runtime_rejects_conflicting_or_duplicate_call_ids(malformed_round
 
 
 @pytest.mark.asyncio
-async def test_runtime_discards_truncated_tool_call_and_retries_without_execution():
+@pytest.mark.parametrize(
+    "truncation_kind",
+    ["reasoning", "content", "json", "tool_arguments"],
+)
+async def test_length_never_replays_the_same_request_fingerprint(
+    truncation_kind,
+):
+    if truncation_kind == "reasoning":
+        chunks = [
+            ModelStreamChunk(reasoning_delta="unfinished reasoning"),
+            ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
+        ]
+    elif truncation_kind == "content":
+        chunks = [ModelStreamChunk(
+            content_delta="unfinished response",
+            finish_reason=ModelFinishReason.LENGTH,
+        )]
+    elif truncation_kind == "json":
+        chunks = [ModelStreamChunk(
+            content_delta='{"answer":"unfinished',
+            finish_reason=ModelFinishReason.LENGTH,
+        )]
+    else:
+        chunks = [ModelStreamChunk(
+            tool_call_deltas=(ToolCallDelta(
+                index=0,
+                id="partial-call",
+                type="function",
+                name="readA",
+                arguments_fragment='{"query":"unfinished',
+            ),),
+            finish_reason=ModelFinishReason.LENGTH,
+        )]
+    model = ScriptedModelGateway([chunks, _answer("must not run")])
+    observer = RecordingObserver([{"readA"}])
+    tools = (_schema("readA"),) if truncation_kind == "tool_arguments" else ()
+
+    updates = await _collect(
+        AgentRuntime(model_gateway=model, observer=observer),
+        tools=tools,
+        scope_tools_to_observer=False,
+        force_tool_choice=bool(tools),
+    )
+
+    expected_error = (
+        "tool_call_truncated"
+        if truncation_kind == "tool_arguments"
+        else "model_output_truncated"
+    )
+    assert _result(updates).error_code == expected_error
+    assert len(model.invocations) == 1
+    call_events = [
+        update
+        for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_CALL_RECORDED
+    ]
+    assert len(call_events) == 1
+    fingerprint = call_events[0].payload["requestFingerprint"]
+    assert str(fingerprint).startswith("sha256:")
+    trace = next(
+        item for item in observer.traces
+        if item.stage == "model_output"
+    )
+    assert trace.details["requestFingerprint"] == fingerprint
+    assert trace.details["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_discards_truncated_tool_call_without_replaying_request():
     truncated = [ModelStreamChunk(
         tool_call_deltas=(ToolCallDelta(
             index=0,
@@ -2959,13 +3028,9 @@ async def test_runtime_discards_truncated_tool_call_and_retries_without_executio
         ),),
         finish_reason=ModelFinishReason.LENGTH,
     )]
-    model = ScriptedModelGateway([
-        truncated,
-        _tool_call("complete-call", "readA"),
-        _answer("done"),
-    ])
-    tools = ScriptedToolGateway([_batch("complete-call", "readA")])
-    observer = RecordingObserver([{"readA"}, set()])
+    model = ScriptedModelGateway([truncated, _answer("must not run")])
+    tools = ScriptedToolGateway([])
+    observer = RecordingObserver([{"readA"}])
 
     updates = await _collect(
         AgentRuntime(
@@ -2978,27 +3043,15 @@ async def test_runtime_discards_truncated_tool_call_and_retries_without_executio
         force_tool_choice=True,
     )
 
-    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert _result(updates).final_response == "done"
-    assert [request.calls[0].id for request in tools.requests] == [
-        "complete-call"
-    ]
-    retry_messages = model.message_rounds[1]
-    assert retry_messages[-1].role is MessageRole.DEVELOPER
-    assert "discarded the entire partial call" in retry_messages[-1].content
-    assert not any(
-        message.role in {MessageRole.ASSISTANT, MessageRole.TOOL}
-        and (
-            any(call.id == "partial-call" for call in message.tool_calls)
-            or message.tool_call_id == "partial-call"
-        )
-        for message in retry_messages
-    )
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "tool_call_truncated"
+    assert tools.requests == []
+    assert len(model.invocations) == 1
     trace = next(
         item
         for item in observer.traces
         if item.stage == "model_output"
-        and item.outcome == "truncated_retry"
+        and item.outcome == "truncated"
     )
     assert trace.details["errorCode"] == "tool_call_truncated"
     assert trace.details["batchExecuted"] is False
@@ -3041,19 +3094,13 @@ async def test_resolved_task_budget_never_retries_the_same_truncated_allowance()
 
 
 @pytest.mark.asyncio
-async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode():
+async def test_reasoning_only_truncation_fails_without_replaying_request():
     reasoning_only = [
         ModelStreamChunk(reasoning_delta="spent the whole allowance reasoning"),
         ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
     ]
-    model = ScriptedModelGateway([
-        reasoning_only,
-        _tool_call("candidate-call", "writeCandidate"),
-        _answer("candidate saved"),
-    ])
-    tools = ScriptedToolGateway([
-        _batch("candidate-call", "writeCandidate"),
-    ])
+    model = ScriptedModelGateway([reasoning_only, _answer("must not run")])
+    tools = ScriptedToolGateway([])
     observer = RecordingObserver()
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="write the candidate"),),
@@ -3082,24 +3129,19 @@ async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode
         scope_tools_to_observer=False,
     )
 
-    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert _result(updates).final_response == "candidate saved"
+    assert _result(updates).outcome is RuntimeOutcome.FAILED
+    assert _result(updates).error_code == "model_output_truncated"
     assert [item.reasoning_mode for item in model.invocations] == [
         ReasoningMode.DEFAULT,
-        ReasoningMode.DEFAULT,
-        ReasoningMode.DEFAULT,
     ]
-    assert [request.calls[0].id for request in tools.requests] == [
-        "candidate-call"
-    ]
+    assert tools.requests == []
     trace = next(
         item
         for item in observer.traces
         if item.stage == "model_output"
-        and item.outcome == "truncated_reasoning_retry"
+        and item.outcome == "truncated"
     )
     assert trace.details["reasoningOnly"] is True
-    assert trace.details["fallbackReasoningMode"] is None
     assert trace.details["outputLimit"]["maxTokens"] == 4_000
 
 
@@ -3127,12 +3169,7 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
                 )
             return await super().stream(messages, invocation, signal)
 
-    reasoning_only = [
-        ModelStreamChunk(reasoning_delta="spent the allowance reasoning"),
-        ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
-    ]
     model = ReplayRequiredProtocolGateway([
-        reasoning_only,
         _tool_call(
             "read-call",
             "readA",
@@ -3179,7 +3216,6 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
     assert [
         item.reasoning_mode for item in model.attempted_invocations
     ] == [
-        ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
@@ -3234,7 +3270,7 @@ async def test_runtime_never_executes_complete_looking_call_finished_by_length()
 
 
 @pytest.mark.asyncio
-async def test_repeated_truncation_keeps_primary_error_and_skips_replanning():
+async def test_truncation_keeps_primary_error_and_skips_replanning():
     truncated = [ModelStreamChunk(
         tool_call_deltas=(ToolCallDelta(
             index=0,
@@ -3245,7 +3281,7 @@ async def test_repeated_truncation_keeps_primary_error_and_skips_replanning():
         ),),
         finish_reason=ModelFinishReason.LENGTH,
     )]
-    model = ScriptedModelGateway([truncated, truncated])
+    model = ScriptedModelGateway([truncated, _answer("must not run")])
     tools = ScriptedToolGateway([])
     observer = RecordingObserver([{"readA"}])
     hook = RecoveryPlanningHook(observer)
@@ -3271,10 +3307,8 @@ async def test_repeated_truncation_keeps_primary_error_and_skips_replanning():
         if item.stage == "model_output"
         and item.outcome in {"truncated_retry", "truncated"}
     ]
-    assert [item.outcome for item in truncation_traces] == [
-        "truncated_retry",
-        "truncated",
-    ]
+    assert [item.outcome for item in truncation_traces] == ["truncated"]
+    assert len(model.invocations) == 1
 
 
 @pytest.mark.asyncio

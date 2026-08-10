@@ -36,6 +36,7 @@ def test_length_is_always_incomplete_and_never_authorizes_tools(
 
     assert result.incomplete is True
     assert result.authorizes_tool_calls is False
+    assert result.termination == "length"
     assert result.error_code == expected_error
 
 
@@ -51,6 +52,7 @@ def test_complete_compatible_finish_reasons_can_authorize_tools(finish_reason):
 
     assert result.incomplete is False
     assert result.authorizes_tool_calls is True
+    assert result.termination == "completed"
     assert result.error_code is None
 
 
@@ -62,7 +64,7 @@ def test_unknown_finish_reason_does_not_authorize_tools():
 
     assert result.incomplete is True
     assert result.authorizes_tool_calls is False
-    assert result.retryable is False
+    assert result.termination == "protocol_invalid"
     assert result.error_code == "unsupported_model_finish_reason"
 
 
@@ -74,7 +76,7 @@ def test_filtered_finish_is_incomplete_and_not_automatically_retryable():
 
     assert result.incomplete is True
     assert result.authorizes_tool_calls is False
-    assert result.retryable is False
+    assert result.termination == "provider_rejected"
     assert result.error_code == "model_output_filtered"
 
 

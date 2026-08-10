@@ -758,7 +758,7 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     assert result.value == {"answer": "ok"}
     assert [invocation.reasoning_mode for invocation in gateway.invocations] == [
         ReasoningMode.DEFAULT,
-        ReasoningMode.DISABLED,
+        ReasoningMode.DEFAULT,
     ]
     assert [[message.role.value for message in messages] for messages, _ in gateway.calls] == [
         ["system", "user"],
@@ -1690,7 +1690,7 @@ async def test_review_generation_keeps_execution_failures_out_of_findings(
         "episodeNumber": 2,
         "code": "model_output_truncated",
         "message": "第 2 集审阅失败",
-        "retryable": True,
+        "retryable": False,
     }]
     assert [item["id"] for item in result["contentJson"]["issues"]] == [
         "episode-1:issue-1",

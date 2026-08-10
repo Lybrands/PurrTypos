@@ -64,7 +64,10 @@ def classify_screenplay_run_failure(error: object) -> FailureSignal:
         return FailureSignal(
             category=FailureCategory.MODEL_OUTPUT_INVALID,
             code=code,
-            retryable=True,
+            retryable=code not in {
+                "model_output_truncated",
+                "tool_call_truncated",
+            },
         )
     if code == "tool_input_invalid":
         return FailureSignal(

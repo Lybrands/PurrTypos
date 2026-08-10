@@ -12,7 +12,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Awaitable, Callable
 
@@ -20,7 +20,6 @@ from purra.contracts import (
     AgentMessage,
     MessageOrigin,
     MessageRole,
-    ReasoningMode,
     RunBinding,
     RunCreateParams,
     RunProvenance,
@@ -193,16 +192,10 @@ class ScreenplayStructuredCallService:
                     ),
                     AgentMessage(role=MessageRole.USER, content=previous),
                 )
-                attempt_count = 0
-
                 async def record_attempt(
                     parameters: Mapping[str, object],
                 ) -> None:
-                    nonlocal attempt_count
-                    attempt_count += 1
                     call_phase = phase if attempt == 0 else f"{phase}_repair"
-                    if attempt_count > 1:
-                        call_phase = f"{call_phase}_reasoning_fallback"
                     await controller.record_event(
                         CoreEventType.MODEL_CALL_RECORDED,
                         {
@@ -216,15 +209,7 @@ class ScreenplayStructuredCallService:
 
                 managed_stream = await model_executor.stream(
                     active,
-                    (
-                        managed_call
-                        if attempt == 0
-                        else replace(
-                            managed_call,
-                            reasoning_mode=ReasoningMode.DISABLED,
-                            allow_reasoning_fallback=False,
-                        )
-                    ),
+                    managed_call,
                     execution.signal,
                     on_attempt=record_attempt,
                 )
