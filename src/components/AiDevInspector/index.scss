@@ -177,15 +177,37 @@
 
 .ai-dev-inspector__runbar {
   display: flex;
-  flex: 0 0 46px;
-  align-items: center;
-  gap: 7px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-light);
+}
+
+.ai-dev-inspector__selectors {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 6px;
+
+  label {
+    display: grid;
+    min-width: 0;
+    align-items: center;
+    gap: 7px;
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  label > span {
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
 
   select {
     min-width: 0;
-    flex: 1;
     height: 30px;
     padding: 0 26px 0 9px;
     color: var(--text-secondary);
@@ -195,10 +217,19 @@
     background: var(--bg-surface);
     font-size: 10px;
   }
+}
+
+.ai-dev-inspector__runbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 4px;
 
   > button {
-    height: 30px;
-    padding: 0 8px;
+    height: 24px;
+    padding: 0 6px;
     cursor: pointer;
     color: var(--text-muted);
     border: 0;

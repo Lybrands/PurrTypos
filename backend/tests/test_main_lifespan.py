@@ -10,25 +10,17 @@ import dependencies
 import main
 from application.agent_composition import get_agent_composition
 from application.run_execution_control import RunExecutionSession
-from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database import connection as database_connection
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
-from agent_core.contracts import RunBinding, RunCreateParams
-from agent_core.long_tasks import LongTaskCreateCommand, LongTaskStatus, LongTaskUnitSpec
-from agent_core.work_items.contracts import WorkItemCreateCommand
+from purra.contracts import RunCreateParams
+from purra.long_tasks import LongTaskCreateCommand, LongTaskStatus, LongTaskUnitSpec
+from purra.work_items.contracts import WorkItemCreateCommand
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
-)
-from infrastructure.persistence.sqlite_screenplay_v2_repository import (
-    SqliteScreenplayV2Repository,
-)
-from schemas.screenplay_v2 import (
-    CreateScreenplayV2ProjectRequest,
-    StartScreenplayV2OperationRequest,
 )
 
 
@@ -204,80 +196,6 @@ async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_proc
         assert unit.worker_id is None
         assert unit.lease_expires_at_ms is None
         assert unit.error_code == "execution_recovery_after_restart"
-
-
-@pytest.mark.asyncio
-async def test_lifespan_startup_checkpoints_running_screenplay_operation(
-    monkeypatch,
-    tmp_path,
-):
-    seed_db = database_connection.DatabaseConnection(tmp_path)
-    await seed_db.init()
-    service = ScreenplayV2ProjectService(seed_db)
-    workspace = await service.create_project(
-        command_id="create-startup-operation-project",
-        request=CreateScreenplayV2ProjectRequest.model_validate({
-            "title": "重启恢复 Operation",
-            "format": "singleEpisode",
-            "source": {"type": "original"},
-        }),
-    )
-    project_id = workspace["project"]["id"]
-    started = await service.start_operation(
-        command_id="start-recoverable-operation",
-        project_id=project_id,
-        request=StartScreenplayV2OperationRequest.model_validate({
-            "expectedProjectRevision": 1,
-            "targetRole": "creativeBrief",
-            "intent": {"type": "generate"},
-        }),
-    )
-    operation_id = started["operation"]["id"]
-    session_id = await seed_db.execute_and_get_id(
-        "INSERT INTO ai_sessions "
-        "(title, scope, screenplay_project_id) VALUES (?, 'screenplay', ?)",
-        ["重启恢复 Operation", project_id],
-    )
-    run_id = await run_store.create_run(
-        seed_db,
-        session_id=session_id,
-        prompt="生成创作简报",
-        mode="agent",
-        binding=RunBinding(
-            namespace="screenplay.operation",
-            aggregate_id=project_id,
-            command_id=operation_id,
-        ),
-    )
-    await service.activate_bound_run(
-        operation_id=operation_id,
-        project_id=project_id,
-        run_id=run_id,
-    )
-    await seed_db.close()
-
-    created = _capture_database(monkeypatch, tmp_path)
-    async with main.lifespan(_RecordingApplication()):
-        repository = SqliteScreenplayV2Repository(created[0])
-        operation = await repository.get_operation(operation_id)
-        assert operation["status"] == "paused"
-        assert operation["progress"] == {
-            "phase": "paused",
-            "reason": "restart",
-        }
-        events = await repository.list_operation_events(
-            operation_id,
-            after=0,
-            limit=10,
-        )
-        assert [event["type"] for event in events["events"]] == [
-            "screenplay.operation.queued",
-            "screenplay.operation.started",
-            "screenplay.operation.paused",
-        ]
-        assert events["events"][-1]["payload"]["reason"] == (
-            "execution_recovery_after_restart"
-        )
 
 
 @pytest.mark.asyncio

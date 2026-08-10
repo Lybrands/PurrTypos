@@ -30,7 +30,7 @@ export type AppMessage = PurrToastApi;
 /** 单次 handleSubmit 调用期间在 onAiChunk 各分支共享的累加状态 */
 export interface AccState {
   response: string;
-  thinking: string;
+  commentary: string;
   bookId: EntityId | null | undefined;
   sessionId: number;
   chapterId: EntityId | null | undefined;
@@ -39,14 +39,15 @@ export interface AccState {
   model: string;
   turnStartedAt: number;
   toolCallSegments?: ToolCallSegment[];
-  thinkingBlocks?: string[];
-  thinkingDurationsMs?: number[];
-  contentAfterToolCalls?: string;
-  /** 当前思考块开始时间（performance.now），用于计算 thinkingDurationsMs */
-  thinkingBlockStartedAt?: number;
+  commentaryBlocks?: string[];
+  commentaryDurationsMs?: number[];
+  /** 当前说明块开始时间（performance.now），用于计算 commentaryDurationsMs。 */
+  commentaryBlockStartedAt?: number;
   agentRunId?: string;
   /** Run whose persisted conversation row owns this visible turn. */
   conversationRunId?: string;
+  /** Run-terminal fallback, committed to the conversation only by root `done`. */
+  pendingFinalResponse?: string;
   longTaskId?: string;
   taskPlan?: AiTaskPlan;
   delegations?: AiAgentDelegation[];

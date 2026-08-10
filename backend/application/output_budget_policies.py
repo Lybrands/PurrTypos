@@ -1,17 +1,15 @@
-"""Application-owned task policies for Agent Core output sizing."""
+"""Application-owned task policies for PurrA output sizing."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-from agent_core.contracts import AgentRunRequest
-from agent_core.output_budget import (
+from purra.contracts import AgentRunRequest
+from purra.output_budget import (
     OutputBudgetPolicy,
-    OutputExecutionMode,
     ResolvedOutputBudget,
     resolve_output_budget,
 )
-from domains.screenplay.contracts import SCREENPLAY_DOMAIN_NAMESPACE
 from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
 
 
@@ -29,40 +27,6 @@ _POLICIES = {
         per_work_unit_tokens=0,
         safety_factor=1.2,
         hard_cap_tokens=24_000,
-    ),
-    "screenplay_agent": OutputBudgetPolicy(
-        key="screenplay_agent",
-        base_tokens=6_000,
-        per_work_unit_tokens=0,
-        safety_factor=1.25,
-        hard_cap_tokens=16_000,
-    ),
-    "screenplay_writer": OutputBudgetPolicy(
-        key="screenplay_writer",
-        base_tokens=1_500,
-        per_work_unit_tokens=3_200,
-        safety_factor=1.2,
-        hard_cap_tokens=24_000,
-        reasoning_reserve_tokens=8_000,
-        execution_mode=OutputExecutionMode.CHUNKED,
-    ),
-    "screenplay_reviewer": OutputBudgetPolicy(
-        key="screenplay_reviewer",
-        base_tokens=2_000,
-        per_work_unit_tokens=500,
-        safety_factor=1.2,
-        hard_cap_tokens=48_000,
-        reasoning_reserve_tokens=24_000,
-        execution_mode=OutputExecutionMode.CHUNKED,
-    ),
-    "screenplay_rewriter": OutputBudgetPolicy(
-        key="screenplay_rewriter",
-        base_tokens=1_500,
-        per_work_unit_tokens=3_200,
-        safety_factor=1.2,
-        hard_cap_tokens=24_000,
-        reasoning_reserve_tokens=8_000,
-        execution_mode=OutputExecutionMode.CHUNKED,
     ),
     "researcher": OutputBudgetPolicy(
         key="researcher",
@@ -87,6 +51,67 @@ _POLICIES = {
     ),
 }
 
+SCREENPLAY_INTENT_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_intent",
+    base_tokens=1_800,
+    per_work_unit_tokens=0,
+    safety_factor=1.25,
+    hard_cap_tokens=4_096,
+    reasoning_reserve_tokens=1_024,
+)
+
+SCREENPLAY_EPISODE_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_episode",
+    base_tokens=1_800,
+    per_work_unit_tokens=1_300,
+    safety_factor=1.15,
+    hard_cap_tokens=24_000,
+    reasoning_reserve_tokens=12_000,
+)
+
+SCREENPLAY_SCENE_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_scene",
+    base_tokens=5_000,
+    per_work_unit_tokens=0,
+    safety_factor=1.15,
+    hard_cap_tokens=8_000,
+)
+
+SCREENPLAY_FRAGMENT_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_fragment",
+    base_tokens=4_000,
+    per_work_unit_tokens=0,
+    safety_factor=1.15,
+    hard_cap_tokens=12_000,
+    reasoning_reserve_tokens=6_000,
+)
+
+SCREENPLAY_METADATA_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_metadata",
+    base_tokens=1_200,
+    per_work_unit_tokens=0,
+    safety_factor=1.1,
+    hard_cap_tokens=2_000,
+)
+
+SCREENPLAY_DELIVERABLE_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_deliverable",
+    base_tokens=8_000,
+    per_work_unit_tokens=0,
+    safety_factor=1.2,
+    hard_cap_tokens=24_000,
+    reasoning_reserve_tokens=8_000,
+)
+
+SCREENPLAY_REVIEW_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_review",
+    base_tokens=8_000,
+    per_work_unit_tokens=0,
+    safety_factor=1.2,
+    hard_cap_tokens=40_000,
+    reasoning_reserve_tokens=24_000,
+)
+
 
 def output_budget_policy_for_request(
     request: AgentRunRequest,
@@ -98,8 +123,6 @@ def output_budget_policy_for_request(
         return _POLICIES[role]
     if str(request.mode or "").strip().lower() != "agent":
         return _POLICIES["conversation"]
-    if request.domain_context.namespace == SCREENPLAY_DOMAIN_NAMESPACE:
-        return _POLICIES["screenplay_agent"]
     if request.domain_context.namespace == WRITING_DOMAIN_NAMESPACE:
         return _POLICIES["writing_agent"]
     return _POLICIES["conversation"]
@@ -132,6 +155,13 @@ def resolve_request_output_budget(
 
 
 __all__ = [
+    "SCREENPLAY_DELIVERABLE_OUTPUT_POLICY",
+    "SCREENPLAY_EPISODE_OUTPUT_POLICY",
+    "SCREENPLAY_FRAGMENT_OUTPUT_POLICY",
+    "SCREENPLAY_INTENT_OUTPUT_POLICY",
+    "SCREENPLAY_METADATA_OUTPUT_POLICY",
+    "SCREENPLAY_REVIEW_OUTPUT_POLICY",
+    "SCREENPLAY_SCENE_OUTPUT_POLICY",
     "output_budget_policy_for_request",
     "resolve_request_output_budget",
 ]

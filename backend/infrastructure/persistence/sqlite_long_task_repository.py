@@ -8,8 +8,9 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from agent_core.json_values import thaw_json_mapping
-from agent_core.long_tasks.contracts import (
+from purra.contracts import SessionId
+from purra.json_values import thaw_json_mapping
+from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
     LongTaskStatus,
@@ -83,7 +84,10 @@ class SqliteLongTaskRepository:
         except sqlite3.IntegrityError as error:
             existing = await self.load(normalized_id)
             if existing is not None:
-                return existing
+                units = await self.list_units(existing.id)
+                if _matches_create(existing, units, command):
+                    return existing
+                raise ValueError("long task id conflicts") from error
             active = await self.find_active(
                 namespace=command.namespace,
                 owner_id=command.owner_id,
@@ -134,7 +138,7 @@ class SqliteLongTaskRepository:
         namespace: str,
         owner_id: str,
         kind: str,
-        session_id: int | None = None,
+        session_id: SessionId | None = None,
         match_session: bool = False,
     ) -> LongTaskRecord | None:
         session_clause = ""
@@ -147,7 +151,7 @@ class SqliteLongTaskRepository:
             session_clause = (
                 "AND COALESCE(CAST(json_extract(metadata_json, '$.sessionId') AS TEXT), '') = ? "
             )
-            params.append("" if session_id is None else str(int(session_id)))
+            params.append("" if session_id is None else str(session_id))
         row = await self._db.fetch_one(
             "SELECT * FROM ai_agent_long_tasks WHERE namespace = ? "
             "AND owner_id = ? AND kind = ? "
@@ -488,19 +492,31 @@ class SqliteLongTaskRepository:
             )
             return await self._require(task.id)
 
-    async def resume(self, task_id: str) -> LongTaskRecord:
+    async def resume(
+        self,
+        task_id: str,
+        *,
+        additional_attempts: int = 0,
+    ) -> LongTaskRecord:
+        extra_attempts = int(additional_attempts)
+        if extra_attempts < 0:
+            raise ValueError("additional long task attempts cannot be negative")
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             if task.status is LongTaskStatus.RUNNING:
                 return task
             if task.status is LongTaskStatus.FAILED:
+                if extra_attempts == 0:
+                    raise ValueError(
+                        "failed long task retry requires additional attempts"
+                    )
                 await self._db.execute(
                     "UPDATE ai_agent_long_task_units SET status = 'pending', "
-                    "max_attempts = attempt + 3, worker_id = NULL, "
+                    "max_attempts = max_attempts + ?, worker_id = NULL, "
                     "lease_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
                     "WHERE task_id = ? AND status IN "
                     "('failed', 'canceled', 'claimed', 'running')",
-                    [task.id],
+                    [extra_attempts, task.id],
                 )
                 await self._db.execute(
                     "UPDATE ai_agent_long_tasks SET status = 'running', "
@@ -511,6 +527,10 @@ class SqliteLongTaskRepository:
                 return await self._require(task.id)
             if task.status is not LongTaskStatus.PAUSED:
                 raise ValueError(f"long task cannot transition from {task.status.value}")
+            if extra_attempts:
+                raise ValueError(
+                    "paused long task resume cannot add retry attempts"
+                )
             await self._update_task_status(task, LongTaskStatus.RUNNING)
             return await self._require(task.id)
 
@@ -667,16 +687,37 @@ def _json_load(value: object, default):
     return parsed if isinstance(parsed, type(default)) else default
 
 
-def _metadata_session_id(value: object) -> int | None:
+def _metadata_session_id(value: object) -> SessionId | None:
     metadata = thaw_json_mapping(value)
     raw = metadata.get("sessionId")
     if raw is None:
         return None
-    try:
-        session_id = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return session_id if session_id > 0 else None
+    session_id = str(raw).strip()
+    return session_id or None
+
+
+def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
+    if (
+        task.namespace != command.namespace
+        or task.kind != command.kind
+        or task.owner_id != command.owner_id
+        or task.work_item_id != command.work_item_id
+        or task.created_by_run_id != command.created_by_run_id
+        or task.max_parallelism != command.max_parallelism
+        or thaw_json_mapping(task.metadata) != thaw_json_mapping(command.metadata)
+        or len(units) != len(command.units)
+    ):
+        return False
+    return all(
+        persisted.id == requested.id
+        and persisted.position == requested.position
+        and persisted.dependencies == requested.dependencies
+        and persisted.input_ref == requested.input_ref
+        and persisted.max_attempts == requested.max_attempts
+        and thaw_json_mapping(persisted.metadata)
+        == thaw_json_mapping(requested.metadata)
+        for persisted, requested in zip(units, command.units)
+    )
 
 
 __all__ = ["SqliteLongTaskRepository"]

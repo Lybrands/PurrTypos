@@ -10,7 +10,7 @@
 | `backend/infrastructure/writing/tools/` | 装配并执行具体 Writing Handler，校验书籍与章节作用域 |
 | 本目录各 `<toolName>/SKILL.md` | **唯一真源**：frontmatter 仅 `name`、`description`；正文含 **\`\`\`json** 的 parameters schema |
 
-`Agent Core` 根据 Writing Planner 的当前步骤只暴露获准工具 Schema；模型只能在该范围内选择，
+`PurrA` 根据 Writing Planner 的当前步骤只暴露获准工具 Schema；模型只能在该范围内选择，
 宿主随后再次执行 allowlist、Policy、参数与对象归属校验。不依赖本地路由模型或 Ollama。
 
 ## 目录约定（与常见 Skills 布局对齐）

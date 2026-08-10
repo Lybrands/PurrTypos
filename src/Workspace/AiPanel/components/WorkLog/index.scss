@@ -86,20 +86,6 @@
   margin: 5px 0 8px;
   color: var(--text-secondary);
   line-height: 1.65;
-
-  p {
-    margin: 0 0 0.45em;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
-  }
-}
-
-.work-log__thinking {
-  margin: 5px 0 8px;
-  color: var(--text-secondary);
-  line-height: 1.65;
   word-break: break-word;
 
   p {
@@ -109,7 +95,6 @@
       margin-bottom: 0;
     }
   }
-
   ul,
   ol {
     margin: 0 0 0.45em;
@@ -118,7 +103,7 @@
 
 }
 
-.work-log__thinking--active {
+.work-log__commentary--active {
   color: var(--text-primary);
 }
 
@@ -271,7 +256,6 @@
   color: var(--danger);
 }
 
-.work-log__body > .thinking-region,
 .work-log__body > .bubble-tool-calls {
   margin: 5px 0 7px;
 }
@@ -363,7 +347,6 @@
   padding-bottom: 3px;
 }
 
-.work-log-step-group__body > .thinking-region,
 .work-log-step-group__body > .bubble-tool-calls {
   margin: 3px 0;
   padding-left: 0;

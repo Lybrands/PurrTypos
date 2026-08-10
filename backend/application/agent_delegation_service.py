@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentDelegation,
     AgentRunResult,
     DelegationAggregation,
     RunLineage,
 )
-from agent_core.ports import DelegationRepository
+from purra.ports import DelegationRepository
 from domains.agent_roles import AgentRoleRegistry
 
 

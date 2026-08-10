@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from agent_core.contracts import AgentRunRequest, TaskContextRequest
-from agent_core.ports import CancellationSignal
+from purra.contracts import AgentRunRequest, TaskContextRequest
+from purra.ports import CancellationSignal
 from domains.writing.associated_context import (
     AssociatedContextBuilder,
     AssociatedContextResult,

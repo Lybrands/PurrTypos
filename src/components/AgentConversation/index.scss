@@ -107,11 +107,7 @@
 .agent-conversation__artifact {
   width: 100%;
   max-width: none;
-  margin-left: 0;
-}
-
-.agent-conversation__after-messages-host {
-  display: contents;
+  margin: 12px 0 0;
 }
 
 @media (max-width: 720px) {

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     ModelCompletion,
+    ModelFinishReason,
     ModelRequest,
     ReasoningMode,
     ResponseValidationResult,
     ToolCall,
     ToolChoiceMode,
 )
-from agent_core.errors import ResponseJudgeContractError
+from purra.errors import ModelGatewayError
+from purra.model_execution import ManagedModelExecutor
 from application.response_judging import ModelBackedResponseJudge
 
 
@@ -27,6 +31,7 @@ class _Gateway:
         return ModelCompletion(
             message=AgentMessage(role="assistant", content='{"ok":true}'),
             model="judge-model",
+            finish_reason=ModelFinishReason.STOP,
         )
 
 
@@ -51,9 +56,9 @@ class _Policy:
 async def test_model_backed_judge_disables_tools_and_controls_model_options():
     gateway = _Gateway()
     policy = _Policy()
-    signal = object()
+    signal = asyncio.Event()
     judge = ModelBackedResponseJudge(
-        model_gateway=gateway,
+        model_executor=ManagedModelExecutor(gateway),
         model_request=ModelRequest(
             provider="fixture",
             model="writer-model",
@@ -120,14 +125,16 @@ async def test_model_backed_judge_fails_closed_on_an_unexpected_tool_call():
                     ),),
                 ),
                 model="judge-model",
+                finish_reason=ModelFinishReason.STOP,
             )
 
-    with pytest.raises(ResponseJudgeContractError, match="unsupported message"):
+    with pytest.raises(ModelGatewayError) as captured:
         await ModelBackedResponseJudge(
-            model_gateway=_ToolCallingGateway(),
+            model_executor=ManagedModelExecutor(_ToolCallingGateway()),
             model_request=ModelRequest(provider="fixture", model="model"),
             policy=_Policy(),
         ).judge(
             content="candidate",
             messages=(AgentMessage(role="user", content="request"),),
         )
+    assert captured.value.code == "unexpected_model_tool_calls"

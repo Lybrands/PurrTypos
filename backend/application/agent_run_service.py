@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     AgentRunResult,
@@ -20,10 +20,10 @@ from agent_core.contracts import (
     RunProvenance,
     ToolExecutionMode,
 )
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.json_values import thaw_json_mapping
-from agent_core.engine import AgentCoreRunOptions
-from agent_core.ports import CancellationSignal, ResponseValidator
+from purra.events import AgentEvent, CoreEventType
+from purra.json_values import thaw_json_mapping
+from purra.api import AgentCoreRunOptions
+from purra.ports import CancellationSignal, ResponseValidator
 from application.agent_composition import AgentComposition
 from application.agent_delegation_service import AgentDelegationService
 from application.agent_delegation_tool import (
@@ -293,8 +293,9 @@ class AgentRunService:
                             # ordinary (non-delegated) Run; run.completed owns
                             # the durable final response snapshot.
                             if child_update.type not in {
-                                CoreEventType.MODEL_DELTA,
-                                CoreEventType.MODEL_THINKING_DELTA,
+                                CoreEventType.MODEL_CONTENT_DELTA,
+                                CoreEventType.MODEL_REASONING_DELTA,
+                                CoreEventType.ASSISTANT_FINAL_DELTA,
                             }:
                                 await composition.append_run_event(
                                     str(child_lineage.parent_run_id),

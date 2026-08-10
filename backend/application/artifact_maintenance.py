@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from agent_core.artifacts.maintenance import (
+from purra.artifacts.maintenance import (
     ArtifactMaintenancePolicy,
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,
 )
-from agent_core.artifacts.ports import ArtifactMaintenanceRepository
+from purra.artifacts.ports import ArtifactMaintenanceRepository
 
 
 logger = logging.getLogger(__name__)

@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from agent_core.contracts import AgentRunResult, RunLineage, RunStatus
-from agent_core.events import CoreEventType
-from agent_core.ports import CancellationSignal
+from purra.contracts import AgentRunResult, RunLineage, RunStatus
+from purra.events import CoreEventType
+from purra.ports import CancellationSignal
 from application.agent_delegation_service import AgentDelegationService
 
 

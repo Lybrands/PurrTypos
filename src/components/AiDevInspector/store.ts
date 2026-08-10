@@ -91,7 +91,9 @@ export interface AiDebugChildRun {
   finishedAt?: number;
   model?: string;
   output: string;
-  thinking: string;
+  commentary: string;
+  reasoning: string;
+  modelContent: string;
   modelCalls: AiDebugModelCall[];
   tools: AiDebugTool[];
   events: AiDebugEvent[];
@@ -103,6 +105,7 @@ export interface AiDebugChildRun {
 
 export interface AiDebugRun {
   id: string;
+  turnId?: string;
   sessionId?: number;
   conversationId?: number;
   source: string;
@@ -117,7 +120,9 @@ export interface AiDebugRun {
   };
   model?: string;
   output: string;
-  thinking: string;
+  commentary: string;
+  reasoning: string;
+  modelContent: string;
   modelCalls: AiDebugModelCall[];
   tools: AiDebugTool[];
   events: AiDebugEvent[];
@@ -140,12 +145,28 @@ interface AiDebugState {
   selectedRunId: string | null;
 }
 
-const MAX_RUNS = 20;
+export interface AiDebugTurnGroup {
+  key: string;
+  runs: AiDebugRun[];
+  startedAt: number;
+  updatedAt: number;
+  sessionId?: number;
+  conversationId?: number;
+  source: string;
+  prompt: string;
+}
+
+const MAX_TURNS = 20;
 const MAX_EVENTS_PER_RUN = 200;
 const SENSITIVE_KEY =
   /^(api[-_]?key|authorization|password|passwd|secret|access[-_]?token|refresh[-_]?token|token)$/i;
 const TERMINAL_STATUSES = new Set<AiDebugRunStatus>([
   "dispatched",
+  "completed",
+  "aborted",
+  "failed",
+]);
+const FINAL_STATUSES = new Set<AiDebugRunStatus>([
   "completed",
   "aborted",
   "failed",
@@ -159,6 +180,59 @@ let state: AiDebugState = {
 let eventSequence = 0;
 let notifyScheduled = false;
 const listeners = new Set<() => void>();
+
+function latestUserPrompt(run: AiDebugRun): string {
+  const message = [...run.request.messages]
+    .reverse()
+    .find((item) => item.role === "user");
+  return typeof message?.content === "string" ? message.content.trim() : "";
+}
+
+/** A user turn owns one or more model/Agent Runs. */
+export function aiDebugTurnKey(run: AiDebugRun): string {
+  if (run.turnId) return `session:${run.sessionId ?? "unknown"}:turn:${run.turnId}`;
+  if (run.conversationId != null) return `conversation:${run.conversationId}`;
+  return `stream:${run.id}`;
+}
+
+export function groupAiDebugRunsByTurn(runs: AiDebugRun[]): AiDebugTurnGroup[] {
+  const groups = new Map<string, AiDebugTurnGroup>();
+  for (const run of runs) {
+    const key = aiDebugTurnKey(run);
+    const group = groups.get(key);
+    if (group) {
+      group.runs.push(run);
+      group.startedAt = Math.min(group.startedAt, run.startedAt);
+      group.updatedAt = Math.max(group.updatedAt, run.updatedAt);
+      group.conversationId ??= run.conversationId;
+      if (!group.prompt) group.prompt = latestUserPrompt(run);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      runs: [run],
+      startedAt: run.startedAt,
+      updatedAt: run.updatedAt,
+      sessionId: run.sessionId,
+      conversationId: run.conversationId,
+      source: run.source,
+      prompt: latestUserPrompt(run),
+    });
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      runs: [...group.runs].sort((left, right) => right.startedAt - left.startedAt),
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function retainRecentTurns(runs: AiDebugRun[]): AiDebugRun[] {
+  const retainedKeys = new Set(
+    groupAiDebugRunsByTurn(runs).slice(0, MAX_TURNS).map((group) => group.key),
+  );
+  return runs.filter((run) => retainedKeys.has(aiDebugTurnKey(run)));
+}
 
 function scheduleNotify(): void {
   if (notifyScheduled) return;
@@ -279,6 +353,7 @@ function toolResultFailure(value: unknown): {
 
 function sourceLabel(streamId: string): string {
   if (streamId.startsWith("chat-")) return "主对话";
+  if (streamId.startsWith("screenplay-")) return "剧本 Agent 对话";
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器改写";
   if (streamId.startsWith("ghost-completion-")) return "幽灵补全";
@@ -286,6 +361,7 @@ function sourceLabel(streamId: string): string {
 }
 
 function initialTaskType(streamId: string, request: AiStreamRequest): string {
+  if (streamId.startsWith("screenplay-")) return "剧本 Agent 任务";
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器选区改写";
   if (streamId.startsWith("ghost-completion-")) return "幽灵补全";
@@ -306,7 +382,12 @@ function updatedTaskType(run: AiDebugRun, chunk: AiDebugChunk): string {
 
 function compactEventPayload(chunk: AiDebugChunk): unknown {
   const payload = sanitizeValue(chunk) as Record<string, unknown>;
-  for (const key of ["delta", "thinkingDelta", "partialContent", "partialThinking"]) {
+  for (const key of [
+    "delta",
+    "commentaryDelta",
+    "reasoningDelta",
+    "modelContentDelta",
+  ]) {
     const value = payload[key];
     if (typeof value === "string" && value.length > 1_200) {
       payload[key] = `${value.slice(0, 1_200)}…`;
@@ -379,19 +460,28 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
       label: `大模型调用 ×${count}${names.length ? ` · ${names.length} 个工具` : ""}`,
     };
   }
-  if (chunk.thinkingDelta) return { type: "thinking", label: "收到思考增量" };
-  if (chunk.delta) return { type: "response", label: "收到正文增量" };
+  if (chunk.commentaryDelta) {
+    return { type: "commentary", label: "收到公开执行说明" };
+  }
+  if (chunk.reasoningDelta) {
+    return { type: "reasoning", label: "收到模型推理增量" };
+  }
+  if (chunk.modelContentDelta) {
+    return { type: "model_content", label: "收到模型原始内容增量" };
+  }
+  if (chunk.delta) return { type: "response", label: "收到最终回答增量" };
   return { type: "event", label: "收到运行事件" };
 }
 
 function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
+  if (FINAL_STATUSES.has(run.status)) return run.status;
   if (chunk.error) return "failed";
   if (chunk.done && chunk.errorReport && !chunk.aborted) return "failed";
   if (chunk.aborted) return "aborted";
   if (chunk.agentRunCompleted) return "completed";
   if (chunk.agentRunFailed || chunk.agentRunBlocked) return "failed";
   if (chunk.agentRunCanceled) return "aborted";
-  if (TERMINAL_STATUSES.has(run.status)) return run.status;
+  if (run.status === "dispatched") return run.status;
   if (chunk.longTaskDispatched) return "dispatched";
   if (chunk.done) {
     return run.taskType.startsWith("持久化长任务")
@@ -400,7 +490,8 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   }
   if (chunk.toolApprovalRequired) return "awaiting_approval";
   if (chunk.toolCallsInProgress || chunk.toolResults?.length) return "tool";
-  if (chunk.thinkingDelta) return "thinking";
+  if (chunk.reasoningDelta) return "thinking";
+  if (chunk.commentaryDelta) return "planning";
   if (chunk.delta) return "responding";
   if (chunk.agentRunTodosUpdated || chunk.agentRunTodoUpdated || chunk.agentRunStarted) {
     return "planning";
@@ -637,7 +728,9 @@ function updateChildRuns(
     startedAt: now,
     updatedAt: now,
     output: "",
-    thinking: "",
+    commentary: "",
+    reasoning: "",
+    modelContent: "",
     modelCalls: [],
     tools: [],
     events: [],
@@ -664,7 +757,9 @@ function updateChildRuns(
       childRunId: envelope.childRunId || getAgentRunId(childChunk) || next.childRunId,
       model: childChunk.model || next.model,
       output: next.output + (childChunk.delta || ""),
-      thinking: next.thinking + (childChunk.thinkingDelta || ""),
+      commentary: next.commentary + (childChunk.commentaryDelta || ""),
+      reasoning: next.reasoning + (childChunk.reasoningDelta || ""),
+      modelContent: next.modelContent + (childChunk.modelContentDelta || ""),
       modelCalls: appendModelCall(next as unknown as AiDebugRun, childChunk, now),
       tools: upsertTools(next as unknown as AiDebugRun, childChunk, now),
       events: appendEvent(next as unknown as AiDebugRun, childChunk, now),
@@ -704,7 +799,11 @@ function upsertDebugDelegation(items: unknown[], value: unknown): unknown[] {
   return items.map((item, itemIndex) => itemIndex === index ? sanitized : item);
 }
 
-export function startAiDebugRun(streamId: string, request: AiStreamRequest): void {
+export function startAiDebugRun(
+  streamId: string,
+  request: AiStreamRequest,
+  context: { turnId?: string; conversationId?: number } = {},
+): void {
   if (!DEBUG_STORE_ENABLED) return;
   const now = Date.now();
   const sanitized = sanitizeValue(request) as Record<string, unknown>;
@@ -714,7 +813,9 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
   const messages = (sanitizeValue(request.messages) ?? []) as AiDebugMessage[];
   const run: AiDebugRun = {
     id: streamId,
+    turnId: context.turnId,
     sessionId: request.sessionId,
+    conversationId: context.conversationId,
     source: sourceLabel(streamId),
     taskType: initialTaskType(streamId, request),
     status: "starting",
@@ -723,7 +824,9 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
     request: { messages, meta: sanitized },
     model: request.options?.model,
     output: "",
-    thinking: "",
+    commentary: "",
+    reasoning: "",
+    modelContent: "",
     modelCalls: [],
     tools: [],
     events: [{
@@ -740,7 +843,7 @@ export function startAiDebugRun(streamId: string, request: AiStreamRequest): voi
   };
   const withoutSameId = state.runs.filter((item) => item.id !== streamId);
   setState({
-    runs: [run, ...withoutSameId].slice(0, MAX_RUNS),
+    runs: retainRecentTurns([run, ...withoutSameId]),
     selectedRunId: streamId,
   });
 }
@@ -763,29 +866,44 @@ function persistedTimestamp(value: string | null | undefined, fallback: number):
   return Number.isFinite(timestamp) ? timestamp : fallback;
 }
 
+function persistedDebugRunId(runId: string): string {
+  return `screenplay-${runId}`;
+}
+
 /** Rebuild a debug entry from the canonical persisted Run event stream. */
 export function hydrateAiDebugRunSnapshot(data: {
   snapshot: AiAgentRunSnapshot;
   prompt: string;
   source?: string;
+  turnId?: string;
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
   const { snapshot } = data;
   const runId = String(snapshot.run.runId || '').trim();
   if (!runId) return;
-  const recoveredId = `recovered:${runId}`;
-  const existing = state.runs.find((run) => run.id === recoveredId);
+  const debugRunId = persistedDebugRunId(runId);
+  const existing = state.runs.find(
+    (run) => run.agentRunId === runId || run.id === debugRunId,
+  );
 
-  if (!existing) {
+  if (!existing || existing.persistedEventCursor == null) {
     const now = Date.now();
     const startedAt = persistedTimestamp(snapshot.run.createdAt, now);
     const source = String(data.source || '').trim() || 'Agent 历史恢复';
+    const runRole = String(
+      snapshot.run.lineage.agentTitle || snapshot.run.lineage.agentRole || '',
+    ).trim();
     const run: AiDebugRun = {
-      id: recoveredId,
+      id: debugRunId,
+      turnId: data.turnId,
       sessionId: snapshot.run.sessionId ?? undefined,
       conversationId: snapshot.run.conversationId ?? undefined,
       source,
-      taskType: '持久化 Agent Run · 历史恢复',
+      taskType: runRole
+        ? `持久化 Agent Run · ${runRole}`
+        : snapshot.run.lineage.depth > 0
+          ? '持久化子 Run'
+          : '持久化主 Run',
       status: persistedRunStatus(snapshot.run.status),
       startedAt,
       updatedAt: persistedTimestamp(snapshot.run.updatedAt, now),
@@ -799,8 +917,12 @@ export function hydrateAiDebugRunSnapshot(data: {
         meta: { recovered: true },
       },
       model: snapshot.run.provenance.modelName ?? undefined,
-      output: '',
-      thinking: '',
+      // Raw screenplay deltas are not part of the Run snapshot event stream.
+      // Preserve any already observed text while rebuilding structured state.
+      output: existing?.output ?? '',
+      commentary: existing?.commentary ?? '',
+      reasoning: existing?.reasoning ?? '',
+      modelContent: existing?.modelContent ?? '',
       modelCalls: [],
       tools: [],
       events: [{
@@ -824,16 +946,16 @@ export function hydrateAiDebugRunSnapshot(data: {
     // that boundary the persisted event stream is authoritative, so replace
     // any partial live debug copy instead of merging and duplicating events.
     const withoutSameRun = state.runs.filter(
-      (item) => item.id !== recoveredId && item.agentRunId !== runId,
+      (item) => item.id !== debugRunId && item.agentRunId !== runId,
     );
     setState({
-      runs: [run, ...withoutSameRun].slice(0, MAX_RUNS),
-      selectedRunId: recoveredId,
+      runs: retainRecentTurns([run, ...withoutSameRun]),
+      selectedRunId: debugRunId,
     });
   }
 
   const currentCursor = state.runs.find(
-    (run) => run.id === recoveredId,
+    (run) => run.agentRunId === runId || run.id === debugRunId,
   )?.persistedEventCursor ?? 0;
   let nextCursor = currentCursor;
   for (const event of [...snapshot.events].sort((left, right) => (
@@ -849,6 +971,7 @@ export function hydrateAiDebugRunSnapshot(data: {
     const terminal = snapshot.run.status !== 'running' && !snapshot.hasMore;
     return {
       ...run,
+      turnId: data.turnId ?? run.turnId,
       sessionId: snapshot.run.sessionId ?? run.sessionId,
       conversationId: snapshot.run.conversationId ?? run.conversationId,
       model: snapshot.run.provenance.modelName ?? run.model,
@@ -881,7 +1004,9 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
       finishedAt: terminal ? run.finishedAt ?? now : run.finishedAt,
       model: chunk.model || run.model,
       output: run.output + (chunk.delta || ""),
-      thinking: run.thinking + (chunk.thinkingDelta || ""),
+      commentary: run.commentary + (chunk.commentaryDelta || ""),
+      reasoning: run.reasoning + (chunk.reasoningDelta || ""),
+      modelContent: run.modelContent + (chunk.modelContentDelta || ""),
       modelCalls: appendModelCall(run, chunk, now),
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
@@ -903,6 +1028,41 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
   });
 }
 
+/** Feed the screenplay persisted SSE into the same live diagnostic store. */
+export function recordScreenplayAiDebugChunk(data: {
+  runId: string;
+  turnId: string;
+  sessionId: number;
+  prompt: string;
+  model?: string;
+  chunk: AiDebugChunk;
+}): void {
+  if (!DEBUG_STORE_ENABLED) return;
+  const existing = state.runs.find((run) => run.agentRunId === data.runId);
+  const streamId = existing?.id ?? persistedDebugRunId(data.runId);
+  if (!existing) {
+    startAiDebugRun(streamId, {
+      streamId,
+      apiKey: "",
+      sessionId: data.sessionId,
+      messages: data.prompt.trim()
+        ? [{ role: "user", content: data.prompt }]
+        : [],
+      options: { model: data.model },
+      chatAgentMode: "agent",
+    }, {
+      turnId: data.turnId,
+    });
+    recordAiDebugChunk(streamId, {
+      agentRunStarted: {
+        runId: data.runId,
+        status: "running",
+      },
+    });
+  }
+  recordAiDebugChunk(streamId, data.chunk);
+}
+
 /**
  * Attach durable child-Run activity to the debug entry that dispatched it.
  * The root Run remains the report identity while model/tool evidence comes
@@ -915,16 +1075,18 @@ export function recordAiDebugRunContinuation(
   if (!DEBUG_STORE_ENABLED || !rootAgentRunId) return;
   const now = Date.now();
   replaceRunByAgentRunId(rootAgentRunId, (run) => {
-    const status = chunk.aborted
-      ? "aborted"
-      : chunk.error
-        ? "failed"
-        : chunk.done
-          ? "completed"
-          : nextStatus(
-              run.status === "dispatched" ? { ...run, status: "preparing" } : run,
-              chunk,
-            );
+    const status = FINAL_STATUSES.has(run.status)
+      ? run.status
+      : chunk.aborted
+        ? "aborted"
+        : chunk.error
+          ? "failed"
+          : chunk.done
+            ? "completed"
+            : nextStatus(
+                run.status === "dispatched" ? { ...run, status: "preparing" } : run,
+                chunk,
+              );
     const terminal = TERMINAL_STATUSES.has(status);
     const delegation =
       chunk.agentDelegationCreated ?? chunk.agentDelegationUpdated;
@@ -935,10 +1097,12 @@ export function recordAiDebugRunContinuation(
       status,
       taskType: updatedTaskType(run, chunk),
       updatedAt: now,
-      finishedAt: terminal ? now : undefined,
+      finishedAt: terminal ? run.finishedAt ?? now : undefined,
       model: chunk.model || run.model,
       output: run.output + (chunk.delta || ""),
-      thinking: run.thinking + (chunk.thinkingDelta || ""),
+      commentary: run.commentary + (chunk.commentaryDelta || ""),
+      reasoning: run.reasoning + (chunk.reasoningDelta || ""),
+      modelContent: run.modelContent + (chunk.modelContentDelta || ""),
       modelCalls: appendModelCall(run, chunk, now),
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),

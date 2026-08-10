@@ -1,1 +1,1 @@
-"""Concrete implementations of Agent Core infrastructure ports."""
+"""Concrete implementations of PurrA infrastructure ports."""

@@ -57,21 +57,21 @@ export interface AiTaskStep {
 }
 
 export interface AiTaskPlan {
+  /** Owns lifecycle updates for this plan; child Runs must not terminalize it. */
+  runId?: string;
   title: string;
   goal?: string;
   status: AiTaskPlanStatus;
   steps: AiTaskStep[];
 }
 
-/** 一段「调用前文案 + 该次调用的正在查看列表」，按调用顺序排列 */
+/** 一次工具批次及其在公开执行过程中的位置。 */
 export interface ToolCallSegment {
-  textBefore: string;
   labels: string[];
   /**
-   * 紧邻本段之前的 thinkingBlocks 下标。null 表示本段前没有思考；
-   * 缺失表示旧版数据，渲染时使用兼容推断。
+   * 紧邻本段之前的 commentaryBlocks 下标。null 表示本段前没有公开说明。
    */
-  thinkingBlockIndex?: number | null;
+  commentaryBlockIndex: number | null;
   /** 与 labels 同长度：目录/参数无法与当前书籍对齐时标记 context_error，气泡显示为失败 */
   labelOutcomes?: ToolCallLabelOutcome[];
   /** 与 labels 同长度：该次工具调用是否命中请求内只读缓存 */
@@ -107,17 +107,16 @@ export interface ChatMessage {
   turnStartedAt?: number;
   /** 从发送到完成/中止/报错的整轮耗时。 */
   durationMs?: number;
-  /** 当前/最后一轮思考（流式时持续追加） */
-  thinking?: string;
-  /** 当前流式思考块开始时间（performance.now），仅实时 UI 使用，不持久化。 */
-  thinkingStartedAt?: number;
-  /** 多轮思考内容，与 toolCallSegments 交错：思考1、工具1、思考2、工具2… */
-  thinkingBlocks?: string[];
-  /** 与 thinkingBlocks 等长：各思考块耗时（毫秒），仅本轮实时会话 */
-  thinkingDurationsMs?: number[];
+  /** 当前公开执行说明，流式时持续追加。 */
+  commentary?: string;
+  /** 当前公开说明块开始时间（performance.now），仅实时 UI 使用。 */
+  commentaryStartedAt?: number;
+  /** 与工具批次交错的公开执行说明。 */
+  commentaryBlocks?: string[];
+  /** 与 commentaryBlocks 等长：各说明块耗时（毫秒）。 */
+  commentaryDurationsMs?: number[];
   toolCalling?: boolean;
   toolCallSegments?: ToolCallSegment[];
-  contentAfterToolCalls?: string;
   /** AI 提议的设定 diff 卡片（人物 / 故事背景） */
   settingDiffCards?: SettingDiffCardState[];
   /** 等待用户批准的高风险 Agent 工具调用。 */

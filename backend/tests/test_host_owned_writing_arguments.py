@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.contracts import (
+from purra.contracts import (
     ApprovalResult,
     ApprovalStatus,
     ExecutionState,
@@ -14,7 +14,7 @@ from agent_core.contracts import (
     ToolBatchRequest,
     ToolCall,
 )
-from agent_core.tools.executor import CoreToolExecutor
+from purra.tools.executor import CoreToolExecutor
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.tools.host_arguments import (
     CURRENT_CHAPTER_DEFAULT_TOOLS,

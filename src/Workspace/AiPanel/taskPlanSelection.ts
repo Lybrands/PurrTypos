@@ -20,13 +20,6 @@ export function getVisibleTaskPlanSteps(plan: AiTaskPlan): AiTaskStep[] {
   );
 }
 
-/**
- * Keep completion progress and the active step ordinal separate.
- *
- * While step 3 is running only two steps are complete. The progress bar
- * should therefore remain at 2/total, but a current-step badge must display
- * 3/total instead of presenting the completed count as the current step.
- */
 export function getTaskPlanProgress(plan: AiTaskPlan) {
   const steps = getVisibleTaskPlanSteps(plan);
   const total = steps.length;
@@ -38,15 +31,21 @@ export function getTaskPlanProgress(plan: AiTaskPlan) {
       (step) => step.status === "blocked" || step.status === "failed",
     ) ||
     steps.find((step) => step.status === "pending");
-  const currentStepIndex = currentStep ? steps.indexOf(currentStep) : -1;
   return {
     total,
     completed,
     runningSteps,
     currentStep,
-    currentStepNumber: currentStepIndex >= 0 ? currentStepIndex + 1 : null,
     percent: total > 0 ? Math.round((completed / total) * 100) : 0,
   };
+}
+
+export function getTaskPlanCountLabel(plan: AiTaskPlan): string {
+  const { completed, total, runningSteps } = getTaskPlanProgress(plan);
+  const active = plan.status === "planned" || plan.status === "running";
+  return active && runningSteps.length > 1
+    ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
+    : `已完成 ${completed}/${total}`;
 }
 
 export function shouldShowTaskPlan(plan: AiTaskPlan): boolean {

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageOrigin,
@@ -14,8 +14,8 @@ from agent_core.contracts import (
     TaskContextRequest,
     TaskSpec,
 )
-from agent_core.context_budget import allocate_context_budget
-from agent_core.evidence import RunEvidenceStore
+from purra.context_budget import allocate_context_budget
+from purra.evidence import RunEvidenceStore
 from database.connection import DatabaseConnection
 from domains.writing.memory_context import (
     MemoryContextRequest,

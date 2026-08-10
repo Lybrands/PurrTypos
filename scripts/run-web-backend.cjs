@@ -4,6 +4,7 @@ const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 
 const projectRoot = path.resolve(__dirname, '..')
+const purraSrc = path.join(projectRoot, 'packages', 'purra', 'src')
 const explicitPython = process.env.PURRTYPOS_PYTHON?.trim()
 const candidates = [
   ...(explicitPython ? [{ command: explicitPython, prefix: [] }] : []),
@@ -50,6 +51,7 @@ const child = spawn(
       PURRTYPOS_DATA_DIR: process.env.PURRTYPOS_DATA_DIR || userDataDir(),
       PURRTYPOS_SKILLS_DIR: path.join(projectRoot, 'backend', 'skills'),
       PURRTYPOS_PORT: process.env.PURRTYPOS_PORT || '18321',
+      PYTHONPATH: [purraSrc, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     },
     stdio: 'inherit',
   },

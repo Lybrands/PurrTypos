@@ -170,7 +170,7 @@ def test_all_read_cache_key_protocols_are_frozen(name, args, expected):
 
 
 def test_query_outline_large_receipt_is_bounded_without_breaking_json():
-    from agent_core.contracts import AgentMessage, MessageOrigin
+    from purra.contracts import AgentMessage, MessageOrigin
     from domains.writing.continuity_validation import (
         AtomicContinuityGroundingValidator,
     )
@@ -218,7 +218,7 @@ def test_query_outline_large_receipt_is_bounded_without_breaking_json():
             content=payload,
             tool_call_id="query-outline",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "queryOutline"},
+            host_metadata={"purra_tool_name": "queryOutline"},
         ),
         AgentMessage(
             role="tool",
@@ -228,7 +228,7 @@ def test_query_outline_large_receipt_is_bounded_without_breaking_json():
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"agent_core_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "getChapterContent"},
         ),
     )
     grounding = AtomicContinuityGroundingValidator(

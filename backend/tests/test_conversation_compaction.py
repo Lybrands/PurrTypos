@@ -6,24 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.context_orchestration.compaction import (
+from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
-from agent_core.context_orchestration.contracts import (
+from purra.context_orchestration.contracts import (
     ContextCompressionSettings,
     ConversationCompactionResult,
 )
-from agent_core.context_orchestration.ledger import (
+from purra.context_orchestration.ledger import (
     ContextCompactionBudget,
     ContextCompactionPhase,
 )
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     DomainContext,
     MessageOrigin,
     MessageRole,
     ModelCompletion,
+    ModelFinishReason,
     ModelRequest,
     PlanningCapabilities,
     ToolCall,
@@ -32,8 +33,9 @@ from application.conversation_compaction_contracts import (
     ConversationSummary,
     ConversationTurn,
 )
-from agent_core.errors import ContextOverflowError, ContractViolationError
-from agent_core.planner import build_planner_messages
+from purra.errors import ContextOverflowError, ContractViolationError
+from purra.model_execution import ManagedModelExecutor
+from purra.planner import build_planner_messages
 from application.conversation_compaction import (
     ConversationCompactionService,
     ConversationSummaryCompressionPolicy,
@@ -87,6 +89,7 @@ class _Gateway:
                 content=response,
             ),
             model="summary-model",
+            finish_reason=ModelFinishReason.STOP,
         )
 
     async def stream(self, messages, invocation, signal=None):  # pragma: no cover
@@ -155,7 +158,7 @@ def _coordinator(
     return ContextCompressionCoordinator(
         ConversationCompactionService(
             repository,
-            ModelBackedConversationSummarizer(gateway),
+            ModelBackedConversationSummarizer(ManagedModelExecutor(gateway)),
         ),
         settings,
     )
@@ -260,7 +263,7 @@ async def test_application_bounds_semantic_passes_before_emergency_projection():
     coordinator = ContextCompressionCoordinator(
         ConversationCompactionService(
             repository,
-            ModelBackedConversationSummarizer(gateway),
+            ModelBackedConversationSummarizer(ManagedModelExecutor(gateway)),
             policy,
         )
     )

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from agent_core.contracts import (
+from purra.contracts import (
     ToolExecutionMode,
     ToolPolicy,
     ToolRiskLevel,

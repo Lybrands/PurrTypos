@@ -211,8 +211,6 @@ async def test_run_snapshot_reuses_live_sse_mapper_for_replay(temp_db):
                     },
                 }],
                 "toolCallsInProgress": True,
-                "partialContent": "",
-                "partialThinking": "",
                 "model": None,
             },
         },

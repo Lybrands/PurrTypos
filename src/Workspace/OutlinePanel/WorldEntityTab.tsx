@@ -9,32 +9,14 @@ import {
   CompassIcon,
 } from '@/purr-components'
 import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import type { Editor } from '@tiptap/core'
-import { Extension } from '@tiptap/core'
-import { useEditor, EditorContent } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
+import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
 import type { EntityId, SettingEntity, SettingEntityType } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
-import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
 import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
-
-/** Tab 键：列表内缩进，非列表插入制表符（与人物/背景编辑器一致） */
-const LiteralTab = Extension.create({
-  name: 'literalTab',
-  addKeyboardShortcuts() {
-    return {
-      Tab: () => {
-        if (this.editor.commands.sinkListItem('listItem')) return true
-        this.editor.commands.insertContent('\t')
-        return true
-      },
-    }
-  },
-})
 
 export const ENTITY_TYPE_OPTIONS: Array<{ value: SettingEntityType; label: string }> = [
   { value: 'location', label: '地点' },
@@ -100,40 +82,7 @@ export default function WorldEntityTab({
   const [draftType, setDraftType] = React.useState<SettingEntityType>('location')
   const [draftName, setDraftName] = React.useState('')
   const [draftTags, setDraftTags] = React.useState<string[]>([])
-
-  const editorRef = React.useRef<Editor | null>(null)
-  const editor = useEditor({
-    immediatelyRender: true,
-    extensions: [
-      LiteralTab,
-      StarterKit.configure({
-        heading: { levels: [1, 2, 3, 4] },
-      }),
-    ],
-    content: '<p></p>',
-    editorProps: {
-      attributes: {
-        class: 'story-background-tiptap-editable',
-        spellcheck: 'false',
-      },
-      handlePaste: (_view, event) => {
-        const text = event.clipboardData?.getData('text/plain') ?? ''
-        if (!text.trim()) return false
-        const looksLikeMarkdown =
-          /^#+\s|^\s*[-*+]\s|^\s*\d+\.\s|\*\*[^*]+|\n\s*[-*+]\s|\n#+\s|^>\s|^\s*\|.+\|/m.test(text)
-        if (looksLikeMarkdown) {
-          event.preventDefault()
-          editorRef.current?.commands.insertContent(markdownToHtml(text))
-          return true
-        }
-        return false
-      },
-    },
-  }, [editModalOpen])
-
-  React.useEffect(() => {
-    editorRef.current = editor ?? null
-  }, [editor])
+  const [draftProfileMd, setDraftProfileMd] = React.useState('')
 
   const loadEntities = React.useCallback(async () => {
     if (bookId == null) return
@@ -155,13 +104,6 @@ export default function WorldEntityTab({
     return () => window.removeEventListener('setting-updated', handler)
   }, [loadEntities])
 
-  // 打开编辑弹窗时灌入草稿（新建给模板脚手架）
-  React.useEffect(() => {
-    if (!editModalOpen || !editor) return
-    const md = editTarget ? (editTarget.profile_md ?? '') : PROFILE_TEMPLATE
-    editor.commands.setContent(markdownToHtml(md))
-  }, [editModalOpen, editTarget, editor])
-
   React.useEffect(() => {
     if (focusEntityId == null) return
     const el = cardRefs.current[focusEntityId]
@@ -176,6 +118,7 @@ export default function WorldEntityTab({
     setDraftType(typeFilter === 'all' ? 'location' : typeFilter)
     setDraftName('')
     setDraftTags([])
+    setDraftProfileMd(PROFILE_TEMPLATE)
     setEditModalOpen(true)
   }, [typeFilter])
 
@@ -185,6 +128,7 @@ export default function WorldEntityTab({
     setDraftType(ent.entity_type || 'other')
     setDraftName(ent.name ?? '')
     setDraftTags(splitToArray(ent.tags))
+    setDraftProfileMd(ent.profile_md ?? '')
     setEditModalOpen(true)
   }, [diff])
 
@@ -200,21 +144,19 @@ export default function WorldEntityTab({
       return
     }
     if (bookId == null) return
-    const ed = editorRef.current
-    const profileMd = ed ? htmlToMarkdown(ed.getHTML()) : ''
     setSaving(true)
     try {
       const res = editTarget
         ? await services.settingEntities.updateSettingEntity({
             id: editTarget.id,
-            data: { entityType: draftType, name, tags: draftTags.join(', '), profileMd },
+            data: { entityType: draftType, name, tags: draftTags.join(', '), profileMd: draftProfileMd },
           })
         : await services.settingEntities.createSettingEntity({
             bookId,
             entityType: draftType,
             name,
             tags: draftTags.join(', '),
-            profileMd,
+            profileMd: draftProfileMd,
           })
       if (res.success) {
         message.success(editTarget ? '已保存' : '条目已创建')
@@ -226,7 +168,7 @@ export default function WorldEntityTab({
     } finally {
       setSaving(false)
     }
-  }, [bookId, draftType, draftName, draftTags, editTarget, closeModal, loadEntities, message])
+  }, [bookId, draftType, draftName, draftTags, draftProfileMd, editTarget, closeModal, loadEntities, message])
 
   /** 打开 AI 全局对话并携带条目上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((ent: SettingEntity) => {
@@ -415,9 +357,13 @@ export default function WorldEntityTab({
             className="character-edit-tags"
           />
         </div>
-        <div className="character-edit-profile story-background-tiptap-wrap">
-          <EditorContent editor={editor} className="story-background-tiptap-container" />
-        </div>
+        <KnowledgeMarkdownEditor
+          documentKey={`world-entity:${editTarget?.id ?? 'new'}`}
+          value={draftProfileMd}
+          onChange={setDraftProfileMd}
+          ariaLabel="设定条目档案"
+          className="character-edit-profile"
+        />
       </PurrModal>
 
       <PurrModal

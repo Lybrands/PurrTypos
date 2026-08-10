@@ -1,1 +1,1 @@
-"""Persistence adapters for Agent Core ports."""
+"""Persistence adapters for PurrA ports."""

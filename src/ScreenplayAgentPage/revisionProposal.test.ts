@@ -12,7 +12,7 @@ import {
 const reference: ScreenplayRevisionRef = {
   schemaVersion: 1,
   projectId: 'project-1',
-  operationId: 'operation-1',
+  taskId: 'task-1',
   revisionId: 'revision-1',
   role: 'sceneList',
   revisionNo: 2,
@@ -32,7 +32,7 @@ const revision = {
     title: '场景规划候选',
     derivedFromIds: ['structure-1'],
   },
-  operationId: 'operation-1',
+  agentTaskId: 'task-1',
   finalizingRunId: 'run-persisted',
   createdAt: null,
   schemaVersion: 1,

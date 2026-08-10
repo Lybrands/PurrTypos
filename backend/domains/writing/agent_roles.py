@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_core.contracts import ToolExecutionMode
+from purra.contracts import ToolExecutionMode
 from domains.agent_roles import AgentRoleDefinition, AgentRoleRegistry
 
 

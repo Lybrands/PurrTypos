@@ -12,8 +12,14 @@ import os
 import sys
 import threading
 import webbrowser
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+
+# The Agent framework is an independent monorepo package. Source deployments
+# install it or vendor it beside this backend; repository runs use its src root.
+_purra_src = Path(__file__).resolve().parent.parent / "packages" / "purra" / "src"
+if _purra_src.is_dir() and str(_purra_src) not in sys.path:
+    sys.path.insert(0, str(_purra_src))
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -112,38 +118,30 @@ async def lifespan(application: FastAPI):
                 ", ".join(recovered_long_tasks),
             )
 
-        from infrastructure.persistence.sqlite_screenplay_v2_repository import (
-            SqliteScreenplayV2Repository,
+        from infrastructure.persistence.sqlite_screenplay_agent_repository import (
+            SqliteScreenplayAgentRepository,
         )
 
-        screenplay_repository = SqliteScreenplayV2Repository(db)
-        recovered_operations = (
-            await screenplay_repository.recover_operations_after_restart()
-        )
-        if recovered_operations:
-            logging.getLogger(__name__).warning(
-                "Checkpointed %s screenplay Operation(s) after restart: %s",
-                len(recovered_operations),
-                ", ".join(recovered_operations),
-            )
-
-        from infrastructure.persistence.sqlite_screenplay_conversation_repository import (
-            SqliteScreenplayConversationRepository,
-        )
-
-        recovered_turns = await SqliteScreenplayConversationRepository(
+        recovered_turn_ids = await SqliteScreenplayAgentRepository(
             db,
             owner_id="screenplay-startup-recovery",
         ).recover_after_restart()
-        if recovered_turns:
-            logging.getLogger(__name__).warning(
-                "Released %s screenplay Conversation Turn(s) for credential "
-                "re-injection after restart: %s",
-                len(recovered_turns),
-                ", ".join(recovered_turns),
+        if recovered_turn_ids:
+            from application.screenplay_agent_stream import (
+                ScreenplayAgentChunkProjector,
             )
 
-        from agent_core.artifacts import ArtifactMaintenancePolicy
+            projector = ScreenplayAgentChunkProjector(db)
+            for turn_id in recovered_turn_ids:
+                with suppress(Exception):
+                    await projector.terminal(turn_id)
+        if recovered_turn_ids:
+            logging.getLogger(__name__).warning(
+                "Failed %s credential-bound screenplay Turn(s) after restart",
+                len(recovered_turn_ids),
+            )
+
+        from purra.artifacts import ArtifactMaintenancePolicy
         from application.artifact_maintenance import (
             monitor_artifact_maintenance,
             run_artifact_maintenance,
@@ -202,9 +200,6 @@ async def lifespan(application: FastAPI):
             monitor_orphaned_runs(
                 execution_db,
                 stop_event=orphan_monitor_stop,
-                reconcile_linked_state=(
-                    screenplay_repository.settle_terminal_root_operations
-                ),
             )
         )
         artifact_monitor = asyncio.create_task(

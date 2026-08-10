@@ -2,42 +2,17 @@ import { services } from '@/services'
 import React from 'react'
 import { AiChatIcon, EditIcon, HistoryIcon, ImportIcon, PaperclipIcon, PlusIcon } from '@/purr-components'
 import { PurrButton, PurrModal, PurrPopconfirm, PurrSpace, PurrTooltip, PurrTypography } from '@/purr-components'
+import KnowledgeMarkdownEditor, {
+  appendImportedMarkdown,
+} from '@/components/KnowledgeMarkdownEditor'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
-import type { Editor } from '@tiptap/core'
-import { mergeAttributes } from '@tiptap/core'
-import { useEditor, EditorContent } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
-import Heading from '@tiptap/extension-heading'
-import { TableKit } from '@tiptap/extension-table'
 import type { EntityId, StoryBackgroundAttachment } from '../../types'
 import { getStoryBackground } from '../utils'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
-import { markdownToHtml, htmlToMarkdown } from '../../utils/markdown'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
-import {
-  appendImportedMarkdown,
-  handleMarkdownPaste,
-  LiteralTab,
-} from './markdownEditorShared'
 import './StoryBackgroundTab.scss'
-
-/** 悬停标题时显示原生 tooltip：第几级标题（与 StarterKit 默认 heading 二选一） */
-const storyBackgroundHeading = Heading.extend({
-  renderHTML({ node, HTMLAttributes }) {
-    const hasLevel = this.options.levels.includes(node.attrs.level)
-    const level = hasLevel ? node.attrs.level : this.options.levels[0]
-    return [
-      `h${level}`,
-      mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
-        title: `第 ${level} 级标题`,
-        'data-heading-level': String(level),
-      }),
-      0,
-    ]
-  },
-}).configure({ levels: [1, 2, 3, 4] })
 
 interface StoryBackgroundTabProps {
   bookId: EntityId | null
@@ -52,41 +27,10 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   const [loading, setLoading] = React.useState(false)
   const [attachmentModalOpen, setAttachmentModalOpen] = React.useState(false)
   const [historyOpen, setHistoryOpen] = React.useState(false)
-  const initialDraftRef = React.useRef('')
+  const [draftContent, setDraftContent] = React.useState('')
 
   const activeDiffSession = useActiveSettingDiffSession('background', bookId)
   const diffLocked = Boolean(activeDiffSession)
-
-  const editor = useEditor({
-    immediatelyRender: true,
-    extensions: [
-      LiteralTab,
-      StarterKit.configure({
-        heading: false,
-      }),
-      storyBackgroundHeading,
-      TableKit,
-    ],
-    content: '<p></p>',
-    editorProps: {
-      attributes: {
-        class: 'story-background-tiptap-editable',
-        spellcheck: 'false',
-      },
-      handlePaste: (_view, event) => handleMarkdownPaste(editorRef.current, event),
-    },
-  }, [editing])
-
-  const editorRef = React.useRef<Editor | null>(null)
-  React.useEffect(() => {
-    editorRef.current = editor ?? null
-  }, [editor])
-
-  React.useEffect(() => {
-    if (editing && editor) {
-      editor.commands.setContent(markdownToHtml(initialDraftRef.current))
-    }
-  }, [editing, editor])
 
   const loadContent = React.useCallback(async () => {
     if (bookId == null) return
@@ -127,14 +71,13 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
 
   const handleAdd = React.useCallback(() => {
     if (diffLocked) return
-    initialDraftRef.current = content
+    setDraftContent(content)
     setEditing(true)
   }, [content, diffLocked])
 
   const handleSave = React.useCallback(async () => {
     if (bookId == null) return
-    const ed = editorRef.current
-    const md = ed ? htmlToMarkdown(ed.getHTML()) : ''
+    const md = draftContent
     setLoading(true)
     try {
       const res = await services.storyBackground.saveStoryBackground({ bookId, content: md })
@@ -148,7 +91,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     } finally {
       setLoading(false)
     }
-  }, [bookId, message])
+  }, [bookId, draftContent, message])
 
   const handleCancel = React.useCallback(() => {
     setEditing(false)
@@ -157,12 +100,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   const handleImportFile = React.useCallback(async () => {
     const res = await services.files.openAndReadTextFile()
     if (res.success && res.data != null) {
-      const ed = editorRef.current
-      if (ed) {
-        const currentMd = htmlToMarkdown(ed.getHTML())
-        const appended = appendImportedMarkdown(currentMd, res.data)
-        ed.commands.setContent(markdownToHtml(appended))
-      }
+      setDraftContent((current) => appendImportedMarkdown(current, res.data ?? ''))
       message.success('已追加导入内容')
     } else if (res.error !== 'canceled') {
       message.error(res.error || '读取文件失败')
@@ -292,9 +230,13 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
             </PurrTooltip>
           </div>
         </div>
-        <div className="story-background-editor-wrap story-background-tiptap-wrap">
-          <EditorContent editor={editor} className="story-background-tiptap-container" />
-        </div>
+        <KnowledgeMarkdownEditor
+          documentKey={`story-background:${bookId}`}
+          value={draftContent}
+          onChange={setDraftContent}
+          ariaLabel="故事背景"
+          className="story-background-editor-wrap"
+        />
         <div className="story-background-toolbar story-background-toolbar-bottom">
           <PurrButton type="primary" size="small" onClick={handleSave} disabled={loading}>
             保存

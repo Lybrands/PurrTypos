@@ -12,7 +12,6 @@ from exceptions import AppError
 from routers.screenplay_v2 import (
     accept_screenplay_v2_revision,
     archive_screenplay_v2_project,
-    cancel_screenplay_v2_operation,
     create_screenplay_v2_project,
     create_screenplay_v2_session,
     create_screenplay_v2_working_copy_from_revision,
@@ -21,13 +20,9 @@ from routers.screenplay_v2 import (
     get_screenplay_v2_workspace,
     list_screenplay_v2_projects,
     list_screenplay_v2_sessions,
-    list_screenplay_v2_operation_events,
     list_screenplay_v2_revision_history,
-    pause_screenplay_v2_operation,
     publish_screenplay_v2_working_copy,
     restore_screenplay_v2_project,
-    resume_screenplay_v2_operation,
-    start_screenplay_v2_operation,
     update_screenplay_v2_project,
     update_screenplay_v2_working_copy,
 )
@@ -38,7 +33,6 @@ from schemas.screenplay_v2 import (
     CreateScreenplayV2WorkingCopyFromRevisionRequest,
     DeleteScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
-    StartScreenplayV2OperationRequest,
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
@@ -232,7 +226,7 @@ async def test_native_project_metadata_uses_idempotent_project_cas(
         )
     assert stale.value.status_code == 409
 
-async def test_native_project_lifecycle_blocks_active_operation_and_is_replay_safe(
+async def test_native_project_lifecycle_is_replay_safe(
     temp_db: DatabaseConnection,
 ):
     created = await create_screenplay_v2_project(
@@ -240,67 +234,34 @@ async def test_native_project_lifecycle_blocks_active_operation_and_is_replay_sa
         idempotency_key="create-lifecycle-project",
     )
     project_id = created["data"]["project"]["id"]
-    started = await start_screenplay_v2_operation(
-        project_id,
-        StartScreenplayV2OperationRequest.model_validate({
-            "expectedProjectRevision": 1,
-            "targetRole": "creativeBrief",
-            "intent": {"type": "generate", "instruction": "生成简报"},
-        }),
-        idempotency_key="start-lifecycle-operation",
-    )
-    operation_id = started["data"]["operation"]["id"]
-
-    with pytest.raises(AppError, match="活动 Operation") as active_archive:
-        await archive_screenplay_v2_project(
-            project_id,
-            ChangeScreenplayV2ProjectLifecycleRequest(
-                expectedProjectRevision=2,
-            ),
-            idempotency_key="archive-active-project",
-        )
-    assert active_archive.value.status_code == 409
-
-    with pytest.raises(AppError, match="活动 Operation") as active_delete:
-        await delete_screenplay_v2_project(
-            project_id,
-            DeleteScreenplayV2ProjectRequest(expectedProjectRevision=2),
-            idempotency_key="delete-active-project",
-        )
-    assert active_delete.value.status_code == 409
-
-    await cancel_screenplay_v2_operation(
-        operation_id,
-        idempotency_key="cancel-lifecycle-operation",
-    )
     archived = await archive_screenplay_v2_project(
         project_id,
         ChangeScreenplayV2ProjectLifecycleRequest(
-            expectedProjectRevision=2,
+            expectedProjectRevision=1,
         ),
         idempotency_key="archive-project",
     )
     assert archived["data"]["project"]["lifecycle"] == "archived"
-    assert archived["data"]["project"]["revision"] == 3
+    assert archived["data"]["project"]["revision"] == 2
 
     replay = await archive_screenplay_v2_project(
         project_id,
         ChangeScreenplayV2ProjectLifecycleRequest(
-            expectedProjectRevision=2,
+            expectedProjectRevision=1,
         ),
         idempotency_key="archive-project",
     )
-    assert replay["data"]["project"]["revision"] == 3
+    assert replay["data"]["project"]["revision"] == 2
 
     restored = await restore_screenplay_v2_project(
         project_id,
         ChangeScreenplayV2ProjectLifecycleRequest(
-            expectedProjectRevision=3,
+            expectedProjectRevision=2,
         ),
         idempotency_key="restore-project",
     )
     assert restored["data"]["project"]["lifecycle"] == "active"
-    assert restored["data"]["project"]["revision"] == 4
+    assert restored["data"]["project"]["revision"] == 3
 
 
 async def test_native_project_delete_is_cas_guarded_and_replay_safe(
@@ -334,114 +295,6 @@ async def test_native_project_delete_is_cas_guarded_and_replay_safe(
         idempotency_key="delete-native-project",
     )
     assert replay == deleted
-
-
-async def test_operation_api_is_idempotent_and_enforces_one_active_target(
-    temp_db: DatabaseConnection,
-):
-    created = await create_screenplay_v2_project(
-        _original_request(),
-        idempotency_key="create-operation-project",
-    )
-    project_id = created["data"]["project"]["id"]
-    request = StartScreenplayV2OperationRequest.model_validate({
-        "expectedProjectRevision": 1,
-        "targetRole": "creativeBrief",
-        "intent": {
-            "type": "generate",
-            "scope": {"section": "all"},
-            "instruction": "生成第一版创作简报",
-        },
-        "conversation": {
-            "sessionId": 7,
-            "userMessageId": "message-1",
-        },
-    })
-
-    started = await start_screenplay_v2_operation(
-        project_id,
-        request,
-        idempotency_key="start-brief-operation",
-    )
-    operation = started["data"]["operation"]
-    operation_id = operation["id"]
-    assert operation["status"] == "queued"
-    assert operation["baseProjectRevision"] == 1
-    assert operation["intent"]["conversation"] == {
-        "sessionId": 7,
-        "userMessageId": "message-1",
-    }
-    assert started["data"]["projectRevision"] == 2
-    assert started["data"]["workspace"]["activeOperations"][0]["id"] == (
-        operation_id
-    )
-
-    replay = await start_screenplay_v2_operation(
-        project_id,
-        request,
-        idempotency_key="start-brief-operation",
-    )
-    assert replay["data"]["operation"]["id"] == operation_id
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_operations WHERE project_id = ?",
-        [project_id],
-    ) == {"count": 1}
-
-    with pytest.raises(AppError, match="Idempotency-Key") as changed_request:
-        await start_screenplay_v2_operation(
-            project_id,
-            StartScreenplayV2OperationRequest.model_validate({
-                **request.model_dump(mode="json"),
-                "intent": {"type": "regenerate", "instruction": "换一种写法"},
-            }),
-            idempotency_key="start-brief-operation",
-        )
-    assert changed_request.value.status_code == 409
-
-    with pytest.raises(AppError, match="同一目标已有") as active_conflict:
-        await start_screenplay_v2_operation(
-            project_id,
-            StartScreenplayV2OperationRequest.model_validate({
-                **request.model_dump(mode="json"),
-                "expectedProjectRevision": 2,
-            }),
-            idempotency_key="start-second-brief-operation",
-        )
-    assert active_conflict.value.status_code == 409
-
-    paused = await pause_screenplay_v2_operation(
-        operation_id,
-        idempotency_key="pause-brief-operation",
-    )
-    assert paused["data"]["operation"]["status"] == "paused"
-    resumed = await resume_screenplay_v2_operation(
-        operation_id,
-        idempotency_key="resume-brief-operation",
-    )
-    assert resumed["data"]["operation"]["status"] == "queued"
-    canceled = await cancel_screenplay_v2_operation(
-        operation_id,
-        idempotency_key="cancel-brief-operation",
-    )
-    assert canceled["data"]["operation"]["status"] == "canceled"
-
-    events = await list_screenplay_v2_operation_events(
-        operation_id,
-        after=0,
-        limit=10,
-    )
-    assert [event["sequence"] for event in events["data"]["events"]] == [
-        1,
-        2,
-        3,
-        4,
-    ]
-    assert [event["type"] for event in events["data"]["events"]] == [
-        "screenplay.operation.queued",
-        "screenplay.operation.paused",
-        "screenplay.operation.queued",
-        "screenplay.operation.canceled",
-    ]
 
 
 async def test_v2_book_project_freezes_source_snapshot(

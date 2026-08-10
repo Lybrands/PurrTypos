@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from agent_core.contracts import DomainContext
-from agent_core.json_values import thaw_json_mapping
+from purra.contracts import DomainContext
+from purra.json_values import thaw_json_mapping
 
 
 WRITING_DOMAIN_NAMESPACE = "purrtypos.writing"

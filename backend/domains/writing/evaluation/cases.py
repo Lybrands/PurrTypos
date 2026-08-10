@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_core.evaluation import (
+from purra.evaluation import (
     TRACE_EVENT_TYPE,
     AgentRuntimeRegressionCase,
 )

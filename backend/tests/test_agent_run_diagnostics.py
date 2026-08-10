@@ -26,7 +26,7 @@ async def temp_db(tmp_path: Path):
 async def test_diagnostics_marks_budget_overflow_or_rejected_tools_as_failure(
     temp_db: DatabaseConnection,
 ):
-    from agent_core.evaluation import evaluate_agent_run
+    from purra.evaluation import evaluate_agent_run
     from infrastructure.persistence.run_store import (
         append_trace,
         create_run,
@@ -54,7 +54,7 @@ async def test_diagnostics_marks_budget_overflow_or_rejected_tools_as_failure(
 async def test_diagnostics_marks_missing_required_tool_call_as_failure(
     temp_db: DatabaseConnection,
 ):
-    from agent_core.evaluation import evaluate_agent_run
+    from purra.evaluation import evaluate_agent_run
     from infrastructure.persistence.run_store import (
         append_trace,
         create_run,
@@ -83,7 +83,7 @@ async def test_diagnostics_marks_missing_required_tool_call_as_failure(
 async def test_diagnostics_rejects_historical_silent_planner_fallback(
     temp_db: DatabaseConnection,
 ):
-    from agent_core.evaluation import evaluate_agent_run
+    from purra.evaluation import evaluate_agent_run
     from infrastructure.persistence.run_store import (
         append_trace,
         create_run,
@@ -372,7 +372,7 @@ async def test_manual_artifact_maintenance_only_reaps_safe_claims(
 async def test_diagnostics_exposes_work_item_lineage_without_claim_secret(
     temp_db: DatabaseConnection,
 ):
-    from agent_core.artifacts import ArtifactCreateCommand
+    from purra.artifacts import ArtifactCreateCommand
     from infrastructure.persistence.run_store import create_run
     from infrastructure.persistence.sqlite_work_item_artifact_lifecycle import (
         SqliteWorkItemArtifactLifecycle,

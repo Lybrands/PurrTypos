@@ -1,24 +1,24 @@
-"""Model-backed adapter for Agent Core conversation summarization."""
+"""Model-backed adapter for PurrA conversation summarization."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Mapping, Sequence
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
-    ModelInvocation,
     ModelRequest,
     ReasoningMode,
-    ToolChoiceMode,
 )
 from application.conversation_compaction_contracts import (
     ConversationSummary,
     ConversationTurn,
 )
-from agent_core.ports import CancellationSignal, ModelGateway
-from agent_core.structured_output import (
+from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.output_budget import OutputBudgetPolicy
+from purra.ports import CancellationSignal
+from purra.structured_output import (
     StructuredOutputParseError,
     parse_json_object,
 )
@@ -43,8 +43,12 @@ shape. Do not use Markdown, comments, or explanatory prose."""
 class ModelBackedConversationSummarizer:
     """Execute the semantic-summary model call behind Core's summarizer port."""
 
-    def __init__(self, model_gateway: ModelGateway) -> None:
-        self._model = model_gateway
+    def __init__(self, model_executor: ManagedModelExecutor) -> None:
+        if not isinstance(model_executor, ManagedModelExecutor):
+            raise TypeError(
+                "conversation summarizer requires a ManagedModelExecutor"
+            )
+        self._model = model_executor
 
     async def summarize(
         self,
@@ -77,26 +81,39 @@ class ModelBackedConversationSummarizer:
                 ),
             ),
         )
-        invocation = ModelInvocation(
+        maximum = max(1, int(max_output_tokens))
+        call = ManagedModelCall(
             request=request,
-            tools=(),
-            tool_choice=ToolChoiceMode.NONE,
-            max_output_tokens=max(1, int(max_output_tokens)),
+            output_policy=OutputBudgetPolicy(
+                key="conversation_summary",
+                base_tokens=maximum,
+                per_work_unit_tokens=0,
+                safety_factor=1,
+                hard_cap_tokens=maximum,
+            ),
+            context_window_tokens=max(32_000, maximum * 4),
             reasoning_mode=ReasoningMode.DISABLED,
         )
-        completion = await self._model.complete(messages, invocation, signal)
+        completion = (
+            await self._model.complete(messages, call, signal)
+        ).completion
         try:
             return parse_json_object(completion.message.content)
         except StructuredOutputParseError:
-            repaired = await self._model.complete(
-                (
-                    *messages,
-                    completion.message,
-                    AgentMessage(role=MessageRole.USER, content=_REPAIR_PROMPT),
-                ),
-                invocation,
-                signal,
-            )
+            repaired = (
+                await self._model.complete(
+                    (
+                        *messages,
+                        completion.message,
+                        AgentMessage(
+                            role=MessageRole.USER,
+                            content=_REPAIR_PROMPT,
+                        ),
+                    ),
+                    call,
+                    signal,
+                )
+            ).completion
             return parse_json_object(repaired.message.content)
 
 

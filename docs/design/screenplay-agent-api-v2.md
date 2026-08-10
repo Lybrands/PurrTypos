@@ -2,7 +2,7 @@
 
 > 状态：当前唯一运行时契约。没有 v1 兼容层，没有项目迁移接口，没有旧 Document 写入链路。
 >
-> 对话重写说明：原生 Conversation/Turn/Snapshot/cursor API 已成为唯一剧本页面运行链路；Phase 4 已删除旧页面 SSE、通用 Writing chunk 分支和 long-task conversation 兼容接口。Project/Operation/Revision/Head 契约继续保留，收口顺序由 [`agent-core-screenplay-refactor-charter.md`](agent-core-screenplay-refactor-charter.md) 定义。
+> 对话重写说明：原生 Conversation/Turn/Snapshot/cursor API 已成为唯一剧本页面运行链路；Phase 4 已删除旧页面 SSE、通用 Writing chunk 分支和 long-task conversation 兼容接口。Project/Operation/Revision/Head 契约继续保留，收口顺序由 [`purra-screenplay-refactor-charter.md`](purra-screenplay-refactor-charter.md) 定义。
 
 ## 1. 设计结论
 

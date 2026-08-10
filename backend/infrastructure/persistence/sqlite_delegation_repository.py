@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentDelegation,
     AgentRunResult,
     DelegationAggregation,

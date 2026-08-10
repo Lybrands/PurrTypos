@@ -302,7 +302,7 @@ async def _revision_document_view(
         "version": int(row.get("revision_no") or 1),
         "status": "accepted" if accepted else "candidate",
         "derived_from_ids": [str(item["input_revision_id"]) for item in inputs],
-        "operation_id": row.get("operation_id"),
+        "agent_task_id": row.get("agent_task_id"),
         "storage_model": "revision_parts",
         "create_time": row.get("create_time"),
         "update_time": row.get("create_time"),

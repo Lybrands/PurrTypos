@@ -10,19 +10,19 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from agent_core.artifacts import (
+from purra.artifacts import (
     ArtifactCreateCommand,
     ArtifactRecord,
     ArtifactScope,
     ArtifactStatus,
     ArtifactWriteClaim,
 )
-from agent_core.artifacts.errors import (
+from purra.artifacts.errors import (
     ArtifactConflictError,
     ArtifactStateError,
 )
-from agent_core.json_values import thaw_json_mapping
-from agent_core.work_items import WorkItemCreateCommand, WorkItemRecord
+from purra.json_values import thaw_json_mapping
+from purra.work_items import WorkItemCreateCommand, WorkItemRecord
 from infrastructure.persistence.sqlite_artifact_repository import (
     SqliteArtifactRepository,
 )

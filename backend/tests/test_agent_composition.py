@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agent_core.context_orchestration.compaction import (
+from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunResult,
     ApprovalRequest,
     ApprovalStatus,
@@ -19,9 +19,8 @@ from agent_core.contracts import (
     ToolCall,
     ToolExecutionMode,
 )
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.long_tasks import LongTaskUnitRecord, LongTaskUnitStatus
-from agent_core.tools import InMemoryApprovalGateway
+from purra.events import AgentEvent, CoreEventType
+from purra.tools import InMemoryApprovalGateway
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
@@ -33,7 +32,6 @@ from application.request_mapping import (
     writing_run_options,
 )
 from application.sse_mapping import core_update_to_sse_chunk
-from application.screenplay_agent_composition import ScreenplayAgentComposition
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.contracts import WritingDomainContext
@@ -46,65 +44,6 @@ from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-
-
-@pytest.mark.asyncio
-async def test_cancel_screenplay_long_task_stops_worker_and_bound_child_run():
-    units = (
-        LongTaskUnitRecord(
-            task_id="task-1",
-            id="batch-0001",
-            position=0,
-            status=LongTaskUnitStatus.RUNNING,
-            run_id="run-child",
-        ),
-        LongTaskUnitRecord(
-            task_id="task-1",
-            id="batch-0002",
-            position=1,
-            status=LongTaskUnitStatus.PENDING,
-        ),
-    )
-    canceled_task = object()
-
-    class _Repository:
-        async def list_units(self, task_id):
-            assert task_id == "task-1"
-            return units
-
-        async def cancel(self, task_id):
-            assert task_id == "task-1"
-            return canceled_task
-
-    class _LeaseStore:
-        def __init__(self):
-            self.canceled_runs = []
-
-        async def request_cancellation(self, run_id):
-            self.canceled_runs.append(run_id)
-            return True
-
-    class _Composition:
-        _long_task_repository = _Repository()
-        _execution_lease_store = _LeaseStore()
-        _active_parent_runs = {"task-1": "run-parent"}
-
-        _request_execution_stop = (
-            ScreenplayAgentComposition._request_execution_stop
-        )
-
-    composition = _Composition()
-
-    result = await ScreenplayAgentComposition.cancel_long_task(
-        composition,
-        "task-1",
-    )
-
-    assert result is canceled_task
-    assert composition._execution_lease_store.canceled_runs == [
-        "run-child",
-        "run-parent",
-    ]
 
 
 @pytest_asyncio.fixture
@@ -794,12 +733,39 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
                     },
                 }],
                 "toolCallsInProgress": True,
-                "partialContent": "",
-                "partialThinking": "",
                 "model": None,
             },
         },
     }
+
+
+def test_sse_mapping_keeps_public_output_separate_from_raw_model_channels():
+    def mapped(event_type: CoreEventType, delta: str):
+        return core_update_to_sse_chunk(
+            AgentEvent(
+                type=event_type,
+                run_id="run-visibility",
+                payload={"delta": delta},
+            ),
+            model="model",
+        )
+
+    assert mapped(
+        CoreEventType.ASSISTANT_COMMENTARY_DELTA,
+        "正在核对人物关系。",
+    ) == {"commentaryDelta": "正在核对人物关系。"}
+    assert mapped(
+        CoreEventType.ASSISTANT_FINAL_DELTA,
+        "核对完成。",
+    ) == {"delta": "核对完成。"}
+    assert mapped(
+        CoreEventType.MODEL_REASONING_DELTA,
+        "private chain",
+    ) == {"reasoningDelta": "private chain"}
+    assert mapped(
+        CoreEventType.MODEL_CONTENT_DELTA,
+        '{"private":"payload"}',
+    ) == {"modelContentDelta": '{"private":"payload"}'}
 
 
 @pytest.mark.asyncio
@@ -948,7 +914,7 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
 
 
 @pytest.mark.asyncio
-async def test_composed_route_uses_complete_agent_core(
+async def test_composed_route_uses_complete_purra(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
 ):

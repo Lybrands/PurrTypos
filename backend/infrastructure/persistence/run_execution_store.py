@@ -6,8 +6,8 @@ import json
 from time import time
 from typing import Any
 
-from agent_core.contracts import RunExecutionLease
-from agent_core.events import CoreEventType
+from purra.contracts import RunExecutionLease
+from purra.events import CoreEventType
 
 
 _ORPHANED_STEP_SUMMARY = "Run stopped because its execution owner was no longer active."

@@ -501,6 +501,7 @@ async def chat_no_stream_as_openai_format(
     return {
         "message": message,
         "model": getattr(msg, "model", None) or model,
+        "finish_reason": getattr(msg, "stop_reason", None),
         "usage": _anthropic_usage_as_openai(native_usage),
     }
 

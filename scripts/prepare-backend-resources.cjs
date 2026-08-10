@@ -9,6 +9,7 @@ const path = require('path')
 const root = path.join(__dirname, '..')
 const outDir = path.join(root, 'build-resources', 'backend')
 const backendSrc = path.join(root, 'backend')
+const purraSrc = path.join(root, 'packages', 'purra', 'src', 'purra')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
 
@@ -49,5 +50,6 @@ if (process.platform === 'win32' && fs.existsSync(frozenExe)) {
     )
   }
   copyDirFiltered(backendSrc, outDir)
+  copyDirFiltered(purraSrc, path.join(outDir, 'purra'))
   console.log('[prepare-backend-resources] Copied source backend →', outDir)
 }

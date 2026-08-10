@@ -1,6 +1,6 @@
 """DeepSeek V4 request profiles for the OpenAI-compatible API."""
 
-from agent_core.output_budget import ThinkingTokenAccounting
+from purra.output_budget import ThinkingTokenAccounting
 from infrastructure.models.profiles.base import ModelProfile
 
 
@@ -13,6 +13,7 @@ class DeepSeekV4ProProfile(ModelProfile):
     })
     max_output_tokens = 393_216
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
+    supports_json_object_output = True
 
 
 class DeepSeekV4FlashProfile(ModelProfile):
@@ -24,6 +25,7 @@ class DeepSeekV4FlashProfile(ModelProfile):
     })
     max_output_tokens = 393_216
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
+    supports_json_object_output = True
 
 
 DEEPSEEK_V4_PRO_PROFILE = DeepSeekV4ProProfile()

@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from agent_core.contracts import AgentRunResult, RunStatus
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.json_values import thaw_json_mapping
+from purra.contracts import AgentRunResult, RunStatus
+from purra.events import AgentEvent, CoreEventType
+from purra.json_values import thaw_json_mapping
 
 
 def core_update_to_sse_chunk(
@@ -70,10 +70,14 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
             terminal_payload["finalResponse"] = final_response
         return {terminal_names[event.type]: terminal_payload}
 
-    if event.type == CoreEventType.MODEL_DELTA:
+    if event.type == CoreEventType.ASSISTANT_FINAL_DELTA:
         return {"delta": str(payload.get("delta") or "")}
-    if event.type == CoreEventType.MODEL_THINKING_DELTA:
-        return {"thinkingDelta": str(payload.get("delta") or "")}
+    if event.type == CoreEventType.ASSISTANT_COMMENTARY_DELTA:
+        return {"commentaryDelta": str(payload.get("delta") or "")}
+    if event.type == CoreEventType.MODEL_CONTENT_DELTA:
+        return {"modelContentDelta": str(payload.get("delta") or "")}
+    if event.type == CoreEventType.MODEL_REASONING_DELTA:
+        return {"reasoningDelta": str(payload.get("delta") or "")}
     if event.type == CoreEventType.TOOL_CALLS_STARTED:
         return {
             "toolCalls": [
@@ -90,8 +94,6 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
                 if isinstance(call, Mapping)
             ],
             "toolCallsInProgress": bool(payload.get("in_progress")),
-            "partialContent": str(payload.get("partial_content") or ""),
-            "partialThinking": str(payload.get("partial_thinking") or ""),
             "model": payload.get("model"),
         }
     if event.type == CoreEventType.TOOL_RESULTS:
@@ -355,5 +357,8 @@ def _runtime_error_message(error_code: str | None) -> str:
         "provider_authentication_failed": "模型服务鉴权失败，请检查 API Key 和接口地址。",
         "provider_rate_limited": "模型服务请求过于频繁或已达到限额，请稍后重试。",
         "provider_bad_request": "模型服务拒绝了请求，请检查模型名称及其参数兼容性。",
+        "provider_reasoning_context_invalid": (
+            "模型思考模式的工具调用上下文不完整，请重试本次任务。"
+        ),
         "provider_unavailable": "模型服务暂时不可用，请稍后重试。",
     }.get(str(error_code or ""), "Agent 运行过程中发生异常，已安全停止；请稍后重试。")

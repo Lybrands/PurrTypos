@@ -5,7 +5,7 @@ import {
   EMPTY_RESPONSE_MESSAGE,
   synthesizeAssistantTextFromToolSegments,
 } from "../chatHistory";
-import { finalizeThinkingBlock } from "./streaming";
+import { finalizeCommentaryBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
 
 const getServices = () => import('@/services').then((module) => module.services)
@@ -14,21 +14,21 @@ export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
 export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
 
 /**
- * 错误终态：保留已产生的思考/工具过程并附上终止原因，随后清理运行态。
+ * 错误终态：保留公开执行说明和工具过程，并附上终止原因。
  */
 export const handleError: ChunkHandler = (chunk, ctx) => {
   if (!chunk.error) return;
   const { acc } = ctx;
   const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
   acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
-  const finalThinking = (acc.thinking || "").trim();
-  let savedThinkingBlocks = acc.thinkingBlocks ?? [];
-  let savedThinkingDurations = acc.thinkingDurationsMs ?? [];
-  if (finalThinking) {
-    const finalized = finalizeThinkingBlock(ctx, finalThinking);
-    savedThinkingBlocks = finalized.blocks;
-    savedThinkingDurations = finalized.durations;
-    acc.thinking = "";
+  const finalCommentary = (acc.commentary || "").trim();
+  let savedCommentaryBlocks = acc.commentaryBlocks ?? [];
+  let savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
+  if (finalCommentary) {
+    const finalized = finalizeCommentaryBlock(ctx, finalCommentary);
+    savedCommentaryBlocks = finalized.blocks;
+    savedCommentaryDurations = finalized.durations;
+    acc.commentary = "";
   }
   ctx.flushCommits();
 
@@ -40,7 +40,7 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
       const cm = last as ChatMessage;
       const hasInspectableProcess = Boolean(
         (acc.response || cm.content || "").trim() ||
-          savedThinkingBlocks.length ||
+          savedCommentaryBlocks.length ||
           (acc.toolCallSegments?.length ?? cm.toolCallSegments?.length ?? 0) ||
           acc.taskPlan ||
           cm.taskPlan ||
@@ -53,12 +53,6 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
       const merged = mergeAssistantErrorNotice(
         {
           content: acc.response || cm.content || "",
-          contentAfterToolCalls:
-            acc.toolCallSegments?.length
-              ? (acc.contentAfterToolCalls ??
-                cm.contentAfterToolCalls)
-              : cm.contentAfterToolCalls,
-          toolCallSegments: acc.toolCallSegments ?? cm.toolCallSegments,
         },
         chunk.error,
       );
@@ -67,17 +61,14 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
         content: hasInspectableProcess
           ? acc.response || cm.content || ""
           : merged.content ?? cm.content,
-        contentAfterToolCalls: hasInspectableProcess
-          ? acc.contentAfterToolCalls ?? cm.contentAfterToolCalls
-          : merged.contentAfterToolCalls,
-        thinking: "",
-        thinkingStartedAt: undefined,
-        thinkingBlocks: savedThinkingBlocks.length
-          ? savedThinkingBlocks
-          : cm.thinkingBlocks,
-        thinkingDurationsMs: savedThinkingDurations.length
-          ? savedThinkingDurations
-          : cm.thinkingDurationsMs,
+        commentary: "",
+        commentaryStartedAt: undefined,
+        commentaryBlocks: savedCommentaryBlocks.length
+          ? savedCommentaryBlocks
+          : cm.commentaryBlocks,
+        commentaryDurationsMs: savedCommentaryDurations.length
+          ? savedCommentaryDurations
+          : cm.commentaryDurationsMs,
         toolCallSegments: acc.toolCallSegments ?? cm.toolCallSegments,
         taskPlan: acc.taskPlan ?? cm.taskPlan,
         durationMs,
@@ -97,7 +88,7 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
 };
 
 /**
- * 正常终态：合并最终内容与 thinking 收尾，cleanup，落库，按需生成会话标题。
+ * 正常终态：收口最终回答和公开执行说明，随后落库。
  */
 export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done) return;
@@ -109,24 +100,22 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (chunk.aborted) {
     acc.taskPlan = markTaskPlanAborted(acc.taskPlan);
   }
-  const hasVisibleModelResponse = Boolean(
-    (acc.response || "").trim() ||
-      (acc.contentAfterToolCalls || "").trim(),
-  );
+  const finalModelResponse = acc.response || acc.pendingFinalResponse || "";
+  const hasVisibleModelResponse = Boolean(finalModelResponse.trim());
   const emptyResponse = !chunk.aborted && !hasVisibleModelResponse;
 
-  const finalThinking = (acc.thinking || "").trim();
-  let savedThinkingBlocks = acc.thinkingBlocks ?? [];
-  let savedThinkingDurations = acc.thinkingDurationsMs ?? [];
-  if (finalThinking) {
-    const finalized = finalizeThinkingBlock(ctx, finalThinking);
-    savedThinkingBlocks = finalized.blocks;
-    savedThinkingDurations = finalized.durations;
+  const finalCommentary = (acc.commentary || "").trim();
+  let savedCommentaryBlocks = acc.commentaryBlocks ?? [];
+  let savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
+  if (finalCommentary) {
+    const finalized = finalizeCommentaryBlock(ctx, finalCommentary);
+    savedCommentaryBlocks = finalized.blocks;
+    savedCommentaryDurations = finalized.durations;
   }
 
   let resolvedAssistantContent = emptyResponse
     ? EMPTY_RESPONSE_MESSAGE
-    : acc.response ||
+    : finalModelResponse ||
       synthesizeAssistantTextFromToolSegments({
           role: "assistant",
           content: "",
@@ -140,20 +129,20 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
       const last = next[next.length - 1];
       if (last?.role === "assistant") {
         const cm = last as ChatMessage;
-        const thinkingBlocks = savedThinkingBlocks.length
-          ? savedThinkingBlocks
-          : cm.thinkingBlocks;
-        const thinkingDurationsMs = savedThinkingDurations.length
-          ? savedThinkingDurations
-          : cm.thinkingDurationsMs;
+        const commentaryBlocks = savedCommentaryBlocks.length
+          ? savedCommentaryBlocks
+          : cm.commentaryBlocks;
+        const commentaryDurationsMs = savedCommentaryDurations.length
+          ? savedCommentaryDurations
+          : cm.commentaryDurationsMs;
         const currentContent = String(last.content || "");
-        const accContent = (acc.response || "").trim();
+        const accContent = finalModelResponse.trim();
         let finalContent = currentContent;
         if (!currentContent.trim()) {
           if (emptyResponse) {
             finalContent = EMPTY_RESPONSE_MESSAGE;
           } else if (accContent) {
-            finalContent = acc.response!;
+            finalContent = finalModelResponse;
           } else {
             const synthesized =
               synthesizeAssistantTextFromToolSegments(cm).trim();
@@ -173,11 +162,11 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           model: acc.model || undefined,
           durationMs,
           turnStartedAt: undefined,
-          thinking: "",
-          thinkingStartedAt: undefined,
-          thinkingBlocks: thinkingBlocks?.length ? thinkingBlocks : undefined,
-          thinkingDurationsMs: thinkingDurationsMs?.length
-            ? thinkingDurationsMs
+          commentary: "",
+          commentaryStartedAt: undefined,
+          commentaryBlocks: commentaryBlocks?.length ? commentaryBlocks : undefined,
+          commentaryDurationsMs: commentaryDurationsMs?.length
+            ? commentaryDurationsMs
             : undefined,
           taskPlan:
             acc.taskPlan ??
@@ -203,9 +192,10 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
     chunk.aborted ? "canceled" : emptyResponse ? "failed" : "completed",
   );
   acc.response = resolvedAssistantContent;
+  acc.pendingFinalResponse = undefined;
 
   if (ctx.persistConversation !== false) {
-    saveConversationIfNeeded(ctx, savedThinkingBlocks, savedThinkingDurations);
+    saveConversationIfNeeded(ctx, savedCommentaryBlocks, savedCommentaryDurations);
     if (!emptyResponse) maybeGenerateSessionTitle(ctx);
   }
 
@@ -230,19 +220,19 @@ function markTaskPlanAborted(plan: AiTaskPlan | undefined): AiTaskPlan | undefin
 
 function saveConversationIfNeeded(
   ctx: Parameters<ChunkHandler>[1],
-  savedThinkingBlocks: string[],
-  savedThinkingDurations: number[],
+  savedCommentaryBlocks: string[],
+  savedCommentaryDurations: number[],
 ): void {
   const { acc } = ctx;
   const respTrim = (acc.response || "").trim();
-  const thinkTrim = (acc.thinking || "").trim();
+  const commentaryTrim = (acc.commentary || "").trim();
   const shouldSave =
     Boolean(acc.sessionId) &&
     Boolean(
       respTrim ||
-        thinkTrim ||
+        commentaryTrim ||
         acc.taskPlan ||
-        savedThinkingBlocks.length > 0 ||
+        savedCommentaryBlocks.length > 0 ||
         (acc.toolCallSegments?.length ?? 0) > 0 ||
         acc.longTaskId,
     );
@@ -256,12 +246,12 @@ function saveConversationIfNeeded(
       prompt: acc.userText,
       response: acc.response || "",
       model: acc.model || undefined,
-      thinking: acc.thinking || undefined,
-      thinkingBlocks: savedThinkingBlocks.length
-        ? savedThinkingBlocks
+      commentary: acc.commentary || undefined,
+      commentaryBlocks: savedCommentaryBlocks.length
+        ? savedCommentaryBlocks
         : undefined,
-      thinkingDurationsMs: savedThinkingDurations.length
-        ? savedThinkingDurations
+      commentaryDurationsMs: savedCommentaryDurations.length
+        ? savedCommentaryDurations
         : undefined,
       durationMs: Math.max(0, Math.round(performance.now() - acc.turnStartedAt)),
       toolCallSegments: acc.toolCallSegments?.length
@@ -359,7 +349,7 @@ function maybeGenerateSessionTitle(
   ctx: Parameters<ChunkHandler>[1],
 ): void {
   const { acc, cfg, apiModelName } = ctx;
-  const titleSource = (acc.response || acc.thinking || "").trim();
+  const titleSource = (acc.response || acc.commentary || "").trim();
   if (!acc.needsTitle || !acc.sessionId || !titleSource) return;
 
   console.log("[AI 对话] 请求生成标题", {

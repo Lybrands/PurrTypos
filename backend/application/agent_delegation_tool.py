@@ -6,7 +6,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentRunResult,
     ExecutionState,
     RunLineage,
@@ -17,9 +17,9 @@ from agent_core.contracts import (
     ToolRiskLevel,
     ToolSchema,
 )
-from agent_core.errors import ContractViolationError
-from agent_core.events import AgentEvent, CoreEventType
-from agent_core.ports import CancellationSignal, ToolRegistration
+from purra.errors import ContractViolationError
+from purra.events import AgentEvent, CoreEventType
+from purra.ports import CancellationSignal, ToolRegistration
 from application.agent_delegation_service import AgentDelegationService
 from application.agent_orchestrator import AgentOrchestrator
 from domains.agent_roles import AgentRoleRegistry

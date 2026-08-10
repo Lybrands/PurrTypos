@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from agent_core.contracts import ModelRequest
-from agent_core.context_budget import estimate_text_tokens
-from agent_core.ports import CancellationSignal
+from purra.contracts import ModelRequest
+from purra.context_budget import estimate_text_tokens
+from purra.ports import CancellationSignal
 from domains.writing.repositories import (
     MemoryItem,
     MemoryLink,

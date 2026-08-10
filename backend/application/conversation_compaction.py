@@ -8,24 +8,24 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
-from agent_core.cancellation import OperationCanceled
-from agent_core.context_budget import (
+from purra.cancellation import OperationCanceled
+from purra.context_budget import (
     estimate_agent_messages_tokens,
     estimate_json_tokens,
     trim_agent_messages_by_turn,
 )
-from agent_core.context_orchestration.contracts import (
+from purra.context_orchestration.contracts import (
     ContextCompressionRequest,
     ConversationCompactionResult,
 )
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageOrigin,
     MessageRole,
 )
-from agent_core.ports import CancellationSignal
-from agent_core.structured_output import StructuredOutputParseError
+from purra.ports import CancellationSignal
+from purra.structured_output import StructuredOutputParseError
 from application.conversation_compaction_contracts import (
     ConversationCompactionRepository,
     ConversationSummarizer,

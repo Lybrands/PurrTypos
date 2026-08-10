@@ -115,8 +115,7 @@ export function useChatScroll({
     return [
       combinedData.length,
       last.content ?? "",
-      last.thinking ?? "",
-      last.contentAfterToolCalls ?? "",
+      last.commentary ?? "",
       last.toolCalling ? "1" : "0",
     ].join("|");
   }, [loading, userHasScrolledUp, combinedData]);

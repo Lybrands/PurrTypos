@@ -6,8 +6,8 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from agent_core.contracts import AgentRunResult, RunLineage, RunStatus
-from agent_core.events import CoreEventType
+from purra.contracts import AgentRunResult, RunLineage, RunStatus
+from purra.events import CoreEventType
 from infrastructure.persistence import run_execution_store, run_store
 
 

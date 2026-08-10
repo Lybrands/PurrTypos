@@ -2,11 +2,10 @@ import type {
   ScreenplayV2RevisionSummary,
   ScreenplayV2WorkingCopy,
 } from '../types'
+import { structuredContentToMarkdown } from './revisionDocumentView.ts'
 
 export interface WorkingCopyEditorDraft {
-  mainJson: string
   mainText: string
-  partJson: string[]
   partText: string[]
 }
 
@@ -14,17 +13,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-function parseObject(value: string, label: string): Record<string, unknown> {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(value || '{}')
-  } catch {
-    throw new Error(`${label}的结构化内容不是有效 JSON`)
-  }
-  if (!isRecord(parsed)) {
-    throw new Error(`${label}的结构化内容必须是 JSON 对象`)
-  }
-  return parsed
+function editableMarkdown(
+  contentText: unknown,
+  payload: Record<string, unknown>,
+): string {
+  const authoredText = String(contentText || '')
+  return authoredText.trim()
+    ? authoredText
+    : structuredContentToMarkdown(payload)
 }
 
 export function workingCopyEditorDraft(
@@ -37,14 +33,11 @@ export function workingCopyEditorDraft(
     ? workingCopy.content.parts.filter(isRecord)
     : []
   return {
-    mainJson: JSON.stringify(contentJson, null, 2),
-    mainText: String(workingCopy.content.contentText || ''),
-    partJson: parts.map((part) => JSON.stringify(
+    mainText: editableMarkdown(workingCopy.content.contentText, contentJson),
+    partText: parts.map((part) => editableMarkdown(
+      part.contentText,
       isRecord(part.payload) ? part.payload : {},
-      null,
-      2,
     )),
-    partText: parts.map((part) => String(part.contentText || '')),
   }
 }
 
@@ -57,14 +50,13 @@ export function buildWorkingCopyContent(
     : []
   return {
     ...workingCopy.content,
-    contentJson: parseObject(draft.mainJson, '主文档'),
+    contentJson: isRecord(workingCopy.content.contentJson)
+      ? workingCopy.content.contentJson
+      : {},
     contentText: draft.mainText,
     parts: parts.map((part, index) => ({
       ...part,
-      payload: parseObject(
-        draft.partJson[index] || '{}',
-        `Part ${String(part.key || index + 1)}`,
-      ),
+      payload: isRecord(part.payload) ? part.payload : {},
       contentText: draft.partText[index] || '',
     })),
   }

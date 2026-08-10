@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
-from agent_core.contracts import (
+from purra.contracts import (
     AgentMessage,
     MessageRole,
     ResponseValidationResult,

@@ -70,6 +70,7 @@ async def test_deepseek_v4_uses_openai_compatible_thinking_and_tools(
             "baseURL": "https://api.deepseek.com",
             "thinking": {"type": thinking_type},
             "max_tokens": 16_384,
+            "response_format": {"type": "json_object"},
             "tools": [{
                 "type": "function",
                 "function": {"name": "read", "parameters": {}},
@@ -85,6 +86,7 @@ async def test_deepseek_v4_uses_openai_compatible_thinking_and_tools(
         "stream": True,
         "extra_body": {"thinking": {"type": thinking_type}},
         "max_tokens": 16_384,
+        "response_format": {"type": "json_object"},
         "tools": [{
             "type": "function",
             "function": {"name": "read", "parameters": {}},
