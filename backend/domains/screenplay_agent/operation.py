@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 from purra.json_values import freeze_json_mapping
-from purra.normalization import optional_text, required_text
+from purra.normalization import non_negative_int, optional_text, required_text
 
 
 class ScreenplayOperationStatus(StrEnum):
@@ -28,12 +28,46 @@ class ScreenplayOperationStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class OperationUsage:
+    invocation_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int | None = 0
+
+    def __post_init__(self) -> None:
+        for name in ("invocation_count", "input_tokens", "output_tokens"):
+            object.__setattr__(
+                self,
+                name,
+                non_negative_int(getattr(self, name), f"Operation usage {name}"),
+            )
+        if self.reasoning_tokens is not None:
+            object.__setattr__(
+                self,
+                "reasoning_tokens",
+                non_negative_int(
+                    self.reasoning_tokens,
+                    "Operation usage reasoning_tokens",
+                ),
+            )
+
+    def to_mapping(self) -> dict[str, int | None]:
+        return {
+            "invocationCount": self.invocation_count,
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+            "reasoningTokens": self.reasoning_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ScreenplayOperationRecord:
     id: str
     turn_id: str
     project_id: str
     session_id: int
     status: ScreenplayOperationStatus
+    revision: int
     long_task_id: str | None
     target_role: str
     requirements_json: Mapping[str, Any]
@@ -42,6 +76,7 @@ class ScreenplayOperationRecord:
     finalization_receipt_id: str | None = None
     cancel_receipt_id: str | None = None
     cancel_requested_at_ms: int | None = None
+    usage: OperationUsage = field(default_factory=OperationUsage)
     error: Mapping[str, Any] | None = None
     create_time: str | None = None
     update_time: str | None = None
@@ -55,6 +90,10 @@ class ScreenplayOperationRecord:
             )
         object.__setattr__(self, "session_id", int(self.session_id))
         object.__setattr__(self, "status", ScreenplayOperationStatus(self.status))
+        revision = int(self.revision)
+        if revision <= 0:
+            raise ValueError("screenplay operation revision must be positive")
+        object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "long_task_id", optional_text(self.long_task_id))
         object.__setattr__(
             self,
@@ -84,6 +123,8 @@ class ScreenplayOperationRecord:
             object.__setattr__(self, "cancel_requested_at_ms", requested_at)
         if self.error is not None:
             object.__setattr__(self, "error", freeze_json_mapping(self.error))
+        if not isinstance(self.usage, OperationUsage):
+            raise TypeError("screenplay operation usage must be OperationUsage")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +202,7 @@ class CancelOperationReceipt:
 
 __all__ = [
     "CancelOperationReceipt",
+    "OperationUsage",
     "ScreenplayOperationCreateCommand",
     "ScreenplayOperationRecord",
     "ScreenplayOperationStatus",

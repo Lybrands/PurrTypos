@@ -146,7 +146,8 @@ class SqliteScreenplayAgentRepository:
                     if operation is not None:
                         await self._db.execute(
                             "UPDATE screenplay_agent_operations SET "
-                            "status = 'canceled', update_time = CURRENT_TIMESTAMP "
+                            "status = 'canceled', revision = revision + 1, "
+                            "update_time = CURRENT_TIMESTAMP "
                             "WHERE id = ? AND status IN "
                             "('queued', 'running', 'paused')",
                             [operation["id"]],
@@ -185,7 +186,8 @@ class SqliteScreenplayAgentRepository:
                     assistant_content = ""
                     await self._db.execute(
                         "UPDATE screenplay_agent_operations SET status = 'paused', "
-                        "error_json = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                        "error_json = ?, revision = revision + 1, "
+                        "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                         [_dump(error), operation["id"]],
                     )
                 await self._db.execute(
@@ -443,6 +445,11 @@ class SqliteScreenplayAgentRepository:
             if operation_ids:
                 operation_marks = _marks(operation_ids)
                 await self._db.execute(
+                    f"DELETE FROM screenplay_agent_operation_usage "
+                    f"WHERE operation_id IN ({operation_marks})",
+                    operation_ids,
+                )
+                await self._db.execute(
                     f"DELETE FROM screenplay_agent_operation_commands "
                     f"WHERE operation_id IN ({operation_marks})",
                     operation_ids,
@@ -461,6 +468,7 @@ class SqliteScreenplayAgentRepository:
                 "sessionId": int(turn["session_id"]),
                 "deletedTurnIds": turn_ids,
                 "deletedTaskIds": task_ids,
+                "deletedOperationIds": operation_ids,
             }
 
     async def _delete_tasks(self, task_ids: Sequence[str]) -> None:
@@ -473,6 +481,7 @@ class SqliteScreenplayAgentRepository:
         )
         work_item_ids = [str(row["work_item_id"]) for row in work_items]
         for table, column in (
+            ("ai_agent_long_task_usage", "task_id"),
             ("ai_agent_long_task_units", "task_id"),
             ("ai_agent_long_tasks", "id"),
         ):
@@ -540,12 +549,14 @@ class SqliteScreenplayAgentRepository:
             "SELECT t.*, o.id AS authoritative_operation_id, "
             "o.status AS operation_status, "
             "o.long_task_id AS authoritative_task_id, "
+            "o.revision AS operation_revision, "
             "o.target_role AS operation_target_role, "
             "o.requirements_json AS operation_requirements_json, "
             "o.result_revision_id AS operation_result_revision_id, "
             "o.finalization_receipt_id AS operation_finalization_receipt_id, "
             "o.cancel_receipt_id AS operation_cancel_receipt_id, "
             "o.cancel_requested_at_ms AS operation_cancel_requested_at_ms, "
+            "o.usage_json AS operation_usage_json, "
             "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
             "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
             "AND e.event_type IN ('screenplay.agent.turn.failed', "
@@ -607,6 +618,7 @@ class SqliteScreenplayAgentRepository:
             "plannerRunId": str(turn.get("planner_run_id") or "") or None,
             "totalUnits": int((task or {}).get("total_units") or 0),
             "completedUnits": int((task or {}).get("completed_units") or 0),
+            "usage": _object((task or {}).get("usage_json")),
             "resultRevisionId": str(
                 turn.get("operation_result_revision_id") or ""
             ) or None,
@@ -837,6 +849,7 @@ def _operation_view(
         "turnId": str(turn["id"]),
         "taskId": str(turn.get("authoritative_task_id") or "") or None,
         "status": str(turn.get("operation_status") or ""),
+        "revision": int(turn.get("operation_revision") or 1),
         "targetRole": str(turn.get("operation_target_role") or ""),
         "parts": list((task or {}).get("units") or ()),
         "resultRevisionId": str(
@@ -854,6 +867,7 @@ def _operation_view(
             else None
         ),
         "error": _object(turn.get("operation_error_json")) or None,
+        "usage": _object(turn.get("operation_usage_json")),
         "createdAt": turn.get("operation_create_time"),
         "updatedAt": turn.get("operation_update_time"),
     }
@@ -905,11 +919,13 @@ _TURN_WITH_OPERATION_SQL = (
     "SELECT t.*, o.id AS authoritative_operation_id, "
     "o.status AS operation_status, "
     "o.long_task_id AS authoritative_task_id, "
+    "o.revision AS operation_revision, "
     "o.target_role AS operation_target_role, "
     "o.result_revision_id AS operation_result_revision_id, "
     "o.finalization_receipt_id AS operation_finalization_receipt_id, "
     "o.cancel_receipt_id AS operation_cancel_receipt_id, "
     "o.cancel_requested_at_ms AS operation_cancel_requested_at_ms, "
+    "o.usage_json AS operation_usage_json, "
     "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
     "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
     "AND e.event_type IN ('screenplay.agent.turn.failed', "

@@ -58,6 +58,41 @@ class LongTaskUnitStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class LongTaskUsage:
+    """Provider-reported usage accumulated without imposing a task budget."""
+
+    invocation_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int | None = 0
+
+    def __post_init__(self) -> None:
+        for name in ("invocation_count", "input_tokens", "output_tokens"):
+            object.__setattr__(
+                self,
+                name,
+                non_negative_int(getattr(self, name), f"long task usage {name}"),
+            )
+        if self.reasoning_tokens is not None:
+            object.__setattr__(
+                self,
+                "reasoning_tokens",
+                non_negative_int(
+                    self.reasoning_tokens,
+                    "long task usage reasoning_tokens",
+                ),
+            )
+
+    def to_mapping(self) -> dict[str, int | None]:
+        return {
+            "invocationCount": self.invocation_count,
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+            "reasoningTokens": self.reasoning_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LongTaskUnitSpec:
     id: str
     position: int
@@ -184,6 +219,7 @@ class LongTaskRecord:
     failed_units: int
     max_parallelism: int
     cancellation_requested_at_ms: int | None = None
+    usage: LongTaskUsage = field(default_factory=LongTaskUsage)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     create_time: str | None = None
     update_time: str | None = None
@@ -229,6 +265,8 @@ class LongTaskRecord:
                 "cancellation_requested_at_ms",
                 requested_at,
             )
+        if not isinstance(self.usage, LongTaskUsage):
+            raise TypeError("long task usage must be LongTaskUsage")
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
         for name in ("create_time", "update_time"):
             object.__setattr__(
@@ -411,4 +449,5 @@ __all__ = [
     "LongTaskUnitResult",
     "LongTaskUnitSpec",
     "LongTaskUnitStatus",
+    "LongTaskUsage",
 ]

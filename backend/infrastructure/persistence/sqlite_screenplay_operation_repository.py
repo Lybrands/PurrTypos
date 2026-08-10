@@ -12,6 +12,7 @@ from typing import Any
 
 from domains.screenplay_agent.operation import (
     CancelOperationReceipt,
+    OperationUsage,
     ScreenplayOperationCreateCommand,
     ScreenplayOperationRecord,
     ScreenplayOperationStatus,
@@ -110,6 +111,63 @@ class SqliteScreenplayOperationRepository:
         )
         return _operation(row) if row is not None else None
 
+    async def record_usage(
+        self,
+        operation_id: str,
+        *,
+        run_id: str,
+        usage: OperationUsage,
+        expected_revision: int,
+    ) -> ScreenplayOperationRecord:
+        normalized_id = _required(operation_id, "screenplay Operation id")
+        normalized_run_id = _required(run_id, "Operation usage Run id")
+        if not isinstance(usage, OperationUsage):
+            raise TypeError("screenplay Operation usage must be OperationUsage")
+        async with self._db.transaction(cancellation_linearizable=True):
+            existing = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operation_usage "
+                "WHERE operation_id = ? AND run_id = ?",
+                [normalized_id, normalized_run_id],
+            )
+            if existing is not None:
+                if _usage_row(existing) != usage:
+                    raise ValueError("screenplay Operation Run usage conflicts")
+                return await self._require(normalized_id)
+            operation = await self._require(normalized_id)
+            if operation.revision != int(expected_revision):
+                raise ValueError("screenplay Operation revision conflict")
+            await self._db.execute(
+                "INSERT INTO screenplay_agent_operation_usage "
+                "(operation_id, run_id, invocation_count, input_tokens, "
+                "output_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    operation.id,
+                    normalized_run_id,
+                    usage.invocation_count,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_tokens,
+                ],
+            )
+            aggregate = await self._db.fetch_one(
+                "SELECT SUM(invocation_count) AS invocation_count, "
+                "SUM(input_tokens) AS input_tokens, "
+                "SUM(output_tokens) AS output_tokens, "
+                "SUM(reasoning_tokens) AS reasoning_tokens, "
+                "SUM(CASE WHEN reasoning_tokens IS NULL THEN 1 ELSE 0 END) "
+                "AS unknown_reasoning FROM screenplay_agent_operation_usage "
+                "WHERE operation_id = ?",
+                [operation.id],
+            )
+            total = _aggregate_usage(aggregate)
+            await self._db.execute(
+                "UPDATE screenplay_agent_operations SET usage_json = ?, "
+                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                [_dump(total.to_mapping()), operation.id],
+            )
+            return await self._require(operation.id)
+
     async def attach_long_task(
         self,
         operation_id: str,
@@ -125,6 +183,105 @@ class SqliteScreenplayOperationRepository:
             target=ScreenplayOperationStatus.RUNNING,
             values={"long_task_id": _required(long_task_id, "long task id")},
         )
+
+    async def resume_with_model(
+        self,
+        operation_id: str,
+        *,
+        command_id: str,
+        expected_revision: int,
+        capability_snapshot: Mapping[str, Any],
+    ) -> ScreenplayOperationRecord:
+        normalized_id = _required(operation_id, "screenplay Operation id")
+        normalized_command = _required(command_id, "resume command id")
+        snapshot = dict(capability_snapshot)
+        digest = _required(snapshot.get("digest"), "capability snapshot digest")
+        request = {
+            "expectedOperationRevision": int(expected_revision),
+            "capabilitySnapshotDigest": digest,
+        }
+        request_digest = _digest(request)
+        async with self._db.transaction(cancellation_linearizable=True):
+            replay = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operation_commands "
+                "WHERE command_id = ?",
+                [normalized_command],
+            )
+            if replay is not None:
+                if (
+                    str(replay["operation_id"]) != normalized_id
+                    or str(replay["command_type"]) != "resume"
+                    or str(replay["request_digest"]) != request_digest
+                ):
+                    raise ValueError("screenplay Operation resume command conflicts")
+                return await self._require(normalized_id)
+            equivalent = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operation_commands "
+                "WHERE operation_id = ? AND command_type = 'resume' "
+                "AND request_digest = ?",
+                [normalized_id, request_digest],
+            )
+            if equivalent is not None:
+                return await self._require(normalized_id)
+            operation = await self._require(normalized_id)
+            if operation.status is not ScreenplayOperationStatus.PAUSED:
+                raise ValueError("only a paused screenplay Operation can resume")
+            if operation.revision != int(expected_revision):
+                raise ValueError("screenplay Operation revision conflict")
+            if operation.cancel_requested_at_ms is not None:
+                raise ValueError("canceled screenplay Operation cannot resume")
+            if not operation.long_task_id:
+                raise ValueError("paused screenplay Operation has no LongTask")
+            task = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_long_tasks WHERE id = ?",
+                [operation.long_task_id],
+            )
+            if task is None or str(task.get("status") or "") != "paused":
+                raise ValueError("screenplay Operation LongTask is not paused")
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'pending', "
+                "max_attempts = max_attempts + 1, worker_id = NULL, "
+                "lease_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status = 'blocked'",
+                [operation.long_task_id],
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_tasks SET status = 'running', "
+                "failed_units = 0, revision = revision + 1, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ? AND status = 'paused'",
+                [operation.long_task_id],
+            )
+            await self._db.execute(
+                "UPDATE screenplay_agent_operations SET status = 'running', "
+                "error_json = NULL, active_capability_snapshot_json = ?, "
+                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'paused' AND revision = ?",
+                [_dump(snapshot), operation.id, operation.revision],
+            )
+            changed = await self._db.fetch_one("SELECT changes() AS count")
+            if int((changed or {}).get("count") or 0) != 1:
+                raise ValueError("screenplay Operation revision conflict")
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET status = 'running', "
+                "assistant_content = '', update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'paused'",
+                [operation.turn_id],
+            )
+            resumed = await self._require(operation.id)
+            await self._record_command(
+                operation_id=operation.id,
+                command_id=normalized_command,
+                command_type="resume",
+                request=request,
+                receipt_id=normalized_command,
+                response={
+                    "operationId": operation.id,
+                    "status": resumed.status.value,
+                    "revision": resumed.revision,
+                    "capabilitySnapshotDigest": digest,
+                },
+            )
+            return resumed
 
     async def pause(
         self,
@@ -261,7 +418,8 @@ class SqliteScreenplayOperationRepository:
                     "UPDATE screenplay_agent_operations SET "
                     "cancel_requested_at_ms = COALESCE(cancel_requested_at_ms, ?), "
                     "cancel_receipt_id = COALESCE(cancel_receipt_id, ?), "
-                    "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+                    "revision = revision + CASE WHEN cancel_requested_at_ms IS NULL "
+                    "THEN 1 ELSE 0 END, update_time = CURRENT_TIMESTAMP WHERE id = ? "
                     "AND status IN ('queued', 'running', 'paused')",
                     [requested_at_ms, receipt_id, operation.id],
                 )
@@ -323,7 +481,8 @@ class SqliteScreenplayOperationRepository:
                     raise ValueError("screenplay Operation cancellation was not requested")
                 await self._db.execute(
                     "UPDATE screenplay_agent_operations SET status = 'canceled', "
-                    "cancel_receipt_id = ?, update_time = CURRENT_TIMESTAMP "
+                    "cancel_receipt_id = ?, revision = revision + 1, "
+                    "update_time = CURRENT_TIMESTAMP "
                     "WHERE id = ? AND status IN ('queued', 'running', 'paused') "
                     "AND cancel_requested_at_ms IS NOT NULL",
                     [normalized_receipt, operation.id],
@@ -472,7 +631,8 @@ class SqliteScreenplayOperationRepository:
             await self._db.execute(
                 "UPDATE screenplay_agent_operations SET "
                 + ", ".join(assignments)
-                + ", update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                + ", revision = revision + 1, update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
                 params,
             )
             await self._record_command(
@@ -542,6 +702,7 @@ def _operation(row: Mapping[str, Any]) -> ScreenplayOperationRecord:
         project_id=str(row["project_id"]),
         session_id=int(row["session_id"]),
         status=str(row["status"]),
+        revision=int(row.get("revision") or 1),
         long_task_id=row.get("long_task_id"),
         target_role=str(row["target_role"]),
         requirements_json=_object(row.get("requirements_json")),
@@ -550,6 +711,7 @@ def _operation(row: Mapping[str, Any]) -> ScreenplayOperationRecord:
         finalization_receipt_id=row.get("finalization_receipt_id"),
         cancel_receipt_id=row.get("cancel_receipt_id"),
         cancel_requested_at_ms=row.get("cancel_requested_at_ms"),
+        usage=_usage_mapping(_object(row.get("usage_json"))),
         error=_object(row.get("error_json")) or None,
         create_time=row.get("create_time"),
         update_time=row.get("update_time"),
@@ -587,6 +749,47 @@ def _object(value: object) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _usage_mapping(value: Mapping[str, Any]) -> OperationUsage:
+    return OperationUsage(
+        invocation_count=int(value.get("invocationCount") or 0),
+        input_tokens=int(value.get("inputTokens") or 0),
+        output_tokens=int(value.get("outputTokens") or 0),
+        reasoning_tokens=(
+            None
+            if value.get("reasoningTokens") is None
+            and int(value.get("invocationCount") or 0) > 0
+            else int(value.get("reasoningTokens") or 0)
+        ),
+    )
+
+
+def _usage_row(row: Mapping[str, Any]) -> OperationUsage:
+    return OperationUsage(
+        invocation_count=int(row.get("invocation_count") or 0),
+        input_tokens=int(row.get("input_tokens") or 0),
+        output_tokens=int(row.get("output_tokens") or 0),
+        reasoning_tokens=(
+            None
+            if row.get("reasoning_tokens") is None
+            else int(row["reasoning_tokens"])
+        ),
+    )
+
+
+def _aggregate_usage(row: Mapping[str, Any] | None) -> OperationUsage:
+    value = row or {}
+    return OperationUsage(
+        invocation_count=int(value.get("invocation_count") or 0),
+        input_tokens=int(value.get("input_tokens") or 0),
+        output_tokens=int(value.get("output_tokens") or 0),
+        reasoning_tokens=(
+            None
+            if int(value.get("unknown_reasoning") or 0) > 0
+            else int(value.get("reasoning_tokens") or 0)
+        ),
+    )
 
 
 def _digest(value: Mapping[str, Any]) -> str:

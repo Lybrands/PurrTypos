@@ -795,6 +795,7 @@ export default function ScreenplayAgentPage({
   )
   const [agentPrompt, setAgentPrompt] = React.useState('')
   const [agentSubmitting, setAgentSubmitting] = React.useState(false)
+  const [agentResumeSubmitting, setAgentResumeSubmitting] = React.useState(false)
   const [agentCancelSubmitting, setAgentCancelSubmitting] = React.useState(false)
   const [agentConversationState, setAgentConversationState] = React.useState<
     ScreenplayConversationState | null
@@ -926,6 +927,11 @@ export default function ScreenplayAgentPage({
       (operation) => operation.turnId === latestConversationTurn.id,
     )
     : undefined
+  const pausedConversationOperation = latestConversationOperation?.status === 'paused'
+    && !latestConversationOperation.cancelRequestedAt
+    && !latestConversationOperation.cancelReceiptId
+      ? latestConversationOperation
+      : null
   const agentRunning = activeConversationTurn != null
     || activeConversationOperation != null
 
@@ -2189,7 +2195,7 @@ export default function ScreenplayAgentPage({
       || cancelPendingConversationOperation?.turnId
       || activeConversationTurn?.id
     if (!targetTurnId || !openedProject || agentSessionId == null) return true
-    if (agentCancelSubmitting) return false
+    if (agentCancelSubmitting || agentResumeSubmitting) return false
     setAgentCancelSubmitting(true)
     try {
       if (!cancelPendingConversationOperation) {
@@ -2214,12 +2220,56 @@ export default function ScreenplayAgentPage({
     activeConversationTurn,
     agentSessionId,
     agentCancelSubmitting,
+    agentResumeSubmitting,
     cancelPendingConversationOperation,
     cancellableConversationOperation,
     conversationClient,
     loadProjectWorkspace,
     message,
     openedProject,
+  ])
+
+  const resumeAgent = React.useCallback(async () => {
+    if (
+      !pausedConversationOperation
+      || !openedProject
+      || agentSessionId == null
+      || agentResumeSubmitting
+    ) return
+    const model = modelConfigs.find((item) => item.id === selectedModelId)
+    if (!model?.apiKey?.trim()) {
+      message.warning('请先在设置中添加可用模型')
+      onOpenSettings()
+      return
+    }
+    setAgentResumeSubmitting(true)
+    try {
+      await conversationClient.resume(
+        createScreenplayCommandId('resume-operation'),
+        pausedConversationOperation.id,
+        pausedConversationOperation.revision,
+        runtimeForModel(model),
+      )
+      const next = await conversationClient.load(openedProject.id, agentSessionId)
+      if (activeAgentSessionRef.current !== agentSessionId) return
+      agentConversationStateRef.current = next
+      setAgentConversationState(next)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '继续执行剧本任务失败')
+    } finally {
+      setAgentResumeSubmitting(false)
+    }
+  }, [
+    agentResumeSubmitting,
+    agentSessionId,
+    conversationClient,
+    message,
+    modelConfigs,
+    onOpenSettings,
+    openedProject,
+    pausedConversationOperation,
+    runtimeForModel,
+    selectedModelId,
   ])
 
   const runAgent = React.useCallback(async (
@@ -2234,6 +2284,10 @@ export default function ScreenplayAgentPage({
     }
     if (agentSessionId == null) {
       message.warning('剧本 Agent 会话尚未就绪，请重新打开项目')
+      return
+    }
+    if (pausedConversationOperation) {
+      message.info('当前任务已暂停，请先继续执行或停止任务')
       return
     }
     const prompt = (promptOverride ?? agentPrompt).trim()
@@ -2318,6 +2372,7 @@ export default function ScreenplayAgentPage({
     modelConfigs,
     onOpenSettings,
     openedProject,
+    pausedConversationOperation,
     runtimeForModel,
     selectedModelId,
   ])
@@ -4226,6 +4281,22 @@ export default function ScreenplayAgentPage({
                           selectedModelConfig={selectedAgentModelConfig}
                           draft={agentPrompt}
                         />
+                        {pausedConversationOperation ? (
+                          <PurrButton
+                            type="default"
+                            size="small"
+                            icon={<RefreshIcon size={15} />}
+                            loading={agentResumeSubmitting}
+                            disabled={
+                              openedProject.status === 'archived'
+                              || !selectedModelId
+                              || agentResumeSubmitting
+                            }
+                            onClick={resumeAgent}
+                          >
+                            继续执行
+                          </PurrButton>
+                        ) : null}
                         {agentRunning
                           || cancellableConversationOperation
                           || cancelPendingConversationOperation
@@ -4233,6 +4304,8 @@ export default function ScreenplayAgentPage({
                           <PurrTooltip title={
                             cancelPendingConversationOperation || agentCancelSubmitting
                               ? '正在停止'
+                              : agentResumeSubmitting
+                                ? '正在继续执行'
                               : '停止生成'
                           }>
                             <PurrButton
@@ -4242,7 +4315,9 @@ export default function ScreenplayAgentPage({
                               icon={<StopCircleIcon size={18} />}
                               onClick={stopAgent}
                               disabled={Boolean(
-                                cancelPendingConversationOperation || agentCancelSubmitting,
+                                cancelPendingConversationOperation
+                                || agentCancelSubmitting
+                                || agentResumeSubmitting,
                               )}
                               aria-label="停止生成"
                             />
@@ -4260,6 +4335,8 @@ export default function ScreenplayAgentPage({
                               !agentPrompt.trim()
                               || openedProject.status === 'archived'
                               || !selectedModelId
+                              || pausedConversationOperation != null
+                              || agentResumeSubmitting
                             }
                             onClick={() => runAgent()}
                             aria-label="发送"

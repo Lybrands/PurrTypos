@@ -4,6 +4,8 @@ import type {
   ScreenplayAgentChunkPage,
   ScreenplayConversationEvent,
   ScreenplayConversationTurn,
+  ScreenplayConversationRuntimeInput,
+  ScreenplayResumeOperationReceipt,
 } from '../types'
 import {
   stateFromScreenplayConversationSnapshot,
@@ -16,6 +18,7 @@ type NativeConversationApi = Pick<ElectronAPI,
   | 'listScreenplayConversationEvents'
   | 'watchScreenplayConversationEvents'
   | 'cancelScreenplayConversationTurn'
+  | 'resumeScreenplayConversationOperation'
   | 'truncateScreenplayConversationFromTurn'
 >
 
@@ -123,6 +126,23 @@ export class ScreenplayConversationClient {
     return dataOrThrow(
       await this.api.cancelScreenplayConversationTurn({ commandId, turnId }),
       '终止剧本对话失败',
+    )
+  }
+
+  async resume(
+    commandId: string,
+    operationId: string,
+    expectedOperationRevision: number,
+    runtime: ScreenplayConversationRuntimeInput,
+  ): Promise<ScreenplayResumeOperationReceipt> {
+    return dataOrThrow(
+      await this.api.resumeScreenplayConversationOperation({
+        commandId,
+        operationId,
+        expectedOperationRevision,
+        runtime,
+      }),
+      '继续执行剧本任务失败',
     )
   }
 

@@ -627,20 +627,20 @@ class ResumeWithModelCommand:
     expected_operation_revision: int
 ```
 
-- [ ] 为 LongTask 与 Operation 增加独立 `usage_json`/revision 更新合同；按 Run id 幂等累计 input/output/reasoning/invocation count，不塞进可能被 Part progress 覆盖的 metadata，也不据此设置隐藏累计 token hard cap。
-- [ ] 增加 `POST /screenplay/v2/conversation/operations/{operation_id}/resume`，请求必须带 `Idempotency-Key` 与完整 runtime；前端仅在 paused 状态提交用户当前选择的模型配置。
-- [ ] 实现显式换模恢复：新 capability snapshot 先通过原 Task Requirements；completed Part refs 保持不变，只领取未完成 Part；不兼容则 Operation 维持 paused，route 返回 409 与 `model_capability_incompatible`。
-- [ ] 为每个注册 profile/adapter 运行统一 contract：输出字段映射、finish、usage、reasoning、tool argument streaming、cancel；Core 断言不读取 profile/model/provider 名。
-- [ ] 实际凭据 E2E：DeepSeek reasoning on/off；GLM-5.2；MiMo V2.5 Pro；同一 screenplay protocol 均完成 Candidate/Revision/final replay。
-- [ ] 故障 E2E：一次注入 `length` 证明无相同 fingerprint 重试且从 split/checkpoint 继续；一次进程恢复；一次显式换模；一次主动取消。
-- [ ] 若任一真实 Provider 凭据缺失，测试必须 skip 并输出明确 release blocker；Fake Gateway 只算 contract test，不能解除 blocker。
-- [ ] 在 `package.json` 新增 `test:model-contracts` 与 `test:screenplay-real-e2e`，并把 contract test 纳入 `check:agent-refactor`；真实 E2E 作为发布 gate 单独执行。
-- [ ] Run: `.venv/bin/python -m pytest backend/tests/test_registered_model_contracts.py backend/tests/test_purra_incident_replay.py -q`
-- [ ] Run: `npm run check:agent-refactor`
-- [ ] Run: `.venv/bin/python -m pytest backend/tests/test_screenplay_multi_model_e2e.py -m real_provider -q`
-- [ ] Run: `git diff --check`
-- [ ] 若为测试启动过服务，停止所有本轮进程，并用 `lsof -nP -iTCP:5173 -sTCP:LISTEN` 与后端端口检查确认无监听。
-- [ ] 更新设计文档状态为“已实现并通过门槛”，记录真实 Provider、模型 profile digest 和 E2E 结果；不得把 skip 写成通过。
+- [x] 为 LongTask 与 Operation 增加独立 `usage_json`/revision 更新合同；按 Run id 幂等累计 input/output/reasoning/invocation count，不塞进可能被 Part progress 覆盖的 metadata，也不据此设置隐藏累计 token hard cap。
+- [x] 增加 `POST /screenplay/v2/conversation/operations/{operation_id}/resume`，请求必须带 `Idempotency-Key` 与完整 runtime；前端仅在 paused 状态提交用户当前选择的模型配置。
+- [x] 实现显式换模恢复：新 capability snapshot 先通过原 Task Requirements；completed Part refs 保持不变，只领取未完成 Part；不兼容则 Operation 维持 paused，route 返回 409 与 `model_capability_incompatible`。
+- [x] 为每个注册 profile/adapter 运行统一 contract：输出字段映射、finish、usage、reasoning、tool argument streaming、cancel；Core 断言不读取 profile/model/provider 名。
+- [ ] 实际凭据 E2E：DeepSeek reasoning on/off；GLM-5.2；MiMo V2.5 Pro；同一 screenplay protocol 均完成 Candidate/Revision/final replay。**发布阻塞：当前环境缺少三类 Provider 凭据，四项均未真实执行。**
+- [x] 故障 E2E：一次注入 `length` 证明无相同 fingerprint 重试且从 split/checkpoint 继续；一次进程恢复；一次显式换模；一次主动取消。
+- [x] 若任一真实 Provider 凭据缺失，测试必须 skip 并输出明确 release blocker；Fake Gateway 只算 contract test，不能解除 blocker。
+- [x] 在 `package.json` 新增 `test:model-contracts` 与 `test:screenplay-real-e2e`，并把 contract test 纳入 `check:agent-refactor`；真实 E2E 作为发布 gate 单独执行。
+- [x] Run: `.venv/bin/python -m pytest backend/tests/test_registered_model_contracts.py backend/tests/test_purra_incident_replay.py -q`
+- [x] Run: `npm run check:agent-refactor`
+- [x] Run: `.venv/bin/python -m pytest backend/tests/test_screenplay_multi_model_e2e.py -m real_provider -q`（命令执行成功；4 项按预期以 `RELEASE BLOCKER` skip，未计为通过。）
+- [x] Run: `git diff --check`
+- [x] 若为测试启动过服务，停止所有本轮进程，并用 `lsof -nP -iTCP:5173 -sTCP:LISTEN` 与后端端口检查确认无监听。（本轮未启动任何服务。）
+- [x] 更新设计文档状态，记录模型 profile digest 与真实 E2E 阻塞结果；未将 skip 写成通过。
 - [ ] Commit: `git commit -m "test(agent): gate model-agnostic long-task execution"`
 
 ## Final Verification Matrix

@@ -40,7 +40,13 @@ class SubmitScreenplayAgentTurnRequest(ScreenplayV2Model):
         return self
 
 
+class ResumeScreenplayOperationRequest(ScreenplayV2Model):
+    expectedOperationRevision: int = Field(..., ge=1)
+    runtime: ScreenplayAgentRuntimeRequest
+
+
 __all__ = [
     "ScreenplayAgentRuntimeRequest",
+    "ResumeScreenplayOperationRequest",
     "SubmitScreenplayAgentTurnRequest",
 ]

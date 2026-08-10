@@ -11,6 +11,7 @@ from purra.long_tasks import (
     LongTaskCreateCommand,
     LongTaskSplitResult,
     LongTaskStatus,
+    LongTaskUsage,
     LongTaskUnitResult,
     LongTaskUnitSpec,
     LongTaskUnitStatus,
@@ -31,6 +32,89 @@ from infrastructure.persistence.sqlite_long_task_repository import (
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
 )
+
+
+@pytest.mark.asyncio
+async def test_long_task_usage_is_run_idempotent_and_revisioned(long_task_db):
+    work_items = SqliteWorkItemRepository(long_task_db)
+    await work_items.create("work-usage", WorkItemCreateCommand(
+        namespace="test",
+        kind="large_write",
+        owner_id="owner-usage",
+        created_by_run_id="run-parent",
+    ))
+    repository = SqliteLongTaskRepository(long_task_db)
+    created = await repository.create("task-usage", LongTaskCreateCommand(
+        namespace="test",
+        kind="large_write",
+        owner_id="owner-usage",
+        work_item_id="work-usage",
+        created_by_run_id="run-parent",
+        units=(LongTaskUnitSpec(id="part-1", position=0),),
+    ))
+
+    first = await repository.record_usage(
+        created.id,
+        run_id="run-1",
+        usage=LongTaskUsage(
+            invocation_count=2,
+            input_tokens=120,
+            output_tokens=30,
+            reasoning_tokens=7,
+        ),
+        expected_revision=created.revision,
+    )
+    replay = await repository.record_usage(
+        created.id,
+        run_id="run-1",
+        usage=LongTaskUsage(
+            invocation_count=2,
+            input_tokens=120,
+            output_tokens=30,
+            reasoning_tokens=7,
+        ),
+        expected_revision=created.revision,
+    )
+
+    assert replay == first
+    assert first.revision == created.revision + 1
+    assert first.usage == LongTaskUsage(
+        invocation_count=2,
+        input_tokens=120,
+        output_tokens=30,
+        reasoning_tokens=7,
+    )
+    with pytest.raises(ValueError, match="usage conflicts"):
+        await repository.record_usage(
+            created.id,
+            run_id="run-1",
+            usage=LongTaskUsage(
+                invocation_count=1,
+                input_tokens=1,
+                output_tokens=1,
+                reasoning_tokens=0,
+            ),
+            expected_revision=first.revision,
+        )
+
+    second = await repository.record_usage(
+        created.id,
+        run_id="run-2",
+        usage=LongTaskUsage(
+            invocation_count=1,
+            input_tokens=80,
+            output_tokens=20,
+            reasoning_tokens=None,
+        ),
+        expected_revision=first.revision,
+    )
+    assert second.revision == first.revision + 1
+    assert second.usage == LongTaskUsage(
+        invocation_count=3,
+        input_tokens=200,
+        output_tokens=50,
+        reasoning_tokens=None,
+    )
 
 
 @pytest_asyncio.fixture
