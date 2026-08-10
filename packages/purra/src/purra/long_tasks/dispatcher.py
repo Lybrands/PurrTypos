@@ -17,6 +17,7 @@ from purra.json_values import freeze_json_mapping, thaw_json_mapping
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitRecord,
     LongTaskUnitResult,
@@ -487,6 +488,23 @@ class _RecipeUnitRunner:
         if not isinstance(failure, FailureSignal):
             return _permanent_execution_failure(error)
         return failure
+
+    def split_unit(self, task, unit, error: Exception) -> LongTaskSplitResult:
+        executor = self._executors.get(str(unit.metadata.get("executor") or ""))
+        splitter = getattr(executor, "split_unit", None)
+        if not callable(splitter):
+            return LongTaskSplitResult(children=(), replacement_dependency_ids=())
+        split = splitter(
+            DurableUnitExecutionContext(
+                task=task,
+                unit=unit,
+                dependency_outputs={},
+            ),
+            error,
+        )
+        if not isinstance(split, LongTaskSplitResult):
+            raise TypeError("durable unit splitter returned an invalid result")
+        return split
 
     async def on_unit_settled(self, task_id: str) -> None:
         await self.emit_progress(task_id)

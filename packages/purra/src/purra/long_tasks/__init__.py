@@ -3,6 +3,7 @@
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitRecord,
     LongTaskUnitResult,
@@ -29,6 +30,7 @@ __all__ = [
     "LongTaskCoordinator",
     "LongTaskCreateCommand",
     "LongTaskRecord",
+    "LongTaskSplitResult",
     "LongTaskRepository",
     "LongTaskStatus",
     "LongTaskUnitRecord",
