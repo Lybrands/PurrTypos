@@ -1,4 +1,6 @@
-# PurrA Execution Reliability Implementation Plan
+# PurrA Execution Reliability Implementation Plan（已失效）
+
+> 状态：本计划基于已被否定的预算与截断恢复假设，禁止执行。待用户复核 `../specs/2026-08-11-purra-model-agnostic-long-task-execution-design.md` 后重新编写实施计划。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
