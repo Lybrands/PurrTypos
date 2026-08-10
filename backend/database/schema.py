@@ -579,10 +579,16 @@ async def init_schema(db: DatabaseConnection) -> None:
         completed_units INTEGER NOT NULL DEFAULT 0,
         failed_units INTEGER NOT NULL DEFAULT 0,
         max_parallelism INTEGER NOT NULL DEFAULT 1,
+        cancel_requested_at_ms INTEGER DEFAULT NULL,
         metadata_json TEXT NOT NULL DEFAULT '{}',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN "
+        "cancel_requested_at_ms INTEGER DEFAULT NULL",
+    )
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_long_tasks_owner_status
         ON ai_agent_long_tasks(namespace, owner_id, kind, status, update_time DESC)

@@ -122,6 +122,13 @@ class LongTaskRepository(Protocol):
 
     async def cancel(self, task_id: str) -> LongTaskRecord: ...
 
+    async def request_cancel(
+        self,
+        task_id: str,
+        *,
+        requested_at_ms: int | None = None,
+    ) -> LongTaskRecord: ...
+
     async def finalize_if_complete(self, task_id: str) -> LongTaskRecord: ...
 
 

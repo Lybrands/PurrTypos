@@ -79,6 +79,9 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
     SqliteScreenplayAgentRepository,
     _unit_view,
 )
+from infrastructure.persistence.sqlite_screenplay_operation_repository import (
+    SqliteScreenplayOperationRepository,
+)
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
@@ -1360,6 +1363,42 @@ async def test_restart_exposes_an_abandoned_turn_as_a_terminal_failure(
     assert snapshot["turns"][0]["status"] == "failed"
     assert snapshot["turns"][0]["error"]["code"] == "screenplay_agent_restarted"
     assert snapshot["turns"][0]["assistantContent"] == ""
+
+
+async def test_restart_finishes_a_durable_cancel_request(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-agent-cancel-recovery",
+    )
+    turn = await repository.begin_turn(
+        command_id="queued-before-cancel-recovery",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="停止这一轮",
+        runtime_profile={"provider": "openai", "model": "test"},
+    )
+    operations = SqliteScreenplayOperationRepository(temp_db)
+    receipt = await operations.request_cancel(
+        turn["id"],
+        idempotency_key="cancel-before-restart",
+    )
+
+    recovered = await repository.recover_after_restart()
+    snapshot = await repository.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+
+    assert recovered == (turn["id"],)
+    assert snapshot["turns"][0]["status"] == "canceled"
+    assert snapshot["turns"][0]["assistantContent"] == ""
+    assert await temp_db.fetch_one(
+        "SELECT cancel_receipt_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    ) == {"cancel_receipt_id": receipt.id}
 
 
 async def _install_head(db, project_id: str, role: str, content: dict) -> str:

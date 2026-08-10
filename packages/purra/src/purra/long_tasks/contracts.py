@@ -183,6 +183,7 @@ class LongTaskRecord:
     completed_units: int
     failed_units: int
     max_parallelism: int
+    cancellation_requested_at_ms: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     create_time: str | None = None
     update_time: str | None = None
@@ -219,6 +220,15 @@ class LongTaskRecord:
             )
         if self.completed_units + self.failed_units > self.total_units:
             raise ValueError("long task progress exceeds total units")
+        if self.cancellation_requested_at_ms is not None:
+            requested_at = int(self.cancellation_requested_at_ms)
+            if requested_at < 0:
+                raise ValueError("long task cancellation timestamp is invalid")
+            object.__setattr__(
+                self,
+                "cancellation_requested_at_ms",
+                requested_at,
+            )
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
         for name in ("create_time", "update_time"):
             object.__setattr__(
