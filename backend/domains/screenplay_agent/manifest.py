@@ -19,7 +19,6 @@ class ScreenplayPartKind(StrEnum):
     DOCUMENT_SECTION = "document_section"
     VALIDATION = "validation"
     FINAL_RESPONSE = "final_response"
-    PUBLISH = "publish"
 
 
 @dataclass(frozen=True, slots=True)

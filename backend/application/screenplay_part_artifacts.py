@@ -235,6 +235,14 @@ class ScreenplayPartArtifactQuery:
         task_id: str,
         unit_id: str,
     ) -> Mapping[str, Any] | None:
+        ref = await self.validated_unit_ref(task_id, unit_id)
+        return None if ref is None else await self.require(ref)
+
+    async def validated_unit_ref(
+        self,
+        task_id: str,
+        unit_id: str,
+    ) -> ValidatedPartArtifactRef | None:
         row = await self._db.fetch_one(
             "SELECT output_ref, artifact_digest, validation_receipt_json "
             "FROM ai_agent_long_task_units WHERE task_id = ? AND unit_id = ? "
@@ -244,14 +252,13 @@ class ScreenplayPartArtifactQuery:
         if row is None or not str(row.get("output_ref") or "").strip():
             return None
         receipt = _mapping(row.get("validation_receipt_json"))
-        ref = ValidatedPartArtifactRef(
+        return ValidatedPartArtifactRef(
             artifact_id=_artifact_id_from_ref(str(row["output_ref"])),
             run_id=str(receipt.get("runId") or ""),
             semantic_key=str(receipt.get("semanticKey") or unit_id),
             content_digest=str(row.get("artifact_digest") or ""),
             validation_receipt=receipt,
         )
-        return await self.require(ref)
 
     async def list_task_outputs(self, task_id: str) -> dict[str, Mapping[str, Any]]:
         rows = await self._db.fetch_all(
