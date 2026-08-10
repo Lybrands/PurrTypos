@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from infrastructure.models.profiles.registry import resolve_model_profile
+from types import SimpleNamespace
+
+import pytest
+
+from application.model_runtime import model_request_from_runtime
+from infrastructure.models.profiles.registry import (
+    BUILTIN_MODEL_PROFILES,
+    resolve_model_profile,
+)
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 
 
@@ -119,3 +127,86 @@ def test_replay_required_profile_declares_protocol_without_core_model_checks():
     assert profile.protocol_capabilities().reasoning_replay is (
         ReasoningReplayPolicy.REQUIRED
     )
+
+
+def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
+    first = {
+        profile.profile_id: profile.capability_snapshot(
+            context_window_tokens=1_000_000,
+        )
+        for profile in BUILTIN_MODEL_PROFILES
+    }
+    second = {
+        profile.profile_id: profile.capability_snapshot(
+            context_window_tokens=1_000_000,
+        )
+        for profile in BUILTIN_MODEL_PROFILES
+    }
+
+    assert set(first) == set(second)
+    assert len(first) == len(BUILTIN_MODEL_PROFILES)
+    for profile_id, snapshot in first.items():
+        assert snapshot.schema_version == 1
+        assert snapshot.profile_id == profile_id
+        assert snapshot.provider_protocol
+        assert snapshot.digest() == second[profile_id].digest()
+        assert len(snapshot.digest()) == 64
+        if snapshot.actionable:
+            assert snapshot.max_output_tokens is not None
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_max_output"),
+    [
+        ("deepseek:deepseek-v4-pro", 393_216),
+        ("deepseek:deepseek-v4-flash", 393_216),
+        ("zai:glm-5.2", 131_072),
+        ("mimo:mimo-v2.5-pro", 131_072),
+    ],
+)
+def test_actionable_profile_output_limits_are_owned_by_each_profile(
+    profile_id,
+    expected_max_output,
+):
+    profile = next(
+        item for item in BUILTIN_MODEL_PROFILES if item.profile_id == profile_id
+    )
+    snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
+
+    assert snapshot.actionable is True
+    assert snapshot.max_output_tokens == expected_max_output
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    ["moonshot:kimi-k3", "moonshot:kimi-k2.6", "minimax:MiniMax-M3"],
+)
+def test_unverified_builtin_output_limits_are_explicitly_not_actionable(profile_id):
+    profile = next(
+        item for item in BUILTIN_MODEL_PROFILES if item.profile_id == profile_id
+    )
+    snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
+
+    assert snapshot.actionable is False
+    assert snapshot.max_output_tokens is None
+
+
+def test_runtime_mapping_preserves_explicit_output_limit_and_reasoning_choice():
+    runtime = SimpleNamespace(
+        apiProvider="openai",
+        baseURL="https://api.deepseek.com",
+        contextWindow="1m",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 256_000,
+            "thinking": {"type": "enabled"},
+        },
+    )
+
+    request = model_request_from_runtime(runtime)
+
+    assert request.options["max_tokens"] == 256_000
+    assert request.options["thinking"] == {"type": "enabled"}
+    assert request.capability_snapshot.profile_id == "deepseek:deepseek-v4-flash"
+    assert request.capability_snapshot.context_window_tokens == 1_000_000

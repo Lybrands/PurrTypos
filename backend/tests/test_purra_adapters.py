@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from purra.contracts import (
 )
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.model_protocol import (
+    generic_capability_snapshot,
     ModelProtocolCapabilities,
     ReasoningControl,
     ReasoningReplayPolicy,
@@ -31,6 +33,15 @@ from purra.ports import ModelGateway
 from purra.runtime import AgentRuntime
 from infrastructure.models import provider_model_gateway
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
+from infrastructure.models.profiles.registry import resolve_model_profile
+
+
+def _snapshot(*, profile_id="generic", protocol=None):
+    return replace(
+        generic_capability_snapshot(),
+        profile_id=profile_id,
+        protocol=protocol or ModelProtocolCapabilities(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -78,8 +89,10 @@ def test_incompatible_reasoning_selection_fails_before_provider_invocation():
         request=ModelRequest(
             provider="openai",
             model="custom-model",
-            protocol_capabilities=ModelProtocolCapabilities(
-                reasoning_control=ReasoningControl.UNAVAILABLE,
+            capability_snapshot=_snapshot(
+                protocol=ModelProtocolCapabilities(
+                    reasoning_control=ReasoningControl.UNAVAILABLE,
+                ),
             ),
             options={"thinking": {"type": "enabled"}},
         ),
@@ -90,21 +103,24 @@ def test_incompatible_reasoning_selection_fails_before_provider_invocation():
         provider_model_gateway._provider_options(invocation)
 
 
-def test_kimi_k3_internal_json_calls_receive_reasoning_headroom():
+def test_always_enabled_reasoning_profile_rejects_disabled_invocation():
     invocation = ModelInvocation(
         request=ModelRequest(
             provider="openai",
             model="kimi-k3",
-            profile_id="moonshot:kimi-k3",
+            capability_snapshot=resolve_model_profile(
+                "moonshot:kimi-k3",
+                "kimi-k3",
+                "https://api.moonshot.cn/v1",
+            ).capability_snapshot(context_window_tokens=1_000_000),
             options={"baseURL": "https://api.moonshot.cn/v1"},
         ),
         max_output_tokens=1_200,
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
-    options = provider_model_gateway._provider_options(invocation)
-
-    assert options["max_tokens"] == 8_192
+    with pytest.raises(UnsupportedModelFeatureError):
+        provider_model_gateway._provider_options(invocation)
 
 
 def test_provider_tool_wire_keeps_display_names_host_only():
@@ -137,7 +153,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
         request=ModelRequest(
             provider="openai",
             model="model",
-            profile_id="profile",
+            capability_snapshot=_snapshot(profile_id="profile"),
             options={
                 "baseURL": (
                     "https://name:password@example.invalid/v1"
@@ -280,7 +296,11 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     request = ModelRequest(
         provider="anthropic",
         model="requested-model",
-        profile_id="minimax:MiniMax-M3",
+        capability_snapshot=resolve_model_profile(
+            "deepseek:deepseek-v4-pro",
+            "deepseek-v4-pro",
+            "https://api.deepseek.com",
+        ).capability_snapshot(context_window_tokens=1_000_000),
         options={
             "baseURL": "https://example.invalid",
             "tool_choice": "required",
@@ -355,7 +375,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert captured["options"]["max_tokens"] == 2_048
     assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
-    assert captured["options"]["model_profile"] == "minimax:MiniMax-M3"
+    assert captured["options"]["model_profile"] == "deepseek:deepseek-v4-pro"
     assert "temperature" not in captured["options"]
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict
@@ -462,8 +482,10 @@ async def test_provider_model_gateway_maps_typed_tool_continuation_messages(monk
             request=ModelRequest(
                 provider="openai",
                 model="model",
-                protocol_capabilities=ModelProtocolCapabilities(
-                    reasoning_replay=ReasoningReplayPolicy.REQUIRED,
+                capability_snapshot=_snapshot(
+                    protocol=ModelProtocolCapabilities(
+                        reasoning_replay=ReasoningReplayPolicy.REQUIRED,
+                    ),
                 ),
             ),
             tool_choice=ToolChoiceMode.NONE,

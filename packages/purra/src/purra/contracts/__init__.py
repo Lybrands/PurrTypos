@@ -13,10 +13,14 @@ from purra.json_values import (
     thaw_json_value,
 )
 from purra.output_budget import (
-    ModelOutputCapabilities,
     ResolvedOutputBudget,
 )
-from purra.model_protocol.capabilities import ModelProtocolCapabilities
+from purra.model_protocol.capabilities import (
+    ModelCapabilitySnapshot,
+    ModelOutputCapabilities,
+    ModelProtocolCapabilities,
+    generic_capability_snapshot,
+)
 from purra.contracts.enums import (
     ApprovalDecision,
     ApprovalStatus,
@@ -155,9 +159,9 @@ class DomainContext:
 class ModelRequest:
     provider: str
     model: str
-    profile_id: str | None = None
-    output_capabilities: ModelOutputCapabilities = ModelOutputCapabilities()
-    protocol_capabilities: ModelProtocolCapabilities = ModelProtocolCapabilities()
+    capability_snapshot: ModelCapabilitySnapshot = field(
+        default_factory=generic_capability_snapshot
+    )
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -167,16 +171,25 @@ class ModelRequest:
         object.__setattr__(self, "model", required_text(
             self.model, "model name"
         ))
-        object.__setattr__(self, "profile_id", _optional_text(self.profile_id))
-        if not isinstance(self.output_capabilities, ModelOutputCapabilities):
+        if not isinstance(self.capability_snapshot, ModelCapabilitySnapshot):
             raise TypeError(
-                "model output capabilities must be ModelOutputCapabilities"
-            )
-        if not isinstance(self.protocol_capabilities, ModelProtocolCapabilities):
-            raise TypeError(
-                "model protocol capabilities must be ModelProtocolCapabilities"
+                "model capability snapshot must be ModelCapabilitySnapshot"
             )
         object.__setattr__(self, "options", freeze_json_mapping(self.options))
+
+    @property
+    def profile_id(self) -> str:
+        return self.capability_snapshot.profile_id
+
+    @property
+    def output_capabilities(self) -> ModelOutputCapabilities:
+        """Compatibility view until the output-budget migration completes."""
+
+        return self.capability_snapshot.output
+
+    @property
+    def protocol_capabilities(self) -> ModelProtocolCapabilities:
+        return self.capability_snapshot.protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -1534,6 +1547,7 @@ class RunProvenance:
     context_window: int
     endpoint_digest: str
     request_profile_digest: str
+    capability_snapshot: Mapping[str, Any] = field(default_factory=dict)
     execution_intent: RunExecutionIntent | None = None
 
     def __post_init__(self) -> None:
@@ -1552,6 +1566,11 @@ class RunProvenance:
             ):
                 raise ValueError(f"run provenance {name} must be a SHA-256 digest")
             object.__setattr__(self, name, value)
+        object.__setattr__(
+            self,
+            "capability_snapshot",
+            freeze_json_mapping(self.capability_snapshot),
+        )
         if self.execution_intent is not None and not isinstance(
             self.execution_intent,
             RunExecutionIntent,
@@ -1559,6 +1578,14 @@ class RunProvenance:
             raise TypeError(
                 "run provenance execution_intent must be a RunExecutionIntent"
             )
+        if self.capability_snapshot and self.execution_intent is not None:
+            snapshot_digest = str(
+                self.capability_snapshot.get("digest") or ""
+            ).strip().lower()
+            if snapshot_digest != self.execution_intent.capability_snapshot_digest:
+                raise ValueError(
+                    "run provenance capability snapshot digest does not match intent"
+                )
 
 
 @dataclass(frozen=True, slots=True)

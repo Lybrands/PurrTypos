@@ -15,6 +15,7 @@ class KimiK3Profile(ModelProfile):
     })
     reasoning_control = ReasoningControl.ALWAYS_ENABLED
     reasoning_replay = ReasoningReplayPolicy.REQUIRED
+    actionable = False
 
     def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
         # K3 currently exposes max reasoning only.  Unknown or lower efforts

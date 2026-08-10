@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from purra.contracts import ModelFinishReason
-from purra.model_protocol import classify_model_termination
+from purra.contracts import ModelFinishReason, ReasoningMode
+from purra.errors import UnsupportedModelFeatureError
+from purra.model_protocol import (
+    FeatureRequirement,
+    FeatureSupport,
+    ModelCapabilitySnapshot,
+    ModelProtocolCapabilities,
+    ReasoningControl,
+    TaskCapabilityRequirements,
+    ThinkingTokenAccounting,
+    classify_model_termination,
+    preflight_capabilities,
+)
 
 
 @pytest.mark.parametrize(
@@ -65,3 +76,114 @@ def test_filtered_finish_is_incomplete_and_not_automatically_retryable():
     assert result.authorizes_tool_calls is False
     assert result.retryable is False
     assert result.error_code == "model_output_filtered"
+
+
+def _snapshot(
+    *,
+    reasoning_control=ReasoningControl.SELECTABLE,
+    tool_calling=FeatureSupport.SUPPORTED,
+    json_schema_level="json_object",
+    streaming=FeatureSupport.SUPPORTED,
+    cancellation=FeatureSupport.SUPPORTED,
+    actionable=True,
+):
+    return ModelCapabilitySnapshot(
+        schema_version=1,
+        profile_id="test:profile",
+        provider_protocol="test_protocol",
+        context_window_tokens=200_000,
+        max_output_tokens=100_000,
+        thinking_token_accounting=ThinkingTokenAccounting.INCLUDED,
+        protocol=ModelProtocolCapabilities(
+            reasoning_control=reasoning_control,
+            tool_calling=tool_calling,
+            json_schema_level=json_schema_level,
+            streaming=streaming,
+            cancellation=cancellation,
+        ),
+        actionable=actionable,
+    )
+
+
+def _requirements(
+    *,
+    reasoning_mode=ReasoningMode.DEFAULT,
+    tool_calling=FeatureRequirement.REQUIRED,
+    structured_output_level="json_object",
+    streaming_required=True,
+    cancellation_required=True,
+):
+    return TaskCapabilityRequirements(
+        reasoning_mode=reasoning_mode,
+        tool_calling=tool_calling,
+        structured_output_level=structured_output_level,
+        streaming_required=streaming_required,
+        cancellation_required=cancellation_required,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reasoning_control", "mode"),
+    [
+        (ReasoningControl.SELECTABLE, ReasoningMode.DEFAULT),
+        (ReasoningControl.SELECTABLE, ReasoningMode.DISABLED),
+        (ReasoningControl.ALWAYS_ENABLED, ReasoningMode.DEFAULT),
+        (ReasoningControl.UNAVAILABLE, ReasoningMode.DISABLED),
+    ],
+)
+def test_capability_preflight_accepts_supported_reasoning_modes(
+    reasoning_control,
+    mode,
+):
+    preflight_capabilities(
+        _snapshot(reasoning_control=reasoning_control),
+        _requirements(reasoning_mode=mode),
+    )
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "requirements"),
+    [
+        (
+            _snapshot(reasoning_control=ReasoningControl.ALWAYS_ENABLED),
+            _requirements(reasoning_mode=ReasoningMode.DISABLED),
+        ),
+        (
+            _snapshot(reasoning_control=ReasoningControl.UNAVAILABLE),
+            _requirements(reasoning_mode=ReasoningMode.DEFAULT),
+        ),
+        (
+            _snapshot(tool_calling=FeatureSupport.UNKNOWN),
+            _requirements(tool_calling=FeatureRequirement.REQUIRED),
+        ),
+        (
+            _snapshot(json_schema_level="unknown"),
+            _requirements(structured_output_level="json_object"),
+        ),
+        (
+            _snapshot(streaming=FeatureSupport.UNAVAILABLE),
+            _requirements(streaming_required=True),
+        ),
+        (
+            _snapshot(cancellation=FeatureSupport.UNAVAILABLE),
+            _requirements(cancellation_required=True),
+        ),
+        (
+            _snapshot(actionable=False),
+            _requirements(),
+        ),
+    ],
+)
+def test_capability_preflight_rejects_incompatible_tasks(snapshot, requirements):
+    with pytest.raises(UnsupportedModelFeatureError) as captured:
+        preflight_capabilities(snapshot, requirements)
+
+    assert captured.value.code == "model_capability_incompatible"
+    assert captured.value.retryable is False
+
+
+def test_optional_tool_requirement_accepts_unknown_support():
+    preflight_capabilities(
+        _snapshot(tool_calling=FeatureSupport.UNKNOWN),
+        _requirements(tool_calling=FeatureRequirement.OPTIONAL),
+    )

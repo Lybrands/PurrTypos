@@ -85,11 +85,17 @@ class ModelGatewayError(AgentCoreError):
 class UnsupportedModelFeatureError(ModelGatewayError):
     """The selected provider/model rejected a requested capability."""
 
-    def __init__(self, message: str = "unsupported model feature"):
+    def __init__(
+        self,
+        message: str = "unsupported model feature",
+        *,
+        code: str = "unsupported_model_feature",
+        retryable: bool = True,
+    ):
         super().__init__(
             message,
-            code="unsupported_model_feature",
-            retryable=True,
+            code=code,
+            retryable=retryable,
         )
 
 

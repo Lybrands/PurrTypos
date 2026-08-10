@@ -28,7 +28,11 @@ from domains.writing.response import (
 from schemas.ai import ChatStreamRequest
 from infrastructure.models.profiles.registry import resolve_model_profile
 from application.model_runtime import reasoning_mode_from_options
-from purra.errors import UnsupportedModelFeatureError
+from purra.model_protocol import (
+    FeatureRequirement,
+    TaskCapabilityRequirements,
+    preflight_capabilities,
+)
 
 
 CONTEXT_WINDOW_TOKENS: dict[str, int] = {
@@ -93,7 +97,6 @@ def to_writing_agent_request(
         )
     model = str(options.pop("model", "") or "").strip()
     profile_id = str(options.pop("model_profile", "") or "").strip() or None
-    options.pop("max_tokens", None)
     options.pop("tools", None)
     options.pop("tool_choice", None)
     window_label = body.contextWindow or options.pop("context_window", None)
@@ -113,11 +116,24 @@ def to_writing_agent_request(
         str(options.get("baseURL") or ""),
     )
     reasoning_mode = reasoning_mode_from_options(options)
-    protocol_capabilities = profile.protocol_capabilities()
-    if not protocol_capabilities.reasoning_mode_is_supported(reasoning_mode):
-        raise UnsupportedModelFeatureError(
-            "selected reasoning mode is incompatible with the model profile"
-        )
+    selected_context_window = context_window_tokens(window_label)
+    snapshot = profile.capability_snapshot(
+        context_window_tokens=selected_context_window,
+    )
+    preflight_capabilities(
+        snapshot,
+        TaskCapabilityRequirements(
+            reasoning_mode=reasoning_mode,
+            tool_calling=(
+                FeatureRequirement.REQUIRED
+                if body.enableAgentTools and body.bookId
+                else FeatureRequirement.OPTIONAL
+            ),
+            structured_output_level="none",
+            streaming_required=True,
+            cancellation_required=True,
+        ),
+    )
     return AgentRunRequest(
         messages=tuple(
             AgentMessage.from_mapping(message)
@@ -127,15 +143,13 @@ def to_writing_agent_request(
         model=ModelRequest(
             provider=body.apiProvider,
             model=model,
-            profile_id=profile_id,
-            output_capabilities=profile.output_capabilities(),
-            protocol_capabilities=protocol_capabilities,
+            capability_snapshot=snapshot,
             options=options,
         ),
         domain_context=context.to_core_context(),
         session_id=body.sessionId,
         mode=body.chatAgentMode,
-        context_window=context_window_tokens(window_label),
+        context_window=selected_context_window,
         tools_enabled=bool(body.enableAgentTools and body.bookId),
         metadata={"locale": body.locale},
     )

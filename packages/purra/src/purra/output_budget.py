@@ -11,6 +11,11 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
+from purra.model_protocol.capabilities import (
+    ModelOutputCapabilities,
+    ThinkingTokenAccounting,
+)
+
 from purra.normalization import (
     non_negative_int,
     optional_positive_int,
@@ -18,43 +23,11 @@ from purra.normalization import (
     required_text,
 )
 
-class ThinkingTokenAccounting(StrEnum):
-    INCLUDED = "included"
-    SEPARATE = "separate"
-    UNKNOWN = "unknown"
-
-
 class OutputBudgetLimit(StrEnum):
     TASK_ESTIMATE = "task_estimate"
     TASK_HARD_CAP = "task_hard_cap"
     MODEL_CAPABILITY = "model_capability"
     CONTEXT_AVAILABLE = "context_available"
-
-
-@dataclass(frozen=True, slots=True)
-class ModelOutputCapabilities:
-    """Stable model capability facts, never per-task preferences."""
-
-    max_output_tokens: int | None = None
-    thinking_token_accounting: ThinkingTokenAccounting = (
-        ThinkingTokenAccounting.UNKNOWN
-    )
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "max_output_tokens", optional_positive_int(
-            self.max_output_tokens, "model max output tokens"
-        ))
-        object.__setattr__(
-            self,
-            "thinking_token_accounting",
-            ThinkingTokenAccounting(self.thinking_token_accounting),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "maxOutputTokens": self.max_output_tokens,
-            "thinkingTokenAccounting": self.thinking_token_accounting.value,
-        }
 
 
 @dataclass(frozen=True, slots=True)
