@@ -413,6 +413,9 @@ def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
         ),
         endpoint_digest=digest_model_endpoint(runtime.baseURL),
         request_profile_digest=hashlib.sha256(profile.encode("utf-8")).hexdigest(),
+        capability_snapshot=request.capability_snapshot.to_mapping(
+            include_digest=True
+        ),
         execution_intent=run_execution_intent(
             request,
             reasoning_mode_from_options(runtime.options),

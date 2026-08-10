@@ -14,7 +14,24 @@ from infrastructure.models.profiles.minimax_m3 import MINIMAX_M3_PROFILE
 from infrastructure.models.profiles.mimo_v2_5_pro import MIMO_V2_5_PRO_PROFILE
 
 
-BUILTIN_MODEL_PROFILES: tuple[ModelProfile, ...] = (
+def _validated_profiles(*profiles: ModelProfile) -> tuple[ModelProfile, ...]:
+    ids = [profile.profile_id for profile in profiles]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError("built-in model profile ids must be unique")
+    invalid = [
+        profile.profile_id
+        for profile in profiles
+        if profile.actionable and profile.max_output_tokens is None
+    ]
+    if invalid:
+        raise RuntimeError(
+            "actionable model profiles require max_output_tokens: "
+            + ", ".join(invalid)
+        )
+    return tuple(profiles)
+
+
+BUILTIN_MODEL_PROFILES: tuple[ModelProfile, ...] = _validated_profiles(
     GLM5_2_PROFILE,
     DEEPSEEK_V4_PRO_PROFILE,
     DEEPSEEK_V4_FLASH_PROFILE,

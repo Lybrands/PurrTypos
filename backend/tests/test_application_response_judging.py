@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from purra.contracts import (
 )
 from purra.errors import ModelGatewayError
 from purra.model_execution import ManagedModelExecutor
+from purra.model_protocol import generic_capability_snapshot
 from application.response_judging import ModelBackedResponseJudge
 
 
@@ -59,10 +61,13 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     signal = asyncio.Event()
     judge = ModelBackedResponseJudge(
         model_executor=ManagedModelExecutor(gateway),
-        model_request=ModelRequest(
-            provider="fixture",
-            model="writer-model",
-            profile_id="fixture:writer-model",
+            model_request=ModelRequest(
+                provider="fixture",
+                model="writer-model",
+                capability_snapshot=replace(
+                    generic_capability_snapshot(),
+                    profile_id="fixture:writer-model",
+                ),
             options={
                 "temperature": 0.8,
                 "tools": [{"name": "unsafe"}],

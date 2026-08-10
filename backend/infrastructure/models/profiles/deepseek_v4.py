@@ -1,7 +1,6 @@
 """DeepSeek V4 request profiles for the OpenAI-compatible API."""
 
-from purra.output_budget import ThinkingTokenAccounting
-from purra.model_protocol import ReasoningReplayPolicy
+from purra.model_protocol import ReasoningReplayPolicy, ThinkingTokenAccounting
 from infrastructure.models.profiles.base import ModelProfile
 
 
@@ -13,6 +12,7 @@ class DeepSeekV4ProProfile(ModelProfile):
         "https://api.deepseek.com/v1",
     })
     max_output_tokens = 393_216
+    capability_source = "https://api-docs.deepseek.com/quick_start/pricing"
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True
     reasoning_replay = ReasoningReplayPolicy.REQUIRED
@@ -26,6 +26,7 @@ class DeepSeekV4FlashProfile(ModelProfile):
         "https://api.deepseek.com/v1",
     })
     max_output_tokens = 393_216
+    capability_source = "https://api-docs.deepseek.com/quick_start/pricing"
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True
     reasoning_replay = ReasoningReplayPolicy.REQUIRED

@@ -3,9 +3,18 @@
 from purra.model_protocol.capabilities import (
     AssistantContentWithToolCalls,
     FeatureSupport,
+    ModelCapabilitySnapshot,
+    ModelOutputCapabilities,
     ModelProtocolCapabilities,
     ReasoningControl,
     ReasoningReplayPolicy,
+    ThinkingTokenAccounting,
+    generic_capability_snapshot,
+)
+from purra.model_protocol.requirements import (
+    FeatureRequirement,
+    TaskCapabilityRequirements,
+    preflight_capabilities,
 )
 
 from purra.model_protocol.termination import (
@@ -15,10 +24,17 @@ from purra.model_protocol.termination import (
 
 __all__ = [
     "AssistantContentWithToolCalls",
+    "FeatureRequirement",
     "FeatureSupport",
+    "ModelCapabilitySnapshot",
+    "ModelOutputCapabilities",
     "ModelProtocolCapabilities",
     "ModelTermination",
     "ReasoningControl",
     "ReasoningReplayPolicy",
+    "TaskCapabilityRequirements",
+    "ThinkingTokenAccounting",
     "classify_model_termination",
+    "generic_capability_snapshot",
+    "preflight_capabilities",
 ]
