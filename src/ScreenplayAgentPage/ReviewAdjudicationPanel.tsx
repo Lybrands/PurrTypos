@@ -19,6 +19,7 @@ import {
   finalizationDisabledReason,
   pendingReviewFindingIds,
   reviewPrimaryAction,
+  reviewRequiresRerun,
   type ReviewBatchDecisionStatus,
 } from './reviewAdjudicationModel'
 
@@ -102,9 +103,7 @@ export default function ReviewAdjudicationPanel({
   const selectedSet = new Set(selectedIds)
   const action = reviewPrimaryAction(review)
   const finalizeDisabledReason = finalizationDisabledReason(review)
-  const reviewInputUnverified = review.hardChecks.some(
-    (check) => check.code === 'review_input_unverified',
-  )
+  const reviewInvalid = reviewRequiresRerun(review)
 
   const openDecision = (
     issueIds: string[],
@@ -266,22 +265,12 @@ export default function ReviewAdjudicationPanel({
             ))}
           </div>
         </>
-      ) : review.failedEpisodes.length > 0 ? (
+      ) : reviewInvalid ? (
         <div className="screenplay-review-adjudication__empty is-failed">
           <AlertCircleIcon />
           <div>
-            <strong>部分分集审阅失败</strong>
-            <span>
-              第 {review.failedEpisodes.map((item) => item.episodeNumber).join('、')} 集没有生成审阅意见。
-            </span>
-          </div>
-        </div>
-      ) : reviewInputUnverified ? (
-        <div className="screenplay-review-adjudication__empty is-failed">
-          <AlertCircleIcon />
-          <div>
-            <strong>当前审阅报告没有有效正文依据</strong>
-            <span>请基于当前剧本正文重新审阅；旧报告中的内容不会作为审阅意见展示。</span>
+            <strong>当前审阅报告不可用于定稿</strong>
+            <span>{review.hardChecks[0]?.message || '请基于当前剧本正文重新审阅。'}</span>
           </div>
         </div>
       ) : review.reviewRevisionId ? (
