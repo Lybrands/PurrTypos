@@ -189,6 +189,8 @@ class SqliteLongTaskRepository:
     ) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status is LongTaskStatus.RUNNING:
                 return task
             if task.status is not LongTaskStatus.PENDING:
@@ -210,7 +212,10 @@ class SqliteLongTaskRepository:
         lease_expires = now_ms + int(lease_duration_ms)
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
-            if task.status is not LongTaskStatus.RUNNING:
+            if (
+                task.status is not LongTaskStatus.RUNNING
+                or task.cancellation_requested_at_ms is not None
+            ):
                 return None
             active = await self._db.fetch_one(
                 "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
@@ -262,7 +267,11 @@ class SqliteLongTaskRepository:
         run_id: str,
     ) -> LongTaskUnitRecord:
         async with self._db.transaction(cancellation_linearizable=True):
+            task = await self._require(task_id)
             unit = await self._require_unit(task_id, unit_id)
+            if task.cancellation_requested_at_ms is not None:
+                await self._cancel_in_transaction(task)
+                return await self._require_unit(task.id, unit.id)
             _require_worker(unit, worker_id)
             if unit.status not in {LongTaskUnitStatus.CLAIMED, LongTaskUnitStatus.RUNNING}:
                 raise ValueError("long task unit is not claimed")
@@ -306,6 +315,9 @@ class SqliteLongTaskRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
+            if task.cancellation_requested_at_ms is not None:
+                await self._cancel_in_transaction(task)
+                return await self._require_unit(task.id, unit.id)
             if task.status is not LongTaskStatus.RUNNING:
                 return unit
             _require_worker(unit, worker_id)
@@ -346,6 +358,8 @@ class SqliteLongTaskRepository:
                 ):
                     return task
                 raise ValueError("long task unit completion conflicts")
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status is not LongTaskStatus.RUNNING:
                 raise ValueError("long task is not running")
             _require_worker(unit, worker_id)
@@ -388,6 +402,8 @@ class SqliteLongTaskRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             _require_worker(unit, worker_id)
             disposition = decision.disposition
             if disposition in {
@@ -477,6 +493,8 @@ class SqliteLongTaskRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if unit.status is LongTaskUnitStatus.EXPANDED:
                 return task
             if task.status is not LongTaskStatus.RUNNING:
@@ -606,6 +624,8 @@ class SqliteLongTaskRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
             unit = await self._require_unit(task.id, unit_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status in {LongTaskStatus.PAUSED, LongTaskStatus.CANCELED}:
                 return task
             if task.status is not LongTaskStatus.RUNNING:
@@ -644,6 +664,10 @@ class SqliteLongTaskRepository:
             )
             task_ids = tuple(str(row["id"]) for row in rows)
             for task_id in task_ids:
+                task = await self._require(task_id)
+                if task.cancellation_requested_at_ms is not None:
+                    await self._cancel_in_transaction(task)
+                    continue
                 await self._db.execute(
                     "UPDATE ai_agent_long_task_units SET status = 'pending', "
                     "max_attempts = max_attempts + 1, worker_id = NULL, "
@@ -663,6 +687,8 @@ class SqliteLongTaskRepository:
     async def pause(self, task_id: str) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status is LongTaskStatus.PAUSED:
                 return task
             if task.status not in {LongTaskStatus.PENDING, LongTaskStatus.RUNNING}:
@@ -694,6 +720,8 @@ class SqliteLongTaskRepository:
             raise ValueError("additional long task attempts cannot be negative")
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status is LongTaskStatus.RUNNING:
                 return task
             if task.status is LongTaskStatus.FAILED:
@@ -750,19 +778,52 @@ class SqliteLongTaskRepository:
                 return task
             if task.status.terminal:
                 raise ValueError("terminal long task cannot be canceled")
-            await self._update_task_status(task, LongTaskStatus.CANCELED)
+            return await self._cancel_in_transaction(task)
+
+    async def _cancel_in_transaction(
+        self,
+        task: LongTaskRecord,
+    ) -> LongTaskRecord:
+        await self._update_task_status(task, LongTaskStatus.CANCELED)
+        await self._db.execute(
+            "UPDATE ai_agent_long_task_units SET status = 'canceled', "
+            "worker_id = NULL, lease_expires_at_ms = NULL, "
+            "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+            "AND status IN ('pending', 'waiting_retry', 'claimed', "
+            "'running', 'needs_split', 'blocked')",
+            [task.id],
+        )
+        return await self._require(task.id)
+
+    async def request_cancel(
+        self,
+        task_id: str,
+        *,
+        requested_at_ms: int | None = None,
+    ) -> LongTaskRecord:
+        requested_at = (
+            int(time.time() * 1000)
+            if requested_at_ms is None
+            else int(requested_at_ms)
+        )
+        async with self._db.transaction(cancellation_linearizable=True):
+            task = await self._require(task_id)
+            if task.status.terminal:
+                return task
             await self._db.execute(
-                "UPDATE ai_agent_long_task_units SET status = 'canceled', "
-                "worker_id = NULL, lease_expires_at_ms = NULL, "
-                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
-                "AND status IN ('pending', 'claimed', 'running')",
-                [task.id],
+                "UPDATE ai_agent_long_tasks SET cancel_requested_at_ms = "
+                "COALESCE(cancel_requested_at_ms, ?), revision = revision + 1, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+                "AND cancel_requested_at_ms IS NULL",
+                [requested_at, task.id],
             )
             return await self._require(task.id)
 
     async def finalize_if_complete(self, task_id: str) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if task.cancellation_requested_at_ms is not None:
+                return await self._cancel_in_transaction(task)
             if task.status is not LongTaskStatus.RUNNING:
                 return task
             counts = await self._db.fetch_one(
@@ -881,6 +942,7 @@ def _task(row: dict[str, Any] | None) -> LongTaskRecord:
         completed_units=int(row["completed_units"]),
         failed_units=int(row["failed_units"]),
         max_parallelism=int(row["max_parallelism"]),
+        cancellation_requested_at_ms=row.get("cancel_requested_at_ms"),
         metadata=_json_load(row.get("metadata_json"), {}),
         create_time=row.get("create_time"),
         update_time=row.get("update_time"),

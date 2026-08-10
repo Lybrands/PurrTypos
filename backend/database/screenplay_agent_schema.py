@@ -30,10 +30,22 @@ async def init_screenplay_agent_schema(db) -> None:
         result_revision_id TEXT DEFAULT NULL,
         finalization_receipt_id TEXT DEFAULT NULL UNIQUE,
         cancel_receipt_id TEXT DEFAULT NULL UNIQUE,
+        cancel_requested_at_ms INTEGER DEFAULT NULL,
         error_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    operation_columns = {
+        str(column["name"])
+        for column in await db.fetch_all(
+            "PRAGMA table_info(screenplay_agent_operations)"
+        )
+    }
+    if "cancel_requested_at_ms" not in operation_columns:
+        await db.execute(
+            "ALTER TABLE screenplay_agent_operations ADD COLUMN "
+            "cancel_requested_at_ms INTEGER DEFAULT NULL"
+        )
     await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
         idx_screenplay_agent_one_active_operation
         ON screenplay_agent_operations(project_id, session_id)
@@ -54,6 +66,16 @@ async def init_screenplay_agent_schema(db) -> None:
         "CREATE INDEX IF NOT EXISTS idx_screenplay_agent_operation_commands "
         "ON screenplay_agent_operation_commands(operation_id, create_time)"
     )
+    await db.execute("""CREATE TABLE IF NOT EXISTS
+        screenplay_agent_cancel_commands (
+        command_id TEXT PRIMARY KEY NOT NULL,
+        turn_id TEXT NOT NULL,
+        operation_id TEXT DEFAULT NULL,
+        request_digest TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        response_json TEXT NOT NULL DEFAULT '{}',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_agent_turns (
         id TEXT PRIMARY KEY NOT NULL,
@@ -74,6 +96,8 @@ async def init_screenplay_agent_schema(db) -> None:
         execution_owner_id TEXT DEFAULT NULL,
         lease_expires_at_ms INTEGER DEFAULT NULL,
         heartbeat_at_ms INTEGER DEFAULT NULL,
+        cancel_requested_at_ms INTEGER DEFAULT NULL,
+        cancel_receipt_id TEXT DEFAULT NULL,
         attempt INTEGER NOT NULL DEFAULT 0,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -92,6 +116,8 @@ async def init_screenplay_agent_schema(db) -> None:
         ("task_id", "TEXT DEFAULT NULL"),
         ("target_role", "TEXT DEFAULT NULL"),
         ("result_revision_id", "TEXT DEFAULT NULL"),
+        ("cancel_requested_at_ms", "INTEGER DEFAULT NULL"),
+        ("cancel_receipt_id", "TEXT DEFAULT NULL"),
     ):
         if name not in turn_columns:
             await db.execute(

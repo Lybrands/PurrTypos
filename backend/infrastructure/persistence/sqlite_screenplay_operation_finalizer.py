@@ -115,6 +115,10 @@ class SqliteScreenplayOperationFinalizer:
                 return _receipt(_object(replay.get("response_json")))
             if operation.status.value != "running" or not operation.long_task_id:
                 raise ValueError("screenplay Operation is not ready to finalize")
+            if operation.cancel_requested_at_ms is not None:
+                raise ValueError(
+                    "screenplay Operation cancel was requested before finalization"
+                )
 
             expected_candidate_keys, expected_response_key = _expected_part_keys(
                 operation

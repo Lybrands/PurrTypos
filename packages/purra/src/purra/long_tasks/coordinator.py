@@ -44,6 +44,8 @@ class LongTaskCoordinator:
         signal: CancellationSignal | None = None,
     ):
         task = await self._require(task_id)
+        if task.cancellation_requested_at_ms is not None:
+            return await self._repository.cancel(task.id)
         if task.status is LongTaskStatus.PENDING:
             task = await self._repository.start(
                 task.id,
@@ -56,6 +58,8 @@ class LongTaskCoordinator:
                     return await self._stop_active(task.id, active)
 
                 task = await self._require(task.id)
+                if task.cancellation_requested_at_ms is not None:
+                    return await self._stop_active(task.id, active)
                 if task.status is not LongTaskStatus.RUNNING:
                     break
 
@@ -202,6 +206,8 @@ class LongTaskCoordinator:
         }:
             return current
         if current.status is LongTaskStatus.RUNNING:
+            if current.cancellation_requested_at_ms is not None:
+                return await self._repository.cancel(task_id)
             return await self._repository.pause(task_id)
         return current
 
