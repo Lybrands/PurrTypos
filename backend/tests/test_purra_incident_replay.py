@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,30 +19,37 @@ FIXTURE = (
 ALLOWED_FIELDS = frozenset({
     "id",
     "errorCode",
+    "termination",
+    "requestFingerprint",
+    "repeatedRequestFingerprints",
     "declaredRetryable",
     "effectState",
     "checkpointAvailable",
+    "partSplittable",
     "attemptsRemaining",
     "expectedCategory",
     "expectedDisposition",
-    "expectedTaskStatus",
-    "completedOutputRefs",
+    "expectedOperationStatus",
+    "completedPartRefs",
     "requestedReasoningMode",
     "observedReasoningModes",
+    "reviewIssueCount",
+    "verdictCount",
     "finalizationCount",
 })
 
 
 def _incidents() -> tuple[dict[str, object], ...]:
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    assert payload["schemaVersion"] == 1
+    assert payload["schemaVersion"] == 2
     return tuple(payload["incidents"])
 
 
-def _task_status(disposition: FailureDisposition) -> str:
-    if disposition in {
-        FailureDisposition.RETRY_ATTEMPT,
-        FailureDisposition.RESUME_CHECKPOINT,
+def _operation_status(disposition: FailureDisposition) -> str:
+    if disposition.value in {
+        "retry_attempt",
+        "resume_checkpoint",
+        "split_part",
     }:
         return "running"
     if disposition is FailureDisposition.PAUSE_RECOVERABLE:
@@ -66,22 +74,51 @@ def test_historical_failure_fixture_is_sanitized_and_complete():
         "tool_call_truncated": 1,
     }
     assert all(set(item) <= ALLOWED_FIELDS for item in incidents)
+    assert all(set(item) == ALLOWED_FIELDS for item in incidents)
+
+
+def test_length_terminations_never_repeat_the_same_request_fingerprint():
+    incidents = [
+        incident
+        for incident in _incidents()
+        if incident["termination"] == "length"
+    ]
+
+    assert incidents
+    for incident in incidents:
+        assert incident["requestFingerprint"] not in incident[
+            "repeatedRequestFingerprints"
+        ], incident["id"]
+        assert len(incident["observedReasoningModes"]) == 1, incident["id"]
+
+
+def test_system_failures_do_not_become_review_findings_or_finalization():
+    for incident in _incidents():
+        completed_before = tuple(incident["completedPartRefs"])
+
+        assert incident["reviewIssueCount"] == 0, incident["id"]
+        assert incident["verdictCount"] == 0, incident["id"]
+        assert incident["finalizationCount"] == 0, incident["id"]
+        assert tuple(incident["completedPartRefs"]) == completed_before
 
 
 def test_historical_failures_replay_without_terminal_amplification():
     for incident in _incidents():
-        completed_before = tuple(incident["completedOutputRefs"])
+        completed_before = tuple(incident["completedPartRefs"])
         signal = classify_screenplay_run_failure(SimpleNamespace(
             code=incident["errorCode"],
             retryable=incident["declaredRetryable"],
         ))
-        signal = type(signal)(
-            category=signal.category,
-            code=signal.code,
-            retryable=signal.retryable,
-            effect_state=RecoveryEffectState(incident["effectState"]),
-            checkpoint_available=incident["checkpointAvailable"],
-        )
+        signal_kwargs = {
+            "category": signal.category,
+            "code": signal.code,
+            "retryable": signal.retryable,
+            "effect_state": RecoveryEffectState(incident["effectState"]),
+            "checkpoint_available": incident["checkpointAvailable"],
+        }
+        if "part_splittable" in signature(type(signal)).parameters:
+            signal_kwargs["part_splittable"] = incident["partSplittable"]
+        signal = type(signal)(**signal_kwargs)
         decision = decide_failure(
             signal,
             attempts_remaining=incident["attemptsRemaining"],
@@ -89,10 +126,14 @@ def test_historical_failures_replay_without_terminal_amplification():
 
         assert signal.category.value == incident["expectedCategory"], incident["id"]
         assert decision.disposition.value == incident["expectedDisposition"], incident["id"]
-        assert _task_status(decision.disposition) == incident["expectedTaskStatus"], incident["id"]
-        assert tuple(incident["completedOutputRefs"]) == completed_before
+        assert _operation_status(decision.disposition) == incident[
+            "expectedOperationStatus"
+        ], incident["id"]
+        assert tuple(incident["completedPartRefs"]) == completed_before
         assert all(
             mode == incident["requestedReasoningMode"]
             for mode in incident["observedReasoningModes"]
         ), incident["id"]
+        assert incident["reviewIssueCount"] == 0
+        assert incident["verdictCount"] == 0
         assert incident["finalizationCount"] == 0
