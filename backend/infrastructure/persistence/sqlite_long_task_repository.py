@@ -19,6 +19,7 @@ from purra.long_tasks.contracts import (
     LongTaskUnitRecord,
     LongTaskUnitResult,
     LongTaskUnitStatus,
+    LongTaskUsage,
 )
 from purra.recovery import (
     FailureDecision,
@@ -180,6 +181,62 @@ class SqliteLongTaskRepository:
             [str(task_id or "").strip()],
         )
         return tuple(_unit(row) for row in rows)
+
+    async def record_usage(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        usage: LongTaskUsage,
+        expected_revision: int,
+    ) -> LongTaskRecord:
+        normalized_run_id = _required(run_id, "long task usage Run id")
+        if not isinstance(usage, LongTaskUsage):
+            raise TypeError("long task usage must be LongTaskUsage")
+        async with self._db.transaction(cancellation_linearizable=True):
+            existing = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_long_task_usage "
+                "WHERE task_id = ? AND run_id = ?",
+                [task_id, normalized_run_id],
+            )
+            if existing is not None:
+                if _usage_row(existing) != usage:
+                    raise ValueError("long task Run usage conflicts")
+                return await self._require(task_id)
+            task = await self._require(task_id)
+            if task.revision != int(expected_revision):
+                raise ValueError("long task revision conflict")
+            await self._db.execute(
+                "INSERT INTO ai_agent_long_task_usage "
+                "(task_id, run_id, invocation_count, input_tokens, "
+                "output_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    task.id,
+                    normalized_run_id,
+                    usage.invocation_count,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_tokens,
+                ],
+            )
+            aggregate = await self._db.fetch_one(
+                "SELECT SUM(invocation_count) AS invocation_count, "
+                "SUM(input_tokens) AS input_tokens, "
+                "SUM(output_tokens) AS output_tokens, "
+                "SUM(reasoning_tokens) AS reasoning_tokens, "
+                "SUM(CASE WHEN reasoning_tokens IS NULL THEN 1 ELSE 0 END) "
+                "AS unknown_reasoning FROM ai_agent_long_task_usage "
+                "WHERE task_id = ?",
+                [task.id],
+            )
+            total = _aggregate_usage(aggregate)
+            await self._db.execute(
+                "UPDATE ai_agent_long_tasks SET usage_json = ?, "
+                "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                [_json_dump(total.to_mapping()), task.id],
+            )
+            return await self._require(task.id)
 
     async def start(
         self,
@@ -943,6 +1000,7 @@ def _task(row: dict[str, Any] | None) -> LongTaskRecord:
         failed_units=int(row["failed_units"]),
         max_parallelism=int(row["max_parallelism"]),
         cancellation_requested_at_ms=row.get("cancel_requested_at_ms"),
+        usage=_usage_mapping(_json_load(row.get("usage_json"), {})),
         metadata=_json_load(row.get("metadata_json"), {}),
         create_time=row.get("create_time"),
         update_time=row.get("update_time"),
@@ -1006,6 +1064,47 @@ def _json_load(value: object, default):
     except (TypeError, ValueError, json.JSONDecodeError):
         return default
     return parsed if isinstance(parsed, type(default)) else default
+
+
+def _usage_mapping(value: Mapping[str, Any]) -> LongTaskUsage:
+    return LongTaskUsage(
+        invocation_count=int(value.get("invocationCount") or 0),
+        input_tokens=int(value.get("inputTokens") or 0),
+        output_tokens=int(value.get("outputTokens") or 0),
+        reasoning_tokens=(
+            None
+            if value.get("reasoningTokens") is None
+            and int(value.get("invocationCount") or 0) > 0
+            else int(value.get("reasoningTokens") or 0)
+        ),
+    )
+
+
+def _usage_row(row: Mapping[str, Any]) -> LongTaskUsage:
+    return LongTaskUsage(
+        invocation_count=int(row.get("invocation_count") or 0),
+        input_tokens=int(row.get("input_tokens") or 0),
+        output_tokens=int(row.get("output_tokens") or 0),
+        reasoning_tokens=(
+            None
+            if row.get("reasoning_tokens") is None
+            else int(row["reasoning_tokens"])
+        ),
+    )
+
+
+def _aggregate_usage(row: Mapping[str, Any] | None) -> LongTaskUsage:
+    value = row or {}
+    return LongTaskUsage(
+        invocation_count=int(value.get("invocation_count") or 0),
+        input_tokens=int(value.get("input_tokens") or 0),
+        output_tokens=int(value.get("output_tokens") or 0),
+        reasoning_tokens=(
+            None
+            if int(value.get("unknown_reasoning") or 0) > 0
+            else int(value.get("reasoning_tokens") or 0)
+        ),
+    )
 
 
 def _metadata_session_id(value: object) -> SessionId | None:

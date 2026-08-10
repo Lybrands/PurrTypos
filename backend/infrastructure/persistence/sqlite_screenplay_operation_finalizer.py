@@ -178,7 +178,8 @@ class SqliteScreenplayOperationFinalizer:
             await self._db.execute(
                 "UPDATE screenplay_agent_operations SET status = 'succeeded', "
                 "result_revision_id = ?, finalization_receipt_id = ?, "
-                "error_json = NULL, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                "error_json = NULL, revision = revision + 1, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                 [revision_id, receipt_id, operation.id],
             )
             await self._db.execute(

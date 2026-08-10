@@ -51,6 +51,12 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     plannerRunId: 'run-plan-1',
     totalUnits: 2,
     completedUnits: 1,
+    usage: {
+      invocationCount: 1,
+      inputTokens: 100,
+      outputTokens: 20,
+      reasoningTokens: 5,
+    },
     resultRevisionId: null,
     resultRevision: null,
     error: null,
@@ -79,6 +85,7 @@ function operation(
     turnId: 'turn-1',
     taskId: 'task-1',
     status: 'running',
+    revision: 1,
     targetRole: 'screenplayDraft',
     parts: task().units,
     resultRevisionId: null,
@@ -86,6 +93,12 @@ function operation(
     cancelReceiptId: null,
     cancelRequestedAt: null,
     error: null,
+    usage: {
+      invocationCount: 1,
+      inputTokens: 100,
+      outputTokens: 20,
+      reasoningTokens: 5,
+    },
     ...overrides,
   }
 }
@@ -508,6 +521,7 @@ test('cancel is available only before a durable request is pending', () => {
 test('screenplay client refreshes canonical snapshot after cursor events', async () => {
   let snapshotReads = 0
   let truncatedTurnId = ''
+  let resumedRevision = 0
   const completedTurn = turn({ status: 'completed', taskId: 'task-1' })
   const completedTask = task({
     status: 'completed',
@@ -545,6 +559,19 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
         terminalStatus: 'succeeded',
       },
     }),
+    resumeScreenplayConversationOperation: async (input) => {
+      resumedRevision = input.expectedOperationRevision
+      return {
+        success: true,
+        data: {
+          operationId: 'operation-1',
+          turnId: 'turn-1',
+          status: 'running',
+          revision: 2,
+          capabilitySnapshotDigest: 'capability-1',
+        },
+      }
+    },
     truncateScreenplayConversationFromTurn: async ({ turnId }) => {
       truncatedTurnId = turnId
       return {
@@ -562,6 +589,15 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
     stateFromScreenplayConversationSnapshot(snapshot()),
   )
   await client.truncateFromTurn('turn-1')
+  const resumed = await client.resume(
+    'resume-1',
+    'operation-1',
+    7,
+    {
+      apiKey: 'secret',
+      options: { model: 'fixture-model' },
+    },
+  )
 
   assert.equal(snapshotReads, 1)
   assert.equal(refreshed.cursor, 13)
@@ -570,6 +606,8 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
     '',
   )
   assert.equal(truncatedTurnId, 'turn-1')
+  assert.equal(resumedRevision, 7)
+  assert.equal(resumed.revision, 2)
 })
 
 test('screenplay SSE routes business invalidation and shared Agent chunks independently', () => {
@@ -595,6 +633,16 @@ test('screenplay SSE routes business invalidation and shared Agent chunks indepe
         turnId: 'turn-1',
         requestedAt: '2026-08-09T00:00:02Z',
         terminalStatus: 'cancel_requested',
+      },
+    }),
+    resumeScreenplayConversationOperation: async () => ({
+      success: true,
+      data: {
+        operationId: 'operation-1',
+        turnId: 'turn-1',
+        status: 'running',
+        revision: 2,
+        capabilitySnapshotDigest: 'capability-1',
       },
     }),
     truncateScreenplayConversationFromTurn: async () => ({

@@ -160,6 +160,14 @@ export const backendApi: BackendApi = {
     {},
     data.commandId,
   ),
+  resumeScreenplayConversationOperation: (data) => apiPostIdempotent(
+    `/screenplay/v2/conversation/operations/${data.operationId}/resume`,
+    {
+      expectedOperationRevision: data.expectedOperationRevision,
+      runtime: data.runtime,
+    },
+    data.commandId,
+  ),
   truncateScreenplayConversationFromTurn: (data) => apiDelete(
     `/screenplay/v2/conversation/turns/${data.turnId}/and-after`,
   ),

@@ -11,6 +11,7 @@ from purra.long_tasks.contracts import (
     LongTaskSplitResult,
     LongTaskUnitRecord,
     LongTaskUnitResult,
+    LongTaskUsage,
 )
 from purra.ports import CancellationSignal
 from purra.recovery import FailureDecision, FailureSignal
@@ -46,6 +47,15 @@ class LongTaskRepository(Protocol):
     ) -> LongTaskRecord | None: ...
 
     async def list_units(self, task_id: str) -> Sequence[LongTaskUnitRecord]: ...
+
+    async def record_usage(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        usage: LongTaskUsage,
+        expected_revision: int,
+    ) -> LongTaskRecord: ...
 
     async def start(self, task_id: str, *, expected_revision: int) -> LongTaskRecord: ...
 

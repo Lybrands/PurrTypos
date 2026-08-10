@@ -1,10 +1,29 @@
 # PurrA 模型无关长任务执行与恢复设计
 
 > 日期：2026-08-11
-> 状态：已确认
+> 状态：已实现；本地合同门禁通过，真实 Provider E2E 因缺少凭据仍是发布阻塞项
 > 取代：`2026-08-10-purra-execution-reliability-design.md`
 > 范围：PurrA 通用模型协议、长任务语义分片、持久化恢复、失败与取消收口、剧本审阅配方、最终输出协议
 > 依据：当前代码、已持久化的真实失败 Run、PurrA/剧本分层章程，以及本轮已确认的产品约束。
+
+## 0. 实施与发布门禁状态
+
+2026-08-11 已完成本设计对应的 Core、Profile、Operation、LongTask、Artifact、取消、恢复与前端投影改造。当前状态必须区分为两类：
+
+- 本地合同门禁已通过：注册 profile 统一请求/finish/usage/reasoning/tool argument stream/cancel 合同；Core 厂商名隔离；显式换模恢复；Run 级 usage 幂等汇总；Candidate/Revision/Assistant final 原子收口；暂停与取消恢复测试。
+- 真实 Provider E2E 未执行成功，不得视为通过：本机缺少 `DEEPSEEK_API_KEY`、`ZAI_API_KEY`、`MIMO_API_KEY`，DeepSeek reasoning on/off、GLM-5.2、MiMo V2.5 Pro 四项均以 `RELEASE BLOCKER` skip。发布前必须在具备真实凭据的环境执行 `npm run test:screenplay-real-e2e`。
+
+本次 1M 上下文能力快照 digest：
+
+| Profile | Digest | Actionable | 单次输出上限 |
+|---|---|---:|---:|
+| `zai:glm-5.2` | `d1761ba0bc69e63c9a3479857589d76cb3692bd373b7dc8549b141225756bc8d` | 是 | 131072 |
+| `deepseek:deepseek-v4-pro` | `06503ce0b4ccc6a87c15bd6f80363a63373b9807d30e4d07c88ab0eb2ee42869` | 是 | 393216 |
+| `deepseek:deepseek-v4-flash` | `f5f9a1882a1d47c99bd8231fcd7f3a45990d5a85c88906b8f069fb5e4fdddbf8` | 是 | 393216 |
+| `moonshot:kimi-k3` | `0eee4cf8339f19cd19fe9e2123623c0a54000295dd1d48fda20064a2a39e3ae3` | 否 | 未验证 |
+| `moonshot:kimi-k2.6` | `c500cc565a1555efc726faf85ba63950d766f60041a80ad7c76a459ce9df828c` | 否 | 未验证 |
+| `minimax:MiniMax-M3` | `d6e6cf85a2af4f807ef5c64b4c519f9f7db87a976971b1ae0701bd44d993b9b8` | 否 | 未验证 |
+| `mimo:mimo-v2.5-pro` | `e4bba7ae9a81c852497424954e9ca24c335c428e35a92c6f77ccb78c0ebf38f1` | 是 | 131072 |
 
 ## 1. 决策摘要
 

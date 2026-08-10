@@ -580,6 +580,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         failed_units INTEGER NOT NULL DEFAULT 0,
         max_parallelism INTEGER NOT NULL DEFAULT 1,
         cancel_requested_at_ms INTEGER DEFAULT NULL,
+        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -589,6 +590,22 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ALTER TABLE ai_agent_long_tasks ADD COLUMN "
         "cancel_requested_at_ms INTEGER DEFAULT NULL",
     )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN usage_json TEXT NOT NULL "
+        "DEFAULT '{\"invocationCount\":0,\"inputTokens\":0,"
+        "\"outputTokens\":0,\"reasoningTokens\":0}'",
+    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_usage (
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        invocation_count INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (task_id, run_id)
+    )""")
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_long_tasks_owner_status
         ON ai_agent_long_tasks(namespace, owner_id, kind, status, update_time DESC)

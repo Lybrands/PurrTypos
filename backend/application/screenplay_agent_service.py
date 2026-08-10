@@ -8,6 +8,7 @@ execution to PurrA.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     DomainContext,
+    ExecutionRecipe,
+    ExecutionRecipeStep,
     MessageRole,
     StepExecutor,
     StepType,
@@ -24,10 +27,12 @@ from purra.contracts import (
     TaskSpec,
     TaskStep,
 )
-from purra.errors import ModelGatewayError
+from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.model_protocol import FeatureRequirement, TaskCapabilityRequirements
 from purra.long_tasks import (
     DurableExecutorRegistry,
     DurableTaskDescriptor,
+    LongTaskUsage,
     RecipeLongTaskDispatcher,
 )
 from purra.task_admission import (
@@ -36,9 +41,13 @@ from purra.task_admission import (
     LongTaskExecutionStatus,
     TaskAdmissionDecision,
 )
-from application.model_runtime import model_request_from_runtime
+from application.model_runtime import (
+    model_request_from_runtime,
+    reasoning_mode_from_options,
+)
 from application.request_mapping import context_window_tokens
 from domains.screenplay_agent import (
+    OperationUsage,
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
@@ -248,6 +257,12 @@ class ScreenplayAgentService:
                     ],
                 },
                 "recipe": compiled.recipe.to_metadata(),
+                "capabilityRequirements": {
+                    "toolCalling": "optional",
+                    "structuredOutputLevel": "none",
+                    "streamingRequired": True,
+                    "cancellationRequired": True,
+                },
             }
             operation = await self._operations.create(
                 ScreenplayOperationCreateCommand(
@@ -312,107 +327,279 @@ class ScreenplayAgentService:
                 target_role=compiled.target_role,
             )
             await self._stream.plan(turn_id)
+            await self._execute_attached_operation(
+                dispatcher=dispatcher,
+                turn=turn,
+                operation_id=operation.id,
+                task_id=receipt.task_id,
+                recipe=compiled.recipe,
+                manifest_digest=compiled.manifest.digest,
+                planner_run_id=planner_run_id,
+            )
+        except Exception as error:
+            await self._settle_execution_exception(turn_id, error)
+
+    def dispatch_resumed_operation(
+        self,
+        operation_id: str,
+        runtime,
+    ) -> asyncio.Task[None]:
+        key = f"operation:{operation_id}"
+        active = _ACTIVE_TASKS.get(key)
+        if active is not None and not active.done():
+            return active
+        task = asyncio.create_task(
+            self.execute_resumed_operation(operation_id, runtime)
+        )
+        self._remember_task(key, task)
+        if callable(self._track_background):
+            self._track_background(task)
+        return task
+
+    async def execute_resumed_operation(self, operation_id: str, runtime) -> None:
+        operation = await self._operations.load(operation_id)
+        if operation is None:
+            raise NotFoundError("剧本 Agent Operation 不存在")
+        if operation.status.value != "running":
+            raise AppError("only a resumed screenplay Operation can execute", 409)
+        if not operation.long_task_id:
+            raise AppError("resumed screenplay Operation has no LongTask", 409)
+        turn = await self._repository.load_turn(operation.turn_id)
+        if turn is None:
+            raise NotFoundError("剧本 Agent Turn 不存在")
+        planner_run_id = str(turn.get("plannerRunId") or "").strip()
+        if not planner_run_id:
+            raise AppError("resumed screenplay Operation has no Planner Run", 409)
+        try:
+            recipe = _execution_recipe_from_metadata(
+                operation.requirements_json.get("recipe")
+            )
+            recipe_manifest_digest = str(
+                recipe.metadata.get("manifestDigest") or ""
+            ).strip()
+            if (
+                recipe_manifest_digest
+                and recipe_manifest_digest != operation.manifest_digest
+            ):
+                raise RuntimeError(
+                    "screenplay Operation recipe manifest digest changed"
+                )
+            descriptor = DurableTaskDescriptor(
+                namespace="purrtypos.screenplay",
+                owner_id=operation.project_id,
+                idempotency_key=str(turn["commandId"]),
+            )
+            dispatcher = RecipeLongTaskDispatcher(
+                work_item_repository=self._work_items,
+                long_task_repository=self._long_tasks,
+                descriptor_resolver=_FixedDescriptorResolver(descriptor),
+                executor_registry=DurableExecutorRegistry({
+                    "screenplay": self._unit_executor_factory(runtime),
+                }),
+                worker_id=self._owner_id,
+            )
+            await self._stream.plan(operation.turn_id)
+            await self._execute_attached_operation(
+                dispatcher=dispatcher,
+                turn=turn,
+                operation_id=operation.id,
+                task_id=operation.long_task_id,
+                recipe=recipe,
+                manifest_digest=operation.manifest_digest,
+                planner_run_id=planner_run_id,
+            )
+        except Exception as error:
+            await self._settle_execution_exception(operation.turn_id, error)
+
+    async def _execute_attached_operation(
+        self,
+        *,
+        dispatcher: RecipeLongTaskDispatcher,
+        turn: Mapping[str, Any],
+        operation_id: str,
+        task_id: str,
+        recipe: ExecutionRecipe,
+        manifest_digest: str,
+        planner_run_id: str,
+    ) -> None:
+        turn_id = str(turn["id"])
+        try:
             result = await dispatcher.execute(
-                receipt.task_id,
+                task_id,
                 parent_run_id=planner_run_id,
                 observer=lambda update: self._observe_task(turn_id, update),
             )
-            if result.status is LongTaskExecutionStatus.PAUSED:
-                code = result.error or "screenplay_task_paused"
-                message = _task_failure_message(code)
-                await self._operations.pause(
-                    operation.id,
-                    code=code,
-                    message=message,
-                    command_id=f"operation:pause:{operation.id}:{code}",
+        finally:
+            await self._sync_operation_usage(
+                operation_id=operation_id,
+                task_id=task_id,
+                planner_run_id=planner_run_id,
+            )
+        operation = await self._operations.load(operation_id)
+        operation_revision = operation.revision if operation is not None else 0
+        if result.status is LongTaskExecutionStatus.PAUSED:
+            code = result.error or "screenplay_task_paused"
+            message = _task_failure_message(code)
+            await self._operations.pause(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:pause:{operation_id}:"
+                    f"{operation_revision}:{code}"
+                ),
+            )
+            await self._repository.pause_task(
+                turn_id,
+                code=code,
+                message=message,
+            )
+            await self._stream.terminal(turn_id)
+            return
+        if result.status is LongTaskExecutionStatus.CANCELED:
+            cancel_receipt = await self._operations.request_cancel(
+                turn_id,
+                idempotency_key=(
+                    f"runtime-cancel:{operation_id}:{operation_revision}"
+                ),
+            )
+            await self._operations.settle_cancel(
+                turn_id,
+                receipt_id=cancel_receipt.id,
+            )
+            await self._stream.terminal(turn_id)
+            return
+        if result.status is LongTaskExecutionStatus.FAILED:
+            code = result.error or "screenplay_task_failed"
+            message = _task_failure_message(code)
+            await self._operations.fail(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:fail:{operation_id}:"
+                    f"{operation_revision}:{code}"
+                ),
+            )
+            await self._repository.fail_task(
+                turn_id,
+                code=code,
+                message=message,
+            )
+            await self._stream.terminal(turn_id)
+            return
+        candidate_refs = []
+        for step in recipe.steps:
+            if step.kind != "validate_manifest_part":
+                continue
+            ref = await self._parts.validated_unit_ref(task_id, step.id)
+            if ref is None:
+                raise RuntimeError(
+                    f"screenplay validation Part is missing: {step.id}"
                 )
-                await self._repository.pause_task(
-                    turn_id,
-                    code=code,
-                    message=message,
-                )
-                await self._stream.terminal(turn_id)
-                return
-            if result.status is LongTaskExecutionStatus.CANCELED:
-                cancel_receipt = await self._operations.request_cancel(
-                    turn_id,
-                    idempotency_key=f"runtime-cancel:{operation.id}",
-                )
-                await self._operations.settle_cancel(
-                    turn_id,
-                    receipt_id=cancel_receipt.id,
-                )
-                await self._stream.terminal(turn_id)
-                return
-            if result.status is LongTaskExecutionStatus.FAILED:
-                code = result.error or "screenplay_task_failed"
-                message = _task_failure_message(code)
+            candidate_refs.append(ref)
+        final_response_ref = await self._parts.validated_unit_ref(
+            task_id,
+            "compose-final-response",
+        )
+        if final_response_ref is None:
+            raise RuntimeError("screenplay final response Part is missing")
+        await self._finalizer.finalize(
+            ScreenplayOperationFinalizationCommand(
+                operation_id=operation_id,
+                expected_manifest_digest=manifest_digest,
+                candidate_part_refs=tuple(candidate_refs),
+                final_response_ref=final_response_ref,
+            )
+        )
+        await self._stream.terminal(turn_id)
+
+    async def _sync_operation_usage(
+        self,
+        *,
+        operation_id: str,
+        task_id: str,
+        planner_run_id: str,
+    ) -> None:
+        rows = await self._db.fetch_all(
+            "SELECT DISTINCT run_id FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND run_id IS NOT NULL ORDER BY run_id",
+            [task_id],
+        )
+        task_run_ids = tuple(
+            str(row.get("run_id") or "").strip()
+            for row in rows
+            if str(row.get("run_id") or "").strip()
+        )
+        for run_id in task_run_ids:
+            usage = await _run_usage(self._db, run_id)
+            if usage is None:
+                continue
+            task = await self._long_tasks.load(task_id)
+            if task is None:
+                raise RuntimeError("screenplay LongTask disappeared")
+            await self._long_tasks.record_usage(
+                task_id,
+                run_id=run_id,
+                usage=LongTaskUsage(
+                    invocation_count=usage.invocation_count,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                ),
+                expected_revision=task.revision,
+            )
+        operation_run_ids = tuple(dict.fromkeys((
+            str(planner_run_id or "").strip(),
+            *task_run_ids,
+        )))
+        for run_id in operation_run_ids:
+            if not run_id:
+                continue
+            usage = await _run_usage(self._db, run_id)
+            if usage is None:
+                continue
+            operation = await self._operations.load(operation_id)
+            if operation is None:
+                raise RuntimeError("screenplay Operation disappeared")
+            await self._operations.record_usage(
+                operation_id,
+                run_id=run_id,
+                usage=usage,
+                expected_revision=operation.revision,
+            )
+
+    async def _settle_execution_exception(
+        self,
+        turn_id: str,
+        error: Exception,
+    ) -> None:
+        code, message = _task_failure(error)
+        with suppress(Exception):
+            operation = await self._operations.load_for_turn(turn_id)
+            if operation is not None and not operation.status.terminal:
                 await self._operations.fail(
                     operation.id,
                     code=code,
                     message=message,
-                    command_id=f"operation:fail:{operation.id}:{code}",
+                    command_id=(
+                        f"operation:fail:{operation.id}:"
+                        f"{operation.revision}:{code}"
+                    ),
                 )
+            if operation is not None:
                 await self._repository.fail_task(
                     turn_id,
                     code=code,
                     message=message,
                 )
-                await self._stream.terminal(turn_id)
-                return
-            candidate_refs = []
-            for step in compiled.recipe.steps:
-                if step.kind != "validate_manifest_part":
-                    continue
-                ref = await self._parts.validated_unit_ref(
-                    receipt.task_id,
-                    step.id,
+            else:
+                await self._repository.fail_turn(
+                    turn_id,
+                    code="screenplay_intent_failed",
+                    message=message,
                 )
-                if ref is None:
-                    raise RuntimeError(
-                        f"screenplay validation Part is missing: {step.id}"
-                    )
-                candidate_refs.append(ref)
-            final_response_ref = await self._parts.validated_unit_ref(
-                receipt.task_id,
-                "compose-final-response",
-            )
-            if final_response_ref is None:
-                raise RuntimeError("screenplay final response Part is missing")
-            await self._finalizer.finalize(
-                ScreenplayOperationFinalizationCommand(
-                    operation_id=operation.id,
-                    expected_manifest_digest=compiled.manifest.digest,
-                    candidate_part_refs=tuple(candidate_refs),
-                    final_response_ref=final_response_ref,
-                )
-            )
             await self._stream.terminal(turn_id)
-        except Exception as error:
-            code, message = _task_failure(error)
-            with suppress(Exception):
-                current = await self._repository.load_turn(turn_id)
-                operation = await self._operations.load_for_turn(turn_id)
-                if operation is not None and not operation.status.terminal:
-                    await self._operations.fail(
-                        operation.id,
-                        code=code,
-                        message=message,
-                        command_id=f"operation:fail:{operation.id}:{code}",
-                    )
-                if operation is not None:
-                    await self._repository.fail_task(
-                        turn_id,
-                        code=code,
-                        message=message,
-                    )
-                else:
-                    await self._repository.fail_turn(
-                        turn_id,
-                        code="screenplay_intent_failed",
-                        message=message,
-                    )
-                await self._stream.terminal(turn_id)
 
     async def _observe_task(
         self,
@@ -453,6 +640,8 @@ class ScreenplayAgentService:
             await run_execution_store.request_cancellation(self._db, run_id)
 
         self._cancel_task(f"turn:{turn_id}")
+        if operation is not None:
+            self._cancel_task(f"operation:{operation.id}")
         if operation is not None and operation.long_task_id:
             task = await self._long_tasks.load(operation.long_task_id)
             if task is not None and not task.status.terminal:
@@ -464,10 +653,47 @@ class ScreenplayAgentService:
         await self._stream.terminal(turn_id)
         return settled.to_mapping()
 
+    async def prepare_resume(self, operation_id: str, *, idempotency_key: str, request):
+        operation = await self._operations.load(operation_id)
+        if operation is None:
+            raise NotFoundError("剧本 Agent Operation 不存在")
+        requirements = _capability_requirements(
+            operation.requirements_json,
+            request.runtime,
+        )
+        try:
+            model_request = model_request_from_runtime(
+                request.runtime,
+                requirements=requirements,
+            )
+        except UnsupportedModelFeatureError as error:
+            raise AppError("model_capability_incompatible", 409) from error
+        snapshot = model_request.capability_snapshot.to_mapping(
+            include_digest=True,
+        )
+        try:
+            resumed = await self._operations.resume_with_model(
+                operation.id,
+                command_id=idempotency_key,
+                expected_revision=request.expectedOperationRevision,
+                capability_snapshot=snapshot,
+            )
+        except ValueError as error:
+            raise AppError(str(error), 409) from error
+        return {
+            "operationId": resumed.id,
+            "turnId": resumed.turn_id,
+            "status": resumed.status.value,
+            "revision": resumed.revision,
+            "capabilitySnapshotDigest": model_request.capability_snapshot.digest(),
+        }
+
     async def truncate_from_turn(self, turn_id: str):
         result = await self._repository.truncate_from_turn(turn_id)
         for deleted_turn_id in result["deletedTurnIds"]:
             self._cancel_task(f"turn:{deleted_turn_id}")
+        for deleted_operation_id in result.get("deletedOperationIds", ()):
+            self._cancel_task(f"operation:{deleted_operation_id}")
         return result
 
     @staticmethod
@@ -551,6 +777,133 @@ def _task_failure_message(code: str) -> str:
         "unsupported_model_finish_reason": "模型以不受支持的状态结束，请更换模型后重试。",
     }
     return messages.get(code, "剧本任务执行失败，请查看诊断信息后重试。")
+
+
+def _capability_requirements(stored: Mapping[str, Any], runtime):
+    raw = dict(stored.get("capabilityRequirements") or {})
+    return TaskCapabilityRequirements(
+        reasoning_mode=reasoning_mode_from_options(runtime.options),
+        tool_calling=FeatureRequirement(
+            str(raw.get("toolCalling") or "optional")
+        ),
+        structured_output_level=str(
+            raw.get("structuredOutputLevel") or "none"
+        ),
+        streaming_required=bool(raw.get("streamingRequired", True)),
+        cancellation_required=bool(raw.get("cancellationRequired", True)),
+    )
+
+
+async def _run_usage(db, run_id: str) -> OperationUsage | None:
+    rows = await db.fetch_all(
+        "SELECT event_type, payload_json FROM ai_agent_run_events "
+        "WHERE run_id = ? AND event_type IN "
+        "('agentRunTrace', 'context.usage_recorded') ORDER BY id",
+        [str(run_id or "").strip()],
+    )
+    trace_values: list[Mapping[str, Any]] = []
+    context_values: list[Mapping[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row.get("payload_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if str(row.get("event_type") or "") == "agentRunTrace":
+            if (
+                payload.get("stage") == "model_usage"
+                and payload.get("outcome") == "provider_reported"
+                and isinstance(payload.get("details"), Mapping)
+            ):
+                trace_values.append(payload["details"])
+        else:
+            context_values.append(payload)
+    values = trace_values or context_values
+    if not values:
+        return None
+    reasoning_known = True
+    reasoning_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
+    for value in values:
+        input_tokens += _usage_int(
+            value.get("actualInputTokens", value.get("inputTokens"))
+        )
+        output_tokens += _usage_int(
+            value.get("actualOutputTokens", value.get("outputTokens"))
+        )
+        reasoning = value.get(
+            "reasoningOutputTokens",
+            value.get("reasoningTokens"),
+        )
+        if reasoning is None:
+            reasoning_known = False
+        else:
+            reasoning_tokens += _usage_int(reasoning)
+    return OperationUsage(
+        invocation_count=len(values),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens if reasoning_known else None,
+    )
+
+
+def _usage_int(value: Any) -> int:
+    try:
+        normalized = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, normalized)
+
+
+def _execution_recipe_from_metadata(raw: Any) -> ExecutionRecipe:
+    if not isinstance(raw, Mapping):
+        raise ValueError("screenplay Operation recipe is missing")
+    reserved_recipe = {"kind", "steps", "maxParallelism"}
+    reserved_step = {
+        "id",
+        "kind",
+        "dependsOn",
+        "inputRef",
+        "executor",
+        "plannerStepId",
+        "maxAttempts",
+    }
+    raw_steps = raw.get("steps")
+    if not isinstance(raw_steps, Sequence) or isinstance(
+        raw_steps,
+        (str, bytes, bytearray),
+    ):
+        raise ValueError("screenplay Operation recipe steps are missing")
+    steps = []
+    for value in raw_steps:
+        if not isinstance(value, Mapping):
+            raise ValueError("screenplay Operation recipe step is invalid")
+        steps.append(ExecutionRecipeStep(
+            id=str(value.get("id") or ""),
+            kind=str(value.get("kind") or ""),
+            depends_on=tuple(value.get("dependsOn") or ()),
+            input_ref=value.get("inputRef"),
+            executor=value.get("executor"),
+            plan_step_id=value.get("plannerStepId"),
+            max_attempts=int(value.get("maxAttempts") or 1),
+            metadata={
+                key: item
+                for key, item in value.items()
+                if key not in reserved_step
+            },
+        ))
+    return ExecutionRecipe(
+        kind=str(raw.get("kind") or ""),
+        steps=tuple(steps),
+        max_parallelism=int(raw.get("maxParallelism") or 1),
+        metadata={
+            key: value
+            for key, value in raw.items()
+            if key not in reserved_recipe
+        },
+    )
 
 
 class _FixedDescriptorResolver:
