@@ -791,19 +791,18 @@ def test_planner_messages_waive_only_one_dependency_edge_without_removing_tools(
 
 
 @pytest.mark.asyncio
-async def test_planner_retries_only_an_explicit_unsupported_reasoning_feature():
+async def test_planner_does_not_replay_an_unsupported_reasoning_feature():
     gateway = FakeModelGateway(
         UnsupportedModelFeatureError(),
         '{"needsTodos":false,"reason":"one response is enough"}',
     )
-    result = await AgentPlanner(gateway).create_plan(
-        _request(), PlanningCapabilities()
-    )
+    with pytest.raises(UnsupportedModelFeatureError):
+        await AgentPlanner(gateway).create_plan(
+            _request(), PlanningCapabilities()
+        )
 
-    assert result.kind is PlanningKind.DIRECT_RESPONSE
-    assert result.model_call_count == 2
-    assert len(gateway.invocations) == 2
-    assert gateway.invocations[1][1].reasoning_mode is ReasoningMode.DEFAULT
+    assert len(gateway.invocations) == 1
+    assert gateway.invocations[0][1].reasoning_mode is ReasoningMode.DISABLED
 
 
 def test_planner_output_is_strict_and_never_expands_tool_authority():

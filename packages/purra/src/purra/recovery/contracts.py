@@ -23,7 +23,6 @@ class RecoveryCause(StrEnum):
         "provider_required_tool_choice_unsupported"
     )
     PROVIDER_STREAM_INTERRUPTED = "provider_stream_interrupted"
-    MODEL_OUTPUT_TRUNCATED = "model_output_truncated"
     MALFORMED_TOOL_CALL_BATCH = "malformed_tool_call_batch"
     MISSING_REQUIRED_TOOL_CALL = "missing_required_tool_call"
     MISSING_REQUIRED_TOOL_CALL_REPLAN = "missing_required_tool_call_replan"
@@ -65,6 +64,7 @@ class FailureDisposition(StrEnum):
 
     RETRY_ATTEMPT = "retry_attempt"
     RESUME_CHECKPOINT = "resume_checkpoint"
+    SPLIT_PART = "split_part"
     PAUSE_RECOVERABLE = "pause_recoverable"
     FAIL_PERMANENT = "fail_permanent"
     CANCEL = "cancel"
@@ -77,6 +77,7 @@ class FailureSignal:
     retryable: bool
     effect_state: RecoveryEffectState = RecoveryEffectState.NOT_STARTED
     checkpoint_available: bool = False
+    part_splittable: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "category", FailureCategory(self.category))
@@ -95,6 +96,7 @@ class FailureSignal:
             "checkpoint_available",
             bool(self.checkpoint_available),
         )
+        object.__setattr__(self, "part_splittable", bool(self.part_splittable))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,7 @@ class FailureDecision:
     attempts_remaining: int
     effect_state: RecoveryEffectState
     checkpoint_available: bool
+    part_splittable: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "category", FailureCategory(self.category))
@@ -135,6 +138,7 @@ class FailureDecision:
             "checkpoint_available",
             bool(self.checkpoint_available),
         )
+        object.__setattr__(self, "part_splittable", bool(self.part_splittable))
 
 
 class RecoveryReason(StrEnum):

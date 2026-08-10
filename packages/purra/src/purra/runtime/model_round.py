@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from purra.contracts import (
@@ -10,7 +10,6 @@ from purra.contracts import (
     ModelFinishReason,
     ModelInvocation,
     ModelTokenUsage,
-    ReasoningMode,
     ToolCall,
 )
 from purra.recovery import RecoveryCause, RecoveryPolicy
@@ -38,31 +37,7 @@ def provider_retry_round_capacity(policy: RecoveryPolicy) -> int:
         for cause in (
             RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED,
             RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
-            RecoveryCause.MODEL_OUTPUT_TRUNCATED,
         )
-    )
-
-
-def is_reasoning_only_truncation(
-    accumulator: "ModelRoundAccumulator",
-    invocation: ModelInvocation,
-    error_code: str,
-) -> bool:
-    return bool(
-        error_code == "model_output_truncated"
-        and accumulator.tool_call_count == 0
-        and not accumulator.content.strip()
-        and accumulator.reasoning.strip()
-        and invocation.reasoning_mode is not ReasoningMode.DISABLED
-    )
-
-
-def retry_provider_attempt(
-    attempt: PendingProviderAttempt,
-) -> PendingProviderAttempt:
-    return replace(
-        attempt,
-        attempt=attempt.attempt + 1,
     )
 
 
@@ -70,27 +45,29 @@ def truncation_trace_details(
     *,
     accumulator: "ModelRoundAccumulator",
     round_number: int,
+    attempt: int,
+    request_fingerprint: str,
     finish_reason: ModelFinishReason,
     error_code: str,
-    can_retry: bool,
-    retry_used: bool,
-    reasoning_only: bool,
     emitted_delta_count: int,
     output_limit: Any | None,
 ) -> dict[str, Any]:
     return {
         "round": round_number,
+        "attempt": attempt,
+        "requestFingerprint": request_fingerprint,
         "finishReason": finish_reason.value,
         "errorCode": error_code,
-        "retryScheduled": can_retry,
-        "retryUsed": retry_used,
+        "retryScheduled": False,
         "batchExecuted": False,
         "toolCallCount": accumulator.tool_call_count,
         "toolNames": list(accumulator.tool_call_names),
         "toolArgumentCharacters": accumulator.tool_argument_characters,
         "contentCharacters": len(accumulator.content),
-        "reasoningOnly": reasoning_only,
-        "fallbackReasoningMode": None,
+        "reasoningOnly": bool(
+            not accumulator.content.strip()
+            and accumulator.reasoning.strip()
+        ),
         "emittedDeltaCount": emitted_delta_count,
         "outputLimit": (
             output_limit.to_mapping() if output_limit is not None else None

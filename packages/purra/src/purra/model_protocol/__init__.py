@@ -23,6 +23,7 @@ from purra.model_protocol.output_limits import (
 )
 
 from purra.model_protocol.termination import (
+    InvocationTermination,
     ModelTermination,
     classify_model_termination,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "FeatureSupport",
     "InvocationOutputLimit",
     "InvocationOutputLimitSource",
+    "InvocationTermination",
     "ModelCapabilitySnapshot",
     "ModelOutputCapabilities",
     "ModelProtocolCapabilities",
