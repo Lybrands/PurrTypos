@@ -327,7 +327,6 @@ test('an explicit artifact target overrides the project-document defaults', () =
         reviewRevisionId: null,
         recommendation: null,
         findings: [],
-        failedEpisodes: [],
         counts: {
           total: 0,
           pending: 0,

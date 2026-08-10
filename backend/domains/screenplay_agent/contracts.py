@@ -154,10 +154,153 @@ class ScreenplayIntent:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewEpisodeInputRef:
+    reviewed_revision_id: str
+    episode_number: int
+    scene_part_refs: tuple[str, ...]
+    scene_plan_revision_id: str
+    content_digest: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "reviewed_revision_id",
+            "scene_plan_revision_id",
+            "content_digest",
+        ):
+            value = _text(getattr(self, name))
+            if not value:
+                raise ValueError(f"review episode input {name} is required")
+            object.__setattr__(self, name, value)
+        number = int(self.episode_number)
+        if number <= 0:
+            raise ValueError("review episode input number must be positive")
+        object.__setattr__(self, "episode_number", number)
+        refs = _text_tuple(self.scene_part_refs)
+        if not refs:
+            raise ValueError("review episode input scene Part refs are required")
+        object.__setattr__(self, "scene_part_refs", refs)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "reviewedRevisionId": self.reviewed_revision_id,
+            "episodeNumber": self.episode_number,
+            "scenePartRefs": list(self.scene_part_refs),
+            "scenePlanRevisionId": self.scene_plan_revision_id,
+            "contentDigest": self.content_digest,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ReviewEpisodeInputRef":
+        return cls(
+            reviewed_revision_id=_text(value.get("reviewedRevisionId")),
+            episode_number=int(value.get("episodeNumber") or 0),
+            scene_part_refs=tuple(value.get("scenePartRefs") or ()),
+            scene_plan_revision_id=_text(value.get("scenePlanRevisionId")),
+            content_digest=_text(value.get("contentDigest")),
+        )
+
+
+_REVIEW_EXECUTION_FIELDS = frozenset({
+    "error",
+    "errorCode",
+    "executionError",
+    "failedEpisodes",
+    "failure",
+    "failureCode",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewEpisodeResult:
+    episode_number: int
+    reviewed_revision_id: str
+    reviewed_content_digest: str
+    issues: tuple[Mapping[str, Any], ...]
+    verdict: str
+    part_receipts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        number = int(self.episode_number)
+        if number <= 0:
+            raise ValueError("review episode result number must be positive")
+        object.__setattr__(self, "episode_number", number)
+        for name in ("reviewed_revision_id", "reviewed_content_digest"):
+            value = _text(getattr(self, name))
+            if not value:
+                raise ValueError(f"review episode result {name} is required")
+            object.__setattr__(self, name, value)
+        verdict = _text(self.verdict)
+        if verdict not in {"ready", "revise", "major_rework"}:
+            raise ValueError("review episode result verdict is invalid")
+        object.__setattr__(self, "verdict", verdict)
+        issues = tuple(dict(value) for value in self.issues)
+        object.__setattr__(self, "issues", issues)
+        receipts = _text_tuple(self.part_receipts)
+        if len(receipts) != 5:
+            raise ValueError("review episode result requires five Part receipts")
+        object.__setattr__(self, "part_receipts", receipts)
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        part_receipts: tuple[str, ...],
+    ) -> "ReviewEpisodeResult":
+        contaminated = _REVIEW_EXECUTION_FIELDS.intersection(value)
+        if contaminated:
+            raise ValueError("review episode result contains execution metadata")
+        if str(value.get("reviewStatus") or "") != "completed":
+            raise ValueError("review episode result is not completed")
+        if int(value.get("inputContractVersion") or 0) < 2:
+            raise ValueError("review episode result input is not verified")
+        raw_issues = value.get("issues")
+        if not isinstance(raw_issues, list):
+            raise ValueError("review episode result issues are required")
+        return cls(
+            episode_number=int(value.get("reviewedEpisode") or 0),
+            reviewed_revision_id=_text(value.get("reviewedDraftId")),
+            reviewed_content_digest=_text(value.get("reviewedContentDigest")),
+            issues=tuple(
+                dict(item) for item in raw_issues if isinstance(item, Mapping)
+            ),
+            verdict=_text(value.get("verdict")),
+            part_receipts=part_receipts,
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        issues = [dict(value) for value in self.issues]
+        return {
+            "verdict": self.verdict,
+            "issues": issues,
+            "issueCount": len(issues),
+            "criticalIssueCount": sum(
+                str(issue.get("severity") or "") == "critical"
+                for issue in issues
+            ),
+            "reviewedEpisode": self.episode_number,
+            "reviewedDraftId": self.reviewed_revision_id,
+            "reviewedContentDigest": self.reviewed_content_digest,
+            "reviewDimensions": [
+                "continuity",
+                "character_arc",
+                "structure_rhythm",
+                "dialogue",
+                "format",
+            ],
+            "reviewStatus": "completed",
+            "inputContractVersion": 2,
+            "partReceipts": list(self.part_receipts),
+        }
+
+
 __all__ = [
     "ScreenplayIntent",
     "ScreenplayIntentAction",
     "ScreenplayIntentScope",
     "ScreenplayScopeKind",
     "SCREENPLAY_DELIVERABLE_ROLES",
+    "ReviewEpisodeInputRef",
+    "ReviewEpisodeResult",
 ]

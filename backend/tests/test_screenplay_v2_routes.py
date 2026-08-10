@@ -168,7 +168,11 @@ async def _seed_project_with_review(
             "issues": issues,
             "issueCount": len(issues),
             "completedEpisodes": [] if failed_episodes else [1],
-            "failedEpisodes": failed_episodes or [],
+            **(
+                {"failedEpisodes": failed_episodes}
+                if failed_episodes is not None
+                else {}
+            ),
             "inputContractVersion": 2,
         },
         content_text="# 审阅报告",
@@ -180,10 +184,10 @@ async def _seed_project_with_review(
     return project_id, draft_id, review_id, workspace
 
 
-async def test_review_failure_materializes_as_episode_status_not_issue(
+async def test_legacy_review_execution_failure_is_not_materialized_as_review_content(
     temp_db: DatabaseConnection,
 ):
-    _, _, review_id, _ = await _seed_project_with_review(
+    _, _, review_id, workspace = await _seed_project_with_review(
         temp_db,
         issues=[],
         failed_episodes=[{
@@ -195,19 +199,15 @@ async def test_review_failure_materializes_as_episode_status_not_issue(
     )
 
     result = await get_screenplay_v2_revision(review_id, view="full")
-    episode = next(
+    assert [
         part for part in result["data"]["parts"]
-        if part["type"] == "episode" and part["key"] == "1"
-    )
-
-    assert episode["payload"]["reviewStatus"] == "failed"
-    assert episode["payload"]["issues"] == []
-    assert episode["payload"]["failure"] == {
-        "episodeNumber": 1,
-        "code": "model_output_truncated",
-        "message": "第 1 集审阅失败",
-        "retryable": True,
-    }
+        if part["type"] == "episode"
+    ] == []
+    assert workspace["workflow"]["review"]["findings"] == []
+    assert workspace["workflow"]["review"]["hardChecks"] == [{
+        "code": "review_execution_contaminated",
+        "message": "当前审阅报告混入了执行故障，需要重新审阅",
+    }]
 
 
 async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
@@ -228,7 +228,6 @@ async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
             "verdict": "ready",
             "issues": [],
             "completedEpisodes": [1],
-            "failedEpisodes": [],
             "inputContractVersion": 2,
         },
         content_text="# 第二次审阅",

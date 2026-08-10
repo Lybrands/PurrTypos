@@ -1,6 +1,8 @@
 """Screenplay Agent semantic intent and durable task recipe contracts."""
 
 from domains.screenplay_agent.contracts import (
+    ReviewEpisodeInputRef,
+    ReviewEpisodeResult,
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayIntentScope,
@@ -26,4 +28,6 @@ __all__ = [
     "ScreenplayArtifactManifest",
     "ScreenplayPartKind",
     "ScreenplayPartSpec",
+    "ReviewEpisodeInputRef",
+    "ReviewEpisodeResult",
 ]

@@ -109,7 +109,7 @@ def test_review_findings_without_decisions_require_adjudication():
     assert state["canFinalize"] is False
 
 
-def test_review_execution_failure_blocks_finalization_without_creating_finding():
+def test_legacy_review_execution_metadata_is_quarantined_from_review_content():
     state = derive_review_state(
         draft_revision_id="draft-v3",
         draft_content={"isComplete": True},
@@ -118,7 +118,12 @@ def test_review_execution_failure_blocks_finalization_without_creating_finding()
             "reviewedDraftId": "draft-v3",
             "inputContractVersion": 2,
             "verdict": "revise",
-            "issues": [],
+            "issues": [{
+                "id": "internal-error",
+                "severity": "critical",
+                "description": "当前环境未提供正文读取工具",
+                "sceneIds": [],
+            }],
             "failedEpisodes": [{
                 "episodeNumber": 2,
                 "code": "model_output_truncated",
@@ -132,17 +137,12 @@ def test_review_execution_failure_blocks_finalization_without_creating_finding()
     )
 
     assert state["findings"] == []
-    assert state["failedEpisodes"] == [{
-        "episodeNumber": 2,
-        "code": "model_output_truncated",
-        "message": "第 2 集审阅失败",
-        "retryable": True,
-        "runId": None,
-    }]
+    assert "failedEpisodes" not in state
+    assert state["recommendation"] is None
     assert state["canFinalize"] is False
     assert state["hardChecks"] == [{
-        "code": "review_episode_failed",
-        "message": "第 2 集审阅失败，需要重新审阅",
+        "code": "review_execution_contaminated",
+        "message": "当前审阅报告混入了执行故障，需要重新审阅",
     }]
     assert state["nextAction"] == {
         "type": "generateDeliverable",

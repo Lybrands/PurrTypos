@@ -10,6 +10,7 @@ from __future__ import annotations
 from purra.errors import ModelGatewayError
 from purra.recovery import (
     FailureCategory,
+    FailureScope,
     FailureSignal,
     RecoveryEffectState,
 )
@@ -86,12 +87,14 @@ def classify_screenplay_run_failure(error: object) -> FailureSignal:
             category=FailureCategory.PROTOCOL_INCOMPATIBLE,
             code=code,
             retryable=False,
+            scope=FailureScope.SYSTEMIC,
         )
     if code in _PERMANENT_EXTERNAL_CODES:
         return FailureSignal(
             category=FailureCategory.PERMANENT_EXTERNAL,
             code=code,
             retryable=False,
+            scope=FailureScope.SYSTEMIC,
         )
     if code in _TOOL_EXECUTION_CODES:
         return FailureSignal(

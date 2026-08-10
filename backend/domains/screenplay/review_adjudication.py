@@ -64,7 +64,6 @@ def derive_review_state(
     normalized_review_id = str(review_revision_id or "").strip() or None
     draft = _mapping(draft_content)
     review = _mapping(review_content)
-    recommendation = str(review.get("verdict") or "").strip() or None
     checks = [_hard_check(value) for value in hard_checks]
     completion = (
         str(completion_source).strip()
@@ -75,12 +74,36 @@ def derive_review_state(
         input_contract_version = int(review.get("inputContractVersion") or 0)
     except (TypeError, ValueError):
         input_contract_version = 0
-    input_verified = bool(
+    contract_verified = bool(
         not normalized_review_id
         or input_contract_version >= 2
         or completion == "legacyAgentVerdict"
     )
-    if normalized_review_id and not input_verified:
+    execution_contaminated = bool(
+        normalized_review_id
+        and any(
+            key in review
+            for key in (
+                "error",
+                "errorCode",
+                "executionError",
+                "failedEpisodes",
+                "failure",
+                "failureCode",
+            )
+        )
+    )
+    input_verified = contract_verified and not execution_contaminated
+    recommendation = (
+        str(review.get("verdict") or "").strip() or None
+        if input_verified else None
+    )
+    if execution_contaminated:
+        checks.append({
+            "code": "review_execution_contaminated",
+            "message": "当前审阅报告混入了执行故障，需要重新审阅",
+        })
+    elif normalized_review_id and not contract_verified:
         checks.append({
             "code": "review_input_unverified",
             "message": "当前审阅报告没有可验证的正文输入，需要重新审阅",
@@ -100,36 +123,6 @@ def derive_review_state(
         checks.append({
             "code": "review_stale",
             "message": "当前审阅报告对应的不是当前剧本版本",
-        })
-
-    failed_episodes: list[dict[str, object]] = []
-    for raw_failure in review.get("failedEpisodes", []) if input_verified else []:
-        if not isinstance(raw_failure, Mapping):
-            continue
-        episode_number = int(raw_failure.get("episodeNumber") or 0)
-        if episode_number <= 0:
-            continue
-        failed_episodes.append({
-            "episodeNumber": episode_number,
-            "code": str(
-                raw_failure.get("code") or "review_episode_failed"
-            ),
-            "message": str(
-                raw_failure.get("message")
-                or f"第 {episode_number} 集审阅失败"
-            ),
-            "retryable": bool(raw_failure.get("retryable", False)),
-            "runId": (
-                str(raw_failure.get("runId") or "").strip() or None
-            ),
-        })
-    if failed_episodes:
-        numbers = "、".join(
-            str(item["episodeNumber"]) for item in failed_episodes
-        )
-        checks.append({
-            "code": "review_episode_failed",
-            "message": f"第 {numbers} 集审阅失败，需要重新审阅",
         })
 
     decision_by_issue = _decisions_by_issue(decisions)
@@ -174,7 +167,7 @@ def derive_review_state(
         }
     elif completion is not None:
         phase = "completed"
-    elif failed_episodes or not input_verified:
+    elif not input_verified:
         phase = "awaitingReview"
         next_action = {
             "type": "generateDeliverable",
@@ -209,7 +202,6 @@ def derive_review_state(
         "reviewRevisionId": normalized_review_id,
         "recommendation": recommendation,
         "findings": findings,
-        "failedEpisodes": failed_episodes,
         "counts": counts,
         "hardChecks": checks,
         "canFinalize": can_finalize,

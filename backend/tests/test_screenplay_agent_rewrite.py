@@ -26,6 +26,7 @@ from purra.errors import ModelGatewayError
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
+    FailureScope,
     decide_failure,
 )
 from application.screenplay_agent_service import (
@@ -38,6 +39,7 @@ from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
+    _aggregate_review_validations,
     _unit_result,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
@@ -73,6 +75,7 @@ from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from exceptions import AppError
 from infrastructure.persistence.sqlite_screenplay_agent_repository import (
     SqliteScreenplayAgentRepository,
+    _unit_view,
 )
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
@@ -764,6 +767,88 @@ async def test_screenplay_failure_codes_have_typed_durable_dispositions(
     assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
 
 
+@pytest.mark.parametrize("code", (
+    "provider_bad_request",
+    "provider_reasoning_context_invalid",
+    "unsupported_model_feature",
+    "provider_authentication_failed",
+))
+async def test_configuration_and_protocol_failures_stop_the_whole_operation(code):
+    failure = classify_screenplay_run_failure(
+        ModelGatewayError(code, code=code, retryable=False)
+    )
+
+    assert failure.scope is FailureScope.SYSTEMIC
+
+
+async def test_review_aggregate_requires_every_episode_and_rejects_execution_metadata():
+    def episode(number: int) -> dict:
+        return {
+            "title": f"第 {number} 集审阅",
+            "contentText": f"第 {number} 集审阅正文",
+            "contentJson": {
+                "verdict": "ready",
+                "issues": [],
+                "issueCount": 0,
+                "criticalIssueCount": 0,
+                "reviewedEpisode": number,
+                "reviewedDraftId": "draft-head",
+                "reviewedContentDigest": f"digest-{number}",
+                "reviewDimensions": list(REVIEW_DIMENSIONS),
+                "reviewStatus": "completed",
+                "inputContractVersion": 2,
+                "partReceipts": [
+                    f"receipt-{number}-{dimension}"
+                    for dimension in REVIEW_DIMENSIONS
+                ],
+            },
+        }
+
+    with pytest.raises(ValueError, match="required episode validations"):
+        _aggregate_review_validations(
+            [episode(1)],
+            required_episode_numbers=(1, 2),
+        )
+
+    contaminated = episode(1)
+    contaminated["contentJson"]["failedEpisodes"] = [{"episodeNumber": 1}]
+    with pytest.raises(ValueError, match="execution metadata"):
+        _aggregate_review_validations(
+            [contaminated],
+            required_episode_numbers=(1,),
+        )
+
+    _, content, _ = _aggregate_review_validations(
+        [episode(1), episode(2)],
+        required_episode_numbers=(1, 2),
+    )
+    assert content["reviewedEpisodes"] == [1, 2]
+    assert content["inputContractVersion"] == 2
+    assert "failedEpisodes" not in content
+
+
+async def test_review_failure_is_projected_from_the_operation_part():
+    projected = _unit_view({
+        "unit_id": "review:3:dialogue",
+        "position": 7,
+        "status": "blocked",
+        "metadata_json": json.dumps({
+            "unitKind": "generate_review_dimension",
+            "input": {
+                "episodeNumber": 3,
+                "reviewDimension": "dialogue",
+            },
+        }),
+        "error_code": "model_output_truncated",
+        "attempt": 1,
+    })
+
+    assert projected["error"] == {
+        "code": "model_output_truncated",
+        "message": "第 3 集审阅失败",
+    }
+
+
 class _Planner:
     def __init__(self, intent: ScreenplayIntent) -> None:
         self.intent = intent
@@ -1333,6 +1418,68 @@ async def _install_head(db, project_id: str, role: str, content: dict) -> str:
         [project_id, deliverable["id"], revision_id],
     )
     return revision_id
+
+
+async def test_review_episode_context_reads_the_requested_immutable_revision(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, _ = await _project_and_session(temp_db)
+    project_id = workspace["project"]["id"]
+    scene_list_id = await _install_head(
+        temp_db,
+        project_id,
+        "sceneList",
+        {"scenes": [{
+            "id": "scene-1",
+            "episodeNumber": 1,
+            "heading": "审讯室",
+        }]},
+    )
+    deliverable = await temp_db.fetch_one(
+        "SELECT id FROM screenplay_deliverables "
+        "WHERE project_id = ? AND role = 'screenplayDraft'",
+        [project_id],
+    )
+    assert deliverable is not None
+    for revision_no, revision_id, text in (
+        (1, "draft-immutable-old", "指定旧版本正文"),
+        (2, "draft-current-head", "当前 Head 正文"),
+    ):
+        payload = {
+            "episodeNumber": 1,
+            "sceneIds": ["scene-1"],
+            "sceneTexts": [{"sceneId": "scene-1", "contentText": text}],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        await temp_db.execute(
+            "INSERT INTO screenplay_revisions "
+            "(id, project_id, deliverable_id, revision_no, content_digest, "
+            "summary_json, created_by) VALUES (?, ?, ?, ?, ?, '{}', 'test')",
+            [revision_id, project_id, deliverable["id"], revision_no, digest],
+        )
+        await temp_db.execute(
+            "INSERT INTO screenplay_revision_parts "
+            "(revision_id, part_type, part_key, position, payload_json, "
+            "content_text, content_digest) VALUES (?, 'episode', '1', 1, ?, ?, ?)",
+            [revision_id, encoded, text, digest],
+        )
+    await temp_db.execute(
+        "INSERT INTO screenplay_project_heads "
+        "(project_id, deliverable_id, revision_id) VALUES (?, ?, ?)",
+        [project_id, deliverable["id"], "draft-current-head"],
+    )
+
+    context = await ScreenplayAgentContextQuery(temp_db).episode_context(
+        project_id,
+        1,
+        draft_revision_id="draft-immutable-old",
+        scene_list_revision_id=scene_list_id,
+    )
+
+    assert context["currentDraft"]["sceneTexts"][0]["contentText"] == (
+        "指定旧版本正文"
+    )
 
 
 class _StructuredDraftModels:

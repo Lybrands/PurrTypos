@@ -730,17 +730,27 @@ def _unit_view(
 ) -> dict[str, Any]:
     metadata = _object(row.get("metadata_json"))
     error_code = str(row.get("error_code") or "")
+    unit_input = dict(metadata.get("input") or {})
+    episode_number = int(unit_input.get("episodeNumber") or 0)
+    unit_kind = str(metadata.get("unitKind") or "")
+    error_message = (
+        f"第 {episode_number} 集审阅失败"
+        if error_code
+        and episode_number > 0
+        and unit_kind in {"generate_review_dimension", "validate_manifest_part"}
+        else error_code
+    )
     return {
         "id": str(row["unit_id"]),
         "position": int(row["position"]),
-        "kind": str(metadata.get("unitKind") or ""),
+        "kind": unit_kind,
         "status": str(row["status"]),
-        "input": dict(metadata.get("input") or {}),
+        "input": unit_input,
         "outputRef": str(row.get("output_ref") or "") or None,
         "artifactDigest": str(row.get("artifact_digest") or "") or None,
         "validationReceipt": _object(row.get("validation_receipt_json")),
         "error": (
-            {"code": error_code, "message": error_code}
+            {"code": error_code, "message": error_message}
             if error_code
             else None
         ),

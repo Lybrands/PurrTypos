@@ -39,7 +39,6 @@ test('projects native lifecycle and CAS revision from the workspace', () => {
         reviewRevisionId: null,
         recommendation: null,
         findings: [],
-        failedEpisodes: [],
         counts: {
           total: 0,
           pending: 0,
