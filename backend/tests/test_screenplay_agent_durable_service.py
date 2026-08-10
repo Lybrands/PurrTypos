@@ -17,10 +17,14 @@ from domains.screenplay_agent import (
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayIntentScope,
+    ScreenplayOperationCreateCommand,
 )
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
 from infrastructure.persistence.sqlite_screenplay_task_output_store import (
     SqliteScreenplayTaskOutputStore,
+)
+from infrastructure.persistence.sqlite_screenplay_operation_repository import (
+    SqliteScreenplayOperationRepository,
 )
 from purra.long_tasks import LongTaskUnitResult
 from purra.errors import ModelGatewayError
@@ -104,6 +108,73 @@ class _PausedUnitExecutor:
 
 
 @pytest.mark.asyncio
+async def test_paused_operation_retains_session_control_until_terminal(
+    screenplay_db,
+):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-operation-control-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Operation control",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    project_id = workspace["project"]["id"]
+    session = await projects.ensure_current_session(project_id)
+    for suffix in ("first", "second"):
+        await screenplay_db.execute(
+            "INSERT INTO screenplay_agent_turns "
+            "(id, project_id, session_id, command_id, status, user_content) "
+            "VALUES (?, ?, ?, ?, 'completed', ?)",
+            [
+                f"operation-turn-{suffix}",
+                project_id,
+                session["id"],
+                f"operation-command-{suffix}",
+                "生成剧本",
+            ],
+        )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    first_command = ScreenplayOperationCreateCommand(
+        turn_id="operation-turn-first",
+        project_id=project_id,
+        session_id=session["id"],
+        target_role="screenplayDraft",
+        requirements_json={"intent": {"action": "create"}},
+        manifest_digest="sha256:first",
+    )
+    second_command = ScreenplayOperationCreateCommand(
+        turn_id="operation-turn-second",
+        project_id=project_id,
+        session_id=session["id"],
+        target_role="screenplayDraft",
+        requirements_json={"intent": {"action": "create"}},
+        manifest_digest="sha256:second",
+    )
+    first = await operations.create(first_command)
+    await operations.pause(
+        first.id,
+        code="model_output_truncated",
+        message="需要恢复",
+        command_id="pause-first-operation",
+    )
+
+    with pytest.raises(ValueError, match="active Operation"):
+        await operations.create(second_command)
+
+    await operations.fail(
+        first.id,
+        code="user_abandoned",
+        message="不再恢复",
+        command_id="fail-first-operation",
+    )
+    second = await operations.create(second_command)
+    assert second.status.value == "queued"
+
+
+@pytest.mark.asyncio
 async def test_screenplay_answer_turn_does_not_create_a_durable_task(screenplay_db):
     projects = ScreenplayV2ProjectService(screenplay_db)
     workspace = await projects.create_project(
@@ -154,6 +225,9 @@ async def test_screenplay_answer_turn_does_not_create_a_durable_task(screenplay_
     assert snapshot["tasks"] == []
     assert snapshot["turns"][0]["status"] == "completed"
     assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operations"
+    ) == {"count": 0}
 
 
 @pytest.mark.asyncio
@@ -220,6 +294,28 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert snapshot["turns"][0]["assistantContent"] == (
         "第 4 至 6 集候选稿已经完成。可以在候选稿区域查看并继续编辑。"
     )
+    operation = await screenplay_db.fetch_one(
+        "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
+        [turn["id"]],
+    )
+    assert operation is not None
+    assert operation["status"] == "succeeded"
+    assert operation["long_task_id"] == task["id"]
+    assert operation["target_role"] == "screenplayDraft"
+    assert operation["result_revision_id"] == "sprev-durable-candidate"
+    assert str(operation["manifest_digest"]).startswith("sha256:")
+    legacy_turn_state = await screenplay_db.fetch_one(
+        "SELECT operation_id, task_id, target_role, result_revision_id, error_json "
+        "FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    )
+    assert legacy_turn_state == {
+        "operation_id": operation["id"],
+        "task_id": None,
+        "target_role": None,
+        "result_revision_id": None,
+        "error_json": None,
+    }
     assert task["status"] == "completed"
     assert task["resultRevision"] is None
     assert [unit["id"] for unit in task["units"]] == [
