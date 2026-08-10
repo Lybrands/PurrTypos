@@ -131,7 +131,6 @@ def _deterministic_request(request: ModelRequest) -> ModelRequest:
     return ModelRequest(
         provider=request.provider,
         model=request.model,
-        profile_id=request.profile_id,
-        output_capabilities=request.output_capabilities,
+        capability_snapshot=request.capability_snapshot,
         options=options,
     )

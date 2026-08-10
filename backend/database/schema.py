@@ -285,6 +285,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         tool_protocol_contract TEXT DEFAULT NULL,
         recovery_policy_id TEXT DEFAULT NULL,
         capability_snapshot_digest TEXT DEFAULT NULL,
+        capability_snapshot_json TEXT DEFAULT NULL,
         binding_namespace TEXT DEFAULT NULL,
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
@@ -317,6 +318,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         "tool_protocol_contract TEXT DEFAULT NULL",
         "recovery_policy_id TEXT DEFAULT NULL",
         "capability_snapshot_digest TEXT DEFAULT NULL",
+        "capability_snapshot_json TEXT DEFAULT NULL",
         "binding_namespace TEXT DEFAULT NULL",
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
@@ -350,7 +352,8 @@ async def init_schema(db: DatabaseConnection) -> None:
             output_contract,
             tool_protocol_contract,
             recovery_policy_id,
-            capability_snapshot_digest
+            capability_snapshot_digest,
+            capability_snapshot_json
         ON ai_agent_runs
         WHEN
             OLD.model_provider IS NOT NEW.model_provider
@@ -363,6 +366,7 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.tool_protocol_contract IS NOT NEW.tool_protocol_contract
             OR OLD.recovery_policy_id IS NOT NEW.recovery_policy_id
             OR OLD.capability_snapshot_digest IS NOT NEW.capability_snapshot_digest
+            OR OLD.capability_snapshot_json IS NOT NEW.capability_snapshot_json
         BEGIN
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END

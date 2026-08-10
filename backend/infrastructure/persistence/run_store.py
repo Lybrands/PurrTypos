@@ -67,9 +67,18 @@ async def create_run(
                 execution_intent.capability_snapshot_digest
                 if execution_intent else None
             ),
+            (
+                json.dumps(
+                    _thaw_mapping(provenance.capability_snapshot),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if provenance.capability_snapshot else None
+            ),
         ]
         if provenance is not None
-        else [None, None, None, None, None, None, None, None, None, None]
+        else [None, None, None, None, None, None, None, None, None, None, None]
     )
     binding_values = (
         [
@@ -91,12 +100,13 @@ async def create_run(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             run_id,
             session_id,
@@ -220,6 +230,7 @@ async def get_run(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "
@@ -240,6 +251,7 @@ async def get_latest_run_for_session(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, parent_run_id, "
         "root_run_id, delegation_id, "

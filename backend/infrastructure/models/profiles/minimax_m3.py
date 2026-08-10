@@ -17,6 +17,8 @@ class MiniMaxM3Profile(ModelProfile):
     })
     native_anthropic_thinking = True
     reasoning_control = ReasoningControl.ALWAYS_ENABLED
+    provider_protocol = "openai_anthropic_compatible"
+    actionable = False
 
     def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
         # MiniMax reasons natively.  reasoning_split exposes the stream as

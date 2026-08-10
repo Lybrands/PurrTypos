@@ -5,20 +5,22 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from purra.output_budget import (
-    ModelOutputCapabilities,
-    ThinkingTokenAccounting,
-)
 from purra.model_protocol import (
     FeatureSupport,
+    ModelCapabilitySnapshot,
+    ModelOutputCapabilities,
     ModelProtocolCapabilities,
     ReasoningControl,
     ReasoningReplayPolicy,
+    ThinkingTokenAccounting,
 )
 
 
 class ModelProfile:
     profile_id = "generic"
+    provider_protocol = "openai_compatible"
+    capability_source: str | None = None
+    actionable = True
     model_names: frozenset[str] = frozenset()
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
@@ -69,6 +71,23 @@ class ModelProfile:
             thinking_token_accounting=self.thinking_token_accounting,
         )
 
+    def capability_snapshot(
+        self,
+        *,
+        context_window_tokens: int,
+    ) -> ModelCapabilitySnapshot:
+        return ModelCapabilitySnapshot(
+            schema_version=1,
+            profile_id=self.profile_id,
+            provider_protocol=self.provider_protocol,
+            context_window_tokens=context_window_tokens,
+            max_output_tokens=self.max_output_tokens,
+            thinking_token_accounting=self.thinking_token_accounting,
+            protocol=self.protocol_capabilities(),
+            actionable=self.actionable,
+            source=self.capability_source,
+        )
+
     def normalize_openai_chunk(self, chunk: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(chunk)
         choices = value.get("choices")
@@ -95,11 +114,13 @@ class ModelProfile:
 
 
 class GenericModelProfile(ModelProfile):
+    provider_protocol = "custom"
+    actionable = True
     reasoning_control = ReasoningControl.UNAVAILABLE
     reasoning_replay = ReasoningReplayPolicy.FORBIDDEN
-    tool_calling = FeatureSupport.UNKNOWN
-    required_tool_choice = FeatureSupport.UNKNOWN
-    parallel_tool_calls = FeatureSupport.UNKNOWN
+    tool_calling = FeatureSupport.SUPPORTED
+    required_tool_choice = FeatureSupport.SUPPORTED
+    parallel_tool_calls = FeatureSupport.SUPPORTED
 
 
 def _normalize_base_url(value: str | None) -> str:

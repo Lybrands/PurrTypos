@@ -67,6 +67,7 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "tool_protocol_contract",
         "recovery_policy_id",
         "capability_snapshot_digest",
+        "capability_snapshot_json",
         "binding_namespace",
         "binding_aggregate_id",
         "binding_command_id",
@@ -188,6 +189,12 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         context_window=200_000,
         endpoint_digest="a" * 64,
         request_profile_digest="b" * 64,
+        capability_snapshot={
+            "schemaVersion": 1,
+            "profileId": "test:profile",
+            "contextWindowTokens": 200_000,
+            "digest": "c" * 64,
+        },
         execution_intent=RunExecutionIntent(
             requested_reasoning_mode="enabled",
             output_contract="assistant_text",
@@ -214,6 +221,7 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         "request_profile_digest": row["request_profile_digest"],
         "requested_reasoning_mode": row["requested_reasoning_mode"],
         "capability_snapshot_digest": row["capability_snapshot_digest"],
+        "capability_snapshot": json.loads(row["capability_snapshot_json"]),
     } == {
         "model_provider": "openai",
         "model_name": "writing-model",
@@ -222,11 +230,22 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         "request_profile_digest": "b" * 64,
         "requested_reasoning_mode": "enabled",
         "capability_snapshot_digest": "c" * 64,
+        "capability_snapshot": {
+            "schemaVersion": 1,
+            "profileId": "test:profile",
+            "contextWindowTokens": 200_000,
+            "digest": "c" * 64,
+        },
     }
     with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
         await run_db.execute(
             "UPDATE ai_agent_runs SET model_name = ? WHERE id = ?",
             ["replacement", run_id],
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
+        await run_db.execute(
+            "UPDATE ai_agent_runs SET capability_snapshot_json = ? WHERE id = ?",
+            ['{"digest":"replacement"}', run_id],
         )
 
     # Provenance-free callers remain valid for operational runs that do not

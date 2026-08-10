@@ -84,8 +84,8 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         apiKey="key",
         apiProvider="openai",
         options={
-            "model": "model",
-            "model_profile": "minimax:MiniMax-M3",
+            "model": "deepseek-v4-pro",
+            "model_profile": "deepseek:deepseek-v4-pro",
             "thinking": {"type": "enabled"},
         },
         enableAgentTools=True,
@@ -97,15 +97,18 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     )
     request = to_writing_agent_request(
         body,
-        {"model": "model", "baseURL": "https://example.test/v1"},
+        {
+            "model": "deepseek-v4-pro",
+            "baseURL": "https://api.deepseek.com",
+        },
     )
     domain = WritingDomainContext.from_core_context(request.domain_context)
     options = writing_run_options(request, {"max_tokens": 2048})
 
     assert request.context_window == 64_000
     assert request.metadata["locale"] == "zh-Hans-CN"
-    assert request.model.options["baseURL"] == "https://example.test/v1"
-    assert request.model.profile_id == "minimax:MiniMax-M3"
+    assert request.model.options["baseURL"] == "https://api.deepseek.com"
+    assert request.model.profile_id == "deepseek:deepseek-v4-pro"
     assert "model_profile" not in request.model.options
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
@@ -506,7 +509,7 @@ def test_request_mapping_does_not_silently_drop_invalid_caller_tool_shapes(
         )
 
 
-def test_caller_output_limit_cannot_override_host_task_policy():
+def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
@@ -525,7 +528,7 @@ def test_caller_output_limit_cannot_override_host_task_policy():
 
     options = writing_run_options(request, provider_options)
 
-    assert "max_tokens" not in request.model.options
+    assert request.model.options["max_tokens"] == 1_000
     assert options.output_reserve_tokens == 7_500
     assert options.output_budget is not None
     assert options.output_budget.policy_key == "conversation"

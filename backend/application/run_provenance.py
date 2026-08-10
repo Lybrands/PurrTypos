@@ -77,12 +77,13 @@ def build_chat_run_provenance(
         model_name,
         body.baseURL,
     )
+    snapshot = model_profile.capability_snapshot(
+        context_window_tokens=context_window,
+    )
     model_request = ModelRequest(
         provider=model_provider,
         model=model_name,
-        profile_id=model_profile_id,
-        output_capabilities=model_profile.output_capabilities(),
-        protocol_capabilities=model_profile.protocol_capabilities(),
+        capability_snapshot=snapshot,
         options=options,
     )
     requested_mode = reasoning_mode_from_options(options)
@@ -92,6 +93,7 @@ def build_chat_run_provenance(
         context_window=context_window,
         endpoint_digest=endpoint_digest,
         request_profile_digest=request_profile_digest,
+        capability_snapshot=snapshot.to_mapping(include_digest=True),
         execution_intent=run_execution_intent(
             model_request,
             requested_mode,
