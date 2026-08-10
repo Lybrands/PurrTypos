@@ -43,6 +43,7 @@ class _CandidateValidator:
         content = str(item.get("contentText") or "")
         metadata = thaw_json_mapping(artifact.metadata)
         part_type = str(metadata.get("partType") or "")
+        part_key = str(metadata.get("partKey") or "")
         draft_scenes = (
             payload.get("scenes") if isinstance(payload, Mapping) else None
         )
@@ -58,13 +59,40 @@ class _CandidateValidator:
         draft_scene_has_text = bool(
             part_type == "scene"
             and isinstance(payload, Mapping)
+            and str(payload.get("sceneId") or "").strip() == part_key
+            and str(payload.get("processSummary") or "").strip()
             and str(payload.get("sceneText") or "").strip()
         )
         draft_metadata_complete = bool(
             part_type == "episode_metadata"
             and isinstance(payload, Mapping)
+            and str(payload.get("episodeNumber") or "") == part_key
             and str(payload.get("title") or "").strip()
+            and str(payload.get("executionSummary") or "").strip()
             and str(payload.get("continuitySummary") or "").strip()
+        )
+        review_dimension_complete = bool(
+            part_type == "review_dimension"
+            and isinstance(payload, Mapping)
+            and ":" in part_key
+            and str(payload.get("episodeNumber") or "") == part_key.split(":", 1)[0]
+            and str(payload.get("reviewDimension") or "") == part_key.split(":", 1)[1]
+            and str(payload.get("title") or "").strip()
+            and str(payload.get("executionSummary") or "").strip()
+            and isinstance(payload.get("contentJson"), Mapping)
+            and payload["contentJson"].get("verdict")
+            in {"ready", "revise", "major_rework"}
+            and isinstance(payload["contentJson"].get("issues"), list)
+            and content.strip()
+        )
+        document_section_complete = bool(
+            part_type == "document_section"
+            and isinstance(payload, Mapping)
+            and str(payload.get("sectionKey") or "") == part_key
+            and str(payload.get("title") or "").strip()
+            and str(payload.get("executionSummary") or "").strip()
+            and isinstance(payload.get("contentJson"), Mapping)
+            and content.strip()
         )
         if (
             not isinstance(payload, Mapping)
@@ -79,11 +107,19 @@ class _CandidateValidator:
                         or draft_metadata_complete
                     )
                 )
+                and not review_dimension_complete
+                and not document_section_complete
             )
         ):
             return ArtifactValidationResult(False, "candidate_part_empty")
-        if len(content) > 80_000:
-            return ArtifactValidationResult(False, "candidate_part_too_large")
+        if part_type == "scene" and not draft_scene_has_text:
+            return ArtifactValidationResult(False, "candidate_scene_invalid")
+        if part_type == "episode_metadata" and not draft_metadata_complete:
+            return ArtifactValidationResult(False, "candidate_metadata_invalid")
+        if part_type == "review_dimension" and not review_dimension_complete:
+            return ArtifactValidationResult(False, "candidate_review_invalid")
+        if part_type == "document_section" and not document_section_complete:
+            return ArtifactValidationResult(False, "candidate_section_invalid")
         return ArtifactValidationResult(True)
 
     async def validate_finalization(
@@ -175,6 +211,9 @@ class ScreenplayCandidateArtifacts:
                     "targetRole": str(scope.get("targetRole") or ""),
                     "partType": str(scope.get("expectedPartType") or ""),
                     "partKey": str(scope.get("expectedPartKey") or ""),
+                    "semanticKey": str(
+                        scope.get("semanticKey") or scope.get("unitId") or ""
+                    ),
                 },
             ))
         if artifact.status is ArtifactStatus.FINALIZED:

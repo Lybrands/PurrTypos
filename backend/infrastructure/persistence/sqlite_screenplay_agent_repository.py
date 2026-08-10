@@ -419,7 +419,6 @@ class SqliteScreenplayAgentRepository:
         )
         work_item_ids = [str(row["work_item_id"]) for row in work_items]
         for table, column in (
-            ("screenplay_agent_task_outputs", "task_id"),
             ("ai_agent_long_task_units", "task_id"),
             ("ai_agent_long_tasks", "id"),
         ):
@@ -533,14 +532,6 @@ class SqliteScreenplayAgentRepository:
             )
             if task is not None else []
         )
-        outputs = {
-            str(row["unit_id"]): _object(row.get("output_json"))
-            for row in await self._db.fetch_all(
-                "SELECT unit_id, output_json "
-                "FROM screenplay_agent_task_outputs WHERE task_id = ?",
-                [task_id],
-            )
-        }
         return {
             "id": task_id,
             "projectId": str(turn["project_id"]),
@@ -557,7 +548,7 @@ class SqliteScreenplayAgentRepository:
             ) or None,
             "error": _object(turn.get("operation_error_json")) or None,
             "units": [
-                _unit_view(unit, outputs.get(str(unit["unit_id"]), {}))
+                _unit_view(unit)
                 for unit in units
             ],
             "createdAt": turn.get("operation_create_time"),
@@ -736,7 +727,6 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _unit_view(
     row: Mapping[str, Any],
-    output: Mapping[str, Any],
 ) -> dict[str, Any]:
     metadata = _object(row.get("metadata_json"))
     error_code = str(row.get("error_code") or "")
@@ -746,7 +736,9 @@ def _unit_view(
         "kind": str(metadata.get("unitKind") or ""),
         "status": str(row["status"]),
         "input": dict(metadata.get("input") or {}),
-        "output": dict(output),
+        "outputRef": str(row.get("output_ref") or "") or None,
+        "artifactDigest": str(row.get("artifact_digest") or "") or None,
+        "validationReceipt": _object(row.get("validation_receipt_json")),
         "error": (
             {"code": error_code, "message": error_code}
             if error_code

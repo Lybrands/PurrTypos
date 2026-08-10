@@ -140,17 +140,36 @@ class ScreenplayAgentContextQuery:
             "contentText": _clip(str(row.get("content_text") or ""), text_limit),
         } for row in rows]
 
+    async def revisions(
+        self,
+        revision_ids: Sequence[str],
+        *,
+        text_limit: int = 16_000,
+    ) -> list[dict[str, Any]]:
+        result = []
+        for revision_id in dict.fromkeys(str(value) for value in revision_ids):
+            revision = await self.revision(revision_id, text_limit=text_limit)
+            if revision is None:
+                raise AppError(f"项目文档版本 {revision_id} 不存在", 409)
+            result.append(revision)
+        return result
+
     async def episode_context(
         self,
         project_id: str,
         episode_number: int,
         *,
         draft_revision_id: str | None = None,
+        scene_list_revision_id: str | None = None,
     ) -> dict[str, Any]:
-        scene = await self._head_episode(
-            project_id,
-            "sceneList",
-            episode_number,
+        scene = (
+            await self._revision_episode(scene_list_revision_id, episode_number)
+            if scene_list_revision_id
+            else await self._head_episode(
+                project_id,
+                "sceneList",
+                episode_number,
+            )
         )
         if scene is None:
             raise AppError(f"场景表中不存在第 {episode_number} 集", 409)
@@ -241,13 +260,25 @@ class ScreenplayAgentContextQuery:
         episode_number: int,
         *,
         draft_revision_id: str | None = None,
+        source_revision_refs: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Resolve exact, bounded evidence before any scene model Run."""
 
+        accepted = (
+            await self.revisions(source_revision_refs, text_limit=0)
+            if source_revision_refs else []
+        )
+        accepted_by_role = {
+            str(item["role"]): item for item in accepted
+        }
+        scene_list_revision_id = str(
+            (accepted_by_role.get("sceneList") or {}).get("revisionId") or ""
+        ) or None
         episode = await self.episode_context(
             project_id,
             episode_number,
             draft_revision_id=draft_revision_id,
+            scene_list_revision_id=scene_list_revision_id,
         )
         scene_plan = episode.get("episode")
         scenes = (
@@ -266,10 +297,16 @@ class ScreenplayAgentContextQuery:
         if len(normalized_scenes) != len(scenes):
             raise AppError(f"第 {episode_number} 集场景数据不完整", 409)
 
-        heads = await self.heads(
-            project_id,
-            roles=("creativeBrief", "structure", "review"),
-            text_limit=0,
+        heads = (
+            [
+                item for item in accepted
+                if item["role"] in {"creativeBrief", "structure", "review"}
+            ]
+            if accepted else await self.heads(
+                project_id,
+                roles=("creativeBrief", "structure", "review"),
+                text_limit=0,
+            )
         )
         by_role = {str(head["role"]): head for head in heads}
         review = by_role.get("review")
@@ -436,7 +473,10 @@ class ScreenplayAgentContextQuery:
             "WHERE revision_id = ? AND part_type = 'episode' AND part_key = ?",
             [revision_id, str(episode_number)],
         )
-        return None if row is None else {"payload": _object(row.get("payload_json"))}
+        return None if row is None else {
+            "revisionId": revision_id,
+            "payload": _object(row.get("payload_json")),
+        }
 
     async def _revision_episode_numbers(
         self,

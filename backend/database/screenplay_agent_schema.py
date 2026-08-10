@@ -174,15 +174,7 @@ async def init_screenplay_agent_schema(db) -> None:
         "ON screenplay_agent_chunks(project_id, session_id, id)"
     )
 
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_agent_task_outputs (
-        task_id TEXT NOT NULL,
-        unit_id TEXT NOT NULL,
-        output_ref TEXT NOT NULL UNIQUE,
-        output_json TEXT NOT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY(task_id, unit_id)
-    )""")
+    await _migrate_legacy_task_outputs(db)
 
     # Test-phase migration: the discarded Job engine owns no accepted document
     # state. Remove its runtime rows instead of preserving a second scheduler.
@@ -301,6 +293,104 @@ def _json_object(value: object) -> dict:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+async def _migrate_legacy_task_outputs(db) -> None:
+    table = await db.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'screenplay_agent_task_outputs'"
+    )
+    if table is None:
+        return
+    generic_tables = {
+        str(row["name"])
+        for row in await db.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+            "('ai_agent_long_tasks','ai_agent_long_task_units',"
+            "'ai_agent_artifacts','ai_agent_artifact_batches')"
+        )
+    }
+    required = {
+        "ai_agent_long_tasks",
+        "ai_agent_long_task_units",
+        "ai_agent_artifacts",
+        "ai_agent_artifact_batches",
+    }
+    if generic_tables == required:
+        rows = await db.fetch_all(
+            "SELECT o.task_id, o.unit_id, o.output_json "
+            "FROM screenplay_agent_task_outputs AS o "
+            "JOIN ai_agent_long_tasks AS t ON t.id = o.task_id "
+            "WHERE t.status IN ('pending','running','paused')"
+        )
+        blocked: set[str] = set()
+        for row in rows:
+            output = _json_object(row.get("output_json"))
+            artifact_id = str(output.get("artifactId") or "").strip()
+            artifact = (
+                await db.fetch_one(
+                    "SELECT id, run_id, revision, metadata_json FROM ai_agent_artifacts "
+                    "WHERE id = ? AND status = 'finalized'",
+                    [artifact_id],
+                )
+                if artifact_id else None
+            )
+            batch = (
+                await db.fetch_one(
+                    "SELECT content_digest FROM ai_agent_artifact_batches "
+                    "WHERE artifact_id = ? ORDER BY sequence LIMIT 1",
+                    [artifact_id],
+                )
+                if artifact is not None else None
+            )
+            if artifact is None or batch is None:
+                blocked.add(str(row["task_id"]))
+                continue
+            metadata = _json_object(artifact.get("metadata_json"))
+            semantic_key = str(
+                metadata.get("semanticKey")
+                or metadata.get("unitId")
+                or row["unit_id"]
+            )
+            digest = str(batch["content_digest"])
+            receipt = {
+                "valid": True,
+                "artifactId": artifact_id,
+                "artifactRevision": int(artifact["revision"]),
+                "semanticKey": semantic_key,
+                "contentDigest": digest,
+                "runId": str(artifact.get("run_id") or ""),
+                "migrated": True,
+            }
+            await db.execute(
+                "UPDATE ai_agent_long_task_units SET output_ref = ?, "
+                "artifact_digest = ?, validation_receipt_json = ? "
+                "WHERE task_id = ? AND unit_id = ?",
+                [
+                    f"screenplay-part-artifact://{artifact_id}",
+                    digest,
+                    json.dumps(receipt, ensure_ascii=False, separators=(",", ":")),
+                    str(row["task_id"]),
+                    str(row["unit_id"]),
+                ],
+            )
+        for task_id in blocked:
+            error = json.dumps({
+                "code": "artifact_migration_required",
+                "message": "Legacy task output has no finalized Artifact authority.",
+            }, ensure_ascii=False, separators=(",", ":"))
+            await db.execute(
+                "UPDATE ai_agent_long_tasks SET status = 'paused', error_code = ? "
+                "WHERE id = ? AND status IN ('pending','running','paused')",
+                ["artifact_migration_required", task_id],
+            )
+            await db.execute(
+                "UPDATE screenplay_agent_operations SET status = 'paused', "
+                "error_json = ? WHERE long_task_id = ? "
+                "AND status IN ('queued','running','paused')",
+                [error, task_id],
+            )
+    await db.execute("DROP TABLE screenplay_agent_task_outputs")
 
 
 __all__ = ["init_screenplay_agent_schema"]
