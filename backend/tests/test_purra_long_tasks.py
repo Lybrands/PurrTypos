@@ -631,6 +631,60 @@ async def test_long_task_pause_resume_and_cancel_are_persistent(long_task_db):
 
 
 @pytest.mark.asyncio
+async def test_cancel_requested_task_cannot_claim_more_units(long_task_db):
+    await SqliteWorkItemRepository(long_task_db).create(
+        "work-cancel-request",
+        WorkItemCreateCommand(
+            namespace="test",
+            kind="large_write",
+            owner_id="owner-cancel-request",
+            created_by_run_id="run-parent",
+        ),
+    )
+    repository = SqliteLongTaskRepository(long_task_db)
+    task = await repository.create("task-cancel-request", LongTaskCreateCommand(
+        namespace="test",
+        kind="large_write",
+        owner_id="owner-cancel-request",
+        work_item_id="work-cancel-request",
+        created_by_run_id="run-parent",
+        units=(
+            LongTaskUnitSpec(id="part-1", position=0),
+            LongTaskUnitSpec(id="part-2", position=1),
+        ),
+    ))
+    task = await repository.start(task.id, expected_revision=task.revision)
+    claimed = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-cancel-request",
+        lease_duration_ms=300_000,
+    )
+    assert claimed is not None
+
+    requested = await repository.request_cancel(
+        task.id,
+        requested_at_ms=1234,
+    )
+
+    assert requested.cancellation_requested_at_ms == 1234
+    assert await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-after-request",
+        lease_duration_ms=300_000,
+    ) is None
+    settled = await repository.complete_unit(
+        task.id,
+        claimed.id,
+        worker_id="worker-cancel-request",
+        result=LongTaskUnitResult(output_ref="artifact://too-late"),
+    )
+    assert settled.status is LongTaskStatus.CANCELED
+    assert {
+        unit.status.value for unit in await repository.list_units(task.id)
+    } == {"canceled"}
+
+
+@pytest.mark.asyncio
 async def test_failed_long_task_can_be_explicitly_retried(long_task_db):
     await SqliteWorkItemRepository(long_task_db).create(
         "work-3",

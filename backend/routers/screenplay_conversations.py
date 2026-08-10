@@ -215,9 +215,11 @@ async def cancel_screenplay_conversation_turn(
     turn_id: str,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    del idempotency_key
-    turn = await _service().cancel_turn(turn_id)
-    return {"success": True, "data": turn}
+    receipt = await _service().cancel_turn(
+        turn_id,
+        idempotency_key=idempotency_key,
+    )
+    return {"success": True, "data": receipt}
 
 
 @router.delete("/conversation/turns/{turn_id}/and-after")

@@ -41,6 +41,7 @@ class ScreenplayOperationRecord:
     result_revision_id: str | None = None
     finalization_receipt_id: str | None = None
     cancel_receipt_id: str | None = None
+    cancel_requested_at_ms: int | None = None
     error: Mapping[str, Any] | None = None
     create_time: str | None = None
     update_time: str | None = None
@@ -76,6 +77,11 @@ class ScreenplayOperationRecord:
             "update_time",
         ):
             object.__setattr__(self, name, optional_text(getattr(self, name)))
+        if self.cancel_requested_at_ms is not None:
+            requested_at = int(self.cancel_requested_at_ms)
+            if requested_at < 0:
+                raise ValueError("screenplay operation cancel timestamp is invalid")
+            object.__setattr__(self, "cancel_requested_at_ms", requested_at)
         if self.error is not None:
             object.__setattr__(self, "error", freeze_json_mapping(self.error))
 
@@ -104,7 +110,57 @@ class ScreenplayOperationCreateCommand:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CancelOperationReceipt:
+    id: str
+    operation_id: str | None
+    turn_id: str
+    requested_at: str
+    terminal_status: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", required_text(self.id, "cancel receipt id"))
+        object.__setattr__(
+            self,
+            "operation_id",
+            optional_text(self.operation_id),
+        )
+        object.__setattr__(
+            self,
+            "turn_id",
+            required_text(self.turn_id, "cancel receipt turn id"),
+        )
+        object.__setattr__(
+            self,
+            "requested_at",
+            required_text(self.requested_at, "cancel receipt requested at"),
+        )
+        status = required_text(
+            self.terminal_status,
+            "cancel receipt terminal status",
+        )
+        if status not in {
+            "cancel_requested",
+            "succeeded",
+            "failed",
+            "canceled",
+        }:
+            raise ValueError("cancel receipt terminal status is invalid")
+        object.__setattr__(self, "terminal_status", status)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "operationId": self.operation_id,
+            "turnId": self.turn_id,
+            "requestedAt": self.requested_at,
+            "terminalStatus": self.terminal_status,
+            "cancelReceiptId": self.id,
+        }
+
+
 __all__ = [
+    "CancelOperationReceipt",
     "ScreenplayOperationCreateCommand",
     "ScreenplayOperationRecord",
     "ScreenplayOperationStatus",

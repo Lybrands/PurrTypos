@@ -100,6 +100,82 @@ class SqliteScreenplayAgentRepository:
                     "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
                     [turn["id"]],
                 )
+                cancel_requested = bool(
+                    turn.get("cancel_requested_at_ms") is not None
+                    or (
+                        operation is not None
+                        and operation.get("cancel_requested_at_ms") is not None
+                    )
+                )
+                if cancel_requested:
+                    task_id = str(
+                        (operation or {}).get("long_task_id") or ""
+                    ) or None
+                    if task_id:
+                        await self._db.execute(
+                            "UPDATE ai_agent_long_tasks SET status = 'canceled', "
+                            "cancel_requested_at_ms = COALESCE("
+                            "cancel_requested_at_ms, ?), revision = revision + 1, "
+                            "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+                            "AND status IN ('pending', 'running', 'paused')",
+                            [
+                                int(turn.get("cancel_requested_at_ms") or now_ms()),
+                                task_id,
+                            ],
+                        )
+                        await self._db.execute(
+                            "UPDATE ai_agent_long_task_units SET status = 'canceled', "
+                            "worker_id = NULL, lease_expires_at_ms = NULL, "
+                            "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                            "AND status IN ('pending', 'waiting_retry', 'claimed', "
+                            "'running', 'needs_split', 'blocked')",
+                            [task_id],
+                        )
+                        await self._db.execute(
+                            "UPDATE ai_agent_runs SET cancel_requested_at_ms = "
+                            "COALESCE(cancel_requested_at_ms, ?), "
+                            "update_time = CURRENT_TIMESTAMP WHERE id IN ("
+                            "SELECT run_id FROM ai_agent_long_task_units "
+                            "WHERE task_id = ? AND run_id IS NOT NULL) "
+                            "AND status = 'running'",
+                            [
+                                int(turn.get("cancel_requested_at_ms") or now_ms()),
+                                task_id,
+                            ],
+                        )
+                    if operation is not None:
+                        await self._db.execute(
+                            "UPDATE screenplay_agent_operations SET "
+                            "status = 'canceled', update_time = CURRENT_TIMESTAMP "
+                            "WHERE id = ? AND status IN "
+                            "('queued', 'running', 'paused')",
+                            [operation["id"]],
+                        )
+                    await self._db.execute(
+                        "UPDATE screenplay_agent_turns SET status = 'canceled', "
+                        "assistant_content = '', execution_owner_id = NULL, "
+                        "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
+                        "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                        [turn["id"]],
+                    )
+                    await self._event_for_turn(
+                        turn,
+                        (
+                            "screenplay.agent.task.canceled"
+                            if operation is not None
+                            else "screenplay.agent.turn.canceled"
+                        ),
+                        {
+                            "taskId": task_id,
+                            "cancelReceiptId": str(
+                                turn.get("cancel_receipt_id")
+                                or (operation or {}).get("cancel_receipt_id")
+                                or ""
+                            ) or None,
+                        },
+                        task_id=task_id,
+                    )
+                    continue
                 turn_status = "failed"
                 assistant_content = ""
                 if operation is not None and str(operation["status"]) in {
@@ -135,6 +211,8 @@ class SqliteScreenplayAgentRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
             if str(turn["status"]) not in {"queued", "planning"}:
+                return False
+            if turn.get("cancel_requested_at_ms") is not None:
                 return False
             owner = str(turn.get("execution_owner_id") or "")
             if owner and int(turn.get("lease_expires_at_ms") or 0) > current:
@@ -321,30 +399,6 @@ class SqliteScreenplayAgentRepository:
                 else "screenplay.agent.turn.failed",
                 {"taskId": task_id, "error": error},
                 task_id=task_id,
-            )
-            return _turn_view(await self._require_turn(turn_id))
-
-    async def cancel_turn(self, turn_id: str) -> dict[str, Any]:
-        async with self._db.transaction(cancellation_linearizable=True):
-            turn = await self._require_turn(turn_id)
-            operation = await self._operation_for_turn(turn_id)
-            if str(turn["status"]) not in {
-                "queued", "planning", "running", "paused",
-            }:
-                return _turn_view(turn)
-            await self._db.execute(
-                "UPDATE screenplay_agent_turns SET status = 'canceled', "
-                "assistant_content = '', execution_owner_id = NULL, "
-                "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
-                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [turn_id],
-            )
-            await self._event_for_turn(
-                turn,
-                "screenplay.agent.task.canceled" if operation
-                else "screenplay.agent.turn.canceled",
-                {"taskId": (operation or {}).get("long_task_id")},
-                task_id=str((operation or {}).get("long_task_id") or "") or None,
             )
             return _turn_view(await self._require_turn(turn_id))
 

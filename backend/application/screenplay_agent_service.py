@@ -48,7 +48,8 @@ from application.screenplay_manifest_compiler import (
 )
 from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
-from exceptions import NotFoundError
+from exceptions import AppError, NotFoundError
+from infrastructure.persistence import run_execution_store
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
@@ -122,6 +123,7 @@ class ScreenplayAgentService:
         projects,
         track_background=None,
     ) -> None:
+        self._db = db
         self._repository = SqliteScreenplayAgentRepository(
             db,
             owner_id=owner_id,
@@ -332,12 +334,14 @@ class ScreenplayAgentService:
                 await self._stream.terminal(turn_id)
                 return
             if result.status is LongTaskExecutionStatus.CANCELED:
-                await self._operations.cancel(
-                    operation.id,
-                    cancel_receipt_id=f"spacancel:{operation.id}:runtime",
-                    command_id=f"operation:cancel:{operation.id}:runtime",
+                cancel_receipt = await self._operations.request_cancel(
+                    turn_id,
+                    idempotency_key=f"runtime-cancel:{operation.id}",
                 )
-                await self._repository.cancel_turn(turn_id)
+                await self._operations.settle_cancel(
+                    turn_id,
+                    receipt_id=cancel_receipt.id,
+                )
                 await self._stream.terminal(turn_id)
                 return
             if result.status is LongTaskExecutionStatus.FAILED:
@@ -417,23 +421,48 @@ class ScreenplayAgentService:
     ) -> None:
         await self._stream.task_progress(turn_id, update.event)
 
-    async def cancel_turn(self, turn_id: str):
-        turn = await self._repository.load_turn(turn_id)
+    async def cancel_turn(self, turn_id: str, *, idempotency_key: str):
+        try:
+            receipt = await self._operations.request_cancel(
+                turn_id,
+                idempotency_key=idempotency_key,
+            )
+        except LookupError as error:
+            raise NotFoundError("剧本 Agent Turn 不存在") from error
+        except ValueError as error:
+            raise AppError(str(error), 409) from error
+        if receipt.terminal_status in {"succeeded", "failed", "canceled"}:
+            return receipt.to_mapping()
+
         operation = await self._operations.load_for_turn(turn_id)
+        run_ids: set[str] = set()
+        turn = await self._repository.load_turn(turn_id)
+        if turn is not None and str(turn.get("plannerRunId") or "").strip():
+            run_ids.add(str(turn["plannerRunId"]))
+        if operation is not None and operation.long_task_id:
+            rows = await self._db.fetch_all(
+                "SELECT run_id FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND run_id IS NOT NULL AND status IN "
+                "('claimed', 'running')",
+                [operation.long_task_id],
+            )
+            run_ids.update(
+                str(row["run_id"]) for row in rows if row.get("run_id")
+            )
+        for run_id in sorted(run_ids):
+            await run_execution_store.request_cancellation(self._db, run_id)
+
         self._cancel_task(f"turn:{turn_id}")
-        if operation and operation.long_task_id:
+        if operation is not None and operation.long_task_id:
             task = await self._long_tasks.load(operation.long_task_id)
             if task is not None and not task.status.terminal:
                 await self._long_tasks.cancel(task.id)
-        if operation is not None and not operation.status.terminal:
-            await self._operations.cancel(
-                operation.id,
-                cancel_receipt_id=f"spacancel:{operation.id}:legacy",
-                command_id=f"operation:cancel:{operation.id}:legacy",
-            )
-        result = await self._repository.cancel_turn(turn_id)
+        settled = await self._operations.settle_cancel(
+            turn_id,
+            receipt_id=receipt.id,
+        )
         await self._stream.terminal(turn_id)
-        return result
+        return settled.to_mapping()
 
     async def truncate_from_turn(self, turn_id: str):
         result = await self._repository.truncate_from_turn(turn_id)
