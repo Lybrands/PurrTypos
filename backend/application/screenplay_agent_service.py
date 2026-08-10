@@ -8,6 +8,8 @@ execution to PurrA.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from purra.contracts import (
     TaskStep,
 )
 from purra.errors import ModelGatewayError
+from purra.json_values import thaw_json_mapping
 from purra.long_tasks import (
     DurableExecutorRegistry,
     DurableTaskDescriptor,
@@ -38,7 +41,11 @@ from purra.task_admission import (
 )
 from application.model_runtime import model_request_from_runtime
 from application.request_mapping import context_window_tokens
-from domains.screenplay_agent import ScreenplayIntent, ScreenplayIntentAction
+from domains.screenplay_agent import (
+    ScreenplayIntent,
+    ScreenplayIntentAction,
+    ScreenplayOperationCreateCommand,
+)
 from domains.screenplay_agent.recipe_compiler import compile_screenplay_task
 from exceptions import NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -46,6 +53,9 @@ from infrastructure.persistence.sqlite_long_task_repository import (
 )
 from infrastructure.persistence.sqlite_screenplay_agent_repository import (
     SqliteScreenplayAgentRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_operation_repository import (
+    SqliteScreenplayOperationRepository,
 )
 from infrastructure.persistence.sqlite_screenplay_task_output_store import (
     SqliteScreenplayTaskOutputStore,
@@ -118,6 +128,7 @@ class ScreenplayAgentService:
         self._projects = projects
         self._track_background = track_background
         self._long_tasks = SqliteLongTaskRepository(db)
+        self._operations = SqliteScreenplayOperationRepository(db)
         self._work_items = SqliteWorkItemRepository(db)
         self._outputs = SqliteScreenplayTaskOutputStore(db)
 
@@ -207,6 +218,23 @@ class ScreenplayAgentService:
                 base_revision_id=resolved.base_revision_id,
                 original_request=str(turn["userContent"]),
             )
+            requirements = {
+                "intent": planned.intent.to_mapping(),
+                "targetRole": compiled.target_role,
+                "episodeNumbers": list(resolved.episode_numbers),
+                "baseRevisionId": resolved.base_revision_id,
+                "recipe": compiled.recipe.to_metadata(),
+            }
+            operation = await self._operations.create(
+                ScreenplayOperationCreateCommand(
+                    turn_id=turn_id,
+                    project_id=str(turn["projectId"]),
+                    session_id=int(turn["sessionId"]),
+                    target_role=compiled.target_role,
+                    requirements_json=requirements,
+                    manifest_digest=_manifest_digest(requirements),
+                )
+            )
             plan = _durable_plan(planned.intent)
             decision = TaskAdmissionDecision(
                 mode=ExecutionMode.DURABLE,
@@ -247,8 +275,14 @@ class ScreenplayAgentService:
                 decision,
                 parent_run_id=planner_run_id,
             )
-            await self._repository.attach_task(
+            await self._operations.attach_long_task(
+                operation.id,
+                long_task_id=receipt.task_id,
+                command_id=f"operation:dispatch:{operation.id}:{receipt.task_id}",
+            )
+            await self._repository.attach_operation(
                 turn_id,
+                operation_id=operation.id,
                 task_id=receipt.task_id,
                 target_role=compiled.target_role,
             )
@@ -260,23 +294,42 @@ class ScreenplayAgentService:
             )
             if result.status is LongTaskExecutionStatus.PAUSED:
                 code = result.error or "screenplay_task_paused"
+                message = _task_failure_message(code)
+                await self._operations.pause(
+                    operation.id,
+                    code=code,
+                    message=message,
+                    command_id=f"operation:pause:{operation.id}:{code}",
+                )
                 await self._repository.pause_task(
                     turn_id,
                     code=code,
-                    message=_task_failure_message(code),
+                    message=message,
                 )
                 await self._stream.terminal(turn_id)
                 return
             if result.status is LongTaskExecutionStatus.CANCELED:
+                await self._operations.cancel(
+                    operation.id,
+                    cancel_receipt_id=f"spacancel:{operation.id}:runtime",
+                    command_id=f"operation:cancel:{operation.id}:runtime",
+                )
                 await self._repository.cancel_turn(turn_id)
                 await self._stream.terminal(turn_id)
                 return
             if result.status is LongTaskExecutionStatus.FAILED:
                 code = result.error or "screenplay_task_failed"
+                message = _task_failure_message(code)
+                await self._operations.fail(
+                    operation.id,
+                    code=code,
+                    message=message,
+                    command_id=f"operation:fail:{operation.id}:{code}",
+                )
                 await self._repository.fail_task(
                     turn_id,
                     code=code,
-                    message=_task_failure_message(code),
+                    message=message,
                 )
                 await self._stream.terminal(turn_id)
                 return
@@ -298,8 +351,17 @@ class ScreenplayAgentService:
                 raise RuntimeError(
                     "screenplay task did not compose a final response"
                 )
-            await self._repository.complete_task(
+            await self._operations.succeed(
+                operation.id,
+                result_revision_id=revision_id,
+                finalization_receipt_id=(
+                    f"spafinal:{operation.id}:{revision_id}"
+                ),
+                command_id=f"operation:succeed:{operation.id}:{revision_id}",
+            )
+            await self._repository.complete_operation(
                 turn_id,
+                task_id=receipt.task_id,
                 revision_id=revision_id,
                 assistant_content=final_response,
             )
@@ -308,7 +370,15 @@ class ScreenplayAgentService:
             code, message = _task_failure(error)
             with suppress(Exception):
                 current = await self._repository.load_turn(turn_id)
-                if current and current.get("taskId"):
+                operation = await self._operations.load_for_turn(turn_id)
+                if operation is not None and not operation.status.terminal:
+                    await self._operations.fail(
+                        operation.id,
+                        code=code,
+                        message=message,
+                        command_id=f"operation:fail:{operation.id}:{code}",
+                    )
+                if operation is not None:
                     await self._repository.fail_task(
                         turn_id,
                         code=code,
@@ -331,11 +401,18 @@ class ScreenplayAgentService:
 
     async def cancel_turn(self, turn_id: str):
         turn = await self._repository.load_turn(turn_id)
+        operation = await self._operations.load_for_turn(turn_id)
         self._cancel_task(f"turn:{turn_id}")
-        if turn and turn.get("taskId"):
-            task = await self._long_tasks.load(str(turn["taskId"]))
+        if operation and operation.long_task_id:
+            task = await self._long_tasks.load(operation.long_task_id)
             if task is not None and not task.status.terminal:
                 await self._long_tasks.cancel(task.id)
+        if operation is not None and not operation.status.terminal:
+            await self._operations.cancel(
+                operation.id,
+                cancel_receipt_id=f"spacancel:{operation.id}:legacy",
+                command_id=f"operation:cancel:{operation.id}:legacy",
+            )
         result = await self._repository.cancel_turn(turn_id)
         await self._stream.terminal(turn_id)
         return result
@@ -406,6 +483,17 @@ def _task_failure(error: Exception) -> tuple[str, str]:
     if message.startswith("剧本任务执行失败") and str(error):
         message = str(error)
     return error.code, message
+
+
+def _manifest_digest(requirements: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        thaw_json_mapping(requirements),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _task_failure_message(code: str) -> str:

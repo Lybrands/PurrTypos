@@ -10,7 +10,7 @@ from database.connection import DatabaseConnection
 pytestmark = pytest.mark.asyncio
 
 
-async def test_startup_drops_discarded_conversation_and_operation_tables(
+async def test_startup_drops_discarded_conversation_tables_without_erasing_receipts(
     tmp_path: Path,
 ):
     first = DatabaseConnection(tmp_path)
@@ -71,11 +71,89 @@ async def test_startup_drops_discarded_conversation_and_operation_tables(
         assert await reopened.fetch_one(
             "SELECT COUNT(*) AS count FROM screenplay_command_receipts "
             "WHERE command_type = 'submitConversationTurn'"
-        ) == {"count": 0}
+        ) == {"count": 1}
         assert await reopened.fetch_one(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
             "AND name IN ('screenplay_operations', 'screenplay_operation_events')"
         ) is None
+    finally:
+        await reopened.close()
+
+
+async def test_startup_migrates_actionable_turns_to_operations_without_revision_loss(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_projects "
+        "(id, title, source_snapshot_json) "
+        "VALUES ('operation-migration-project', '迁移项目', '{}')"
+    )
+    await first.execute(
+        "INSERT INTO ai_sessions "
+        "(id, title, scope, screenplay_project_id) "
+        "VALUES (9001, '迁移对话', 'screenplay', 'operation-migration-project')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_revisions "
+        "(id, project_id, deliverable_id, revision_no, content_digest, "
+        "summary_json, created_by, agent_task_id) VALUES "
+        "('kept-operation-revision', 'operation-migration-project', "
+        "'spdel:operation-migration-project:screenplayDraft', 1, "
+        "'kept-digest', '{}', 'screenplay_agent_task', 'legacy-task')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content, "
+        "assistant_content, intent_json, task_id, target_role, "
+        "result_revision_id) VALUES "
+        "('legacy-actionable-turn', 'operation-migration-project', 9001, "
+        "'legacy-actionable-command', 'completed', '生成剧本', '已完成', "
+        "'{\"action\":\"create\",\"instruction\":\"生成剧本\"}', "
+        "'legacy-task', 'screenplayDraft', 'kept-operation-revision')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content, "
+        "assistant_content, intent_json) VALUES "
+        "('legacy-answer-turn', 'operation-migration-project', 9001, "
+        "'legacy-answer-command', 'completed', '解释进度', '当前在创作阶段', "
+        "'{\"action\":\"answer\",\"instruction\":\"解释进度\"}')"
+    )
+    await first.execute("DROP TABLE screenplay_agent_operation_commands")
+    await first.execute("DROP TABLE screenplay_agent_operations")
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        operations = await reopened.fetch_all(
+            "SELECT * FROM screenplay_agent_operations ORDER BY turn_id"
+        )
+        assert len(operations) == 1
+        operation = operations[0]
+        assert operation["turn_id"] == "legacy-actionable-turn"
+        assert operation["status"] == "succeeded"
+        assert operation["long_task_id"] == "legacy-task"
+        assert operation["target_role"] == "screenplayDraft"
+        assert operation["result_revision_id"] == "kept-operation-revision"
+        assert str(operation["manifest_digest"]).startswith("sha256:")
+        assert await reopened.fetch_one(
+            "SELECT id, content_digest FROM screenplay_revisions "
+            "WHERE id = 'kept-operation-revision'"
+        ) == {
+            "id": "kept-operation-revision",
+            "content_digest": "kept-digest",
+        }
+        assert await reopened.fetch_one(
+            "SELECT operation_id FROM screenplay_agent_turns "
+            "WHERE id = 'legacy-actionable-turn'"
+        ) == {"operation_id": operation["id"]}
+        assert await reopened.fetch_one(
+            "SELECT operation_id FROM screenplay_agent_turns "
+            "WHERE id = 'legacy-answer-turn'"
+        ) == {"operation_id": None}
     finally:
         await reopened.close()
 

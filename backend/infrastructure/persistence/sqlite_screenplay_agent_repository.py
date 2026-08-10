@@ -1,4 +1,4 @@
-"""SQLite conversation state around PurrA-owned screenplay tasks."""
+"""SQLite Turn messages and UI projections over screenplay Operations."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ LEASE_MS = 30_000
 
 
 class SqliteScreenplayAgentRepository:
-    """Own Turns and UI events; PurrA repositories own execution state."""
+    """Own Turns/events while Operation and PurrA repositories own execution."""
 
     def __init__(self, db, *, owner_id: str) -> None:
         self._db = db
@@ -33,8 +33,8 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             existing = await self._db.fetch_one(
-                "SELECT * FROM screenplay_agent_turns "
-                "WHERE project_id = ? AND command_id = ?",
+                _TURN_WITH_OPERATION_SQL
+                + " WHERE t.project_id = ? AND t.command_id = ?",
                 [project_id, command_id],
             )
             if existing is not None:
@@ -45,6 +45,14 @@ class SqliteScreenplayAgentRepository:
                     raise AppError("同一个对话命令对应了不同请求", 409)
                 return _turn_view(existing)
             await self._require_session(project_id, session_id)
+            active_operation = await self._db.fetch_one(
+                "SELECT id FROM screenplay_agent_operations WHERE project_id = ? "
+                "AND session_id = ? AND status IN ('queued', 'running', 'paused') "
+                "LIMIT 1",
+                [project_id, int(session_id)],
+            )
+            if active_operation is not None:
+                raise AppError("当前对话仍有未结束的剧本任务", 409)
             active = await self._db.fetch_one(
                 "SELECT id FROM screenplay_agent_turns WHERE project_id = ? "
                 "AND status IN ('queued', 'planning', 'running') LIMIT 1",
@@ -88,33 +96,36 @@ class SqliteScreenplayAgentRepository:
                 "WHERE status IN ('queued', 'planning', 'running')"
             )
             for turn in turns:
-                task = await self._db.fetch_one(
-                    "SELECT id, metadata_json FROM ai_agent_long_tasks "
-                    "WHERE namespace = 'purrtypos.screenplay' "
-                    "AND json_extract(metadata_json, '$.turnId') = ? "
-                    "ORDER BY update_time DESC LIMIT 1",
+                operation = await self._db.fetch_one(
+                    "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
                     [turn["id"]],
                 )
-                metadata = _object((task or {}).get("metadata_json"))
+                turn_status = "failed"
+                assistant_content = error["message"]
+                if operation is not None and str(operation["status"]) in {
+                    "queued", "running", "paused",
+                }:
+                    turn_status = "paused"
+                    assistant_content = ""
+                    await self._db.execute(
+                        "UPDATE screenplay_agent_operations SET status = 'paused', "
+                        "error_json = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                        [_dump(error), operation["id"]],
+                    )
                 await self._db.execute(
-                    "UPDATE screenplay_agent_turns SET status = 'failed', "
-                    "assistant_content = ?, error_json = ?, "
-                    "task_id = COALESCE(task_id, ?), "
-                    "target_role = COALESCE(target_role, ?), "
-                    "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
-                    "heartbeat_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
-                    "WHERE id = ?",
-                    [
-                        error["message"],
-                        _dump(error),
-                        (task or {}).get("id"),
-                        metadata.get("targetRole"),
-                        turn["id"],
-                    ],
+                    "UPDATE screenplay_agent_turns SET status = ?, "
+                    "assistant_content = ?, execution_owner_id = NULL, "
+                    "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
+                    "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                    [turn_status, assistant_content, turn["id"]],
                 )
                 await self._event_for_turn(
                     turn,
-                    "screenplay.agent.turn.failed",
+                    (
+                        "screenplay.agent.task.paused"
+                        if turn_status == "paused"
+                        else "screenplay.agent.turn.failed"
+                    ),
                     {"error": error},
                 )
             return tuple(str(turn["id"]) for turn in turns)
@@ -177,10 +188,11 @@ class SqliteScreenplayAgentRepository:
             require_planning_owner=True,
         )
 
-    async def attach_task(
+    async def attach_operation(
         self,
         turn_id: str,
         *,
+        operation_id: str,
         task_id: str,
         target_role: str,
     ) -> dict[str, Any]:
@@ -188,10 +200,10 @@ class SqliteScreenplayAgentRepository:
             turn = await self._require_owned_turn(turn_id)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'running', "
-                "task_id = ?, target_role = ?, execution_owner_id = NULL, "
+                "operation_id = ?, execution_owner_id = NULL, "
                 "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [task_id, target_role, turn_id],
+                [operation_id, turn_id],
             )
             await self._event_for_turn(
                 turn,
@@ -201,10 +213,11 @@ class SqliteScreenplayAgentRepository:
             )
             return _turn_view(await self._require_turn(turn_id))
 
-    async def complete_task(
+    async def complete_operation(
         self,
         turn_id: str,
         *,
+        task_id: str,
         revision_id: str,
         assistant_content: str,
     ) -> dict[str, Any]:
@@ -216,15 +229,15 @@ class SqliteScreenplayAgentRepository:
                 raise AppError("剧本任务已不在运行状态", 409)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'completed', "
-                "assistant_content = ?, result_revision_id = ?, "
+                "assistant_content = ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [assistant_content, revision_id, turn_id],
+                [assistant_content, turn_id],
             )
             await self._event_for_turn(
                 turn,
                 "screenplay.agent.task.completed",
-                {"taskId": turn.get("task_id"), "revisionId": revision_id},
-                task_id=str(turn.get("task_id") or "") or None,
+                {"taskId": task_id, "revisionId": revision_id},
+                task_id=task_id,
             )
             return _turn_view(await self._require_turn(turn_id))
 
@@ -255,6 +268,7 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
+            operation = await self._operation_for_turn(turn_id)
             if str(turn["status"]) == "paused":
                 return _turn_view(turn)
             if str(turn["status"]) in {"completed", "failed", "canceled"}:
@@ -262,17 +276,18 @@ class SqliteScreenplayAgentRepository:
             error = {"code": code, "message": message}
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'paused', "
-                "assistant_content = '', error_json = ?, "
+                "assistant_content = '', "
                 "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
                 "heartbeat_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
                 "WHERE id = ?",
-                [_dump(error), turn_id],
+                [turn_id],
             )
+            task_id = str((operation or {}).get("long_task_id") or "") or None
             await self._event_for_turn(
                 turn,
                 "screenplay.agent.task.paused",
-                {"taskId": turn.get("task_id"), "error": error},
-                task_id=str(turn.get("task_id") or "") or None,
+                {"taskId": task_id, "error": error},
+                task_id=task_id,
             )
             return _turn_view(await self._require_turn(turn_id))
 
@@ -285,6 +300,7 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
+            operation = await self._operation_for_turn(turn_id)
             if str(turn["status"]) in {
                 "completed", "paused", "failed", "canceled",
             }:
@@ -292,24 +308,26 @@ class SqliteScreenplayAgentRepository:
             error = {"code": code, "message": message}
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'failed', "
-                "assistant_content = ?, error_json = ?, "
+                "assistant_content = ?, "
                 "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
                 "heartbeat_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
                 "WHERE id = ?",
-                [message, _dump(error), turn_id],
+                [message, turn_id],
             )
+            task_id = str((operation or {}).get("long_task_id") or "") or None
             await self._event_for_turn(
                 turn,
-                "screenplay.agent.task.failed" if turn.get("task_id")
+                "screenplay.agent.task.failed" if task_id
                 else "screenplay.agent.turn.failed",
-                {"taskId": turn.get("task_id"), "error": error},
-                task_id=str(turn.get("task_id") or "") or None,
+                {"taskId": task_id, "error": error},
+                task_id=task_id,
             )
             return _turn_view(await self._require_turn(turn_id))
 
     async def cancel_turn(self, turn_id: str) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
+            operation = await self._operation_for_turn(turn_id)
             if str(turn["status"]) not in {
                 "queued", "planning", "running", "paused",
             }:
@@ -323,10 +341,10 @@ class SqliteScreenplayAgentRepository:
             )
             await self._event_for_turn(
                 turn,
-                "screenplay.agent.task.canceled" if turn.get("task_id")
+                "screenplay.agent.task.canceled" if operation
                 else "screenplay.agent.turn.canceled",
-                {"taskId": turn.get("task_id")},
-                task_id=str(turn.get("task_id") or "") or None,
+                {"taskId": (operation or {}).get("long_task_id")},
+                task_id=str((operation or {}).get("long_task_id") or "") or None,
             )
             return _turn_view(await self._require_turn(turn_id))
 
@@ -334,17 +352,26 @@ class SqliteScreenplayAgentRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
             rows = await self._db.fetch_all(
-                "SELECT * FROM screenplay_agent_turns WHERE project_id = ? "
-                "AND session_id = ? AND rowid >= ("
+                "SELECT t.*, o.id AS authoritative_operation_id, "
+                "o.long_task_id AS authoritative_task_id "
+                "FROM screenplay_agent_turns AS t "
+                "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+                "WHERE t.project_id = ? "
+                "AND t.session_id = ? AND t.rowid >= ("
                 "SELECT rowid FROM screenplay_agent_turns WHERE id = ?) "
-                "ORDER BY rowid",
+                "ORDER BY t.rowid",
                 [turn["project_id"], turn["session_id"], turn_id],
             )
             turn_ids = [str(row["id"]) for row in rows]
             task_ids = [
-                str(row["task_id"])
+                str(row["authoritative_task_id"])
                 for row in rows
-                if row.get("task_id")
+                if row.get("authoritative_task_id")
+            ]
+            operation_ids = [
+                str(row["authoritative_operation_id"])
+                for row in rows
+                if row.get("authoritative_operation_id")
             ]
             turn_marks = _marks(turn_ids)
             await self._db.execute(
@@ -359,6 +386,18 @@ class SqliteScreenplayAgentRepository:
             )
             if task_ids:
                 await self._delete_tasks(task_ids)
+            if operation_ids:
+                operation_marks = _marks(operation_ids)
+                await self._db.execute(
+                    f"DELETE FROM screenplay_agent_operation_commands "
+                    f"WHERE operation_id IN ({operation_marks})",
+                    operation_ids,
+                )
+                await self._db.execute(
+                    f"DELETE FROM screenplay_agent_operations "
+                    f"WHERE id IN ({operation_marks})",
+                    operation_ids,
+                )
             await self._db.execute(
                 f"DELETE FROM screenplay_agent_turns WHERE id IN ({turn_marks})",
                 turn_ids,
@@ -445,8 +484,22 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         await self._require_session(project_id, session_id, writable=False)
         turns = await self._db.fetch_all(
-            "SELECT * FROM screenplay_agent_turns "
-            "WHERE project_id = ? AND session_id = ? ORDER BY rowid",
+            "SELECT t.*, o.id AS authoritative_operation_id, "
+            "o.status AS operation_status, "
+            "o.long_task_id AS authoritative_task_id, "
+            "o.target_role AS operation_target_role, "
+            "o.requirements_json AS operation_requirements_json, "
+            "o.result_revision_id AS operation_result_revision_id, "
+            "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
+            "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
+            "AND e.event_type IN ('screenplay.agent.turn.failed', "
+            "'screenplay.agent.task.failed', 'screenplay.agent.task.paused') "
+            "ORDER BY e.id DESC LIMIT 1)) AS operation_error_json, "
+            "o.create_time AS operation_create_time, "
+            "o.update_time AS operation_update_time "
+            "FROM screenplay_agent_turns AS t "
+            "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+            "WHERE t.project_id = ? AND t.session_id = ? ORDER BY t.rowid",
             [project_id, int(session_id)],
         )
         cursor = await self._db.fetch_one(
@@ -462,22 +515,23 @@ class SqliteScreenplayAgentRepository:
             "tasks": [
                 await self._task_view(turn)
                 for turn in turns
-                if turn.get("task_id")
+                if turn.get("authoritative_task_id")
             ],
         }
 
     async def _task_view(self, turn: Mapping[str, Any]) -> dict[str, Any]:
-        task_id = str(turn["task_id"])
+        task_id = str(turn["authoritative_task_id"])
         task = await self._db.fetch_one(
             "SELECT * FROM ai_agent_long_tasks WHERE id = ?",
             [task_id],
         )
-        if task is None:
-            raise RuntimeError("screenplay durable task does not exist")
-        units = await self._db.fetch_all(
-            "SELECT * FROM ai_agent_long_task_units "
-            "WHERE task_id = ? ORDER BY position",
-            [task_id],
+        units = (
+            await self._db.fetch_all(
+                "SELECT * FROM ai_agent_long_task_units "
+                "WHERE task_id = ? ORDER BY position",
+                [task_id],
+            )
+            if task is not None else []
         )
         outputs = {
             str(row["unit_id"]): _object(row.get("output_json"))
@@ -492,20 +546,22 @@ class SqliteScreenplayAgentRepository:
             "projectId": str(turn["project_id"]),
             "sessionId": int(turn["session_id"]),
             "turnId": str(turn["id"]),
-            "status": str(task["status"]),
-            "targetRole": str(turn.get("target_role") or ""),
+            "status": _operation_task_status(turn.get("operation_status")),
+            "targetRole": str(turn.get("operation_target_role") or ""),
             "intent": _object(turn.get("intent_json")),
             "plannerRunId": str(turn.get("planner_run_id") or "") or None,
-            "totalUnits": int(task["total_units"]),
-            "completedUnits": int(task.get("completed_units") or 0),
-            "resultRevisionId": str(turn.get("result_revision_id") or "") or None,
-            "error": _object(turn.get("error_json")) or None,
+            "totalUnits": int((task or {}).get("total_units") or 0),
+            "completedUnits": int((task or {}).get("completed_units") or 0),
+            "resultRevisionId": str(
+                turn.get("operation_result_revision_id") or ""
+            ) or None,
+            "error": _object(turn.get("operation_error_json")) or None,
             "units": [
                 _unit_view(unit, outputs.get(str(unit["unit_id"]), {}))
                 for unit in units
             ],
-            "createdAt": task.get("create_time"),
-            "updatedAt": task.get("update_time"),
+            "createdAt": turn.get("operation_create_time"),
+            "updatedAt": turn.get("operation_update_time"),
         }
 
     async def list_events(
@@ -531,7 +587,7 @@ class SqliteScreenplayAgentRepository:
 
     async def load_turn(self, turn_id: str) -> dict[str, Any] | None:
         row = await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_turns WHERE id = ?",
+            _TURN_WITH_OPERATION_SQL + " WHERE t.id = ?",
             [turn_id],
         )
         return _turn_view(row) if row is not None else None
@@ -587,12 +643,21 @@ class SqliteScreenplayAgentRepository:
 
     async def _require_turn(self, turn_id: str) -> Mapping[str, Any]:
         row = await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_turns WHERE id = ?",
+            _TURN_WITH_OPERATION_SQL + " WHERE t.id = ?",
             [turn_id],
         )
         if row is None:
             raise NotFoundError("剧本 Agent Turn 不存在")
         return row
+
+    async def _operation_for_turn(
+        self,
+        turn_id: str,
+    ) -> Mapping[str, Any] | None:
+        return await self._db.fetch_one(
+            "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
+            [turn_id],
+        )
 
     async def _require_owned_turn(self, turn_id: str) -> Mapping[str, Any]:
         turn = await self._require_turn(turn_id)
@@ -657,10 +722,13 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "runtimeProfile": _object(row.get("runtime_profile_json")),
         "intent": _object(row.get("intent_json")) or None,
         "plannerRunId": str(row.get("planner_run_id") or "") or None,
-        "taskId": str(row.get("task_id") or "") or None,
-        "targetRole": str(row.get("target_role") or "") or None,
-        "resultRevisionId": str(row.get("result_revision_id") or "") or None,
-        "error": _object(row.get("error_json")) or None,
+        "operationId": str(row.get("authoritative_operation_id") or "") or None,
+        "taskId": str(row.get("authoritative_task_id") or "") or None,
+        "targetRole": str(row.get("operation_target_role") or "") or None,
+        "resultRevisionId": str(
+            row.get("operation_result_revision_id") or ""
+        ) or None,
+        "error": _object(row.get("operation_error_json")) or None,
         "createdAt": row.get("create_time"),
         "updatedAt": row.get("update_time"),
     }
@@ -686,6 +754,11 @@ def _unit_view(
         ),
         "attempt": int(row.get("attempt") or 0),
     }
+
+
+def _operation_task_status(value: object) -> str:
+    status = str(value or "")
+    return "completed" if status == "succeeded" else status
 
 
 def _event_view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -728,6 +801,22 @@ def _marks(values: Sequence[object]) -> str:
     if not values:
         raise ValueError("SQL placeholder values cannot be empty")
     return ",".join("?" for _ in values)
+
+
+_TURN_WITH_OPERATION_SQL = (
+    "SELECT t.*, o.id AS authoritative_operation_id, "
+    "o.status AS operation_status, "
+    "o.long_task_id AS authoritative_task_id, "
+    "o.target_role AS operation_target_role, "
+    "o.result_revision_id AS operation_result_revision_id, "
+    "COALESCE(o.error_json, (SELECT json_extract(e.payload_json, '$.error') "
+    "FROM screenplay_agent_events AS e WHERE e.turn_id = t.id "
+    "AND e.event_type IN ('screenplay.agent.turn.failed', "
+    "'screenplay.agent.task.failed', 'screenplay.agent.task.paused') "
+    "ORDER BY e.id DESC LIMIT 1)) AS operation_error_json "
+    "FROM screenplay_agent_turns AS t "
+    "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id"
+)
 
 
 __all__ = ["LEASE_MS", "SqliteScreenplayAgentRepository"]

@@ -19,6 +19,12 @@ AGENT_REPOSITORY = (
     / "persistence"
     / "sqlite_screenplay_agent_repository.py"
 )
+OPERATION_REPOSITORY = (
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_screenplay_operation_repository.py"
+)
 REMOVED_RUNTIME_FILES = (
     BACKEND_DIR / "database" / "crud" / "screenplay_read_model.py",
     BACKEND_DIR / "routers" / "screenplay.py",
@@ -63,4 +69,29 @@ def test_screenplay_agent_repository_does_not_duplicate_purra_task_state():
     assert "ai_agent_long_tasks" in source
     assert "screenplay_agent_events" in source
     assert "screenplay_agent_chunks" in source
-    assert "screenplay_operations" not in source
+    assert "screenplay_agent_operations" in source
+    assert OPERATION_REPOSITORY.exists()
+    assert "screenplay_agent_operations" in OPERATION_REPOSITORY.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_new_screenplay_agent_code_never_writes_legacy_turn_task_authority():
+    source = AGENT_REPOSITORY.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(AGENT_REPOSITORY))
+    legacy_columns = {
+        "task_id",
+        "result_revision_id",
+        "error_json",
+        "target_role",
+    }
+    violations = sorted({
+        column
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "UPDATE screenplay_agent_turns" in node.value
+        for column in legacy_columns
+        if f"{column} =" in node.value
+    })
+    assert violations == []
