@@ -270,17 +270,9 @@ class ScreenplayAgentChunkProjector:
                             {
                                 "id": str(unit["unit_id"]),
                                 "title": _unit_label(unit, task),
-                                "type": (
-                                    "review"
-                                    if unit["kind"] == "publish_candidate_revision"
-                                    else "write"
-                                ),
+                                "type": "write",
                                 "status": _unit_status(str(unit["status"])),
-                                "executor": (
-                                    "tool"
-                                    if unit["kind"] == "publish_candidate_revision"
-                                    else "model"
-                                ),
+                                "executor": "model",
                                 **(
                                     {"error": _error_message(unit.get("error_json"))}
                                     if unit.get("error_json")
@@ -391,8 +383,6 @@ def _unit_label(unit: Mapping[str, Any], task: Mapping[str, Any] | None) -> str:
             if episode_number
             else f"校验{target}完整性"
         )
-    if kind == "publish_candidate_revision":
-        return "整理并发布候选稿"
     return "执行剧本任务"
 
 

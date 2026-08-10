@@ -46,6 +46,7 @@ from domains.screenplay_agent import (
 from application.screenplay_manifest_compiler import (
     compile_screenplay_manifest,
 )
+from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from exceptions import NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -56,6 +57,10 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 )
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
+    ScreenplayOperationFinalizationCommand,
+    SqliteScreenplayOperationFinalizer,
 )
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
@@ -132,6 +137,10 @@ class ScreenplayAgentService:
         self._operations = SqliteScreenplayOperationRepository(db)
         self._work_items = SqliteWorkItemRepository(db)
         self._parts = ScreenplayPartArtifactQuery(db)
+        self._finalizer = SqliteScreenplayOperationFinalizer(
+            db,
+            candidate_assembler=ScreenplayCandidateAssembler(db),
+        )
 
     async def submit_turn(
         self,
@@ -347,37 +356,32 @@ class ScreenplayAgentService:
                 )
                 await self._stream.terminal(turn_id)
                 return
-            published = await self._parts.require_unit(
-                receipt.task_id,
-                "publish-candidate",
-            )
-            revision_id = str((published or {}).get("revisionId") or "")
-            if not revision_id:
-                raise RuntimeError("screenplay task did not publish a Revision")
-            composed = await self._parts.require_unit(
+            candidate_refs = []
+            for step in compiled.recipe.steps:
+                if step.kind != "validate_manifest_part":
+                    continue
+                ref = await self._parts.validated_unit_ref(
+                    receipt.task_id,
+                    step.id,
+                )
+                if ref is None:
+                    raise RuntimeError(
+                        f"screenplay validation Part is missing: {step.id}"
+                    )
+                candidate_refs.append(ref)
+            final_response_ref = await self._parts.validated_unit_ref(
                 receipt.task_id,
                 "compose-final-response",
             )
-            final_response = str(
-                (composed or {}).get("finalResponse") or ""
-            ).strip()
-            if not final_response:
-                raise RuntimeError(
-                    "screenplay task did not compose a final response"
+            if final_response_ref is None:
+                raise RuntimeError("screenplay final response Part is missing")
+            await self._finalizer.finalize(
+                ScreenplayOperationFinalizationCommand(
+                    operation_id=operation.id,
+                    expected_manifest_digest=compiled.manifest.digest,
+                    candidate_part_refs=tuple(candidate_refs),
+                    final_response_ref=final_response_ref,
                 )
-            await self._operations.succeed(
-                operation.id,
-                result_revision_id=revision_id,
-                finalization_receipt_id=(
-                    f"spafinal:{operation.id}:{revision_id}"
-                ),
-                command_id=f"operation:succeed:{operation.id}:{revision_id}",
-            )
-            await self._repository.complete_operation(
-                turn_id,
-                task_id=receipt.task_id,
-                revision_id=revision_id,
-                assistant_content=final_response,
             )
             await self._stream.terminal(turn_id)
         except Exception as error:

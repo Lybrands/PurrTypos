@@ -25,6 +25,13 @@ OPERATION_REPOSITORY = (
     / "persistence"
     / "sqlite_screenplay_operation_repository.py"
 )
+OPERATION_FINALIZER = (
+    BACKEND_DIR
+    / "infrastructure"
+    / "persistence"
+    / "sqlite_screenplay_operation_finalizer.py"
+)
+AGENT_SERVICE = BACKEND_DIR / "application" / "screenplay_agent_service.py"
 REMOVED_RUNTIME_FILES = (
     BACKEND_DIR / "database" / "crud" / "screenplay_read_model.py",
     BACKEND_DIR / "routers" / "screenplay.py",
@@ -95,3 +102,19 @@ def test_new_screenplay_agent_code_never_writes_legacy_turn_task_authority():
         if f"{column} =" in node.value
     })
     assert violations == []
+
+
+def test_operation_finalizer_is_the_only_success_commit_boundary():
+    service = AGENT_SERVICE.read_text(encoding="utf-8")
+    finalizer = OPERATION_FINALIZER.read_text(encoding="utf-8")
+
+    assert OPERATION_FINALIZER.exists()
+    assert "SqliteScreenplayOperationFinalizer" in service
+    assert "self._finalizer.finalize(" in service
+    assert "self._operations.succeed(" not in service
+    assert "self._repository.complete_operation(" not in service
+    assert "publish_candidate_revision" not in service
+    assert "publish_screenplay_agent_task_candidate(" in finalizer
+    assert "UPDATE screenplay_agent_turns SET status = 'completed'" in finalizer
+    assert "UPDATE screenplay_agent_operations SET status = 'succeeded'" in finalizer
+    assert "command_type, request_digest" in finalizer

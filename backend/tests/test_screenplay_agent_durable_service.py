@@ -11,6 +11,9 @@ from application.screenplay_agent_service import (
     ResolvedScreenplayTask,
     ScreenplayAgentService,
 )
+from application.screenplay_candidate_assembler import (
+    ScreenplayCandidateAssembler,
+)
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
@@ -23,6 +26,10 @@ from domains.screenplay_agent import (
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
+    ScreenplayOperationFinalizationCommand,
+    SqliteScreenplayOperationFinalizer,
 )
 from purra.long_tasks import LongTaskUnitResult
 from purra.errors import ModelGatewayError
@@ -80,8 +87,23 @@ class _UnitExecutor:
                 ),
                 "runId": "run-compose-final-response",
             }
-        elif context.unit.id == "publish-candidate":
-            output = {"revisionId": "sprev-durable-candidate"}
+        elif context.unit.id.endswith(":validation"):
+            episode_number = int(context.unit.id.split(":")[1])
+            output = {
+                "executionSummary": f"完成第 {episode_number} 集",
+                "sceneListId": "sprev-scenes",
+                "episodeDraft": {
+                    "episodeNumber": episode_number,
+                    "title": f"第 {episode_number} 集",
+                    "sceneIds": [f"ep{episode_number:02d}_s01"],
+                    "sceneTexts": [{
+                        "sceneId": f"ep{episode_number:02d}_s01",
+                        "contentText": f"第 {episode_number} 集正文",
+                    }],
+                    "contentText": f"第 {episode_number} 集正文",
+                    "continuitySummary": f"第 {episode_number} 集连续性",
+                },
+            }
         else:
             output = {"partId": context.unit.id}
         ref = await self._parts.write_host_part(
@@ -98,11 +120,195 @@ class _UnitExecutor:
             run_id=ref.run_id,
             artifact_digest=ref.content_digest,
             validation_receipt=ref.validation_receipt,
-            metadata=(
-                {"revisionId": output["revisionId"]}
-                if "revisionId" in output else {}
-            ),
         )
+
+
+async def _finalization_fixture(db):
+    projects = ScreenplayV2ProjectService(db)
+    workspace = await projects.create_project(
+        command_id="create-finalizer-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Atomic finalizer",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    project_id = workspace["project"]["id"]
+    session = await projects.ensure_current_session(project_id)
+    turn_id = "turn-atomic-finalizer"
+    await db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content, "
+        "planner_run_id) VALUES (?, ?, ?, ?, 'running', ?, ?)",
+        [
+            turn_id,
+            project_id,
+            session["id"],
+            "command-atomic-finalizer",
+            "生成创作简报",
+            "run-planner-finalizer",
+        ],
+    )
+    manifest_digest = "sha256:atomic-finalizer-manifest"
+    operations = SqliteScreenplayOperationRepository(db)
+    operation = await operations.create(ScreenplayOperationCreateCommand(
+        turn_id=turn_id,
+        project_id=project_id,
+        session_id=session["id"],
+        target_role="creativeBrief",
+        manifest_digest=manifest_digest,
+        requirements_json={
+            "targetRole": "creativeBrief",
+            "baseRevisionId": None,
+            "recipe": {"steps": [
+                {
+                    "id": "document:validation",
+                    "kind": "validate_manifest_part",
+                },
+                {
+                    "id": "compose-final-response",
+                    "kind": "compose_final_response",
+                },
+            ]},
+        },
+    ))
+    await operations.attach_long_task(
+        operation.id,
+        long_task_id="task-atomic-finalizer",
+        command_id="attach-task-atomic-finalizer",
+    )
+    parts = ScreenplayPartArtifactQuery(db)
+    candidate_ref = await parts.write_host_part(
+        project_id=project_id,
+        task_id="task-atomic-finalizer",
+        unit_id="document:validation",
+        semantic_key="document:validation",
+        part_kind="validate_manifest_part",
+        output={
+            "title": "创作简报",
+            "executionSummary": "已完成创作简报",
+            "contentText": "# 创作简报\n\n人物驱动。",
+            "contentJson": {
+                "schemaVersion": 1,
+                "documentKind": "creative_brief",
+                "fields": {"approach": "人物驱动", "premise": "意外重逢"},
+            },
+        },
+    )
+    response_ref = await parts.write_host_part(
+        project_id=project_id,
+        task_id="task-atomic-finalizer",
+        unit_id="compose-final-response",
+        semantic_key="compose-final-response",
+        part_kind="compose_final_response",
+        output={
+            "finalResponse": "创作简报已经完成，可以在候选稿中查看。",
+        },
+    )
+    command = ScreenplayOperationFinalizationCommand(
+        operation_id=operation.id,
+        expected_manifest_digest=manifest_digest,
+        candidate_part_refs=(candidate_ref,),
+        final_response_ref=response_ref,
+    )
+    finalizer = SqliteScreenplayOperationFinalizer(
+        db,
+        candidate_assembler=ScreenplayCandidateAssembler(db),
+    )
+    return operation, turn_id, command, finalizer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ("revision", "turn", "operation"))
+async def test_operation_finalization_rolls_back_every_write_on_failure(
+    screenplay_db,
+    failure_point,
+):
+    operation, turn_id, command, finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    trigger = {
+        "revision": (
+            "CREATE TRIGGER inject_finalizer_failure BEFORE INSERT ON "
+            "screenplay_revisions WHEN NEW.agent_task_id = 'task-atomic-finalizer' "
+            "BEGIN SELECT RAISE(ABORT, 'injected revision failure'); END"
+        ),
+        "turn": (
+            "CREATE TRIGGER inject_finalizer_failure BEFORE UPDATE OF status ON "
+            "screenplay_agent_turns WHEN NEW.id = 'turn-atomic-finalizer' "
+            "AND NEW.status = 'completed' "
+            "BEGIN SELECT RAISE(ABORT, 'injected turn failure'); END"
+        ),
+        "operation": (
+            "CREATE TRIGGER inject_finalizer_failure BEFORE UPDATE OF status ON "
+            "screenplay_agent_operations WHEN NEW.id = '" + operation.id + "' "
+            "AND NEW.status = 'succeeded' "
+            "BEGIN SELECT RAISE(ABORT, 'injected operation failure'); END"
+        ),
+    }[failure_point]
+    await screenplay_db.execute(trigger)
+
+    with pytest.raises(Exception, match=f"injected {failure_point} failure"):
+        await finalizer.finalize(command)
+
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions "
+        "WHERE agent_task_id = 'task-atomic-finalizer'"
+    ) == {"count": 0}
+    turn = await screenplay_db.fetch_one(
+        "SELECT status, assistant_content FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    )
+    assert turn == {"status": "running", "assistant_content": ""}
+    stored_operation = await screenplay_db.fetch_one(
+        "SELECT status, result_revision_id, finalization_receipt_id "
+        "FROM screenplay_agent_operations WHERE id = ?",
+        [operation.id],
+    )
+    assert stored_operation == {
+        "status": "running",
+        "result_revision_id": None,
+        "finalization_receipt_id": None,
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operation_commands "
+        "WHERE operation_id = ? AND command_type = 'finalize'",
+        [operation.id],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_operation_finalization_replay_returns_the_same_receipt(screenplay_db):
+    operation, turn_id, command, finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+
+    first = await finalizer.finalize(command)
+    replayed = await finalizer.finalize(command)
+
+    assert replayed == first
+    assert first.operation_id == operation.id
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions "
+        "WHERE agent_task_id = 'task-atomic-finalizer'"
+    ) == {"count": 1}
+    assert await screenplay_db.fetch_one(
+        "SELECT status, assistant_content FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {
+        "status": "completed",
+        "assistant_content": "创作简报已经完成，可以在候选稿中查看。",
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT status, result_revision_id, finalization_receipt_id "
+        "FROM screenplay_agent_operations WHERE id = ?",
+        [operation.id],
+    ) == {
+        "status": "succeeded",
+        "result_revision_id": first.revision_id,
+        "finalization_receipt_id": first.id,
+    }
 
 
 class _PausedUnitExecutor:
@@ -298,10 +504,9 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
         session_id=session["id"],
     )
     task = snapshot["tasks"][0]
+    revision_id = snapshot["turns"][0]["resultRevisionId"]
     assert snapshot["turns"][0]["taskId"] == task["id"]
-    assert snapshot["turns"][0]["resultRevisionId"] == (
-        "sprev-durable-candidate"
-    )
+    assert str(revision_id).startswith("sprev_")
     assert snapshot["turns"][0]["assistantContent"] == (
         "第 4 至 6 集候选稿已经完成。可以在候选稿区域查看并继续编辑。"
     )
@@ -313,7 +518,8 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert operation["status"] == "succeeded"
     assert operation["long_task_id"] == task["id"]
     assert operation["target_role"] == "screenplayDraft"
-    assert operation["result_revision_id"] == "sprev-durable-candidate"
+    assert operation["result_revision_id"] == revision_id
+    assert operation["finalization_receipt_id"]
     assert str(operation["manifest_digest"]).startswith("sha256:")
     legacy_turn_state = await screenplay_db.fetch_one(
         "SELECT operation_id, task_id, target_role, result_revision_id, error_json "
@@ -328,7 +534,8 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
         "error_json": None,
     }
     assert task["status"] == "completed"
-    assert task["resultRevision"] is None
+    assert task["resultRevision"]["id"] == revision_id
+    assert task["resultRevision"]["agentTaskId"] == task["id"]
     expected_ids = [
         "evidence:4",
         "draft:4:ep04_s01",
@@ -343,7 +550,6 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
         "episode:6:metadata",
         "episode:6:validation",
         "compose-final-response",
-        "publish-candidate",
     ]
     assert [unit["id"] for unit in task["units"]] == expected_ids
     def output_ref(unit_id: str) -> str:
@@ -368,16 +574,6 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
                 for number in (4, 5, 6)
             },
         ),
-        (
-            "publish-candidate",
-            {
-                **{
-                    f"episode:{number}:validation": output_ref(f"episode:{number}:validation")
-                    for number in (4, 5, 6)
-                },
-                "compose-final-response": output_ref("compose-final-response"),
-            },
-        ),
     ]
     assert await screenplay_db.fetch_all(
         "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -400,7 +596,7 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     ]
     assert progress
     assert progress[-1]["status"] == "completed"
-    assert progress[-1]["completedUnits"] == 14
+    assert progress[-1]["completedUnits"] == 13
     assert [unit["title"] for unit in progress[-1]["units"]] == [
         "整理第 4 集创作依据",
         "创作第 4 集场景 ep04_s01",
@@ -415,7 +611,6 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
         "整理第 6 集连续性",
         "校验第 6 集完整性",
         "整理最终答复",
-        "整理并发布候选稿",
     ]
     assert any(
         any(unit["status"] == "claimed" for unit in snapshot["units"])
