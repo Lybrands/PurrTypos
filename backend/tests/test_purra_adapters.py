@@ -22,6 +22,11 @@ from purra.contracts import (
     ToolSchema,
 )
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.model_protocol import (
+    ModelProtocolCapabilities,
+    ReasoningControl,
+    ReasoningReplayPolicy,
+)
 from purra.ports import ModelGateway
 from purra.runtime import AgentRuntime
 from infrastructure.models import provider_model_gateway
@@ -66,6 +71,23 @@ def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
 
     assert options["temperature"] == 0
     assert options["thinking"] == {"type": "disabled"}
+
+
+def test_incompatible_reasoning_selection_fails_before_provider_invocation():
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="custom-model",
+            protocol_capabilities=ModelProtocolCapabilities(
+                reasoning_control=ReasoningControl.UNAVAILABLE,
+            ),
+            options={"thinking": {"type": "enabled"}},
+        ),
+        reasoning_mode=ReasoningMode.DEFAULT,
+    )
+
+    with pytest.raises(UnsupportedModelFeatureError):
+        provider_model_gateway._provider_options(invocation)
 
 
 def test_kimi_k3_internal_json_calls_receive_reasoning_headroom():
@@ -437,7 +459,13 @@ async def test_provider_model_gateway_maps_typed_tool_continuation_messages(monk
             AgentMessage(role="tool", content="result", tool_call_id="call-1"),
         ],
         ModelInvocation(
-            request=ModelRequest(provider="openai", model="model"),
+            request=ModelRequest(
+                provider="openai",
+                model="model",
+                protocol_capabilities=ModelProtocolCapabilities(
+                    reasoning_replay=ReasoningReplayPolicy.REQUIRED,
+                ),
+            ),
             tool_choice=ToolChoiceMode.NONE,
         ),
     )

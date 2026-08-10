@@ -550,7 +550,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
                 "contextMaxOutputTokens": 100_000,
                 "limitingFactor": "task_estimate",
             },
-            "reasoningMode": "default",
+                "reasoningMode": "disabled",
             "toolChoice": "none",
             "toolNames": [],
             "messageCount": 3,

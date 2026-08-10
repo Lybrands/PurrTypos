@@ -134,6 +134,20 @@ export function deliverableRoleForProposal(
   return roleByKind[kind]
 }
 
+export interface RevisionLibraryTarget {
+  role: ScreenplayV2DeliverableRole
+  revisionId: string
+}
+
+export function revisionLibraryTarget(
+  artifact: RevisionLibraryTarget | null,
+): RevisionLibraryTarget | null {
+  return artifact ? {
+    role: artifact.role,
+    revisionId: artifact.revisionId,
+  } : null
+}
+
 export function findWorkspaceRevision(input: {
   workspace: ScreenplayV2Workspace | null
   role: ScreenplayV2DeliverableRole

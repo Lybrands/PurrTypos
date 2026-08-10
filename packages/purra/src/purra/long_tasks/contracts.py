@@ -36,8 +36,10 @@ class LongTaskStatus(StrEnum):
 
 class LongTaskUnitStatus(StrEnum):
     PENDING = "pending"
+    WAITING_RETRY = "waiting_retry"
     CLAIMED = "claimed"
     RUNNING = "running"
+    BLOCKED = "blocked"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"

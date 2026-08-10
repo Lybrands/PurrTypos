@@ -19,6 +19,11 @@ from purra.contracts import (
 )
 from purra.model_execution import ManagedModelExecutor, ManagedModelStream
 from purra.errors import ModelGatewayError
+from purra.recovery import (
+    FailureCategory,
+    FailureDisposition,
+    decide_failure,
+)
 from purra.output_budget import OutputBudgetPolicy
 from application.screenplay_agent_service import (
     PlannedScreenplayIntent,
@@ -30,9 +35,13 @@ from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
+    _unit_result,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
-from application.screenplay_agent_planner import SqliteScreenplayTaskResolver
+from application.screenplay_agent_planner import (
+    ModelScreenplayIntentPlanner,
+    SqliteScreenplayTaskResolver,
+)
 from application.screenplay_structured_call import (
     StreamedModelText,
     StructuredModelResult,
@@ -49,6 +58,8 @@ from domains.screenplay_agent import (
     ScreenplayIntentScope,
 )
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
+from domains.screenplay_agent.recovery import classify_screenplay_run_failure
+from domains.screenplay_agent.recipe_compiler import compile_screenplay_task
 from exceptions import AppError
 from infrastructure.persistence.sqlite_screenplay_agent_repository import (
     SqliteScreenplayAgentRepository,
@@ -58,6 +69,51 @@ from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_formal_recipe_separates_evidence_generation_validation_and_publish():
+    compiled = compile_screenplay_task(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="创作第 4 集",
+            requested_deliverable="screenplayDraft",
+        ),
+        target_role="screenplayDraft",
+        episode_numbers=(4,),
+        original_request="请创作第 4 集，并保留上一集的结尾伏笔。",
+    )
+
+    steps = compiled.recipe.steps
+    assert [step.id for step in steps] == [
+        "collect-evidence-episode-4",
+        "generate-candidate-episode-4",
+        "validate-candidate-episode-4",
+        "compose-final-response",
+        "publish-candidate",
+    ]
+    assert [step.kind for step in steps] == [
+        "collect_evidence",
+        "generate_candidate",
+        "validate_candidate",
+        "compose_final_response",
+        "publish_candidate_revision",
+    ]
+    assert steps[0].metadata["effectClass"] == "read_only"
+    assert steps[1].metadata["effectClass"] == "idempotent_write"
+    assert steps[2].metadata["effectClass"] == "read_only"
+    assert steps[3].metadata["effectClass"] == "read_only"
+    assert steps[1].depends_on == (steps[0].id,)
+    assert steps[2].depends_on == (steps[1].id,)
+    assert steps[3].depends_on == (steps[2].id,)
+    assert steps[4].depends_on == (steps[2].id, steps[3].id)
+    assert steps[3].metadata["input"] == {
+        "targetRole": "screenplayDraft",
+        "instruction": "创作第 4 集",
+        "userRequest": "请创作第 4 集，并保留上一集的结尾伏笔。",
+        "constraints": [],
+        "preserve": [],
+    }
+    assert compiled.recipe.metadata["recipeVersion"] == 3
 
 
 async def test_execution_progress_is_projected_before_the_json_is_complete():
@@ -167,14 +223,14 @@ async def test_raw_reasoning_is_diagnostic_only():
             call_parameters=(),
         ),
         Controller(),
-        execution_progress_fields={"executionSummary": "请求理解："},
+        execution_progress_fields={"executionSummary": ""},
         emit_execution_progress=lambda delta: _append_async(projected, delta),
         emit_model_diagnostic=lambda chunk: _append_async(diagnostics, chunk),
     )
 
     visible = "".join(projected)
     assert reasoning not in visible
-    assert "请求理解：确定创作第 7 至 8 集。" in visible
+    assert visible == "确定创作第 7 至 8 集。\n"
     assert "executionSummary" not in visible
     assert "{" not in visible
     assert recorded_events == []
@@ -210,6 +266,234 @@ async def _project_and_session(db):
     )
     session = await projects.ensure_current_session(workspace["project"]["id"])
     return projects, workspace, session
+
+
+async def test_turn_start_does_not_emit_a_host_authored_plan(
+    temp_db: DatabaseConnection,
+):
+    projects, workspace, session = await _project_and_session(temp_db)
+    service = ScreenplayAgentService(
+        temp_db,
+        owner_id="no-canned-plan-test",
+        planner=object(),  # type: ignore[arg-type]
+        resolver=object(),  # type: ignore[arg-type]
+        unit_executor_factory=lambda _runtime: object(),
+        projects=projects,
+    )
+    request = _request(session["id"], "继续完成第七集。")
+
+    turn = await service.submit_turn(
+        command_id="no-canned-plan",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    chunks = [
+        json.loads(row["chunk_json"])
+        for row in await temp_db.fetch_all(
+            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+        )
+    ]
+    assert chunks == [{
+        "agentRunStarted": {
+            "runId": turn["id"],
+            "status": "running",
+            "goal": "继续完成第七集。",
+        },
+    }]
+
+
+async def test_planner_projects_model_owned_summary_without_a_host_prefix(
+    temp_db: DatabaseConnection,
+):
+    projects, workspace, session = await _project_and_session(temp_db)
+    planner_output = json.dumps({
+        "executionSummary": "确认当前阶段后直接回答，不创建交付物。",
+        "action": "answer",
+        "instruction": "说明当前阶段",
+        "scope": {"kind": "current_stage"},
+        "constraints": [],
+        "preserve": [],
+        "requestedDeliverable": None,
+        "reply": "当前处于创作简报阶段。",
+    }, ensure_ascii=False)
+
+    class PlannerGateway(_ModelGateway):
+        async def stream(self, messages, invocation, signal=None):
+            del messages, signal
+            self.invocations.append(invocation)
+
+            async def chunks():
+                yield ModelStreamChunk(content_delta=planner_output)
+                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
+
+            return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+    gateway = PlannerGateway("secret")
+    planner = ModelScreenplayIntentPlanner(
+        temp_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    )
+    service = ScreenplayAgentService(
+        temp_db,
+        owner_id="model-summary-ownership-test",
+        planner=planner,
+        resolver=SqliteScreenplayTaskResolver(temp_db),
+        unit_executor_factory=lambda _runtime: object(),
+        projects=projects,
+    )
+    request = _request(session["id"], "现在处于哪个阶段？")
+    turn = await service.submit_turn(
+        command_id="model-summary-ownership",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    chunks = [
+        json.loads(row["chunk_json"])
+        for row in await temp_db.fetch_all(
+            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+        )
+    ]
+    visible = "".join(
+        chunk.get("commentaryDelta", "") for chunk in chunks
+    )
+    assert visible == "确认当前阶段后直接回答，不创建交付物。\n"
+
+
+async def test_published_unit_metadata_does_not_invent_a_final_answer():
+    result = _unit_result(
+        "screenplay-task-output://task-1/publish-candidate",
+        {"revisionId": "sprev-1"},
+    )
+
+    assert result.metadata == {"revisionId": "sprev-1"}
+
+
+async def test_final_response_composition_receives_only_public_candidate_facts(
+    temp_db: DatabaseConnection,
+):
+    class CapturingModels:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def run_json(self, **kwargs):
+            self.calls.append(kwargs)
+            value = kwargs["validate"]({
+                "finalResponse": (
+                    "第 4 至 5 集候选稿已经完成，并保留了上一集的结尾伏笔。"
+                    "可以在候选稿区域查看并继续编辑。"
+                ),
+            })
+            return StructuredModelResult(value, "run-final-response")
+
+    models = CapturingModels()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        model_executor_factory=_model_executor_factory,
+    )
+    executor._models = models  # type: ignore[assignment]
+    task = {
+        "id": "task-final-response-facts",
+        "projectId": "project-final-response-facts",
+        "sessionId": 7,
+        "turnId": "turn-final-response-facts",
+        "targetRole": "screenplayDraft",
+        "units": [
+            {
+                "id": "validate-candidate-episode-4",
+                "kind": "validate_candidate",
+                "status": "completed",
+                "output": {
+                    "executionSummary": "承接上一集选择并完成本集转折。",
+                    "episodeDraft": {
+                        "episodeNumber": 4,
+                        "title": "重逢",
+                        "sceneIds": ["scene-4-a", "scene-4-b"],
+                        "contentText": "绝不能进入最终回答上下文的第四集正文",
+                        "sceneTexts": [{
+                            "sceneId": "scene-4-a",
+                            "contentText": "绝不能进入最终回答上下文的场景正文",
+                        }],
+                    },
+                    "validationReceipt": "receipt-4",
+                    "runId": "run-episode-4",
+                },
+            },
+            {
+                "id": "validate-candidate-episode-5",
+                "kind": "validate_candidate",
+                "status": "completed",
+                "output": {
+                    "executionSummary": "推进新冲突并留下后续问题。",
+                    "episodeDraft": {
+                        "episodeNumber": 5,
+                        "title": "追问",
+                        "sceneIds": ["scene-5-a"],
+                        "contentText": "绝不能进入最终回答上下文的第五集正文",
+                    },
+                    "validationReceipt": "receipt-5",
+                    "runId": "run-episode-5",
+                },
+            },
+        ],
+    }
+    unit = {
+        "id": "compose-final-response",
+        "kind": "compose_final_response",
+        "input": {
+            "targetRole": "screenplayDraft",
+            "instruction": "完成第 4 至 5 集",
+            "userRequest": "请把第 4 至 5 集写完。",
+            "constraints": ["每集结尾留下问题"],
+            "preserve": ["保留上一集结尾伏笔"],
+        },
+    }
+
+    result = await executor.execute(
+        task=task,
+        unit=unit,
+        runtime=object(),
+    )
+
+    assert result == {
+        "finalResponse": (
+            "第 4 至 5 集候选稿已经完成，并保留了上一集的结尾伏笔。"
+            "可以在候选稿区域查看并继续编辑。"
+        ),
+        "runId": "run-final-response",
+    }
+    assert len(models.calls) == 1
+    payload = models.calls[0]["user_payload"]
+    assert payload == {
+        "request": "请把第 4 至 5 集写完。",
+        "instruction": "完成第 4 至 5 集",
+        "target": {"role": "screenplayDraft", "label": "剧本正文"},
+        "constraints": ["每集结尾留下问题"],
+        "preserve": ["保留上一集结尾伏笔"],
+        "candidates": [
+            {
+                "episodeNumber": 4,
+                "title": "重逢",
+                "sceneCount": 2,
+                "executionSummary": "承接上一集选择并完成本集转折。",
+            },
+            {
+                "episodeNumber": 5,
+                "title": "追问",
+                "sceneCount": 1,
+                "executionSummary": "推进新冲突并留下后续问题。",
+            },
+        ],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "contentText" not in serialized
+    assert "sceneTexts" not in serialized
+    assert "validationReceipt" not in serialized
+    assert "run-episode" not in serialized
+    assert models.calls[0].get("execution_progress_fields") is None
 
 
 async def test_planning_context_contains_state_not_artifact_bodies(
@@ -350,39 +634,29 @@ async def test_screenplay_task_preserves_managed_model_failure_code():
     assert "不完整结果未被保存" in message
 
 
-async def test_screenplay_task_retries_only_the_uncommitted_truncated_fragment():
+@pytest.mark.parametrize(("code", "retryable", "expected_category"), (
+    ("tool_execution_failed", True, FailureCategory.TOOL_EXECUTION),
+    ("model_output_truncated", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    ("invalid_tool_results", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    ("max_model_rounds", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    ("invalid_tool_arguments_json", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    ("tool_call_truncated", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    ("provider_bad_request", False, FailureCategory.PROTOCOL_INCOMPATIBLE),
+))
+async def test_screenplay_failure_codes_have_typed_durable_dispositions(
+    code,
+    retryable,
+    expected_category,
+):
     executor = object.__new__(ScreenplayTaskUnitExecutor)
+    error = ModelGatewayError(code, code=code, retryable=retryable)
 
-    assert executor.is_retryable(ModelGatewayError(
-        "provider stream reached its output limit",
-        code="model_output_truncated",
-        retryable=True,
-    )) is True
-    assert executor.is_retryable(ModelGatewayError(
-        "provider truncated one uncommitted tool call",
-        code="tool_call_truncated",
-        retryable=True,
-    )) is True
-    assert executor.is_retryable(ModelGatewayError(
-        "model selected an input outside the scoped read contract",
-        code="tool_input_invalid",
-        retryable=True,
-    )) is True
-    assert executor.is_retryable(ModelGatewayError(
-        "model emitted malformed function arguments",
-        code="invalid_tool_arguments_json",
-        retryable=True,
-    )) is True
-    assert executor.is_retryable(ModelGatewayError(
-        "model exhausted a bounded research loop",
-        code="max_model_rounds",
-        retryable=True,
-    )) is True
-    assert executor.is_retryable(ModelGatewayError(
-        "provider stream disconnected",
-        code="upstream_stream_interrupted",
-        retryable=True,
-    )) is True
+    failure = executor.classify_failure(error)
+    decision = decide_failure(failure, attempts_remaining=0)
+
+    assert failure.category is expected_category
+    assert failure.code == code
+    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
 
 
 class _Planner:
@@ -454,7 +728,11 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
 
     monkeypatch.setattr(screenplay_structured_call, "_stream_text", fake_stream)
     runtime = _request(session["id"], "测试结构化输出").runtime
-    runtime.options["thinking"] = {"type": "enabled"}
+    runtime.options.update({
+        "model": "deepseek-v4-flash",
+        "model_profile": "deepseek:deepseek-v4-flash",
+        "thinking": {"type": "enabled"},
+    })
     gateway = _ModelGateway("secret")
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
@@ -486,11 +764,13 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     assert gateway.calls[1][0][1].content == malformed
     assert "question" not in str(gateway.calls[1][0][1].content)
     assert await temp_db.fetch_one(
-        "SELECT status, binding_namespace FROM ai_agent_runs WHERE id = ?",
+        "SELECT status, binding_namespace, final_response "
+        "FROM ai_agent_runs WHERE id = ?",
         [result.run_id],
     ) == {
         "status": "done",
         "binding_namespace": "screenplay.agent.test",
+        "final_response": "",
     }
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_events "
@@ -607,7 +887,11 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
 
     monkeypatch.setattr(screenplay_structured_call, "_stream_text", capture_stream)
     runtime = _request(session["id"], "测试思考配置").runtime
-    runtime.options["thinking"] = {"type": "enabled"}
+    runtime.options.update({
+        "model": "deepseek-v4-flash",
+        "model_profile": "deepseek:deepseek-v4-flash",
+        "thinking": {"type": "enabled"},
+    })
 
     await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
@@ -979,13 +1263,23 @@ async def _install_head(db, project_id: str, role: str, content: dict) -> str:
 class _StructuredDraftModels:
     async def run_json(self, **kwargs):
         payload = kwargs["user_payload"]
+        if kwargs["phase"] == "screenplay_final_response_composition":
+            value = kwargs["validate"]({
+                "finalResponse": (
+                    "第 1 至 2 集候选稿已经完成。"
+                    "可以在候选稿区域查看并继续编辑。"
+                ),
+            })
+            return StructuredModelResult(value, "run-final-response")
         number = int(payload["episodeNumber"])
         return StructuredModelResult({
             "episodeNumber": number,
             "title": f"第 {number} 集",
+            "executionSummary": f"完成第 {number} 集场景推进与连续性校验。",
             "continuitySummary": f"第 {number} 集连续性",
             "scenes": [{
                 "sceneId": scene["id"],
+                "processSummary": f"场景 {scene['id']} 推演：完成目标与转折。",
                 "sceneText": f"{scene['heading']}\n\n第 {number} 集正文",
             } for scene in payload["scenePlan"]["scenes"]],
         }, f"run-draft-{number}")
@@ -997,6 +1291,7 @@ class _CheckpointingToolCalls:
         self.failed = False
         self.calls: list[tuple[str, str, ReasoningMode]] = []
         self.user_payloads: list[dict] = []
+        self.system_instructions: list[str] = []
 
     async def run_candidate(self, **kwargs):
         context = kwargs["domain_context"]
@@ -1004,6 +1299,7 @@ class _CheckpointingToolCalls:
         part_key = context.expected_part_key
         self.calls.append((part_type, part_key, kwargs["reasoning_mode"]))
         self.user_payloads.append(dict(kwargs["user_payload"]))
+        self.system_instructions.append(str(kwargs["system_instruction"]))
         if part_key == self.fail_once_key and not self.failed:
             self.failed = True
             raise ModelGatewayError(
@@ -1127,6 +1423,94 @@ class _IncrementalEpisodeContext:
         }
 
 
+class _EvidenceCheckpointOnlyContext:
+    def __getattr__(self, name):
+        raise AssertionError(f"generation refetched evidence via {name}")
+
+
+async def test_formal_generation_consumes_evidence_without_refetching_context(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    tool_calls = _CheckpointingToolCalls()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    executor._context = _EvidenceCheckpointOnlyContext()
+    evidence = {
+        "episodeNumber": 1,
+        "manifest": {
+            "sceneListId": "scene-list-head",
+            "sceneIds": ("scene-1", "scene-2"),
+        },
+        "writingContext": {
+            "sceneListId": "scene-list-head",
+            "scenePlans": {
+                "scene-1": {"id": "scene-1", "objective": "建立危机"},
+                "scene-2": {"id": "scene-2", "objective": "完成转折"},
+            },
+            "currentDraftScenes": {},
+            "previousEpisodeContinuity": None,
+            "reviewRevisionId": None,
+            "reviewIssues": [],
+            "acceptedGuidance": {},
+        },
+        "acceptedDeliverables": [],
+    }
+    task = {
+        "id": "task-formal-evidence-checkpoint",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-formal-evidence-checkpoint",
+        "targetRole": "screenplayDraft",
+        "units": [
+            {
+                "id": "collect-evidence-episode-1",
+                "kind": "collect_evidence",
+                "status": "completed",
+                "input": {"episodeNumber": 1},
+                "output": {"evidence": evidence, "evidenceReceipt": "receipt-1"},
+            },
+            {
+                "id": "generate-candidate-episode-1",
+                "kind": "generate_candidate",
+                "status": "pending",
+                "dependsOn": ["collect-evidence-episode-1"],
+                "input": {
+                    "episodeNumber": 1,
+                    "instruction": "创作第一集",
+                    "baseRevisionId": None,
+                },
+            },
+        ],
+    }
+
+    generated = await executor.execute(
+        task=task,
+        unit=task["units"][1],
+        runtime=object(),
+    )
+    task["units"][1].update({"status": "completed", "output": generated})
+    validation_unit = {
+        "id": "validate-candidate-episode-1",
+        "kind": "validate_candidate",
+        "status": "pending",
+        "dependsOn": ["generate-candidate-episode-1"],
+        "input": {"episodeNumber": 1},
+    }
+    task["units"].append(validation_unit)
+    validated = await executor.execute(
+        task=task,
+        unit=validation_unit,
+        runtime=object(),
+    )
+
+    assert validated["episodeDraft"]["sceneIds"] == ["scene-1", "scene-2"]
+    assert len(validated["validationReceipt"]) == 64
+    assert [key for _, key, _ in tool_calls.calls] == ["scene-1", "scene-2", "1"]
+
+
 async def test_episode_generation_checkpoints_scenes_and_resumes_after_truncation(
     temp_db: DatabaseConnection,
 ):
@@ -1225,7 +1609,27 @@ class _IncrementalReviewContext:
 
     async def episode_context(self, project_id, episode_number, **kwargs):
         assert project_id and kwargs["draft_revision_id"] == "draft-head"
-        return {"currentDraft": {"sceneIds": [f"scene-{episode_number}"]}}
+        return {
+            "episode": {
+                "episodeNumber": episode_number,
+                "scenes": [{
+                    "id": f"scene-{episode_number}",
+                    "objective": "核对真实正文",
+                }],
+            },
+            "previousEpisode": (
+                {"continuitySummary": "上一集连续性"}
+                if episode_number > 1 else None
+            ),
+            "currentDraft": {
+                "episodeNumber": episode_number,
+                "sceneIds": [f"scene-{episode_number}"],
+                "sceneTexts": [{
+                    "sceneId": f"scene-{episode_number}",
+                    "contentText": f"第 {episode_number} 集真实正文",
+                }],
+            },
+        }
 
 
 async def test_review_generation_checkpoints_each_episode_and_aggregates_host_side(
@@ -1259,6 +1663,112 @@ async def test_review_generation_checkpoints_each_episode_and_aggregates_host_si
     assert result["contentJson"]["verdict"] == "revise"
     assert result["contentJson"]["issues"][0]["id"] == "episode-1:issue-1"
     assert len(result["sourceRunIds"]) == 2
+    review_input = tool_calls.user_payloads[0]["reviewInput"]
+    assert review_input["contractVersion"] == 2
+    assert review_input["draftRevisionId"] == "draft-head"
+    assert review_input["episodeNumber"] == 1
+    assert review_input["sceneIds"] == ["scene-1"]
+    assert "第 1 集真实正文" in review_input["draftContentText"]
+    assert review_input["scenePlan"]["scenes"][0]["id"] == "scene-1"
+    assert len(review_input["contentDigest"]) == 64
+    assert "按需调用工具读取" not in tool_calls.system_instructions[0]
+
+
+async def test_review_generation_keeps_execution_failures_out_of_findings(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    tool_calls = _CheckpointingToolCalls(fail_once_key="2")
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    executor._context = _IncrementalReviewContext()
+    task = {
+        "id": "task-partial-review",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-partial-review",
+        "targetRole": "review",
+    }
+    unit = {"id": "generate-deliverable", "input": {"instruction": "审阅全剧"}}
+
+    result = await executor._generate_review_incrementally(
+        task=task,
+        unit=unit,
+        runtime=object(),
+        signal=None,
+        reviewed_draft_id="draft-head",
+    )
+
+    assert result["contentJson"]["completedEpisodes"] == [1]
+    assert result["contentJson"]["reviewedEpisodes"] == [1, 2]
+    assert result["contentJson"]["failedEpisodes"] == [{
+        "episodeNumber": 2,
+        "code": "model_output_truncated",
+        "message": "第 2 集审阅失败",
+        "retryable": True,
+    }]
+    assert [item["id"] for item in result["contentJson"]["issues"]] == [
+        "episode-1:issue-1",
+    ]
+    assert "output limit" not in result["contentText"]
+    assert "正文不可读" not in result["contentText"]
+
+
+async def test_review_retry_reuses_completed_episodes_and_only_reruns_failures(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    first_calls = _CheckpointingToolCalls(fail_once_key="2")
+    first_executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=first_calls,  # type: ignore[arg-type]
+    )
+    first_executor._context = _IncrementalReviewContext()
+    first = await first_executor._generate_review_incrementally(
+        task={
+            "id": "task-partial-review-first",
+            "projectId": workspace["project"]["id"],
+            "sessionId": session["id"],
+            "turnId": "turn-partial-review-first",
+            "targetRole": "review",
+        },
+        unit={"id": "generate-deliverable", "input": {"instruction": "审阅全剧"}},
+        runtime=object(),
+        signal=None,
+        reviewed_draft_id="draft-head",
+    )
+
+    retry_calls = _CheckpointingToolCalls()
+    retry_executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=retry_calls,  # type: ignore[arg-type]
+    )
+    retry_executor._context = _IncrementalReviewContext()
+    retried = await retry_executor._generate_review_incrementally(
+        task={
+            "id": "task-partial-review-retry",
+            "projectId": workspace["project"]["id"],
+            "sessionId": session["id"],
+            "turnId": "turn-partial-review-retry",
+            "targetRole": "review",
+        },
+        unit={"id": "generate-deliverable", "input": {"instruction": "重新审阅失败集"}},
+        runtime=object(),
+        signal=None,
+        reviewed_draft_id="draft-head",
+        previous_review=first["contentJson"],
+    )
+
+    assert [key for _, key, _ in retry_calls.calls] == ["2"]
+    assert retried["contentJson"]["completedEpisodes"] == [1, 2]
+    assert retried["contentJson"]["failedEpisodes"] == []
+    assert [item["id"] for item in retried["contentJson"]["issues"]] == [
+        "episode-1:issue-1",
+    ]
+    assert "第 1 集" in retried["contentText"]
+    assert "第 2 集" in retried["contentText"]
 
 
 async def test_scene_list_generation_checkpoints_each_structure_episode(
@@ -1367,6 +1877,18 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
     )
     task = snapshot["tasks"][0]
     assert task["status"] == "completed"
+    result_revision = task["resultRevision"]
+    assert result_revision["id"] == task["resultRevisionId"]
+    assert result_revision["role"] == "screenplayDraft"
+    assert result_revision["revisionNo"] == 1
+    assert result_revision["summary"]["proposalKind"] == "scene_draft"
+    assert result_revision["summary"]["title"] == "第 1–2 集剧本"
+    assert result_revision["summary"]["partCount"] == 3
+    assert result_revision["agentTaskId"] == task["id"]
+    assert result_revision["status"] == "candidate"
+    assert "parts" not in result_revision
+    assert "contentText" not in result_revision
+    assert "contentJson" not in result_revision
     revision = await projects.get_revision(task["resultRevisionId"], view="full")
     assert revision["createdBy"] == "agent"
     assert revision["parts"][0]["payload"]["sceneListId"] == scene_list_id
@@ -1416,6 +1938,17 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
     continued_snapshot = await continuation_service.get_snapshot(
         project_id=project_id,
         session_id=session["id"],
+    )
+    assert [
+        item["resultRevision"]["id"]
+        for item in continued_snapshot["tasks"]
+    ] == [
+        revision["id"],
+        continued_snapshot["tasks"][1]["resultRevisionId"],
+    ]
+    assert all(
+        "parts" not in item["resultRevision"]
+        for item in continued_snapshot["tasks"]
     )
     continued_revision = await projects.get_revision(
         continued_snapshot["tasks"][1]["resultRevisionId"],

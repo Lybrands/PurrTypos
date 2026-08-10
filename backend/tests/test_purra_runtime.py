@@ -263,9 +263,11 @@ def _tool_call(
     name: str,
     *,
     content_delta: str = "",
+    reasoning_delta: str = "",
 ) -> list[ModelStreamChunk]:
     return [ModelStreamChunk(
         content_delta=content_delta,
+        reasoning_delta=reasoning_delta,
         tool_call_deltas=(ToolCallDelta(
             index=0,
             id=call_id,
@@ -3056,7 +3058,7 @@ async def test_resolved_task_budget_never_retries_the_same_truncated_allowance()
 
 
 @pytest.mark.asyncio
-async def test_reasoning_only_truncation_retries_once_with_reasoning_disabled():
+async def test_reasoning_only_truncation_retries_without_mutating_reasoning_mode():
     reasoning_only = [
         ModelStreamChunk(reasoning_delta="spent the whole allowance reasoning"),
         ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
@@ -3114,8 +3116,8 @@ async def test_reasoning_only_truncation_retries_once_with_reasoning_disabled():
     assert _result(updates).final_response == "candidate saved"
     assert [item.reasoning_mode for item in model.invocations] == [
         ReasoningMode.DEFAULT,
-        ReasoningMode.DISABLED,
-        ReasoningMode.DISABLED,
+        ReasoningMode.DEFAULT,
+        ReasoningMode.DEFAULT,
     ]
     assert [request.calls[0].id for request in tools.requests] == [
         "candidate-call"
@@ -3124,16 +3126,16 @@ async def test_reasoning_only_truncation_retries_once_with_reasoning_disabled():
         item
         for item in observer.traces
         if item.stage == "model_output"
-        and item.outcome == "truncated_reasoning_fallback"
+        and item.outcome == "truncated_reasoning_retry"
     )
     assert trace.details["reasoningOnly"] is True
-    assert trace.details["fallbackReasoningMode"] == "disabled"
+    assert trace.details["fallbackReasoningMode"] is None
     assert trace.details["outputBudget"]["policyKey"] == "reasoning-heavy-task"
 
 
 @pytest.mark.asyncio
-async def test_reasoning_fallback_stays_disabled_across_later_tool_rounds():
-    class DeepSeekProtocolGateway(ScriptedModelGateway):
+async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
+    class ReplayRequiredProtocolGateway(ScriptedModelGateway):
         def __init__(self, rounds):
             super().__init__(rounds)
             self.attempted_invocations = []
@@ -3159,10 +3161,18 @@ async def test_reasoning_fallback_stays_disabled_across_later_tool_rounds():
         ModelStreamChunk(reasoning_delta="spent the allowance reasoning"),
         ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
     ]
-    model = DeepSeekProtocolGateway([
+    model = ReplayRequiredProtocolGateway([
         reasoning_only,
-        _tool_call("read-call", "readA"),
-        _tool_call("write-call", "writeCandidate"),
+        _tool_call(
+            "read-call",
+            "readA",
+            reasoning_delta="reason before reading",
+        ),
+        _tool_call(
+            "write-call",
+            "writeCandidate",
+            reasoning_delta="reason before writing",
+        ),
         _answer("candidate saved"),
     ])
     tools = ScriptedToolGateway([
@@ -3187,7 +3197,7 @@ async def test_reasoning_fallback_stays_disabled_across_later_tool_rounds():
         messages=(AgentMessage(role="user", content="review and write"),),
         model=ModelRequest(
             provider="openai",
-            model="deepseek-v4-flash",
+            model="reasoning-replay-model",
             options={"thinking": {"type": "enabled"}},
         ),
         domain_context=DomainContext(namespace="test"),
@@ -3213,19 +3223,15 @@ async def test_reasoning_fallback_stays_disabled_across_later_tool_rounds():
         item.reasoning_mode for item in model.attempted_invocations
     ] == [
         ReasoningMode.DEFAULT,
-        ReasoningMode.DISABLED,
-        ReasoningMode.DISABLED,
-        ReasoningMode.DISABLED,
+        ReasoningMode.DEFAULT,
+        ReasoningMode.DEFAULT,
+        ReasoningMode.DEFAULT,
     ]
     assert [request.calls[0].name for request in tools.requests] == [
         "readA",
         "writeCandidate",
     ]
-    assert any(
-        trace.stage == "reasoning_mode"
-        and trace.outcome == "pinned_disabled_after_truncation"
-        for trace in observer.traces
-    )
+    assert not any(trace.stage == "reasoning_mode" for trace in observer.traces)
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,15 @@ SCREENPLAY_INTENT_OUTPUT_POLICY = OutputBudgetPolicy(
     reasoning_reserve_tokens=1_024,
 )
 
+SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY = OutputBudgetPolicy(
+    key="screenplay_final_response",
+    base_tokens=320,
+    per_work_unit_tokens=0,
+    safety_factor=1.1,
+    hard_cap_tokens=1_024,
+    reasoning_reserve_tokens=512,
+)
+
 SCREENPLAY_EPISODE_OUTPUT_POLICY = OutputBudgetPolicy(
     key="screenplay_episode",
     base_tokens=1_800,
@@ -158,6 +167,7 @@ __all__ = [
     "SCREENPLAY_DELIVERABLE_OUTPUT_POLICY",
     "SCREENPLAY_EPISODE_OUTPUT_POLICY",
     "SCREENPLAY_FRAGMENT_OUTPUT_POLICY",
+    "SCREENPLAY_FINAL_RESPONSE_OUTPUT_POLICY",
     "SCREENPLAY_INTENT_OUTPUT_POLICY",
     "SCREENPLAY_METADATA_OUTPUT_POLICY",
     "SCREENPLAY_REVIEW_OUTPUT_POLICY",

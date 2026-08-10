@@ -40,6 +40,7 @@ from application.model_runtime import model_request_from_runtime
 from application.request_mapping import context_window_tokens
 from domains.screenplay_agent import ScreenplayIntent, ScreenplayIntentAction
 from domains.screenplay_agent.recipe_compiler import compile_screenplay_task
+from exceptions import NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
@@ -204,6 +205,7 @@ class ScreenplayAgentService:
                 target_role=resolved.target_role,
                 episode_numbers=resolved.episode_numbers,
                 base_revision_id=resolved.base_revision_id,
+                original_request=str(turn["userContent"]),
             )
             plan = _durable_plan(planned.intent)
             decision = TaskAdmissionDecision(
@@ -256,7 +258,20 @@ class ScreenplayAgentService:
                 parent_run_id=planner_run_id,
                 observer=lambda update: self._observe_task(turn_id, update),
             )
-            if result.status is not LongTaskExecutionStatus.COMPLETED:
+            if result.status is LongTaskExecutionStatus.PAUSED:
+                code = result.error or "screenplay_task_paused"
+                await self._repository.pause_task(
+                    turn_id,
+                    code=code,
+                    message=_task_failure_message(code),
+                )
+                await self._stream.terminal(turn_id)
+                return
+            if result.status is LongTaskExecutionStatus.CANCELED:
+                await self._repository.cancel_turn(turn_id)
+                await self._stream.terminal(turn_id)
+                return
+            if result.status is LongTaskExecutionStatus.FAILED:
                 code = result.error or "screenplay_task_failed"
                 await self._repository.fail_task(
                     turn_id,
@@ -272,10 +287,21 @@ class ScreenplayAgentService:
             revision_id = str((published or ("", {}))[1].get("revisionId") or "")
             if not revision_id:
                 raise RuntimeError("screenplay task did not publish a Revision")
+            composed = await self._outputs.load_unit(
+                receipt.task_id,
+                "compose-final-response",
+            )
+            final_response = str(
+                (composed or ("", {}))[1].get("finalResponse") or ""
+            ).strip()
+            if not final_response:
+                raise RuntimeError(
+                    "screenplay task did not compose a final response"
+                )
             await self._repository.complete_task(
                 turn_id,
                 revision_id=revision_id,
-                assistant_content=result.final_response,
+                assistant_content=final_response,
             )
             await self._stream.terminal(turn_id)
         except Exception as error:
@@ -336,10 +362,26 @@ class ScreenplayAgentService:
             task.cancel()
 
     async def get_snapshot(self, *, project_id: str, session_id: int):
-        return await self._repository.get_snapshot(
+        snapshot = await self._repository.get_snapshot(
             project_id=project_id,
             session_id=session_id,
         )
+        for task in snapshot["tasks"]:
+            task["resultRevision"] = None
+            revision_id = str(task.get("resultRevisionId") or "").strip()
+            if not revision_id:
+                continue
+            try:
+                task["resultRevision"] = await self._projects.get_revision(
+                    revision_id,
+                    view="summary",
+                )
+            except NotFoundError:
+                # Legacy or synthetic Task records can retain a stable result
+                # reference after the Revision itself has been removed. Keep
+                # the reference visible without inventing replacement metadata.
+                continue
+        return snapshot
 
     async def list_events(
         self,

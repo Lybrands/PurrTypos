@@ -20,6 +20,7 @@ class ScreenplayAgentDomainContext:
     target_role: str
     expected_part_type: str
     expected_part_key: str
+    tool_access: str = "all"
     source_book_id: str | None = None
     source_scope: Mapping[str, Any] | None = None
     locale: str = "zh-CN"
@@ -44,6 +45,10 @@ class ScreenplayAgentDomainContext:
         )
         object.__setattr__(self, "source_scope", dict(self.source_scope or {}))
         object.__setattr__(self, "locale", str(self.locale or "zh-CN").strip())
+        tool_access = str(self.tool_access or "all").strip()
+        if tool_access not in {"all", "evidence_read", "candidate_write"}:
+            raise ValueError("screenplay Agent tool_access is invalid")
+        object.__setattr__(self, "tool_access", tool_access)
 
     def to_core_context(self) -> DomainContext:
         return DomainContext(
@@ -55,6 +60,7 @@ class ScreenplayAgentDomainContext:
                 "targetRole": self.target_role,
                 "expectedPartType": self.expected_part_type,
                 "expectedPartKey": self.expected_part_key,
+                "toolAccess": self.tool_access,
                 "sourceBookId": self.source_book_id,
                 "sourceScope": dict(self.source_scope or {}),
                 "locale": self.locale,
@@ -79,6 +85,7 @@ class ScreenplayAgentDomainContext:
             target_role=str(payload.get("targetRole") or ""),
             expected_part_type=str(payload.get("expectedPartType") or ""),
             expected_part_key=str(payload.get("expectedPartKey") or ""),
+            tool_access=str(payload.get("toolAccess") or "all"),
             source_book_id=str(payload.get("sourceBookId") or "") or None,
             source_scope=(
                 dict(source_scope) if isinstance(source_scope, Mapping) else {}

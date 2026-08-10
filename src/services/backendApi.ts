@@ -188,6 +188,9 @@ export const backendApi: BackendApi = {
       `/screenplay/v2/projects/${data.projectId}/deliverables/${data.role}/revisions${query ? `?${query}` : ''}`,
     )
   },
+  getScreenplayV2LatestReviewForDraft: (data) => apiGet(
+    `/screenplay/v2/projects/${data.projectId}/draft-revisions/${data.draftRevisionId}/latest-review`,
+  ),
   createScreenplayV2WorkingCopyFromRevision: (data) => apiPostIdempotent(
     `/screenplay/v2/projects/${data.projectId}/revisions/${data.revisionId}/working-copy`,
     {
@@ -216,6 +219,24 @@ export const backendApi: BackendApi = {
     {
       expectedProjectRevision: data.expectedProjectRevision,
       confirmInvalidation: data.confirmInvalidation === true,
+    },
+    data.commandId,
+  ),
+  adjudicateScreenplayV2Review: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/review-decisions`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      reviewRevisionId: data.reviewRevisionId,
+      decisions: data.decisions,
+    },
+    data.commandId,
+  ),
+  finalizeScreenplayV2Project: (data) => apiPostIdempotent(
+    `/screenplay/v2/projects/${data.projectId}/finalize`,
+    {
+      expectedProjectRevision: data.expectedProjectRevision,
+      draftRevisionId: data.draftRevisionId,
+      reviewRevisionId: data.reviewRevisionId,
     },
     data.commandId,
   ),

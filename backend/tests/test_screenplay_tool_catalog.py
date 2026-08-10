@@ -54,6 +54,7 @@ def _context(
     target_role: str = "creativeBrief",
     expected_part_type: str = "document",
     expected_part_key: str = "main",
+    tool_access: str = "all",
 ):
     return ScreenplayAgentDomainContext(
         project_id="screenplay-project",
@@ -62,6 +63,7 @@ def _context(
         target_role=target_role,
         expected_part_type=expected_part_type,
         expected_part_key=expected_part_key,
+        tool_access=tool_access,
         source_book_id=source_book_id,
         source_scope=source_scope or {"mode": "whole_book"},
     )
@@ -200,6 +202,28 @@ async def test_host_captured_scene_exposes_no_model_writer(
     )))
 
     assert enabled == set()
+
+
+async def test_formal_stage_tool_access_never_mixes_reads_and_candidate_writes(
+    screenplay_tool_db,
+):
+    catalog = build_screenplay_tool_catalog(db=screenplay_tool_db)
+    evidence = catalog.enabled_names(_request(_context(
+        source_book_id="source-book",
+        tool_access="evidence_read",
+    )))
+    candidate = catalog.enabled_names(_request(_context(
+        source_book_id="source-book",
+        tool_access="candidate_write",
+    )))
+
+    assert evidence
+    assert "writeScreenplayCandidatePart" not in evidence
+    assert "inspectScreenplayCandidate" not in evidence
+    assert candidate == {
+        "writeScreenplayCandidatePart",
+        "inspectScreenplayCandidate",
+    }
 
 
 async def test_candidate_artifact_stores_long_content_only_once(
@@ -597,7 +621,7 @@ class _ReasoningTruncationToolModelGateway:
                 yield ModelStreamChunk(
                     tool_call_deltas=(ToolCallDelta(
                         index=0,
-                        id="call-read-after-reasoning-fallback",
+                        id="call-read-after-reasoning-retry",
                         type="function",
                         name="inspectScreenplayProject",
                         arguments_fragment="{}",
@@ -608,9 +632,9 @@ class _ReasoningTruncationToolModelGateway:
             if call_number == 3:
                 arguments = json.dumps({
                     "candidate": {
-                        "title": "回退后生成的简报",
-                        "executionSummary": "关闭深度推理后完成结构化写入。",
-                        "contentText": "# 创作简报\n\n回退成功。",
+                        "title": "重试后生成的简报",
+                        "executionSummary": "保持用户选择的思考模式并完成结构化写入。",
+                        "contentText": "# 创作简报\n\n重试成功。",
                         "contentJson": {
                             "fields": {"approach": "人物驱动"},
                         },
@@ -619,7 +643,7 @@ class _ReasoningTruncationToolModelGateway:
                 yield ModelStreamChunk(
                     tool_call_deltas=(ToolCallDelta(
                         index=0,
-                        id="call-write-after-reasoning-fallback",
+                        id="call-write-after-reasoning-retry",
                         type="function",
                         name="writeScreenplayCandidatePart",
                         arguments_fragment=arguments,
@@ -732,7 +756,7 @@ async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body
     )
 
 
-async def test_screenplay_tool_run_recovers_when_reasoning_consumes_output_budget(
+async def test_screenplay_tool_run_retries_without_changing_reasoning_mode(
     screenplay_tool_db,
     monkeypatch,
 ):
@@ -749,7 +773,8 @@ async def test_screenplay_tool_run_recovers_when_reasoning_consumes_output_budge
         "apiProvider": "openai",
         "baseURL": "https://provider.example/v1",
         "options": {
-            "model": "fixture-model",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
             "thinking": {"type": "enabled"},
         },
         "contextWindow": "128k",
@@ -771,12 +796,12 @@ async def test_screenplay_tool_run_recovers_when_reasoning_consumes_output_budge
     finally:
         await composition.shutdown()
 
-    assert result.candidate["payload"]["title"] == "回退后生成的简报"
+    assert result.candidate["payload"]["title"] == "重试后生成的简报"
     assert [item.reasoning_mode for item in gateway.invocations] == [
         ReasoningMode.DEFAULT,
-        ReasoningMode.DISABLED,
-        ReasoningMode.DISABLED,
-        ReasoningMode.DISABLED,
+        ReasoningMode.DEFAULT,
+        ReasoningMode.DEFAULT,
+        ReasoningMode.DEFAULT,
     ]
     rows = await screenplay_tool_db.fetch_all(
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
@@ -785,8 +810,8 @@ async def test_screenplay_tool_run_recovers_when_reasoning_consumes_output_budge
     commentary = "".join(
         str(chunk.get("commentaryDelta") or "") for chunk in chunks
     )
-    assert "关闭深度推理后完成结构化写入" in commentary
-    assert "回退成功" not in commentary
+    assert "保持用户选择的思考模式并完成结构化写入" in commentary
+    assert "重试成功" not in commentary
 
 
 async def test_host_prepared_scene_is_host_committed_without_tool_json(

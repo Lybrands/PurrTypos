@@ -302,12 +302,62 @@ export interface ScreenplayV2Project {
   updatedAt?: string | null;
 }
 
+export type ScreenplayV2ReviewFindingStatus =
+  | 'pending'
+  | 'planned'
+  | 'resolved'
+  | 'dismissed'
+  | 'riskAccepted';
+export type ScreenplayV2ReviewPhase =
+  | 'awaitingReview'
+  | 'adjudicating'
+  | 'readyToRevise'
+  | 'readyToFinalize'
+  | 'completed';
+export interface ScreenplayV2ReviewFinding {
+  id: string;
+  severity: 'critical' | 'major' | 'minor';
+  description: string;
+  sceneIds: string[];
+  status: ScreenplayV2ReviewFindingStatus;
+  note: string;
+  actor?: string | null;
+  decidedAt?: string | null;
+}
+export interface ScreenplayV2ReviewState {
+  phase: ScreenplayV2ReviewPhase;
+  draftRevisionId: string | null;
+  reviewRevisionId: string | null;
+  recommendation: 'ready' | 'revise' | 'major_rework' | null;
+  findings: ScreenplayV2ReviewFinding[];
+  failedEpisodes: Array<{
+    episodeNumber: number;
+    code: string;
+    message: string;
+    retryable: boolean;
+    runId?: string | null;
+  }>;
+  counts: {
+    total: number;
+    pending: number;
+    planned: number;
+    resolved: number;
+    dismissed: number;
+    riskAccepted: number;
+  };
+  hardChecks: Array<{ code: string; message: string }>;
+  canFinalize: boolean;
+  completionSource: 'user' | 'legacyAgentVerdict' | null;
+  nextAction: Record<string, string> | null;
+}
+
 export interface ScreenplayV2Workspace {
   project: ScreenplayV2Project;
   workflow: {
     stage: ScreenplayStage;
     heads: Partial<Record<ScreenplayV2DeliverableRole, ScreenplayV2RevisionSummary | null>>;
     nextActions: Array<Record<string, unknown>>;
+    review: ScreenplayV2ReviewState;
   };
   deliverables: Array<{
     id: string;
@@ -321,6 +371,8 @@ export interface ScreenplayV2Workspace {
 export type ScreenplayConversationTurnStatus =
   | 'queued'
   | 'planning'
+  | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'canceled';
@@ -349,8 +401,10 @@ export interface ScreenplayConversationTurn {
 }
 
 export type ScreenplayAgentTaskStatus =
+  | 'pending'
   | 'queued'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'canceled';
@@ -359,7 +413,15 @@ export interface ScreenplayAgentTaskUnit {
   id: string;
   position: number;
   kind: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
+  status:
+    | 'pending'
+    | 'claimed'
+    | 'running'
+    | 'waiting_retry'
+    | 'blocked'
+    | 'completed'
+    | 'failed'
+    | 'canceled';
   input: Record<string, unknown>;
   output: Record<string, unknown>;
   error: { code?: string; message?: string } | null;
@@ -378,6 +440,7 @@ export interface ScreenplayAgentTask {
   totalUnits: number;
   completedUnits: number;
   resultRevisionId: string | null;
+  resultRevision: ScreenplayV2RevisionSummary | null;
   error: { code?: string; message?: string } | null;
   units: ScreenplayAgentTaskUnit[];
   createdAt?: string | null;
@@ -1558,6 +1621,10 @@ export interface ElectronAPI {
     items: ScreenplayV2RevisionSummary[];
     nextCursor: string | null;
   }>>;
+  getScreenplayV2LatestReviewForDraft: (data: {
+    projectId: EntityId;
+    draftRevisionId: string;
+  }) => Promise<ApiResult<ScreenplayV2RevisionDetail | null>>;
   createScreenplayV2WorkingCopyFromRevision: (data: {
     commandId: string;
     projectId: EntityId;
@@ -1591,6 +1658,24 @@ export interface ElectronAPI {
     invalidatedHeads: Array<{ role: ScreenplayV2DeliverableRole; revisionId: string }>;
     workspace: ScreenplayV2Workspace;
   }>>;
+  adjudicateScreenplayV2Review: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+    reviewRevisionId: string;
+    decisions: Array<{
+      issueId: string;
+      status: ScreenplayV2ReviewFindingStatus;
+      note?: string;
+    }>;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
+  finalizeScreenplayV2Project: (data: {
+    commandId: string;
+    projectId: EntityId;
+    expectedProjectRevision: number;
+    draftRevisionId: string;
+    reviewRevisionId: string;
+  }) => Promise<ApiResult<ScreenplayV2Workspace>>;
   updateScreenplayV2Project: (data: {
     commandId: string;
     projectId: EntityId;
@@ -2124,6 +2209,8 @@ export interface ElectronAPI {
       reasoningDelta?: string;
       done?: boolean;
       aborted?: boolean;
+      /** False when execution settled without a product-level final answer. */
+      finalResponseExpected?: boolean;
       error?: string;
       /** 本地自动创建的脱敏错误报告。 */
       errorReport?: AiErrorReport;

@@ -1,25 +1,31 @@
-"""Recovery policy for bounded screenplay generation fragments.
+"""Typed recovery facts for screenplay execution boundaries.
 
-The model Run and the durable unit are two recovery layers around the same
-fragment. Keep their classification in one place so an inner protocol failure
-cannot silently bypass the unit's persisted attempt budget.
+PurrA decides how a durable failure is settled. This module owns the
+screenplay-specific translation from stable domain error codes into the
+provider-neutral facts consumed by that decision.
 """
 
 from __future__ import annotations
 
+from purra.errors import ModelGatewayError
+from purra.recovery import (
+    FailureCategory,
+    FailureSignal,
+    RecoveryEffectState,
+)
 
-_RETRYABLE_RUN_CODES = frozenset({
-    # Provider/transmission failures.
+
+_TRANSIENT_PROVIDER_CODES = frozenset({
     "upstream_stream_interrupted",
     "model_gateway_error",
     "provider_unavailable",
     "provider_rate_limited",
-    # Bounded model-output/protocol failures. Retrying is safe because a
-    # fragment is checkpointed only after its candidate Artifact validates.
+})
+
+_MODEL_OUTPUT_CODES = frozenset({
     "model_output_truncated",
     "tool_call_truncated",
     "invalid_tool_arguments_json",
-    "tool_input_invalid",
     "invalid_tool_results",
     "max_model_rounds",
     "missing_required_tool_call",
@@ -27,14 +33,88 @@ _RETRYABLE_RUN_CODES = frozenset({
     "empty_model_response",
     "model_candidate_invalid",
     "candidate_validation_failed",
+})
+
+_PROTOCOL_CODES = frozenset({
+    "provider_bad_request",
+    "provider_reasoning_context_invalid",
+    "unsupported_model_feature",
+    "unsupported_model_finish_reason",
+})
+
+_PERMANENT_EXTERNAL_CODES = frozenset({
+    "provider_authentication_failed",
+    "provider_insufficient_balance",
+    "model_output_filtered",
+})
+
+_TOOL_EXECUTION_CODES = frozenset({
+    "tool_execution_failed",
     "candidate_commit_failed",
     "candidate_commit_missing",
-    "completion_projection_failed",
 })
 
 
-def is_retryable_screenplay_run_error(code: object) -> bool:
-    return str(code or "").strip() in _RETRYABLE_RUN_CODES
+def classify_screenplay_run_failure(error: object) -> FailureSignal:
+    """Translate one failed screenplay attempt without choosing settlement."""
+
+    code = _failure_code(error)
+    declared_retryable = bool(getattr(error, "retryable", False))
+    if code in _MODEL_OUTPUT_CODES:
+        return FailureSignal(
+            category=FailureCategory.MODEL_OUTPUT_INVALID,
+            code=code,
+            retryable=True,
+        )
+    if code == "tool_input_invalid":
+        return FailureSignal(
+            category=FailureCategory.TOOL_INPUT_INVALID,
+            code=code,
+            retryable=True,
+        )
+    if code in _TRANSIENT_PROVIDER_CODES:
+        return FailureSignal(
+            category=FailureCategory.TRANSIENT_PROVIDER,
+            code=code,
+            retryable=True,
+        )
+    if code in _PROTOCOL_CODES:
+        return FailureSignal(
+            category=FailureCategory.PROTOCOL_INCOMPATIBLE,
+            code=code,
+            retryable=False,
+        )
+    if code in _PERMANENT_EXTERNAL_CODES:
+        return FailureSignal(
+            category=FailureCategory.PERMANENT_EXTERNAL,
+            code=code,
+            retryable=False,
+        )
+    if code in _TOOL_EXECUTION_CODES:
+        return FailureSignal(
+            category=FailureCategory.TOOL_EXECUTION,
+            code=code,
+            retryable=declared_retryable,
+            effect_state=RecoveryEffectState.UNKNOWN,
+        )
+    if isinstance(error, ModelGatewayError) and declared_retryable:
+        return FailureSignal(
+            category=FailureCategory.TRANSIENT_PROVIDER,
+            code=code,
+            retryable=True,
+        )
+    return FailureSignal(
+        category=FailureCategory.BUSINESS_INVARIANT,
+        code=code,
+        retryable=False,
+    )
 
 
-__all__ = ["is_retryable_screenplay_run_error"]
+def _failure_code(error: object) -> str:
+    code = str(getattr(error, "code", "") or "").strip()
+    if not code:
+        code = str(error or "").strip()
+    return (code or "screenplay_task_failed")[:240]
+
+
+__all__ = ["classify_screenplay_run_failure"]

@@ -50,11 +50,15 @@ export const services = {
     getScreenplayV2Workspace: backendApi.getScreenplayV2Workspace,
     getScreenplayV2Revision: backendApi.getScreenplayV2Revision,
     listScreenplayV2RevisionHistory: backendApi.listScreenplayV2RevisionHistory,
+    getScreenplayV2LatestReviewForDraft:
+      backendApi.getScreenplayV2LatestReviewForDraft,
     createScreenplayV2WorkingCopyFromRevision:
       backendApi.createScreenplayV2WorkingCopyFromRevision,
     updateScreenplayV2WorkingCopy: backendApi.updateScreenplayV2WorkingCopy,
     publishScreenplayV2WorkingCopy: backendApi.publishScreenplayV2WorkingCopy,
     acceptScreenplayV2Revision: backendApi.acceptScreenplayV2Revision,
+    adjudicateScreenplayV2Review: backendApi.adjudicateScreenplayV2Review,
+    finalizeScreenplayV2Project: backendApi.finalizeScreenplayV2Project,
     updateScreenplayV2Project: backendApi.updateScreenplayV2Project,
     archiveScreenplayV2Project: backendApi.archiveScreenplayV2Project,
     restoreScreenplayV2Project: backendApi.restoreScreenplayV2Project,

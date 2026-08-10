@@ -184,6 +184,10 @@ def _resolve_invocation(
     call: ManagedModelCall,
     mode: ReasoningMode,
 ) -> tuple[ModelInvocation, ResolvedOutputBudget]:
+    if not call.request.protocol_capabilities.reasoning_mode_is_supported(mode):
+        raise UnsupportedModelFeatureError(
+            "selected reasoning mode is incompatible with model capabilities"
+        )
     budget = resolve_output_budget(
         policy=call.output_policy,
         capabilities=call.request.output_capabilities,

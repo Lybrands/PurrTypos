@@ -7,9 +7,12 @@ import type {
   ScreenplayConversationStreamEvent,
   ScreenplayConversationSnapshot,
   ScreenplayConversationTurn,
+  ScreenplayV2RevisionSummary,
+  ScreenplayV2Workspace,
 } from '../types'
 import {
   isScreenplayTurnTerminal,
+  screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
   stateFromScreenplayConversationSnapshot,
 } from './conversationState.ts'
@@ -47,6 +50,7 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     totalUnits: 2,
     completedUnits: 1,
     resultRevisionId: null,
+    resultRevision: null,
     error: null,
     units: [{
       id: 'draft-episode-1',
@@ -58,6 +62,25 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
       error: null,
       attempt: 1,
     }],
+    ...overrides,
+  }
+}
+
+function revision(
+  id: string,
+  role: ScreenplayV2RevisionSummary['role'],
+  overrides: Partial<ScreenplayV2RevisionSummary> = {},
+): ScreenplayV2RevisionSummary {
+  return {
+    id,
+    deliverableId: `deliverable-${role}`,
+    role,
+    revisionNo: 1,
+    parentRevisionId: null,
+    contentDigest: `digest-${id}`,
+    summary: {},
+    agentTaskId: null,
+    status: 'candidate',
     ...overrides,
   }
 }
@@ -118,6 +141,173 @@ test('Turn and Task must both be terminal before reconciliation', () => {
   )
 })
 
+test('every completed Task result is projected onto its own conversation turn', () => {
+  const sceneRevision = revision('revision-scenes', 'sceneList', {
+    revisionNo: 3,
+    summary: {
+      proposalKind: 'scene_list',
+      title: '第 1 至 8 集场景规划',
+    },
+  })
+  const draftRevision = revision('revision-draft', 'screenplayDraft', {
+    revisionNo: 2,
+    summary: {
+      proposalKind: 'scene_draft',
+      title: '第 1 至 2 集剧本',
+    },
+  })
+
+  const artifacts = screenplayTurnArtifacts([
+    task({
+      id: 'task-scenes',
+      turnId: 'turn-scenes',
+      status: 'completed',
+      targetRole: 'sceneList',
+      resultRevisionId: sceneRevision.id,
+      resultRevision: sceneRevision,
+    }),
+    task({
+      id: 'task-draft',
+      turnId: 'turn-draft',
+      status: 'completed',
+      targetRole: 'screenplayDraft',
+      resultRevisionId: draftRevision.id,
+      resultRevision: draftRevision,
+    }),
+  ], null)
+
+  assert.deepEqual([...artifacts.entries()].map(([turnId, artifact]) => ({
+    turnId,
+    taskId: artifact.taskId,
+    revisionId: artifact.revisionId,
+    role: artifact.role,
+    revisionNo: artifact.revisionNo,
+    kind: artifact.kind,
+    title: artifact.title,
+  })), [
+    {
+      turnId: 'turn-scenes',
+      taskId: 'task-scenes',
+      revisionId: 'revision-scenes',
+      role: 'sceneList',
+      revisionNo: 3,
+      kind: 'scene_list',
+      title: '第 1 至 8 集场景规划',
+    },
+    {
+      turnId: 'turn-draft',
+      taskId: 'task-draft',
+      revisionId: 'revision-draft',
+      role: 'screenplayDraft',
+      revisionNo: 2,
+      kind: 'scene_draft',
+      title: '第 1 至 2 集剧本',
+    },
+  ])
+})
+
+test('artifact projection keeps exact Revision targets without optional summaries', () => {
+  const artifacts = screenplayTurnArtifacts([
+    task({
+      id: 'task-legacy',
+      turnId: 'turn-legacy',
+      status: 'completed',
+      targetRole: 'review',
+      resultRevisionId: 'revision-legacy',
+      resultRevision: null,
+    }),
+    task({
+      id: 'task-running',
+      turnId: 'turn-running',
+      status: 'running',
+      resultRevisionId: 'revision-uncommitted',
+      resultRevision: null,
+    }),
+    task({
+      id: 'task-answer',
+      turnId: 'turn-answer',
+      status: 'completed',
+      resultRevisionId: null,
+      resultRevision: null,
+    }),
+  ], null)
+
+  assert.deepEqual([...artifacts.values()], [{
+    turnId: 'turn-legacy',
+    taskId: 'task-legacy',
+    revisionId: 'revision-legacy',
+    role: 'review',
+    revisionNo: null,
+    title: '审阅修订候选稿',
+    kind: null,
+    status: 'candidate',
+    sourceRunId: 'run-draft-1',
+  }])
+})
+
+test('current Workspace truth overrides stale artifact status snapshots', () => {
+  const sceneRevision = revision('revision-scenes', 'sceneList', {
+    status: 'historical',
+    summary: { proposalKind: 'scene_list', title: '场景规划' },
+  })
+  const draftRevision = revision('revision-draft', 'screenplayDraft', {
+    status: 'candidate',
+    summary: { proposalKind: 'scene_draft', title: '剧本正文' },
+  })
+  const workspace = {
+    workflow: {
+      heads: {
+        sceneList: sceneRevision,
+      },
+    },
+    candidates: [draftRevision],
+  } as ScreenplayV2Workspace
+
+  const artifacts = screenplayTurnArtifacts([
+    task({
+      id: 'task-scenes',
+      turnId: 'turn-scenes',
+      status: 'completed',
+      targetRole: 'sceneList',
+      resultRevisionId: sceneRevision.id,
+      resultRevision: sceneRevision,
+    }),
+    task({
+      id: 'task-draft',
+      turnId: 'turn-draft',
+      status: 'completed',
+      targetRole: 'screenplayDraft',
+      resultRevisionId: draftRevision.id,
+      resultRevision: draftRevision,
+    }),
+  ], workspace)
+
+  assert.equal(artifacts.get('turn-scenes')?.status, 'current')
+  assert.equal(artifacts.get('turn-draft')?.status, 'candidate')
+})
+
+test('paused execution settles streaming without fabricating assistant content', () => {
+  const pausedTurn = turn({ status: 'paused', taskId: 'task-1' })
+  const pausedTask = task({
+    status: 'paused',
+    error: { code: 'provider_bad_request', message: '请求能力不兼容' },
+    units: [{
+      ...task().units[0],
+      status: 'blocked',
+      error: { code: 'provider_bad_request', message: '请求能力不兼容' },
+    }],
+  })
+
+  const state = stateFromScreenplayConversationSnapshot(snapshot(
+    pausedTurn,
+    pausedTask,
+  ))
+
+  assert.equal(isScreenplayTurnTerminal(pausedTurn), true)
+  assert.equal(state.messages[1].content, '')
+  assert.equal(screenplayTurnReconciliationKey(pausedTurn, pausedTask), null)
+})
+
 test('screenplay client refreshes canonical snapshot after cursor events', async () => {
   let snapshotReads = 0
   let truncatedTurnId = ''
@@ -170,7 +360,7 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
   assert.equal(refreshed.cursor, 13)
   assert.equal(
     refreshed.messages[1].content,
-    '剧本任务已完成，候选稿已生成。请在下方预览并应用。',
+    '',
   )
   assert.equal(truncatedTurnId, 'turn-1')
 })

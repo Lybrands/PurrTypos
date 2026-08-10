@@ -17,11 +17,13 @@ from infrastructure.persistence.sqlite_screenplay_session_repository import (
     SqliteScreenplaySessionRepository,
 )
 from schemas.screenplay_v2 import (
+    AdjudicateScreenplayV2ReviewRequest,
     AcceptScreenplayV2RevisionRequest,
     ChangeScreenplayV2ProjectLifecycleRequest,
     CreateScreenplayV2ProjectRequest,
     CreateScreenplayV2WorkingCopyFromRevisionRequest,
     DeleteScreenplayV2ProjectRequest,
+    FinalizeScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
     ScreenplayV2BookSourceRequest,
     UpdateScreenplayV2ProjectRequest,
@@ -265,6 +267,21 @@ class ScreenplayV2ProjectService:
             limit=max(1, min(100, int(limit))),
         )
 
+    async def get_latest_review_for_draft(
+        self,
+        *,
+        project_id: str,
+        draft_revision_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_project_id = str(project_id or "").strip()
+        normalized_draft_id = str(draft_revision_id or "").strip()
+        if not normalized_project_id or not normalized_draft_id:
+            raise NotFoundError("剧本版本不存在")
+        return await self._repository.get_latest_review_for_draft(
+            project_id=normalized_project_id,
+            draft_revision_id=normalized_draft_id,
+        )
+
     async def update_working_copy(
         self,
         *,
@@ -386,6 +403,61 @@ class ScreenplayV2ProjectService:
                 normalized_project_id
             ),
         }
+
+    async def adjudicate_review(
+        self,
+        *,
+        command_id: str,
+        project_id: str,
+        request: AdjudicateScreenplayV2ReviewRequest,
+    ) -> dict[str, Any]:
+        normalized_command_id = _command_id(command_id)
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise NotFoundError("剧本项目不存在")
+        request_digest = _digest({
+            "projectId": normalized_project_id,
+            **request.model_dump(mode="json"),
+        })
+        await self._repository.adjudicate_review(
+            command_id=normalized_command_id,
+            request_digest=request_digest,
+            project_id=normalized_project_id,
+            expected_project_revision=request.expectedProjectRevision,
+            review_revision_id=request.reviewRevisionId,
+            decisions=[
+                decision.model_dump(mode="json")
+                for decision in request.decisions
+            ],
+            actor="user",
+        )
+        return await self._repository.get_workspace(normalized_project_id)
+
+    async def finalize_project(
+        self,
+        *,
+        command_id: str,
+        project_id: str,
+        request: FinalizeScreenplayV2ProjectRequest,
+    ) -> dict[str, Any]:
+        normalized_command_id = _command_id(command_id)
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise NotFoundError("剧本项目不存在")
+        request_digest = _digest({
+            "projectId": normalized_project_id,
+            **request.model_dump(mode="json"),
+        })
+        await self._repository.finalize_project(
+            command_id=normalized_command_id,
+            request_digest=request_digest,
+            project_id=normalized_project_id,
+            expected_project_revision=request.expectedProjectRevision,
+            draft_revision_id=request.draftRevisionId,
+            review_revision_id=request.reviewRevisionId,
+            actor="user",
+        )
+        return await self._repository.get_workspace(normalized_project_id)
 
 
 def _digest(value: Mapping[str, Any]) -> str:

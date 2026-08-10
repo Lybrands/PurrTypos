@@ -21,6 +21,7 @@ from purra.contracts import (
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_call_parameters import build_model_call_parameters
+from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 from purra.ports import CancellationSignal
 from infrastructure.models import provider_router
 from infrastructure.models.profiles import resolve_model_profile
@@ -65,7 +66,15 @@ class ProviderModelGateway:
         try:
             result = await provider_router.create_chat_stream(
                 self._api_key,
-                [_provider_message(message) for message in messages],
+                [
+                    _provider_message(
+                        message,
+                        reasoning_replay=(
+                            request.protocol_capabilities.reasoning_replay
+                        ),
+                    )
+                    for message in messages
+                ],
                 options,
                 request.provider,
                 signal,  # type: ignore[arg-type]
@@ -99,7 +108,15 @@ class ProviderModelGateway:
         request = invocation.request
         result = await provider_router.create_chat_no_stream(
             self._api_key,
-            [_provider_message(message) for message in messages],
+            [
+                _provider_message(
+                    message,
+                    reasoning_replay=(
+                        request.protocol_capabilities.reasoning_replay
+                    ),
+                )
+                for message in messages
+            ],
             _provider_options(invocation),
             request.provider,
             signal,  # type: ignore[arg-type]
@@ -117,6 +134,11 @@ def _provider_options(
     invocation: ModelInvocation,
 ) -> dict:
     request = invocation.request
+    capabilities = request.protocol_capabilities
+    if not capabilities.reasoning_mode_is_supported(invocation.reasoning_mode):
+        raise UnsupportedModelFeatureError(
+            "selected reasoning mode is incompatible with model capabilities"
+        )
     options = thaw_json_mapping(request.options)
     options["model"] = request.model
     options.pop("model_profile", None)
@@ -134,7 +156,10 @@ def _provider_options(
             )
             maximum = max(maximum, profile.internal_output_token_floor())
         options["max_tokens"] = maximum
-    if invocation.reasoning_mode is ReasoningMode.DISABLED:
+    if (
+        invocation.reasoning_mode is ReasoningMode.DISABLED
+        and capabilities.reasoning_control is ReasoningControl.SELECTABLE
+    ):
         caller_thinking = options.get("thinking")
         caller_had_thinking_enabled = bool(
             options.get("thinking_enabled") is True
@@ -154,6 +179,9 @@ def _provider_options(
         # lets each provider apply the correct non-thinking default.
         if caller_had_thinking_enabled:
             options.pop("temperature", None)
+    elif capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
+        options.pop("thinking_enabled", None)
+        options.pop("thinking", None)
     if invocation.tools and invocation.tool_choice is not ToolChoiceMode.NONE:
         options["tools"] = [
             {
@@ -178,7 +206,11 @@ def _provider_options(
     return options
 
 
-def _provider_message(message: AgentMessage) -> dict:
+def _provider_message(
+    message: AgentMessage,
+    *,
+    reasoning_replay: ReasoningReplayPolicy = ReasoningReplayPolicy.REQUIRED,
+) -> dict:
     value = thaw_json_mapping(message.attributes)
     # These attributes are Core/Application bookkeeping, not provider message
     # fields.  OpenAI-compatible APIs may reject unknown keys even though the
@@ -203,7 +235,10 @@ def _provider_message(message: AgentMessage) -> dict:
     value.update(
         {"role": provider_role, "content": thaw_json_value(message.content)}
     )
-    if message.reasoning is not None:
+    if (
+        message.reasoning is not None
+        and reasoning_replay is ReasoningReplayPolicy.REQUIRED
+    ):
         value["reasoning_content"] = message.reasoning
     if message.tool_calls:
         value["tool_calls"] = [

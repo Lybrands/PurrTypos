@@ -61,6 +61,7 @@ _CANDIDATE_TOOLS = frozenset({
     "writeScreenplayCandidatePart",
     "inspectScreenplayCandidate",
 })
+_READ_TOOLS = _PROJECT_TOOLS | _SOURCE_TOOLS | {"getScreenplayEpisodeContext"}
 _HOST_CAPTURED_TEXT_PARTS = frozenset({"scene"})
 _HOST_PREPARED_TOOL_WRITE_PARTS = frozenset({"episode_metadata"})
 _ROLE_TOOLS = {
@@ -219,6 +220,15 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
         # The application has already assembled the exact metadata context.
         # This phase is a bounded commit, not another research loop.
         return frozenset({"writeScreenplayCandidatePart"})
+    if context.tool_access == "candidate_write":
+        return _CANDIDATE_TOOLS
+    if context.tool_access == "evidence_read":
+        enabled = set(_ROLE_TOOLS.get(context.target_role, ())) & _READ_TOOLS
+        if not context.source_book_id:
+            enabled.difference_update(_SOURCE_TOOLS)
+        elif is_restricted_source_scope(context.source_scope or {}):
+            enabled.difference_update(_UNSCOPED_SOURCE_TOOLS)
+        return frozenset(enabled)
     enabled = set(_ROLE_TOOLS.get(context.target_role, ()))
     if not context.source_book_id:
         enabled.difference_update(_SOURCE_TOOLS)

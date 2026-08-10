@@ -10,6 +10,7 @@ import pytest_asyncio
 
 from purra.contracts import (
     RunCreateParams,
+    RunExecutionIntent,
     RunBinding,
     RunLineage,
     RunProvenance,
@@ -61,6 +62,11 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "context_window",
         "endpoint_digest",
         "request_profile_digest",
+        "requested_reasoning_mode",
+        "output_contract",
+        "tool_protocol_contract",
+        "recovery_policy_id",
+        "capability_snapshot_digest",
         "binding_namespace",
         "binding_aggregate_id",
         "binding_command_id",
@@ -182,6 +188,13 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         context_window=200_000,
         endpoint_digest="a" * 64,
         request_profile_digest="b" * 64,
+        execution_intent=RunExecutionIntent(
+            requested_reasoning_mode="enabled",
+            output_contract="assistant_text",
+            tool_protocol_contract="host_tools",
+            recovery_policy_id="purra.default.v1",
+            capability_snapshot_digest="c" * 64,
+        ),
     )
 
     run_id = await repository.create(RunCreateParams(
@@ -199,12 +212,16 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         "context_window": row["context_window"],
         "endpoint_digest": row["endpoint_digest"],
         "request_profile_digest": row["request_profile_digest"],
+        "requested_reasoning_mode": row["requested_reasoning_mode"],
+        "capability_snapshot_digest": row["capability_snapshot_digest"],
     } == {
         "model_provider": "openai",
         "model_name": "writing-model",
         "context_window": 200_000,
         "endpoint_digest": "a" * 64,
         "request_profile_digest": "b" * 64,
+        "requested_reasoning_mode": "enabled",
+        "capability_snapshot_digest": "c" * 64,
     }
     with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
         await run_db.execute(

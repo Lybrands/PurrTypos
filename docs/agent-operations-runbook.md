@@ -133,6 +133,27 @@ GET /api/ai/agent-security-redteam
 
 语义 Judge 无法完成或返回无效契约。候选不会展示。它属于外部模型/协议故障，不应通过跳过 Judge 来兜底。
 
+### 剧本任务的 `paused`
+
+剧本正式任务按“整理依据 → 生成候选稿 → 校验候选稿 → 发布 Revision”执行。单个阶段的可恢复故障不会再把整个任务标记为失败：
+
+- 有剩余安全尝试时，当前阶段进入 `waiting_retry`；
+- 尝试耗尽、协议不兼容或工具副作用未知时，当前阶段进入 `blocked`，任务和对话进入 `paused`；
+- 已完成阶段的 output ref、候选 Artifact 和 Revision 不会被清空；
+- 恢复只重新排队 `blocked` 阶段，不重跑已完成的依据收集或候选写入；
+- `paused` 不生成正式 Assistant 结论，只有 Revision 成功发布后才生成一次最终结论。
+
+排查时先查看 Task/Unit 状态、失败码、attempt 数量和 output ref。不要把 `blocked` 手工改成 `failed`，也不要通过关闭用户选择的思考模式来绕过失败。
+
+### 思考模式与能力不兼容
+
+前端选择的思考模式是该 Run 的不可变执行意图。模型 Profile 声明 `selectable`、`always_enabled` 或 `unavailable`，请求会在调用供应商前完成兼容性校验。遇到 `unsupported_model_feature` 或 `provider_bad_request` 时应：
+
+1. 保留当前 Task 和所有已完成检查点；
+2. 核对 Run provenance 中的 requested reasoning mode 与 capability digest；
+3. 修正模型 Profile、Base URL 或用户配置后恢复任务；
+4. 不得在同一主任务内静默切换为另一种思考模式。
+
 ## 8. 修改后的最小验证
 
 按改动范围选择测试，至少覆盖：

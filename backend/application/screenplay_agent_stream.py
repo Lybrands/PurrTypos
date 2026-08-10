@@ -101,14 +101,14 @@ class ScreenplayAgentChunkProjector:
             "agentRunStarted": {
                 "runId": turn_id,
                 "status": "running",
-                "title": "剧本创作任务",
                 "goal": str(turn["user_content"]),
             },
         })
-        await self.plan(turn_id)
 
     async def plan(self, turn_id: str) -> None:
         turn, task, units = await self._state(turn_id)
+        if task is None:
+            return
         await self._append_plan(turn, task, units)
 
     async def task_progress(self, turn_id: str, event: AgentEvent) -> None:
@@ -173,7 +173,14 @@ class ScreenplayAgentChunkProjector:
                     )
         await self._append(
             turn,
-            {"done": True, **({"aborted": True} if status == "canceled" else {})},
+            {
+                "done": True,
+                **(
+                    {"finalResponseExpected": False}
+                    if status == "paused" else {}
+                ),
+                **({"aborted": True} if status == "canceled" else {}),
+            },
             task_id=str((task or {}).get("id") or "") or None,
         )
 
@@ -231,17 +238,10 @@ class ScreenplayAgentChunkProjector:
             {
                 "agentRunTodosUpdated": {
                     "runId": str(turn["id"]),
-                    "title": "剧本创作任务",
+                    "title": str(turn["user_content"]),
                     "goal": str(turn["user_content"]),
                     "status": _plan_status(_effective_status(turn, task)),
                     "steps": [
-                        {
-                            "id": f"{turn['id']}:plan",
-                            "title": "理解请求并确定任务",
-                            "type": "analyze",
-                            "status": _planner_status(str(turn["status"])),
-                            "executor": "model",
-                        },
                         *[
                             {
                                 "id": str(unit["unit_id"]),
@@ -290,6 +290,7 @@ class ScreenplayAgentChunkProjector:
 def _plan_status(status: str) -> str:
     return {
         "queued": "planned",
+        "paused": "paused",
         "completed": "done",
         "failed": "failed",
         "canceled": "canceled",
@@ -306,13 +307,6 @@ def _effective_status(
         if turn_status in {"failed", "canceled"}
         else str((task or turn)["status"])
     )
-
-
-def _planner_status(status: str) -> str:
-    return {
-        "failed": "failed",
-        "canceled": "blocked",
-    }.get(status, "running" if status in {"queued", "planning"} else "done")
 
 
 def _unit_status(status: str) -> str:
@@ -337,11 +331,33 @@ _ROLE_LABELS = {
 def _unit_label(unit: Mapping[str, Any], task: Mapping[str, Any] | None) -> str:
     kind = str(unit["kind"])
     payload = _object(unit.get("input_json"))
+    episode_number = int(payload.get("episodeNumber") or 0)
+    role = str((task or {}).get("target_role") or "")
+    target = _ROLE_LABELS.get(role, "剧本交付物")
+    if kind == "compose_final_response":
+        return "整理最终答复"
+    if kind == "collect_evidence":
+        return (
+            f"整理第 {episode_number} 集创作依据"
+            if episode_number
+            else f"整理{target}创作依据"
+        )
+    if kind == "generate_candidate":
+        return (
+            f"创作第 {episode_number} 集候选稿"
+            if episode_number
+            else f"生成{target}候选稿"
+        )
+    if kind == "validate_candidate":
+        return (
+            f"校验第 {episode_number} 集候选稿"
+            if episode_number
+            else f"校验{target}候选稿"
+        )
     if kind == "generate_episode_draft":
-        return f"创作第 {int(payload.get('episodeNumber') or 0)} 集正文"
+        return f"创作第 {episode_number} 集正文"
     if kind == "generate_deliverable":
-        role = str((task or {}).get("target_role") or "")
-        return f"生成{_ROLE_LABELS.get(role, '剧本交付物')}"
+        return f"生成{target}"
     if kind == "publish_candidate_revision":
         return "整理并发布候选稿"
     return "执行剧本任务"

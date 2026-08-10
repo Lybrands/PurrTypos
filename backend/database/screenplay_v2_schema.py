@@ -76,6 +76,15 @@ async def init_screenplay_v2_schema(db) -> None:
         "ALTER TABLE screenplay_projects ADD COLUMN "
         "source_snapshot_json TEXT DEFAULT NULL",
     )
+    await _try_exec(
+        db,
+        "ALTER TABLE screenplay_projects ADD COLUMN "
+        "completion_source TEXT DEFAULT NULL",
+    )
+    await db.execute(
+        "UPDATE screenplay_projects SET completion_source = 'legacyAgentVerdict' "
+        "WHERE active_stage = 'completed' AND completion_source IS NULL"
+    )
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_deliverables (
         id TEXT PRIMARY KEY NOT NULL,
         project_id TEXT NOT NULL,
@@ -200,6 +209,58 @@ async def init_screenplay_v2_schema(db) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_acceptance_events_history "
         "ON screenplay_acceptance_events(project_id, deliverable_id, create_time DESC)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_review_decisions (
+        project_id TEXT NOT NULL,
+        review_revision_id TEXT NOT NULL,
+        draft_revision_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        actor TEXT NOT NULL,
+        decided_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(review_revision_id, issue_id)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_review_decisions_project "
+        "ON screenplay_review_decisions(project_id, review_revision_id)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_review_decision_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        command_id TEXT NOT NULL,
+        review_revision_id TEXT NOT NULL,
+        draft_revision_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        previous_status TEXT DEFAULT NULL,
+        status TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        actor TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(command_id, issue_id)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_review_decision_events_history "
+        "ON screenplay_review_decision_events(project_id, review_revision_id, create_time DESC)"
+    )
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_finalization_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        command_id TEXT NOT NULL,
+        draft_revision_id TEXT NOT NULL,
+        review_revision_id TEXT NOT NULL,
+        decision_snapshot_hash TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(project_id, command_id)
+    )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screenplay_finalization_events_current "
+        "ON screenplay_finalization_events(project_id, draft_revision_id, review_revision_id, create_time DESC)"
     )
 
     await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_command_receipts (

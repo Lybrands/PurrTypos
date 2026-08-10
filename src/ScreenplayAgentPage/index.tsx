@@ -3,7 +3,9 @@ import React from 'react'
 import AppHeader from '../components/AppHeader'
 import AgentConversation from '../components/AgentConversation'
 import AgentComposer from '../components/AgentComposer'
-import AgentConversationIndex from '../components/AgentConversationIndex'
+import AgentConversationIndex, {
+  type AgentConversationActivity,
+} from '../components/AgentConversationIndex'
 import AgentTaskProgress from '../components/AgentTaskProgress'
 import {
   hydrateAiDebugRunSnapshot,
@@ -64,9 +66,7 @@ import type {
   EntityId,
   ScreenplayDocument,
   ScreenplayDocumentEpisode,
-  ScreenplayDocumentProposal,
   ScreenplayAgentTask,
-  ScreenplayRevisionRef,
   ScreenplayDraftEpisode,
   ScreenplayFormat,
   ScreenplayProject,
@@ -76,6 +76,7 @@ import type {
   ScreenplaySourceScopeRequest,
   ScreenplayConversationRuntimeInput,
   ScreenplayConversationTurn,
+  ScreenplayV2ReviewFindingStatus,
   ScreenplayV2Workspace,
 } from '../types'
 import {
@@ -104,26 +105,33 @@ import {
 import { selectScreenplayAgentSession } from './sessionRestore'
 import {
   createScreenplayCommandId,
-  findWorkspaceRevision,
-  deliverableRoleForProposal,
   projectFromV2Project,
   projectFromWorkspace,
+  revisionLibraryTarget,
   screenplayFormatToV2,
   screenplaySourceToV2,
+  type RevisionLibraryTarget,
 } from './screenplayProjectModel'
 import { ScreenplayConversationClient } from './conversationClient'
 import {
   modelRunIds,
+  screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
   type ScreenplayConversationState,
+  type ScreenplayTurnArtifact,
 } from './conversationState'
 import RevisionLibraryModal from './RevisionLibraryModal'
+import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
+import {
+  reviewPrimaryAction,
+  reviewRequiresRerun,
+  reviewWorkspaceEntry,
+} from './reviewAdjudicationModel'
 import { structuredContentToMarkdown } from './revisionDocumentView'
 import {
   documentEpisodesFromRevision,
   documentFromRevision,
   draftEpisodesFromRevision,
-  proposalFromRevision,
 } from './revisionProposal'
 import './index.scss'
 
@@ -194,6 +202,14 @@ const DOCUMENT_KIND_LABELS: Record<ScreenplayDocument['kind'], string> = {
   scene_draft: '场景正文',
   review: '审阅报告',
 }
+const DELIVERABLE_ROLE_LABELS: Record<ScreenplayTurnArtifact['role'], string> = {
+  sourceAnalysis: '原作分析',
+  creativeBrief: '创作简报',
+  structure: '结构设计',
+  sceneList: '场景规划',
+  screenplayDraft: '剧本正文',
+  review: '审阅修订',
+}
 type ScreenplayDocumentStage = Exclude<ScreenplayProject['active_stage'], 'completed'>
 const DOCUMENT_STAGE_GROUPS: Array<{
   stage: ScreenplayDocumentStage
@@ -259,7 +275,9 @@ function replayTurnStartedAt(
   turn: ScreenplayConversationTurn,
   task?: ScreenplayAgentTask,
 ): number {
-  const terminal = ['completed', 'failed', 'canceled'].includes(task?.status || turn.status)
+  const terminal = ['paused', 'completed', 'failed', 'canceled'].includes(
+    task?.status || turn.status,
+  )
   const elapsed = terminal
     ? screenplayTurnDurationMs(turn, task)
     : Math.max(0, Date.now() - (backendTimestampMs(turn.createdAt) ?? Date.now()))
@@ -270,7 +288,9 @@ function turnTiming(
   turn: ScreenplayConversationTurn,
   task?: ScreenplayAgentTask,
 ): Pick<ChatMessage, 'durationMs' | 'turnStartedAt'> {
-  return ['completed', 'failed', 'canceled'].includes(task?.status || turn.status)
+  return ['paused', 'completed', 'failed', 'canceled'].includes(
+    task?.status || turn.status,
+  )
     ? { durationMs: screenplayTurnDurationMs(turn, task) }
     : { turnStartedAt: replayTurnStartedAt(turn, task) }
 }
@@ -351,6 +371,7 @@ function stageAgentStarter(
   project: ScreenplayProject,
   documents: ScreenplayDocument[] = [],
   draftScope: ScreenplayDraftScope = 'next_episode',
+  reviewState?: ScreenplayV2Workspace['workflow']['review'],
 ): string {
   if (project.active_stage === 'completed') {
     return project.delivery_manifest
@@ -393,6 +414,17 @@ function stageAgentStarter(
       : `继续创作完整正文，${suffix}`
   }
   if (project.active_stage === 'review') {
+    if ((reviewState?.failedEpisodes.length ?? 0) > 0) {
+      const numbers = reviewState?.failedEpisodes
+        .map((item) => item.episodeNumber)
+        .join('、')
+      return `重新审阅第 ${numbers} 集。只处理上次执行失败的分集，基于当前完整正文生成新的正式审阅报告，不要把系统执行错误写成审阅意见。`
+    }
+    if (reviewState?.hardChecks.some(
+      (check) => check.code === 'review_input_unverified',
+    )) {
+      return '重新审阅当前完整剧本。上一份报告没有可验证的正文输入，不得沿用其中的意见；请基于当前完整正文重新检查连贯性、人物弧光、结构节奏、对白和剧本格式，并生成新的正式审阅报告。'
+    }
     const acceptedDraft = [...documents].reverse().find(
       (document) => document.kind === 'scene_draft'
         && document.status === 'accepted',
@@ -406,7 +438,9 @@ function stageAgentStarter(
       && String(acceptedReview.content_json?.reviewedDraftId || '')
         === String(acceptedDraft?.id || '')
     ) {
-      const issueCount = Number(acceptedReview.content_json?.issueCount || 0)
+      const issueCount = reviewState?.phase === 'readyToRevise'
+        ? reviewState.counts.planned
+        : Number(acceptedReview.content_json?.issueCount || 0)
       return `根据已经确认的审阅报告修订完整剧本，逐项解决其中 ${issueCount} 个问题，并生成可应用的完整修订稿。`
     }
     const previousReviewId = String(
@@ -469,6 +503,7 @@ function stagePrimaryActionLabel(
   documents: ScreenplayDocument[],
   episodes: ScreenplayDraftEpisode[] = [],
   documentEpisodes: ScreenplayDocumentEpisode[] = [],
+  reviewState?: ScreenplayV2Workspace['workflow']['review'],
 ): string {
   if (project.active_stage === 'completed') return '创作已完成'
   if (project.active_stage === 'orientation') {
@@ -493,6 +528,7 @@ function stagePrimaryActionLabel(
     if (sceneCount > 0 && completedCount >= sceneCount) return '完成剧本正文'
     return SERIES_FORMATS.has(project.format) ? '创作下一集' : '创作正文'
   }
+  if (reviewState) return reviewPrimaryAction(reviewState).label
   const acceptedDraft = [...documents].reverse().find(
     (document) => document.kind === 'scene_draft' && document.status === 'accepted',
   )
@@ -511,61 +547,36 @@ function stagePrimaryActionLabel(
   return '开始审阅'
 }
 
-function proposalAdvancesProjectStage(
-  project: ScreenplayProject | null,
-  proposal: ScreenplayDocumentProposal | null,
-): boolean {
-  if (!project || !proposal) return false
-  if (project.active_stage === 'orientation') {
-    return project.source_kind === 'book'
-      ? proposal.kind === 'source_analysis'
-      : proposal.kind === 'creative_brief'
-  }
-  if (project.active_stage === 'brief') return proposal.kind === 'creative_brief'
-  if (project.active_stage === 'structure') {
-    return proposal.kind === 'beat_sheet' || proposal.kind === 'episode_outline'
-  }
-  if (project.active_stage === 'scenes') return proposal.kind === 'scene_list'
-  if (project.active_stage === 'draft') {
-    return proposal.kind === 'scene_draft' && proposal.contentJson.isComplete === true
-  }
-  if (project.active_stage === 'review') {
-    return proposal.kind === 'review' && proposal.contentJson.verdict === 'ready'
-  }
-  return false
-}
-
 interface ScreenplayProposalActionPanelProps {
-  proposal: ScreenplayDocumentProposal
-  acceptedRevisionId: EntityId | null
-  savedRevisionId: EntityId | null
+  artifact: ScreenplayTurnArtifact
   sourceCount: number
   showSources: boolean
-  willAdvance: boolean
   running: boolean
-  saving: boolean
   accepting: boolean
   archived: boolean
-  activeStage: ScreenplayProject['active_stage']
   onView: () => void
   onApply: () => void
 }
 
 function ScreenplayProposalActionPanel({
-  proposal,
-  acceptedRevisionId,
-  savedRevisionId,
+  artifact,
   sourceCount,
   showSources,
-  willAdvance,
   running,
-  saving,
   accepting,
   archived,
-  activeStage,
   onView,
   onApply,
 }: ScreenplayProposalActionPanelProps) {
+  const current = artifact.status === 'current'
+  const statusLabel = current
+    ? '已应用'
+    : artifact.status === 'historical'
+      ? '历史版本'
+      : '待应用'
+  const kindLabel = artifact.kind
+    ? DOCUMENT_KIND_LABELS[artifact.kind]
+    : DELIVERABLE_ROLE_LABELS[artifact.role]
   return (
     <div className="screenplay-agent-result">
       <div className="screenplay-agent-result__title">
@@ -583,29 +594,26 @@ function ScreenplayProposalActionPanel({
         <header>
           <div>
             <span className="screenplay-source-eyebrow">FORMAL PROPOSAL</span>
-            <h3>{proposal.title}</h3>
+            <h3>{artifact.title}</h3>
             <span>
-              {DOCUMENT_KIND_LABELS[proposal.kind]}
+              {kindLabel}
+              {artifact.revisionNo != null ? ` · v${artifact.revisionNo}` : ''}
               {' · '}
-              {acceptedRevisionId
+              {current
                 ? '已应用到项目'
-                : savedRevisionId
-                  ? '候选已就绪，等待应用'
-                  : '候选提交中'}
+                : artifact.status === 'historical'
+                  ? '曾应用，可重新使用'
+                  : '候选已就绪，等待应用'}
             </span>
           </div>
           <span className={`screenplay-document-status ${
-            acceptedRevisionId
+            current
               ? 'is-accepted'
-              : savedRevisionId
+              : artifact.status === 'candidate'
                 ? 'is-saved'
                 : ''
           }`}>
-            {acceptedRevisionId
-              ? '已应用'
-              : savedRevisionId
-                ? '待应用'
-                : '提交中'}
+            {statusLabel}
           </span>
         </header>
         <div className="screenplay-document-proposal__handoff">
@@ -619,14 +627,11 @@ function ScreenplayProposalActionPanel({
         </div>
         <footer>
           <span>
-            {willAdvance
-              ? 'Agent 已生成唯一候选；应用会原子更新当前版本并推进阶段。'
-              : 'Agent 已生成唯一候选；应用会原子更新当前业务版本。'}
+            应用会原子更新项目当前版本；若影响下游内容，系统会先请求确认。
           </span>
           <div>
             <PurrButton
               icon={<EyeIcon />}
-              disabled={!savedRevisionId}
               onClick={onView}
             >
               查看候选稿
@@ -636,20 +641,17 @@ function ScreenplayProposalActionPanel({
               icon={<CheckCircleIcon />}
               loading={accepting}
               disabled={
-                acceptedRevisionId != null
+                current
                 || running
-                || saving
                 || archived
               }
               onClick={onApply}
             >
-              {acceptedRevisionId
+              {current
                 ? '已应用'
-                : willAdvance
-                  ? activeStage === 'review'
-                    ? '应用并完成'
-                    : '应用并推进'
-                  : '应用当前版本'}
+                : artifact.status === 'historical'
+                  ? '重新应用'
+                  : '应用此版本'}
             </PurrButton>
           </div>
         </footer>
@@ -778,6 +780,9 @@ export default function ScreenplayAgentPage({
   >({})
   const [documentLibraryOpen, setDocumentLibraryOpen] = React.useState(false)
   const [revisionLibraryOpen, setRevisionLibraryOpen] = React.useState(false)
+  const [revisionLibrarySelection, setRevisionLibrarySelection] = React.useState<
+    RevisionLibraryTarget | null
+  >(null)
   const [draftRangeModalOpen, setDraftRangeModalOpen] = React.useState(false)
   const [customDraftEpisodeCount, setCustomDraftEpisodeCount] = React.useState<number | null>(2)
   const [projectLoading, setProjectLoading] = React.useState(false)
@@ -794,8 +799,6 @@ export default function ScreenplayAgentPage({
     ScreenplayQueuedSubmission[]
   >([])
   const [agentQueueDraining, setAgentQueueDraining] = React.useState(false)
-  const [agentProposal, setAgentProposal] = React.useState<ScreenplayDocumentProposal | null>(null)
-  const [agentRevisionRef, setAgentRevisionRef] = React.useState<ScreenplayRevisionRef | null>(null)
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
@@ -803,8 +806,11 @@ export default function ScreenplayAgentPage({
   const [agentConversationIndexOpen, setAgentConversationIndexOpen] = React.useState(true)
   const [editingAgentSessionId, setEditingAgentSessionId] = React.useState<number | null>(null)
   const [editingAgentSessionTitle, setEditingAgentSessionTitle] = React.useState('')
-  const [savingAgentDraft, setSavingAgentDraft] = React.useState(false)
-  const [acceptingAgentDraft, setAcceptingAgentDraft] = React.useState(false)
+  const [acceptingAgentRevisionId, setAcceptingAgentRevisionId] = React.useState<
+    EntityId | null
+  >(null)
+  const [reviewMutationPending, setReviewMutationPending] = React.useState(false)
+  const [reviewAdjudicationOpen, setReviewAdjudicationOpen] = React.useState(false)
   const [exportFormat, setExportFormat] = React.useState<
     'fountain' | 'markdown' | 'txt' | 'pdf' | 'json'
   >('fountain')
@@ -812,25 +818,6 @@ export default function ScreenplayAgentPage({
   const [selectedDocument, setSelectedDocument] = React.useState<ScreenplayDocument | null>(null)
   const [comparisonDocument, setComparisonDocument] = React.useState<ScreenplayDocument | null>(null)
   const [updatingProjectStatus, setUpdatingProjectStatus] = React.useState(false)
-  const candidateRevision = React.useMemo(() => (
-    (agentRevisionRef || agentProposal) && projectWorkspace
-      ? findWorkspaceRevision({
-          workspace: projectWorkspace,
-          role: agentRevisionRef?.role
-            ?? deliverableRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
-          revisionId: agentRevisionRef?.revisionId,
-          taskId: agentRevisionRef?.taskId,
-          finalizingRunId: agentRevisionRef?.sourceRunId ?? undefined,
-        })
-      : null
-  ), [agentProposal, agentRevisionRef, projectWorkspace])
-  const savedAgentDocumentId = candidateRevision?.id ?? agentRevisionRef?.revisionId ?? null
-  const acceptedAgentDocumentId = candidateRevision
-    && projectWorkspace
-    && projectWorkspace.workflow.heads[candidateRevision.role]?.id === candidateRevision.id
-      ? candidateRevision.id
-      : null
-  const hydratedAgentRevisionIdRef = React.useRef<string | null>(null)
   const activeAgentSessionRef = React.useRef<number | null>(null)
   const agentConversationStateRef = React.useRef<ScreenplayConversationState | null>(null)
   const agentChunkReplayRef = React.useRef(new AgentChunkReplay())
@@ -905,7 +892,6 @@ export default function ScreenplayAgentPage({
     )
     : undefined
   const agentRunning = activeConversationTurn != null || activeConversationTask != null
-  const agentResponse = latestConversationTurn?.assistantContent || ''
 
   React.useEffect(() => {
     activeAgentSessionRef.current = agentSessionId
@@ -991,61 +977,6 @@ export default function ScreenplayAgentPage({
     diagnosticRunMonitorsRef.current.forEach((cancel) => cancel())
     diagnosticRunMonitorsRef.current.clear()
   }, [agentSessionId])
-
-  React.useEffect(() => {
-    const revisionTask = [...(agentConversationState?.tasks ?? [])]
-      .reverse()
-      .find((task) => task.resultRevisionId)
-    if (!revisionTask || openedProject?.id !== revisionTask.projectId) {
-      setAgentRevisionRef(null)
-      setAgentProposal(null)
-      hydratedAgentRevisionIdRef.current = null
-      return undefined
-    }
-    if (hydratedAgentRevisionIdRef.current === revisionTask.resultRevisionId) {
-      return undefined
-    }
-    const revisionTurn = agentConversationState?.turns.find(
-      (turn) => turn.id === revisionTask.turnId,
-    )
-    let canceled = false
-    void services.screenplay.getScreenplayV2Revision({
-      revisionId: revisionTask.resultRevisionId!,
-      view: 'full',
-    }).then((result) => {
-      if (canceled) return
-      if (!result.success || !result.data) {
-        message.error(result.error || '读取 Agent 候选版本失败')
-        return
-      }
-      try {
-        const reference: ScreenplayRevisionRef = {
-          schemaVersion: 1,
-          projectId: revisionTask.projectId,
-          taskId: revisionTask.id,
-          revisionId: revisionTask.resultRevisionId!,
-          role: result.data.role,
-          revisionNo: result.data.revisionNo,
-          sourceRunId: modelRunIds(revisionTask).at(-1)
-            || revisionTurn?.plannerRunId
-            || undefined,
-        }
-        const proposal = proposalFromRevision(reference, result.data)
-        hydratedAgentRevisionIdRef.current = reference.revisionId
-        setAgentRevisionRef(reference)
-        setAgentProposal(proposal)
-      } catch (error) {
-        message.error(error instanceof Error ? error.message : 'Agent 候选版本无效')
-      }
-    })
-    return () => {
-      canceled = true
-    }
-  }, [
-    agentConversationState,
-    message,
-    openedProject?.id,
-  ])
 
   React.useEffect(() => {
     if (modelConfigs.length === 0) return
@@ -1238,6 +1169,7 @@ export default function ScreenplayAgentPage({
 		setOpenedProject(null)
 		setProjectWorkspace(null)
 		setRevisionLibraryOpen(false)
+		setRevisionLibrarySelection(null)
 		setProjectDocuments([])
         setDocumentEpisodes([])
         setDraftEpisodes([])
@@ -1253,9 +1185,6 @@ export default function ScreenplayAgentPage({
           (submission) => submission.projectId !== projectId,
         ))
         setAgentPrompt('')
-        setAgentProposal(null)
-        setAgentRevisionRef(null)
-        hydratedAgentRevisionIdRef.current = null
         setStage('source')
       }
       setDeleteProjectTarget(null)
@@ -1653,13 +1582,11 @@ export default function ScreenplayAgentPage({
     setOpenedProject(null)
     setProjectWorkspace(null)
     setRevisionLibraryOpen(false)
+    setRevisionLibrarySelection(null)
     setProjectDocuments([])
     setDocumentEpisodes([])
     setDraftEpisodes([])
     setProjectSourceRefs([])
-    setAgentProposal(null)
-    setAgentRevisionRef(null)
-    hydratedAgentRevisionIdRef.current = null
     setAgentSessionId(null)
     setAgentSessions([])
     setAgentConversationState(null)
@@ -1795,9 +1722,6 @@ export default function ScreenplayAgentPage({
     agentChunkReplayRef.current.reset()
     agentChunkCursorRef.current = 0
     setAgentChunkVersion((current) => current + 1)
-    setAgentProposal(null)
-    setAgentRevisionRef(null)
-    hydratedAgentRevisionIdRef.current = null
     try {
       const next = await conversationClient.load(project.id, sessionId)
       if (activeAgentSessionRef.current !== sessionId) return
@@ -1821,6 +1745,7 @@ export default function ScreenplayAgentPage({
     setOpenedProject(project)
     setProjectWorkspace(null)
     setRevisionLibraryOpen(false)
+    setRevisionLibrarySelection(null)
     setProjectDocuments([])
     setDocumentEpisodes([])
     setDraftEpisodes([])
@@ -1836,9 +1761,6 @@ export default function ScreenplayAgentPage({
     setAgentChunkHydrating(true)
     setAgentChunkVersion((current) => current + 1)
     setAgentPrompt('')
-    setAgentProposal(null)
-    setAgentRevisionRef(null)
-    hydratedAgentRevisionIdRef.current = null
     setProjectLoading(true)
     setStage('project')
     try {
@@ -2005,7 +1927,9 @@ export default function ScreenplayAgentPage({
                   })
                 }
                 agentChunkCursorRef.current = event.cursor
-                const terminalReplay = turn && ['completed', 'failed', 'canceled'].includes(
+                const terminalReplay = turn && [
+                  'paused', 'completed', 'failed', 'canceled',
+                ].includes(
                   task?.status || turn.status,
                 )
                 changed = (
@@ -2298,9 +2222,6 @@ export default function ScreenplayAgentPage({
         runtime,
       })
       if (activeAgentSessionRef.current !== agentSessionId) return
-      setAgentProposal(null)
-      setAgentRevisionRef(null)
-      hydratedAgentRevisionIdRef.current = null
       const next = await conversationClient.load(openedProject.id, agentSessionId)
       if (activeAgentSessionRef.current !== agentSessionId) return
       agentConversationStateRef.current = next
@@ -2368,131 +2289,95 @@ export default function ScreenplayAgentPage({
     runAgent,
   ])
 
-  const saveAgentProposal = React.useCallback(async (): Promise<EntityId | null> => {
-    if (!openedProject || (!agentProposal && !agentRevisionRef)) return null
-    if (candidateRevision) return candidateRevision.id
-    setSavingAgentDraft(true)
-    try {
-      const refreshed = await loadProjectWorkspace(openedProject.id)
-      const revision = findWorkspaceRevision({
-        workspace: refreshed,
-        role: agentRevisionRef?.role
-          ?? deliverableRoleForProposal((agentProposal as ScreenplayDocumentProposal).kind),
-        revisionId: agentRevisionRef?.revisionId,
-        taskId: agentRevisionRef?.taskId,
-        finalizingRunId: agentRevisionRef?.sourceRunId ?? undefined,
-      })
-      if (!revision) {
-        message.error('候选版本尚未完成持久化，请稍后重试')
-        return null
-      }
-      return revision.id
-    } finally {
-      setSavingAgentDraft(false)
-    }
-  }, [
-    agentProposal,
-    agentRevisionRef,
-    loadProjectWorkspace,
-    message,
-    openedProject,
-    candidateRevision,
-    projectWorkspace,
-  ])
-
-  const acceptAgentProposal = React.useCallback(async () => {
+  const acceptAgentRevision = React.useCallback(async (
+    artifact: ScreenplayTurnArtifact,
+  ) => {
     if (
       !openedProject
       || !projectWorkspace
-      || (!agentProposal && !agentRevisionRef)
-      || acceptingAgentDraft
+      || acceptingAgentRevisionId != null
     ) return
-    setAcceptingAgentDraft(true)
+    setAcceptingAgentRevisionId(artifact.revisionId)
     try {
-      const documentId = await saveAgentProposal()
-      if (!documentId) return
-      {
-        const workspaceForAccept = await loadProjectWorkspace(openedProject.id)
-          ?? projectWorkspace
-        const candidate = workspaceForAccept.candidates.find(
-          (revision) => revision.id === documentId,
-        )
-        if (!candidate) {
-          const currentHead = Object.values(workspaceForAccept.workflow.heads).find(
-            (revision) => revision?.id === documentId,
-          )
-          if (currentHead) return
-          message.error('候选版本已变化，请刷新项目后重试')
-          return
-        }
-        const commandId = createScreenplayCommandId('accept-revision')
-        let accepted = await services.screenplay.acceptScreenplayV2Revision({
-          commandId,
-          projectId: openedProject.id,
-          revisionId: documentId,
-          expectedProjectRevision: workspaceForAccept.project.revision,
-        })
-        if (!accepted.success || !accepted.data?.workspace) {
-          const reconciled = await loadProjectWorkspace(openedProject.id)
-          if (reconciled?.workflow.heads[candidate.role]?.id === documentId) {
-            await loadProjectDocuments(openedProject.id)
-            message.success('候选版本已经应用')
-            return
-          }
-          if (accepted.error?.includes('下游版本失效')) {
-            const confirmation = await confirm({
-              title: '应用并重置下游版本？',
-              content: '这个候选修改了上游基线。应用后，依赖旧基线的下游当前版本会同时失效，需要从新的阶段状态继续生成。',
-              confirmText: '应用并重置',
-              confirmVariant: 'danger',
-              cancelText: '取消',
-            })
-            if (confirmation !== 'confirm') return
-            accepted = await services.screenplay.acceptScreenplayV2Revision({
-              commandId,
-              projectId: openedProject.id,
-              revisionId: documentId,
-              expectedProjectRevision: workspaceForAccept.project.revision,
-              confirmInvalidation: true,
-            })
-          }
-        }
-        if (!accepted.success || !accepted.data?.workspace) {
-          const reconciled = await loadProjectWorkspace(openedProject.id)
-          if (reconciled?.workflow.heads[candidate.role]?.id === documentId) {
-            await loadProjectDocuments(openedProject.id)
-            message.success('候选版本已经应用')
-            return
-          }
-          message.error(accepted.error || '应用候选版本失败')
-          return
-        }
-        applyProjectWorkspace(accepted.data.workspace)
-        const synchronizedProject = projectFromV2Project(
-          accepted.data.workspace.project,
-        )
-        setOpenedProject(synchronizedProject)
-        setProjects((current) => current.map((project) => (
-          project.id === synchronizedProject.id ? synchronizedProject : project
-        )))
-        await Promise.all([
-          loadProjectDocuments(openedProject.id),
-          loadProjectSourceRefs(openedProject.id),
-        ])
-        message.success(
-          accepted.data.workspace.workflow.stage !== workspaceForAccept.workflow.stage
-            ? '已应用候选版本并推进项目阶段'
-            : '已应用为当前剧本版本',
-        )
+      const workspaceForAccept = await loadProjectWorkspace(openedProject.id)
+        ?? projectWorkspace
+      if (
+        workspaceForAccept.workflow.heads[artifact.role]?.id
+        === artifact.revisionId
+      ) {
+        message.info('这个版本已经是当前版本')
         return
       }
+      const commandId = createScreenplayCommandId('accept-revision')
+      let accepted = await services.screenplay.acceptScreenplayV2Revision({
+        commandId,
+        projectId: openedProject.id,
+        revisionId: artifact.revisionId,
+        expectedProjectRevision: workspaceForAccept.project.revision,
+      })
+      if (!accepted.success || !accepted.data?.workspace) {
+        const reconciled = await loadProjectWorkspace(openedProject.id)
+        if (
+          reconciled?.workflow.heads[artifact.role]?.id
+          === artifact.revisionId
+        ) {
+          await loadProjectDocuments(openedProject.id)
+          message.success('这个版本已经应用')
+          return
+        }
+        if (accepted.error?.includes('下游版本失效')) {
+          const confirmation = await confirm({
+            title: '应用并重置下游版本？',
+            content: '这个版本修改了上游基线。应用后，依赖旧基线的下游当前版本会同时失效，需要从新的阶段状态继续生成。',
+            confirmText: '应用并重置',
+            confirmVariant: 'danger',
+            cancelText: '取消',
+          })
+          if (confirmation !== 'confirm') return
+          accepted = await services.screenplay.acceptScreenplayV2Revision({
+            commandId,
+            projectId: openedProject.id,
+            revisionId: artifact.revisionId,
+            expectedProjectRevision: workspaceForAccept.project.revision,
+            confirmInvalidation: true,
+          })
+        }
+      }
+      if (!accepted.success || !accepted.data?.workspace) {
+        const reconciled = await loadProjectWorkspace(openedProject.id)
+        if (
+          reconciled?.workflow.heads[artifact.role]?.id
+          === artifact.revisionId
+        ) {
+          await loadProjectDocuments(openedProject.id)
+          message.success('这个版本已经应用')
+          return
+        }
+        message.error(accepted.error || '应用版本失败')
+        return
+      }
+      applyProjectWorkspace(accepted.data.workspace)
+      const synchronizedProject = projectFromV2Project(
+        accepted.data.workspace.project,
+      )
+      setOpenedProject(synchronizedProject)
+      setProjects((current) => current.map((project) => (
+        project.id === synchronizedProject.id ? synchronizedProject : project
+      )))
+      await Promise.all([
+        loadProjectDocuments(openedProject.id),
+        loadProjectSourceRefs(openedProject.id),
+      ])
+      message.success(
+        accepted.data.workspace.workflow.stage !== workspaceForAccept.workflow.stage
+          ? '已应用版本并推进项目阶段'
+          : '已应用为当前剧本版本',
+      )
     } finally {
-      setAcceptingAgentDraft(false)
+      setAcceptingAgentRevisionId(null)
     }
   }, [
-    acceptingAgentDraft,
-    agentProposal,
-    agentRevisionRef,
+    acceptingAgentRevisionId,
     applyProjectWorkspace,
     confirm,
     loadProjectDocuments,
@@ -2501,7 +2386,103 @@ export default function ScreenplayAgentPage({
     message,
     openedProject,
     projectWorkspace,
-    saveAgentProposal,
+  ])
+
+  const adjudicateReview = React.useCallback(async (
+    issueIds: string[],
+    status: ScreenplayV2ReviewFindingStatus,
+    note: string,
+  ): Promise<boolean> => {
+    if (
+      !openedProject
+      || !projectWorkspace
+      || reviewMutationPending
+      || issueIds.length === 0
+    ) return false
+    setReviewMutationPending(true)
+    try {
+      const latestWorkspace = await loadProjectWorkspace(openedProject.id)
+        ?? projectWorkspace
+      const reviewRevisionId = latestWorkspace.workflow.review.reviewRevisionId
+      if (!reviewRevisionId) {
+        message.error('当前没有可处理的审阅报告')
+        return false
+      }
+      const result = await services.screenplay.adjudicateScreenplayV2Review({
+        commandId: createScreenplayCommandId('adjudicate-review'),
+        projectId: openedProject.id,
+        expectedProjectRevision: latestWorkspace.project.revision,
+        reviewRevisionId,
+        decisions: issueIds.map((issueId) => ({ issueId, status, note })),
+      })
+      if (!result.success || !result.data) {
+        await loadProjectWorkspace(openedProject.id)
+        message.error(result.error || '处理审阅意见失败')
+        return false
+      }
+      await applyRevisionWorkspace(result.data)
+      message.success(`已处理 ${issueIds.length} 条审阅意见`)
+      return true
+    } finally {
+      setReviewMutationPending(false)
+    }
+  }, [
+    applyRevisionWorkspace,
+    loadProjectWorkspace,
+    message,
+    openedProject,
+    projectWorkspace,
+    reviewMutationPending,
+  ])
+
+  const finalizeProject = React.useCallback(async () => {
+    if (!openedProject || !projectWorkspace || reviewMutationPending) return
+    const latestWorkspace = await loadProjectWorkspace(openedProject.id)
+      ?? projectWorkspace
+    const reviewState = latestWorkspace.workflow.review
+    if (
+      !reviewState.canFinalize
+      || !reviewState.draftRevisionId
+      || !reviewState.reviewRevisionId
+    ) {
+      message.warning('当前剧本尚未满足定稿条件')
+      return
+    }
+    const decision = await confirm({
+      title: '确认当前剧本定稿？',
+      content: `本次定稿包含 ${reviewState.counts.resolved} 条已解决、${reviewState.counts.dismissed} 条不成立和 ${reviewState.counts.riskAccepted} 条接受风险的审阅裁决。定稿后仍可查看完整记录。`,
+      confirmText: '确认定稿',
+      confirmVariant: 'primary',
+      cancelText: '继续检查',
+    })
+    if (decision !== 'confirm') return
+    setReviewMutationPending(true)
+    try {
+      const result = await services.screenplay.finalizeScreenplayV2Project({
+        commandId: createScreenplayCommandId('finalize-project'),
+        projectId: openedProject.id,
+        expectedProjectRevision: latestWorkspace.project.revision,
+        draftRevisionId: reviewState.draftRevisionId,
+        reviewRevisionId: reviewState.reviewRevisionId,
+      })
+      if (!result.success || !result.data) {
+        await loadProjectWorkspace(openedProject.id)
+        message.error(result.error || '确认定稿失败')
+        return
+      }
+      await applyRevisionWorkspace(result.data)
+      message.success('剧本已由你确认定稿')
+    } finally {
+      setReviewMutationPending(false)
+    }
+  }, [
+    applyRevisionWorkspace,
+    confirm,
+    loadProjectWorkspace,
+    message,
+    openedProject,
+    projectWorkspace,
+    reviewMutationPending,
   ])
 
   const acceptedScreenplayDraft = React.useMemo(
@@ -2740,11 +2721,18 @@ export default function ScreenplayAgentPage({
   )
   const agentSessionActivities = React.useMemo(() => {
     if (agentSessionId == null || !latestConversationTurn) return {}
+    const durableStatus = latestConversationTask?.status
+    const state: AgentConversationActivity['state'] = (
+      latestConversationTurn.status === 'planning'
+      || latestConversationTurn.status === 'running'
+    )
+      ? 'running'
+      : durableStatus === 'pending'
+        ? 'queued'
+        : durableStatus || latestConversationTurn.status
     return {
       [agentSessionId]: {
-        state: latestConversationTurn.status === 'planning'
-          ? 'running'
-          : latestConversationTask?.status || latestConversationTurn.status,
+        state,
         queuedCount: activeQueuedSubmissions.length + ((
           latestConversationTurn.status === 'queued'
           || latestConversationTask?.status === 'queued'
@@ -2787,53 +2775,70 @@ export default function ScreenplayAgentPage({
     ?? nonEmptyProjectDocumentGroups.at(-1)
     ?? null
   )
-  const proposalWillAdvance = proposalAdvancesProjectStage(openedProject, agentProposal)
-  const proposalTask = [...(agentConversationState?.tasks ?? [])].reverse().find(
-    (task) => (
-      (agentRevisionRef?.taskId && task.id === agentRevisionRef.taskId)
-      || (
-        savedAgentDocumentId != null
-        && task.resultRevisionId === savedAgentDocumentId
-      )
-    ),
+  const agentTurnArtifacts = React.useMemo(() => screenplayTurnArtifacts(
+    agentConversationState?.tasks ?? [],
+    projectWorkspace,
+  ), [agentConversationState?.tasks, projectWorkspace])
+  const openRevisionLibrary = React.useCallback((
+    target: RevisionLibraryTarget | null,
+  ) => {
+    setRevisionLibrarySelection(revisionLibraryTarget(target))
+    setRevisionLibraryOpen(true)
+  }, [])
+  const renderAgentArtifact = React.useCallback((
+    artifact: ScreenplayTurnArtifact,
+  ) => {
+    const sourceCount = artifact.sourceRunId
+      ? projectSourceRefs.filter(
+          (ref) => ref.agent_run_id === artifact.sourceRunId,
+        ).length
+      : 0
+    return (
+      <ScreenplayProposalActionPanel
+        artifact={artifact}
+        sourceCount={sourceCount}
+        showSources={!agentRunning && Boolean(artifact.sourceRunId)}
+        running={agentRunning}
+        accepting={acceptingAgentRevisionId === artifact.revisionId}
+        archived={openedProject?.status === 'archived'}
+        onView={() => openRevisionLibrary(artifact)}
+        onApply={() => void acceptAgentRevision(artifact)}
+      />
+    )
+  }, [
+    acceptAgentRevision,
+    acceptingAgentRevisionId,
+    agentRunning,
+    openRevisionLibrary,
+    openedProject?.status,
+    projectSourceRefs,
+  ])
+  const agentArtifactVersion = [...agentTurnArtifacts.values()]
+    .map((artifact) => `${artifact.revisionId}:${artifact.status}`)
+    .join('|')
+  const hasPendingAgentProposal = Boolean(
+    projectWorkspace?.candidates.some((revision) => revision.agentTaskId),
   )
-  const proposalTurnId = proposalTask?.turnId ?? null
-  const proposalRunId = agentRevisionRef?.sourceRunId
-    ?? agentProposal?.sourceRunId
-    ?? ''
-  const proposalSourceCount = proposalRunId
-    ? projectSourceRefs.filter((ref) => ref.agent_run_id === proposalRunId).length
-    : 0
-  const agentProposalAttachment = agentProposal ? (
-    <ScreenplayProposalActionPanel
-      proposal={agentProposal}
-      acceptedRevisionId={acceptedAgentDocumentId}
-      savedRevisionId={savedAgentDocumentId}
-      sourceCount={proposalSourceCount}
-      showSources={!agentRunning && Boolean(proposalRunId)}
-      willAdvance={proposalWillAdvance}
-      running={agentRunning}
-      saving={savingAgentDraft}
-      accepting={acceptingAgentDraft}
-      archived={openedProject?.status === 'archived'}
-      activeStage={openedProject?.active_stage ?? 'completed'}
-      onView={() => setRevisionLibraryOpen(true)}
-      onApply={() => void acceptAgentProposal()}
-    />
-  ) : null
-  const hasPendingAgentProposal = (
-    agentProposal != null || agentRevisionRef != null
-  ) && acceptedAgentDocumentId == null
-  // The CURRENT TASK panel always keeps the stage's primary shortcut visible.
-  // Runtime/proposal state may temporarily disable it, but must not remove the
-  // entry point and make the panel appear to have lost its core action.
+  const reviewState = projectWorkspace?.workflow.review
+  const reviewEntry = reviewState?.reviewRevisionId
+    ? reviewWorkspaceEntry(reviewState)
+    : null
+  React.useEffect(() => {
+    if (!reviewState?.reviewRevisionId) setReviewAdjudicationOpen(false)
+  }, [reviewState?.reviewRevisionId])
+  const reviewUsesAgentAction = openedProject?.active_stage !== 'review'
+    || reviewState?.phase === 'awaitingReview'
+    || reviewState?.phase === 'readyToRevise'
+    || reviewRequiresRerun(reviewState ?? {})
   const showStageStartAction = openedProject?.active_stage !== 'completed'
+    && reviewUsesAgentAction
   const stageStartActionDisabled = openedProject?.status === 'archived'
     || !projectWorkspace
     || agentSessionLoading
     || agentChunkHydrating
     || agentRunning
     || agentSubmitting
+    || reviewMutationPending
     || hasPendingAgentProposal
     || (
       openedProject?.active_stage === 'orientation'
@@ -2863,6 +2868,13 @@ export default function ScreenplayAgentPage({
       || agentRunning
       || agentSubmitting
       || hasPendingAgentProposal
+      || reviewMutationPending
+      || (
+        openedProject.active_stage === 'review'
+        && !reviewRequiresRerun(reviewState ?? {})
+        && reviewState?.phase !== 'awaitingReview'
+        && reviewState?.phase !== 'readyToRevise'
+      )
     ) {
       return
     }
@@ -2872,6 +2884,7 @@ export default function ScreenplayAgentPage({
         openedProject,
         projectDocuments,
         defaultDraftScope,
+        reviewState,
       ),
     )
   }, [
@@ -2881,6 +2894,10 @@ export default function ScreenplayAgentPage({
     openedProject,
     projectDocuments,
     projectWorkspace,
+    reviewMutationPending,
+    reviewState?.failedEpisodes,
+    reviewState?.hardChecks,
+    reviewState?.phase,
     runAgent,
   ])
   const startDraftRange = React.useCallback((scope: ScreenplayDraftScope) => {
@@ -3834,66 +3851,81 @@ export default function ScreenplayAgentPage({
                   </div>
                   <div className="screenplay-project-next__command">
                     <p>{milestone?.description}</p>
-                    {showStageStartAction ? (
+                    {showStageStartAction || reviewEntry ? (
                       <div className="screenplay-project-next__actions">
-                        {openedProject.active_stage === 'draft'
-                          && draftBatchActions.length > 0 ? (
-                            <PurrDropdown.Button
-                              type="primary"
-                              size="small"
-                              placement="bottomRight"
-                              trigger={['click']}
-                              disabled={stageStartActionDisabled}
-                              icon={<ChevronDownIcon />}
-                              dropdownAriaLabel="选择创作范围"
-                              onClick={handleStageStartAction}
-                              menu={{
-                                items: [
-                                  ...draftBatchActions
-                                    .filter((action) => action.key !== 'all_remaining')
-                                    .map((action) => ({
-                                      key: action.key,
-                                      label: action.label,
-                                      onClick: () => handleDraftBatchAction(action),
-                                    })),
-                                  {
-                                    key: 'custom_episode_range',
-                                    label: '自定义连续集数…',
-                                    onClick: openCustomDraftRange,
-                                  },
-                                  ...draftBatchActions
-                                    .filter((action) => action.key === 'all_remaining')
-                                    .map((action) => ({
-                                      key: action.key,
-                                      label: action.label,
-                                      onClick: () => handleDraftBatchAction(action),
-                                    })),
-                                ],
-                              }}
-                            >
-                              {stagePrimaryActionLabel(
-                                openedProject,
-                                projectDocuments,
-                                draftEpisodes,
-                                documentEpisodes,
-                              )}
-                            </PurrDropdown.Button>
-                          ) : (
-                            <PurrButton
-                              type="primary"
-                              size="small"
-                              icon={<ArrowRightIcon />}
-                              disabled={stageStartActionDisabled}
-                              onClick={handleStageStartAction}
-                            >
-                              {stagePrimaryActionLabel(
-                                openedProject,
-                                projectDocuments,
-                                draftEpisodes,
-                                documentEpisodes,
-                              )}
-                            </PurrButton>
-                          )}
+                        {showStageStartAction && (
+                          openedProject.active_stage === 'draft'
+                            && draftBatchActions.length > 0 ? (
+                              <PurrDropdown.Button
+                                type="primary"
+                                size="small"
+                                placement="bottomRight"
+                                trigger={['click']}
+                                disabled={stageStartActionDisabled}
+                                icon={<ChevronDownIcon />}
+                                dropdownAriaLabel="选择创作范围"
+                                onClick={handleStageStartAction}
+                                menu={{
+                                  items: [
+                                    ...draftBatchActions
+                                      .filter((action) => action.key !== 'all_remaining')
+                                      .map((action) => ({
+                                        key: action.key,
+                                        label: action.label,
+                                        onClick: () => handleDraftBatchAction(action),
+                                      })),
+                                    {
+                                      key: 'custom_episode_range',
+                                      label: '自定义连续集数…',
+                                      onClick: openCustomDraftRange,
+                                    },
+                                    ...draftBatchActions
+                                      .filter((action) => action.key === 'all_remaining')
+                                      .map((action) => ({
+                                        key: action.key,
+                                        label: action.label,
+                                        onClick: () => handleDraftBatchAction(action),
+                                      })),
+                                  ],
+                                }}
+                              >
+                                {stagePrimaryActionLabel(
+                                  openedProject,
+                                  projectDocuments,
+                                  draftEpisodes,
+                                  documentEpisodes,
+                                  reviewState,
+                                )}
+                              </PurrDropdown.Button>
+                            ) : (
+                              <PurrButton
+                                type="primary"
+                                size="small"
+                                icon={<ArrowRightIcon />}
+                                disabled={stageStartActionDisabled}
+                                onClick={handleStageStartAction}
+                              >
+                                {stagePrimaryActionLabel(
+                                  openedProject,
+                                  projectDocuments,
+                                  draftEpisodes,
+                                  documentEpisodes,
+                                  reviewState,
+                                )}
+                              </PurrButton>
+                            )
+                        )}
+                        {reviewEntry && (
+                          <PurrButton
+                            type={reviewEntry.emphasis === 'primary' ? 'primary' : 'default'}
+                            size="small"
+                            icon={<EyeIcon />}
+                            disabled={reviewMutationPending}
+                            onClick={() => setReviewAdjudicationOpen(true)}
+                          >
+                            {reviewEntry.label}
+                          </PurrButton>
+                        )}
                       </div>
                     ) : null}
                   </div>
@@ -4049,17 +4081,12 @@ export default function ScreenplayAgentPage({
                   emptyDescription="发送后会实时展示执行过程、素材读取和结果。"
                   afterAssistantMessage={(_message, index) => {
                     const entry = agentConversationState?.messages[index]
-                    return entry?.role === 'assistant'
-                      && entry.turnId === proposalTurnId
-                      ? agentProposalAttachment
-                      : null
+                    const artifact = entry?.role === 'assistant'
+                      ? agentTurnArtifacts.get(entry.turnId)
+                      : undefined
+                    return artifact ? renderAgentArtifact(artifact) : null
                   }}
-                  messageAttachmentsVersion={[
-                    proposalTurnId || 'detached',
-                    agentProposal?.title || agentResponse.length,
-                    savedAgentDocumentId || 'unsaved',
-                    acceptedAgentDocumentId || 'unapplied',
-                  ].join(':')}
+                  messageAttachmentsVersion={agentArtifactVersion}
                   onEditMessage={editAgentMessage}
                 />
 
@@ -4186,7 +4213,7 @@ export default function ScreenplayAgentPage({
                   <button
                     type="button"
                     className="screenplay-document-library-launch"
-                    onClick={() => setRevisionLibraryOpen(true)}
+                    onClick={() => openRevisionLibrary(null)}
                   >
                     <span className="screenplay-document-library-launch__icon">
                       <HistoryIcon />
@@ -4212,10 +4239,43 @@ export default function ScreenplayAgentPage({
             open={revisionLibraryOpen}
             projectId={openedProject.id}
             workspace={projectWorkspace}
+            target={revisionLibrarySelection}
             readOnly={openedProject.status === 'archived'}
-            onClose={() => setRevisionLibraryOpen(false)}
+            onClose={() => {
+              setRevisionLibraryOpen(false)
+              setRevisionLibrarySelection(null)
+            }}
             onWorkspaceChange={applyRevisionWorkspace}
           />
+        )}
+
+        {openedProject && reviewState?.reviewRevisionId && (
+          <PurrModal
+            title="审阅与定稿"
+            open={reviewAdjudicationOpen}
+            width="min(1120px, calc(100vw - 48px))"
+            footer={null}
+            destroyOnHidden
+            className="screenplay-review-adjudication-modal"
+            onCancel={() => {
+              if (reviewMutationPending) return
+              setReviewAdjudicationOpen(false)
+            }}
+          >
+            <ReviewAdjudicationPanel
+              modal
+              review={reviewState}
+              readOnly={
+                openedProject.status === 'archived'
+                || reviewState.phase === 'completed'
+              }
+              busy={reviewMutationPending || agentRunning || agentSubmitting}
+              onDecide={adjudicateReview}
+              onStartReview={handleStageStartAction}
+              onStartRevision={handleStageStartAction}
+              onFinalize={() => void finalizeProject()}
+            />
+          </PurrModal>
         )}
 
         <PurrModal

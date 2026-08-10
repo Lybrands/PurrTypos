@@ -8,11 +8,13 @@ from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
 from routers.screenplay_conversations import router as conversation_router
 from schemas.screenplay_v2 import (
+    AdjudicateScreenplayV2ReviewRequest,
     AcceptScreenplayV2RevisionRequest,
     ChangeScreenplayV2ProjectLifecycleRequest,
     CreateScreenplayV2ProjectRequest,
     CreateScreenplayV2WorkingCopyFromRevisionRequest,
     DeleteScreenplayV2ProjectRequest,
+    FinalizeScreenplayV2ProjectRequest,
     PublishScreenplayV2WorkingCopyRequest,
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
@@ -183,6 +185,22 @@ async def list_screenplay_v2_revision_history(
     return {"success": True, "data": history}
 
 
+@router.get(
+    "/projects/{project_id}/draft-revisions/{draft_revision_id}/latest-review"
+)
+async def get_latest_screenplay_v2_review_for_draft(
+    project_id: str,
+    draft_revision_id: str,
+):
+    review = await ScreenplayV2ProjectService(
+        get_db()
+    ).get_latest_review_for_draft(
+        project_id=project_id,
+        draft_revision_id=draft_revision_id,
+    )
+    return {"success": True, "data": review}
+
+
 @router.patch("/working-copies/{working_copy_id}")
 async def update_screenplay_v2_working_copy(
     working_copy_id: str,
@@ -245,7 +263,36 @@ async def accept_screenplay_v2_revision(
     return {"success": True, "data": result}
 
 
+@router.post("/projects/{project_id}/review-decisions")
+async def adjudicate_screenplay_v2_review(
+    project_id: str,
+    body: AdjudicateScreenplayV2ReviewRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+):
+    workspace = await ScreenplayV2ProjectService(get_db()).adjudicate_review(
+        command_id=idempotency_key,
+        project_id=project_id,
+        request=body,
+    )
+    return {"success": True, "data": workspace}
+
+
+@router.post("/projects/{project_id}/finalize")
+async def finalize_screenplay_v2_project(
+    project_id: str,
+    body: FinalizeScreenplayV2ProjectRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+):
+    workspace = await ScreenplayV2ProjectService(get_db()).finalize_project(
+        command_id=idempotency_key,
+        project_id=project_id,
+        request=body,
+    )
+    return {"success": True, "data": workspace}
+
+
 __all__ = [
+    "adjudicate_screenplay_v2_review",
     "accept_screenplay_v2_revision",
     "archive_screenplay_v2_project",
     "create_screenplay_v2_project",
@@ -253,6 +300,8 @@ __all__ = [
     "create_screenplay_v2_working_copy_from_revision",
     "delete_screenplay_v2_project",
     "ensure_current_screenplay_v2_session",
+    "finalize_screenplay_v2_project",
+    "get_latest_screenplay_v2_review_for_draft",
     "get_screenplay_v2_revision",
     "get_screenplay_v2_workspace",
     "list_screenplay_v2_projects",

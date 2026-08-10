@@ -57,15 +57,11 @@ def is_reasoning_only_truncation(
     )
 
 
-def reasoning_disabled_attempt(
+def retry_provider_attempt(
     attempt: PendingProviderAttempt,
 ) -> PendingProviderAttempt:
     return replace(
         attempt,
-        invocation=replace(
-            attempt.invocation,
-            reasoning_mode=ReasoningMode.DISABLED,
-        ),
         attempt=attempt.attempt + 1,
     )
 
@@ -94,11 +90,7 @@ def truncation_trace_details(
         "toolArgumentCharacters": accumulator.tool_argument_characters,
         "contentCharacters": len(accumulator.content),
         "reasoningOnly": reasoning_only,
-        "fallbackReasoningMode": (
-            ReasoningMode.DISABLED.value
-            if can_retry and reasoning_only
-            else None
-        ),
+        "fallbackReasoningMode": None,
         "emittedDeltaCount": emitted_delta_count,
         "outputBudget": (
             output_budget.to_mapping() if output_budget is not None else None
