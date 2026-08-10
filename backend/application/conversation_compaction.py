@@ -48,7 +48,6 @@ class ConversationSummaryCompressionPolicy:
     target_ratio: float = 0.65
     summary_reserve_tokens: int = 6_000
     max_input_characters: int = 60_000
-    max_output_tokens: int = 1_600
     runtime_keep_recent_messages: int = 20
     max_compaction_passes: int = 8
 
@@ -58,7 +57,6 @@ class ConversationSummaryCompressionPolicy:
             "fallback_keep_recent_turns",
             "summary_reserve_tokens",
             "max_input_characters",
-            "max_output_tokens",
             "runtime_keep_recent_messages",
         ):
             value = int(getattr(self, name))
@@ -278,7 +276,6 @@ class ConversationCompactionService:
         try:
             semantic = await self._summarizer.summarize(
                 request=request.model,
-                max_output_tokens=self._policy.max_output_tokens,
                 existing=summary,
                 turns=selected,
                 signal=signal,

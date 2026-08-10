@@ -1,7 +1,7 @@
 """Screenplay structured-output adaptation over managed PurrA calls.
 
 The screenplay product owns prompts, schemas, validation and visible progress.
-PurrA owns provider invocation construction, output-budget resolution,
+PurrA owns provider invocation construction, output-limit resolution,
 capability fallback and terminal-reason classification.
 """
 
@@ -31,7 +31,6 @@ from purra.model_execution import (
     ManagedModelExecutor,
     ManagedModelStream,
 )
-from purra.output_budget import OutputBudgetPolicy
 from purra.run_controller import AgentRunController
 from purra.structured_output import parse_json_object
 from application.model_runtime import (
@@ -103,9 +102,7 @@ class ScreenplayStructuredCallService:
         conversation_turn_id: str | None = None,
         task_id: str | None = None,
         phase: str,
-        output_policy: OutputBudgetPolicy,
         repair_instruction: str,
-        work_units: int = 1,
         validate: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         execution_progress_fields: Mapping[str, str] | None = None,
         project_execution: (
@@ -120,11 +117,6 @@ class ScreenplayStructuredCallService:
         model = request.model
         managed_call = ManagedModelCall(
             request=request,
-            output_policy=output_policy,
-            context_window_tokens=context_window_tokens(
-                runtime.contextWindow or runtime.options.get("context_window")
-            ),
-            work_units=work_units,
             reasoning_mode=reasoning_mode_from_options(runtime.options),
         )
         model_executor = self._model_executor_factory(

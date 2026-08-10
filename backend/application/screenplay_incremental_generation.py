@@ -15,13 +15,6 @@ from typing import Any
 
 from purra.contracts import ReasoningMode
 
-from application.output_budget_policies import (
-    SCREENPLAY_FRAGMENT_OUTPUT_POLICY,
-    SCREENPLAY_METADATA_OUTPUT_POLICY,
-    SCREENPLAY_SCENE_OUTPUT_POLICY,
-)
-
-
 class ScreenplayIncrementalGeneration:
     def __init__(
         self,
@@ -125,7 +118,6 @@ class ScreenplayIncrementalGeneration:
                 },
                 expected_part_type="scene",
                 expected_part_key=scene_id,
-                output_policy=SCREENPLAY_SCENE_OUTPUT_POLICY,
                 reasoning_mode=ReasoningMode.DISABLED,
                 host_candidate_template=_host_scene_candidate_template(
                     scene_id,
@@ -163,7 +155,6 @@ class ScreenplayIncrementalGeneration:
             },
             expected_part_type="episode_metadata",
             expected_part_key=str(episode_number),
-            output_policy=SCREENPLAY_METADATA_OUTPUT_POLICY,
             reasoning_mode=ReasoningMode.DISABLED,
             validate_candidate=lambda candidate: validate_metadata(
                 candidate,
@@ -273,7 +264,6 @@ class ScreenplayIncrementalGeneration:
                     },
                     expected_part_type="review_episode",
                     expected_part_key=str(episode_number),
-                    output_policy=SCREENPLAY_FRAGMENT_OUTPUT_POLICY,
                     validate_candidate=lambda candidate, number=episode_number, ids=scene_ids, digest=review_input["contentDigest"]: (
                         validate_fragment(
                             candidate,
@@ -414,7 +404,6 @@ class ScreenplayIncrementalGeneration:
                 },
                 expected_part_type="scene_list_episode",
                 expected_part_key=str(episode_number),
-                output_policy=SCREENPLAY_FRAGMENT_OUTPUT_POLICY,
                 validate_candidate=lambda candidate, number=episode_number: (
                     validate_fragment(candidate, number)
                 ),
@@ -455,7 +444,6 @@ class ScreenplayIncrementalGeneration:
         user_payload: Mapping[str, Any],
         expected_part_type: str,
         expected_part_key: str,
-        output_policy,
         validate_candidate,
         host_candidate_template=None,
         reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT,
@@ -479,8 +467,6 @@ class ScreenplayIncrementalGeneration:
                 unit_id=unit_id,
             ),
             conversation_turn_id=str(task["turnId"]),
-            output_policy=output_policy,
-            work_units=1,
             reasoning_mode=reasoning_mode,
             host_candidate_template=host_candidate_template,
             validate_candidate=validate_candidate,

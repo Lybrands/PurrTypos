@@ -15,7 +15,6 @@ from purra.contracts import (
 )
 from purra.api import AgentCoreRunOptions
 from purra.ports import ResponseJudge
-from application.output_budget_policies import resolve_request_output_budget
 from domains.writing.context import writing_context_claims
 from domains.writing.contracts import (
     WRITING_DOMAIN_NAMESPACE,
@@ -32,6 +31,7 @@ from purra.model_protocol import (
     FeatureRequirement,
     TaskCapabilityRequirements,
     preflight_capabilities,
+    resolve_invocation_output_limit,
 )
 
 
@@ -183,16 +183,14 @@ def writing_run_options(
     agent_role: str | None = None,
     output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
-    output_budget = resolve_request_output_budget(
-        request,
-        agent_role=agent_role,
-        work_units=output_work_units,
+    del agent_role, output_work_units
+    output_limit = resolve_invocation_output_limit(
+        request.model.capability_snapshot,
+        request.model.options.get("max_tokens"),
     )
-    output_reserve = output_budget.effective_tokens
     return AgentCoreRunOptions(
         context_claims=writing_context_claims(request),
-        output_reserve_tokens=output_reserve,
-        output_budget=output_budget,
+        output_limit=output_limit,
         default_context_window_tokens=request.context_window or 200_000,
         force_planned_tool_choice=force_planned_tool_choice,
         reasoning_mode=reasoning_mode_from_options(provider_options),

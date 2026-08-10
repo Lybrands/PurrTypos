@@ -67,8 +67,7 @@ from purra.host_planned_tool_gateway import (
     HOST_PLANNED_EXECUTION_ROUTE,
 )
 from purra.model_call_parameters import describe_model_call
-from purra.model_protocol import classify_model_termination
-from purra.output_budget import ResolvedOutputBudget
+from purra.model_protocol import InvocationOutputLimit, classify_model_termination
 from purra.runtime_context import project_intermediate_tool_context
 from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
@@ -248,7 +247,7 @@ class AgentRuntime:
         execution_state: ExecutionState | None = None,
         run_id: RunId | None = None,
         context_budget: ContextBudget | None = None,
-        output_budget: ResolvedOutputBudget | None = None,
+        output_limit: InvocationOutputLimit | None = None,
         round_input_tokens: int | None = None,
         scope_tools_to_observer: bool = True,
         force_tool_choice: bool = False,
@@ -338,8 +337,8 @@ class AgentRuntime:
             return
 
         maximum_output_tokens = (
-            context_budget.output_reserve_tokens
-            if context_budget is not None
+            output_limit.max_tokens
+            if output_limit is not None
             else None
         )
         round_limit = self._limits.max_model_rounds
@@ -676,8 +675,7 @@ class AgentRuntime:
                                 else ToolChoiceMode.NONE
                             )
                         ),
-                        max_output_tokens=maximum_output_tokens,
-                        output_budget=output_budget,
+                        output_limit=output_limit,
                         reasoning_mode=reasoning_mode,
                     ),
                     allowed_names=allowed_names,
@@ -831,8 +829,7 @@ class AgentRuntime:
                         request=invocation.request,
                         tools=invocation.tools,
                         tool_choice=ToolChoiceMode.AUTO,
-                        max_output_tokens=invocation.max_output_tokens,
-                        output_budget=invocation.output_budget,
+                        output_limit=invocation.output_limit,
                         reasoning_mode=invocation.reasoning_mode,
                     )
                     pending_provider_attempt = _PendingProviderAttempt(
@@ -1146,9 +1143,9 @@ class AgentRuntime:
                             if finish_reason is not None
                             else None
                         ),
-                        "outputBudget": (
-                            invocation.output_budget.to_mapping()
-                            if invocation.output_budget is not None
+                        "outputLimit": (
+                            invocation.output_limit.to_mapping()
+                            if invocation.output_limit is not None
                             else None
                         ),
                         "localInputEstimate": local_input_estimate,
@@ -1186,9 +1183,9 @@ class AgentRuntime:
                                 if finish_reason is not None
                                 else None
                             ),
-                            "outputBudget": (
-                                invocation.output_budget.to_mapping()
-                                if invocation.output_budget is not None
+                            "outputLimit": (
+                                invocation.output_limit.to_mapping()
+                                if invocation.output_limit is not None
                                 else None
                             ),
                         },
@@ -1254,7 +1251,7 @@ class AgentRuntime:
                         ),
                         retryable=(
                             reasoning_only_truncation
-                            or termination.retryable and output_budget is None
+                            or termination.retryable and output_limit is None
                         ),
                         cancellation_requested=_is_canceled(signal),
                         visible_output_emitted=direct_content_released,
@@ -1284,7 +1281,7 @@ class AgentRuntime:
                         ),
                         reasoning_only=reasoning_only_truncation,
                         emitted_delta_count=emitted_delta_count,
-                        output_budget=output_budget,
+                        output_limit=output_limit,
                     ),
                 )
                 if can_retry:

@@ -16,7 +16,7 @@ from purra.normalization import (
     optional_non_negative_int,
     positive_int,
 )
-from purra.output_budget import ResolvedOutputBudget
+from purra.model_protocol import InvocationOutputLimit
 from purra.ports import ResponseJudge, ResponseValidator
 
 
@@ -25,8 +25,7 @@ class AgentCoreRunOptions:
     """Per-run generic limits; domain content remains in injected adapters."""
 
     context_claims: tuple[ContextBudgetClaim, ...] = ()
-    output_reserve_tokens: int = 8_192
-    output_budget: ResolvedOutputBudget | None = None
+    output_limit: InvocationOutputLimit | None = None
     default_context_window_tokens: int = 128_000
     safety_reserve_tokens: int | None = None
     runtime_reserve_tokens: int | None = None
@@ -48,15 +47,19 @@ class AgentCoreRunOptions:
         if len(names) != len(set(names)):
             raise ValueError("context claim names must be unique")
         object.__setattr__(self, "context_claims", claims)
-        for name in ("output_reserve_tokens", "default_context_window_tokens"):
-            object.__setattr__(self, name, positive_int(getattr(self, name), name))
-        if self.output_budget is not None:
-            if not isinstance(self.output_budget, ResolvedOutputBudget):
-                raise TypeError("output budget must be ResolvedOutputBudget")
-            if self.output_reserve_tokens != self.output_budget.effective_tokens:
-                raise ValueError(
-                    "output reserve must match the resolved output budget"
-                )
+        object.__setattr__(
+            self,
+            "default_context_window_tokens",
+            positive_int(
+                self.default_context_window_tokens,
+                "default_context_window_tokens",
+            ),
+        )
+        if self.output_limit is not None and not isinstance(
+            self.output_limit,
+            InvocationOutputLimit,
+        ):
+            raise TypeError("output limit must be InvocationOutputLimit")
         for name in (
             "safety_reserve_tokens",
             "runtime_reserve_tokens",

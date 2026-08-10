@@ -15,7 +15,6 @@ from purra.contracts import (
 )
 from purra.json_values import thaw_json_mapping
 from purra.model_execution import ManagedModelCall, ManagedModelExecutor
-from purra.output_budget import OutputBudgetPolicy
 from purra.ports import CancellationSignal
 from domains.writing.memory_reranking import (
     MemoryCandidateCard,
@@ -45,7 +44,7 @@ _SYSTEM_PROMPT = """你是小说项目统一记忆的相关性重排器。
 "supports":["它支持的任务方面"],"reason":"简短原因"}],
 "unresolvedNeeds":["候选中仍缺少的必要信息"]}"""
 
-_CONNECTION_OPTION_KEYS = frozenset({"baseURL"})
+_CONNECTION_OPTION_KEYS = frozenset({"baseURL", "max_tokens"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +53,6 @@ class ModelBackedMemoryReranker:
 
     model_executor: ManagedModelExecutor
     batch_size: int = 40
-    max_output_tokens: int = 1_800
     context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
@@ -64,8 +62,6 @@ class ModelBackedMemoryReranker:
             )
         if not 4 <= int(self.batch_size) <= 40:
             raise ValueError("story-memory rerank batch size must be between 4 and 40")
-        if int(self.max_output_tokens) <= 0:
-            raise ValueError("story-memory reranker output budget must be positive")
         if int(self.context_window_tokens) <= 0:
             raise ValueError("story-memory reranker context window must be positive")
 
@@ -211,14 +207,6 @@ class ModelBackedMemoryReranker:
             messages,
             ManagedModelCall(
                 request=_deterministic_request(model_request),
-                output_policy=OutputBudgetPolicy(
-                    key="story_memory_reranker",
-                    base_tokens=int(self.max_output_tokens),
-                    per_work_unit_tokens=0,
-                    safety_factor=1,
-                    hard_cap_tokens=int(self.max_output_tokens),
-                ),
-                context_window_tokens=self.context_window_tokens,
                 reasoning_mode=reasoning_mode,
             ),
             signal,

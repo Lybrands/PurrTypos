@@ -74,6 +74,7 @@ from purra.errors import (
     ContractViolationError,
     InvalidPlannerOutputError,
     ModelGatewayError,
+    UnsupportedModelFeatureError,
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.engine.context_phase import (
@@ -100,7 +101,7 @@ from purra.engine.planning_validation import (
 )
 from purra.host_planned_tool_gateway import HostPlannedToolGateway
 from purra.json_values import thaw_json_mapping
-from purra.output_budget import ResolvedOutputBudget
+from purra.model_protocol import resolve_invocation_output_limit
 from purra.planner import (
     AgentPlanner,
     build_execution_message,
@@ -260,6 +261,19 @@ class AgentCore:
         signal: CancellationSignal | None = None,
     ) -> AsyncIterator[CoreRunUpdate]:
         options = options or AgentCoreRunOptions()
+        output_limit = options.output_limit or resolve_invocation_output_limit(
+            request.model.capability_snapshot,
+            request.model.options.get("max_tokens"),
+        )
+        selected_context_window = (
+            request.context_window or options.default_context_window_tokens
+        )
+        if output_limit.max_tokens >= selected_context_window:
+            raise UnsupportedModelFeatureError(
+                "model output limit leaves no room for provider input",
+                code="model_context_capacity_incompatible",
+                retryable=False,
+            )
         sink = _BufferedEventSink()
         controller = AgentRunController(
             repository=self._repository,
@@ -340,7 +354,7 @@ class AgentCore:
                         request.context_window
                         or options.default_context_window_tokens
                     ),
-                    output_reserve_tokens=options.output_reserve_tokens,
+                    output_reserve_tokens=output_limit.max_tokens,
                     tools=reserved_schemas,
                     claims=context_claims,
                     safety_reserve_tokens=options.safety_reserve_tokens,
@@ -954,7 +968,7 @@ class AgentCore:
                         request.context_window
                         or options.default_context_window_tokens
                     ),
-                    output_reserve_tokens=options.output_reserve_tokens,
+                    output_reserve_tokens=output_limit.max_tokens,
                     tools=schemas,
                     claims=effective_context_claims,
                     safety_reserve_tokens=options.safety_reserve_tokens,
@@ -1297,11 +1311,7 @@ class AgentCore:
                         "providerInputTokens": budget.provider_input_tokens,
                         "estimatedInputTokens": estimated_input_tokens,
                         "outputReserveTokens": budget.output_reserve_tokens,
-                        "outputBudget": (
-                            options.output_budget.to_mapping()
-                            if options.output_budget is not None
-                            else None
-                        ),
+                        "outputLimit": output_limit.to_mapping(),
                         "runtimeReserveTokens": budget.runtime_reserve_tokens,
                         "safetyReserveTokens": budget.safety_reserve_tokens,
                         "toolSchemaTokens": budget.tool_schema_tokens,
@@ -1403,7 +1413,7 @@ class AgentCore:
                     execution_state=state,
                     run_id=controller.run_id,
                     context_budget=budget,
-                    output_budget=options.output_budget,
+                    output_limit=output_limit,
                     scope_tools_to_observer=(plan is not None),
                     force_tool_choice=bool(
                         plan is not None

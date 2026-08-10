@@ -93,7 +93,7 @@ def classify_agent_run_failures(
             evidence={
                 "failureCount": tool_error_codes["tool_call_truncated"],
             },
-            remediation="inspect_model_output_budget",
+            remediation="split_continuation_from_checkpoint",
         )
     incomplete_calls = _non_negative_integer(metrics.get("incompleteToolCalls"))
     if incomplete_calls:

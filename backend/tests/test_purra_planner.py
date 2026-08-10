@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -40,6 +41,7 @@ from purra.planner import (
     normalize_task_plan,
     parse_planner_output,
 )
+from purra.model_protocol import generic_capability_snapshot
 
 
 class FakeModelGateway:
@@ -65,7 +67,15 @@ class FakeModelGateway:
 def _request() -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role=MessageRole.USER, content="research then change it"),),
-        model=ModelRequest(provider="test", model="model"),
+        model=ModelRequest(
+            provider="test",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=4_096,
+            ),
+        ),
         domain_context=DomainContext(namespace="test"),
         tools_enabled=True,
     )

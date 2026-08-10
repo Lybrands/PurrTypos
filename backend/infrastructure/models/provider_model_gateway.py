@@ -24,7 +24,6 @@ from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 from purra.ports import CancellationSignal
 from infrastructure.models import provider_router
-from infrastructure.models.profiles import resolve_model_profile
 from utils.async_stream import OwnedAsyncIterator
 
 
@@ -147,15 +146,7 @@ def _provider_options(
     options.pop("tools", None)
     options.pop("tool_choice", None)
     if invocation.max_output_tokens is not None:
-        maximum = invocation.max_output_tokens
-        if invocation.reasoning_mode is ReasoningMode.DISABLED:
-            profile = resolve_model_profile(
-                request.profile_id,
-                request.model,
-                options.get("baseURL"),
-            )
-            maximum = max(maximum, profile.internal_output_token_floor())
-        options["max_tokens"] = maximum
+        options["max_tokens"] = invocation.max_output_tokens
     if (
         invocation.reasoning_mode is ReasoningMode.DISABLED
         and capabilities.reasoning_control is ReasoningControl.SELECTABLE
@@ -174,9 +165,8 @@ def _provider_options(
         options["thinking_enabled"] = False
         options["thinking"] = {"type": "disabled"}
         # A caller-selected thinking temperature may be invalid after Core
-        # disables reasoning for planners/judges.  Kimi K2.6, for example,
-        # requires 1.0 with thinking but 0.6 without it.  Omitting sampling
-        # lets each provider apply the correct non-thinking default.
+        # disables reasoning for a derived invocation. Omitting sampling lets
+        # each provider apply the correct non-thinking default.
         if caller_had_thinking_enabled:
             options.pop("temperature", None)
     elif capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:

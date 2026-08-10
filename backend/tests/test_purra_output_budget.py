@@ -1,112 +1,79 @@
 from __future__ import annotations
 
-from purra.output_budget import (
-    ModelOutputCapabilities,
-    OutputBudgetLimit,
-    OutputBudgetPolicy,
-    ThinkingTokenAccounting,
-    resolve_output_budget,
+from dataclasses import replace
+
+import pytest
+
+from purra.errors import UnsupportedModelFeatureError
+from purra.model_protocol import generic_capability_snapshot
+from purra.model_protocol.output_limits import (
+    InvocationOutputLimitSource,
+    resolve_invocation_output_limit,
 )
 
 
-def test_resolver_separates_task_estimate_from_model_capability():
-    budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="fixture",
-            base_tokens=2_000,
-            per_work_unit_tokens=3_000,
-            safety_factor=1.2,
-            hard_cap_tokens=32_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=128_000),
-        context_window_tokens=256_000,
-        work_units=4,
+def _snapshot(max_output_tokens: int | None = 393_216):
+    return replace(
+        generic_capability_snapshot(),
+        profile_id="fixture:model",
+        max_output_tokens=max_output_tokens,
     )
 
-    assert budget.target_tokens == 14_000
-    assert budget.requested_tokens == 16_800
-    assert budget.effective_tokens == 16_800
-    assert budget.model_max_output_tokens == 128_000
-    assert budget.limiting_factor is OutputBudgetLimit.TASK_ESTIMATE
 
-
-def test_resolver_reports_the_boundary_that_reduces_the_request():
-    policy = OutputBudgetPolicy(
-        key="fixture",
-        base_tokens=20_000,
-        per_work_unit_tokens=0,
-        safety_factor=1.5,
-        hard_cap_tokens=24_000,
+def test_profile_limit_is_the_default_invocation_output_limit():
+    limit = resolve_invocation_output_limit(
+        _snapshot(),
+        explicit_user_override=None,
     )
 
-    task_limited = resolve_output_budget(
-        policy=policy,
-        capabilities=ModelOutputCapabilities(max_output_tokens=128_000),
-        context_window_tokens=256_000,
-    )
-    model_limited = resolve_output_budget(
-        policy=policy,
-        capabilities=ModelOutputCapabilities(max_output_tokens=12_000),
-        context_window_tokens=256_000,
-    )
-
-    assert task_limited.effective_tokens == 24_000
-    assert task_limited.limiting_factor is OutputBudgetLimit.TASK_HARD_CAP
-    assert model_limited.effective_tokens == 12_000
-    assert model_limited.limiting_factor is OutputBudgetLimit.MODEL_CAPABILITY
+    assert limit.max_tokens == 393_216
+    assert limit.profile_max_tokens == 393_216
+    assert limit.source is InvocationOutputLimitSource.MODEL_PROFILE
+    assert limit.to_mapping() == {
+        "maxTokens": 393_216,
+        "source": "model_profile",
+        "profileMaxTokens": 393_216,
+    }
 
 
-def test_resolver_preserves_limit_precedence_when_values_tie():
-    budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="tie",
-            base_tokens=30_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=20_000,
-        ),
-        capabilities=ModelOutputCapabilities(max_output_tokens=20_000),
-        context_window_tokens=256_000,
+def test_explicit_user_override_is_preserved_without_rescaling():
+    limit = resolve_invocation_output_limit(
+        _snapshot(),
+        explicit_user_override=256_000,
     )
 
-    assert budget.effective_tokens == 20_000
-    assert budget.limiting_factor is OutputBudgetLimit.TASK_HARD_CAP
+    assert limit.max_tokens == 256_000
+    assert limit.profile_max_tokens == 393_216
+    assert limit.source is InvocationOutputLimitSource.USER_OVERRIDE
 
 
-def test_separate_reasoning_accounting_does_not_consume_visible_output_budget():
-    budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="fixture",
-            base_tokens=2_000,
-            per_work_unit_tokens=0,
-            safety_factor=1.2,
-            hard_cap_tokens=32_000,
-            reasoning_reserve_tokens=10_000,
-        ),
-        capabilities=ModelOutputCapabilities(
-            max_output_tokens=64_000,
-            thinking_token_accounting=ThinkingTokenAccounting.SEPARATE,
-        ),
-        context_window_tokens=128_000,
-        thinking_enabled=True,
-    )
+@pytest.mark.parametrize("reasoning_mode", ["enabled", "disabled"])
+def test_reasoning_mode_cannot_change_the_resolved_limit(reasoning_mode):
+    del reasoning_mode
 
-    assert budget.reasoning_reserve_tokens == 0
-    assert budget.effective_tokens == 2_400
+    assert resolve_invocation_output_limit(
+        _snapshot(),
+        explicit_user_override=256_000,
+    ).max_tokens == 256_000
 
 
-def test_small_context_window_clamps_before_context_allocation():
-    budget = resolve_output_budget(
-        policy=OutputBudgetPolicy(
-            key="large-task",
-            base_tokens=100_000,
-            per_work_unit_tokens=0,
-            safety_factor=1,
-            hard_cap_tokens=100_000,
-        ),
-        capabilities=ModelOutputCapabilities(),
-        context_window_tokens=32_000,
-    )
+def test_user_override_above_profile_limit_fails_before_provider_call():
+    with pytest.raises(UnsupportedModelFeatureError) as captured:
+        resolve_invocation_output_limit(
+            _snapshot(),
+            explicit_user_override=400_000,
+        )
 
-    assert budget.effective_tokens == 16_000
-    assert budget.limiting_factor is OutputBudgetLimit.CONTEXT_AVAILABLE
+    assert captured.value.code == "model_output_limit_exceeded"
+    assert captured.value.retryable is False
+
+
+def test_profile_without_verified_output_limit_is_not_inherited_or_guessed():
+    with pytest.raises(UnsupportedModelFeatureError) as captured:
+        resolve_invocation_output_limit(
+            _snapshot(max_output_tokens=None),
+            explicit_user_override=10_000,
+        )
+
+    assert captured.value.code == "model_output_limit_unknown"
+    assert captured.value.retryable is False

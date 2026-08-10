@@ -18,13 +18,16 @@ from purra.contracts import (
     ReasoningMode,
 )
 from purra.model_execution import ManagedModelExecutor, ManagedModelStream
+from purra.model_protocol import (
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
+)
 from purra.errors import ModelGatewayError
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
     decide_failure,
 )
-from purra.output_budget import OutputBudgetPolicy
 from application.screenplay_agent_service import (
     PlannedScreenplayIntent,
     ScreenplayAgentService,
@@ -69,6 +72,12 @@ from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
 pytestmark = pytest.mark.asyncio
+
+_TEST_OUTPUT_LIMIT = InvocationOutputLimit(
+    max_tokens=32_768,
+    source=InvocationOutputLimitSource.USER_OVERRIDE,
+    profile_max_tokens=393_216,
+)
 
 
 async def test_formal_recipe_separates_evidence_generation_validation_and_publish():
@@ -168,7 +177,7 @@ async def test_model_execution_progress_reaches_the_shared_stream_incrementally(
         ManagedModelStream(
             chunks=raw_stream.chunks,
             model=raw_stream.model,
-            output_budget=None,  # type: ignore[arg-type]
+            output_limit=_TEST_OUTPUT_LIMIT,
             call_parameters=(),
         ),
         Controller(),
@@ -219,7 +228,7 @@ async def test_raw_reasoning_is_diagnostic_only():
         ManagedModelStream(
             chunks=raw_stream.chunks,
             model=raw_stream.model,
-            output_budget=None,  # type: ignore[arg-type]
+            output_limit=_TEST_OUTPUT_LIMIT,
             call_parameters=(),
         ),
         Controller(),
@@ -600,7 +609,11 @@ def _request(session_id: int, content: str):
             "apiKey": "secret",
             "apiProvider": "openai",
             "baseURL": "https://provider.example/v1",
-            "options": {"model": "planner-model"},
+            "options": {
+                "model": "planner-model",
+                "model_profile": "deepseek:deepseek-v4-flash",
+                "max_tokens": 32_768,
+            },
             "contextWindow": "128k",
         },
     })
@@ -701,15 +714,6 @@ class _ModelGateway:
         )
 
 
-_TEST_OUTPUT_POLICY = OutputBudgetPolicy(
-    key="screenplay_test",
-    base_tokens=200,
-    per_work_unit_tokens=0,
-    safety_factor=1,
-    hard_cap_tokens=200,
-)
-
-
 def _model_executor_factory(api_key: str) -> ManagedModelExecutor:
     return ManagedModelExecutor(_ModelGateway(api_key))
 
@@ -747,7 +751,6 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
         binding_aggregate_id="project-test",
         binding_command_id="repair-test",
         phase="screenplay_test",
-        output_policy=_TEST_OUTPUT_POLICY,
         repair_instruction="修复 JSON",
         validate=lambda value: value,
     )
@@ -816,7 +819,6 @@ async def test_truncated_structured_output_is_never_repaired_or_replayed(
             binding_aggregate_id="project-test",
             binding_command_id="truncated-output-test",
             phase="screenplay_test",
-            output_policy=_TEST_OUTPUT_POLICY,
             repair_instruction="修复 JSON",
             validate=lambda value: value,
         )
@@ -856,7 +858,6 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
         binding_aggregate_id="project-test",
         binding_command_id="slow-lease-test",
         phase="screenplay_test",
-        output_policy=_TEST_OUTPUT_POLICY,
         repair_instruction="修复 JSON",
         validate=lambda value: value,
     )
@@ -906,7 +907,6 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
         binding_aggregate_id="project-test",
         binding_command_id="thinking-option-test",
         phase="screenplay_test",
-        output_policy=_TEST_OUTPUT_POLICY,
         repair_instruction="修复 JSON",
         validate=lambda value: value,
     )
@@ -915,38 +915,24 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
     assert reasoning_modes == [ReasoningMode.DEFAULT]
 
 
-async def test_screenplay_policies_reserve_output_for_visible_content_after_reasoning():
-    from application.output_budget_policies import (
-        SCREENPLAY_DELIVERABLE_OUTPUT_POLICY,
-        SCREENPLAY_EPISODE_OUTPUT_POLICY,
-        SCREENPLAY_INTENT_OUTPUT_POLICY,
-        SCREENPLAY_REVIEW_OUTPUT_POLICY,
-    )
-    from purra.output_budget import (
-        ModelOutputCapabilities,
-        ThinkingTokenAccounting,
-        resolve_output_budget,
-    )
+async def test_screenplay_uses_the_exact_profile_or_user_output_limit():
+    from purra.model_protocol import resolve_invocation_output_limit
+    from infrastructure.models.profiles.registry import resolve_model_profile
 
-    assert SCREENPLAY_INTENT_OUTPUT_POLICY.reasoning_reserve_tokens == 1_024
-    assert SCREENPLAY_EPISODE_OUTPUT_POLICY.reasoning_reserve_tokens == 12_000
-    assert SCREENPLAY_DELIVERABLE_OUTPUT_POLICY.reasoning_reserve_tokens == 8_000
-    assert SCREENPLAY_REVIEW_OUTPUT_POLICY.reasoning_reserve_tokens == 24_000
-    assert SCREENPLAY_REVIEW_OUTPUT_POLICY.hard_cap_tokens == 40_000
+    snapshot = resolve_model_profile(
+        "deepseek:deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+    ).capability_snapshot(context_window_tokens=1_000_000)
 
-    budget = resolve_output_budget(
-        policy=SCREENPLAY_REVIEW_OUTPUT_POLICY,
-        capabilities=ModelOutputCapabilities(
-            max_output_tokens=393_216,
-            thinking_token_accounting=ThinkingTokenAccounting.INCLUDED,
-        ),
-        context_window_tokens=1_000_000,
-        thinking_enabled=True,
-    )
-
-    assert budget.target_tokens == 8_000
-    assert budget.reasoning_reserve_tokens == 24_000
-    assert budget.effective_tokens == 33_600
+    assert resolve_invocation_output_limit(
+        snapshot,
+        explicit_user_override=None,
+    ).max_tokens == 393_216
+    assert resolve_invocation_output_limit(
+        snapshot,
+        explicit_user_override=256_000,
+    ).max_tokens == 256_000
 
 
 async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
@@ -975,7 +961,6 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
             binding_aggregate_id="project-test",
             binding_command_id="failure-diagnostic-test",
             phase="screenplay_test",
-            output_policy=_TEST_OUTPUT_POLICY,
             repair_instruction="修复 JSON",
             validate=lambda value: value,
         )
@@ -1014,7 +999,6 @@ async def test_reasoning_only_output_is_not_accepted_as_business_output(
             binding_aggregate_id="project-test",
             binding_command_id="reasoning-json-test",
             phase="screenplay_intent_planning",
-            output_policy=_TEST_OUTPUT_POLICY,
             repair_instruction="修复 JSON",
             validate=lambda value: value,
         )
@@ -1054,7 +1038,6 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
         binding_aggregate_id="project-test",
         binding_command_id="body-isolation-test",
         phase="screenplay_episode_generation",
-        output_policy=_TEST_OUTPUT_POLICY,
         repair_instruction="修复 JSON",
         validate=lambda value: value,
         project_execution=lambda value: (

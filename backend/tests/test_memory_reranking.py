@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -12,6 +13,7 @@ from purra.contracts import (
     ModelRequest,
 )
 from purra.model_execution import ManagedModelExecutor
+from purra.model_protocol import generic_capability_snapshot
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.memory_reranking import MemoryCandidateCard
 
@@ -58,6 +60,18 @@ def _candidate(record_id: str, state: str) -> MemoryCandidateCard:
     )
 
 
+def _model_request() -> ModelRequest:
+    return ModelRequest(
+        provider="test",
+        model="test-model",
+        capability_snapshot=replace(
+            generic_capability_snapshot(),
+            profile_id="test:test-model",
+            max_output_tokens=4_096,
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_model_reranker_selects_only_host_candidates():
     gateway = _Gateway("record-2")
@@ -74,7 +88,7 @@ async def test_model_reranker_selects_only_host_candidates():
         entity_refs=("character-1", "character-2"),
         chapter_ids=("chapter-1",),
         max_selected=1,
-        model_request=ModelRequest(provider="test", model="test-model"),
+        model_request=_model_request(),
     )
 
     assert [item.record_id for item in result.decisions] == ["record-2"]
@@ -100,5 +114,5 @@ async def test_model_reranker_rejects_unknown_candidate_ids():
             entity_refs=(),
             chapter_ids=(),
             max_selected=1,
-            model_request=ModelRequest(provider="test", model="test-model"),
+            model_request=_model_request(),
         )
