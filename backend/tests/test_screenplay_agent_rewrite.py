@@ -201,6 +201,30 @@ async def test_execution_progress_is_projected_before_the_json_is_complete():
     assert hidden == ""
 
 
+async def test_execution_progress_projection_caps_model_summary_at_600_chars():
+    projector = JsonStringFieldProjector({"executionSummary": ""})
+
+    visible = projector.feed(json.dumps({
+        "executionSummary": "概" * 700,
+        "action": "answer",
+    }, ensure_ascii=False))
+
+    assert visible == ("概" * 600) + "\n"
+
+
+async def test_execution_progress_projection_omits_blank_string_values():
+    projector = JsonStringFieldProjector({
+        "executionSummary": "",
+        "processSummary": "场景推演：",
+    })
+
+    visible = projector.feed(
+        '{"executionSummary":"","processSummary":""}'
+    )
+
+    assert visible == ""
+
+
 async def test_model_execution_progress_reaches_the_shared_stream_incrementally():
     raw = (
         '{"executionSummary":"先承接上一集的人物选择，再推动本集核心冲突。",'
@@ -423,6 +447,67 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
         chunk.get("commentaryDelta", "") for chunk in chunks
     )
     assert visible == "确认当前阶段后直接回答，不创建交付物。\n"
+
+
+async def test_planner_allows_missing_execution_summary_without_fallback_copy(
+    temp_db: DatabaseConnection,
+):
+    projects, workspace, session = await _project_and_session(temp_db)
+    planner_output = json.dumps({
+        "action": "answer",
+        "instruction": "说明当前阶段",
+        "scope": {"kind": "current_stage"},
+        "constraints": [],
+        "preserve": [],
+        "requestedDeliverable": None,
+        "reply": "当前处于创作简报阶段。",
+    }, ensure_ascii=False)
+
+    class PlannerGateway(_ModelGateway):
+        async def stream(self, messages, invocation, signal=None):
+            del messages, signal
+            self.invocations.append(invocation)
+
+            async def chunks():
+                yield ModelStreamChunk(content_delta=planner_output)
+                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
+
+            return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+    gateway = PlannerGateway("secret")
+    service = ScreenplayAgentService(
+        temp_db,
+        owner_id="optional-model-summary-test",
+        planner=ModelScreenplayIntentPlanner(
+            temp_db,
+            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        ),
+        resolver=SqliteScreenplayTaskResolver(temp_db),
+        unit_executor_factory=lambda _runtime: object(),
+        projects=projects,
+    )
+    request = _request(session["id"], "现在处于哪个阶段？")
+    turn = await service.submit_turn(
+        command_id="optional-model-summary",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    chunks = [
+        json.loads(row["chunk_json"])
+        for row in await temp_db.fetch_all(
+            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+        )
+    ]
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert not any("commentaryDelta" in chunk for chunk in chunks)
+    assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
+    assert len(gateway.invocations) == 1
 
 
 async def test_final_response_unit_metadata_does_not_duplicate_the_response():
