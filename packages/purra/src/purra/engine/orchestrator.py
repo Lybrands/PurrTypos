@@ -1540,14 +1540,9 @@ class AgentCore:
                 "runtime, tool, approval and domain events cannot use "
                 f"controller-owned event type {event.type!r}"
             )
-        # Token deltas remain transport-only. Lifecycle, context, tool,
-        # approval and domain effects are replayable repository events.
-        if event.type not in {
-            CoreEventType.MODEL_CONTENT_DELTA,
-            CoreEventType.MODEL_REASONING_DELTA,
-            CoreEventType.ASSISTANT_FINAL_DELTA,
-        }:
-            await self._repository.append_event(run_id, event)
+        # Runtime events are structured lifecycle, context, tool, approval or
+        # domain facts. Provider text is owned exclusively by OutputProcessor.
+        await self._repository.append_event(run_id, event)
 
 
 class _BufferedEventSink:

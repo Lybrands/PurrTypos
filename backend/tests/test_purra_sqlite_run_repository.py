@@ -54,9 +54,9 @@ async def test_domain_projector_cannot_replace_event_envelope(tmp_path: Path):
             RunCreateParams(session_id=None, prompt="project", mode="agent")
         )
         event = AgentEvent(
-            type=CoreEventType.MODEL_CONTENT_DELTA,
+            type=CoreEventType.MODEL_CALL_RECORDED,
             run_id=run_id,
-            payload={"delta": "original"},
+            payload={"model": "original"},
         )
 
         with pytest.raises(

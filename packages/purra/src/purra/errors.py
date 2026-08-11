@@ -31,6 +31,12 @@ class ContractViolationError(AgentCoreError):
     """A registered capability violates a Core contract."""
 
 
+class OutputPersistenceError(CodedAgentCoreError):
+    """A canonical output event could not become durable."""
+
+    default_code = "output_persistence_failed"
+
+
 class ResponseJudgeContractError(ContractViolationError):
     """A semantic judge response violates its declared verdict contract."""
 

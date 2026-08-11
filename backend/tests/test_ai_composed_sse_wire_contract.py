@@ -415,7 +415,7 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
         item["payload"]["event"]["type"]
         for item in persisted_child_events
     ]
-    assert CoreEventType.ASSISTANT_FINAL_DELTA not in persisted_child_types
+    assert "assistant.final_delta" not in persisted_child_types
     assert CoreEventType.RUN_STARTED in persisted_child_types
     assert CoreEventType.RUN_COMPLETED in persisted_child_types
 

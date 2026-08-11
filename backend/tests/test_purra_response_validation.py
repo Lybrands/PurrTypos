@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -29,6 +30,7 @@ from purra.contracts import (
 from purra.engine import AgentCoreRunOptions
 from purra.errors import ResponseJudgeContractError
 from purra.events import AgentEvent, CoreEventType
+from purra.model_protocol import generic_capability_snapshot
 from purra.ports import ResponseJudge
 from purra.runtime import AgentRuntime
 
@@ -135,7 +137,15 @@ class _TraceObserver:
 def _request(*, tools_enabled: bool = False) -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role="user", content="review"),),
-        model=ModelRequest(provider="fixture", model="model"),
+        model=ModelRequest(
+            provider="fixture",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=32_000,
+            ),
+        ),
         domain_context=DomainContext(namespace="fixture"),
         tools_enabled=tools_enabled,
     )
@@ -160,7 +170,7 @@ def _model_deltas(updates) -> list[str]:
         update.payload["delta"]
         for update in updates
         if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
     ]
 
 
@@ -249,9 +259,9 @@ async def test_injected_validator_withholds_and_repairs_once_without_domain_logi
         update.payload["delta"]
         for update in updates
         if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
     ]
-    assert deltas == [repaired]
+    assert deltas == []
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == repaired
 
@@ -329,7 +339,8 @@ async def test_response_repairs_have_independent_phase_budgets_after_tool_round(
         round_messages[-1].role is MessageRole.DEVELOPER
         for round_messages in model.message_rounds[2:]
     )
-    assert _model_deltas(updates) == [compliant]
+    assert _model_deltas(updates) == []
+    assert _result(updates).final_response == compliant
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == compliant
 
@@ -371,7 +382,7 @@ async def test_injected_validator_fails_closed_after_its_single_repair():
     assert judge.calls == []
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
     assert _result(updates).outcome is RuntimeOutcome.FAILED
@@ -418,12 +429,12 @@ async def test_async_judge_withholds_repairs_and_rejudges_once_without_tools():
     assert "Keep one semantic dimension only" in (
         model.message_rounds[1][-1].content
     )
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == [repaired]
+    )
+    assert _result(updates).final_response == repaired
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     judge_traces = [
         trace for trace in observer.traces
@@ -482,7 +493,8 @@ async def test_deterministic_phase_can_use_remaining_budget_after_semantic_repai
         compliant,
     ]
     assert [call[0] for call in judge.calls] == [semantic_invalid, compliant]
-    assert _model_deltas(updates) == [compliant]
+    assert _model_deltas(updates) == []
+    assert _result(updates).final_response == compliant
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == compliant
 
@@ -523,7 +535,7 @@ async def test_async_judge_exception_and_contract_violation_fail_closed():
     )
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in (*exception_updates, *contract_updates)
     )
 
@@ -560,7 +572,7 @@ async def test_async_judge_fails_closed_after_the_single_semantic_repair():
     assert _result(updates).error_code == "response_constraint_violation"
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
 

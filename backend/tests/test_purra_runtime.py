@@ -394,7 +394,7 @@ def _result(updates) -> AgentRuntimeResult:
 
 
 @pytest.mark.asyncio
-async def test_runtime_streams_provider_neutral_deltas_and_completes_without_tools():
+async def test_runtime_does_not_publish_provider_text_and_completes_without_tools():
     model = ScriptedModelGateway([[
         ModelStreamChunk(reasoning_delta="brief"),
         ModelStreamChunk(content_delta="answer", finish_reason=ModelFinishReason.STOP),
@@ -407,8 +407,6 @@ async def test_runtime_streams_provider_neutral_deltas_and_completes_without_too
     assert isinstance(model, ModelGateway)
     assert [update.type for update in updates if isinstance(update, AgentEvent)] == [
         CoreEventType.MODEL_CALL_RECORDED,
-        CoreEventType.MODEL_REASONING_DELTA,
-        CoreEventType.ASSISTANT_FINAL_DELTA,
     ]
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == "answer"
@@ -480,7 +478,7 @@ async def test_runtime_rejects_repeated_reasoning_only_responses():
 
 
 @pytest.mark.asyncio
-async def test_runtime_retries_deferred_action_only_response_before_completion():
+async def test_runtime_does_not_replace_provider_deferred_response():
     deferred = (
         "好的，让我先查看一下当前章节中场景部分的具体内容，"
         "然后给你提供针对性的优化方案。"
@@ -497,17 +495,15 @@ async def test_runtime_retries_deferred_action_only_response_before_completion()
         observer=observer,
     ))
 
-    visible = [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ]
-    assert visible == [answer]
+    )
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert _result(updates).final_response == answer
-    assert "only announced work" in model.message_rounds[1][-1].content
-    assert any(
+    assert _result(updates).final_response == deferred
+    assert len(model.message_rounds) == 1
+    assert not any(
         trace.stage == "model_output"
         and trace.outcome == "deferred_action_retry"
         for trace in observer.traces
@@ -515,7 +511,7 @@ async def test_runtime_retries_deferred_action_only_response_before_completion()
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_repeated_deferred_action_only_responses():
+async def test_runtime_accepts_provider_deferred_response_without_host_retry():
     deferred = "让我先读取当前章节，然后为您提供完整的分析方案。"
     model = ScriptedModelGateway([
         _answer(deferred),
@@ -526,11 +522,12 @@ async def test_runtime_rejects_repeated_deferred_action_only_responses():
 
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
-    assert _result(updates).outcome is RuntimeOutcome.FAILED
-    assert _result(updates).error_code == "incomplete_model_response"
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
+    assert _result(updates).final_response == deferred
+    assert len(model.invocations) == 1
 
 
 @pytest.mark.asyncio
@@ -542,12 +539,11 @@ async def test_runtime_accepts_short_explanation_that_starts_with_let_me():
 
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == answer
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == [answer]
+    )
 
 
 @pytest.mark.asyncio
@@ -643,12 +639,11 @@ async def test_runtime_without_response_constraints_keeps_streaming_each_delta()
         AgentRuntime(model_gateway=model, observer=observer),
     )
 
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == ["first ", "second"]
+    )
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == "first second"
     assert observer.model_delta_count == 2
@@ -673,12 +668,11 @@ async def test_valid_exact_item_constraint_buffers_and_emits_one_complete_delta(
     )
 
     expected = "1. first item\n2. second item"
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == [expected]
+    )
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == expected
     assert observer.model_delta_count == 1
@@ -715,12 +709,11 @@ async def test_exact_item_constraint_withholds_invalid_answer_and_repairs_once_w
     )
     assert repair_messages[-1].role is MessageRole.DEVELOPER
     assert "exactly 2 top-level items" in repair_messages[-1].content
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == [repaired]
+    )
     assert invalid not in "".join(
         str(update.payload.get("delta") or "")
         for update in updates
@@ -755,7 +748,7 @@ async def test_exact_item_constraint_fails_closed_after_one_failed_repair():
         update
         for update in updates
         if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
     ]
     assert observer.model_delta_count == 0
     assert _result(updates).outcome is RuntimeOutcome.FAILED
@@ -797,7 +790,7 @@ async def test_textual_tool_call_during_response_repair_is_rejected_without_anot
         update
         for update in updates
         if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
     ]
     assert observer.model_delta_count == 0
     assert _result(updates).outcome is RuntimeOutcome.FAILED
@@ -825,7 +818,7 @@ async def test_structured_tool_call_during_response_repair_is_rejected():
     assert not any(
         isinstance(update, AgentEvent)
         and update.type in {
-            CoreEventType.ASSISTANT_FINAL_DELTA,
+            "assistant.final_delta",
             CoreEventType.TOOL_CALLS_STARTED,
         }
         for update in updates
@@ -880,7 +873,7 @@ async def test_exact_item_constraint_rejects_an_extra_column_zero_item():
         update
         for update in updates
         if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
     ]
     assert _result(updates).outcome is RuntimeOutcome.FAILED
     assert _result(updates).error_code == "response_constraint_violation"
@@ -936,7 +929,7 @@ async def test_runtime_preserves_typed_continuation_scope_and_state_across_tool_
     assert second_round_tail[1].tool_call_id == "call-a"
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         and update.payload["delta"].startswith("hidden")
         for update in updates
     )
@@ -1251,18 +1244,15 @@ async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
     )
 
     result = _result(updates)
-    deltas = [
-        str(update.payload["delta"])
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code == "tool_execution_failed"
+    assert result.final_response == ""
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ]
-    assert result.outcome is RuntimeOutcome.COMPLETED
-    assert result.final_response == deltas[0]
-    assert "工具步骤未能完成" in result.final_response
-    assert "<tool_call>" not in "".join(deltas)
-    assert "payload" not in "".join(deltas)
-    assert observer.model_delta_count == 1
+    )
+    assert observer.model_delta_count == 0
     assert any(
         trace.stage == "model_output"
         and trace.outcome == "unstructured_tool_output_replaced"
@@ -1750,8 +1740,6 @@ async def test_runtime_stops_consuming_model_stream_after_terminal_chunk():
     assert stream_closed.is_set()
     assert [update.type for update in updates if isinstance(update, AgentEvent)] == [
         CoreEventType.MODEL_CALL_RECORDED,
-        CoreEventType.MODEL_REASONING_DELTA,
-        CoreEventType.ASSISTANT_FINAL_DELTA,
     ]
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == "answer"
@@ -1777,12 +1765,11 @@ async def test_runtime_retries_buffered_partial_stream_with_frozen_inputs():
         ),
     )
 
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == ["1. final"]
+    )
     assert model.message_rounds[0] == model.message_rounds[1]
     assert model.invocations[0] == model.invocations[1]
     terminal_traces = [
@@ -1818,12 +1805,11 @@ async def test_runtime_does_not_retry_after_unbuffered_partial_was_emitted():
         AgentRuntime(model_gateway=model, observer=observer),
     )
 
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == ["visible partial"]
+    )
     assert len(model.invocations) == 1
     trace = next(item for item in observer.traces if item.stage == "stream")
     assert trace.outcome == "interrupted"
@@ -2082,7 +2068,7 @@ async def test_runtime_treats_eof_without_finish_as_interruption_not_completion(
 
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
     assert [
@@ -2174,8 +2160,8 @@ async def test_runtime_fails_when_required_model_does_not_call_a_tool():
     assert not any(
         isinstance(update, AgentEvent)
         and update.type in {
-            CoreEventType.ASSISTANT_FINAL_DELTA,
-            CoreEventType.MODEL_REASONING_DELTA,
+            "assistant.final_delta",
+            "model.reasoning_delta",
         }
         for update in updates
     )
@@ -2257,15 +2243,14 @@ async def test_runtime_keeps_logical_required_guard_after_provider_fallback():
     assert _result(updates).error_code == "missing_required_tool_call"
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "model.reasoning_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.MODEL_REASONING_DELTA
-    ] == ["private reasoning", "private reasoning"]
+    )
 
 
 @pytest.mark.asyncio
@@ -2327,16 +2312,14 @@ async def test_runtime_keeps_required_tool_round_reasoning_diagnostic_only():
         require_tool_call=True,
     )
 
-    reasoning = [
-        update.payload["delta"]
-        for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.MODEL_REASONING_DELTA
-    ]
-    assert reasoning == ["private reasoning"]
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_COMMENTARY_DELTA
+        and update.type == "model.reasoning_delta"
+        for update in updates
+    )
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.commentary_delta"
         for update in updates
     )
     started = next(
@@ -2380,18 +2363,15 @@ async def test_runtime_promotes_tool_round_content_to_public_commentary():
         require_tool_call=True,
     )
 
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type in {
+            "assistant.commentary_delta",
+            "assistant.final_delta",
+        }
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_COMMENTARY_DELTA
-    ] == ["我先核对现有资料。"]
-    assert [
-        update.payload["delta"]
-        for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == ["核对完成。"]
+    )
+    assert _result(updates).final_response == "核对完成。"
 
 
 @pytest.mark.asyncio
@@ -3409,19 +3389,12 @@ async def test_runtime_preserves_declined_canceled_and_failed_tool_semantics(
             and trace.details["approvalStatuses"] == ["rejected"]
             for trace in observer.traces
         )
-        assert _result(updates).final_response == (
-            "You rejected the approval. The operation was not executed, and "
-            "the related data remains unchanged."
-        )
-        assert [
-            str(update.payload["delta"])
+        assert _result(updates).final_response == "continued"
+        assert not any(
+            isinstance(update, AgentEvent)
+            and update.type == "assistant.final_delta"
             for update in updates
-            if isinstance(update, AgentEvent)
-            and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-        ] == [
-            "You rejected the approval. The operation was not executed, and "
-            "the related data remains unchanged."
-        ]
+        )
 
 
 @pytest.mark.asyncio
@@ -3481,25 +3454,19 @@ async def test_runtime_suppresses_textual_tool_call_after_decline_and_retries_pl
         force_tool_choice=True,
     )
 
-    deltas = [
-        str(update.payload["delta"])
-        for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ]
-    assert deltas == ["您已拒绝审批；操作未执行，相关数据仍保留。"]
-    assert "正在删除" not in "".join(deltas)
-    assert "删除失败" not in "".join(deltas)
-    assert "权限" not in "".join(deltas)
-    assert "<tool_call>" not in "".join(deltas)
-    assert any(
+    assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.MODEL_REASONING_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_COMMENTARY_DELTA
+        and update.type == "model.reasoning_delta"
+        for update in updates
+    )
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.commentary_delta"
         for update in updates
     )
     assert len(tools.requests) == 1
@@ -3519,12 +3486,12 @@ async def test_runtime_suppresses_textual_tool_call_after_decline_and_retries_pl
     )
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == (
-        "您已拒绝审批；操作未执行，相关数据仍保留。"
+        "已找到人物，正在删除。删除失败，请检查权限或联系管理员。"
     )
 
 
 @pytest.mark.asyncio
-async def test_runtime_uses_host_decline_response_when_model_content_is_empty():
+async def test_runtime_does_not_invent_decline_response_when_model_is_empty():
     model = ScriptedModelGateway([
         _tool_call("call-delete", "deleteCharacter"),
         _answer(""),
@@ -3554,14 +3521,12 @@ async def test_runtime_uses_host_decline_response_when_model_content_is_empty():
         force_tool_choice=True,
     )
 
-    deltas = [
-        str(update.payload["delta"])
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ]
-    assert deltas == ["您已拒绝审批；操作未执行，相关数据仍保留。"]
-    assert _result(updates).final_response == deltas[0]
+    )
+    assert _result(updates).final_response == ""
     assert len(tools.requests) == 1
     assert model.invocations[1].tools == ()
     assert model.invocations[1].tool_choice is ToolChoiceMode.NONE
@@ -3611,7 +3576,7 @@ async def test_runtime_fails_closed_when_textual_tool_call_repeats_after_decline
 
     assert not any(
         isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
+        and update.type == "assistant.final_delta"
         for update in updates
     )
     assert len(tools.requests) == 1
@@ -4088,12 +4053,11 @@ async def test_runtime_cancels_while_waiting_for_the_next_model_chunk():
     updates = await asyncio.wait_for(consumer, timeout=1.0)
 
     assert finalized.is_set()
-    assert [
-        update.payload["delta"]
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == "assistant.final_delta"
         for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
-    ] == ["partial"]
+    )
     assert _result(updates).outcome is RuntimeOutcome.CANCELED
     assert _result(updates).error_code == "request_canceled"
     terminal_traces = [

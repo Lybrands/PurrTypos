@@ -85,14 +85,10 @@ from purra.runtime.model_round import (
     truncation_trace_details,
 )
 from purra.runtime.response_finalization import (
-    declined_final_response as _declined_final_response,
     exact_item_count_repair_guidance as _exact_item_count_repair_guidance,
-    failed_tool_final_response as _failed_tool_final_response,
-    is_deferred_action_only_response as _is_deferred_action_only_response,
     is_textual_tool_call as _is_textual_tool_call,
     is_unstructured_tool_output as _is_unstructured_tool_output,
     response_constraint_repair_guidance as _response_constraint_repair_guidance,
-    should_hold_potential_deferred_response as _should_hold_potential_deferred_response,
     top_level_numbered_items as _top_level_numbered_items,
 )
 from purra.runtime.tool_round import (
@@ -183,14 +179,6 @@ _MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
     "provider's native structured tool-call protocol. Include one stable call id, "
     "one currently exposed tool name, and one complete JSON object for arguments. "
     "Do not emit XML-like tool markup or an argument dump as ordinary text."
-)
-_DEFERRED_ACTION_RETRY_GUIDANCE = (
-    "Your preceding response only announced work you intended to do later and "
-    "did not deliver the result requested by the user. That incomplete response "
-    "was withheld. Continue the task now: use an exposed tool through a valid "
-    "structured call if evidence is still required, otherwise provide the "
-    "complete answer in the user's language. Do not repeat a process "
-    "announcement or promise a later response."
 )
 _RECOVERABLE_TOOL_INPUT_ERROR_CODES = frozenset({
     "duplicate_tool_call_id",
@@ -967,36 +955,16 @@ class AgentRuntime:
                     accumulator.add(chunk)
                     if chunk.reasoning_delta:
                         emitted_delta_count += 1
-                        yield AgentEvent(
-                            type=CoreEventType.MODEL_REASONING_DELTA,
-                            run_id=run_id,
-                            payload={"delta": chunk.reasoning_delta},
-                        )
                     if (
                         chunk.content_delta
                         and not require_tool
                         and not buffer_model_content
                         and not invocation.tools
                     ):
-                        should_hold = bool(
-                            not direct_content_released
-                            and _should_hold_potential_deferred_response(
-                                accumulator.content
-                            )
-                        )
-                        if not should_hold:
-                            visible_delta = chunk.content_delta
-                            if not direct_content_released:
-                                visible_delta = accumulator.content
-                                direct_content_released = True
-                            if self._observer is not None:
-                                await self._observer.on_model_delta()
-                            emitted_delta_count += 1
-                            yield AgentEvent(
-                                type=CoreEventType.ASSISTANT_FINAL_DELTA,
-                                run_id=run_id,
-                                payload={"delta": visible_delta},
-                            )
+                        direct_content_released = True
+                        if self._observer is not None:
+                            await self._observer.on_model_delta()
+                        emitted_delta_count += 1
                     if chunk.finish_reason is not None:
                         break
             except OperationCanceled:
@@ -1554,22 +1522,15 @@ class AgentRuntime:
                             content=_FAILED_TOOL_OUTPUT_RETRY_GUIDANCE,
                         ))
                         continue
-                    final_response = _failed_tool_final_response(
-                        request.messages
-                    )
-                    if self._observer is not None:
-                        await self._observer.on_model_delta()
-                    yield AgentEvent(
-                        type=CoreEventType.ASSISTANT_FINAL_DELTA,
-                        run_id=run_id,
-                        payload={"delta": final_response},
-                    )
                     yield _runtime_result(
                         run_id,
-                        RuntimeOutcome.COMPLETED,
+                        RuntimeOutcome.FAILED,
                         used_model,
                         round_number,
-                        final_response=final_response,
+                        error_code=(
+                            failed_tool_recovery_error_code
+                            or "tool_execution_failed"
+                        ),
                     )
                     return
 
@@ -1629,63 +1590,6 @@ class AgentRuntime:
                         used_model,
                         round_number,
                         error_code="empty_model_response",
-                    )
-                    return
-
-                if (
-                    not declined_response_pending
-                    and _is_deferred_action_only_response(accumulator.content)
-                ):
-                    deferred_retry_count = recovery_ledger.attempts(
-                        RecoveryCause.DEFERRED_MODEL_RESPONSE
-                    )
-                    deferred_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=RecoveryCause.DEFERRED_MODEL_RESPONSE,
-                            action=RecoveryAction.RETRY_MODEL,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
-                    )
-                    can_retry = deferred_decision.allowed
-                    await self._trace(
-                        "model_output",
-                        (
-                            "deferred_action_retry"
-                            if can_retry
-                            else "deferred_action_rejected"
-                        ),
-                        details={
-                            "round": round_number,
-                            "retryCount": deferred_retry_count,
-                            "retryScheduled": can_retry,
-                            "responseCharacters": len(accumulator.content),
-                        },
-                    )
-                    if can_retry:
-                        messages.extend((
-                            AgentMessage(
-                                role=MessageRole.ASSISTANT,
-                                content=accumulator.content,
-                                reasoning=accumulator.reasoning or None,
-                            ),
-                            AgentMessage(
-                                role=MessageRole.DEVELOPER,
-                                content=_DEFERRED_ACTION_RETRY_GUIDANCE,
-                            ),
-                        ))
-                        continue
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.FAILED,
-                        used_model,
-                        round_number,
-                        error_code="incomplete_model_response",
                     )
                     return
 
@@ -1992,27 +1896,13 @@ class AgentRuntime:
                         )
                         return
 
-                final_response = (
-                    _declined_final_response(request.messages)
-                    if declined_response_pending
-                    else accumulator.content
-                )
+                final_response = accumulator.content
                 if buffer_model_content:
                     if self._observer is not None:
                         await self._observer.on_model_delta()
-                    yield AgentEvent(
-                        type=CoreEventType.ASSISTANT_FINAL_DELTA,
-                        run_id=run_id,
-                        payload={"delta": final_response},
-                    )
                 elif not direct_content_released and final_response:
                     if self._observer is not None:
                         await self._observer.on_model_delta()
-                    yield AgentEvent(
-                        type=CoreEventType.ASSISTANT_FINAL_DELTA,
-                        run_id=run_id,
-                        payload={"delta": final_response},
-                    )
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.COMPLETED,
@@ -2234,12 +2124,6 @@ class AgentRuntime:
 
             if scope_tools_to_observer and self._observer is not None:
                 await self._observer.on_tool_calls_started(tuple(sorted(requested_names)))
-            if accumulator.content.strip() and not direct_content_released:
-                yield AgentEvent(
-                    type=CoreEventType.ASSISTANT_COMMENTARY_DELTA,
-                    run_id=run_id,
-                    payload={"delta": accumulator.content},
-                )
             yield AgentEvent(
                 type=CoreEventType.TOOL_CALLS_STARTED,
                 run_id=run_id,
