@@ -249,6 +249,7 @@ function AssistantMessageBodyInner({
     <div className="bubble-assistant-body">
       {executionPanel.visible && executionPanelLogKey ? (
         <WorkLog
+          key={executionPanelLogKey}
           logKey={executionPanelLogKey}
           active={executionPanel.active}
           autoOpen={executionPanel.autoOpen}

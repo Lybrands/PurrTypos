@@ -88,6 +88,10 @@ const {
   toolCallDisplayRow,
 } = loadTypeScriptModule(path.join(__dirname, 'toolCallLabels.ts'))
 
+const loadWorkLogState = () => loadTypeScriptModule(
+  path.join(__dirname, '../components/WorkLog/state.ts'),
+)
+
 test('legacy tool label fallback remains localized for persisted sessions', () => {
   for (const name of Object.keys(KNOWN_TOOL_CALL_LABELS)) {
     const row = toolCallDisplayRow(name, {}, [], [])
@@ -373,6 +377,76 @@ test('execution panel keys stay turn-specific when separate sessions reuse an in
     'live-turn-42-work-log',
   )
   assert.equal(getExecutionPanelLogKey({}), null)
+})
+
+test('work log follows auto-open transitions before a manual choice', () => {
+  const {
+    applyWorkLogAutoOpen,
+    getInitialWorkLogOpenState,
+  } = loadWorkLogState()
+  const initial = getInitialWorkLogOpenState(undefined, true)
+
+  assert.deepEqual(initial, { open: true, manuallySet: false })
+  assert.deepEqual(
+    applyWorkLogAutoOpen(initial, true, false),
+    { open: false, manuallySet: false },
+  )
+})
+
+test('work log keeps a manual choice across later auto-open transitions', () => {
+  const {
+    applyWorkLogAutoOpen,
+    toggleWorkLogOpenState,
+  } = loadWorkLogState()
+  const manuallyCollapsed = toggleWorkLogOpenState({
+    open: true,
+    manuallySet: false,
+  })
+
+  assert.deepEqual(manuallyCollapsed, { open: false, manuallySet: true })
+  assert.deepEqual(
+    applyWorkLogAutoOpen(manuallyCollapsed, false, true),
+    { open: false, manuallySet: true },
+  )
+})
+
+test('work log initializes each turn from its own stored or auto-open state', () => {
+  const { getInitialWorkLogOpenState } = loadWorkLogState()
+
+  assert.deepEqual(
+    getInitialWorkLogOpenState(
+      { open: false, manuallySet: true },
+      true,
+    ),
+    { open: false, manuallySet: true },
+  )
+  assert.deepEqual(
+    getInitialWorkLogOpenState(undefined, true),
+    { open: true, manuallySet: false },
+  )
+  assert.deepEqual(
+    getInitialWorkLogOpenState(undefined, false),
+    { open: false, manuallySet: false },
+  )
+})
+
+test('work log recent-state cache stays bounded and retains recently read turns', () => {
+  const {
+    readWorkLogOpenState,
+    writeWorkLogOpenState,
+  } = loadWorkLogState()
+  const cache = new Map()
+
+  writeWorkLogOpenState(cache, 'turn-a', { open: true, manuallySet: true }, 2)
+  writeWorkLogOpenState(cache, 'turn-b', { open: false, manuallySet: true }, 2)
+  assert.deepEqual(
+    readWorkLogOpenState(cache, 'turn-a'),
+    { open: true, manuallySet: true },
+  )
+  writeWorkLogOpenState(cache, 'turn-c', { open: true, manuallySet: false }, 2)
+
+  assert.deepEqual([...cache.keys()], ['turn-a', 'turn-c'])
+  assert.equal(readWorkLogOpenState(cache, 'turn-b'), undefined)
 })
 
 test('execution-panel progress reports the active visible step frontier', () => {
