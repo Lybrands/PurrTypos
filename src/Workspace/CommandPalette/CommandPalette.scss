@@ -2,7 +2,7 @@
 .cmdk-mask {
   position: fixed;
   inset: 0;
-  z-index: 1300;
+  z-index: var(--purr-z-modal);
   background: rgba(25, 19, 16, 0.38);
   backdrop-filter: blur(6px);
   display: flex;

@@ -2,7 +2,7 @@
 
 // ─── 选区浮起工具条 ──────────────────────────────────────────────
 .inline-edit-toolbar {
-  z-index: 1100;
+  z-index: var(--purr-z-floating);
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
@@ -40,7 +40,7 @@
 // 设计：只有一条滚动条 → header / footer 固定，中间 body 是唯一滚动容器，
 // 内部各分区（原文 / 输入 / 结果）通过分隔线区分，不再各自 overflow。
 .inline-edit-popover {
-  z-index: 1200;
+  z-index: var(--purr-z-floating);
   width: 520px;
   max-width: calc(100vw - 48px);
   max-height: 70vh;

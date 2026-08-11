@@ -1,5 +1,5 @@
 .workspace-search-floating {
-  z-index: 1000;
+  z-index: var(--purr-z-floating);
   pointer-events: auto;
 
   &--fixed {
