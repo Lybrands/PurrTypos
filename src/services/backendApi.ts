@@ -108,6 +108,7 @@ export const backendApi: BackendApi = {
       sessionId: data.sessionId,
       content: data.content,
       runtime: data.runtime,
+      ...(data.stageCommand ? { stageCommand: data.stageCommand } : {}),
     },
     data.commandId,
   ),
