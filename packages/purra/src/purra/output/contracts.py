@@ -44,6 +44,7 @@ class OutputChannel(StrEnum):
     LIFECYCLE = "lifecycle"
     ERROR = "error"
     DIAGNOSTIC = "diagnostic"
+    DELEGATION = "delegation"
 
 
 class OutputVisibility(StrEnum):
@@ -65,6 +66,7 @@ class OutputEventKind(StrEnum):
     RUN_LIFECYCLE = "run.lifecycle"
     TOOL = "tool.event"
     DOMAIN_EFFECT = "domain.effect"
+    DELEGATION = "delegation.event"
 
 
 _PUBLIC_INTENTS = frozenset({
@@ -327,6 +329,29 @@ class DomainEffectOutput:
         if not isinstance(self.effect, DomainEffect):
             raise TypeError("domain effect output requires a DomainEffect")
         _require_aware(self.occurred_at, "occurred_at")
+
+
+@dataclass(frozen=True, slots=True)
+class FederatedOutputEvent:
+    parent_run_id: RunId
+    delegation_id: str
+    source_event: AgentOutputEvent
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "parent_run_id",
+            required_text(self.parent_run_id, "parent run id"),
+        )
+        object.__setattr__(
+            self,
+            "delegation_id",
+            required_text(self.delegation_id, "delegation id"),
+        )
+        if not isinstance(self.source_event, AgentOutputEvent):
+            raise TypeError("federated output requires an AgentOutputEvent")
+        if self.source_event.run_id == self.parent_run_id:
+            raise ValueError("federated output source must be a child run")
 
 
 def _validate_public_text(

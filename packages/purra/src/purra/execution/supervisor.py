@@ -13,7 +13,7 @@ from purra.errors import ContractViolationError
 from purra.events import AgentEvent
 from purra.execution.handle import AgentRunHandle
 from purra.normalization import non_negative_int, required_text
-from purra.output.contracts import AgentOutputEvent
+from purra.output.contracts import AgentOutputEvent, OutputVisibility
 from purra.output.ports import AgentOutputPublisher, AgentOutputRepository
 from purra.ports.persistence import ExecutionLeaseStore
 
@@ -179,7 +179,8 @@ class AgentRunSupervisor:
                             "output repository returned a stale sequence"
                         )
                     cursor = event.sequence
-                    yield event
+                    if event.visibility is OutputVisibility.PUBLIC:
+                        yield event
                 continue
             if result_future.done():
                 return
