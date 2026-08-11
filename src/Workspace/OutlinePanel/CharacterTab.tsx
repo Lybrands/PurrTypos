@@ -245,7 +245,6 @@ export default function CharacterTab({
                     <span className="character-card-index">{index + 1}.</span>
                     {preview ? (
                       <PurrTooltip
-                        zIndex={1301}
                         title={<div className="character-info-tooltip">{preview}</div>}
                       >
                         <span className="character-card-name">{c.name}</span>

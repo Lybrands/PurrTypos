@@ -211,7 +211,7 @@
  */
 .editor-panel.panel-main {
   /*
-   * 让出右侧 14px 给 .floating-rail--right（z-index: 30，绝对定位贴 .app-body 右边）。
+   * 保留右侧 14px 空间，避免正文滚动条贴住工作区边缘。
    * 否则 .editor-lexical-wrap 的原生滚动条会被贴线完全盖住，无法点击/拖动。
    * 用 margin-right 让 wrap 横向收缩，scroll thumb 自然落到贴线内侧；居中正文/字数浮签
    * 都基于 wrap 重新计算，整体仍然居中、不破坏布局。
@@ -258,7 +258,7 @@
 
 .ai-float-box {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--purr-z-floating);
   width: 520px;
   background: var(--bg-surface);
   border: 1px solid var(--border);

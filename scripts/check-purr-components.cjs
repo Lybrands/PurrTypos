@@ -1,9 +1,11 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const ts = require('typescript')
 
 const projectRoot = path.resolve(__dirname, '..')
 const sourceRoot = path.join(projectRoot, 'src')
 const purrComponentsRoot = path.join(sourceRoot, 'purr-components')
+const layerRegistryPath = path.join(sourceRoot, 'styles', 'layers.scss')
 const sourceExtensions = new Set(['.ts', '.tsx', '.scss', '.css'])
 const violations = []
 const sharedDirectories = new Set(['icons', 'styles'])
@@ -12,6 +14,17 @@ const packageDependencies = {
   ...packageJson.dependencies,
   ...packageJson.devDependencies,
 }
+const requiredLayerTokens = new Map([
+  ['--purr-z-floating', 1000],
+  ['--purr-z-diagnostics', 1050],
+  ['--purr-z-drawer-backdrop', 1100],
+  ['--purr-z-drawer', 1110],
+  ['--purr-z-modal-backdrop', 1200],
+  ['--purr-z-modal', 1210],
+  ['--purr-z-popup', 1220],
+  ['--purr-z-tooltip', 1230],
+  ['--purr-z-toast', 1300],
+])
 
 const legacyComponentClass =
   /\b(?:ant|ui)-(?:btn|button|checkbox|drawer|empty|form|input|popover|tag|space|card|list|divider|alert|segmented|progress|switch|slider|typography|radio|select|tabs|modal)(?:[A-Za-z0-9_-]*)\b/g
@@ -65,6 +78,55 @@ function validateIconSources() {
   }
 }
 
+function validateLayerRegistry() {
+  const source = fs.readFileSync(layerRegistryPath, 'utf8')
+  for (const [token, value] of requiredLayerTokens) {
+    const declaration = new RegExp(`${token}\\s*:\\s*${value}\\s*;`)
+    if (!declaration.test(source)) {
+      violations.push(`src/styles/layers.scss: ${token} 必须固定为 ${value}`)
+    }
+  }
+}
+
+function validateNumericZIndex(source, relativePath) {
+  for (const match of source.matchAll(/z-index\s*:\s*(-?\d+)\b/g)) {
+    const value = Number(match[1])
+    if (value < -1 || value > 9) {
+      violations.push(`${relativePath}: z-index ${value} 必须改用全局语义变量或局部 -1–9`)
+    }
+  }
+}
+
+function validateInlineBusinessZIndex(source, filePath, relativePath) {
+  if (filePath.startsWith(purrComponentsRoot + path.sep)) return
+  if (path.extname(filePath) !== '.tsx') return
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  )
+
+  function inspect(node) {
+    if (ts.isJsxAttribute(node) && node.name.text === 'style') {
+      const expression = node.initializer?.expression
+      if (expression && ts.isObjectLiteralExpression(expression)) {
+        const hasZIndex = expression.properties.some((property) => {
+          if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return false
+          return property.name?.getText(sourceFile) === 'zIndex'
+        })
+        if (hasZIndex) {
+          violations.push(`${relativePath}: 业务浮层不得直接写 style.zIndex，请使用 Purr 组件的 zIndex 参数`)
+        }
+      }
+    }
+    ts.forEachChild(node, inspect)
+  }
+
+  inspect(sourceFile)
+}
+
 function visit(directory) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const filePath = path.join(directory, entry.name)
@@ -76,6 +138,9 @@ function visit(directory) {
 
     const source = fs.readFileSync(filePath, 'utf8')
     const relativePath = path.relative(projectRoot, filePath)
+
+    validateNumericZIndex(source, relativePath)
+    validateInlineBusinessZIndex(source, filePath, relativePath)
 
     if (/from\s+['"]antd(?:\/[^'"]*)?['"]|require\(\s*['"]antd(?:\/[^'"]*)?['"]\s*\)/.test(source)) {
       violations.push(`${relativePath}: 不允许直接导入 antd`)
@@ -117,6 +182,7 @@ function visit(directory) {
 validateComponentDirectories()
 validateIconDependencies()
 validateIconSources()
+validateLayerRegistry()
 visit(sourceRoot)
 
 if (violations.length) {
