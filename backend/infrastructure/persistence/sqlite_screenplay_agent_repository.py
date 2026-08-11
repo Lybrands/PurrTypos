@@ -29,6 +29,7 @@ class SqliteScreenplayAgentRepository:
         project_id: str,
         session_id: int,
         content: str,
+        stage_command: Mapping[str, Any] | None,
         runtime_profile: Mapping[str, Any],
     ) -> dict[str, Any]:
         async with self._db.transaction(cancellation_linearizable=True):
@@ -38,9 +39,16 @@ class SqliteScreenplayAgentRepository:
                 [project_id, command_id],
             )
             if existing is not None:
+                existing_command = (
+                    _object(existing.get("stage_command_json")) or None
+                )
+                requested_command = (
+                    dict(stage_command) if stage_command is not None else None
+                )
                 if (
                     int(existing["session_id"]) != int(session_id)
                     or str(existing["user_content"]) != content
+                    or existing_command != requested_command
                 ):
                     raise AppError("同一个对话命令对应了不同请求", 409)
                 return _turn_view(existing)
@@ -64,13 +72,15 @@ class SqliteScreenplayAgentRepository:
             await self._db.execute(
                 "INSERT INTO screenplay_agent_turns "
                 "(id, project_id, session_id, command_id, user_content, "
-                "runtime_profile_json) VALUES (?, ?, ?, ?, ?, ?)",
+                "stage_command_json, runtime_profile_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     turn_id,
                     project_id,
                     int(session_id),
                     command_id,
                     content,
+                    _dump(stage_command) if stage_command is not None else None,
                     _dump(runtime_profile),
                 ],
             )
@@ -785,6 +795,7 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "sessionId": int(row["session_id"]),
         "status": str(row["status"]),
         "userContent": str(row["user_content"]),
+        "stageCommand": _object(row.get("stage_command_json")) or None,
         "assistantContent": str(row.get("assistant_content") or ""),
         "runtimeProfile": _object(row.get("runtime_profile_json")),
         "intent": _object(row.get("intent_json")) or None,

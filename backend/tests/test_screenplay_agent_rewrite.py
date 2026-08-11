@@ -10,6 +10,7 @@ import pytest_asyncio
 
 import application.model_runtime as model_runtime
 import application.screenplay_structured_call as screenplay_structured_call
+import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
     ModelCompletion,
@@ -295,6 +296,119 @@ async def _append_async(target: list, value) -> None:
     target.append(value)
 
 
+async def test_stage_command_accepts_only_the_same_action_role_and_scope():
+    command = screenplay_contracts.ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    })
+    command.require_compatible(ScreenplayIntent(
+        action=ScreenplayIntentAction.REVIEW,
+        instruction="审阅当前完整剧本",
+        requested_deliverable="review",
+    ))
+
+    with pytest.raises(
+        screenplay_contracts.ScreenplayIntentCommandMismatchError,
+        match="stage command",
+    ):
+        command.require_compatible(ScreenplayIntent(
+            action=ScreenplayIntentAction.ANSWER,
+            instruction="说明没有 JSON",
+            reply="没有 JSON",
+        ))
+
+
+@pytest.mark.parametrize("intent", [
+    ScreenplayIntent(
+        action=ScreenplayIntentAction.REVISE,
+        instruction="修订三集",
+        scope=ScreenplayIntentScope(
+            kind=ScreenplayScopeKind.NEXT_EPISODES,
+            count=3,
+        ),
+        requested_deliverable="screenplayDraft",
+    ),
+    ScreenplayIntent(
+        action=ScreenplayIntentAction.CREATE,
+        instruction="生成简报",
+        scope=ScreenplayIntentScope(
+            kind=ScreenplayScopeKind.NEXT_EPISODES,
+            count=3,
+        ),
+        requested_deliverable="creativeBrief",
+    ),
+    ScreenplayIntent(
+        action=ScreenplayIntentAction.CREATE,
+        instruction="创作两集",
+        scope=ScreenplayIntentScope(
+            kind=ScreenplayScopeKind.NEXT_EPISODES,
+            count=2,
+        ),
+        requested_deliverable="screenplayDraft",
+    ),
+    ScreenplayIntent(
+        action=ScreenplayIntentAction.CREATE,
+        instruction="创作第 1、3 集",
+        scope=ScreenplayIntentScope(
+            kind=ScreenplayScopeKind.EPISODES,
+            episode_numbers=(1, 3),
+        ),
+        requested_deliverable="screenplayDraft",
+    ),
+])
+async def test_stage_command_rejects_each_changed_business_boundary(intent):
+    command = screenplay_contracts.ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "next_episodes", "count": 3},
+    })
+
+    with pytest.raises(
+        screenplay_contracts.ScreenplayIntentCommandMismatchError,
+    ):
+        command.require_compatible(intent)
+
+
+@pytest.mark.parametrize("value", [
+    {
+        "kind": "stage_action",
+        "action": "answer",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "current_stage", "count": 2},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "episodes", "episodeNumbers": [1, 1]},
+    },
+])
+async def test_stage_command_rejects_invalid_action_role_and_scope(value):
+    with pytest.raises(ValueError):
+        screenplay_contracts.ScreenplayStageCommand.from_mapping(value)
+
+
 @pytest_asyncio.fixture
 async def temp_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
@@ -353,6 +467,36 @@ async def test_turn_start_does_not_emit_a_host_authored_plan(
             "goal": "继续完成第七集。",
         },
     }]
+
+
+async def test_service_persists_the_validated_stage_command_with_the_turn(
+    temp_db: DatabaseConnection,
+):
+    projects, workspace, session = await _project_and_session(temp_db)
+    service = ScreenplayAgentService(
+        temp_db,
+        owner_id="stage-command-service-test",
+        planner=object(),  # type: ignore[arg-type]
+        resolver=object(),  # type: ignore[arg-type]
+        unit_executor_factory=lambda _runtime: object(),
+        projects=projects,
+    )
+    payload = _request(session["id"], "开始审阅").model_dump(mode="json")
+    payload["stageCommand"] = {
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    }
+    request = SubmitScreenplayAgentTurnRequest.model_validate(payload)
+
+    turn = await service.submit_turn(
+        command_id="stage-command-service",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    assert turn["stageCommand"] == payload["stageCommand"]
 
 
 async def test_planner_projects_model_owned_summary_without_a_host_prefix(
@@ -1484,6 +1628,7 @@ async def test_screenplay_stream_replays_materialized_shared_chunks(
         project_id=project_id,
         session_id=session["id"],
         content="创作下一集",
+        stage_command=None,
         runtime_profile={"provider": "openai", "model": "test"},
     )
     chunks = ScreenplayAgentChunkStore(temp_db)
@@ -1533,6 +1678,63 @@ async def test_screenplay_stream_replays_materialized_shared_chunks(
     }
 
 
+async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-stage-command-test",
+    )
+    review_command = {
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    }
+    turn = await repository.begin_turn(
+        command_id="persist-stage-command",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="开始审阅",
+        stage_command=review_command,
+        runtime_profile={"provider": "openai", "model": "test"},
+    )
+
+    replay = await repository.begin_turn(
+        command_id="persist-stage-command",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="开始审阅",
+        stage_command=review_command,
+        runtime_profile={"provider": "openai", "model": "test"},
+    )
+    snapshot = await repository.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+
+    assert replay["id"] == turn["id"]
+    assert turn["stageCommand"] == review_command
+    assert snapshot["turns"][0]["stageCommand"] == review_command
+
+    with pytest.raises(AppError) as captured:
+        await repository.begin_turn(
+            command_id="persist-stage-command",
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+            content="开始审阅",
+            stage_command={
+                **review_command,
+                "action": "revise",
+                "targetRole": "screenplayDraft",
+            },
+            runtime_profile={"provider": "openai", "model": "test"},
+        )
+
+    assert captured.value.status_code == 409
+
+
 async def test_legacy_chunks_that_leaked_model_json_are_discarded(
     temp_db: DatabaseConnection,
 ):
@@ -1546,6 +1748,7 @@ async def test_legacy_chunks_that_leaked_model_json_are_discarded(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
         content="生成候选稿",
+        stage_command=None,
         runtime_profile={"provider": "openai", "model": "test"},
     )
     await temp_db.execute(
@@ -1581,6 +1784,7 @@ async def test_restart_exposes_an_abandoned_turn_as_a_terminal_failure(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
         content="分析一下当前剧本",
+        stage_command=None,
         runtime_profile={"provider": "openai", "model": "test"},
     )
 
@@ -1609,6 +1813,7 @@ async def test_restart_finishes_a_durable_cancel_request(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
         content="停止这一轮",
+        stage_command=None,
         runtime_profile={"provider": "openai", "model": "test"},
     )
     operations = SqliteScreenplayOperationRepository(temp_db)
