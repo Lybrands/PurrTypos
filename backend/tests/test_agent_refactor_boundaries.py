@@ -471,6 +471,25 @@ def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
     )
 
 
+def test_screenplay_structured_call_does_not_own_core_recovery_policy():
+    path = BACKEND_DIR / "application" / "screenplay_structured_call.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "purra.recovery"
+        for alias in node.names
+    }
+
+    assert not imported_names.intersection({
+        "EMPTY_RESPONSE_RETRY_GUIDANCE",
+        "RecoveryCause",
+        "RecoveryLedger",
+        "RecoveryPolicy",
+    })
+
+
 def test_legacy_task_budgets_and_truncation_replay_stay_removed():
     forbidden = {
         "OutputBudgetPolicy",

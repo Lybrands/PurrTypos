@@ -20,15 +20,16 @@ from purra.contracts import (
     AgentMessage,
     MessageOrigin,
     MessageRole,
+    ModelStreamChunk,
     RunBinding,
     RunCreateParams,
     RunProvenance,
 )
 from purra.events import AgentEvent, CoreEventType
+from purra.errors import ModelGatewayError
 from purra.model_execution import (
     ManagedModelCall,
     ManagedModelExecutor,
-    ManagedModelStream,
 )
 from purra.run_controller import AgentRunController
 from purra.structured_output import parse_json_object
@@ -65,10 +66,85 @@ class StructuredModelResult:
     run_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class StreamedModelText:
-    content: str
-    projected_progress: bool = False
+class StructuredChunkProjection:
+    """Project diagnostics and selected public fields without owning output."""
+
+    def __init__(
+        self,
+        controller: AgentRunController,
+        *,
+        execution_progress_fields: Mapping[str, str] | None = None,
+        emit_execution_progress: Callable[[str], Awaitable[None]] | None = None,
+        emit_model_diagnostic: (
+            Callable[[Mapping[str, Any]], Awaitable[None]] | None
+        ) = None,
+    ) -> None:
+        self._controller = controller
+        self._execution_progress_fields = execution_progress_fields
+        self._emit_execution_progress = emit_execution_progress
+        self._emit_model_diagnostic = emit_model_diagnostic
+        self._progress_projector = JsonStringFieldProjector(
+            execution_progress_fields or {}
+        )
+        self._progress_buffer = ""
+        self._last_progress_flush = monotonic()
+        self.projected_progress = False
+
+    async def observe(self, chunk: ModelStreamChunk) -> None:
+        if chunk.reasoning_delta and self._emit_model_diagnostic is not None:
+            await self._emit_model_diagnostic({
+                "reasoningDelta": chunk.reasoning_delta,
+            })
+        if chunk.content_delta:
+            if self._emit_model_diagnostic is not None:
+                await self._emit_model_diagnostic({
+                    "modelContentDelta": chunk.content_delta,
+                })
+            if (
+                self._execution_progress_fields
+                and self._emit_execution_progress is not None
+            ):
+                await self._emit_progress(
+                    self._progress_projector.feed(chunk.content_delta)
+                )
+        if chunk.usage is not None:
+            await self._controller.record_event(
+                CoreEventType.CONTEXT_USAGE_RECORDED,
+                {
+                    "inputTokens": chunk.usage.input_tokens,
+                    "outputTokens": chunk.usage.output_tokens,
+                    "totalTokens": chunk.usage.total_tokens,
+                    "reasoningOutputTokens": chunk.usage.reasoning_output_tokens,
+                },
+            )
+
+    async def close(self) -> None:
+        await self._flush_progress()
+
+    async def _emit_progress(self, projected: str) -> None:
+        if not projected:
+            return
+        self.projected_progress = True
+        self._progress_buffer += projected
+        now = monotonic()
+        if (
+            "\n" in projected
+            or len(self._progress_buffer) >= VISIBLE_STREAM_CHUNK_CHARS
+            or now - self._last_progress_flush >= 0.04
+        ):
+            await self._flush_progress()
+
+    async def _flush_progress(self) -> None:
+        if (
+            not self._progress_buffer
+            or self._emit_execution_progress is None
+        ):
+            return
+        pending = self._progress_buffer
+        self._progress_buffer = ""
+        for fragment in visible_stream_chunks(pending):
+            await self._emit_execution_progress(fragment)
+        self._last_progress_flush = monotonic()
 
 
 class ScreenplayStructuredCallService:
@@ -177,25 +253,17 @@ class ScreenplayStructuredCallService:
                     content=json.dumps(user_payload, ensure_ascii=False),
                 ),
             )
-            previous = ""
             projected_execution = False
-            for attempt in range(2):
-                active = messages if attempt == 0 else (
-                    AgentMessage(
-                        role=MessageRole.SYSTEM,
-                        content=(
-                            f"{system_instruction}\n\n{repair_instruction}\n"
-                            "只修复下面候选的 JSON 语法和协议字段，不重新分析或扩写"
-                            "业务内容；只返回修复后的完整 JSON 对象。"
-                        ),
-                        origin=MessageOrigin.HOST_CONTEXT,
-                    ),
-                    AgentMessage(role=MessageRole.USER, content=previous),
-                )
+
+            async def call(
+                active_messages: Sequence[AgentMessage],
+                call_phase: str,
+            ) -> str:
+                nonlocal projected_execution
+
                 async def record_attempt(
                     parameters: Mapping[str, object],
                 ) -> None:
-                    call_phase = phase if attempt == 0 else f"{phase}_repair"
                     await controller.record_event(
                         CoreEventType.MODEL_CALL_RECORDED,
                         {
@@ -207,14 +275,7 @@ class ScreenplayStructuredCallService:
                         },
                     )
 
-                managed_stream = await model_executor.stream(
-                    active,
-                    managed_call,
-                    execution.signal,
-                    on_attempt=record_attempt,
-                )
-                streamed = await _stream_text(
-                    managed_stream,
+                projection = StructuredChunkProjection(
                     controller,
                     execution_progress_fields=(
                         execution_progress_fields
@@ -227,43 +288,69 @@ class ScreenplayStructuredCallService:
                     ),
                     emit_model_diagnostic=emit_chunk,
                 )
-                projected_execution = (
-                    projected_execution or streamed.projected_progress
-                )
-                previous = streamed.content
-                last_error: Exception | None = None
-                for candidate in (streamed.content,):
-                    if not candidate.strip():
-                        continue
-                    try:
-                        value = dict(parse_json_object(candidate))
-                        if validate is not None:
-                            value = validate(value)
-                    except (TypeError, ValueError, json.JSONDecodeError) as error:
-                        last_error = error
-                        continue
-                    reply = (
-                        str(value.get("reply") or "").strip()
-                        if phase == "screenplay_intent_planning"
-                        else ""
+                try:
+                    result = await model_executor.stream_text(
+                        active_messages,
+                        managed_call,
+                        execution.signal,
+                        on_attempt=record_attempt,
+                        on_chunk=projection.observe,
                     )
-                    if project_execution is not None and not projected_execution:
-                        for item in project_execution(value):
-                            progress = visible_execution_progress(item)
-                            if progress:
-                                await emit_public_text(
-                                    "commentaryDelta",
-                                    f"{progress}\n",
-                                )
-                    if reply:
-                        await emit_public_text("delta", reply)
-                    await controller.complete(reply)
-                    return StructuredModelResult(value, controller.run_id)
-                if attempt == 1:
-                    raise last_error or ValueError(
-                        "model output does not contain a complete JSON object"
+                    return result.content
+                finally:
+                    await projection.close()
+                    projected_execution = (
+                        projected_execution or projection.projected_progress
                     )
-            raise RuntimeError("structured model repair loop ended unexpectedly")
+
+            def parse(candidate: str) -> dict[str, Any]:
+                value = dict(parse_json_object(candidate))
+                return validate(value) if validate is not None else value
+
+            candidate = await call(messages, phase)
+            if not candidate.strip():
+                raise RuntimeError("Core returned an empty structured candidate")
+            try:
+                value = parse(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError) as first_error:
+                repaired = await call((
+                    AgentMessage(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            f"{system_instruction}\n\n{repair_instruction}\n"
+                            "只修复下面候选的 JSON 语法和协议字段，不重新分析或扩写"
+                            "业务内容；只返回修复后的完整 JSON 对象。"
+                        ),
+                        origin=MessageOrigin.HOST_CONTEXT,
+                    ),
+                    AgentMessage(role=MessageRole.USER, content=candidate),
+                ), f"{phase}_repair")
+                try:
+                    value = parse(repaired)
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise ModelGatewayError(
+                        str(error) or str(first_error),
+                        code="structured_output_invalid",
+                        retryable=False,
+                    ) from error
+
+            reply = (
+                str(value.get("reply") or "").strip()
+                if phase == "screenplay_intent_planning"
+                else ""
+            )
+            if project_execution is not None and not projected_execution:
+                for item in project_execution(value):
+                    progress = visible_execution_progress(item)
+                    if progress:
+                        await emit_public_text(
+                            "commentaryDelta",
+                            f"{progress}\n",
+                        )
+            if reply:
+                await emit_public_text("delta", reply)
+            await controller.complete(reply)
+            return StructuredModelResult(value, controller.run_id)
         except asyncio.CancelledError:
             snapshot = controller.snapshot
             if snapshot is not None and not snapshot.terminal:
@@ -280,92 +367,6 @@ class ScreenplayStructuredCallService:
             raise
         finally:
             await execution.close()
-
-async def _stream_text(
-    stream: ManagedModelStream,
-    controller: AgentRunController,
-    *,
-    execution_progress_fields: Mapping[str, str] | None = None,
-    emit_execution_progress: Callable[[str], Awaitable[None]] | None = None,
-    emit_model_diagnostic: (
-        Callable[[Mapping[str, Any]], Awaitable[None]] | None
-    ) = None,
-) -> StreamedModelText:
-    chunks = stream.chunks
-    parts: list[str] = []
-    progress_projector = JsonStringFieldProjector(
-        execution_progress_fields or {}
-    )
-    progress_buffer = ""
-    projected_progress = False
-    last_progress_flush = monotonic()
-
-    async def flush_progress() -> None:
-        nonlocal progress_buffer
-        nonlocal last_progress_flush
-        if not progress_buffer or emit_execution_progress is None:
-            return
-        pending = progress_buffer
-        progress_buffer = ""
-        for fragment in visible_stream_chunks(pending):
-            await emit_execution_progress(fragment)
-        last_progress_flush = monotonic()
-
-    async def emit_progress(projected: str) -> None:
-        nonlocal progress_buffer
-        nonlocal projected_progress
-        if not projected:
-            return
-        projected_progress = True
-        progress_buffer += projected
-        now = monotonic()
-        if (
-            "\n" in projected
-            or len(progress_buffer) >= VISIBLE_STREAM_CHUNK_CHARS
-            or now - last_progress_flush >= 0.04
-        ):
-            await flush_progress()
-
-    async def project_structured(delta: str) -> None:
-        if not execution_progress_fields or emit_execution_progress is None:
-            return
-        await emit_progress(progress_projector.feed(delta))
-
-    try:
-        async for chunk in chunks:
-            if chunk.reasoning_delta:
-                if emit_model_diagnostic is not None:
-                    await emit_model_diagnostic({
-                        "reasoningDelta": chunk.reasoning_delta,
-                    })
-            if chunk.content_delta:
-                parts.append(chunk.content_delta)
-                if emit_model_diagnostic is not None:
-                    await emit_model_diagnostic({
-                        "modelContentDelta": chunk.content_delta,
-                    })
-                await project_structured(chunk.content_delta)
-            if chunk.usage is not None:
-                await controller.record_event(
-                    CoreEventType.CONTEXT_USAGE_RECORDED,
-                    {
-                        "inputTokens": chunk.usage.input_tokens,
-                        "outputTokens": chunk.usage.output_tokens,
-                        "totalTokens": chunk.usage.total_tokens,
-                        "reasoningOutputTokens": (
-                            chunk.usage.reasoning_output_tokens
-                        ),
-                    },
-                )
-    finally:
-        await flush_progress()
-        close = getattr(chunks, "aclose", None)
-        if callable(close):
-            await close()
-    return StreamedModelText(
-        content="".join(parts),
-        projected_progress=projected_progress,
-    )
 
 
 def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
@@ -404,6 +405,6 @@ def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
 
 __all__ = [
     "ScreenplayStructuredCallService",
-    "StreamedModelText",
+    "StructuredChunkProjection",
     "StructuredModelResult",
 ]
