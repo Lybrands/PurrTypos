@@ -90,7 +90,6 @@ import { buildStreamOptions } from '../Workspace/AiPanel/hooks/streamOptions'
 import { getActiveTaskPlan } from '../Workspace/AiPanel/taskPlanSelection'
 import {
   buildDraftBatchActions,
-  draftEpisodeCountFromScope,
   draftScopeForEpisodeCount,
   MAX_SCREENPLAY_DRAFT_BATCH_EPISODES,
   type DraftBatchAction,
@@ -125,10 +124,10 @@ import {
 import RevisionLibraryModal from './RevisionLibraryModal'
 import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
 import {
-  reviewPrimaryAction,
   reviewRequiresRerun,
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel'
+import { stageAgentAction } from './stageAgentAction'
 import { structuredContentToMarkdown } from './revisionDocumentView'
 import {
   documentEpisodesFromRevision,
@@ -379,93 +378,6 @@ function previousDocumentVersion(
     .sort((left, right) => right.version - left.version)[0] ?? null
 }
 
-function stageAgentStarter(
-  project: ScreenplayProject,
-  documents: ScreenplayDocument[] = [],
-  draftScope: ScreenplayDraftScope = 'next_episode',
-  reviewState?: ScreenplayV2Workspace['workflow']['review'],
-): string {
-  if (project.active_stage === 'completed') {
-    return project.delivery_manifest
-      ? '这个剧本已经通过最终复审，权威版本链与内容摘要已固化为交付清单。你可以查看历史版本，或导出完整稿和交付清单。'
-      : '这个剧本已经通过审阅并完成。你可以直接查看版本或导出当前完整稿。'
-  }
-  if (project.active_stage === 'orientation' && project.source_kind === 'book') {
-    if (!project.source_book_id) {
-      return '来源作品已经移除，当前无法完成原作范围分析。请保留已有文档，或从书架中的有效作品新建改编项目。'
-    }
-    return '分析当前选定的原作范围，梳理主要人物、关键事件、核心冲突、可改编内容、连续性风险和仍需确认的问题；完成后生成可应用的正式原作范围分析提案。'
-  }
-  if (project.active_stage === 'brief' && project.source_kind === 'book') {
-    return '基于已经确认的原作分析，形成一份可执行的改编方案，明确剧本规模、叙事终点和主要改编取舍；完成后生成可应用的正式创作简报提案。'
-  }
-  if (project.active_stage === 'structure') {
-    return SERIES_FORMATS.has(project.format)
-      ? '基于已经确认的创作方案，设计完整的分集结构，并生成可应用的正式分集结构提案。'
-      : '基于已经确认的创作方案，设计完整的故事节拍，并生成可应用的正式节拍表提案。'
-  }
-  if (project.active_stage === 'scenes') {
-    return SERIES_FORMATS.has(project.format)
-      ? '把已经确认的分集结构拆成完整场景表，明确每场的目标、冲突和转折，并生成可应用的正式场景表提案。'
-      : '把已经确认的故事节拍拆成完整场景表，明确每场的目标、冲突和转折，并生成可应用的正式场景表提案。'
-  }
-  if (project.active_stage === 'draft') {
-    const suffix = '保持与当前已接受的场景表和正文版本连贯，并生成可应用的正文提案。'
-    if (draftScope === 'all_remaining') return `继续创作全部剩余正文，${suffix}`
-    const draftEpisodeCount = draftEpisodeCountFromScope(draftScope)
-    if (draftEpisodeCount === 1) {
-      return SERIES_FORMATS.has(project.format)
-        ? `继续创作下一集，${suffix}`
-        : `继续创作完整正文，${suffix}`
-    }
-    if (draftEpisodeCount != null) {
-      return `连续创作接下来 ${draftEpisodeCount} 集，${suffix}`
-    }
-    return SERIES_FORMATS.has(project.format)
-      ? `继续创作下一集，${suffix}`
-      : `继续创作完整正文，${suffix}`
-  }
-  if (project.active_stage === 'review') {
-    if (reviewRequiresRerun(reviewState ?? {})) {
-      return '重新审阅当前完整剧本。上一份报告不可用于定稿，不得沿用其中的意见；请基于当前完整正文重新检查连贯性、人物弧光、结构节奏、对白和剧本格式，并生成新的正式审阅报告。'
-    }
-    const acceptedDraft = [...documents].reverse().find(
-      (document) => document.kind === 'scene_draft'
-        && document.status === 'accepted',
-    )
-    const acceptedReview = [...documents].reverse().find(
-      (document) => document.kind === 'review'
-        && document.status === 'accepted',
-    )
-    if (
-      acceptedReview
-      && String(acceptedReview.content_json?.reviewedDraftId || '')
-        === String(acceptedDraft?.id || '')
-    ) {
-      const issueCount = reviewState?.phase === 'readyToRevise'
-        ? reviewState.counts.planned
-        : Number(acceptedReview.content_json?.issueCount || 0)
-      return `根据已经确认的审阅报告修订完整剧本，逐项解决其中 ${issueCount} 个问题，并生成可应用的完整修订稿。`
-    }
-    const previousReviewId = String(
-      acceptedDraft?.content_json?.reviewId || '',
-    )
-    const previousReview = documents.find(
-      (document) => document.kind === 'review'
-        && document.id === previousReviewId,
-    )
-    if (previousReviewId && previousReview) {
-      const issueCount = Number(previousReview.content_json?.issueCount || 0)
-      return `复审当前修订稿，逐项核验上一轮提出的 ${issueCount} 个问题是否真正解决，检查是否出现新的问题，并生成可应用的复审报告。`
-    }
-    return '审阅当前完整稿，重点检查连贯性、人物弧光、结构节奏、对白和剧本格式，并生成可应用的正式审阅报告。'
-  }
-  if (project.premise) {
-    return '基于当前项目资料完善创作方案，处理可以安全推断的创作取舍，并生成可应用的正式创作简报提案。'
-  }
-  return '根据当前项目设定确定原创剧本的核心方向，并生成可应用的正式创作简报提案；只有缺少无法安全推断的关键决定时再向我确认。'
-}
-
 function screenplayDraftBatchScope(
   project: ScreenplayProject,
   documents: ScreenplayDocument[],
@@ -500,55 +412,6 @@ function screenplayDraftBatchScope(
     pendingSceneCount: pendingSceneIds.length,
     pendingEpisodeCount,
   }
-}
-
-function stagePrimaryActionLabel(
-  project: ScreenplayProject,
-  documents: ScreenplayDocument[],
-  episodes: ScreenplayDraftEpisode[] = [],
-  documentEpisodes: ScreenplayDocumentEpisode[] = [],
-  reviewState?: ScreenplayV2Workspace['workflow']['review'],
-): string {
-  if (project.active_stage === 'completed') return '创作已完成'
-  if (project.active_stage === 'orientation') {
-    return project.source_kind === 'book' ? '开始分析' : '生成创作简报'
-  }
-  if (project.active_stage === 'brief') return '生成创作简报'
-  if (project.active_stage === 'structure') {
-    return SERIES_FORMATS.has(project.format) ? '设计分集结构' : '设计故事节拍'
-  }
-  if (project.active_stage === 'scenes') return '生成场景表'
-  if (project.active_stage === 'draft') {
-    const sceneList = [...documents].reverse().find(
-      (document) => document.kind === 'scene_list' && document.status === 'accepted',
-    )
-    const sceneCount = documentEpisodes
-      .filter((episode) => episode.document_id === sceneList?.id)
-      .reduce((count, episode) => count + episode.item_ids.length, 0)
-    const completedCount = episodes.reduce(
-      (count, episode) => count + episode.scene_ids.length,
-      0,
-    )
-    if (sceneCount > 0 && completedCount >= sceneCount) return '完成剧本正文'
-    return SERIES_FORMATS.has(project.format) ? '创作下一集' : '创作正文'
-  }
-  if (reviewState) return reviewPrimaryAction(reviewState).label
-  const acceptedDraft = [...documents].reverse().find(
-    (document) => document.kind === 'scene_draft' && document.status === 'accepted',
-  )
-  const acceptedReview = [...documents].reverse().find(
-    (document) => document.kind === 'review' && document.status === 'accepted',
-  )
-  if (
-    acceptedReview
-    && String(acceptedReview.content_json?.reviewedDraftId || '')
-      === String(acceptedDraft?.id || '')
-    && acceptedReview.content_json?.verdict !== 'ready'
-  ) {
-    return '开始修订'
-  }
-  if (acceptedDraft?.content_json?.reviewId) return '开始复审'
-  return '开始审阅'
 }
 
 interface ScreenplayProposalActionPanelProps {
@@ -1750,7 +1613,6 @@ export default function ScreenplayAgentPage({
   const loadAgentSession = React.useCallback(async (
     sessionId: number,
     project: ScreenplayProject,
-    documents: ScreenplayDocument[],
   ) => {
     setAgentSessionLoading(true)
     setAgentChunkHydrating(true)
@@ -1769,9 +1631,7 @@ export default function ScreenplayAgentPage({
       if (activeAgentSessionRef.current !== sessionId) return
       agentConversationStateRef.current = next
       setAgentConversationState(next)
-      setAgentPrompt(
-        next.turns.length > 0 ? '' : stageAgentStarter(project, documents),
-      )
+      setAgentPrompt('')
     } catch (error) {
       agentChunkReplayCaughtUpRef.current = true
       setAgentChunkHydrating(false)
@@ -1837,15 +1697,12 @@ export default function ScreenplayAgentPage({
         )
         setAgentSessions(sessions)
         if (targetSession) {
-          await loadAgentSession(targetSession.id, effectiveProject, documents || [])
+          await loadAgentSession(targetSession.id, effectiveProject)
         }
       } else {
         agentChunkReplayCaughtUpRef.current = true
         setAgentChunkHydrating(false)
         message.error(sessionResult.error || '初始化剧本 Agent 会话失败')
-      }
-      if (documents && !sessionResult.success) {
-        setAgentPrompt(stageAgentStarter(effectiveProject, documents))
       }
     } finally {
       setProjectLoading(false)
@@ -2090,14 +1947,13 @@ export default function ScreenplayAgentPage({
       || agentChunkHydrating
       || sessionId === agentSessionId
     ) return
-    void loadAgentSession(sessionId, openedProject, projectDocuments)
+    void loadAgentSession(sessionId, openedProject)
   }, [
     agentSessionId,
     agentChunkHydrating,
     agentSessionLoading,
     loadAgentSession,
     openedProject,
-    projectDocuments,
   ])
 
   const createAgentSession = React.useCallback(async () => {
@@ -2114,7 +1970,7 @@ export default function ScreenplayAgentPage({
         return
       }
       setAgentSessions((current) => [...current, result.data!])
-      await loadAgentSession(result.data.id, openedProject, projectDocuments)
+      await loadAgentSession(result.data.id, openedProject)
     } finally {
       setAgentSessionLoading(false)
     }
@@ -2126,7 +1982,6 @@ export default function ScreenplayAgentPage({
     loadAgentSession,
     message,
     openedProject,
-    projectDocuments,
   ])
 
   const closeAgentSession = React.useCallback(async (session: AiSession) => {
@@ -2143,7 +1998,7 @@ export default function ScreenplayAgentPage({
       if (session.id !== agentSessionId) return
       const nextSession = remaining[remaining.length - 1]
       if (nextSession) {
-        await loadAgentSession(nextSession.id, openedProject, projectDocuments)
+        await loadAgentSession(nextSession.id, openedProject)
         return
       }
       const created = await services.screenplay.createScreenplaySession({
@@ -2152,7 +2007,7 @@ export default function ScreenplayAgentPage({
       })
       if (created.success && created.data) {
         setAgentSessions([created.data])
-        await loadAgentSession(created.data.id, openedProject, projectDocuments)
+        await loadAgentSession(created.data.id, openedProject)
       }
     } finally {
       setAgentSessionLoading(false)
@@ -2165,7 +2020,6 @@ export default function ScreenplayAgentPage({
     loadAgentSession,
     message,
     openedProject,
-    projectDocuments,
   ])
 
   const saveAgentSessionTitle = React.useCallback(async () => {
@@ -2979,6 +2833,15 @@ export default function ScreenplayAgentPage({
     MAX_SCREENPLAY_DRAFT_BATCH_EPISODES,
     draftBatchScope?.pendingEpisodeCount ?? 0,
   )
+  const primaryStageAction = openedProject
+    ? stageAgentAction({
+        project: openedProject,
+        documents: projectDocuments,
+        draftEpisodes,
+        documentEpisodes,
+        reviewState,
+      })
+    : ''
   const handleStageStartAction = React.useCallback(() => {
     if (
       !openedProject
@@ -2997,28 +2860,23 @@ export default function ScreenplayAgentPage({
     ) {
       return
     }
-    const defaultDraftScope: ScreenplayDraftScope = 'next_episode'
-    runAgent(
-      stageAgentStarter(
-        openedProject,
-        projectDocuments,
-        defaultDraftScope,
-        reviewState,
-      ),
-    )
+    runAgent(primaryStageAction)
   }, [
     agentRunning,
     agentSubmitting,
     hasPendingAgentProposal,
     openedProject,
-    projectDocuments,
+    primaryStageAction,
     projectWorkspace,
     reviewMutationPending,
     reviewState?.hardChecks,
     reviewState?.phase,
     runAgent,
   ])
-  const startDraftRange = React.useCallback((scope: ScreenplayDraftScope) => {
+  const startDraftRange = React.useCallback((
+    scope: ScreenplayDraftScope,
+    actionLabel?: string,
+  ) => {
     if (
       !openedProject
       || !projectWorkspace
@@ -3029,24 +2887,26 @@ export default function ScreenplayAgentPage({
     ) {
       return
     }
-    runAgent(
-      stageAgentStarter(
-        openedProject,
-        projectDocuments,
-        scope,
-      ),
-    )
+    runAgent(actionLabel ?? stageAgentAction({
+      project: openedProject,
+      documents: projectDocuments,
+      draftEpisodes,
+      documentEpisodes,
+      draftScope: scope,
+    }))
   }, [
     agentRunning,
     agentSubmitting,
     hasPendingAgentProposal,
+    documentEpisodes,
+    draftEpisodes,
     openedProject,
     projectDocuments,
     projectWorkspace,
     runAgent,
   ])
   const handleDraftBatchAction = React.useCallback((action: DraftBatchAction) => {
-    startDraftRange(action.key)
+    startDraftRange(action.key, action.label)
   }, [startDraftRange])
   const editAgentMessage = React.useCallback((
     messageIndex: number,
@@ -3075,7 +2935,10 @@ export default function ScreenplayAgentPage({
       return
     }
     setDraftRangeModalOpen(false)
-    startDraftRange(draftScopeForEpisodeCount(episodeCount))
+    startDraftRange(
+      draftScopeForEpisodeCount(episodeCount),
+      `连续创作 ${episodeCount} 集`,
+    )
   }, [customDraftEpisodeCount, maxCustomDraftEpisodeCount, message, startDraftRange])
   const selectedPreviousDocument = selectedDocument
     ? previousDocumentVersion(selectedDocument, projectDocuments)
@@ -4007,13 +3870,7 @@ export default function ScreenplayAgentPage({
                                   ],
                                 }}
                               >
-                                {stagePrimaryActionLabel(
-                                  openedProject,
-                                  projectDocuments,
-                                  draftEpisodes,
-                                  documentEpisodes,
-                                  reviewState,
-                                )}
+                                {primaryStageAction}
                               </PurrDropdown.Button>
                             ) : (
                               <PurrButton
@@ -4023,13 +3880,7 @@ export default function ScreenplayAgentPage({
                                 disabled={stageStartActionDisabled}
                                 onClick={handleStageStartAction}
                               >
-                                {stagePrimaryActionLabel(
-                                  openedProject,
-                                  projectDocuments,
-                                  draftEpisodes,
-                                  documentEpisodes,
-                                  reviewState,
-                                )}
+                                {primaryStageAction}
                               </PurrButton>
                             )
                         )}
