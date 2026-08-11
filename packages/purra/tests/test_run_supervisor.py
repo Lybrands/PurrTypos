@@ -61,7 +61,13 @@ class _Journal:
             if event.sequence > after_sequence
         )[:limit]
 
-    def append(self, run_id: str, *, terminal: bool = False):
+    def append(
+        self,
+        run_id: str,
+        *,
+        terminal: bool = False,
+        visibility: OutputVisibility = OutputVisibility.PUBLIC,
+    ):
         sequence = len(self.events.setdefault(run_id, [])) + 1
         now = datetime.now(timezone.utc)
         event = AgentOutputEvent(
@@ -74,7 +80,7 @@ class _Journal:
             source=OutputSource.RUNTIME,
             kind=OutputEventKind.RUN_LIFECYCLE,
             channel=OutputChannel.LIFECYCLE,
-            visibility=OutputVisibility.PUBLIC,
+            visibility=visibility,
             payload={"terminal": terminal},
             occurred_at=now,
             emitted_at=now,
@@ -235,6 +241,28 @@ async def test_reconnect_reads_only_events_after_cursor():
     )]
 
     assert [event.sequence for event in replayed] == [2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_subscription_skips_private_events_without_stalling_cursor():
+    handle, execution = await _fixture()
+    first_subscription = handle.subscribe(after_sequence=0)
+    first = await anext(first_subscription)
+    await first_subscription.aclose()
+    private = execution.journal.append(
+        handle.run_id,
+        visibility=OutputVisibility.PRIVATE,
+    )
+    await execution.publisher.append(private)
+    execution.release.set()
+    await handle.wait()
+
+    replayed = [event async for event in handle.subscribe(
+        after_sequence=first.sequence
+    )]
+
+    assert private.sequence not in [event.sequence for event in replayed]
+    assert [event.sequence for event in replayed] == [3, 4, 5]
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from purra.output.contracts import (
     AgentOutputEventDraft,
     AgentOutputIntent,
     DomainEffectOutput,
+    FederatedOutputEvent,
     OutputChannel,
     OutputCommitMode,
     OutputEventKind,
