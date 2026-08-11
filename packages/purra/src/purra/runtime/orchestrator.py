@@ -75,6 +75,7 @@ from purra.model_invocation import (
 )
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
 from purra.output import AgentOutputIntent, OutputCommitMode
+from purra.output.contracts import ResponseTransactionMode
 from purra.operations import (
     AgentOperationController,
     OperationDisplay,
@@ -232,6 +233,7 @@ class AgentRuntime:
         response_constraints: ResponseConstraints = ResponseConstraints(),
         response_validators: Sequence[ResponseValidator] = (),
         response_judges: Sequence[ResponseJudge] = (),
+        response_transaction_mode: ResponseTransactionMode | None = None,
         execution_state: ExecutionState | None = None,
         run_id: RunId | None = None,
         context_budget: ContextBudget | None = None,
@@ -264,6 +266,30 @@ class AgentRuntime:
             return
         validators = tuple(response_validators)
         judges = tuple(response_judges)
+        transaction_mode = (
+            ResponseTransactionMode(response_transaction_mode)
+            if response_transaction_mode is not None
+            else (
+                ResponseTransactionMode.VALIDATED_RESULT
+                if (
+                    response_constraints.exact_top_level_item_count is not None
+                    or validators
+                    or judges
+                )
+                else ResponseTransactionMode.DIRECT_LIVE
+            )
+        )
+        if (
+            transaction_mode is ResponseTransactionMode.DIRECT_LIVE
+            and (
+                response_constraints.exact_top_level_item_count is not None
+                or validators
+                or judges
+            )
+        ):
+            raise ContractViolationError(
+                "direct-live response cannot require full-text validation"
+            )
         state = execution_state or ExecutionState()
         evidence_store = RunEvidenceStore()
         context_receipts = evidence_store.record_context_messages(messages)
@@ -472,9 +498,8 @@ class AgentRuntime:
                     require_tool
                     or declined_response_pending
                     or failed_tool_recovery_error_code is not None
-                    or response_constraints.exact_top_level_item_count is not None
-                    or validators
-                    or judges
+                    or transaction_mode
+                    is ResponseTransactionMode.VALIDATED_RESULT
                 )
                 projection = project_intermediate_tool_context(
                     messages,

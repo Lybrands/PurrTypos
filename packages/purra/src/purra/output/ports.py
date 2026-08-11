@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from purra.contracts import ModelFinishReason, ModelStreamChunk, RunId
+from purra.contracts import (
+    AgentRunResult,
+    ModelFinishReason,
+    ModelStreamChunk,
+    RunId,
+)
 from purra.output.contracts import (
     AgentOutputEvent,
     AgentOutputEventDraft,
     OutputStreamSpec,
+    PublicFactBundle,
     RunLifecycleOutputDraft,
 )
 
@@ -72,6 +78,24 @@ class AgentOutputPolicy(Protocol):
         spec: OutputStreamSpec,
         chunk: ModelStreamChunk,
     ) -> ModelStreamChunk | None: ...
+
+
+@runtime_checkable
+class CommittedResultFactsProvider(Protocol):
+    async def facts_for(
+        self,
+        run_id: RunId,
+        result: AgentRunResult,
+    ) -> PublicFactBundle: ...
+
+
+@runtime_checkable
+class ValidatedResultCommitter(Protocol):
+    async def commit_candidate(
+        self,
+        run_id: RunId,
+        candidate: str,
+    ) -> AgentRunResult: ...
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

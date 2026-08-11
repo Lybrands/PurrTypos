@@ -20,7 +20,7 @@ from purra.model_protocol import (
     resolve_invocation_output_limit,
 )
 from purra.normalization import optional_text, required_text
-from purra.output import AgentOutputIntent, OutputCommitMode
+from purra.output.contracts import AgentOutputIntent, OutputCommitMode
 
 
 @dataclass(frozen=True, slots=True)
