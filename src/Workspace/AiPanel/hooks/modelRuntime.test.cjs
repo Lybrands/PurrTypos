@@ -45,6 +45,7 @@ const {
 )
 const {
   buildAssistantTimeline,
+  getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
   getOperationGroupProgress,
@@ -343,6 +344,35 @@ test('an empty historical Assistant turn does not invent an execution panel', ()
       stepCount: 0,
     },
   )
+})
+
+test('execution panel keys stay turn-specific when separate sessions reuse an index', () => {
+  const firstSessionTurn = {
+    conversationId: 1201,
+    clientTurnId: 'turn-session-a',
+  }
+  const secondSessionTurn = {
+    conversationId: 1202,
+    clientTurnId: 'turn-session-b',
+  }
+
+  assert.notEqual(
+    getExecutionPanelLogKey(firstSessionTurn),
+    getExecutionPanelLogKey(secondSessionTurn),
+  )
+  assert.equal(
+    getExecutionPanelLogKey(firstSessionTurn),
+    'client-turn-turn-session-a-work-log',
+  )
+  assert.equal(
+    getExecutionPanelLogKey({ conversationId: 1201 }),
+    'conversation-1201-work-log',
+  )
+  assert.equal(
+    getExecutionPanelLogKey({ turnStartedAt: 42 }),
+    'live-turn-42-work-log',
+  )
+  assert.equal(getExecutionPanelLogKey({}), null)
 })
 
 test('execution-panel progress reports the active visible step frontier', () => {

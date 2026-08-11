@@ -87,6 +87,8 @@ export interface ToolCallSegment {
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** 当前页面新建回合的本地唯一标识；不写入持久化记录。 */
+  clientTurnId?: string;
   /** 用户消息的发送时间；历史记录来自数据库，实时消息在发送时写入。 */
   sentAt?: string;
   /** 已落库的 ai_conversations.id，仅 assistant 消息有值。 */
