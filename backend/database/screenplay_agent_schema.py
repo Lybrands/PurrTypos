@@ -114,6 +114,7 @@ async def init_screenplay_agent_schema(db) -> None:
         command_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
         user_content TEXT NOT NULL,
+        stage_command_json TEXT DEFAULT NULL,
         assistant_content TEXT NOT NULL DEFAULT '',
         intent_json TEXT NOT NULL DEFAULT '{}',
         runtime_profile_json TEXT NOT NULL DEFAULT '{}',
@@ -142,6 +143,7 @@ async def init_screenplay_agent_schema(db) -> None:
         for column in await db.fetch_all("PRAGMA table_info(screenplay_agent_turns)")
     }
     for name, definition in (
+        ("stage_command_json", "TEXT DEFAULT NULL"),
         ("operation_id", "TEXT DEFAULT NULL"),
         ("task_id", "TEXT DEFAULT NULL"),
         ("target_role", "TEXT DEFAULT NULL"),

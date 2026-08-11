@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field, SecretStr, model_validator
 
-from schemas.screenplay_v2 import ScreenplayV2Model
+from domains.screenplay_agent import ScreenplayStageCommand
+from schemas.screenplay_v2 import ScreenplayV2DeliverableRole, ScreenplayV2Model
 
 
 class ScreenplayAgentRuntimeRequest(ScreenplayV2Model):
@@ -27,10 +30,34 @@ class ScreenplayAgentRuntimeRequest(ScreenplayV2Model):
         return self
 
 
+class ScreenplayStageScopeRequest(ScreenplayV2Model):
+    kind: Literal[
+        "current_stage",
+        "next_episodes",
+        "episodes",
+        "all_remaining",
+    ] = "current_stage"
+    count: int | None = Field(default=None, ge=1, le=100)
+    episodeNumbers: list[int] = Field(default_factory=list, max_length=100)
+
+
+class ScreenplayStageCommandRequest(ScreenplayV2Model):
+    kind: Literal["stage_action"]
+    action: Literal["create", "revise", "review"]
+    targetRole: ScreenplayV2DeliverableRole
+    scope: ScreenplayStageScopeRequest
+
+    @model_validator(mode="after")
+    def validate_domain_contract(self):
+        ScreenplayStageCommand.from_mapping(self.model_dump(mode="json"))
+        return self
+
+
 class SubmitScreenplayAgentTurnRequest(ScreenplayV2Model):
     sessionId: int = Field(..., ge=1)
     content: str = Field(..., min_length=1, max_length=20_000)
     runtime: ScreenplayAgentRuntimeRequest
+    stageCommand: ScreenplayStageCommandRequest | None = None
 
     @model_validator(mode="after")
     def normalize(self):
@@ -48,5 +75,7 @@ class ResumeScreenplayOperationRequest(ScreenplayV2Model):
 __all__ = [
     "ScreenplayAgentRuntimeRequest",
     "ResumeScreenplayOperationRequest",
+    "ScreenplayStageCommandRequest",
+    "ScreenplayStageScopeRequest",
     "SubmitScreenplayAgentTurnRequest",
 ]
