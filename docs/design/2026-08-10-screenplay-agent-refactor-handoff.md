@@ -174,7 +174,7 @@ PurrA 不应出现 `screenplay`、Stage、Episode、Scene、Revision 等产品�
 
 问题：用户可以直接输入“创作后三集”等没有预置按钮的自然语言，不能依赖按钮文案穷举业务命令。
 
-结论：按钮和自然语言应进入同一意图/任务系统。宿主确定边界和授权，模型负责语义理解及工具选择；已经持久化并拆好的剧本 Task 不应再在 PurrA 内嵌套生成一份重复 Planner 计划。
+结论：按钮与自由文本进入同一 Planner；正式按钮携带宿主不可变的 action/target/scope 边界，模型补全 instruction，但不能把正式命令降级为 answer。已经持久化并拆好的剧本 Task 不应再在 PurrA 内嵌套生成一份重复 Planner 计划。
 
 ### 6.6 失败后整体重试超长模型调用
 

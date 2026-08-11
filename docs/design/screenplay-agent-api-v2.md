@@ -186,20 +186,17 @@ POST /conversation/turns/{turnId}/resume
 }
 ```
 
-正式任务在同一个请求中附带 Operation 命令，不允许前端先创建 Operation、再发送第二个 Chat 请求：
+正式阶段按钮在同一个请求中附带宿主类型化的 `stageCommand`。前端不创建 Operation，也不通过长篇固定文案代替命令边界：
 
 ```json
 {
   "sessionId": 12,
   "content": "按当前结构生成场景表",
-  "operation": {
-    "expectedProjectRevision": 7,
+  "stageCommand": {
+    "kind": "stage_action",
+    "action": "create",
     "targetRole": "sceneList",
-    "intent": {
-      "type": "generate",
-      "scope": {},
-      "instruction": "按当前结构生成场景表"
-    }
+    "scope": { "kind": "current_stage" }
   },
   "runtime": {
     "apiKey": "runtime-only-secret",
@@ -209,7 +206,7 @@ POST /conversation/turns/{turnId}/resume
 }
 ```
 
-提交先原子持久化 User Turn；正式请求在同一事务创建唯一 Operation 和命令回执。API key、原始 provider URL 均不落库，只保存脱敏 runtime profile。执行恢复从 Turn/Operation 读取业务输入，客户端只需通过 resume 重新提供 runtime 凭据。
+提交先原子持久化 User Turn 与可选 `stageCommand`。执行阶段由统一 Planner 补全 instruction；Planner 结果必须与命令的 action、targetRole 和 scope 精确相容，并通过 Resolver 的权威项目状态校验后，服务端才创建唯一 Operation。API key、原始 provider URL 均不落库，只保存脱敏 runtime profile。执行恢复从 Turn/Operation 读取业务输入，客户端只需通过 resume 重新提供 runtime 凭据。
 
 Snapshot 是界面事实源，cursor event 只负责通知 Snapshot 已失效。事件订阅断开只移除订阅者，不取消 Turn、Run 或 Operation；取消必须调用 cancel 命令。普通咨询必须保持 Operation、Candidate 与 Revision 数量为零。
 

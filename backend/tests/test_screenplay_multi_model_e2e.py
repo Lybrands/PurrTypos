@@ -6,6 +6,7 @@ are absent.  A Fake Gateway contract is useful, but never counts as this gate.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from purra.contracts import (
     ReasoningMode,
 )
 from purra.model_protocol import resolve_invocation_output_limit
+from purra.model_execution import ManagedModelCall, ManagedModelExecutor
 from tests.test_screenplay_agent_durable_service import _finalization_fixture
 
 
@@ -141,6 +143,41 @@ async def test_live_profile_completes_screenplay_candidate_revision_and_replay(
     assert completion.usage is not None
     assert completion.usage.input_tokens > 0
     assert completion.usage.output_tokens > 0
+
+    if case.id == "deepseek-v4-flash-reasoning-on":
+        structured_request = ModelRequest(
+            provider=case.provider,
+            model=case.model,
+            capability_snapshot=snapshot,
+            options={
+                "baseURL": case.base_url,
+                "model_profile": case.profile_id,
+                "thinking": {"type": case.thinking},
+                "response_format": {"type": "json_object"},
+            },
+        )
+        structured = await ManagedModelExecutor(
+            ProviderModelGateway(api_key)
+        ).stream_text(
+            (AgentMessage(
+                role=MessageRole.USER,
+                content=(
+                    '只输出一个 JSON 对象：{"status":"ok"}。'
+                    "不要输出 Markdown 或额外文字。"
+                ),
+            ),),
+            ManagedModelCall(
+                request=structured_request,
+                output_limit=resolve_invocation_output_limit(
+                    snapshot,
+                    explicit_user_override=512,
+                ),
+                reasoning_mode=case.reasoning_mode,
+            ),
+        )
+        parsed = json.loads(structured.content)
+        assert isinstance(parsed, dict)
+        assert 1 <= structured.attempts <= 3
 
     operation, turn_id, command, finalizer = await _finalization_fixture(
         real_screenplay_db
