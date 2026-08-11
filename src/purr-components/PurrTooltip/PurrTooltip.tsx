@@ -1,5 +1,6 @@
 import React from 'react'
 import { Tooltip as BaseTooltip } from '@base-ui/react/tooltip'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 type TooltipPlacement = 'top' | 'topLeft' | 'topRight' | 'bottom' | 'bottomLeft' | 'bottomRight' | 'left' | 'leftTop' | 'leftBottom' | 'right' | 'rightTop' | 'rightBottom'
@@ -36,10 +37,16 @@ export function PurrTooltip({ title, children, placement = 'top', mouseEnterDela
     <BaseTooltip.Root disabled={disabled} open={open} onOpenChange={(nextOpen) => onOpenChange?.(nextOpen)}>
       <BaseTooltip.Trigger render={children} delay={mouseEnterDelay == null ? undefined : mouseEnterDelay * 1000} />
       <BaseTooltip.Portal container={getPopupContainer?.()}>
-        <BaseTooltip.Positioner side={position.side} align={position.align} sideOffset={8}>
+        <BaseTooltip.Positioner
+          className="purr-tooltip__positioner"
+          style={getOverlayLayerStyle('PurrTooltip', zIndex)}
+          side={position.side}
+          align={position.align}
+          sideOffset={8}
+        >
           <BaseTooltip.Popup
             className={['purr-tooltip', className].filter(Boolean).join(' ')}
-            style={{ zIndex, ...styles?.root, ...styles?.container }}
+            style={{ ...styles?.root, ...styles?.container }}
           >
             <BaseTooltip.Arrow className="purr-tooltip__arrow" />
             {title}

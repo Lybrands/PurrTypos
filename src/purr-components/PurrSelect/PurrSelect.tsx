@@ -1,5 +1,6 @@
 import React from 'react'
 import { Select as BaseSelect } from '@base-ui/react/select'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 function SelectChevron() {
@@ -55,6 +56,7 @@ export interface PurrSelectProps<T extends string | number = string | number> {
   suffixIcon?: React.ReactNode
   variant?: 'outlined' | 'borderless'
   optionRender?: (option: { value: T; label: React.ReactNode; data: PurrSelectOption<T> }) => React.ReactNode
+  zIndex?: number
 }
 
 function TagsSelect<T extends string | number>({
@@ -144,6 +146,7 @@ export function PurrSelect<T extends string | number = string | number>(props: P
     suffixIcon,
     variant = 'outlined',
     optionRender,
+    zIndex,
   } = props
 
   if (mode === 'tags') return <TagsSelect {...props} />
@@ -217,6 +220,7 @@ export function PurrSelect<T extends string | number = string | number>(props: P
       <BaseSelect.Portal>
         <BaseSelect.Positioner
           className="purr-select__positioner"
+          style={getOverlayLayerStyle('PurrSelect', zIndex)}
           side="bottom"
           align="start"
           sideOffset={4}

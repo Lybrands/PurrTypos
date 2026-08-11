@@ -2,6 +2,7 @@ import React from 'react'
 import { ContextMenu } from '@base-ui/react/context-menu'
 import { Menu } from '@base-ui/react/menu'
 import { PurrButton, type PurrButtonProps } from '../PurrButton'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 type DropdownPlacement = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight'
@@ -29,6 +30,7 @@ export interface PurrDropdownProps {
   placement?: DropdownPlacement
   disabled?: boolean
   trigger?: Array<'click' | 'hover' | 'contextMenu'>
+  zIndex?: number
 }
 
 function DropdownMenuItems({
@@ -58,9 +60,10 @@ function DropdownMenuItems({
 }
 
 /** 基于 Base UI Menu 的项目内下拉操作菜单，同时支持右键上下文菜单。 */
-function DropdownBase({ children, menu, placement = 'bottomLeft', disabled, trigger }: PurrDropdownProps) {
+function DropdownBase({ children, menu, placement = 'bottomLeft', disabled, trigger, zIndex }: PurrDropdownProps) {
   const position = placementMap[placement]
   const items = menu.items ?? []
+  const layerStyle = getOverlayLayerStyle('PurrDropdown', zIndex)
 
   if (trigger?.includes('contextMenu')) {
     return (
@@ -69,7 +72,7 @@ function DropdownBase({ children, menu, placement = 'bottomLeft', disabled, trig
           {children}
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
-          <ContextMenu.Positioner>
+          <ContextMenu.Positioner className="purr-dropdown__positioner" style={layerStyle}>
             <ContextMenu.Popup className="purr-dropdown">
               <DropdownMenuItems
                 items={items}
@@ -89,7 +92,13 @@ function DropdownBase({ children, menu, placement = 'bottomLeft', disabled, trig
         {children}
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Positioner side={position.side} align={position.align} sideOffset={6}>
+        <Menu.Positioner
+          className="purr-dropdown__positioner"
+          style={layerStyle}
+          side={position.side}
+          align={position.align}
+          sideOffset={6}
+        >
           <Menu.Popup className="purr-dropdown">
             <DropdownMenuItems items={items} onClick={menu.onClick} Item={Menu.Item} />
           </Menu.Popup>
@@ -105,6 +114,7 @@ interface DropdownButtonProps extends Omit<PurrButtonProps, 'icon'> {
   trigger?: PurrDropdownProps['trigger']
   placement?: DropdownPlacement
   dropdownAriaLabel?: string
+  zIndex?: number
 }
 
 function DropdownButton({
@@ -112,6 +122,7 @@ function DropdownButton({
   icon,
   trigger,
   placement,
+  zIndex,
   children,
   className,
   dropdownAriaLabel = '更多操作',
@@ -121,7 +132,7 @@ function DropdownButton({
   return (
     <span className={['purr-dropdown-button', className].filter(Boolean).join(' ')}>
       <PurrButton {...buttonProps} onClick={onClick}>{children}</PurrButton>
-      <DropdownBase menu={menu} trigger={trigger} placement={placement}>
+      <DropdownBase menu={menu} trigger={trigger} placement={placement} zIndex={zIndex}>
         {/* The disclosure half only opens the menu. Never forward the
             primary action's onClick to it. */}
         <PurrButton {...buttonProps} icon={icon} aria-label={dropdownAriaLabel} />

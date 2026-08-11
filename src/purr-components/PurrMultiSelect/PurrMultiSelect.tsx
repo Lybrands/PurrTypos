@@ -3,6 +3,7 @@ import { Select as BaseSelect } from '@base-ui/react/select'
 import type { PurrSelectOption } from '../PurrSelect'
 import { PurrTooltip } from '../PurrTooltip'
 import { ChevronDownIcon, SearchIcon } from '../icons'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 export interface PurrMultiSelectProps<T extends string | number> {
@@ -23,6 +24,7 @@ export interface PurrMultiSelectProps<T extends string | number> {
     selectedOptions: PurrSelectOption<T>[],
   ) => React.ReactNode
   optionRender?: (option: PurrSelectOption<T>) => React.ReactNode
+  zIndex?: number
 }
 
 /** 基础多选控件，支持在有限选项中搜索、筛选和批量关联。 */
@@ -41,6 +43,7 @@ export function PurrMultiSelect<T extends string | number>({
   maxVisibleValues = 1,
   renderValue,
   optionRender,
+  zIndex,
 }: PurrMultiSelectProps<T>) {
   const [search, setSearch] = React.useState('')
   const normalizedSearch = search.trim().toLocaleLowerCase()
@@ -129,7 +132,13 @@ export function PurrMultiSelect<T extends string | number>({
         <BaseSelect.Icon className="purr-select__icon"><ChevronDownIcon /></BaseSelect.Icon>
       </BaseSelect.Trigger>
       <BaseSelect.Portal>
-        <BaseSelect.Positioner side="bottom" align="start" sideOffset={4}>
+        <BaseSelect.Positioner
+          className="purr-select__positioner"
+          style={getOverlayLayerStyle('PurrMultiSelect', zIndex)}
+          side="bottom"
+          align="start"
+          sideOffset={4}
+        >
           <BaseSelect.Popup className={[
             'purr-select__popup',
             searchable && 'purr-select__popup--searchable',
