@@ -56,6 +56,8 @@ class OutputEventKind(StrEnum):
     STREAM_OPENED = "stream.opened"
     PROVIDER_CONTENT_DELTA = "provider.content_delta"
     PROVIDER_REASONING_DELTA = "provider.reasoning_delta"
+    PROVIDER_TOOL_CALL_DELTA = "provider.tool_call_delta"
+    PROVIDER_USAGE = "provider.usage"
     STREAM_COMMITTED = "stream.committed"
     STREAM_ABORTED = "stream.aborted"
     OPERATION_STARTED = "operation.started"
@@ -280,12 +282,20 @@ class RunLifecycleOutputDraft:
 @dataclass(frozen=True, slots=True)
 class ToolOutputEvent:
     operation_id: str
+    run_id: RunId
+    invocation_id: str | None
     tool_call_id: str
     tool_name: str
     status: str
     occurred_at: datetime
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", required_text(self.run_id, "run id"))
+        object.__setattr__(
+            self,
+            "invocation_id",
+            optional_text(self.invocation_id),
+        )
         for attribute, label in (
             ("operation_id", "operation id"),
             ("tool_call_id", "tool call id"),
@@ -302,10 +312,18 @@ class ToolOutputEvent:
 
 @dataclass(frozen=True, slots=True)
 class DomainEffectOutput:
+    effect_id: str
+    run_id: RunId
     effect: DomainEffect
     occurred_at: datetime
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "effect_id",
+            required_text(self.effect_id, "effect id"),
+        )
+        object.__setattr__(self, "run_id", required_text(self.run_id, "run id"))
         if not isinstance(self.effect, DomainEffect):
             raise TypeError("domain effect output requires a DomainEffect")
         _require_aware(self.occurred_at, "occurred_at")

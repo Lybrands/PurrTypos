@@ -234,11 +234,6 @@ def _screenplay_chunk(
     # Candidate payload and the model's short terminal acknowledgement are not
     # conversation content. Commentary, reasoning diagnostics and tool events
     # remain canonical PurrA chunks.
-    if event.type in {
-        CoreEventType.ASSISTANT_FINAL_DELTA,
-        CoreEventType.MODEL_CONTENT_DELTA,
-    }:
-        return None
     chunk = core_event_to_sse_chunk(event)
     if not chunk:
         return None

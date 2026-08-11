@@ -298,6 +298,8 @@ class SqliteAgentOutputRepository:
             projected = await self._domain_projector.project(
                 draft.run_id,
                 DomainEffectOutput(
+                    effect_id=draft.source_event_key,
+                    run_id=draft.run_id,
                     effect=DomainEffect(
                         type=effect_type,
                         payload=thaw_json_mapping(effect_payload),

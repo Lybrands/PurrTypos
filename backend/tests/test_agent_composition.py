@@ -753,7 +753,7 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
     }
 
 
-def test_sse_mapping_keeps_public_output_separate_from_raw_model_channels():
+def test_legacy_sse_mapping_cannot_create_public_output():
     def mapped(event_type: CoreEventType, delta: str):
         return core_update_to_sse_chunk(
             AgentEvent(
@@ -765,21 +765,21 @@ def test_sse_mapping_keeps_public_output_separate_from_raw_model_channels():
         )
 
     assert mapped(
-        CoreEventType.ASSISTANT_COMMENTARY_DELTA,
+        "assistant.commentary_delta",
         "正在核对人物关系。",
-    ) == {"commentaryDelta": "正在核对人物关系。"}
+    ) is None
     assert mapped(
-        CoreEventType.ASSISTANT_FINAL_DELTA,
+        "assistant.final_delta",
         "核对完成。",
-    ) == {"delta": "核对完成。"}
+    ) is None
     assert mapped(
-        CoreEventType.MODEL_REASONING_DELTA,
+        "model.reasoning_delta",
         "private chain",
-    ) == {"reasoningDelta": "private chain"}
+    ) is None
     assert mapped(
-        CoreEventType.MODEL_CONTENT_DELTA,
+        "model.content_delta",
         '{"private":"payload"}',
-    ) == {"modelContentDelta": '{"private":"payload"}'}
+    ) is None
 
 
 @pytest.mark.asyncio
