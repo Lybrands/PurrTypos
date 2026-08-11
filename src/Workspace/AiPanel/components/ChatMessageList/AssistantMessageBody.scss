@@ -13,12 +13,8 @@
 .work-log:has(+ .bubble-processing-standby) {
   margin-bottom: 0;
 
-  .work-log__body {
-    padding-bottom: 0;
-
-    > :last-child {
-      margin-bottom: 0;
-    }
+  > :last-child {
+    margin-bottom: 0;
   }
 }
 
