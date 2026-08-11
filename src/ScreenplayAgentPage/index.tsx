@@ -77,6 +77,7 @@ import type {
   ScreenplayConversationRuntimeInput,
   ScreenplayConversationTurn,
   ScreenplayOperationProjection,
+  ScreenplayStageCommand,
   ScreenplayV2ReviewFindingStatus,
   ScreenplayV2Workspace,
 } from '../types'
@@ -171,6 +172,7 @@ interface ScreenplayQueuedSubmission {
   sessionId: number
   content: string
   runtime: ScreenplayConversationRuntimeInput
+  stageCommand?: ScreenplayStageCommand
 }
 
 const FORMAT_OPTIONS: ScreenplayFormat[] = ['短片', '电影', '单集剧', '连续剧', '竖屏短剧']
@@ -2130,6 +2132,7 @@ export default function ScreenplayAgentPage({
     promptOverride?: string,
     editMessageIndex?: number,
     runtimeOverride?: ScreenplayConversationRuntimeInput,
+    stageCommand?: ScreenplayStageCommand,
   ) => {
     if (!openedProject) return
     if (openedProject.status === 'archived') {
@@ -2168,6 +2171,7 @@ export default function ScreenplayAgentPage({
         sessionId: agentSessionId,
         content: prompt,
         runtime,
+        ...(stageCommand ? { stageCommand } : {}),
       }])
       if (consumesComposerPrompt) setAgentPrompt('')
       message.info('已加入发送队列')
@@ -2191,6 +2195,7 @@ export default function ScreenplayAgentPage({
         sessionId: agentSessionId,
         content: prompt,
         runtime,
+        ...(stageCommand ? { stageCommand } : {}),
       })
       if (activeAgentSessionRef.current !== agentSessionId) return
       const next = await conversationClient.load(openedProject.id, agentSessionId)
@@ -2248,7 +2253,12 @@ export default function ScreenplayAgentPage({
     setAgentQueuedSubmissions((current) => current.filter(
       (submission) => submission.id !== queued.id,
     ))
-    void runAgent(queued.content, undefined, queued.runtime).finally(() => {
+    void runAgent(
+      queued.content,
+      undefined,
+      queued.runtime,
+      queued.stageCommand,
+    ).finally(() => {
       setAgentQueueDraining(false)
     })
   }, [
@@ -2840,7 +2850,7 @@ export default function ScreenplayAgentPage({
         documentEpisodes,
         reviewState,
       })
-    : ''
+    : { label: '' }
   const handleStageStartAction = React.useCallback(() => {
     if (
       !openedProject
@@ -2858,7 +2868,12 @@ export default function ScreenplayAgentPage({
     ) {
       return
     }
-    runAgent(primaryStageAction)
+    runAgent(
+      primaryStageAction.label,
+      undefined,
+      undefined,
+      primaryStageAction.stageCommand,
+    )
   }, [
     agentRunning,
     agentSubmitting,
@@ -2873,7 +2888,6 @@ export default function ScreenplayAgentPage({
   ])
   const startDraftRange = React.useCallback((
     scope: ScreenplayDraftScope,
-    actionLabel?: string,
   ) => {
     if (
       !openedProject
@@ -2885,13 +2899,19 @@ export default function ScreenplayAgentPage({
     ) {
       return
     }
-    runAgent(actionLabel ?? stageAgentAction({
+    const stageAction = stageAgentAction({
       project: openedProject,
       documents: projectDocuments,
       draftEpisodes,
       documentEpisodes,
       draftScope: scope,
-    }))
+    })
+    runAgent(
+      stageAction.label,
+      undefined,
+      undefined,
+      stageAction.stageCommand,
+    )
   }, [
     agentRunning,
     agentSubmitting,
@@ -2904,7 +2924,7 @@ export default function ScreenplayAgentPage({
     runAgent,
   ])
   const handleDraftBatchAction = React.useCallback((action: DraftBatchAction) => {
-    startDraftRange(action.key, action.label)
+    startDraftRange(action.key)
   }, [startDraftRange])
   const editAgentMessage = React.useCallback((
     messageIndex: number,
@@ -2933,10 +2953,7 @@ export default function ScreenplayAgentPage({
       return
     }
     setDraftRangeModalOpen(false)
-    startDraftRange(
-      draftScopeForEpisodeCount(episodeCount),
-      `连续创作 ${episodeCount} 集`,
-    )
+    startDraftRange(draftScopeForEpisodeCount(episodeCount))
   }, [customDraftEpisodeCount, maxCustomDraftEpisodeCount, message, startDraftRange])
   const selectedPreviousDocument = selectedDocument
     ? previousDocumentVersion(selectedDocument, projectDocuments)
@@ -3868,7 +3885,7 @@ export default function ScreenplayAgentPage({
                                   ],
                                 }}
                               >
-                                {primaryStageAction}
+                                {primaryStageAction.label}
                               </PurrDropdown.Button>
                             ) : (
                               <PurrButton
@@ -3878,7 +3895,7 @@ export default function ScreenplayAgentPage({
                                 disabled={stageStartActionDisabled}
                                 onClick={handleStageStartAction}
                               >
-                                {primaryStageAction}
+                                {primaryStageAction.label}
                               </PurrButton>
                             )
                         )}
