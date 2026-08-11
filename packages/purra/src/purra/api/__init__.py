@@ -6,5 +6,11 @@ implementation modules are not application entry points.
 """
 
 from purra.engine import AgentCore, AgentCoreRunOptions, CoreRunUpdate
+from purra.execution import AgentRunHandle
 
-__all__ = ["AgentCore", "AgentCoreRunOptions", "CoreRunUpdate"]
+__all__ = [
+    "AgentCore",
+    "AgentCoreRunOptions",
+    "AgentRunHandle",
+    "CoreRunUpdate",
+]

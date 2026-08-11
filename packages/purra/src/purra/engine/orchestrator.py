@@ -93,6 +93,7 @@ from purra.engine.durable_execution import (
     validate_task_admission_coverage as _validate_task_admission_coverage,
 )
 from purra.engine.options import AgentCoreRunOptions
+from purra.execution import AgentRunHandle, AgentRunSupervisor
 from purra.engine.planning_validation import (
     effective_registrations as _effective_registrations,
     validate_plan_authority as _validate_plan_authority,
@@ -124,6 +125,7 @@ from purra.ports import (
     ContextProvider,
     ConversationCompactor,
     DynamicTaskPlanner,
+    ExecutionLeaseStore,
     ExecutionStateFactory,
     PlanningPolicy,
     ResponseJudge,
@@ -138,6 +140,8 @@ from purra.ports import (
     ToolRegistration,
     ModelGateway,
 )
+from purra.output.contracts import AgentOutputEvent
+from purra.output.ports import AgentOutputPublisher, AgentOutputRepository
 from purra.run_controller import AgentRunController
 from purra.run_state import RunStateMachine
 from purra.runtime import AgentRuntime
@@ -161,14 +165,15 @@ from purra.timing import duration_ms as _duration_ms
 from purra.operations import AgentOperationController, OperationScope
 
 
-CoreRunUpdate = AgentEvent | AgentRunResult
+CoreRunUpdate = AgentEvent | AgentOutputEvent | AgentRunResult
 
 
 class AgentCore:
     """Compose planning, context, model/tool runtime and run lifecycle.
 
-    The async iterator is the only public output channel. Applications can map
-    its typed events to any host transport.
+    ``submit`` returns the stable server-owned execution handle. ``run`` is a
+    compatibility iterator that delegates to that handle once canonical output
+    infrastructure is configured.
     Concrete domain tools enter only as registrations in ``tool_catalog``.
     """
 
@@ -193,6 +198,11 @@ class AgentCore:
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
         tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(),
         operation_controller: AgentOperationController | None = None,
+        output_repository: AgentOutputRepository | None = None,
+        output_publisher: AgentOutputPublisher | None = None,
+        execution_lease_store: ExecutionLeaseStore | None = None,
+        execution_owner_id: str | None = None,
+        execution_lease_duration_ms: int | None = None,
     ) -> None:
         self._model_gateway = model_gateway
         self._repository = run_repository
@@ -244,6 +254,29 @@ class AgentCore:
             tool_idempotency_gateway,
             operation_controller,
         )
+        if (output_repository is None) != (output_publisher is None):
+            raise ValueError(
+                "canonical output repository and publisher must be configured together"
+            )
+        self._run_supervisor = None
+        if output_repository is not None and output_publisher is not None:
+            owner_id = (
+                execution_owner_id
+                or getattr(run_repository, "owner_id", None)
+            )
+            lease_duration_ms = (
+                execution_lease_duration_ms
+                or getattr(run_repository, "lease_duration_ms", None)
+                or 30_000
+            )
+            self._run_supervisor = AgentRunSupervisor(
+                output_repository=output_repository,
+                output_publisher=output_publisher,
+                execution_factory=self._supervised_execution,
+                lease_store=execution_lease_store,
+                owner_id=owner_id,
+                lease_duration_ms=lease_duration_ms,
+            )
 
     async def resolve_approval(
         self,
@@ -260,7 +293,60 @@ class AgentCore:
     async def cancel_pending_approvals(self, run_id: RunId) -> int:
         return await self._approval_gateway.cancel_pending(run_id)
 
+    async def submit(
+        self,
+        request: AgentRunRequest,
+        *,
+        options: AgentCoreRunOptions | None = None,
+    ) -> AgentRunHandle:
+        if self._run_supervisor is None:
+            raise ContractViolationError(
+                "AgentCore.submit requires canonical output infrastructure"
+            )
+        return await self._run_supervisor.submit(
+            request,
+            options=options or AgentCoreRunOptions(),
+        )
+
     async def run(
+        self,
+        request: AgentRunRequest,
+        *,
+        options: AgentCoreRunOptions | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> AsyncIterator[CoreRunUpdate]:
+        if self._run_supervisor is None:
+            legacy_stream = self._execute_run(
+                request,
+                options=options,
+                signal=signal,
+            )
+            try:
+                async for update in legacy_stream:
+                    yield update
+            finally:
+                await legacy_stream.aclose()
+            return
+        handle = await self.submit(request, options=options)
+        async for event in handle.subscribe(after_sequence=0):
+            yield event
+        yield await handle.wait()
+
+    def _supervised_execution(
+        self,
+        request: AgentRunRequest,
+        options: object | None,
+        signal: asyncio.Event,
+    ) -> AsyncIterator[AgentEvent | AgentRunResult]:
+        if options is not None and not isinstance(options, AgentCoreRunOptions):
+            raise TypeError("supervised execution requires AgentCoreRunOptions")
+        return self._execute_run(
+            request,
+            options=options,
+            signal=signal,
+        )
+
+    async def _execute_run(
         self,
         request: AgentRunRequest,
         *,
@@ -1542,10 +1628,11 @@ class AgentCore:
                     await self._approval_gateway.cancel_pending(run_id)
             snapshot = controller.snapshot
             if snapshot is not None and not snapshot.terminal:
-                # Closing the public iterator is itself a disconnect signal.
-                # Ordinary commit errors are intentionally not swallowed:
-                # aclose()/the consuming task must observe persistence failure.
-                await controller.cancel("consumer_disconnected")
+                # This private execution iterator is owned by Supervisor. If
+                # it is stopped before a terminal result, the execution owner
+                # itself is shutting down; subscriber disposal never reaches
+                # this path.
+                await controller.cancel("execution_owner_stopped")
 
     async def _publish_runtime_event(
         self,
