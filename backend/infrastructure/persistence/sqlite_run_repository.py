@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Protocol, Sequence
 from uuid import uuid4
-from typing import Sequence
 
 from purra.contracts import (
     RunCreateParams,
@@ -23,7 +24,6 @@ from purra.ports import (
     RunBeginResult,
     RunCommit,
     DelegationRepository,
-    DomainEventProjector,
     validate_run_commit_lifecycle,
 )
 from infrastructure.persistence import run_store
@@ -36,6 +36,12 @@ from infrastructure.persistence.run_execution_store import now_ms
 DEFAULT_RUN_LEASE_DURATION_MS = 30_000
 
 
+class RunEventSideEffectProjector(Protocol):
+    """Temporary legacy projector removed with the old Run event path."""
+
+    async def project(self, run_id: RunId, event: AgentEvent) -> None: ...
+
+
 class SqliteRunRepository:
     def __init__(
         self,
@@ -44,7 +50,7 @@ class SqliteRunRepository:
         owner_id: str | None = None,
         lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
         delegation_repository: DelegationRepository | None = None,
-        event_projector: DomainEventProjector | None = None,
+        event_projector: RunEventSideEffectProjector | None = None,
     ):
         self._db = db
         self._write_lock = asyncio.Lock()
@@ -91,6 +97,24 @@ class SqliteRunRepository:
         run_id: RunId,
         commit: RunCommit,
     ) -> tuple[AgentEvent, ...]:
+        normalized_run_id = self._validate_commit(run_id, commit)
+
+        async with self.write_transaction():
+            await self.apply_commit_in_ambient_transaction(
+                normalized_run_id,
+                commit,
+            )
+            persisted_events = []
+            for event in commit.events:
+                persisted_events.append(
+                    await self._append_event_unchecked(
+                        normalized_run_id,
+                        event,
+                    )
+                )
+        return tuple(persisted_events)
+
+    def _validate_commit(self, run_id: RunId, commit: RunCommit) -> str:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             raise ContractViolationError("run commit requires a run_id")
@@ -103,52 +127,54 @@ class SqliteRunRepository:
             validate_run_commit_lifecycle(commit)
         except ValueError as error:
             raise ContractViolationError(str(error)) from error
+        return normalized_run_id
 
+    @asynccontextmanager
+    async def write_transaction(self) -> AsyncIterator[None]:
+        """Serialize a Run mutation with every persistence side effect."""
         async with self._write_lock:
             async with self._db.transaction(cancellation_linearizable=True):
-                current = await self._db.fetch_one(
-                    "SELECT status, execution_owner_id, lease_expires_at_ms "
-                    "FROM ai_agent_runs WHERE id = ?",
-                    [normalized_run_id],
-                )
-                if current is None:
-                    raise ContractViolationError(
-                        f"run {normalized_run_id!r} does not exist"
-                    )
-                if current["status"] != RunStatus.RUNNING.value:
-                    raise ContractViolationError(
-                        "terminal run cannot be mutated"
-                    )
-                if current.get("execution_owner_id") != self._owner_id:
-                    raise ContractViolationError(
-                        "run execution lease is owned by another executor"
-                    )
-                if int(current.get("lease_expires_at_ms") or 0) <= now_ms():
-                    raise ContractViolationError("run execution lease has expired")
+                yield
 
-                if commit.replace_steps is not None:
-                    await self.replace_steps(
-                        normalized_run_id,
-                        commit.replace_steps,
-                    )
-                for update in commit.step_updates:
-                    await self.update_step(normalized_run_id, update)
-                if commit.terminal_status is not None:
-                    await self.transition(
-                        normalized_run_id,
-                        commit.terminal_status,
-                        final_response=commit.final_response,
-                        error=commit.error,
-                    )
-                persisted_events = []
-                for event in commit.events:
-                    persisted_events.append(
-                        await self._append_event_unchecked(
-                            normalized_run_id,
-                            event,
-                        )
-                    )
-        return tuple(persisted_events)
+    async def apply_commit_in_ambient_transaction(
+        self,
+        run_id: RunId,
+        commit: RunCommit,
+    ) -> None:
+        """Apply Run state without writing the legacy event envelope."""
+        normalized_run_id = self._validate_commit(run_id, commit)
+        if not self._db.current_task_owns_transaction():
+            raise RuntimeError("run commit requires an ambient transaction")
+
+        current = await self._db.fetch_one(
+            "SELECT status, execution_owner_id, lease_expires_at_ms "
+            "FROM ai_agent_runs WHERE id = ?",
+            [normalized_run_id],
+        )
+        if current is None:
+            raise ContractViolationError(
+                f"run {normalized_run_id!r} does not exist"
+            )
+        if current["status"] != RunStatus.RUNNING.value:
+            raise ContractViolationError("terminal run cannot be mutated")
+        if current.get("execution_owner_id") != self._owner_id:
+            raise ContractViolationError(
+                "run execution lease is owned by another executor"
+            )
+        if int(current.get("lease_expires_at_ms") or 0) <= now_ms():
+            raise ContractViolationError("run execution lease has expired")
+
+        if commit.replace_steps is not None:
+            await self.replace_steps(normalized_run_id, commit.replace_steps)
+        for update in commit.step_updates:
+            await self.update_step(normalized_run_id, update)
+        if commit.terminal_status is not None:
+            await self.transition(
+                normalized_run_id,
+                commit.terminal_status,
+                final_response=commit.final_response,
+                error=commit.error,
+            )
 
     async def create(self, params: RunCreateParams) -> RunId:
         created_at = now_ms()
@@ -265,11 +291,9 @@ class SqliteRunRepository:
         if self._event_projector is not None:
             projected_event = await self._event_projector.project(run_id, event)
             if projected_event is not None:
-                if projected_event.run_id != run_id:
-                    raise ContractViolationError(
-                        "projected event run_id does not match repository run_id"
-                    )
-                persisted_event = projected_event
+                raise ContractViolationError(
+                    "domain event projector must not replace event envelope"
+                )
         await run_store.append_event(
             self._db,
             run_id,
