@@ -1,5 +1,6 @@
 import React from 'react'
 import { Popover as BasePopover } from '@base-ui/react/popover'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 type PopoverPlacement = 'top' | 'topLeft' | 'topRight' | 'bottom' | 'bottomLeft' | 'bottomRight' | 'left' | 'leftTop' | 'leftBottom' | 'right' | 'rightTop' | 'rightBottom'
@@ -36,6 +37,7 @@ export interface PurrPopoverProps {
   disabled?: boolean
   /** 触发节点最终渲染为原生 button 时保持 true；仅 span 等节点设为 false。 */
   nativeButton?: boolean
+  zIndex?: number
 }
 
 /** 项目内点击/悬停浮层入口，支持受控开合与定位。 */
@@ -57,6 +59,7 @@ export function PurrPopover({
   mouseLeaveDelay,
   disabled,
   nativeButton = true,
+  zIndex,
 }: PurrPopoverProps) {
   const position = placementMap[placement]
   const triggers = Array.isArray(trigger) ? trigger : [trigger]
@@ -88,6 +91,7 @@ export function PurrPopover({
       <BasePopover.Portal>
         <BasePopover.Positioner
           className="purr-popover__positioner"
+          style={getOverlayLayerStyle('PurrPopover', zIndex)}
           side={position.side}
           align={position.align}
           sideOffset={8 + (align?.offset?.[1] ?? 0)}
