@@ -39,14 +39,6 @@ export type TimelineOperationPart =
   | TimelineDelegationsPart
   | TimelineContextCompactionPart;
 
-export type WorkLogTimelineItem =
-  | AssistantTimelinePart
-  | {
-      type: "stepGroup";
-      groupKey: string;
-      parts: TimelineOperationPart[];
-    };
-
 export interface OperationGroupProgress {
   total: number;
   completed: number;
@@ -63,49 +55,6 @@ export interface BuildAssistantTimelineOptions {
 
 export function getAssistantProcessingLabel(_message: ChatMessage): string {
   return "";
-}
-
-export function groupConsecutiveWorkSteps(
-  parts: AssistantTimelinePart[],
-  messageIndex: number,
-): WorkLogTimelineItem[] {
-  const items: WorkLogTimelineItem[] = [];
-  let stepParts: TimelineOperationPart[] = [];
-  let groupStartIndex = 0;
-
-  const flushSteps = () => {
-    if (stepParts.length === 0) return;
-    items.push({
-      type: "stepGroup",
-      groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
-      parts: stepParts,
-    });
-    stepParts = [];
-  };
-
-  parts.forEach((part, partIndex) => {
-    if (
-      part.type === "tools" &&
-      part.segment.labels.every(
-        (_label, labelIndex) => part.segment.cachedFlags?.[labelIndex],
-      )
-    ) {
-      return;
-    }
-    if (
-      part.type === "tools" ||
-      part.type === "delegations" ||
-      part.type === "contextCompaction"
-    ) {
-      if (stepParts.length === 0) groupStartIndex = partIndex;
-      stepParts.push(part);
-      return;
-    }
-    flushSteps();
-    items.push(part);
-  });
-  flushSteps();
-  return items;
 }
 
 export function getOperationGroupProgress(
@@ -153,6 +102,36 @@ export function getOperationGroupProgress(
       ? Math.min(total, completed + Math.max(1, activeCount))
       : completed,
     active,
+  };
+}
+
+export interface ExecutionPanelPresentation {
+  visible: boolean;
+  active: boolean;
+  autoOpen: boolean;
+  stepCount: number;
+}
+
+function isTimelineOperationPart(
+  part: AssistantTimelinePart,
+): part is TimelineOperationPart {
+  return part.type === "tools"
+    || part.type === "delegations"
+    || part.type === "contextCompaction";
+}
+
+export function getExecutionPanelPresentation(
+  parts: AssistantTimelinePart[],
+  input: { isStreaming: boolean; durationMs?: number },
+): ExecutionPanelPresentation {
+  const progress = getOperationGroupProgress(parts.filter(isTimelineOperationPart));
+  return {
+    visible: input.isStreaming
+      || parts.length > 0
+      || (input.durationMs != null && input.durationMs > 0),
+    active: input.isStreaming,
+    autoOpen: input.isStreaming,
+    stepCount: progress.total,
   };
 }
 

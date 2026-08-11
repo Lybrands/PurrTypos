@@ -9,16 +9,15 @@ import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
 import ToolApprovalCard from "../ToolApprovalCard";
-import { WorkLogStepGroup } from "../WorkLog";
+import WorkLog from "../WorkLog";
 import SubAgentStatusList from "../SubAgentStatusList";
 import StructuredQuestionCard from "../StructuredQuestionCard";
 import ErrorReportNotice from "./ErrorReportNotice";
 import { parseStructuredQuestions } from "../../structuredQuestions";
 import {
   buildAssistantTimeline,
+  getExecutionPanelPresentation,
   getAssistantProcessingLabel,
-  getOperationGroupProgress,
-  groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
   type TimelineOperationPart,
   type TimelineStepPart,
@@ -107,16 +106,6 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   });
 }
 
-function operationIsActive(part: TimelineOperationPart): boolean {
-  if (part.type === "tools") return Boolean(part.isLive);
-  if (part.type === "contextCompaction") {
-    return part.state.status === "running";
-  }
-  return part.items.some((item) =>
-    ["queued", "claimed", "running"].includes(item.status),
-  );
-}
-
 function AssistantMessageBodyInner({
   index,
   message,
@@ -143,11 +132,10 @@ function AssistantMessageBodyInner({
 
   const answerParts = timeline.filter((part) => part.type === "text");
   const workLogParts = timeline.filter(isVisibleWorkLogPart);
-  const workLogItems = React.useMemo(
-    () => groupConsecutiveWorkSteps(workLogParts, index),
-    [workLogParts, index],
-  );
-  const hasWorkLog = workLogItems.length > 0;
+  const executionPanel = getExecutionPanelPresentation(workLogParts, {
+    isStreaming,
+    durationMs: message.durationMs,
+  });
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
@@ -237,63 +225,38 @@ function AssistantMessageBodyInner({
     return renderStepPart(part);
   };
 
+  const renderDirectWorkLogPart = (
+    part: AssistantTimelinePart,
+    partIndex: number,
+  ) => {
+    if (part.type === "commentary") return renderStepPart(part);
+    if (
+      part.type === "tools" ||
+      part.type === "delegations" ||
+      part.type === "contextCompaction"
+    ) {
+      return renderOperationPart(
+        part,
+        `${index}-operation-${part.type}-${partIndex}`,
+      );
+    }
+    return null;
+  };
+
   return (
     <div className="bubble-assistant-body">
-      {hasWorkLog ? (
-        <div className="work-log">
-          {workLogItems.map((part, partIndex) => {
-            if (part.type === "stepGroup") {
-              const activePart = part.parts.find(operationIsActive);
-              const progress = getOperationGroupProgress(part.parts);
-              const completedDurationMs = part.parts.reduce(
-                (total, item) =>
-                  total + (
-                    item.type === "tools" && !item.isLive
-                      ? item.segment.durationMs ?? 0
-                      : 0
-                  ),
-                0,
-              );
-              return (
-                <WorkLogStepGroup
-                  key={part.groupKey}
-                  groupKey={part.groupKey}
-                  stepCount={progress.total}
-                  currentStepCount={progress.current}
-                  completedDurationMs={completedDurationMs}
-                  activeStartedAt={
-                    activePart?.type === "tools"
-                      ? activePart.segment.startedAt
-                      : undefined
-                  }
-                  active={progress.active}
-                  hasError={workLogHasError(part.parts)}
-                >
-                  {part.parts.map((item, itemIndex) =>
-                    renderOperationPart(
-                      item,
-                      `${part.groupKey}-${item.type}-${itemIndex}`,
-                    ),
-                  )}
-                </WorkLogStepGroup>
-              );
-            }
-            if (part.type === "commentary") {
-              return renderStepPart(part);
-            }
-            if (
-              part.type === "tools" ||
-              part.type === "delegations" ||
-              part.type === "contextCompaction"
-            ) {
-              return renderOperationPart(
-                part,
-                `${index}-operation-${part.type}-${partIndex}`,
-              );
-            }
-            return null;
-          })}
-        </div>
+      {executionPanel.visible ? (
+        <WorkLog
+          logKey={message.agentRunId || `${index}-work-log`}
+          active={executionPanel.active}
+          autoOpen={executionPanel.autoOpen}
+          stepCount={executionPanel.stepCount}
+          startedAt={message.turnStartedAt}
+          durationMs={message.durationMs}
+          hasError={workLogHasError(workLogParts)}
+        >
+          {workLogParts.map(renderDirectWorkLogPart)}
+        </WorkLog>
       ) : null}
 
       {!showPlaceholder &&
