@@ -31,7 +31,11 @@ from purra.operations import (
     OperationKind,
     OperationScope,
 )
-from purra.output import AgentOutputIntent, OutputCommitMode, OutputStreamSpec
+from purra.output.contracts import (
+    AgentOutputIntent,
+    OutputCommitMode,
+    OutputStreamSpec,
+)
 from purra.ports import CancellationSignal, ModelGateway
 
 

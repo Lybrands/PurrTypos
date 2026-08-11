@@ -12,6 +12,11 @@ from purra.output.contracts import (
     OutputSource,
     OutputStreamSpec,
     OutputVisibility,
+    PublicFact,
+    PublicFactBundle,
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
     RunLifecycleOutputDraft,
     ToolOutputEvent,
 )
@@ -19,6 +24,24 @@ from purra.output.ports import (
     AgentOutputPolicy,
     AgentOutputPublisher,
     AgentOutputRepository,
+    CommittedResultFactsProvider,
+    ValidatedResultCommitter,
 )
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+_LAZY_RESPONSE_TRANSACTION_EXPORTS = frozenset({
+    "AgentResponseTransaction",
+    "ResponseTransactionValidationError",
+})
+
+
+def __getattr__(name: str):
+    if name in _LAZY_RESPONSE_TRANSACTION_EXPORTS:
+        from purra.output import response_transaction
+
+        return getattr(response_transaction, name)
+    raise AttributeError(name)
+
+
+__all__ = [
+    name for name in globals() if not name.startswith("_")
+] + sorted(_LAZY_RESPONSE_TRANSACTION_EXPORTS)

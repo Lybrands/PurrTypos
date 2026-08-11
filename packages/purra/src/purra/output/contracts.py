@@ -6,14 +6,27 @@ Runtime, tool, and domain producers use separate structured contracts.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+import json
+import re
 from typing import Any
 
-from purra.contracts import DomainEffect, RunId, RunStatus
-from purra.json_values import FrozenDict, freeze_json_mapping
+from purra.contracts import (
+    AgentMessage,
+    DomainEffect,
+    MessageRole,
+    RunId,
+    RunStatus,
+)
+from purra.json_values import (
+    FrozenDict,
+    freeze_json_mapping,
+    freeze_json_value,
+    thaw_json_value,
+)
 from purra.normalization import optional_text, positive_int, required_text
 
 
@@ -67,6 +80,149 @@ class OutputEventKind(StrEnum):
     TOOL = "tool.event"
     DOMAIN_EFFECT = "domain.effect"
     DELEGATION = "delegation.event"
+
+
+class ResponseTransactionMode(StrEnum):
+    DIRECT_LIVE = "direct_live"
+    VALIDATED_RESULT = "validated_result"
+
+
+class PublicPresentationMode(StrEnum):
+    NONE = "none"
+    MODEL_LIVE = "model_live"
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseTransactionPolicy:
+    mode: ResponseTransactionMode
+    public_presentation: PublicPresentationMode = PublicPresentationMode.NONE
+
+    def __post_init__(self) -> None:
+        mode = ResponseTransactionMode(self.mode)
+        presentation = PublicPresentationMode(self.public_presentation)
+        if (
+            mode is ResponseTransactionMode.DIRECT_LIVE
+            and presentation is not PublicPresentationMode.NONE
+        ):
+            raise ValueError(
+                "direct-live response cannot add a second presentation"
+            )
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "public_presentation", presentation)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicFact:
+    key: str
+    value: Any
+
+    def __post_init__(self) -> None:
+        key = required_text(self.key, "public fact key")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", key):
+            raise ValueError("public fact key must be lower-camel compatible")
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "value", freeze_json_value(self.value))
+
+
+@dataclass(frozen=True, slots=True)
+class PublicFactBundle:
+    facts: tuple[PublicFact, ...]
+    resource_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        facts = tuple(self.facts)
+        if len(facts) > 32:
+            raise ValueError("public fact bundle has too many facts")
+        if any(not isinstance(fact, PublicFact) for fact in facts):
+            raise TypeError("public fact bundle requires PublicFact values")
+        keys = [fact.key for fact in facts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("public fact keys must be unique")
+        for fact in facts:
+            _reject_private_fact_fields(fact.key, fact.value)
+
+        refs = tuple(required_text(ref, "public resource reference") for ref in self.resource_refs)
+        if len(refs) > 16:
+            raise ValueError("public fact bundle has too many resource references")
+        for ref in refs:
+            if not re.fullmatch(
+                r"resource://[a-z][a-z0-9-]{0,31}/[A-Za-z0-9][A-Za-z0-9._~-]{0,127}",
+                ref,
+            ):
+                raise ValueError("invalid public resource reference")
+
+        encoded = json.dumps(
+            {
+                "facts": [
+                    {"key": fact.key, "value": thaw_json_value(fact.value)}
+                    for fact in facts
+                ],
+                "resourceRefs": list(refs),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 8_192:
+            raise ValueError("public fact bundle exceeds the size limit")
+        object.__setattr__(self, "facts", facts)
+        object.__setattr__(self, "resource_refs", refs)
+
+    def as_messages(self) -> tuple[AgentMessage, ...]:
+        payload = json.dumps(
+            {
+                "facts": [
+                    {"key": fact.key, "value": thaw_json_value(fact.value)}
+                    for fact in self.facts
+                ],
+                "resourceRefs": list(self.resource_refs),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return (
+            AgentMessage(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "Write the final user-facing response using only the "
+                    "committed public facts below. Do not expose identifiers, "
+                    "private state, hidden content, or tool calls."
+                ),
+            ),
+            AgentMessage(role=MessageRole.USER, content=payload),
+        )
+
+
+_FORBIDDEN_PUBLIC_FACT_KEYS = frozenset({
+    "artifactid",
+    "candidatebody",
+    "candidateid",
+    "contenttext",
+    "databaseid",
+    "internalid",
+    "payload",
+    "privatestatus",
+    "reportbody",
+    "reviewid",
+    "revisionid",
+    "runid",
+    "status",
+    "trace",
+})
+
+
+def _reject_private_fact_fields(key: str, value: Any) -> None:
+    normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+    if normalized in _FORBIDDEN_PUBLIC_FACT_KEYS:
+        raise ValueError(f"forbidden public fact field: {key}")
+    if isinstance(value, Mapping):
+        for nested_key, nested_value in value.items():
+            _reject_private_fact_fields(str(nested_key), nested_value)
+    elif isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        for nested in value:
+            _reject_private_fact_fields("item", nested)
 
 
 _PUBLIC_INTENTS = frozenset({

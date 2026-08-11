@@ -1515,6 +1515,9 @@ class AgentCore:
                     response_constraints=options.response_constraints,
                     response_validators=options.response_validators,
                     response_judges=options.response_judges,
+                    response_transaction_mode=(
+                        options.resolved_response_transaction_policy.mode
+                    ),
                     execution_state=state,
                     run_id=controller.run_id,
                     context_budget=budget,
