@@ -19,6 +19,7 @@ from purra.output.contracts import (
     AgentOutputEventDraft,
     AgentOutputIntent,
     DomainEffectOutput,
+    FederatedOutputEvent,
     OutputChannel,
     OutputEventKind,
     OutputSource,
@@ -331,6 +332,49 @@ class AgentOutputProcessor:
                 "payload": thaw_json_mapping(event.effect.payload),
             },
             occurred_at=event.occurred_at,
+        ))
+
+    async def accept_federated_event(
+        self,
+        event: FederatedOutputEvent,
+    ) -> AgentOutputEvent:
+        if not isinstance(event, FederatedOutputEvent):
+            raise TypeError("output processor requires a FederatedOutputEvent")
+        source = event.source_event
+        return await self._append(AgentOutputEventDraft(
+            run_id=event.parent_run_id,
+            turn_id=source.turn_id,
+            output_stream_id=None,
+            invocation_id=source.invocation_id,
+            source_event_key=(
+                f"delegation:{event.delegation_id}:{source.event_id}"
+            ),
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.DELEGATION,
+            channel=OutputChannel.DELEGATION,
+            visibility=source.visibility,
+            payload={
+                "delegationId": event.delegation_id,
+                "parentRunId": event.parent_run_id,
+                "sourceRunId": source.run_id,
+                "sourceSequence": source.sequence,
+                "event": {
+                    "eventId": source.event_id,
+                    "outputStreamId": source.output_stream_id,
+                    "runId": source.run_id,
+                    "turnId": source.turn_id,
+                    "invocationId": source.invocation_id,
+                    "sequence": source.sequence,
+                    "source": source.source.value,
+                    "kind": source.kind.value,
+                    "channel": source.channel.value,
+                    "visibility": source.visibility.value,
+                    "payload": thaw_json_mapping(source.payload),
+                    "occurredAt": source.occurred_at.isoformat(),
+                    "emittedAt": source.emitted_at.isoformat(),
+                },
+            },
+            occurred_at=source.occurred_at,
         ))
 
     def _provider_draft(
