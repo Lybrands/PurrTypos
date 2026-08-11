@@ -10,6 +10,7 @@ import type {
   AiContextBudgetState,
   AiContextCompactionState,
 } from "../../../types";
+import type { CanonicalOutputState } from "../../../agent-runtime/canonicalOutput";
 
 export type ToolCallLabelOutcome = "ok" | "context_error";
 
@@ -76,17 +77,23 @@ export interface ToolCallSegment {
   labelOutcomes?: ToolCallLabelOutcome[];
   /** 与 labels 同长度：该次工具调用是否命中请求内只读缓存 */
   cachedFlags?: boolean[];
-  /** 本段内已执行完成的工具数量（与后端 toolIndexCompleted 同步，顺序递增） */
+  /** 本段内已执行完成的工具数量。 */
   completedToolCount?: number;
   /** 工具批次开始时间（performance.now），仅实时 UI 使用。 */
   startedAt?: number;
   /** 整个工具批次耗时；完成时写入历史。 */
   durationMs?: number;
+  /** 与 labels 等长：每个具体操作的已完成耗时。 */
+  itemDurationsMs?: Array<number | null>;
+  /** 当前顺序操作的开始时间（performance.now）。 */
+  activeItemStartedAt?: number;
 }
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** 已收到但尚未在根 Run 终态提交的助手正文；仅用于实时上下文计量。 */
+  streamingContent?: string;
   /** 当前页面新建回合的本地唯一标识；不写入持久化记录。 */
   clientTurnId?: string;
   /** 用户消息的发送时间；历史记录来自数据库，实时消息在发送时写入。 */
@@ -133,6 +140,8 @@ export interface ChatMessage {
   contextCompaction?: AiContextCompactionState;
   /** 后端对本轮完整模型输入的实际预算。 */
   contextBudget?: AiContextBudgetState;
+  /** PurrA 规范输出的唯一实时/重放读模型。 */
+  canonicalOutput?: CanonicalOutputState;
 }
 
 export interface AiSubAgentActivity {

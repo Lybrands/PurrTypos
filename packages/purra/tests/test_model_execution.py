@@ -17,14 +17,15 @@ from purra.contracts import (
 )
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.model_execution import (
-    ManagedModelCall,
-    ManagedModelExecutor,
+    AgentModelTask,
+    AgentModelTaskRunner,
 )
+from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from purra.model_protocol import generic_capability_snapshot
 
 
-def _call() -> ManagedModelCall:
-    return ManagedModelCall(
+def _call() -> AgentModelTask:
+    return AgentModelTask(
         request=ModelRequest(
             provider="test",
             model="model",
@@ -35,6 +36,13 @@ def _call() -> ManagedModelCall:
             ),
         ),
         reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+
+def _model_tasks(gateway) -> AgentModelTaskRunner:
+    return AgentModelTaskRunner(
+        AgentModelInvocationManager(gateway),
+        ModelInvocationContext(run_id="model-task-test-run"),
     )
 
 
@@ -85,7 +93,7 @@ class _ScriptedStreamGateway(_Gateway):
 def test_complete_resolves_the_exact_provider_output_limit():
     async def run():
         gateway = _Gateway()
-        result = await ManagedModelExecutor(gateway).complete((), _call())
+        result = await _model_tasks(gateway).complete((), _call())
         assert result.completion.message.content == "done"
         assert result.output_limit.max_tokens == 200
         assert gateway.invocations[0].output_limit == result.output_limit
@@ -105,7 +113,7 @@ def test_reasoning_incompatibility_is_not_replayed_with_another_mode():
     async def run():
         gateway = Gateway()
         with pytest.raises(UnsupportedModelFeatureError):
-            await ManagedModelExecutor(gateway).complete((), _call())
+            await _model_tasks(gateway).complete((), _call())
         assert [item.reasoning_mode for item in gateway.invocations] == [
             ReasoningMode.DISABLED,
         ]
@@ -127,7 +135,7 @@ def test_complete_rejects_non_terminal_or_incomplete_output_without_retry(
     async def run():
         gateway = _Gateway(finish_reason=reason)
         with pytest.raises(ModelGatewayError) as captured:
-            await ManagedModelExecutor(gateway).complete((), _call())
+            await _model_tasks(gateway).complete((), _call())
         assert captured.value.code == code
         assert len(gateway.invocations) == 1
 
@@ -137,7 +145,7 @@ def test_complete_rejects_non_terminal_or_incomplete_output_without_retry(
 def test_stream_rejects_truncation_after_preserving_diagnostic_chunks():
     async def run():
         gateway = _Gateway(finish_reason=ModelFinishReason.LENGTH)
-        stream = await ManagedModelExecutor(gateway).stream((), _call())
+        stream = await _model_tasks(gateway).stream((), _call())
         observed = []
         with pytest.raises(ModelGatewayError) as captured:
             async for chunk in stream.chunks:
@@ -166,7 +174,7 @@ def test_stream_text_retries_reasoning_only_without_changing_mode():
         async def observe(chunk):
             observed.append(chunk)
 
-        result = await ManagedModelExecutor(gateway).stream_text(
+        result = await _model_tasks(gateway).stream_text(
             (AgentMessage(role=MessageRole.USER, content="return JSON"),),
             _call(),
             on_chunk=observe,
@@ -207,7 +215,7 @@ def test_stream_text_rejects_repeated_empty_official_responses(reasoning):
         ])
 
         with pytest.raises(ModelGatewayError) as captured:
-            await ManagedModelExecutor(gateway).stream_text((), _call())
+            await _model_tasks(gateway).stream_text((), _call())
 
         assert captured.value.code == "empty_model_response"
         assert len(gateway.invocations) == 3
@@ -223,7 +231,7 @@ def test_stream_text_never_retries_length_termination():
         ]])
 
         with pytest.raises(ModelGatewayError) as captured:
-            await ManagedModelExecutor(gateway).stream_text((), _call())
+            await _model_tasks(gateway).stream_text((), _call())
 
         assert captured.value.code == "model_output_truncated"
         assert len(gateway.invocations) == 1

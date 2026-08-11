@@ -26,7 +26,8 @@ from purra.contracts import (
     ReasoningMode,
 )
 from purra.model_protocol import resolve_invocation_output_limit
-from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.api import AgentModelTask, AgentModelTaskRunner
+from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from tests.test_screenplay_agent_durable_service import _finalization_fixture
 
 
@@ -156,8 +157,9 @@ async def test_live_profile_completes_screenplay_candidate_revision_and_replay(
                 "response_format": {"type": "json_object"},
             },
         )
-        structured = await ManagedModelExecutor(
-            ProviderModelGateway(api_key)
+        structured = await AgentModelTaskRunner(
+            AgentModelInvocationManager(ProviderModelGateway(api_key)),
+            ModelInvocationContext(run_id=f"live-e2e-{case.id}"),
         ).stream_text(
             (AgentMessage(
                 role=MessageRole.USER,
@@ -166,7 +168,7 @@ async def test_live_profile_completes_screenplay_candidate_revision_and_replay(
                     "不要输出 Markdown 或额外文字。"
                 ),
             ),),
-            ManagedModelCall(
+            AgentModelTask(
                 request=structured_request,
                 output_limit=resolve_invocation_output_limit(
                     snapshot,

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from purra.model_execution import ManagedModelExecutor
 from purra.contracts import ReasoningMode
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
@@ -46,7 +45,7 @@ class ScreenplayTaskModelCalls:
         self,
         db,
         *,
-        model_executor_factory: Callable[[str], ManagedModelExecutor] | None = None,
+        composition=None,
         tool_calling_service: ScreenplayToolCallingService | None = None,
     ) -> None:
         self._db = db
@@ -54,9 +53,9 @@ class ScreenplayTaskModelCalls:
         self._models = (
             ScreenplayStructuredCallService(
                 db,
-                model_executor_factory=model_executor_factory,
+                composition=composition,
             )
-            if model_executor_factory is not None
+            if composition is not None
             else None
         )
         self._tool_calls = tool_calling_service
@@ -316,11 +315,8 @@ class ScreenplayTaskModelCalls:
                 _previous_episode_validation(task, episode_number)
                 or writing.get("previousEpisodeContinuity")
             ),
-            "completedSceneSummaries": [
-                {
-                    "sceneId": str(output.get("sceneId") or ""),
-                    "processSummary": str(output.get("processSummary") or ""),
-                }
+            "completedScenes": [
+                {"sceneId": str(output.get("sceneId") or "")}
                 for output in completed_scenes
             ],
             "previousSceneTail": str(
@@ -400,13 +396,7 @@ class ScreenplayTaskModelCalls:
         user_payload = {
             "task": "finalize_screenplay_episode_metadata",
             "episodeNumber": episode_number,
-            "sceneSummaries": [
-                {
-                    "sceneId": scene["sceneId"],
-                    "processSummary": scene["processSummary"],
-                }
-                for scene in scenes
-            ],
+            "scenes": [{"sceneId": scene["sceneId"]} for scene in scenes],
             "finalSceneTail": str(scenes[-1]["sceneText"])[-1_200:],
         }
         if self._tool_calls is not None:
@@ -618,7 +608,7 @@ class ScreenplayTaskModelCalls:
             ],
         }
         assert self._models is not None
-        result = await self._models.run_json(
+        result = await self._models.run_public_text(
             runtime=runtime,
             session_id=int(task["sessionId"]),
             prompt=payload["request"] or payload["instruction"],
@@ -627,18 +617,13 @@ class ScreenplayTaskModelCalls:
             binding_namespace="screenplay.agent.task",
             binding_aggregate_id=str(task["projectId"]),
             binding_command_id=f"{task['id']}:{unit['id']}",
-            conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
             phase="screenplay_final_response_composition",
-            repair_instruction=(
-                "只返回包含非空 finalResponse 的 JSON 对象；"
-                "答复保持简短，不得加入候选正文或内部字段。"
-            ),
-            validate=_validate_final_response,
+            conversation_turn_id=str(task["turnId"]),
             signal=signal,
         )
         return {
-            "finalResponse": result.value["finalResponse"],
+            "finalResponse": result.text,
             "runId": result.run_id,
         }
 
@@ -690,13 +675,13 @@ class ScreenplayTaskUnitExecutor:
         db,
         *,
         runtime,
-        model_executor_factory: Callable[[str], ManagedModelExecutor] | None = None,
+        composition=None,
         tool_calling_service: ScreenplayToolCallingService | None = None,
     ) -> None:
         self._runtime = runtime
         self._delegate = ScreenplayTaskModelCalls(
             db,
-            model_executor_factory=model_executor_factory,
+            composition=composition,
             tool_calling_service=tool_calling_service,
         )
         self._parts = ScreenplayPartArtifactQuery(db)
@@ -927,23 +912,13 @@ def _host_scene_candidate_template(
     scene_id: str,
     scene_plan: Mapping[str, Any],
 ) -> dict[str, Any]:
-    summary = "；".join(
-        str(scene_plan.get(key) or "").strip()
-        for key in ("objective", "conflict", "turn")
-        if str(scene_plan.get(key) or "").strip()
-    )
-    summary = " ".join(summary.replace("{", "").replace("}", "").split())
-    if not summary:
-        summary = "按已采纳场景计划推进人物目标、冲突与转折。"
-    return {
-        "sceneId": scene_id,
-        "processSummary": f"场景 {scene_id} 推演：{summary}"[:600],
-    }
+    del scene_plan
+    return {"sceneId": scene_id}
 
 
 def _scene_json_instruction(episode_number: int, scene_id: str) -> str:
     return f"""只创作第 {episode_number} 集场景 {scene_id}，只输出 JSON：
-{{"sceneId":"{scene_id}","processSummary":"简短公开创作说明","sceneText":"完整场景正文"}}
+{{"sceneId":"{scene_id}","sceneText":"完整场景正文"}}
 不得生成其他场景，sceneId 必须保持不变。"""
 
 
@@ -957,7 +932,6 @@ def _validate_scene_json(
         raise ValueError("scene output does not match the requested Manifest Part")
     return {
         "sceneId": scene_id,
-        "processSummary": _scene_process_summary(value),
         "sceneText": scene_text,
     }
 
@@ -965,13 +939,13 @@ def _validate_scene_json(
 def _episode_metadata_tool_instruction(episode_number: int) -> str:
     return f"""你只负责整理第 {episode_number} 集的短元数据，不生成或复述剧本正文。
 完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须严格为：
-{{"episodeNumber":{episode_number},"title":"简洁集标题","executionSummary":"2 至 4 句公开创作说明","continuitySummary":"供下一集续写的连续性摘要"}}
+{{"episodeNumber":{episode_number},"title":"简洁集标题","continuitySummary":"供下一集续写的连续性摘要"}}
 写入成功后只回复一句简短确认。"""
 
 
 def _episode_metadata_json_instruction(episode_number: int) -> str:
     return f"""只整理第 {episode_number} 集元数据，只输出 JSON：
-{{"episodeNumber":{episode_number},"title":"简洁集标题","executionSummary":"简短公开创作说明","continuitySummary":"连续性摘要"}}
+{{"episodeNumber":{episode_number},"title":"简洁集标题","continuitySummary":"连续性摘要"}}
 不得输出或复述剧本正文。"""
 
 
@@ -988,7 +962,6 @@ def _validate_episode_metadata_json(
     return {
         "episodeNumber": episode_number,
         "title": title,
-        "executionSummary": _execution_summary(value),
         "continuitySummary": continuity,
     }
 
@@ -1001,7 +974,7 @@ def _review_dimension_tool_instruction(
     return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
 宿主已在 reviewInput 中完整提供指定不可变版本的本集正文、场景计划和必要上下文。只能依据这些材料审阅，不得另行检索、声称材料不可读或把系统错误写成审阅意见。
 完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","executionSummary":"简短公开审阅说明","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
+{{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
 问题只能引用这些场景 ID：{list(scene_ids)}。没有问题时 issues=[] 且 verdict=ready。"""
 
 
@@ -1060,14 +1033,14 @@ def _validate_review_dimension_candidate(
 def _document_section_tool_instruction(role: str, section_key: str) -> str:
     return f"""你只生成 {role} 文档中的 {section_key} 章节。
 宿主已提供本章节需要的项目证据。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"sectionKey":"{section_key}","title":"章节标题","executionSummary":"简短公开说明","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
+{{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
 contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。"""
 
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
     return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
 完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
-{{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","executionSummary":"简短公开规划说明","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
+{{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
 只提交当前集，场景顺序必须可直接用于后续剧本创作。"""
 
 
@@ -1091,7 +1064,6 @@ def _validate_document_section_candidate(
         **dict(candidate),
         "payload": {
             "title": title,
-            "executionSummary": _execution_summary(value),
             "contentJson": dict(content),
         },
         "contentText": text,
@@ -1219,7 +1191,6 @@ def _validate_draft_episode_parts(
         "contentText": str(scene["sceneText"]),
     } for scene in scenes]
     result = {
-        "executionSummary": str(meta["executionSummary"]),
         "sceneListId": next(iter(scene_list_ids)),
         "episodeDraft": {
             "episodeNumber": number,
@@ -1294,7 +1265,6 @@ def _validate_review_episode_parts(
                     "episodeNumber": number,
                     "reviewDimension": dimension,
                     "title": part.get("title"),
-                    "executionSummary": part.get("executionSummary"),
                     "contentJson": content,
                 },
                 "contentText": part.get("contentText"),
@@ -1332,7 +1302,6 @@ def _validate_review_episode_parts(
     )
     result = {
         "title": f"第 {number} 集审阅",
-        "executionSummary": f"已完成第 {number} 集五个审阅维度并校验同一正文版本。",
         "contentText": "\n\n".join(str(part.get("contentText") or "") for part in parts),
         "contentJson": episode_result.to_mapping(),
         "sourceRunIds": _source_run_ids(parts),
@@ -1394,7 +1363,6 @@ def _validate_document_parts(
         role,
         {
             "title": _ROLE_LABELS.get(role, "剧本交付物"),
-            "executionSummary": f"已按 {len(sections)} 个独立章节完成生成与全量校验。",
             "contentText": "\n\n".join(str(section["contentText"]) for section in sections),
             "contentJson": merged,
         },
@@ -1444,17 +1412,15 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
 
 def _final_response_instruction() -> str:
     return """你负责为已经完成校验、但尚未向用户公布的剧本候选稿撰写最终答复。
-只输出 JSON：{"finalResponse":"自然语言答复"}。
-finalResponse 使用 2 至 4 句，先准确说明完成了哪些候选内容，再说明用户可以在候选稿区域查看和继续编辑。
+使用 2 至 4 句自然语言，先准确说明完成了哪些候选内容，再说明用户可以在候选稿区域查看和继续编辑。
 只能依据输入中的公开事实，不得声称候选稿已经采纳，不得编造版本号、链接或未提供的结果。
-不得复述剧本正文，不得输出 JSON 字段解释、工具过程、内部协议、推理过程或固定套话。"""
+不得复述剧本正文，不得输出工具过程、内部协议、推理过程或固定套话。"""
 
 
 def _public_candidate_fact(
     role: str,
     output: Mapping[str, Any],
 ) -> dict[str, Any]:
-    summary = " ".join(str(output.get("executionSummary") or "").split())
     if role == "screenplayDraft":
         draft = output.get("episodeDraft")
         if not isinstance(draft, Mapping):
@@ -1470,25 +1436,7 @@ def _public_candidate_fact(
         raise ValueError("validated screenplay candidate title is missing")
     if role == "screenplayDraft" and int(fact["episodeNumber"]) <= 0:
         raise ValueError("validated screenplay episode number is missing")
-    if summary:
-        fact["executionSummary"] = _execution_summary({
-            "executionSummary": summary,
-        })
     return fact
-
-
-def _validate_final_response(value: dict[str, Any]) -> dict[str, Any]:
-    response = " ".join(str(value.get("finalResponse") or "").split())
-    if not response or len(response) > 1_200:
-        raise ValueError("finalResponse must be non-empty and concise")
-    if any(marker in response for marker in (
-        "```",
-        "contentText",
-        "contentJson",
-        "sceneText",
-    )):
-        raise ValueError("finalResponse contains internal candidate data")
-    return {"finalResponse": response}
 
 
 def _validate_scene_candidate(
@@ -1502,7 +1450,6 @@ def _validate_scene_candidate(
         raise ValueError("scene candidate does not match the requested scene")
     scene = {
         "sceneId": scene_id,
-        "processSummary": _scene_process_summary(value),
         "sceneText": scene_text,
     }
     if str(candidate.get("contentText") or "").strip() != scene_text:
@@ -1524,7 +1471,6 @@ def _validate_episode_metadata_candidate(
     metadata = {
         "episodeNumber": episode_number,
         "title": title,
-        "executionSummary": _execution_summary(value),
         "continuitySummary": continuity,
     }
     return {**dict(candidate), "payload": metadata, "contentText": ""}
@@ -1539,7 +1485,6 @@ def _validate_deliverable(
     reviewed_draft_id: str | None,
 ) -> dict[str, Any]:
     title = str(value.get("title") or "").strip()
-    execution_summary = _execution_summary(value)
     text = str(value.get("contentText") or "").strip()
     content = value.get("contentJson")
     if not title or not text or not isinstance(content, Mapping):
@@ -1584,7 +1529,6 @@ def _validate_deliverable(
         normalized["reviewedDraftId"] = reviewed_draft_id
     return {
         "title": title,
-        "executionSummary": execution_summary,
         "contentText": text,
         "contentJson": normalized,
     }
@@ -1611,7 +1555,6 @@ def _validate_deliverable_candidate(
         **dict(candidate),
         "payload": {
             "title": normalized["title"],
-            "executionSummary": normalized["executionSummary"],
             "contentJson": normalized["contentJson"],
         },
         "contentText": normalized["contentText"],
@@ -1642,7 +1585,6 @@ def _validate_scene_list_fragment_candidate(
         **dict(candidate),
         "payload": {
             "title": title,
-            "executionSummary": _execution_summary(value),
             "contentJson": {"scenes": normalized_scenes},
         },
         "contentText": text,
@@ -1655,38 +1597,6 @@ def _aggregate_review_verdict(values) -> str:
     if not normalized or any(value not in ranks for value in normalized):
         raise ValueError("review fragment verdict is invalid")
     return max(normalized, key=ranks.__getitem__)
-
-
-def _execution_summary(value: Mapping[str, Any]) -> str:
-    summary = " ".join(str(value.get("executionSummary") or "").split())
-    if not summary or len(summary) > 600:
-        raise ValueError("executionSummary must be a concise work-log summary")
-    if any(marker in summary for marker in (
-        "```",
-        "{",
-        "}",
-        "sceneText",
-        "contentText",
-        "contentJson",
-    )):
-        raise ValueError("executionSummary contains artifact payload data")
-    return summary
-
-
-def _scene_process_summary(value: Mapping[str, Any]) -> str:
-    summary = " ".join(str(value.get("processSummary") or "").split())
-    if not summary or len(summary) > 600:
-        raise ValueError("scene processSummary is required and must be concise")
-    if any(marker in summary for marker in (
-        "```",
-        "{",
-        "}",
-        "sceneText",
-        "contentText",
-        "contentJson",
-    )):
-        raise ValueError("scene processSummary contains artifact payload data")
-    return summary
 
 
 def _validate_structure(content: Mapping[str, Any]) -> None:

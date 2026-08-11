@@ -60,20 +60,20 @@ function estimateUnits(value: string, asciiDivisor: number): number {
   return nonAsciiCount + Math.ceil(asciiCount / Math.max(1, asciiDivisor));
 }
 
-function estimateMessageTokens(message: Pick<ChatMessage, "role" | "content">): number {
-  const content = String(message.content ?? "").trim();
+function estimateMessageTokens(
+  message: Pick<ChatMessage, "role" | "content" | "streamingContent">,
+): number {
+  const content = String(message.content || message.streamingContent || "").trim();
   if (!content) return 0;
   const encoded = JSON.stringify({ role: message.role, content });
   return estimateUnits(encoded, 2) + 4;
 }
 
-function estimateConversationTokens(messages: ChatMessage[], draft: string): number {
-  const messageTokens = messages.reduce(
+function estimateConversationTokens(messages: ChatMessage[]): number {
+  return messages.reduce(
     (total, message) => total + estimateMessageTokens(message),
     0,
   );
-  const draftTokens = estimateMessageTokens({ role: "user", content: draft });
-  return messageTokens + draftTokens;
 }
 
 function latestBudgetSnapshot(messages: ChatMessage[]): {
@@ -107,12 +107,10 @@ function latestBudgetSnapshot(messages: ChatMessage[]): {
 export function calculateContextUsage(params: {
   messages: ChatMessage[];
   windowTokens: number;
-  draft?: string;
   modelConfigId?: string;
   modelName?: string;
 }): ContextUsage {
   const windowTokens = Math.max(1, Math.round(params.windowTokens));
-  const draft = String(params.draft ?? "");
   const snapshot = latestBudgetSnapshot(params.messages);
   const selectedModelMatchesSnapshot = snapshot !== null && matchesSelectedModel({
     message: snapshot.message,
@@ -132,16 +130,11 @@ export function calculateContextUsage(params: {
       )
     : 0;
   const inputCapacityTokens = Math.max(1, windowTokens - outputReserveTokens);
-  const visibleConversationTokens = estimateConversationTokens(
-    params.messages,
-    draft,
-  );
+  const visibleConversationTokens = estimateConversationTokens(params.messages);
   const snapshotBasedTokens = snapshot === null
     ? 0
-    : snapshot.baseTokens + estimateConversationTokens(
-        params.messages.slice(snapshot.index),
-        draft,
-      );
+    : snapshot.baseTokens
+      + estimateConversationTokens(params.messages.slice(snapshot.index));
   const usedTokens = Math.max(visibleConversationTokens, snapshotBasedTokens);
   const providerCalibrated = snapshot?.providerCalibrated === true
     && selectedModelMatchesSnapshot;

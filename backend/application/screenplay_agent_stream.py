@@ -7,7 +7,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from purra.events import AgentEvent, CoreEventType
-from application.screenplay_progress_stream import visible_stream_chunks
+from purra.output import AgentOutputEvent
+from application.sse_mapping import canonical_output_to_sse_chunk
 
 
 class ScreenplayAgentChunkStore:
@@ -36,6 +37,29 @@ class ScreenplayAgentChunkStore:
                 run_id,
                 json.dumps(dict(chunk), ensure_ascii=False, separators=(",", ":")),
             ],
+        )
+
+    async def append_output_event(
+        self,
+        *,
+        project_id: str,
+        session_id: int,
+        turn_id: str,
+        event: AgentOutputEvent,
+        task_id: str | None = None,
+    ) -> None:
+        """Persist one raw public PurrA event for live delivery and replay."""
+
+        chunk = canonical_output_to_sse_chunk(event)
+        if chunk is None:
+            return
+        await self.append(
+            project_id=project_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=event.run_id,
+            chunk=chunk,
         )
 
     async def list_chunks(
@@ -91,25 +115,13 @@ class ScreenplayAgentChunkProjector:
         self._chunks = ScreenplayAgentChunkStore(db)
 
     async def started(self, turn_id: str) -> None:
-        if await self._db.fetch_one(
-            "SELECT 1 FROM screenplay_agent_chunks WHERE turn_id = ? LIMIT 1",
-            [turn_id],
-        ):
-            return
-        turn, _task, _units = await self._state(turn_id)
-        await self._append(turn, {
-            "agentRunStarted": {
-                "runId": turn_id,
-                "status": "running",
-                "goal": str(turn["user_content"]),
-            },
-        })
+        # A Turn is a durable host container, not a synthetic Agent Run.
+        # The first visible execution event must come from a submitted PurrA Run.
+        await self._state(turn_id)
 
     async def plan(self, turn_id: str) -> None:
-        turn, task, units = await self._state(turn_id)
-        if task is None:
-            return
-        await self._append_plan(turn, task, units)
+        # PurrA runtime events are the only source of Agent plan presentation.
+        await self._state(turn_id)
 
     async def task_progress(self, turn_id: str, event: AgentEvent) -> None:
         if event.type != CoreEventType.LONG_TASK_PROGRESS:
@@ -137,7 +149,6 @@ class ScreenplayAgentChunkProjector:
             raw_units,
             (str, bytes, bytearray),
         ) else []
-        await self._append_plan(turn, task, units)
         await self._append(
             turn,
             {
@@ -152,30 +163,31 @@ class ScreenplayAgentChunkProjector:
 
     async def terminal(self, turn_id: str) -> None:
         turn, task, _units = await self._state(turn_id)
-        await self.plan(turn_id)
         status = _effective_status(turn, task)
         if status == "failed":
-            error = _error_message(
-                (task or {}).get("error_json")
-                or turn.get("operation_error_json")
-            )
-            await self._append(turn, {"error": error or "剧本任务执行失败。"}, task_id=(
-                str((task or {}).get("id") or "") or None
-            ))
+            await self._append(turn, {
+                "done": True,
+                "runResult": {
+                    "runId": turn_id,
+                    "status": "failed",
+                    "errorCode": _error_code(
+                        (task or {}).get("error_json")
+                        or turn.get("operation_error_json")
+                    ),
+                },
+            }, task_id=str((task or {}).get("id") or "") or None)
             return
-        if task is not None and status == "completed":
-            summary = str(turn.get("assistant_content") or "").strip()
-            if summary:
-                for fragment in visible_stream_chunks(summary):
-                    await self._append(
-                        turn,
-                        {"delta": fragment},
-                        task_id=str(task["id"]),
-                    )
         await self._append(
             turn,
             {
                 "done": True,
+                "runResult": {
+                    "runId": turn_id,
+                    "status": (
+                        "done" if status == "completed" else status
+                    ),
+                    "errorCode": None,
+                },
                 **(
                     {"finalResponseExpected": False}
                     if status == "paused" else {}
@@ -256,37 +268,6 @@ class ScreenplayAgentChunkProjector:
             return turn, task_view, units
         return turn, None, []
 
-    async def _append_plan(self, turn, task, units) -> None:
-        await self._append(
-            turn,
-            {
-                "agentRunTodosUpdated": {
-                    "runId": str(turn["id"]),
-                    "title": str(turn["user_content"]),
-                    "goal": str(turn["user_content"]),
-                    "status": _plan_status(_effective_status(turn, task)),
-                    "steps": [
-                        *[
-                            {
-                                "id": str(unit["unit_id"]),
-                                "title": _unit_label(unit, task),
-                                "type": "write",
-                                "status": _unit_status(str(unit["status"])),
-                                "executor": "model",
-                                **(
-                                    {"error": _error_message(unit.get("error_json"))}
-                                    if unit.get("error_json")
-                                    else {}
-                                ),
-                            }
-                            for unit in units
-                        ],
-                    ],
-                },
-            },
-            task_id=str((task or {}).get("id") or "") or None,
-        )
-
     async def _append(
         self,
         turn: Mapping[str, Any],
@@ -303,16 +284,6 @@ class ScreenplayAgentChunkProjector:
         )
 
 
-def _plan_status(status: str) -> str:
-    return {
-        "queued": "planned",
-        "paused": "paused",
-        "completed": "done",
-        "failed": "failed",
-        "canceled": "canceled",
-    }.get(status, "running")
-
-
 def _effective_status(
     turn: Mapping[str, Any],
     task: Mapping[str, Any] | None,
@@ -325,13 +296,9 @@ def _effective_status(
     )
 
 
-def _unit_status(status: str) -> str:
-    return {
-        "claimed": "running",
-        "completed": "done",
-        "failed": "failed",
-        "canceled": "blocked",
-    }.get(status, status)
+def _error_code(value: Any) -> str:
+    payload = _object(value)
+    return str(payload.get("code") or "screenplay_task_failed")
 
 
 _ROLE_LABELS = {
@@ -400,14 +367,6 @@ def _unit_failure_message(metadata: Mapping[str, Any], error_code: str) -> str:
     }:
         return f"第 {episode_number} 集审阅失败"
     return error_code
-
-
-def _error_message(value: object) -> str:
-    try:
-        payload = json.loads(str(value or "{}"))
-    except (TypeError, json.JSONDecodeError):
-        return ""
-    return str(payload.get("message") or "") if isinstance(payload, dict) else ""
 
 
 def _object(value: object) -> dict[str, Any]:

@@ -41,6 +41,7 @@ class RunCommit:
     step_updates: tuple[TaskStepUpdate, ...] = ()
     terminal_status: TerminalRunStatus | None = None
     final_response: str | None = None
+    validated_result: str | None = None
     error: str | None = None
     events: tuple[AgentEvent, ...] = ()
 
@@ -68,10 +69,23 @@ class RunCommit:
             raise ValueError(
                 "run commit final_response is only valid for completed runs"
             )
+        if terminal is not RunStatus.DONE and self.validated_result is not None:
+            raise ValueError(
+                "run commit validated_result is only valid for completed runs"
+            )
 
         object.__setattr__(self, "replace_steps", replacement)
         object.__setattr__(self, "step_updates", updates)
         object.__setattr__(self, "terminal_status", terminal)
+        object.__setattr__(
+            self,
+            "validated_result",
+            (
+                None
+                if self.validated_result is None
+                else str(self.validated_result)
+            ),
+        )
         object.__setattr__(self, "events", events)
 
 

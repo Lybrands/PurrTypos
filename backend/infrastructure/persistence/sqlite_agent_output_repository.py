@@ -8,8 +8,14 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from purra.contracts import DomainEffect, ModelFinishReason, RunId, RunStatus
-from purra.errors import ContractViolationError
+from purra.contracts import (
+    DomainEffect,
+    ModelFinishReason,
+    RunCreateParams,
+    RunId,
+    RunStatus,
+)
+from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.json_values import thaw_json_mapping
 from purra.normalization import non_negative_int, positive_int, required_text
 from purra.output import (
@@ -25,7 +31,8 @@ from purra.output import (
     OutputVisibility,
     RunLifecycleOutputDraft,
 )
-from purra.ports import RunCommit
+from purra.ports import RunBeginResult, RunCommit
+from purra.ports.projection import RunCommitProjector
 
 
 class SqliteAgentOutputRepository:
@@ -37,10 +44,12 @@ class SqliteAgentOutputRepository:
         *,
         run_repository=None,
         domain_projector=None,
+        run_commit_projector: RunCommitProjector | None = None,
     ) -> None:
         self._db = db
         self._runs = run_repository
         self._domain_projector = domain_projector
+        self._run_commit_projector = run_commit_projector
 
     async def open_stream(self, spec: OutputStreamSpec) -> OutputStreamSpec:
         if not isinstance(spec, OutputStreamSpec):
@@ -89,12 +98,45 @@ class SqliteAgentOutputRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             return await self._append_event_in_transaction(draft)
 
+    async def begin_run_lifecycle(
+        self,
+        params: RunCreateParams,
+        started_event,
+    ) -> tuple[RunBeginResult, AgentOutputEvent]:
+        if self._runs is None:
+            raise RuntimeError(
+                "run lifecycle output requires the owning run repository"
+            )
+        async with self._runs.write_transaction():
+            begun = await self._runs.begin_in_ambient_transaction(
+                params,
+                started_event,
+                persist_legacy_event=False,
+            )
+            output = await self._append_event_in_transaction(
+                AgentOutputEventDraft(
+                    run_id=begun.run_id,
+                    turn_id=None,
+                    output_stream_id=None,
+                    invocation_id=None,
+                    source_event_key=f"run:{begun.run_id}:running",
+                    source=OutputSource.RUNTIME,
+                    kind=OutputEventKind.RUN_LIFECYCLE,
+                    channel=OutputChannel.LIFECYCLE,
+                    visibility=OutputVisibility.PUBLIC,
+                    payload=begun.event.payload,
+                    occurred_at=_now(),
+                )
+            )
+        return begun, output
+
     async def commit_run_lifecycle(
         self,
         run_id: RunId,
         commit: RunCommit,
         draft: RunLifecycleOutputDraft,
-    ) -> AgentOutputEvent:
+        related_drafts: tuple[AgentOutputEventDraft, ...] = (),
+    ) -> tuple[AgentOutputEvent, ...]:
         normalized_run_id = required_text(run_id, "run id")
         if not isinstance(commit, RunCommit):
             raise TypeError("run lifecycle output requires a RunCommit")
@@ -141,12 +183,46 @@ class SqliteAgentOutputRepository:
                     raise ContractViolationError(
                         "canonical lifecycle event does not match Run state"
                     )
-                return existing
+                related = tuple(
+                    await self._require_event_by_source_key(
+                        item.source_event_key
+                    )
+                    for item in related_drafts
+                )
+                return (*related, existing)
+            for item in related_drafts:
+                if await self._existing_event_for_draft(item) is not None:
+                    raise ContractViolationError(
+                        "partial canonical lifecycle commit already exists"
+                    )
             await self._runs.apply_commit_in_ambient_transaction(
                 normalized_run_id,
                 commit,
             )
-            return await self._append_event_in_transaction(event_draft)
+            if self._run_commit_projector is not None:
+                try:
+                    projected = await self._run_commit_projector.project(
+                        normalized_run_id,
+                        commit,
+                    )
+                except RunCommitProjectionError:
+                    raise
+                except Exception as error:
+                    raise RunCommitProjectionError(
+                        "run commit projector rejected the terminal transaction"
+                    ) from error
+                if projected is not None:
+                    raise ContractViolationError(
+                        "run commit projector must return None"
+                    )
+            related = tuple(
+                [
+                    await self._append_event_in_transaction(item)
+                    for item in related_drafts
+                ]
+            )
+            lifecycle = await self._append_event_in_transaction(event_draft)
+            return (*related, lifecycle)
 
     async def commit_stream(
         self,

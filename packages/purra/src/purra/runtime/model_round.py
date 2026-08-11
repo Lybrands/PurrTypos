@@ -12,6 +12,8 @@ from purra.contracts import (
     ModelTokenUsage,
     ToolCall,
 )
+from purra.model_invocation.contracts import AgentModelCall
+from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.recovery import RecoveryCause, RecoveryPolicy
 
 
@@ -38,6 +40,36 @@ def provider_retry_round_capacity(policy: RecoveryPolicy) -> int:
             RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED,
             RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
         )
+    )
+
+
+def build_agent_model_call(
+    invocation: ModelInvocation,
+    *,
+    require_tool: bool,
+    requires_full_text_validation: bool,
+) -> AgentModelCall:
+    """Assign one model round to the closed public/private output contract."""
+
+    private_round = bool(invocation.tools or require_tool)
+    if private_round:
+        intent = AgentOutputIntent.STRUCTURED_PRIVATE
+        commit_mode = OutputCommitMode.PRIVATE
+    elif requires_full_text_validation:
+        intent = AgentOutputIntent.STRUCTURED_PRIVATE
+        commit_mode = OutputCommitMode.GATED
+    else:
+        intent = AgentOutputIntent.FINAL_PUBLIC
+        commit_mode = OutputCommitMode.LIVE
+    return AgentModelCall(
+        request=invocation.request,
+        output_intent=intent,
+        commit_mode=commit_mode,
+        requires_full_text_validation=requires_full_text_validation,
+        reasoning_mode=invocation.reasoning_mode,
+        output_limit=invocation.output_limit,
+        tools=invocation.tools,
+        tool_choice=invocation.tool_choice,
     )
 
 

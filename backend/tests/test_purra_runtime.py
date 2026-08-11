@@ -601,6 +601,7 @@ async def test_runtime_does_not_replace_ui_anchor_with_transient_tool_round_usag
             finish_reason=ModelFinishReason.STOP,
             usage=ModelTokenUsage(input_tokens=9_000, output_tokens=30),
         )],
+        _answer("final"),
     ])
     tools = ScriptedToolGateway([_batch("call-a", "readA")])
 
@@ -942,6 +943,7 @@ async def test_runtime_preserves_typed_continuation_scope_and_state_across_tool_
 async def test_runtime_allows_dynamic_planner_to_recover_from_tool_failure():
     model = ScriptedModelGateway([
         _tool_call("call-a", "readA"),
+        _answer("Recovered without retrying the failed tool."),
         _answer("Recovered without retrying the failed tool."),
     ])
     tools = ScriptedToolGateway([_batch(
@@ -2173,6 +2175,7 @@ async def test_runtime_replans_after_required_tool_call_retry_is_omitted():
         _answer("fake textual call"),
         _answer("still not a structured call"),
         _answer("Recovered from the evidence already collected."),
+        _answer("Recovered from the evidence already collected."),
     ])
     observer = RecordingObserver([{"readA"}, set()])
     hook = RecoveryPlanningHook(observer)
@@ -2456,6 +2459,7 @@ async def test_runtime_replans_after_repeated_unauthorized_tool_selection():
         _tool_call("stale-1", "readLegacy"),
         _tool_call("stale-2", "readLegacy"),
         _tool_call("call-b", "readB"),
+        _answer("done"),
         _answer("done"),
     ])
     tools = ScriptedToolGateway([_batch("call-b", "readB")])
@@ -3172,6 +3176,7 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
             reasoning_delta="reason before writing",
         ),
         _answer("candidate saved"),
+        _answer("candidate saved"),
     ])
     tools = ScriptedToolGateway([
         _batch("read-call", "readA", content='{"evidence":"ready"}'),
@@ -3207,6 +3212,7 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
     assert [
         item.reasoning_mode for item in model.attempted_invocations
     ] == [
+        ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
@@ -3351,7 +3357,7 @@ async def test_runtime_preserves_declined_canceled_and_failed_tool_semantics(
 ):
     rounds = [_tool_call("call-a", "readA")]
     if second_round:
-        rounds.append(_answer("continued"))
+        rounds.extend((_answer("continued"), _answer("continued")))
     model = ScriptedModelGateway(rounds)
     tools = ScriptedToolGateway([_batch(
         "call-a",
@@ -3379,7 +3385,7 @@ async def test_runtime_preserves_declined_canceled_and_failed_tool_semantics(
     )
 
     assert _result(updates).outcome is expected
-    assert len(model.message_rounds) == (2 if second_round else 1)
+    assert len(model.message_rounds) == (3 if second_round else 1)
     assert observer.completed_tool_rounds == (1 if second_round else 0)
     assert observer.completed_tool_outcomes == ([outcome] if second_round else [])
     if outcome is ToolBatchOutcome.DECLINED:
@@ -3428,6 +3434,13 @@ async def test_runtime_suppresses_textual_tool_call_after_decline_and_retries_pl
                 finish_reason=ModelFinishReason.STOP,
             ),
         ],
+        [
+            ModelStreamChunk(content_delta="已保留人物，"),
+            ModelStreamChunk(
+                content_delta="未执行删除。",
+                finish_reason=ModelFinishReason.STOP,
+            ),
+        ],
     ])
     tools = ScriptedToolGateway([_batch(
         "call-delete",
@@ -3470,24 +3483,28 @@ async def test_runtime_suppresses_textual_tool_call_after_decline_and_retries_pl
         for update in updates
     )
     assert len(tools.requests) == 1
-    assert len(model.message_rounds) == 3
-    assert model.invocations[1].tools == model.invocations[2].tools == ()
+    assert len(model.message_rounds) == 4
+    assert (
+        model.invocations[1].tools
+        == model.invocations[2].tools
+        == model.invocations[3].tools
+        == ()
+    )
     assert model.invocations[1].tool_choice is ToolChoiceMode.NONE
     assert model.invocations[2].tool_choice is ToolChoiceMode.NONE
+    assert model.invocations[3].tool_choice is ToolChoiceMode.NONE
     assert model.message_rounds[1][-1].role is MessageRole.DEVELOPER
     assert "user rejected" in str(model.message_rounds[1][-1].content)
     assert model.message_rounds[2][-1].role is MessageRole.DEVELOPER
     assert "not shown to the user" in str(model.message_rounds[2][-1].content)
-    assert observer.model_delta_count == 1
+    assert observer.model_delta_count == 2
     assert any(
         trace.stage == "model_output"
         and trace.outcome == "textual_tool_call_retry"
         for trace in observer.traces
     )
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert _result(updates).final_response == (
-        "已找到人物，正在删除。删除失败，请检查权限或联系管理员。"
-    )
+    assert _result(updates).final_response == "已保留人物，未执行删除。"
 
 
 @pytest.mark.asyncio
@@ -3739,7 +3756,7 @@ async def test_runtime_rejects_actual_tool_schema_cost_mismatch_before_model_cal
 async def test_runtime_passes_the_exact_output_limit_to_normal_invocation():
     schema = _schema("readA")
     budget = _matching_budget(window=4_096, tools=(schema,), output=321)
-    model = ScriptedModelGateway([_answer("done")])
+    model = ScriptedModelGateway([_answer("done"), _answer("done")])
 
     updates = await _collect(
         AgentRuntime(model_gateway=model),
@@ -3753,6 +3770,8 @@ async def test_runtime_passes_the_exact_output_limit_to_normal_invocation():
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert model.invocations[0].max_output_tokens == 321
     assert model.invocations[0].tools == (schema,)
+    assert model.invocations[1].max_output_tokens == 321
+    assert model.invocations[1].tools == ()
 
 
 @pytest.mark.asyncio
@@ -3762,6 +3781,7 @@ async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
     model = ScriptedModelGateway([
         UnsupportedModelFeatureError("unsupported"),
         _tool_call("call-a", "readA"),
+        _answer("done"),
         _answer("done"),
     ])
     tools = ScriptedToolGateway([_batch("call-a", "readA")])
@@ -3784,8 +3804,14 @@ async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
         ToolChoiceMode.REQUIRED,
         ToolChoiceMode.AUTO,
         ToolChoiceMode.AUTO,
+        ToolChoiceMode.NONE,
     ]
-    assert [item.max_output_tokens for item in model.invocations] == [257, 257, 257]
+    assert [item.max_output_tokens for item in model.invocations] == [
+        257,
+        257,
+        257,
+        257,
+    ]
 
 
 @pytest.mark.asyncio
@@ -3830,6 +3856,7 @@ async def test_runtime_executes_unplanned_agent_tools_in_auto_mode():
     model = ScriptedModelGateway([
         _tool_call("call-a", "readA"),
         _answer("auto finished"),
+        _answer("auto finished"),
     ])
     tools = ScriptedToolGateway([_batch("call-a", "readA")])
     observer = RecordingObserver([set()])
@@ -3848,6 +3875,7 @@ async def test_runtime_executes_unplanned_agent_tools_in_auto_mode():
     assert [item.tool_choice for item in model.invocations] == [
         ToolChoiceMode.AUTO,
         ToolChoiceMode.AUTO,
+        ToolChoiceMode.NONE,
     ]
     assert len(tools.requests) == 1
     assert observer.started_tools == []

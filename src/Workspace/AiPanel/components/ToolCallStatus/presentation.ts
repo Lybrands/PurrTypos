@@ -8,6 +8,8 @@ export interface ToolCallRow {
   outcome: ToolCallLabelOutcome
   phase: ToolRowPhase
   text: string
+  durationMs?: number
+  startedAt?: number
 }
 
 export interface ToolCallRowsInput {
@@ -15,6 +17,8 @@ export interface ToolCallRowsInput {
   labelOutcomes?: ToolCallLabelOutcome[]
   cachedFlags?: boolean[]
   completedToolCount: number
+  itemDurationsMs?: Array<number | null>
+  activeItemStartedAt?: number
 }
 
 function rowPhase(
@@ -47,6 +51,8 @@ export function buildToolCallRows({
   labelOutcomes,
   cachedFlags,
   completedToolCount,
+  itemDurationsMs,
+  activeItemStartedAt,
 }: ToolCallRowsInput): ToolCallRow[] {
   const done = Math.min(Math.max(0, completedToolCount), labels.length)
   return labels.flatMap((label, index) => {
@@ -59,6 +65,12 @@ export function buildToolCallRows({
       outcome,
       phase,
       text: rowText(label, outcome, phase),
+      ...(itemDurationsMs?.[index] != null
+        ? { durationMs: itemDurationsMs[index] as number }
+        : {}),
+      ...(phase === 'running' && activeItemStartedAt != null
+        ? { startedAt: activeItemStartedAt }
+        : {}),
     }]
   })
 }

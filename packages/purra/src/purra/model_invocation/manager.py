@@ -37,6 +37,7 @@ from purra.output.contracts import (
     OutputStreamSpec,
 )
 from purra.ports import CancellationSignal, ModelGateway
+from purra.stream_ownership import OwnedAsyncIterator
 
 
 class ModelInvocationOutputObserver(Protocol):
@@ -129,11 +130,15 @@ class AgentModelInvocationManager:
                 await self._fail_operation(operation_id, error)
             raise
         return ManagedInvocationStream(
-            chunks=self._observe_chunks(
+            chunks=OwnedAsyncIterator(
+                self._observe_chunks(
+                    stream.chunks,
+                    receipt,
+                    signal,
+                    operation_id,
+                ),
                 stream.chunks,
-                receipt,
-                signal,
-                operation_id,
+                terminal_predicate=lambda chunk: chunk.finish_reason is not None,
             ),
             receipt=receipt,
         )

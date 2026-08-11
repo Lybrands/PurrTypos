@@ -22,7 +22,7 @@ from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
 )
-from utils.async_stream import (
+from purra.stream_ownership import (
     OwnedAsyncIterator,
     close_async_resource,
     openai_chunk_is_terminal,

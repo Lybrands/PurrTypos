@@ -6,18 +6,25 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Protocol
 
-from purra.contracts import ModelFinishReason, ModelStreamChunk
+from purra.contracts import (
+    ModelFinishReason,
+    ModelStreamChunk,
+    RunCreateParams,
+)
 from purra.errors import (
     ContractViolationError,
     OutputPersistenceError,
+    RunCommitProjectionError,
 )
 from purra.json_values import thaw_json_mapping
 from purra.model_invocation.contracts import ModelInvocationReceipt
 from purra.operations import OperationFinished, OperationStarted
+from purra.events import AgentEvent
 from purra.output.contracts import (
     AgentOutputEvent,
     AgentOutputEventDraft,
     AgentOutputIntent,
+    DelegationOutputEvent,
     DomainEffectOutput,
     FederatedOutputEvent,
     OutputChannel,
@@ -26,6 +33,7 @@ from purra.output.contracts import (
     OutputStreamSpec,
     OutputVisibility,
     RunLifecycleOutputDraft,
+    RuntimeOutputEvent,
     ToolOutputEvent,
 )
 from purra.output.ports import (
@@ -33,7 +41,7 @@ from purra.output.ports import (
     AgentOutputPublisher,
     AgentOutputRepository,
 )
-from purra.ports.run_lifecycle import RunCommit
+from purra.ports.run_lifecycle import RunBeginResult, RunCommit
 
 
 class OutputRecoveryObserver(Protocol):
@@ -88,6 +96,23 @@ class AgentOutputProcessor:
         self._streams[spec.output_stream_id] = opened
         self._chunk_indices.setdefault(spec.output_stream_id, 0)
         return opened
+
+    async def begin_run_lifecycle(
+        self,
+        params: RunCreateParams,
+        started_event: AgentEvent,
+    ) -> RunBeginResult:
+        try:
+            begun, output = await self._repository.begin_run_lifecycle(
+                params,
+                started_event,
+            )
+        except (ContractViolationError, RunCommitProjectionError):
+            raise
+        except Exception as error:
+            raise await self._persistence_error("unbound", error) from error
+        await self._publish_if_visible(output)
+        return begun
 
     async def accept_provider_chunk(
         self,
@@ -267,24 +292,53 @@ class AgentOutputProcessor:
         self,
         commit: RunCommit,
         event: RunLifecycleOutputDraft,
-    ) -> AgentOutputEvent:
+    ) -> tuple[AgentOutputEvent, ...]:
         run_ids = {item.run_id for item in commit.events if item.run_id}
         if len(run_ids) != 1:
             raise ContractViolationError(
                 "run lifecycle commit requires one bound run id"
             )
         run_id = next(iter(run_ids))
+        related_drafts = tuple(
+            AgentOutputEventDraft(
+                run_id=run_id,
+                turn_id=None,
+                output_stream_id=None,
+                invocation_id=None,
+                source_event_key=(
+                    f"run-commit:{run_id}:{index}:{runtime_event.type}"
+                ),
+                source=OutputSource.RUNTIME,
+                kind=OutputEventKind.RUNTIME,
+                channel=OutputChannel.LIFECYCLE,
+                visibility=OutputVisibility.PUBLIC,
+                payload={
+                    "eventType": str(runtime_event.type),
+                    "data": payload,
+                },
+                occurred_at=event.occurred_at,
+            )
+            for index, runtime_event in enumerate(commit.events)
+            if (
+                payload := _public_runtime_payload(
+                    str(runtime_event.type),
+                    runtime_event.payload,
+                )
+            ) is not None
+        )
         try:
             committed = await self._repository.commit_run_lifecycle(
                 run_id,
                 commit,
                 event,
+                related_drafts,
             )
-        except ContractViolationError:
+        except (ContractViolationError, RunCommitProjectionError):
             raise
         except Exception as error:
             raise await self._persistence_error(run_id, error) from error
-        await self._publish_if_visible(committed)
+        for output in committed:
+            await self._publish_if_visible(output)
         return committed
 
     async def accept_tool_event(self, event: ToolOutputEvent) -> AgentOutputEvent:
@@ -334,6 +388,32 @@ class AgentOutputProcessor:
             occurred_at=event.occurred_at,
         ))
 
+    async def accept_runtime_event(
+        self,
+        event: RuntimeOutputEvent,
+    ) -> AgentOutputEvent | None:
+        if not isinstance(event, RuntimeOutputEvent):
+            raise TypeError("output processor requires a RuntimeOutputEvent")
+        payload = _public_runtime_payload(event.event_type, event.payload)
+        if payload is None:
+            return None
+        return await self._append(AgentOutputEventDraft(
+            run_id=event.run_id,
+            turn_id=None,
+            output_stream_id=None,
+            invocation_id=None,
+            source_event_key=f"runtime:{event.event_id}",
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.RUNTIME,
+            channel=OutputChannel.LIFECYCLE,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "eventType": event.event_type,
+                "data": payload,
+            },
+            occurred_at=event.occurred_at,
+        ))
+
     async def accept_federated_event(
         self,
         event: FederatedOutputEvent,
@@ -354,9 +434,13 @@ class AgentOutputProcessor:
             channel=OutputChannel.DELEGATION,
             visibility=source.visibility,
             payload={
+                "eventType": "child_output",
                 "delegationId": event.delegation_id,
                 "parentRunId": event.parent_run_id,
                 "sourceRunId": source.run_id,
+                "agentRole": event.agent_role,
+                "agentTitle": event.agent_title,
+                "objective": event.objective,
                 "sourceSequence": source.sequence,
                 "event": {
                     "eventId": source.event_id,
@@ -375,6 +459,36 @@ class AgentOutputProcessor:
                 },
             },
             occurred_at=source.occurred_at,
+        ))
+
+    async def accept_delegation_event(
+        self,
+        event: DelegationOutputEvent,
+    ) -> AgentOutputEvent:
+        if not isinstance(event, DelegationOutputEvent):
+            raise TypeError("output processor requires a DelegationOutputEvent")
+        return await self._append(AgentOutputEventDraft(
+            run_id=event.parent_run_id,
+            turn_id=None,
+            output_stream_id=None,
+            invocation_id=None,
+            source_event_key=f"delegation-status:{event.event_id}",
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.DELEGATION,
+            channel=OutputChannel.DELEGATION,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "eventType": "status",
+                "delegationId": event.delegation_id,
+                "parentRunId": event.parent_run_id,
+                "childRunId": event.child_run_id,
+                "agentRole": event.agent_role,
+                "agentTitle": event.agent_title,
+                "objective": event.objective,
+                "status": event.status,
+                "errorCode": event.error_code,
+            },
+            occurred_at=event.occurred_at,
         ))
 
     def _provider_draft(
@@ -462,6 +576,45 @@ def _content_destination(
     if spec.intent is AgentOutputIntent.FINAL_PUBLIC:
         return OutputChannel.FINAL, OutputVisibility.PUBLIC
     return OutputChannel.DIAGNOSTIC, OutputVisibility.PRIVATE
+
+
+def _public_runtime_payload(
+    event_type: str,
+    payload: Mapping[str, object],
+) -> dict[str, object] | None:
+    if event_type not in _PUBLIC_RUNTIME_EVENT_TYPES:
+        return None
+    public = thaw_json_mapping(payload)
+    if event_type == "run.todos_updated":
+        steps = public.get("steps")
+        if isinstance(steps, list):
+            public["steps"] = [
+                step for step in steps
+                if not (
+                    isinstance(step, Mapping)
+                    and bool(step.get("protocol_private"))
+                )
+            ]
+    elif event_type == "run.todo_updated":
+        step = public.get("step")
+        if isinstance(step, Mapping) and bool(step.get("protocol_private")):
+            return None
+    return public
+
+
+_PUBLIC_RUNTIME_EVENT_TYPES = frozenset({
+    "run.todos_updated",
+    "run.todo_updated",
+    "approval.requested",
+    "approval.resolved",
+    "context.budgeted",
+    "context.usage_recorded",
+    "conversation.compaction.started",
+    "conversation.compaction.completed",
+    "task.admission_decided",
+    "long_task.dispatched",
+    "long_task.progress",
+})
 
 
 __all__ = ["AgentOutputProcessor", "OutputRecoveryObserver"]

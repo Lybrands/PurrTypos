@@ -34,3 +34,8 @@
     color: var(--text-muted);
   }
 }
+
+.bubble-tool-call-duration {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}

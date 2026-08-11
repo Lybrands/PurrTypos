@@ -14,7 +14,7 @@ from infrastructure.screenplay import (
 )
 
 
-class _ChainedEventProjector:
+class _ChainedRunCommitProjector:
     def __init__(self, *projectors) -> None:
         self._projectors = tuple(projectors)
 
@@ -22,7 +22,7 @@ class _ChainedEventProjector:
         for projector in self._projectors:
             projected = await projector.project(run_id, event)
             if projected is not None:
-                raise TypeError("domain event projector must return None")
+                raise TypeError("run commit projector must return None")
 
 
 def create_agent_composition(
@@ -32,16 +32,16 @@ def create_agent_composition(
     """Install product profiles without teaching generic composition domains."""
 
     registrations = tuple(kwargs.pop("profile_registrations", ()))
-    supplied_projector = kwargs.pop("event_projector", None)
+    supplied_projector = kwargs.pop("run_commit_projector", None)
     screenplay_projector = ScreenplayCandidateCompletionProjector(db)
-    event_projector = (
-        _ChainedEventProjector(screenplay_projector, supplied_projector)
+    run_commit_projector = (
+        _ChainedRunCommitProjector(screenplay_projector, supplied_projector)
         if supplied_projector is not None
         else screenplay_projector
     )
     return AgentComposition(
         db,
-        event_projector=event_projector,
+        run_commit_projector=run_commit_projector,
         profile_registrations=(
             *registrations,
             AgentProfileRegistration(

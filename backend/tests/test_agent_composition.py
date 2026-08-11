@@ -20,6 +20,8 @@ from purra.contracts import (
     ToolExecutionMode,
 )
 from purra.events import AgentEvent, CoreEventType
+from purra.api import AgentModelTaskRunner
+from purra.model_invocation import ModelInvocationContext
 from purra.tools import InMemoryApprovalGateway
 from application.agent_composition import (
     AgentComposition,
@@ -41,6 +43,10 @@ from routers.ai import (
     resolve_pending_tool_approval,
 )
 from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
+from tests.support.canonical_wire import (
+    assert_raw_canonical_wire,
+    project_wire_events_for_legacy_assertions,
+)
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -349,22 +355,22 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
         "对照当前章节与关联大纲，找出两处不一致，并给出最小修改建议。"
     )
     p3_request = _request("读取当前章节，给出一个150字以内的摘要。")
-    p5_judges = composition.create_response_judges("key", p5_request)
-    p3_judges = composition.create_response_judges("key", p3_request)
+    p5_judges = composition.create_response_judge_policies(p5_request)
+    p3_judges = composition.create_response_judge_policies(p3_request)
     core = composition.create_core("key")
     p5_options = writing_run_options(
         p5_request,
         {"max_tokens": 2_048},
-        response_judges=p5_judges,
+        response_judge_policies=p5_judges,
     )
     p3_options = writing_run_options(
         p3_request,
         {"max_tokens": 2_048},
-        response_judges=p3_judges,
+        response_judge_policies=p3_judges,
     )
 
-    assert len(p5_options.response_judges) == 1
-    assert p3_options.response_judges == ()
+    assert len(p5_options.response_judge_policies) == 1
+    assert p3_options.response_judge_policies == ()
     assert not hasattr(core, "_response_judges")
 
 
@@ -376,20 +382,22 @@ async def test_composition_wires_compaction_into_core_not_run_service(
 
     core = composition.create_core("key")
 
-    assert isinstance(
-        core._conversation_compactor,
-        ContextCompressionCoordinator,
-    )
-    assert isinstance(
+    assert core._conversation_compactor_factory is not None
+    compactor = core._conversation_compactor_factory(AgentModelTaskRunner(
+        core._model_invocations,
+        ModelInvocationContext(run_id="composition-test-run"),
+    ))
+    assert not isinstance(
         core._conversation_compactor.hook,
         ConversationCompactionService,
     )
-    assert core._conversation_compactor.hook._repository is (
+    assert isinstance(compactor.hook, ConversationCompactionService)
+    assert compactor.hook._repository is (
         composition.conversation_compaction_repository
     )
-    assert core._conversation_compactor.settings.trigger_ratio == 0.85
+    assert compactor.settings.trigger_ratio == 0.85
     assert (
-        core._conversation_compactor.settings.default_keep_recent_messages
+        compactor.settings.default_keep_recent_messages
         == 20
     )
 
@@ -540,7 +548,7 @@ def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
     assert options.output_limit.max_tokens == 1_000
 
 
-def test_sse_mapping_preserves_public_run_and_domain_event_names():
+def _legacy_sse_mapping_reference():
     started = core_update_to_sse_chunk(
         AgentEvent(
             type=CoreEventType.RUN_STARTED,
@@ -753,7 +761,7 @@ def test_sse_mapping_preserves_public_run_and_domain_event_names():
     }
 
 
-def test_legacy_sse_mapping_cannot_create_public_output():
+def _legacy_sse_mapping_cannot_create_public_output():
     def mapped(event_type: CoreEventType, delta: str):
         return core_update_to_sse_chunk(
             AgentEvent(
@@ -768,18 +776,18 @@ def test_legacy_sse_mapping_cannot_create_public_output():
         "assistant.commentary_delta",
         "正在核对人物关系。",
     ) is None
-    assert mapped(
-        "assistant.final_delta",
-        "核对完成。",
-    ) is None
-    assert mapped(
-        "model.reasoning_delta",
-        "private chain",
-    ) is None
-    assert mapped(
-        "model.content_delta",
-        '{"private":"payload"}',
-    ) is None
+
+
+def test_sse_mapping_rejects_legacy_agent_events():
+    with pytest.raises(TypeError, match="canonical output"):
+        core_update_to_sse_chunk(
+            AgentEvent(
+                type=CoreEventType.RUN_STARTED,
+                run_id="run-legacy",
+                payload={"status": "running"},
+            ),
+            model="model",
+        )
 
 
 @pytest.mark.asyncio
@@ -840,22 +848,36 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
     class _FakeCore:
         def __init__(self, owner):
             self._owner = owner
+            self.run_id = ""
 
-        async def run(self, _request, *, options, signal):
-            assert signal is not None
+        async def submit(self, _request, *, options):
             self._owner.options.append(options)
+            self.run_id = f"run-{len(self._owner.options)}"
             if len(self._owner.options) == 1:
                 self._owner.unsupported_callback()
-            yield AgentEvent(
-                type=CoreEventType.RUN_STARTED,
-                run_id=f"run-{len(self._owner.options)}",
-                payload={"status": "running"},
-            )
-            yield AgentRunResult(
-                run_id=f"run-{len(self._owner.options)}",
-                status=RunStatus.DONE,
-                model="resolved-model",
-            )
+
+            core = self
+
+            class _FakeHandle:
+                run_id = core.run_id
+
+                def subscribe(self, after_sequence=0):
+                    assert after_sequence == 0
+
+                    async def _events():
+                        if False:
+                            yield None
+
+                    return _events()
+
+                async def wait(self):
+                    return AgentRunResult(
+                        run_id=self.run_id,
+                        status=RunStatus.DONE,
+                        model="resolved-model",
+                    )
+
+            return _FakeHandle()
 
     class _FakeComposition:
         def __init__(self):
@@ -873,14 +895,14 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
             self.unsupported_callback = on_required_tool_choice_unsupported or (lambda: None)
             return _FakeCore(self)
 
-        def create_response_judges(self, _api_key, _request):
+        def create_response_judge_policies(self, _request):
             return ()
 
         def observe_event(self, _event):
             return None
 
-        async def release_run(self, run_id):
-            self.released.append(run_id)
+        def release_core(self, core):
+            self.released.append(core.run_id)
 
     composition = _FakeComposition()
     set_agent_composition(composition)  # type: ignore[arg-type]
@@ -922,8 +944,24 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
     )
     assert composition.options[0].force_planned_tool_choice is True
     assert composition.options[1].force_planned_tool_choice is False
-    assert first[-1] == {"done": True, "model": "resolved-model"}
-    assert second[-1] == {"done": True, "model": "resolved-model"}
+    assert first[-1] == {
+        "done": True,
+        "model": "resolved-model",
+        "runResult": {
+            "runId": "run-1",
+            "status": "done",
+            "errorCode": None,
+        },
+    }
+    assert second[-1] == {
+        "done": True,
+        "model": "resolved-model",
+        "runResult": {
+            "runId": "run-2",
+            "status": "done",
+            "errorCode": None,
+        },
+    }
     assert composition.released == ["run-1", "run-2"]
 
 
@@ -932,6 +970,8 @@ async def test_composed_route_uses_complete_purra(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    round_number = 0
+
     async def _create_chat_stream(
         key,
         messages,
@@ -939,10 +979,12 @@ async def test_composed_route_uses_complete_purra(
         api_provider,
         signal=None,
     ):
+        nonlocal round_number
+        round_number += 1
         assert key == "key"
         assert api_provider == "openai"
         assert options["model"] == "model"
-        assert options.get("tools")
+        assert bool(options.get("tools")) is (round_number == 1)
         assert signal is not None
 
         async def _stream():
@@ -976,11 +1018,16 @@ async def test_composed_route_uses_complete_purra(
     )
     events = await _collect(response)
 
-    assert any("agentRunStarted" in event for event in events)
-    assert any("contextBudget" in event for event in events)
-    assert "".join(event.get("delta", "") for event in events) == "完成"
-    assert any("agentRunCompleted" in event for event in events)
-    assert events[-1] == {"done": True, "model": "model"}
+    assert_raw_canonical_wire(events)
+    projected = project_wire_events_for_legacy_assertions(events)
+    assert any("agentRunStarted" in event for event in projected)
+    assert any("contextBudget" in event for event in projected)
+    assert round_number == 2
+    assert "".join(event.get("delta", "") for event in projected) == "完成"
+    assert any("agentRunCompleted" in event for event in projected)
+    assert events[-1]["done"] is True
+    assert events[-1]["model"] == "model"
+    assert events[-1]["runResult"]["status"] == "done"
 
 
 @pytest.mark.asyncio
@@ -1053,7 +1100,15 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
         signal=asyncio.Event(),
     ):
         chunks.append(chunk)
-        approval = chunk.get("toolApprovalRequired")
+        payload = chunk.get("payload")
+        approval = (
+            payload.get("data")
+            if chunk.get("kind") == "runtime.event"
+            and isinstance(payload, dict)
+            and payload.get("eventType") == "approval.requested"
+            and isinstance(payload.get("data"), dict)
+            else None
+        )
         if approval:
             resolved = await resolve_pending_tool_approval(
                 approval["approvalId"],
@@ -1064,17 +1119,16 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
                 "data": {"status": "rejected"},
             }
 
-    assert round_number == 2
-    assert any("toolApprovalRequired" in chunk for chunk in chunks)
-    assert any(
-        item["content"].find("approval_rejected") >= 0
-        for chunk in chunks
-        for item in chunk.get("toolResults", [])
-    )
-    assert "".join(chunk.get("delta", "") for chunk in chunks) == (
-        "您已拒绝审批；操作未执行，相关数据仍保留。"
-    )
-    assert chunks[-1] == {"done": True, "model": "model"}
+    assert round_number == 3
+    assert_raw_canonical_wire(chunks)
+    projected = project_wire_events_for_legacy_assertions(chunks)
+    assert any("toolApprovalRequired" in chunk for chunk in projected)
+    assert any("toolApprovalResolved" in chunk for chunk in projected)
+    assert not any(chunk.get("toolResults") for chunk in projected)
+    assert "".join(chunk.get("delta", "") for chunk in projected) == "已保留人物"
+    assert chunks[-1]["done"] is True
+    assert chunks[-1]["model"] == "model"
+    assert chunks[-1]["runResult"]["status"] == "done"
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from purra.events import AgentEvent, CoreEventType
+from purra.contracts import RunStatus
+from purra.errors import RunCommitProjectionError
+from purra.ports import RunCommit
 
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE,
@@ -16,10 +18,10 @@ from infrastructure.screenplay.tools.candidate_artifact import (
 )
 
 
-class ScreenplayCandidateCompletionError(RuntimeError):
+class ScreenplayCandidateCompletionError(RunCommitProjectionError):
     """A completed model result could not become a durable candidate."""
 
-    code = "candidate_commit_failed"
+    default_code = "candidate_commit_failed"
 
 
 class ScreenplayCandidateCompletionProjector:
@@ -35,9 +37,9 @@ class ScreenplayCandidateCompletionProjector:
     async def project(
         self,
         run_id: str,
-        event: AgentEvent,
+        commit: RunCommit,
     ) -> None:
-        if event.type != CoreEventType.RUN_COMPLETED:
+        if commit.terminal_status is not RunStatus.DONE:
             return None
         row = await self._db.fetch_one(
             "SELECT binding_attributes_json FROM ai_agent_runs "
@@ -58,7 +60,10 @@ class ScreenplayCandidateCompletionProjector:
         try:
             host_capture = projection.get("hostCapture")
             if isinstance(host_capture, Mapping):
-                candidate = _host_candidate(host_capture, event)
+                candidate = _host_candidate(
+                    host_capture,
+                    commit.validated_result,
+                )
                 scope = projection.get("scope")
                 if not isinstance(scope, Mapping):
                     raise ValueError("candidate projection scope is missing")
@@ -94,13 +99,13 @@ def _json_mapping(value: object) -> dict[str, object]:
 
 def _host_candidate(
     capture: Mapping[str, object],
-    event: AgentEvent,
+    validated_result: str | None,
 ) -> dict[str, object]:
     template = capture.get("candidateTemplate")
     if not isinstance(template, Mapping):
         raise ValueError("host candidate template is missing")
     text_field = str(capture.get("textField") or "").strip()
-    text = str(event.payload.get("final_response") or "").strip()
+    text = str(validated_result or "").strip()
     if not text_field or not text:
         raise ValueError("host candidate response is empty")
     candidate = dict(template)

@@ -524,6 +524,7 @@ async def get_latest_session_agent_run(
         return {"success": True, "data": None}
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
+        composition.output_repository,
         role_registry=getattr(composition, "agent_role_registry", None),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
@@ -551,6 +552,7 @@ async def get_agent_run_snapshot(
     composition = get_agent_composition()
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
+        composition.output_repository,
         role_registry=getattr(composition, "agent_role_registry", None),
     ).get_snapshot(
         run_id,

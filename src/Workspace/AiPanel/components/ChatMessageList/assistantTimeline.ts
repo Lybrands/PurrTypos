@@ -1,5 +1,9 @@
 import { getAssistantRenderableMarkdown } from "../../rendering";
 import type { ChatMessage, ToolCallSegment } from "../../hooks/chat.types";
+import type { CanonicalOperation } from "../../../../agent-runtime/canonicalOutput";
+import { toolCallDisplayRow } from "../../hooks/toolCallLabels";
+export { groupConsecutiveWorkSteps } from "../WorkLog/grouping";
+export type { WorkLogTimelineItem } from "../WorkLog/grouping";
 
 export type TimelineCommentaryPart = {
   type: "commentary";
@@ -25,25 +29,33 @@ export type TimelineContextCompactionPart = {
   type: "contextCompaction";
   state: NonNullable<ChatMessage["contextCompaction"]>;
 };
+export type TimelineCanonicalOperationPart = {
+  type: "operation";
+  operation: CanonicalOperation;
+  label: string;
+};
 
 export type AssistantTimelinePart =
   | TimelineCommentaryPart
   | TimelineToolsPart
   | TimelineTextPart
   | TimelineDelegationsPart
-  | TimelineContextCompactionPart;
+  | TimelineContextCompactionPart
+  | TimelineCanonicalOperationPart;
 
 export type TimelineStepPart = TimelineCommentaryPart | TimelineToolsPart;
 export type TimelineOperationPart =
   | TimelineToolsPart
   | TimelineDelegationsPart
-  | TimelineContextCompactionPart;
+  | TimelineContextCompactionPart
+  | TimelineCanonicalOperationPart;
 
 export interface OperationGroupProgress {
   total: number;
   completed: number;
   current: number;
   active: boolean;
+  parallel: boolean;
 }
 
 export interface BuildAssistantTimelineOptions {
@@ -51,6 +63,8 @@ export interface BuildAssistantTimelineOptions {
   isStreaming?: boolean;
   isLastAssistant?: boolean;
   loading?: boolean;
+  /** 子 Run 可显示已收到的普通文本；根回答始终保持终态原子提交。 */
+  allowStreamingText?: boolean;
 }
 
 export function getAssistantProcessingLabel(_message: ChatMessage): string {
@@ -65,6 +79,12 @@ export function getOperationGroupProgress(
   let activeCount = 0;
 
   for (const part of parts) {
+    if (part.type === "operation") {
+      total += 1;
+      if (part.operation.status === "running") activeCount += 1;
+      else completed += 1;
+      continue;
+    }
     if (part.type === "tools") {
       const visibleIndexes = part.segment.labels.flatMap((_label, index) =>
         part.segment.cachedFlags?.[index] ? [] : [index],
@@ -102,6 +122,7 @@ export function getOperationGroupProgress(
       ? Math.min(total, completed + Math.max(1, activeCount))
       : completed,
     active,
+    parallel: activeCount > 1,
   };
 }
 
@@ -117,7 +138,8 @@ function isTimelineOperationPart(
 ): part is TimelineOperationPart {
   return part.type === "tools"
     || part.type === "delegations"
-    || part.type === "contextCompaction";
+    || part.type === "contextCompaction"
+    || part.type === "operation";
 }
 
 export function getExecutionPanelPresentation(
@@ -164,8 +186,57 @@ export function buildAssistantTimeline(
   const segments = message.toolCallSegments ?? [];
   const blocks = message.commentaryBlocks ?? [];
   const durations = message.commentaryDurationsMs ?? [];
-  const { messageIndex, isStreaming, isLastAssistant, loading } = opts;
+  const {
+    messageIndex,
+    isStreaming,
+    isLastAssistant,
+    loading,
+    allowStreamingText = false,
+  } = opts;
   const emittedBlocks = new Set<number>();
+
+  if (message.canonicalOutput) {
+    const canonicalParts: Array<{
+      sequence: number;
+      part: AssistantTimelinePart;
+    }> = [];
+    message.canonicalOutput.commentaryBlocks
+      .filter((block) => !block.aborted && block.text.trim())
+      .forEach((block) => {
+        canonicalParts.push({
+          sequence: block.firstSequence,
+          part: {
+            type: "commentary",
+            md: block.text.trim(),
+            startedAt: Date.parse(block.startedAt),
+            regionKey: `${messageIndex}-canonical-commentary-${block.outputStreamId}`,
+          },
+        });
+      });
+    message.canonicalOutput.operationOrder.forEach((operationId) => {
+      const operation = message.canonicalOutput?.operations[operationId];
+      if (!operation) return;
+      canonicalParts.push({
+        sequence: operation.firstSequence,
+        part: {
+          type: "operation",
+          operation,
+          label: canonicalOperationLabel(operation),
+        },
+      });
+    });
+    canonicalParts
+      .sort((left, right) => left.sequence - right.sequence)
+      .forEach(({ part }) => parts.push(part));
+
+    const canonicalMarkdown = isStreaming
+      ? message.streamingContent || message.content
+      : message.content;
+    if (canonicalMarkdown.trim()) {
+      parts.push({ type: "text", md: canonicalMarkdown });
+    }
+    return parts;
+  }
 
   const appendCommentary = (
     blockIndex: number | null | undefined,
@@ -212,8 +283,14 @@ export function buildAssistantTimeline(
   const assistantMarkdown = getAssistantRenderableMarkdown(message);
   // Defense in depth: even stale/replayed state must not expose answer text
   // while the root turn is still receiving process events.
-  if (!isStreaming && assistantMarkdown.trim()) {
-    parts.push({ type: "text", md: assistantMarkdown });
+  if (
+    (message.streamingContent || !isStreaming || allowStreamingText)
+    && (message.streamingContent || assistantMarkdown).trim()
+  ) {
+    parts.push({
+      type: "text",
+      md: message.streamingContent || assistantMarkdown,
+    });
   }
 
   if (isStreaming && message.commentary?.trim()) {
@@ -226,4 +303,22 @@ export function buildAssistantTimeline(
   }
 
   return parts;
+}
+
+function canonicalOperationLabel(operation: CanonicalOperation): string {
+  const params = operation.display.labelParams;
+  const toolName = typeof params.toolName === "string"
+    ? params.toolName
+    : operation.toolName;
+  if (operation.kind === "tool" && toolName) {
+    return toolCallDisplayRow(toolName, {}, [], []).label;
+  }
+  const labels: Record<string, string> = {
+    model: "调用模型",
+    validation: "校验输出",
+    context_compaction: "压缩上下文",
+    delegation: "委派子 Agent",
+    tool: "执行工具",
+  };
+  return labels[operation.kind] || "执行操作";
 }

@@ -14,7 +14,7 @@ from purra.contracts import (
     ReasoningMode,
 )
 from purra.json_values import thaw_json_mapping
-from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.api import AgentModelTask, AgentModelTaskRunner
 from purra.ports import CancellationSignal
 from domains.writing.memory_reranking import (
     MemoryCandidateCard,
@@ -51,14 +51,14 @@ _CONNECTION_OPTION_KEYS = frozenset({"baseURL", "max_tokens"})
 class ModelBackedMemoryReranker:
     """Batch candidate cards through the request's configured chat model."""
 
-    model_executor: ManagedModelExecutor
+    model_tasks: AgentModelTaskRunner
     batch_size: int = 40
     context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model_executor, ManagedModelExecutor):
+        if not isinstance(self.model_tasks, AgentModelTaskRunner):
             raise TypeError(
-                "story-memory reranker requires a ManagedModelExecutor"
+                "story-memory reranker requires PurrA Run model tasks"
             )
         if not 4 <= int(self.batch_size) <= 40:
             raise ValueError("story-memory rerank batch size must be between 4 and 40")
@@ -203,9 +203,9 @@ class ModelBackedMemoryReranker:
         reasoning_mode: ReasoningMode,
         signal: CancellationSignal | None,
     ):
-        result = await self.model_executor.complete(
+        result = await self.model_tasks.complete(
             messages,
-            ManagedModelCall(
+            AgentModelTask(
                 request=_deterministic_request(model_request),
                 reasoning_mode=reasoning_mode,
             ),

@@ -2271,12 +2271,27 @@ export interface ElectronAPI {
   onAiChunk: (
     callback: (chunk: {
       streamId?: string;
+      /** Raw canonical PurrA output event. Transport adds only streamId. */
+      eventId?: string;
+      outputStreamId?: string | null;
+      runId?: string;
+      turnId?: string | null;
+      invocationId?: string | null;
+      sequence?: number;
+      source?: "provider" | "runtime" | "tool" | "domain";
+      kind?: string;
+      channel?: "commentary" | "final" | "operation" | "lifecycle" | "error" | "diagnostic" | "delegation";
+      visibility?: "public" | "private" | "diagnostic";
+      payload?: Record<string, unknown>;
+      occurredAt?: string;
+      emittedAt?: string;
+      /** Transport terminal metadata; never Assistant-authored content. */
+      runResult?: {
+        runId: string;
+        status: "done" | "failed" | "blocked" | "canceled" | string;
+        errorCode?: string | null;
+      };
       delta?: string;
-      commentaryDelta?: string;
-      /** Provider raw model content; diagnostics only. */
-      modelContentDelta?: string;
-      /** Provider raw reasoning; diagnostics only, never conversation UI. */
-      reasoningDelta?: string;
       done?: boolean;
       aborted?: boolean;
       /** False when execution settled without a product-level final answer. */
@@ -2285,18 +2300,6 @@ export interface ElectronAPI {
       /** 本地自动创建的脱敏错误报告。 */
       errorReport?: AiErrorReport;
       model?: string;
-      toolCalls?: {
-        id: string;
-        type: string;
-        displayNames?: Record<string, string>;
-        function: { name: string; arguments: string };
-      }[];
-      toolCallsInProgress?: boolean;
-      toolResults?: {
-        tool_call_id: string;
-        name?: string;
-        content: string;
-      }[];
       chapterCreated?: {
         chapterId: EntityId;
         title: string;
@@ -2322,87 +2325,6 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
-      /** 高风险工具需要用户在当前 SSE 回合中批准或拒绝。 */
-      toolApprovalRequired?: ToolApprovalRequest;
-      /** 审批的服务端最终状态（包含超时与连接取消）。 */
-      toolApprovalResolved?: {
-        runId?: string;
-        approvalId: string;
-        toolName: string;
-        status: Exclude<ToolApprovalStatus, "pending">;
-      };
-      /** Host-side accounting for the complete model context window. */
-      contextBudget?: Partial<AiContextBudgetState>;
-      contextCompaction?: AiContextCompactionState;
-      modelInvocation?: {
-        phase: string;
-        count?: number;
-        toolNames?: string[];
-        toolChoice?: string;
-        round?: number;
-        logicalRound?: number;
-        attempt?: number;
-        revision?: number;
-        judgeIndex?: number;
-        parameters?: Record<string, unknown>;
-      };
-      /** 当前批次内第 index 个工具已执行完成（0-based），用于逐条更新 UI */
-      toolIndexCompleted?: number;
-      /** 完成事件的稳定工具标识和结果，用于错误诊断。 */
-      toolCallId?: string;
-      toolName?: string;
-      toolOutcome?: "completed" | "failed" | "rejected" | "canceled" | string;
-      toolErrorCode?: string;
-      toolExceptionType?: string;
-      /** 本次完成是否命中会话内只读缓存（不读库）；为 true 时前端可隐藏该行 */
-      toolFromCache?: boolean;
-      agentRunStarted?: {
-        runId: string;
-        status: string;
-        title?: string;
-        goal?: string | null;
-      };
-      agentRunTodosUpdated?: AiTaskPlanChunk & { runId: string };
-      agentRunTodoUpdated?: {
-        runId: string;
-        stepId: string;
-        step: AiTaskPlanChunk["steps"][number];
-        status?: string;
-      };
-      agentRunCompleted?: {
-        runId: string;
-        status: "done";
-        finalResponse?: string;
-      };
-      agentRunFailed?: { runId: string; status: "failed"; error?: string };
-      agentRunBlocked?: { runId: string; status: "blocked" };
-      agentRunCanceled?: { runId: string; status: "canceled"; reason?: string };
-      agentDelegationCreated?: AiAgentDelegation & { runId: string };
-      agentDelegationUpdated?: AiAgentDelegation & { runId: string };
-      /** Canonical child-Run event projected through the parent Run stream. */
-      agentSubRunEvent?: {
-        runId: string;
-        parentRunId: string;
-        rootRunId: string;
-        delegationId: string;
-        childRunId?: string | null;
-        agentRole: string;
-        agentTitle?: string | null;
-        objective?: string;
-        unitId?: string;
-        attempt?: number;
-        chunk: Record<string, unknown>;
-      };
-      taskAdmission?: {
-        runId: string;
-        mode: 'inline' | 'durable' | 'clarify' | 'reject';
-        reasonCode: string;
-        estimatedUnits: number;
-        estimatedModelCalls: number;
-        requiresConfirmation: boolean;
-        /** Present on events emitted after durable step coverage was introduced. */
-        coveredStepIds?: string[];
-      };
       longTaskDispatched?: {
         runId: string;
         taskId: string;

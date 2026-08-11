@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from uuid import uuid4
 
 from purra.cancellation import await_with_cancellation, is_canceled
 from purra.contracts import (
@@ -21,8 +20,10 @@ from purra.contracts import (
     ModelTokenUsage,
     MessageRole,
     ReasoningMode,
+    ResponseValidationResult,
 )
-from purra.errors import ModelGatewayError
+from purra.errors import ModelGatewayError, ResponseJudgeContractError
+from purra.json_values import thaw_json_mapping
 from purra.model_invocation import (
     AgentModelCall,
     AgentModelInvocationManager,
@@ -34,7 +35,7 @@ from purra.model_protocol import (
     resolve_invocation_output_limit,
 )
 from purra.output import AgentOutputIntent, OutputCommitMode
-from purra.ports import CancellationSignal, ModelGateway
+from purra.ports import CancellationSignal, ResponseJudgePolicy
 from purra.recovery import (
     EMPTY_RESPONSE_RETRY_GUIDANCE,
     RecoveryAction,
@@ -46,8 +47,8 @@ from purra.recovery import (
 
 
 @dataclass(frozen=True, slots=True)
-class ManagedModelCall:
-    """Host-declared intent for one no-tool model operation."""
+class AgentModelTask:
+    """Extension-declared intent for one PurrA-owned private model task."""
 
     request: ModelRequest
     output_limit: InvocationOutputLimit | None = None
@@ -71,14 +72,14 @@ class ManagedModelCall:
 
 
 @dataclass(frozen=True, slots=True)
-class ManagedModelCompletion:
+class AgentModelTaskCompletion:
     completion: ModelCompletion
     output_limit: InvocationOutputLimit
     call_parameters: tuple[Mapping[str, object], ...]
 
 
 @dataclass(frozen=True, slots=True)
-class ManagedModelStream:
+class AgentModelTaskStream:
     chunks: AsyncIterator[ModelStreamChunk]
     model: str
     output_limit: InvocationOutputLimit
@@ -86,7 +87,7 @@ class ManagedModelStream:
 
 
 @dataclass(frozen=True, slots=True)
-class ManagedModelTextResult:
+class AgentModelTextResult:
     content: str
     reasoning: str
     finish_reason: ModelFinishReason
@@ -94,33 +95,42 @@ class ManagedModelTextResult:
     attempts: int
 
 
-ManagedChunkObserver = Callable[[ModelStreamChunk], Awaitable[None]]
+AgentModelChunkObserver = Callable[[ModelStreamChunk], Awaitable[None]]
 
 
-class ManagedModelExecutor:
-    """The only public PurrA boundary for host-owned model sub-operations."""
+class AgentModelTaskRunner:
+    """Run-bound PurrA capability injected into extension factories."""
 
-    def __init__(self, gateway: ModelGateway) -> None:
-        self._manager = AgentModelInvocationManager(gateway)
+    def __init__(
+        self,
+        manager: AgentModelInvocationManager,
+        context: ModelInvocationContext,
+    ) -> None:
+        if not isinstance(manager, AgentModelInvocationManager):
+            raise TypeError("model task runner requires PurrA's invocation manager")
+        if not isinstance(context, ModelInvocationContext):
+            raise TypeError("model task runner requires a Run context")
+        self._manager = manager
+        self._context = context
 
     async def complete(
         self,
         messages: Sequence[AgentMessage],
-        call: ManagedModelCall,
+        call: AgentModelTask,
         signal: CancellationSignal | None = None,
         *,
         on_attempt: (
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
-    ) -> ManagedModelCompletion:
+    ) -> AgentModelTaskCompletion:
         managed = await self._manager.complete(
             messages,
             _agent_call(call),
-            _detached_context(),
+            self._context,
             signal,
             on_attempt=on_attempt,
         )
-        return ManagedModelCompletion(
+        return AgentModelTaskCompletion(
             completion=managed.completion,
             output_limit=managed.receipt.output_limit,
             call_parameters=managed.receipt.call_parameters,
@@ -129,21 +139,21 @@ class ManagedModelExecutor:
     async def stream(
         self,
         messages: Sequence[AgentMessage],
-        call: ManagedModelCall,
+        call: AgentModelTask,
         signal: CancellationSignal | None = None,
         *,
         on_attempt: (
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
-    ) -> ManagedModelStream:
+    ) -> AgentModelTaskStream:
         managed = await self._manager.stream(
             messages,
             _agent_call(call),
-            _detached_context(),
+            self._context,
             signal,
             on_attempt=on_attempt,
         )
-        return ManagedModelStream(
+        return AgentModelTaskStream(
             chunks=_validated_chunks(managed.chunks, signal),
             model=managed.receipt.model,
             output_limit=managed.receipt.output_limit,
@@ -153,15 +163,15 @@ class ManagedModelExecutor:
     async def stream_text(
         self,
         messages: Sequence[AgentMessage],
-        call: ManagedModelCall,
+        call: AgentModelTask,
         signal: CancellationSignal | None = None,
         *,
         on_attempt: (
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
-        on_chunk: ManagedChunkObserver | None = None,
+        on_chunk: AgentModelChunkObserver | None = None,
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
-    ) -> ManagedModelTextResult:
+    ) -> AgentModelTextResult:
         """Collect one no-tool response with bounded empty-output recovery."""
 
         original_messages = tuple(messages)
@@ -201,7 +211,7 @@ class ManagedModelExecutor:
             content = "".join(content_parts)
             reasoning = "".join(reasoning_parts)
             if content.strip():
-                return ManagedModelTextResult(
+                return AgentModelTextResult(
                     content=content,
                     reasoning=reasoning,
                     finish_reason=finish_reason,
@@ -235,7 +245,74 @@ class ManagedModelExecutor:
             ))
 
 
-def _agent_call(call: ManagedModelCall) -> AgentModelCall:
+@dataclass(frozen=True, slots=True)
+class AgentModelResponseJudge:
+    """PurrA-owned model invocation around a domain-only judge policy."""
+
+    model_tasks: AgentModelTaskRunner
+    model_request: ModelRequest
+    policy: ResponseJudgePolicy
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model_tasks, AgentModelTaskRunner):
+            raise TypeError("model response judge requires PurrA Run model tasks")
+        if not isinstance(self.model_request, ModelRequest):
+            raise TypeError("model response judge requires a ModelRequest")
+        if not isinstance(self.policy, ResponseJudgePolicy):
+            raise TypeError("model response judge requires a ResponseJudgePolicy")
+
+    async def judge(
+        self,
+        *,
+        content: str,
+        messages: Sequence[AgentMessage],
+        signal: CancellationSignal | None = None,
+    ) -> ResponseValidationResult:
+        judge_messages = self.policy.build_messages(
+            content=content,
+            messages=messages,
+        )
+        completion = (
+            await self.model_tasks.complete(
+                judge_messages,
+                AgentModelTask(
+                    request=_deterministic_private_request(self.model_request),
+                    reasoning_mode=ReasoningMode.DISABLED,
+                ),
+                signal,
+            )
+        ).completion
+        if (
+            completion.message.role is not MessageRole.ASSISTANT
+            or completion.message.tool_calls
+            or not isinstance(completion.message.content, str)
+        ):
+            raise ResponseJudgeContractError(
+                "semantic judge returned an unsupported message"
+            )
+        return self.policy.evaluate(
+            judgment_content=completion.message.content,
+            candidate_content=content,
+        )
+
+
+def _deterministic_private_request(request: ModelRequest) -> ModelRequest:
+    caller_options = thaw_json_mapping(request.options)
+    options = {
+        key: caller_options[key]
+        for key in ("baseURL", "max_tokens")
+        if key in caller_options
+    }
+    options["temperature"] = 0
+    return ModelRequest(
+        provider=request.provider,
+        model=request.model,
+        capability_snapshot=request.capability_snapshot,
+        options=options,
+    )
+
+
+def _agent_call(call: AgentModelTask) -> AgentModelCall:
     return AgentModelCall(
         request=call.request,
         output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
@@ -244,10 +321,6 @@ def _agent_call(call: ManagedModelCall) -> AgentModelCall:
         reasoning_mode=call.reasoning_mode,
         output_limit=call.output_limit,
     )
-
-
-def _detached_context() -> ModelInvocationContext:
-    return ModelInvocationContext(run_id=f"detached-model-{uuid4().hex}")
 
 
 async def _validated_chunks(
@@ -300,9 +373,10 @@ async def _close_async_iterator(iterator: object) -> None:
 
 
 __all__ = [
-    "ManagedModelCall",
-    "ManagedModelCompletion",
-    "ManagedModelExecutor",
-    "ManagedModelStream",
-    "ManagedModelTextResult",
+    "AgentModelTask",
+    "AgentModelTaskCompletion",
+    "AgentModelTaskRunner",
+    "AgentModelTaskStream",
+    "AgentModelTextResult",
+    "AgentModelResponseJudge",
 ]

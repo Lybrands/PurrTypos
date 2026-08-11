@@ -69,12 +69,11 @@ from purra.host_planned_tool_gateway import (
     HOST_PLANNED_EXECUTION_ROUTE,
 )
 from purra.model_invocation import (
-    AgentModelCall,
     AgentModelInvocationManager,
     ModelInvocationContext,
 )
+from purra.model_invocation.manager import ModelInvocationOutputObserver
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
-from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.output.contracts import ResponseTransactionMode
 from purra.operations import (
     AgentOperationController,
@@ -88,6 +87,7 @@ from purra.runtime_context import project_intermediate_tool_context
 from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
     PendingProviderAttempt as _PendingProviderAttempt,
+    build_agent_model_call as _agent_model_call,
     provider_retry_round_capacity,
     truncation_trace_details,
 )
@@ -187,6 +187,12 @@ _MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
     "one currently exposed tool name, and one complete JSON object for arguments. "
     "Do not emit XML-like tool markup or an argument dump as ordinary text."
 )
+_FINAL_PUBLIC_PRESENTATION_GUIDANCE = (
+    "The preceding assistant content came from a private tool-capable model "
+    "round and was not shown to the user. Return the final user-facing answer "
+    "now in this tool-free response. Preserve supported facts, do not mention "
+    "this handoff, and do not imitate or request a tool call."
+)
 _RECOVERABLE_TOOL_INPUT_ERROR_CODES = frozenset({
     "duplicate_tool_call_id",
     "invalid_tool_arguments_json",
@@ -213,9 +219,12 @@ class AgentRuntime:
         limits: RuntimeLimits = RuntimeLimits(),
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
         operation_controller: AgentOperationController | None = None,
+        output_observer: ModelInvocationOutputObserver | None = None,
+        model_manager: AgentModelInvocationManager | None = None,
     ):
-        self._model_manager = AgentModelInvocationManager(
+        self._model_manager = model_manager or AgentModelInvocationManager(
             model_gateway,
+            output_observer=output_observer,
             operation_controller=operation_controller,
         )
         self._tool_execution_gateway = tool_execution_gateway
@@ -327,6 +336,7 @@ class AgentRuntime:
         recovery_ledger = RecoveryLedger(self._recovery_policy)
         declined_response_pending = False
         response_repair_pending = False
+        public_presentation_pending = False
         pending_provider_attempt: _PendingProviderAttempt | None = None
         logical_round_number = 0
         dynamic_replan_pending = False
@@ -372,6 +382,7 @@ class AgentRuntime:
         absolute_round_limit = self._limits.max_model_rounds + (
             self._limits.max_progress_rounds
             + provider_retry_round_capacity(self._recovery_policy)
+            + 1
         )
 
         for round_index in range(absolute_round_limit):
@@ -481,7 +492,11 @@ class AgentRuntime:
                 )
                 visible_tools = (
                     ()
-                    if declined_response_pending or response_repair_pending
+                    if (
+                        declined_response_pending
+                        or response_repair_pending
+                        or public_presentation_pending
+                    )
                     else tuple(
                         schema
                         for schema in configured_tools
@@ -496,10 +511,15 @@ class AgentRuntime:
                 )
                 buffer_model_content = bool(
                     require_tool
-                    or declined_response_pending
-                    or failed_tool_recovery_error_code is not None
-                    or transaction_mode
-                    is ResponseTransactionMode.VALIDATED_RESULT
+                    or (
+                        not public_presentation_pending
+                        and (
+                            declined_response_pending
+                            or failed_tool_recovery_error_code is not None
+                            or transaction_mode
+                            is ResponseTransactionMode.VALIDATED_RESULT
+                        )
+                    )
                 )
                 projection = project_intermediate_tool_context(
                     messages,
@@ -1979,6 +1999,25 @@ class AgentRuntime:
                         return
 
                 final_response = accumulator.content
+                if (
+                    (invocation.tools or buffer_model_content)
+                    and transaction_mode is ResponseTransactionMode.DIRECT_LIVE
+                    and not public_presentation_pending
+                ):
+                    public_presentation_pending = True
+                    round_limit += 1
+                    messages.extend((
+                        AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=final_response,
+                            reasoning=accumulator.reasoning or None,
+                        ),
+                        AgentMessage(
+                            role=MessageRole.DEVELOPER,
+                            content=_FINAL_PUBLIC_PRESENTATION_GUIDANCE,
+                        ),
+                    ))
+                    continue
                 if buffer_model_content:
                     if self._observer is not None:
                         await self._observer.on_model_delta()
@@ -2768,34 +2807,6 @@ def _context_budget_contract_error(
     if budget.output_reserve_tokens <= 0:
         return "context_budget_output_reserve_invalid"
     return None
-
-
-def _agent_model_call(
-    invocation: ModelInvocation,
-    *,
-    require_tool: bool,
-    requires_full_text_validation: bool,
-) -> AgentModelCall:
-    private_round = bool(invocation.tools or require_tool)
-    if private_round:
-        intent = AgentOutputIntent.STRUCTURED_PRIVATE
-        commit_mode = OutputCommitMode.PRIVATE
-    elif requires_full_text_validation:
-        intent = AgentOutputIntent.STRUCTURED_PRIVATE
-        commit_mode = OutputCommitMode.GATED
-    else:
-        intent = AgentOutputIntent.FINAL_PUBLIC
-        commit_mode = OutputCommitMode.LIVE
-    return AgentModelCall(
-        request=invocation.request,
-        output_intent=intent,
-        commit_mode=commit_mode,
-        requires_full_text_validation=requires_full_text_validation,
-        reasoning_mode=invocation.reasoning_mode,
-        output_limit=invocation.output_limit,
-        tools=invocation.tools,
-        tool_choice=invocation.tool_choice,
-    )
 
 
 def _runtime_result(

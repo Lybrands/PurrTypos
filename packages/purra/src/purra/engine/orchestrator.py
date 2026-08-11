@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Iterable, Mapping, Sequence
+from uuid import uuid4
 
 from purra.cancellation import (
     OperationCanceled,
@@ -49,23 +49,20 @@ from purra.contracts import (
     PlanningCapabilities,
     PlanningConstraints,
     PlanningKind,
-    PlanningTurn,
     ResponseConstraints,
     RunCreateParams,
     RunId,
     RunProvenance,
     RunLineage,
+    RunStatus,
     RuntimeLimits,
     RuntimeOutcome,
     StepExecutor,
     StepStatus,
-    StepType,
     TaskContextRequest,
     TaskPlan,
     TaskStep,
-    ToolBatchOutcome,
     ToolExecutionLimits,
-    ToolRiskLevel,
     TraceRecord,
 )
 from purra.normalization import optional_text as _optional_text
@@ -73,7 +70,6 @@ from purra.errors import (
     ContextOverflowError,
     ContractViolationError,
     InvalidPlannerOutputError,
-    ModelGatewayError,
     UnsupportedModelFeatureError,
 )
 from purra.events import AgentEvent, CoreEventType
@@ -87,12 +83,26 @@ from purra.engine.context_phase import (
     planning_tool_guidance as _planning_tool_guidance,
     validate_context_allocations as _validate_context_allocations,
 )
+from purra.engine.canonical_sink import (
+    BufferedEventSink as _BufferedEventSink,
+    runtime_output_event as _runtime_output_event,
+)
 from purra.engine.durable_execution import (
     bind_event_to_run as _bind_event_to_run,
     complete_admitted_task as _complete_admitted_task,
     validate_task_admission_coverage as _validate_task_admission_coverage,
 )
+from purra.engine.dynamic_planning import (
+    DynamicPlanningOrchestrator as _DynamicPlanningOrchestrator,
+    safe_model_only_plan as _safe_model_only_plan,
+)
 from purra.engine.options import AgentCoreRunOptions
+from purra.delegation import (
+    AgentCoreSubmitter,
+    AgentDelegationCoordinator,
+    ChildRunRequestFactory,
+    build_delegation_tool_registration,
+)
 from purra.execution import AgentRunHandle, AgentRunSupervisor
 from purra.engine.planning_validation import (
     effective_registrations as _effective_registrations,
@@ -100,12 +110,17 @@ from purra.engine.planning_validation import (
     validate_planning_constraints as _validate_planning_constraints,
     validate_task_constraint_refinement as _validate_task_constraint_refinement,
 )
+from purra.engine.tool_catalog import AugmentedToolCatalog as _AugmentedToolCatalog
 from purra.host_planned_tool_gateway import HostPlannedToolGateway
 from purra.json_values import thaw_json_mapping
 from purra.model_protocol import resolve_invocation_output_limit
+from purra.model_invocation import (
+    AgentModelInvocationManager,
+    ModelInvocationContext,
+)
+from purra.model_execution import AgentModelResponseJudge, AgentModelTaskRunner
 from purra.planner import (
     AgentPlanner,
-    build_execution_message,
     effective_planning_tool_names,
 )
 from purra.plan_constraints import (
@@ -113,7 +128,6 @@ from purra.plan_constraints import (
 )
 from purra.plan_compiler import (
     compile_task_plan,
-    project_completed_steps_for_planning,
     projected_planning_tool_names,
     projected_planning_tool_schemas,
     runtime_tool_names_for_planning_names,
@@ -124,6 +138,7 @@ from purra.ports import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     ContextProvider,
     ConversationCompactor,
+    DelegationRepository,
     DynamicTaskPlanner,
     ExecutionLeaseStore,
     ExecutionStateFactory,
@@ -140,10 +155,12 @@ from purra.ports import (
     ToolRegistration,
     ModelGateway,
 )
-from purra.output.contracts import AgentOutputEvent
+from purra.output import AgentResponseTransaction
+from purra.output.contracts import PublicPresentationMode, ResponseTransactionMode
+from purra.output.processor import AgentOutputProcessor
+from purra.output.run_repository import CanonicalRunRepository
 from purra.output.ports import AgentOutputPublisher, AgentOutputRepository
 from purra.run_controller import AgentRunController
-from purra.run_state import RunStateMachine
 from purra.runtime import AgentRuntime
 from purra.recovery import RecoveryPolicy
 from purra.tools import (
@@ -165,15 +182,11 @@ from purra.timing import duration_ms as _duration_ms
 from purra.operations import AgentOperationController, OperationScope
 
 
-CoreRunUpdate = AgentEvent | AgentOutputEvent | AgentRunResult
-
-
 class AgentCore:
     """Compose planning, context, model/tool runtime and run lifecycle.
 
-    ``submit`` returns the stable server-owned execution handle. ``run`` is a
-    compatibility iterator that delegates to that handle once canonical output
-    infrastructure is configured.
+    ``submit`` is the only complete-run entry and returns a stable,
+    server-owned execution handle.
     Concrete domain tools enter only as registrations in ``tool_catalog``.
     """
 
@@ -185,7 +198,13 @@ class AgentCore:
         planner: TaskPlanner | None = None,
         planning_policy: PlanningPolicy | None = None,
         context_provider: ContextProvider | None = None,
+        context_provider_factory: (
+            Callable[[AgentModelTaskRunner], ContextProvider] | None
+        ) = None,
         conversation_compactor: ConversationCompactor | None = None,
+        conversation_compactor_factory: (
+            Callable[[AgentModelTaskRunner], ConversationCompactor] | None
+        ) = None,
         execution_state_factory: ExecutionStateFactory | None = None,
         tool_catalog: ToolCatalog | None = None,
         agent_role_guidance: Mapping[str, Any] | None = None,
@@ -203,17 +222,62 @@ class AgentCore:
         execution_lease_store: ExecutionLeaseStore | None = None,
         execution_owner_id: str | None = None,
         execution_lease_duration_ms: int | None = None,
+        delegation_repository: DelegationRepository | None = None,
+        child_core_submitter: AgentCoreSubmitter | None = None,
+        child_request_factory: ChildRunRequestFactory | None = None,
     ) -> None:
         self._model_gateway = model_gateway
-        self._repository = run_repository
         self._runtime_limits = runtime_limits
         self._recovery_policy = recovery_policy
-        self._operations = operation_controller
-        self._conversation_compactor = conversation_compactor or (
-            ContextCompressionCoordinator(
-                operation_controller=operation_controller,
+        if (output_repository is None) != (output_publisher is None):
+            raise ValueError(
+                "canonical output repository and publisher must be configured together"
             )
+        self._output_processor = (
+            AgentOutputProcessor(output_repository, output_publisher)
+            if output_repository is not None and output_publisher is not None
+            else None
         )
+        self._repository = (
+            CanonicalRunRepository(run_repository, self._output_processor)
+            if self._output_processor is not None
+            else run_repository
+        )
+        self._operations = operation_controller or (
+            AgentOperationController(self._output_processor)
+            if self._output_processor is not None
+            else None
+        )
+        self._model_invocations = AgentModelInvocationManager(
+            model_gateway,
+            output_observer=self._output_processor,
+            operation_controller=self._operations,
+        )
+        if context_provider is not None and context_provider_factory is not None:
+            raise ValueError(
+                "context provider and context provider factory are mutually exclusive"
+            )
+        if (
+            conversation_compactor is not None
+            and conversation_compactor_factory is not None
+        ):
+            raise ValueError(
+                "conversation compactor and compactor factory are mutually exclusive"
+            )
+        self._context_provider_factory = context_provider_factory
+        self._conversation_compactor_factory = conversation_compactor_factory
+        if isinstance(conversation_compactor, ContextCompressionCoordinator):
+            self._conversation_compactor = ContextCompressionCoordinator(
+                conversation_compactor.hook,
+                conversation_compactor.settings,
+                operation_controller=self._operations,
+            )
+        else:
+            self._conversation_compactor = conversation_compactor or (
+                ContextCompressionCoordinator(
+                    operation_controller=self._operations,
+                )
+            )
         self._task_admission_evaluator = task_admission_evaluator
         self._long_task_dispatcher = long_task_dispatcher
         default_planner_limits = PlannerLimits()
@@ -233,14 +297,77 @@ class AgentCore:
                     max(1, runtime_limits.max_model_rounds),
                 ),
             ),
-            operation_controller=operation_controller,
+            operation_controller=self._operations,
+            output_observer=self._output_processor,
+            model_manager=self._model_invocations,
         )
         self._planning_policy = planning_policy or _DefaultPlanningPolicy()
         self._context_provider = context_provider or _EmptyContextProvider()
         self._execution_state_factory = (
             execution_state_factory or _DefaultExecutionStateFactory()
         )
-        self._tool_catalog = tool_catalog or InMemoryToolCatalog(())
+        self._delegation_coordinator: AgentDelegationCoordinator | None = None
+        delegation_parts = (
+            delegation_repository,
+            child_core_submitter,
+            child_request_factory,
+        )
+        if any(part is not None for part in delegation_parts):
+            if not all(part is not None for part in delegation_parts):
+                raise ValueError(
+                    "delegation repository, child submitter and request "
+                    "factory must be configured together"
+                )
+            if self._output_processor is None or self._operations is None:
+                raise ValueError(
+                    "delegation requires canonical output infrastructure"
+                )
+            if not agent_role_guidance:
+                raise ValueError("delegation requires agent role guidance")
+            self._delegation_coordinator = AgentDelegationCoordinator(
+                repository=delegation_repository,
+                core=child_core_submitter,
+                output_processor=self._output_processor,
+                operation_controller=self._operations,
+                child_request_factory=child_request_factory,
+                worker_id=(
+                    execution_owner_id
+                    or getattr(run_repository, "owner_id", None)
+                    or f"agent-core-{uuid4().hex}"
+                ),
+                max_parallel_children=max_parallel_agents,
+                role_titles={
+                    str(role_id): str(value.get("title") or role_id)
+                    for role_id, value in (agent_role_guidance or {}).items()
+                    if isinstance(value, Mapping)
+                },
+            )
+        base_tool_catalog = tool_catalog or InMemoryToolCatalog(())
+        if self._delegation_coordinator is not None:
+            role_guidance = {
+                str(role_id): {
+                    "title": str(
+                        value.get("title")
+                        if isinstance(value, Mapping)
+                        else role_id
+                    ),
+                    "description": str(
+                        value.get("description")
+                        if isinstance(value, Mapping)
+                        else ""
+                    ),
+                }
+                for role_id, value in (agent_role_guidance or {}).items()
+            }
+            self._tool_catalog = _AugmentedToolCatalog(
+                base_tool_catalog,
+                (build_delegation_tool_registration(
+                    self._delegation_coordinator,
+                    role_guidance=role_guidance,
+                ),),
+            )
+        else:
+            self._tool_catalog = base_tool_catalog
         self._registrations = tuple(self._tool_catalog.registrations())
         self._agent_role_guidance = dict(agent_role_guidance or {})
         self._max_parallel_agents = max(1, int(max_parallel_agents))
@@ -252,12 +379,8 @@ class AgentCore:
             self._approval_gateway,
             tool_execution_limits,
             tool_idempotency_gateway,
-            operation_controller,
+            self._operations,
         )
-        if (output_repository is None) != (output_publisher is None):
-            raise ValueError(
-                "canonical output repository and publisher must be configured together"
-            )
         self._run_supervisor = None
         if output_repository is not None and output_publisher is not None:
             owner_id = (
@@ -293,6 +416,10 @@ class AgentCore:
     async def cancel_pending_approvals(self, run_id: RunId) -> int:
         return await self._approval_gateway.cancel_pending(run_id)
 
+    async def close(self) -> None:
+        if self._run_supervisor is not None:
+            await self._run_supervisor.close()
+
     async def submit(
         self,
         request: AgentRunRequest,
@@ -307,30 +434,6 @@ class AgentCore:
             request,
             options=options or AgentCoreRunOptions(),
         )
-
-    async def run(
-        self,
-        request: AgentRunRequest,
-        *,
-        options: AgentCoreRunOptions | None = None,
-        signal: CancellationSignal | None = None,
-    ) -> AsyncIterator[CoreRunUpdate]:
-        if self._run_supervisor is None:
-            legacy_stream = self._execute_run(
-                request,
-                options=options,
-                signal=signal,
-            )
-            try:
-                async for update in legacy_stream:
-                    yield update
-            finally:
-                await legacy_stream.aclose()
-            return
-        handle = await self.submit(request, options=options)
-        async for event in handle.subscribe(after_sequence=0):
-            yield event
-        yield await handle.wait()
 
     def _supervised_execution(
         self,
@@ -352,7 +455,7 @@ class AgentCore:
         *,
         options: AgentCoreRunOptions | None = None,
         signal: CancellationSignal | None = None,
-    ) -> AsyncIterator[CoreRunUpdate]:
+    ) -> AsyncIterator[AgentEvent | AgentRunResult]:
         options = options or AgentCoreRunOptions()
         output_limit = options.output_limit or resolve_invocation_output_limit(
             request.model.capability_snapshot,
@@ -367,7 +470,7 @@ class AgentCore:
                 code="model_context_capacity_incompatible",
                 retryable=False,
             )
-        sink = _BufferedEventSink()
+        sink = _BufferedEventSink(self._output_processor)
         controller = AgentRunController(
             repository=self._repository,
             event_sink=sink,
@@ -387,6 +490,41 @@ class AgentCore:
                     lineage=options.lineage, binding=options.binding,
                 )
             )
+            model_tasks = AgentModelTaskRunner(
+                self._model_invocations,
+                ModelInvocationContext(run_id=controller.run_id),
+            )
+            context_provider = (
+                self._context_provider_factory(model_tasks)
+                if self._context_provider_factory is not None
+                else self._context_provider
+            )
+            conversation_compactor = (
+                self._conversation_compactor_factory(model_tasks)
+                if self._conversation_compactor_factory is not None
+                else self._conversation_compactor
+            )
+            if (
+                self._conversation_compactor_factory is not None
+                and isinstance(
+                    conversation_compactor,
+                    ContextCompressionCoordinator,
+                )
+            ):
+                conversation_compactor = ContextCompressionCoordinator(
+                    conversation_compactor.hook,
+                    conversation_compactor.settings,
+                    operation_controller=self._operations,
+                )
+            if not isinstance(context_provider, ContextProvider):
+                raise TypeError("context provider factory returned an invalid port")
+            if (
+                conversation_compactor is not None
+                and not isinstance(conversation_compactor, ConversationCompactor)
+            ):
+                raise TypeError(
+                    "conversation compactor factory returned an invalid port"
+                )
             for event in sink.drain():
                 yield event
 
@@ -418,7 +556,7 @@ class AgentCore:
             try:
                 context_claims = await await_with_cancellation(
                     resolve_context_budget_claims(
-                        self._context_provider,
+                        context_provider,
                         request,
                         options.context_claims,
                         signal,
@@ -454,7 +592,7 @@ class AgentCore:
                     runtime_reserve_tokens=options.runtime_reserve_tokens,
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
-                compactor = self._conversation_compactor
+                compactor = conversation_compactor
                 if compactor is not None:
                     compaction_started = asyncio.Event()
                     compaction_started_payload: dict[str, Any] = {}
@@ -623,8 +761,8 @@ class AgentCore:
                         )
                         yield completed_event
                 staged_context_provider = (
-                    self._context_provider
-                    if isinstance(self._context_provider, StagedContextProvider)
+                    context_provider
+                    if isinstance(context_provider, StagedContextProvider)
                     else None
                 )
                 planning_bundle = await await_with_cancellation(
@@ -635,7 +773,7 @@ class AgentCore:
                             signal,
                         )
                         if staged_context_provider is not None
-                        else self._context_provider.build_context(
+                        else context_provider.build_context(
                             request,
                             reserved_budget,
                             signal,
@@ -1095,7 +1233,7 @@ class AgentCore:
                         # permission to silently omit previously available
                         # context. Rebuild through the legacy full path.
                         bundle = await await_with_cancellation(
-                            self._context_provider.build_context(
+                            context_provider.build_context(
                                 request,
                                 budget,
                                 signal,
@@ -1144,7 +1282,7 @@ class AgentCore:
                     ),
                     "selectedToolCount": len(selected_names),
                 }
-                compactor = self._conversation_compactor
+                compactor = conversation_compactor
                 if compactor is not None:
                     resolved_context_tokens = estimate_agent_messages_tokens(
                         _assemble_messages((), bundle.blocks, plan)
@@ -1493,19 +1631,27 @@ class AgentCore:
                 if registration.host_planned_arguments is not None
             }
             runtime_model_gateway: ModelGateway = self._model_gateway
+            runtime_model_manager = self._model_invocations
             if host_planned_arguments:
                 runtime_model_gateway = HostPlannedToolGateway(
                     self._model_gateway,
                     host_planned_arguments,
                 )
+                runtime_model_manager = AgentModelInvocationManager(
+                    runtime_model_gateway,
+                    output_observer=self._output_processor,
+                    operation_controller=self._operations,
+                )
             runtime = AgentRuntime(
                 model_gateway=runtime_model_gateway,
                 tool_execution_gateway=self._tool_executor,
                 observer=controller,
-                context_compressor=self._conversation_compactor,
+                context_compressor=conversation_compactor,
                 limits=self._runtime_limits,
                 recovery_policy=self._recovery_policy,
                 operation_controller=self._operations,
+                output_observer=self._output_processor,
+                model_manager=runtime_model_manager,
             )
             runtime_result: AgentRuntimeResult | None = None
             try:
@@ -1514,7 +1660,17 @@ class AgentCore:
                     tools=schemas,
                     response_constraints=options.response_constraints,
                     response_validators=options.response_validators,
-                    response_judges=options.response_judges,
+                    response_judges=(
+                        *options.response_judges,
+                        *(
+                            AgentModelResponseJudge(
+                                model_tasks=model_tasks,
+                                model_request=request.model,
+                                policy=policy,
+                            )
+                            for policy in options.response_judge_policies
+                        ),
+                    ),
                     response_transaction_mode=(
                         options.resolved_response_transaction_policy.mode
                     ),
@@ -1590,7 +1746,55 @@ class AgentCore:
                 await controller.fail("runtime_returned_no_result")
             elif runtime_result.outcome is RuntimeOutcome.COMPLETED:
                 try:
-                    await controller.complete(runtime_result.final_response)
+                    final_response = runtime_result.final_response
+                    validated_result: str | None = None
+                    transaction_policy = (
+                        options.resolved_response_transaction_policy
+                    )
+                    if (
+                        transaction_policy.mode
+                        is ResponseTransactionMode.VALIDATED_RESULT
+                    ):
+                        validated_result = final_response
+                        final_response = ""
+                        if (
+                            transaction_policy.public_presentation
+                            is PublicPresentationMode.MODEL_LIVE
+                        ):
+                            transaction = AgentResponseTransaction(
+                                AgentModelInvocationManager(
+                                    self._model_gateway,
+                                    output_observer=self._output_processor,
+                                    operation_controller=self._operations,
+                                ),
+                                policy=transaction_policy,
+                                facts_provider=(
+                                    options.committed_result_facts_provider
+                                ),
+                                operation_controller=self._operations,
+                            )
+                            final_response = await transaction.present(
+                                AgentRunResult(
+                                    run_id=controller.run_id,
+                                    status=RunStatus.DONE,
+                                    final_response=(
+                                        runtime_result.final_response
+                                    ),
+                                    model=runtime_result.model,
+                                ),
+                                request=request.model,
+                                context=ModelInvocationContext(
+                                    run_id=controller.run_id,
+                                ),
+                                signal=signal,
+                            )
+                    if validated_result is None:
+                        await controller.complete(final_response)
+                    else:
+                        await controller.complete_validated_result(
+                            validated_result,
+                            final_response=final_response,
+                        )
                 except Exception as error:
                     # A host projector participates in the terminal repository
                     # transaction. Rejection means the result was not durably
@@ -1652,19 +1856,10 @@ class AgentCore:
         # Runtime events are structured lifecycle, context, tool, approval or
         # domain facts. Provider text is owned exclusively by OutputProcessor.
         await self._repository.append_event(run_id, event)
-
-
-class _BufferedEventSink:
-    def __init__(self) -> None:
-        self._events: deque[AgentEvent] = deque()
-
-    async def emit(self, event: AgentEvent) -> None:
-        self._events.append(event)
-
-    def drain(self) -> tuple[AgentEvent, ...]:
-        events = tuple(self._events)
-        self._events.clear()
-        return events
+        if self._output_processor is not None:
+            await self._output_processor.accept_runtime_event(
+                _runtime_output_event(event, run_id)
+            )
 
 
 class _DefaultPlanningPolicy:
@@ -1682,288 +1877,6 @@ class _DefaultPlanningPolicy:
         capabilities: PlanningCapabilities,
     ) -> bool:
         return bool(request.tools_enabled and capabilities.available_tool_names)
-
-
-class _DynamicPlanningOrchestrator:
-    """Bridge runtime evidence to a dynamic planner and durable Run authority."""
-
-    def __init__(
-        self,
-        *,
-        planner: DynamicTaskPlanner,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-        controller: AgentRunController,
-        enabled_names: frozenset[str],
-        registrations: Sequence[ToolRegistration],
-    ) -> None:
-        self._planner = planner
-        self._request = request
-        self._capabilities = capabilities
-        self._controller = controller
-        self._enabled_names = enabled_names
-        self._registrations = tuple(registrations)
-        self._revision = 0
-
-    async def replan_after_tool(
-        self,
-        messages: Sequence[AgentMessage],
-        *,
-        round_number: int,
-        remaining_model_rounds: int,
-        outcome: ToolBatchOutcome,
-        signal: CancellationSignal | None = None,
-    ) -> AgentMessage:
-        started = perf_counter()
-        self._revision += 1
-        snapshot = self._controller.snapshot
-        if snapshot is None:
-            raise ContractViolationError("dynamic planning requires a live run")
-        if outcome is ToolBatchOutcome.FAILED:
-            await self._controller.on_tool_round_failed()
-            snapshot = self._controller.snapshot
-            if snapshot is None:  # pragma: no cover - controller invariant
-                raise ContractViolationError("dynamic planning lost its live run")
-        runtime_completed_steps = tuple(
-            step
-            for step in snapshot.steps
-            if step.status in {
-                StepStatus.DONE,
-                StepStatus.BLOCKED,
-                StepStatus.FAILED,
-            }
-        )
-        completed_steps = project_completed_steps_for_planning(
-            runtime_completed_steps,
-            self._registrations,
-            self._enabled_names,
-        )
-        try:
-            planning = await await_with_cancellation(
-                self._planner.revise_plan(
-                    self._request,
-                    self._capabilities,
-                    PlanningTurn(
-                        revision=self._revision,
-                        round_number=round_number,
-                        remaining_model_rounds=remaining_model_rounds,
-                        messages=tuple(messages),
-                        completed_steps=completed_steps,
-                        last_tool_outcome=outcome,
-                    ),
-                    signal,
-                    run_id=self._controller.run_id,
-                ),
-                signal,
-            )
-        except (InvalidPlannerOutputError, ModelGatewayError) as error:
-            # Replanning is advisory: after a successful tool round, the
-            # controller still owns a previously compiled and validated plan.
-            # A malformed or unavailable model revision must not destroy that
-            # trusted state. After a failed tool round, continuing future tool
-            # steps could be unsafe, so recovery becomes a host-authored
-            # model-only response instead of advancing past missing evidence.
-            reason_code = getattr(error, "code", "replanning_failed")
-            validation_reason = (
-                str(error)[:240]
-                if isinstance(error, InvalidPlannerOutputError)
-                else None
-            )
-            if outcome is ToolBatchOutcome.FAILED:
-                recovery_plan = _safe_model_only_plan(
-                    title=snapshot.title,
-                    goal=snapshot.goal,
-                    step_id=f"respond-after-tool-failure-{self._revision}",
-                )
-                _validate_plan_authority(
-                    recovery_plan,
-                    self._enabled_names,
-                    available_agent_roles=(
-                        self._capabilities.available_agent_roles
-                    ),
-                    constraints=self._capabilities.constraints,
-                    max_tool_steps=0,
-                )
-                revised = await self._controller.revise_plan(recovery_plan)
-                remaining_plan = TaskPlan(
-                    title=revised.title,
-                    goal=revised.goal,
-                    steps=tuple(
-                        step
-                        for step in revised.steps
-                        if step.status in {
-                            StepStatus.PENDING,
-                            StepStatus.RUNNING,
-                        }
-                    ),
-                )
-                await self._controller.record_trace(TraceRecord(
-                    stage="planning",
-                    outcome="fallback_safe_response",
-                    details={
-                        "dynamic": True,
-                        "revision": self._revision,
-                        "round": round_number,
-                        "errorType": type(error).__name__,
-                        "reasonCode": reason_code,
-                        "validationReason": validation_reason,
-                        "fallbackToolCount": 0,
-                    },
-                    duration_ms=_duration_ms(started),
-                ))
-                return build_execution_message(remaining_plan)
-            remaining_steps = tuple(
-                step
-                for step in snapshot.steps
-                if step.status in {StepStatus.PENDING, StepStatus.RUNNING}
-            )
-            if not remaining_steps:
-                remaining_steps = (TaskStep(
-                    id="respond-after-replan-fallback",
-                    title="Respond from completed work",
-                    type=StepType.REVIEW,
-                    executor=StepExecutor.MODEL,
-                    risk_level=ToolRiskLevel.READ,
-                ),)
-            fallback_plan = TaskPlan(
-                title=snapshot.title,
-                goal=snapshot.goal,
-                steps=remaining_steps,
-            )
-            fallback_tool_count = sum(
-                step.executor is StepExecutor.TOOL
-                for step in fallback_plan.steps
-            )
-            # This plan was compiled and authorized before execution began.
-            # Re-check its authority, but do not reinterpret a shrinking
-            # runtime round allowance as a capability-contract violation. If
-            # the trusted plan eventually exhausts the runtime allowance, the
-            # runtime reports max_model_rounds instead of misclassifying an
-            # advisory Planner failure as dynamic_planning_failed.
-            _validate_plan_authority(
-                fallback_plan,
-                self._enabled_names,
-                available_agent_roles=(
-                    self._capabilities.available_agent_roles
-                ),
-                constraints=self._capabilities.constraints,
-                max_tool_steps=fallback_tool_count,
-            )
-            await self._controller.record_trace(TraceRecord(
-                stage="planning",
-                outcome="fallback_previous_plan",
-                details={
-                    "dynamic": True,
-                    "revision": self._revision,
-                    "round": round_number,
-                    "errorType": type(error).__name__,
-                    "reasonCode": reason_code,
-                    "validationReason": validation_reason,
-                    "remainingStepCount": len(remaining_steps),
-                    "trustedPlanToolCount": fallback_tool_count,
-                },
-                duration_ms=_duration_ms(started),
-            ))
-            return build_execution_message(fallback_plan)
-        if planning.model_call_parameters:
-            for parameters in planning.model_call_parameters:
-                await self._controller.record_event(
-                    CoreEventType.MODEL_CALL_RECORDED,
-                    {
-                        "phase": "replanning",
-                        "count": 1,
-                        "toolNames": [],
-                        "toolChoice": "none",
-                        "round": round_number,
-                        "revision": self._revision,
-                        "parameters": dict(parameters),
-                    },
-                )
-        elif planning.model_call_count > 0:
-            await self._controller.record_event(
-                CoreEventType.MODEL_CALL_RECORDED,
-                {
-                    "phase": "replanning",
-                    "count": planning.model_call_count,
-                    "toolNames": [],
-                    "toolChoice": "none",
-                    "round": round_number,
-                    "revision": self._revision,
-                },
-            )
-        satisfied_tool_names = frozenset(
-            name
-            for step in runtime_completed_steps
-            if step.status is StepStatus.DONE
-            for name in step.suggested_tools
-        ) | self._capabilities.constraints.execution_satisfied_tool_names
-        compiled = compile_task_plan(
-            planning.plan,
-            self._registrations,
-            constraints=self._capabilities.constraints,
-            satisfied_tool_names=satisfied_tool_names,
-            enabled_tool_names=self._enabled_names,
-        )
-        prospective = RunStateMachine.revise_plan(snapshot, compiled.plan)
-        remaining_plan = TaskPlan(
-            title=prospective.title,
-            goal=prospective.goal,
-            task_spec=compiled.plan.task_spec,
-            steps=tuple(
-                step
-                for step in prospective.steps
-                if step.status in {StepStatus.PENDING, StepStatus.RUNNING}
-            ),
-        )
-        _validate_plan_authority(
-            remaining_plan,
-            self._enabled_names,
-            available_agent_roles=self._capabilities.available_agent_roles,
-            constraints=self._capabilities.constraints,
-            max_tool_steps=max(0, remaining_model_rounds - 1),
-        )
-        revised = await self._controller.revise_plan(compiled.plan)
-        await self._controller.record_trace(TraceRecord(
-            stage="planning",
-            outcome="replanned",
-            details={
-                "dynamic": True,
-                "revision": self._revision,
-                "round": round_number,
-                "planningKind": planning.kind.value,
-                "completedStepCount": len(completed_steps),
-                "remainingStepCount": sum(
-                    step.status in {StepStatus.PENDING, StepStatus.RUNNING}
-                    for step in revised.steps
-                ),
-                "hostInsertedPrerequisiteCount": len(
-                    compiled.inserted_tool_names
-                ),
-            },
-            duration_ms=_duration_ms(started),
-        ))
-        return build_execution_message(remaining_plan)
-
-
-def _safe_model_only_plan(
-    *,
-    title: str,
-    goal: str | None,
-    step_id: str,
-) -> TaskPlan:
-    """Return the only fail-open plan Core may author without model trust."""
-
-    return TaskPlan(
-        title=title,
-        goal=goal,
-        steps=(TaskStep(
-            id=step_id,
-            title="说明当前结果",
-            type=StepType.REVIEW,
-            executor=StepExecutor.MODEL,
-            risk_level=ToolRiskLevel.READ,
-        ),),
-    )
 
 
 class _EmptyContextProvider:

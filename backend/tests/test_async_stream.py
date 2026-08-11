@@ -5,7 +5,7 @@ from time import perf_counter
 
 import pytest
 
-from utils import async_stream
+from purra import stream_ownership as async_stream
 
 
 @pytest.mark.asyncio

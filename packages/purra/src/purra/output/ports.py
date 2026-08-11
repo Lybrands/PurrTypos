@@ -8,8 +8,10 @@ from purra.contracts import (
     AgentRunResult,
     ModelFinishReason,
     ModelStreamChunk,
+    RunCreateParams,
     RunId,
 )
+from purra.events import AgentEvent
 from purra.output.contracts import (
     AgentOutputEvent,
     AgentOutputEventDraft,
@@ -19,11 +21,17 @@ from purra.output.contracts import (
 )
 
 if TYPE_CHECKING:
-    from purra.ports.run_lifecycle import RunCommit
+    from purra.ports.run_lifecycle import RunBeginResult, RunCommit
 
 
 @runtime_checkable
 class AgentOutputRepository(Protocol):
+    async def begin_run_lifecycle(
+        self,
+        params: RunCreateParams,
+        started_event: AgentEvent,
+    ) -> tuple[RunBeginResult, AgentOutputEvent]: ...
+
     async def open_stream(self, spec: OutputStreamSpec) -> OutputStreamSpec: ...
 
     async def append_event(
@@ -36,7 +44,8 @@ class AgentOutputRepository(Protocol):
         run_id: RunId,
         commit: RunCommit,
         draft: RunLifecycleOutputDraft,
-    ) -> AgentOutputEvent: ...
+        related_drafts: tuple[AgentOutputEventDraft, ...] = (),
+    ) -> tuple[AgentOutputEvent, ...]: ...
 
     async def commit_stream(
         self,

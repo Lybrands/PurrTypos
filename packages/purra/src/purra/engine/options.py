@@ -23,7 +23,7 @@ from purra.output.contracts import (
     ResponseTransactionPolicy,
 )
 from purra.output.ports import CommittedResultFactsProvider
-from purra.ports import ResponseJudge, ResponseValidator
+from purra.ports import ResponseJudge, ResponseJudgePolicy, ResponseValidator
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +46,7 @@ class AgentCoreRunOptions:
     response_constraints: ResponseConstraints = ResponseConstraints()
     response_validators: tuple[ResponseValidator, ...] = ()
     response_judges: tuple[ResponseJudge, ...] = ()
+    response_judge_policies: tuple[ResponseJudgePolicy, ...] = ()
     response_transaction_policy: ResponseTransactionPolicy | None = None
     committed_result_facts_provider: CommittedResultFactsProvider | None = None
 
@@ -108,6 +109,15 @@ class AgentCoreRunOptions:
         if any(not isinstance(item, ResponseJudge) for item in judges):
             raise TypeError("response judges must implement ResponseJudge")
         object.__setattr__(self, "response_judges", judges)
+        judge_policies = tuple(self.response_judge_policies)
+        if any(
+            not isinstance(item, ResponseJudgePolicy)
+            for item in judge_policies
+        ):
+            raise TypeError(
+                "response judge policies must implement ResponseJudgePolicy"
+            )
+        object.__setattr__(self, "response_judge_policies", judge_policies)
         policy = self.response_transaction_policy
         if policy is not None and not isinstance(
             policy,
@@ -128,6 +138,7 @@ class AgentCoreRunOptions:
             self.response_constraints.exact_top_level_item_count is not None
             or validators
             or judges
+            or judge_policies
         )
         if (
             policy is not None
@@ -155,6 +166,7 @@ class AgentCoreRunOptions:
             self.response_constraints.exact_top_level_item_count is not None
             or self.response_validators
             or self.response_judges
+            or self.response_judge_policies
         )
         return ResponseTransactionPolicy(
             mode=(

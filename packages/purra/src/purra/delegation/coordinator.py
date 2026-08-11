@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from datetime import datetime, timezone
+from typing import Mapping, Protocol, runtime_checkable
+from uuid import uuid4
 
 from purra.contracts import (
     AgentDelegation,
@@ -23,7 +25,11 @@ from purra.operations import (
     OperationKind,
     OperationScope,
 )
-from purra.output import AgentOutputEvent, FederatedOutputEvent
+from purra.output import (
+    AgentOutputEvent,
+    DelegationOutputEvent,
+    FederatedOutputEvent,
+)
 from purra.output.processor import AgentOutputProcessor
 from purra.ports import DelegationRepository
 
@@ -60,10 +66,12 @@ class AgentDelegationCoordinator:
         worker_id: str,
         max_parallel_children: int = 3,
         max_depth: int = 3,
+        role_titles: Mapping[str, str] | None = None,
     ) -> None:
         for method in (
             "create",
             "claim",
+            "attach_child_run",
             "record_result",
             "fail",
             "cancel_children",
@@ -92,6 +100,11 @@ class AgentDelegationCoordinator:
         self._max_depth = int(max_depth)
         if self._max_depth <= 0:
             raise ValueError("delegation max depth must be positive")
+        self._role_titles = {
+            str(role).strip(): str(title).strip()
+            for role, title in (role_titles or {}).items()
+            if str(role).strip() and str(title).strip()
+        }
         self._active: dict[RunId, dict[str, AgentRunHandle]] = {}
         self._settlements: set[asyncio.Task[AgentRunResult]] = set()
         self._canceled_parents: set[RunId] = set()
@@ -106,7 +119,7 @@ class AgentDelegationCoordinator:
         required: bool = True,
         priority: int = 0,
     ) -> AgentDelegation:
-        return await self._repository.create(
+        delegation = await self._repository.create(
             parent_run_id=parent_run_id,
             agent_role=agent_role,
             objective=objective,
@@ -115,6 +128,8 @@ class AgentDelegationCoordinator:
             priority=priority,
             max_depth=self._max_depth,
         )
+        await self._emit_status(delegation, "queued")
+        return delegation
 
     async def claim_and_submit(
         self,
@@ -132,6 +147,7 @@ class AgentDelegationCoordinator:
             raise ContractViolationError(
                 "delegation could not be claimed for child execution"
             )
+        await self._emit_status(claim.delegation, "claimed")
         operation = await self._operations.start(
             OperationKind.DELEGATION,
             OperationScope(
@@ -152,6 +168,21 @@ class AgentDelegationCoordinator:
                     "child request factory returned an invalid request"
                 )
             child = await self._core.submit(request, options=options)
+            attached = await self._repository.attach_child_run(
+                delegation_id=claim.delegation.id,
+                child_run_id=child.run_id,
+                worker_id=self._worker_id,
+            )
+            if not attached:
+                await child.cancel("delegation_attach_failed")
+                raise ContractViolationError(
+                    "child run could not attach to its delegation"
+                )
+            await self._emit_status(
+                claim.delegation,
+                "running",
+                child_run_id=child.run_id,
+            )
         except BaseException as error:
             await self._repository.fail(
                 delegation_id=claim.delegation.id,
@@ -161,6 +192,11 @@ class AgentDelegationCoordinator:
             await self._operations.fail(
                 operation.operation_id,
                 "delegation_submit_failed",
+            )
+            await self._emit_status(
+                claim.delegation,
+                "failed",
+                error_code="delegation_submit_failed",
             )
             raise
 
@@ -214,6 +250,11 @@ class AgentDelegationCoordinator:
                         parent_run_id=parent_run_id,
                         delegation_id=claim.delegation.id,
                         source_event=event,
+                        agent_role=claim.delegation.agent_role,
+                        agent_title=self._role_titles.get(
+                            claim.delegation.agent_role
+                        ),
+                        objective=claim.delegation.objective,
                     )
                 )
             result = await child.wait()
@@ -226,6 +267,16 @@ class AgentDelegationCoordinator:
                 raise ContractViolationError(
                     "child result did not settle the active delegation"
                 )
+            terminal_status = {
+                RunStatus.DONE: "done",
+                RunStatus.CANCELED: "canceled",
+            }.get(result.status, "failed")
+            await self._emit_status(
+                claim.delegation,
+                terminal_status,
+                child_run_id=child.run_id,
+                error_code=result.error,
+            )
             if result.status is RunStatus.DONE:
                 await self._operations.succeed(operation_id)
             elif result.status is RunStatus.CANCELED:
@@ -263,6 +314,27 @@ class AgentDelegationCoordinator:
                 active.pop(claim.delegation.id, None)
                 if not active:
                     self._active.pop(parent_run_id, None)
+
+    async def _emit_status(
+        self,
+        delegation: AgentDelegation,
+        status: str,
+        *,
+        child_run_id: RunId | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        await self._output.accept_delegation_event(DelegationOutputEvent(
+            event_id=f"delegation-{uuid4().hex}",
+            parent_run_id=delegation.parent_run_id,
+            delegation_id=delegation.id,
+            status=status,
+            agent_role=delegation.agent_role,
+            agent_title=self._role_titles.get(delegation.agent_role),
+            objective=delegation.objective,
+            child_run_id=child_run_id or delegation.child_run_id,
+            error_code=error_code,
+            occurred_at=datetime.now(timezone.utc),
+        ))
 
 
 class _CoordinatedChildHandle:

@@ -60,7 +60,6 @@ class _CandidateValidator:
             part_type == "scene"
             and isinstance(payload, Mapping)
             and str(payload.get("sceneId") or "").strip() == part_key
-            and str(payload.get("processSummary") or "").strip()
             and str(payload.get("sceneText") or "").strip()
         )
         draft_metadata_complete = bool(
@@ -68,7 +67,6 @@ class _CandidateValidator:
             and isinstance(payload, Mapping)
             and str(payload.get("episodeNumber") or "") == part_key
             and str(payload.get("title") or "").strip()
-            and str(payload.get("executionSummary") or "").strip()
             and str(payload.get("continuitySummary") or "").strip()
         )
         review_dimension_complete = bool(
@@ -78,7 +76,6 @@ class _CandidateValidator:
             and str(payload.get("episodeNumber") or "") == part_key.split(":", 1)[0]
             and str(payload.get("reviewDimension") or "") == part_key.split(":", 1)[1]
             and str(payload.get("title") or "").strip()
-            and str(payload.get("executionSummary") or "").strip()
             and isinstance(payload.get("contentJson"), Mapping)
             and payload["contentJson"].get("verdict")
             in {"ready", "revise", "major_rework"}
@@ -90,7 +87,6 @@ class _CandidateValidator:
             and isinstance(payload, Mapping)
             and str(payload.get("sectionKey") or "") == part_key
             and str(payload.get("title") or "").strip()
-            and str(payload.get("executionSummary") or "").strip()
             and isinstance(payload.get("contentJson"), Mapping)
             and content.strip()
         )

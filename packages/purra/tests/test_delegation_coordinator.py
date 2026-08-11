@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from purra.contracts import (
     DelegationAggregation,
     DelegationClaim,
     DomainContext,
+    ExecutionState,
     ModelRequest,
     RunLineage,
     RunStatus,
@@ -134,6 +136,7 @@ class _Delegations:
             ),
         )
         self.results = []
+        self.attached = []
         self.cancel_calls = 0
 
     async def create(self, **kwargs):
@@ -146,6 +149,10 @@ class _Delegations:
 
     async def record_result(self, **kwargs):
         self.results.append(kwargs)
+        return True
+
+    async def attach_child_run(self, **kwargs):
+        self.attached.append(kwargs)
         return True
 
     async def fail(self, **kwargs):
@@ -251,14 +258,30 @@ async def test_child_events_receive_parent_sequence_and_keep_source_ids():
     assert [event.sequence for event in parent_events] == list(
         range(1, len(parent_events) + 1)
     )
-    federated = [
+    delegation_events = [
         event
         for event in parent_events
         if event.kind is OutputEventKind.DELEGATION
     ]
+    statuses = [
+        event.payload["status"]
+        for event in delegation_events
+        if event.payload.get("eventType") == "status"
+    ]
+    assert statuses == ["claimed", "running", "done"]
+    federated = [
+        event
+        for event in delegation_events
+        if event.payload.get("eventType") == "child_output"
+    ]
     assert [event.payload["sourceSequence"] for event in federated] == [1, 2]
     assert all(event.payload["sourceRunId"] == "child-1" for event in federated)
     assert all(event.payload["parentRunId"] == "parent-1" for event in federated)
+    assert delegations.attached == [{
+        "delegation_id": "delegation-1",
+        "child_run_id": "child-1",
+        "worker_id": "worker-1",
+    }]
     assert len(delegations.results) == 1
 
 
@@ -278,3 +301,49 @@ async def test_cancel_parent_cancels_active_child_once():
     assert second == 0
     assert child.cancel_calls == 1
     assert delegations.cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generic_delegation_tool_uses_coordinator_and_returns_aggregate():
+    from purra.delegation import build_delegation_tool_registration
+
+    coordinator, output, _delegations, _child = _fixture()
+    registration = build_delegation_tool_registration(
+        coordinator,
+        role_guidance={
+            "researcher": {
+                "title": "Researcher",
+                "description": "Collect independent evidence",
+            },
+        },
+    )
+    state = ExecutionState(run_id="parent-1")
+
+    result = await registration.handler(
+        state,
+        {
+            "delegations": [{
+                "agentRole": "researcher",
+                "objective": "collect facts",
+            }],
+        },
+    )
+
+    assert json.loads(result.content) == {
+        "state": "ready",
+        "counts": {"done": 1},
+        "requiredFailures": [],
+        "results": [],
+    }
+    status_events = [
+        event
+        for event in await output.list_events("parent-1", after_sequence=0)
+        if event.kind is OutputEventKind.DELEGATION
+        and event.payload.get("eventType") == "status"
+    ]
+    assert [event.payload["status"] for event in status_events] == [
+        "queued",
+        "claimed",
+        "running",
+        "done",
+    ]

@@ -42,9 +42,23 @@ from purra.contracts import (
     ModelStream,
     ModelStreamChunk,
 )
+from purra.api import AgentCore
 from purra.errors import ModelGatewayError
 from purra.long_tasks import LongTaskUnitResult
-from purra.model_execution import ManagedModelExecutor
+from purra.tools import InMemoryToolCatalog
+from domains.screenplay_agent.adapter import (
+    ScreenplayExecutionStateFactory,
+    ScreenplayHostContextProvider,
+    ScreenplayToolLoopPolicy,
+)
+from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from infrastructure.persistence.sqlite_agent_output_repository import (
+    SqliteAgentOutputRepository,
+)
+from infrastructure.persistence.agent_output_publisher import (
+    InProcessAgentOutputPublisher,
+)
+from infrastructure.persistence.run_execution_store import SqliteExecutionLeaseStore
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from exceptions import AppError
 from schemas.screenplay_agent import (
@@ -62,6 +76,37 @@ async def screenplay_db(tmp_path: Path):
         yield db
     finally:
         await db.close()
+
+
+class _CoreComposition:
+    def __init__(self, db, gateway) -> None:
+        self._gateway = gateway
+        self._runs = SqliteRunRepository(db)
+        self._outputs = SqliteAgentOutputRepository(
+            db,
+            run_repository=self._runs,
+        )
+        self._publisher = InProcessAgentOutputPublisher()
+        self._leases = SqliteExecutionLeaseStore(db)
+
+    def create_core_for_request(self, request, api_key):
+        del request, api_key
+        return AgentCore(
+            model_gateway=self._gateway,
+            run_repository=self._runs,
+            planning_policy=ScreenplayToolLoopPolicy(),
+            context_provider=ScreenplayHostContextProvider(),
+            execution_state_factory=ScreenplayExecutionStateFactory(),
+            tool_catalog=InMemoryToolCatalog(()),
+            output_repository=self._outputs,
+            output_publisher=self._publisher,
+            execution_lease_store=self._leases,
+            execution_owner_id=self._runs.owner_id,
+            execution_lease_duration_ms=self._runs.lease_duration_ms,
+        )
+
+    def release_core(self, core) -> None:
+        del core
 
 
 class _Planner:
@@ -1027,7 +1072,7 @@ async def _review_incident_fixture(screenplay_db, rounds, *, owner_id: str):
     gateway = _ScriptedPlannerGateway(rounds)
     planner = ModelScreenplayIntentPlanner(
         screenplay_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_CoreComposition(screenplay_db, gateway),
     )
     service = ScreenplayAgentService(
         screenplay_db,
@@ -1111,8 +1156,8 @@ async def test_reasoning_only_review_intent_recovers_without_answer_repair(
         "ORDER BY id"
     )
     assert phases == [
-        {"phase": "screenplay_intent_planning"},
-        {"phase": "screenplay_intent_planning"},
+        {"phase": "generation"},
+        {"phase": "generation"},
     ]
     assert not any(str(row["phase"]).endswith("_repair") for row in phases)
     assert "未收到需要修复的候选 JSON" not in projected_turn["assistantContent"]
@@ -1447,6 +1492,11 @@ async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final
     assert chunks[-1] == {
         "done": True,
         "finalResponseExpected": False,
+        "runResult": {
+            "runId": turn["id"],
+            "status": "paused",
+            "errorCode": None,
+        },
     }
     operations = SqliteScreenplayOperationRepository(screenplay_db)
     operation = await operations.load_for_turn(turn["id"])

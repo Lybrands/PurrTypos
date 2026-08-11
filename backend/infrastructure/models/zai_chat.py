@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 
 from infrastructure.models.capabilities import normalize_thinking_enabled
 from infrastructure.models.profiles import resolve_model_profile
-from utils.async_stream import OwnedAsyncIterator, openai_chunk_is_terminal
+from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
 from utils.session_title import SESSION_TITLE_SYSTEM_PROMPT, normalize_session_title
 from utils.url import normalize_base_url
 

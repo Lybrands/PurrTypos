@@ -39,6 +39,7 @@ from purra.model_invocation import (
     AgentModelInvocationManager,
     ModelInvocationContext,
 )
+from purra.model_invocation.manager import ModelInvocationOutputObserver
 from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.operations import AgentOperationController
 from purra.plan_constraints import (
@@ -369,9 +370,12 @@ class AgentPlanner:
         model_gateway: ModelGateway,
         limits: PlannerLimits = PlannerLimits(),
         operation_controller: AgentOperationController | None = None,
+        output_observer: ModelInvocationOutputObserver | None = None,
+        model_manager: AgentModelInvocationManager | None = None,
     ):
-        self._model_manager = AgentModelInvocationManager(
+        self._model_manager = model_manager or AgentModelInvocationManager(
             model_gateway,
+            output_observer=output_observer,
             operation_controller=operation_controller,
         )
         self._limits = limits

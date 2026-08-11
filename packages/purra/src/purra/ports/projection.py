@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from purra.contracts import RunId
 from purra.output.contracts import DomainEffectOutput
+
+if TYPE_CHECKING:
+    from purra.ports.run_lifecycle import RunCommit
 
 
 @runtime_checkable
@@ -22,4 +25,11 @@ class DomainEventProjector(Protocol):
     ) -> None: ...
 
 
-__all__ = ["DomainEventProjector"]
+@runtime_checkable
+class RunCommitProjector(Protocol):
+    """Project host-bound terminal effects inside the Run commit transaction."""
+
+    async def project(self, run_id: RunId, commit: "RunCommit") -> None: ...
+
+
+__all__ = ["DomainEventProjector", "RunCommitProjector"]

@@ -1,17 +1,8 @@
 import type { AiStreamChunk, ChunkCtx } from "./types";
 import {
-  handleAgentRunStarted,
-  handleAgentRunTerminal,
-  handleAgentRunTodoUpdated,
-  handleAgentRunTodosUpdated,
-  handleAgentDelegation,
   handleLongTaskDispatched,
   handleLongTaskProgress,
-} from "./agentRun";
-import {
-  handleDelta,
-  handleCommentaryDelta,
-} from "./streaming";
+} from "./durableTask";
 import {
   handleChapterCreated,
   handleProposedChapterDiff,
@@ -19,17 +10,11 @@ import {
 } from "./sideEffects";
 import { handleProposedSettingDiff } from "./settingDiff";
 import {
-  handleToolApprovalRequired,
-  handleToolApprovalResolved,
-} from "./toolApproval";
-import { handleToolIndexCompleted } from "./toolProgress";
-import { handleToolCallsInProgress } from "./toolStart";
-import { handleDone, handleError } from "./terminal";
-import {
-  handleContextBudget,
-  handleContextCompaction,
-} from "./context";
-import { handleAgentSubRunEvent } from "./subAgent";
+  handleDone,
+  handleError,
+  handleRunResultTerminal,
+} from "./terminal";
+import { handleCanonicalOutput } from "./canonical";
 
 export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
 
@@ -41,40 +26,23 @@ export type { AiStreamChunk, ChunkCtx, AccState } from "./types";
  * - error / done 由 handler 自身负责清理订阅 + refs（通过 ctx.cleanup()）。
  */
 export function dispatchChunk(chunk: AiStreamChunk, ctx: ChunkCtx): void {
-  // Child Runs reuse this exact reducer but write into delegation-scoped
-  // activity blocks, so concurrent token streams can never share acc.response.
-  if (handleAgentSubRunEvent(chunk, ctx, dispatchChunk)) return;
+  // Canonical PurrA output is the only Agent content path. Transport terminal
+  // notices (`done` / `error`) remain outside the journal and are handled below.
+  if (handleCanonicalOutput(chunk, ctx)) return;
+
+  if (handleRunResultTerminal(chunk, ctx)) return;
 
   // 1. 错误终态：合并提示 + cleanup，必须立即停（避免后续分支二次写 state）
   if (handleError(chunk, ctx)) return;
 
-  // 2. 公开执行说明 / 最终回答（供应商 reasoning 只供诊断，不进入这里）
-  handleCommentaryDelta(chunk, ctx);
-  handleDelta(chunk, ctx);
-  handleContextCompaction(chunk, ctx);
-  handleContextBudget(chunk, ctx);
-
-  // 3. 副作用：派发 DOM 事件（无短路）
+  // Product side effects remain typed host events; Agent output does not.
   handleProposedChapterDiff(chunk, ctx);
   handleProposedSettingDiff(chunk, ctx);
-  handleToolApprovalRequired(chunk, ctx);
-  handleToolApprovalResolved(chunk, ctx);
   handleChapterCreated(chunk, ctx);
   handleSettingUpdated(chunk, ctx);
-  handleAgentRunStarted(chunk, ctx);
-  handleAgentRunTodosUpdated(chunk, ctx);
-  handleAgentRunTodoUpdated(chunk, ctx);
   handleLongTaskDispatched(chunk, ctx);
   handleLongTaskProgress(chunk, ctx);
-  handleAgentRunTerminal(chunk, ctx);
-  handleAgentDelegation(chunk, ctx);
 
-  // 4. 工具进度：仅当 chunk 只含进度信号时短路
-  if (handleToolIndexCompleted(chunk, ctx)) return;
-
-  // 5. 工具批次开始：构造气泡段，吞掉 chunk 后续分支
-  if (handleToolCallsInProgress(chunk, ctx)) return;
-
-  // 6. 正常终态
+  // Transport terminal metadata settles the enclosing conversation only.
   if (handleDone(chunk, ctx)) return;
 }

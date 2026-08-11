@@ -19,10 +19,13 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
+  getOperationGroupProgress,
+  groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
   type TimelineOperationPart,
   type TimelineStepPart,
 } from "./assistantTimeline";
+import type { CanonicalOperation } from "../../../../agent-runtime/canonicalOutput";
 import "./AssistantMessageBody.scss";
 
 export interface AssistantMessageBodyProps {
@@ -54,6 +57,9 @@ function getTimelineActivityKey(
     }
     if (part.type === "delegations") {
       return `delegations:${JSON.stringify(part.items).length}`;
+    }
+    if (part.type === "operation") {
+      return `operation:${part.operation.operationId}:${part.operation.status}`;
     }
     return `context:${JSON.stringify(part.state).length}`;
   });
@@ -98,6 +104,9 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
     if (part.type === "delegations") {
       return part.items.some((item) => item.status === "failed");
     }
+    if (part.type === "operation") {
+      return part.operation.status === "failed";
+    }
     if (part.type !== "tools") return false;
     return part.segment.labelOutcomes?.some(
       (outcome, labelIndex) =>
@@ -105,6 +114,76 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
         !part.segment.cachedFlags?.[labelIndex],
     );
   });
+}
+
+function operationIsActive(part: TimelineOperationPart): boolean {
+  if (part.type === "operation") return part.operation.status === "running";
+  if (part.type === "tools") return Boolean(part.isLive);
+  if (part.type === "contextCompaction") {
+    return part.state.status === "running";
+  }
+  return part.items.some((item) =>
+    ["queued", "claimed", "running"].includes(item.status),
+  );
+}
+
+function CanonicalOperationRow({
+  operation,
+  label,
+}: {
+  operation: CanonicalOperation;
+  label: string;
+}) {
+  const running = operation.status === "running";
+  const failed = operation.status === "failed";
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  const startedAt = Date.parse(operation.startedAt);
+  const durationMs = operation.durationMs ?? (
+    running && Number.isFinite(startedAt)
+      ? Math.max(0, now - startedAt)
+      : undefined
+  );
+  const text = running
+    ? `正在执行 ${label}`
+    : failed
+      ? `执行失败 ${label}`
+      : operation.status === "canceled"
+        ? `已取消 ${label}`
+        : `已完成 ${label}`;
+  return (
+    <div
+      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${running ? "running" : "done"}`}
+    >
+      {running ? (
+        <LoadingIcon spin className="bubble-tool-call-icon" />
+      ) : failed ? (
+        <AlertCircleIcon className="bubble-tool-call-icon" />
+      ) : (
+        <CheckCircleIcon className="bubble-tool-call-icon" />
+      )}
+      <span>{text}</span>
+      {durationMs != null ? (
+        <span className="bubble-tool-call-duration">
+          · {formatOperationDuration(durationMs)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function formatOperationDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}分${remainder}秒` : `${minutes}分钟`;
 }
 
 function AssistantMessageBodyInner({
@@ -138,6 +217,21 @@ function AssistantMessageBodyInner({
     durationMs: message.durationMs,
   });
   const executionPanelLogKey = getExecutionPanelLogKey(message);
+  const workLogItems = React.useMemo(
+    () => groupConsecutiveWorkSteps(
+      workLogParts,
+      executionPanelLogKey ?? `message-${index}`,
+    ),
+    [executionPanelLogKey, index, workLogParts],
+  );
+  const executionProgress = getOperationGroupProgress(
+    workLogParts.filter((part): part is TimelineOperationPart =>
+      part.type === "tools"
+      || part.type === "operation"
+      || part.type === "delegations"
+      || part.type === "contextCompaction",
+    ),
+  );
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
@@ -178,6 +272,8 @@ function AssistantMessageBodyInner({
         labelOutcomes={seg.labelOutcomes}
         cachedFlags={seg.cachedFlags}
         completedToolCount={toolCompletedCount}
+        itemDurationsMs={seg.itemDurationsMs}
+        activeItemStartedAt={part.isLive ? seg.activeItemStartedAt : undefined}
       />
     );
   };
@@ -186,6 +282,16 @@ function AssistantMessageBodyInner({
     part: TimelineOperationPart,
     key: React.Key,
   ) => {
+    if (part.type === "operation") {
+      return (
+        <div key={key} className="bubble-tool-call-details">
+          <CanonicalOperationRow
+            operation={part.operation}
+            label={part.label}
+          />
+        </div>
+      );
+    }
     if (part.type === "contextCompaction") {
       const running = part.state.status === "running";
       const failed = part.state.status === "failed";
@@ -227,13 +333,14 @@ function AssistantMessageBodyInner({
     return renderStepPart(part);
   };
 
-  const renderDirectWorkLogPart = (
-    part: AssistantTimelinePart,
+  const renderWorkLogItem = (
+    part: ReturnType<typeof groupConsecutiveWorkSteps>[number],
     partIndex: number,
   ) => {
     if (part.type === "commentary") return renderStepPart(part);
     if (
       part.type === "tools" ||
+      part.type === "operation" ||
       part.type === "delegations" ||
       part.type === "contextCompaction"
     ) {
@@ -254,11 +361,14 @@ function AssistantMessageBodyInner({
           active={executionPanel.active}
           autoOpen={executionPanel.autoOpen}
           stepCount={executionPanel.stepCount}
+          currentStepCount={executionProgress.current}
+          completedStepCount={executionProgress.completed}
+          parallel={executionProgress.parallel}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
           hasError={workLogHasError(workLogParts)}
         >
-          {workLogParts.map(renderDirectWorkLogPart)}
+          {workLogItems.map(renderWorkLogItem)}
         </WorkLog>
       ) : null}
 

@@ -18,6 +18,7 @@ import type {
 } from "../chat.types";
 import type { ConversationUpdater } from "./commitScheduler";
 import type { ChatRunOutcome } from "../chatQueue";
+import type { CanonicalOutputState } from "../../../../agent-runtime/canonicalOutput";
 
 /** 主进程 SSE chunk 的真实类型（直接从 ElectronAPI 接口提取，避免重复声明漂移） */
 export type AiStreamChunk = Parameters<
@@ -56,6 +57,8 @@ export interface AccState {
   subAgentActivities?: AiSubAgentActivity[];
   /** Live reducer state is isolated per delegation to prevent token mixing. */
   subAgentAccumulators?: Record<string, AccState>;
+  /** 规范事件序列的唯一累加状态。 */
+  canonicalOutput?: CanonicalOutputState;
 }
 
 /**
