@@ -2,7 +2,7 @@
 
 日期：2026-08-11
 
-状态：已确认
+状态：实现完成，真实供应商发布门禁待凭据
 
 范围：剧本阶段按钮、Conversation Turn、意图 Planner、PurrA 托管模型调用、结构化 JSON 修复与 Turn/Operation 提交边界
 

@@ -618,7 +618,10 @@ class ScreenplayAgentService:
                         code
                         if isinstance(
                             error,
-                            ScreenplayIntentCommandMismatchError,
+                            (
+                                ModelGatewayError,
+                                ScreenplayIntentCommandMismatchError,
+                            ),
                         )
                         else "screenplay_intent_failed"
                     ),

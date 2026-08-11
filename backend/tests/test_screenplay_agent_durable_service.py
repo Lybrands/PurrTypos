@@ -12,6 +12,7 @@ from application.screenplay_agent_service import (
     ResolvedScreenplayTask,
     ScreenplayAgentService,
 )
+from application.screenplay_agent_planner import ModelScreenplayIntentPlanner
 from application.screenplay_candidate_assembler import (
     ScreenplayCandidateAssembler,
 )
@@ -34,8 +35,16 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     ScreenplayOperationFinalizationCommand,
     SqliteScreenplayOperationFinalizer,
 )
-from purra.long_tasks import LongTaskUnitResult
+from purra.contracts import (
+    AgentMessage,
+    ModelCompletion,
+    ModelFinishReason,
+    ModelStream,
+    ModelStreamChunk,
+)
 from purra.errors import ModelGatewayError
+from purra.long_tasks import LongTaskUnitResult
+from purra.model_execution import ManagedModelExecutor
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from exceptions import AppError
 from schemas.screenplay_agent import (
@@ -138,6 +147,107 @@ class _UnitExecutor:
                     },
                 }),
             ],
+        )
+        return LongTaskUnitResult(
+            output_ref=ref.output_ref,
+            run_id=ref.run_id,
+            artifact_digest=ref.content_digest,
+            validation_receipt=ref.validation_receipt,
+        )
+
+
+class _ScriptedPlannerGateway:
+    def __init__(self, rounds) -> None:
+        self.rounds = list(rounds)
+        self.calls = []
+
+    def describe_invocation(self, messages, invocation):
+        return {
+            "messageCount": len(messages),
+            "model": invocation.request.model,
+        }
+
+    async def stream(self, messages, invocation, signal=None):
+        del signal
+        self.calls.append((tuple(messages), invocation))
+        round_chunks = self.rounds.pop(0)
+
+        async def chunks():
+            for chunk in round_chunks:
+                yield chunk
+
+        return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+    async def complete(self, messages, invocation, signal=None):
+        del messages, signal
+        return ModelCompletion(
+            message=AgentMessage(role="assistant", content="{}"),
+            model=invocation.request.model,
+            finish_reason=ModelFinishReason.STOP,
+        )
+
+
+class _ReviewResolver:
+    async def resolve(self, **kwargs):
+        assert kwargs["intent"].action is ScreenplayIntentAction.REVIEW
+        return ResolvedScreenplayTask(
+            target_role="review",
+            episode_numbers=(1,),
+            episode_scene_ids={1: ("scene-1",)},
+            reviewed_draft_id="sprev-draft",
+        )
+
+
+class _ReviewUnitExecutor:
+    def __init__(self, db) -> None:
+        self._parts = ScreenplayPartArtifactQuery(db)
+
+    async def execute(self, context, signal=None):
+        del signal
+        if context.unit.id == "compose-final-response":
+            output = {
+                "finalResponse": "当前完整剧本已审阅，可以查看正式审阅报告。",
+            }
+        elif context.unit.id.endswith(":validation"):
+            output = {
+                "title": "第 1 集审阅",
+                "executionSummary": "已完成五个维度的审阅。",
+                "contentText": "第 1 集审阅正文。",
+                "contentJson": {
+                    "verdict": "ready",
+                    "issues": [],
+                    "issueCount": 0,
+                    "criticalIssueCount": 0,
+                    "reviewedEpisode": 1,
+                    "reviewedDraftId": "sprev-draft",
+                    "reviewedContentDigest": "sha256:review-input",
+                    "reviewDimensions": [
+                        "continuity",
+                        "character_arc",
+                        "structure_rhythm",
+                        "dialogue",
+                        "format",
+                    ],
+                    "reviewStatus": "completed",
+                    "inputContractVersion": 2,
+                    "partReceipts": [
+                        "receipt-continuity",
+                        "receipt-character-arc",
+                        "receipt-structure-rhythm",
+                        "receipt-dialogue",
+                        "receipt-format",
+                    ],
+                },
+            }
+        else:
+            output = {"partId": context.unit.id}
+        ref = await self._parts.write_host_part(
+            project_id=str(context.task.owner_id),
+            task_id=context.task.id,
+            unit_id=context.unit.id,
+            semantic_key=str(context.unit.semantic_key),
+            part_kind=str(context.unit.metadata.get("unitKind") or ""),
+            output=output,
         )
         return LongTaskUnitResult(
             output_ref=ref.output_ref,
@@ -887,6 +997,166 @@ async def test_formal_review_command_can_never_complete_as_answer(screenplay_db)
     assert projected["intent"] is None
     assert snapshot["operations"] == []
     assert snapshot["tasks"] == []
+
+
+def _review_intent_json() -> str:
+    return json.dumps({
+        "action": "review",
+        "instruction": "审阅当前完整剧本",
+        "scope": {"kind": "current_stage"},
+        "constraints": [],
+        "preserve": [],
+        "requestedDeliverable": "review",
+        "reply": None,
+    }, ensure_ascii=False)
+
+
+async def _review_incident_fixture(screenplay_db, rounds, *, owner_id: str):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id=f"create-{owner_id}",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Review incident replay",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    project_id = workspace["project"]["id"]
+    session = await projects.ensure_current_session(project_id)
+    gateway = _ScriptedPlannerGateway(rounds)
+    planner = ModelScreenplayIntentPlanner(
+        screenplay_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    )
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=owner_id,
+        planner=planner,
+        resolver=_ReviewResolver(),
+        unit_executor_factory=lambda _runtime: _ReviewUnitExecutor(screenplay_db),
+        projects=projects,
+    )
+    request = SubmitScreenplayAgentTurnRequest.model_validate({
+        "sessionId": session["id"],
+        "content": "开始审阅",
+        "stageCommand": {
+            "kind": "stage_action",
+            "action": "review",
+            "targetRole": "review",
+            "scope": {"kind": "current_stage"},
+        },
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://api.deepseek.com/v1",
+            "options": {
+                "model": "deepseek-v4-flash",
+                "model_profile": "deepseek:deepseek-v4-flash",
+                "thinking": {"type": "enabled"},
+            },
+            "contextWindow": "128k",
+        },
+    })
+    return service, workspace, session, gateway, request
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_review_intent_recovers_without_answer_repair(
+    screenplay_db,
+):
+    review_json = _review_intent_json()
+    service, workspace, session, gateway, request = await _review_incident_fixture(
+        screenplay_db,
+        [
+            [
+                ModelStreamChunk(reasoning_delta=review_json),
+                ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+            ],
+            [
+                ModelStreamChunk(content_delta=review_json),
+                ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+            ],
+        ],
+        owner_id="screenplay-review-recovery",
+    )
+    turn = await service.submit_turn(
+        command_id="reasoning-review-recovery",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    projected_turn = snapshot["turns"][0]
+    assert projected_turn["status"] == "completed", projected_turn["error"]
+    operation = snapshot["operations"][0]
+    assert projected_turn["stageCommand"] == {
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    }
+    assert operation["targetRole"] == "review"
+    assert operation["status"] == "succeeded"
+    assert snapshot["tasks"][0]["status"] == "completed"
+    assert len(gateway.calls) == 2
+    phases = await screenplay_db.fetch_all(
+        "SELECT json_extract(payload_json, '$.phase') AS phase "
+        "FROM ai_agent_run_events WHERE event_type = 'model.call_recorded' "
+        "ORDER BY id"
+    )
+    assert phases == [
+        {"phase": "screenplay_intent_planning"},
+        {"phase": "screenplay_intent_planning"},
+    ]
+    assert not any(str(row["phase"]).endswith("_repair") for row in phases)
+    assert "未收到需要修复的候选 JSON" not in projected_turn["assistantContent"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_review_intent_exhaustion_creates_no_execution(
+    screenplay_db,
+):
+    review_json = _review_intent_json()
+    reasoning_only = [
+        ModelStreamChunk(reasoning_delta=review_json),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]
+    service, workspace, session, gateway, request = await _review_incident_fixture(
+        screenplay_db,
+        [reasoning_only, reasoning_only, reasoning_only],
+        owner_id="screenplay-review-exhaustion",
+    )
+    revision_count_before = await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions"
+    )
+    turn = await service.submit_turn(
+        command_id="reasoning-review-exhaustion",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    projected_turn = snapshot["turns"][0]
+    assert projected_turn["status"] == "failed"
+    assert projected_turn["error"]["code"] == "empty_model_response"
+    assert projected_turn["intent"] is None
+    assert snapshot["operations"] == []
+    assert snapshot["tasks"] == []
+    assert len(gateway.calls) == 3
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions"
+    ) == revision_count_before
 
 
 @pytest.mark.asyncio
