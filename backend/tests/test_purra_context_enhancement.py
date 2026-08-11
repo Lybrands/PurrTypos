@@ -49,6 +49,7 @@ from tests.test_purra_runtime import (
     _answer,
     _batch,
     _matching_budget,
+    _output_limit,
     _schema,
     _tool_call,
 )
@@ -477,10 +478,11 @@ async def test_runtime_projects_only_intermediate_round_and_restores_final_evide
         async for update in runtime.run(
             request,
             tools=(read_one, read_two),
-            context_budget=_matching_budget(
-                window=16_000,
-                tools=(read_one, read_two),
-            ),
+                context_budget=_matching_budget(
+                    window=16_000,
+                    tools=(read_one, read_two),
+                ),
+                output_limit=_output_limit(),
             force_tool_choice=True,
             require_tool_call=True,
             tool_context_contracts={
@@ -564,10 +566,11 @@ async def test_runtime_projects_before_budget_check_and_completes_final_round():
         async for update in runtime.run(
             request,
             tools=(schema,),
-            context_budget=_matching_budget(
-                window=4_096,
-                tools=(schema,),
-            ),
+                context_budget=_matching_budget(
+                    window=4_096,
+                    tools=(schema,),
+                ),
+                output_limit=_output_limit(),
             force_tool_choice=True,
             require_tool_call=True,
             tool_context_contracts={

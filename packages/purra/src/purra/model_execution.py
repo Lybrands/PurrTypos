@@ -9,27 +9,31 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from uuid import uuid4
 
 from purra.cancellation import await_with_cancellation, is_canceled
 from purra.contracts import (
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
-    ModelInvocation,
     ModelRequest,
     ModelStreamChunk,
     ModelTokenUsage,
     MessageRole,
     ReasoningMode,
-    ToolChoiceMode,
 )
-from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
-from purra.model_call_parameters import describe_model_call
+from purra.errors import ModelGatewayError
+from purra.model_invocation import (
+    AgentModelCall,
+    AgentModelInvocationManager,
+    ModelInvocationContext,
+)
 from purra.model_protocol import (
     InvocationOutputLimit,
     classify_model_termination,
     resolve_invocation_output_limit,
 )
+from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.ports import CancellationSignal, ModelGateway
 from purra.recovery import (
     EMPTY_RESPONSE_RETRY_GUIDANCE,
@@ -97,9 +101,7 @@ class ManagedModelExecutor:
     """The only public PurrA boundary for host-owned model sub-operations."""
 
     def __init__(self, gateway: ModelGateway) -> None:
-        if not isinstance(gateway, ModelGateway):
-            raise TypeError("managed model executor requires a ModelGateway")
-        self._gateway = gateway
+        self._manager = AgentModelInvocationManager(gateway)
 
     async def complete(
         self,
@@ -111,26 +113,17 @@ class ManagedModelExecutor:
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
     ) -> ManagedModelCompletion:
-        invocation, output_limit = _resolve_invocation(
-            call,
-            call.reasoning_mode,
-        )
-        parameters = describe_model_call(
-            self._gateway,
+        managed = await self._manager.complete(
             messages,
-            invocation,
-        )
-        if on_attempt is not None:
-            await on_attempt(parameters)
-        completion = await await_with_cancellation(
-            self._gateway.complete(messages, invocation, signal),
+            _agent_call(call),
+            _detached_context(),
             signal,
+            on_attempt=on_attempt,
         )
-        _validate_completion(completion)
         return ManagedModelCompletion(
-            completion=completion,
-            output_limit=output_limit,
-            call_parameters=(parameters,),
+            completion=managed.completion,
+            output_limit=managed.receipt.output_limit,
+            call_parameters=managed.receipt.call_parameters,
         )
 
     async def stream(
@@ -143,26 +136,18 @@ class ManagedModelExecutor:
             Callable[[Mapping[str, object]], Awaitable[None]] | None
         ) = None,
     ) -> ManagedModelStream:
-        invocation, output_limit = _resolve_invocation(
-            call,
-            call.reasoning_mode,
-        )
-        parameters = describe_model_call(
-            self._gateway,
+        managed = await self._manager.stream(
             messages,
-            invocation,
-        )
-        if on_attempt is not None:
-            await on_attempt(parameters)
-        stream = await await_with_cancellation(
-            self._gateway.stream(messages, invocation, signal),
+            _agent_call(call),
+            _detached_context(),
             signal,
+            on_attempt=on_attempt,
         )
         return ManagedModelStream(
-            chunks=_validated_chunks(stream.chunks, signal),
-            model=stream.model,
-            output_limit=output_limit,
-            call_parameters=(parameters,),
+            chunks=_validated_chunks(managed.chunks, signal),
+            model=managed.receipt.model,
+            output_limit=managed.receipt.output_limit,
+            call_parameters=managed.receipt.call_parameters,
         )
 
     async def stream_text(
@@ -250,36 +235,19 @@ class ManagedModelExecutor:
             ))
 
 
-def _resolve_invocation(
-    call: ManagedModelCall,
-    mode: ReasoningMode,
-) -> tuple[ModelInvocation, InvocationOutputLimit]:
-    if not call.request.protocol_capabilities.reasoning_mode_is_supported(mode):
-        raise UnsupportedModelFeatureError(
-            "selected reasoning mode is incompatible with model capabilities"
-        )
-    output_limit = call.output_limit
-    if output_limit is None:  # normalized by ManagedModelCall.__post_init__
-        raise TypeError("managed model call output limit was not resolved")
-    return ModelInvocation(
+def _agent_call(call: ManagedModelCall) -> AgentModelCall:
+    return AgentModelCall(
         request=call.request,
-        tools=(),
-        tool_choice=ToolChoiceMode.NONE,
-        output_limit=output_limit,
-        reasoning_mode=mode,
-    ), output_limit
+        output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+        requires_full_text_validation=True,
+        reasoning_mode=call.reasoning_mode,
+        output_limit=call.output_limit,
+    )
 
 
-def _validate_completion(completion: ModelCompletion) -> None:
-    reason = completion.finish_reason
-    if reason is None:
-        raise ModelGatewayError(
-            "model completion ended without a finish reason",
-            code="upstream_stream_interrupted",
-        )
-    tool_count = len(completion.message.tool_calls)
-    termination = classify_model_termination(reason, tool_call_count=tool_count)
-    _raise_for_termination(termination, tool_count=tool_count)
+def _detached_context() -> ModelInvocationContext:
+    return ModelInvocationContext(run_id=f"detached-model-{uuid4().hex}")
 
 
 async def _validated_chunks(
@@ -311,17 +279,13 @@ async def _validated_chunks(
         finish_reason,
         tool_call_count=len(tool_indices),
     )
-    _raise_for_termination(termination, tool_count=len(tool_indices))
-
-
-def _raise_for_termination(termination, *, tool_count: int) -> None:
     if termination.incomplete:
         raise ModelGatewayError(
             "model output is incomplete",
             code=termination.error_code or "model_output_truncated",
             retryable=False,
         )
-    if tool_count:
+    if tool_indices:
         raise ModelGatewayError(
             "managed no-tool model call returned tool calls",
             code="unexpected_model_tool_calls",

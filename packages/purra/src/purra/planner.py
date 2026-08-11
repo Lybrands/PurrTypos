@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import replace
 from typing import Any, Mapping
+from uuid import uuid4
 
 from purra.contracts import (
     AgentMessage,
@@ -33,7 +34,12 @@ from purra.normalization import (
 )
 from purra.errors import InvalidPlannerOutputError, RepairablePlannerOutputError
 from purra.json_values import thaw_json_mapping, thaw_json_value
-from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.model_invocation import (
+    AgentModelCall,
+    AgentModelInvocationManager,
+    ModelInvocationContext,
+)
+from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.plan_constraints import (
     agent_assignment_coverage_violations,
 )
@@ -362,7 +368,7 @@ class AgentPlanner:
         model_gateway: ModelGateway,
         limits: PlannerLimits = PlannerLimits(),
     ):
-        self._model_executor = ManagedModelExecutor(model_gateway)
+        self._model_manager = AgentModelInvocationManager(model_gateway)
         self._limits = limits
 
     async def create_plan(
@@ -513,15 +519,19 @@ class AgentPlanner:
         request: AgentRunRequest,
         signal: CancellationSignal | None,
     ) -> tuple[ModelCompletion, tuple[Mapping[str, Any], ...]]:
-        result = await self._model_executor.complete(
+        result = await self._model_manager.complete(
             messages,
-            ManagedModelCall(
+            AgentModelCall(
                 request=request.model,
+                output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+                commit_mode=OutputCommitMode.PRIVATE,
+                requires_full_text_validation=True,
                 reasoning_mode=ReasoningMode.DISABLED,
             ),
+            ModelInvocationContext(run_id=f"planner-{uuid4().hex}"),
             signal,
         )
-        return result.completion, result.call_parameters
+        return result.completion, result.receipt.call_parameters
 
 
 def build_planner_messages(
