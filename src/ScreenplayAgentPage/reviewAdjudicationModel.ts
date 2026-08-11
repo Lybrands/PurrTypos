@@ -77,6 +77,10 @@ export function reviewAgentActionAvailable(input: {
     || input.phase === 'readyToRevise'
 }
 
+export function reviewVersionLabel(reviewRevisionId: string | null): string {
+  return reviewRevisionId ? '当前审阅版本' : ''
+}
+
 export function reviewPrimaryAction(input: {
   phase: ScreenplayV2ReviewPhase
   recommendation: 'ready' | 'revise' | 'major_rework' | null
