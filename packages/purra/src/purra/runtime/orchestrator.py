@@ -14,6 +14,7 @@ from dataclasses import replace
 from hashlib import sha256
 from time import perf_counter
 from typing import Any, AsyncIterator, Mapping, Sequence
+from uuid import uuid4
 
 from purra.cancellation import (
     OperationCanceled,
@@ -67,8 +68,13 @@ from purra.evidence import RunEvidenceStore
 from purra.host_planned_tool_gateway import (
     HOST_PLANNED_EXECUTION_ROUTE,
 )
-from purra.model_call_parameters import describe_model_call
+from purra.model_invocation import (
+    AgentModelCall,
+    AgentModelInvocationManager,
+    ModelInvocationContext,
+)
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
+from purra.output import AgentOutputIntent, OutputCommitMode
 from purra.json_values import thaw_json_mapping
 from purra.recovery import EMPTY_RESPONSE_RETRY_GUIDANCE
 from purra.runtime_context import project_intermediate_tool_context
@@ -212,7 +218,7 @@ class AgentRuntime:
         limits: RuntimeLimits = RuntimeLimits(),
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
     ):
-        self._model_gateway = model_gateway
+        self._model_manager = AgentModelInvocationManager(model_gateway)
         self._tool_execution_gateway = tool_execution_gateway
         self._observer = observer
         self._context_compressor = context_compressor
@@ -243,6 +249,9 @@ class AgentRuntime:
         signal: CancellationSignal | None = None,
     ) -> AsyncIterator[RuntimeUpdate]:
         messages = list(request.messages)
+        invocation_context = ModelInvocationContext(
+            run_id=str(run_id or f"runtime-{uuid4().hex}"),
+        )
         if not request.model.protocol_capabilities.reasoning_mode_is_supported(
             reasoning_mode
         ):
@@ -680,48 +689,48 @@ class AgentRuntime:
             received_chunk_count = 0
             emitted_delta_count = 0
             direct_content_released = False
-            invocation_parameters = describe_model_call(
-                self._model_gateway,
-                round_messages,
-                invocation,
-            )
             request_fingerprint = _model_request_fingerprint(
                 round_messages,
                 invocation,
             )
-            host_planned_dispatch = (
-                invocation_parameters.get("executionRoute")
-                == HOST_PLANNED_EXECUTION_ROUTE
-            )
-            yield AgentEvent(
-                type=(
-                    CoreEventType.HOST_PLANNED_TOOL_DISPATCHED
-                    if host_planned_dispatch
-                    else CoreEventType.MODEL_CALL_RECORDED
-                ),
-                run_id=run_id,
-                payload={
-                    "phase": "generation",
-                    "count": 0 if host_planned_dispatch else 1,
-                    "toolNames": [
-                        schema.name for schema in invocation.tools
-                    ],
-                    "toolChoice": invocation.tool_choice.value,
-                    "round": round_number,
-                    "logicalRound": provider_attempt.logical_round,
-                    "attempt": provider_attempt.attempt,
-                    "requestFingerprint": request_fingerprint,
-                    "parameters": invocation_parameters,
-                },
-            )
             try:
-                stream = await await_with_cancellation(
-                    self._model_gateway.stream(
-                        round_messages,
+                stream = await self._model_manager.stream(
+                    round_messages,
+                    _agent_model_call(
                         invocation,
-                        signal,
+                        require_tool=require_tool,
+                        requires_full_text_validation=bool(
+                            buffer_model_content or validators or judges
+                        ),
                     ),
+                    invocation_context,
                     signal,
+                )
+                invocation_parameters = stream.receipt.call_parameters[0]
+                host_planned_dispatch = (
+                    invocation_parameters.get("executionRoute")
+                    == HOST_PLANNED_EXECUTION_ROUTE
+                )
+                yield AgentEvent(
+                    type=(
+                        CoreEventType.HOST_PLANNED_TOOL_DISPATCHED
+                        if host_planned_dispatch
+                        else CoreEventType.MODEL_CALL_RECORDED
+                    ),
+                    run_id=run_id,
+                    payload={
+                        "phase": "generation",
+                        "count": 0 if host_planned_dispatch else 1,
+                        "toolNames": [
+                            schema.name for schema in invocation.tools
+                        ],
+                        "toolChoice": invocation.tool_choice.value,
+                        "round": round_number,
+                        "logicalRound": provider_attempt.logical_round,
+                        "attempt": provider_attempt.attempt,
+                        "requestFingerprint": request_fingerprint,
+                        "parameters": invocation_parameters,
+                    },
                 )
             except OperationCanceled:
                 await self._trace(
@@ -944,7 +953,7 @@ class AgentRuntime:
                 )
                 return
 
-            used_model = stream.model or used_model
+            used_model = stream.receipt.model or used_model
             stream_canceled = False
             stream_error: Exception | None = None
             chunks = stream.chunks
@@ -2746,6 +2755,34 @@ def _context_budget_contract_error(
     if budget.output_reserve_tokens <= 0:
         return "context_budget_output_reserve_invalid"
     return None
+
+
+def _agent_model_call(
+    invocation: ModelInvocation,
+    *,
+    require_tool: bool,
+    requires_full_text_validation: bool,
+) -> AgentModelCall:
+    private_round = bool(invocation.tools or require_tool)
+    if private_round:
+        intent = AgentOutputIntent.STRUCTURED_PRIVATE
+        commit_mode = OutputCommitMode.PRIVATE
+    elif requires_full_text_validation:
+        intent = AgentOutputIntent.STRUCTURED_PRIVATE
+        commit_mode = OutputCommitMode.GATED
+    else:
+        intent = AgentOutputIntent.FINAL_PUBLIC
+        commit_mode = OutputCommitMode.LIVE
+    return AgentModelCall(
+        request=invocation.request,
+        output_intent=intent,
+        commit_mode=commit_mode,
+        requires_full_text_validation=requires_full_text_validation,
+        reasoning_mode=invocation.reasoning_mode,
+        output_limit=invocation.output_limit,
+        tools=invocation.tools,
+        tool_choice=invocation.tool_choice,
+    )
 
 
 def _runtime_result(
