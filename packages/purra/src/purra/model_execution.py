@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from purra.cancellation import await_with_cancellation
+from purra.cancellation import await_with_cancellation, is_canceled
 from purra.contracts import (
     AgentMessage,
     ModelCompletion,
@@ -18,6 +18,8 @@ from purra.contracts import (
     ModelInvocation,
     ModelRequest,
     ModelStreamChunk,
+    ModelTokenUsage,
+    MessageRole,
     ReasoningMode,
     ToolChoiceMode,
 )
@@ -29,6 +31,14 @@ from purra.model_protocol import (
     resolve_invocation_output_limit,
 )
 from purra.ports import CancellationSignal, ModelGateway
+from purra.recovery import (
+    EMPTY_RESPONSE_RETRY_GUIDANCE,
+    RecoveryAction,
+    RecoveryCause,
+    RecoveryLedger,
+    RecoveryPolicy,
+    RecoveryRequest,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +79,18 @@ class ManagedModelStream:
     model: str
     output_limit: InvocationOutputLimit
     call_parameters: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedModelTextResult:
+    content: str
+    reasoning: str
+    finish_reason: ModelFinishReason
+    usage: ModelTokenUsage | None
+    attempts: int
+
+
+ManagedChunkObserver = Callable[[ModelStreamChunk], Awaitable[None]]
 
 
 class ManagedModelExecutor:
@@ -142,6 +164,90 @@ class ManagedModelExecutor:
             output_limit=output_limit,
             call_parameters=(parameters,),
         )
+
+    async def stream_text(
+        self,
+        messages: Sequence[AgentMessage],
+        call: ManagedModelCall,
+        signal: CancellationSignal | None = None,
+        *,
+        on_attempt: (
+            Callable[[Mapping[str, object]], Awaitable[None]] | None
+        ) = None,
+        on_chunk: ManagedChunkObserver | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy(),
+    ) -> ManagedModelTextResult:
+        """Collect one no-tool response with bounded empty-output recovery."""
+
+        original_messages = tuple(messages)
+        active_messages = original_messages
+        recovery_ledger = RecoveryLedger(recovery_policy)
+        attempt = 0
+        while True:
+            attempt += 1
+            managed = await self.stream(
+                active_messages,
+                call,
+                signal,
+                on_attempt=on_attempt,
+            )
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            finish_reason: ModelFinishReason | None = None
+            usage: ModelTokenUsage | None = None
+            try:
+                async for chunk in managed.chunks:
+                    if on_chunk is not None:
+                        await on_chunk(chunk)
+                    content_parts.append(chunk.content_delta)
+                    reasoning_parts.append(chunk.reasoning_delta)
+                    if chunk.finish_reason is not None:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+            finally:
+                await _close_async_iterator(managed.chunks)
+
+            if finish_reason is None:
+                raise ModelGatewayError(
+                    "model stream ended without a finish reason",
+                    code="upstream_stream_interrupted",
+                )
+            content = "".join(content_parts)
+            reasoning = "".join(reasoning_parts)
+            if content.strip():
+                return ManagedModelTextResult(
+                    content=content,
+                    reasoning=reasoning,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    attempts=attempt,
+                )
+
+            remaining_retries = (
+                recovery_policy.max_attempts(RecoveryCause.EMPTY_MODEL_RESPONSE)
+                - recovery_ledger.attempts(RecoveryCause.EMPTY_MODEL_RESPONSE)
+            )
+            decision = recovery_ledger.decide(RecoveryRequest(
+                cause=RecoveryCause.EMPTY_MODEL_RESPONSE,
+                action=RecoveryAction.RETRY_MODEL,
+                remaining_model_rounds=remaining_retries,
+                cancellation_requested=is_canceled(signal),
+            ))
+            if not decision.allowed:
+                raise ModelGatewayError(
+                    "model returned no official response content",
+                    code="empty_model_response",
+                    retryable=False,
+                )
+            active_messages = (*original_messages, AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                reasoning=reasoning or None,
+            ), AgentMessage(
+                role=MessageRole.DEVELOPER,
+                content=EMPTY_RESPONSE_RETRY_GUIDANCE,
+            ))
 
 
 def _resolve_invocation(
@@ -234,4 +340,5 @@ __all__ = [
     "ManagedModelCompletion",
     "ManagedModelExecutor",
     "ManagedModelStream",
+    "ManagedModelTextResult",
 ]

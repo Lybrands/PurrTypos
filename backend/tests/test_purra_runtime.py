@@ -407,6 +407,7 @@ async def test_runtime_streams_provider_neutral_deltas_and_completes_without_too
     assert observer.traces[-1].outcome == "stop"
 
 
+@pytest.mark.asyncio
 async def test_runtime_retries_reasoning_only_round_and_returns_visible_answer():
     reasoning_only = [
         ModelStreamChunk(reasoning_delta="I still need to answer."),
@@ -435,7 +436,7 @@ async def test_runtime_retries_reasoning_only_round_and_returns_visible_answer()
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == "给用户的完整答复"
     assert len(model.invocations) == 3
-    assert "without any user-visible response" in str(
+    assert "without any official response content" in str(
         model.message_rounds[2][-1].content
     )
     assert any(
