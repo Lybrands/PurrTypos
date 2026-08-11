@@ -14,6 +14,7 @@ export interface PurrPopconfirmProps {
   placement?: React.ComponentProps<typeof PurrPopover>['placement']
   disabled?: boolean
   okButtonProps?: React.ComponentProps<typeof PurrButton>
+  zIndex?: number
 }
 
 export function PurrPopconfirm({
@@ -27,10 +28,12 @@ export function PurrPopconfirm({
   placement = 'top',
   disabled,
   okButtonProps,
+  zIndex,
 }: PurrPopconfirmProps) {
   const [open, setOpen] = React.useState(false)
   return (
     <PurrPopover
+      zIndex={zIndex}
       open={open}
       onOpenChange={setOpen}
       placement={placement}
