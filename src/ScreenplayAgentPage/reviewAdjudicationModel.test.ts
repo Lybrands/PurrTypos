@@ -5,6 +5,7 @@ import {
   batchDecisionLabel,
   finalizationDisabledReason,
   pendingReviewFindingIds,
+  reviewAgentActionAvailable,
   reviewPrimaryAction,
   reviewRequiresRerun,
   reviewWorkspaceEntry,
@@ -120,7 +121,7 @@ test('review workspace entry never duplicates the Agent rerun action', () => {
   assert.deepEqual(reviewWorkspaceEntry({
     phase: 'adjudicating',
     counts: { pending: 8 },
-  }), { label: '处理审阅意见（8）', emphasis: 'primary' })
+  }), { label: '查看审阅项（8）', emphasis: 'secondary' })
   assert.deepEqual(reviewWorkspaceEntry({
     phase: 'readyToRevise',
     counts: { pending: 0 },
@@ -133,6 +134,20 @@ test('review workspace entry never duplicates the Agent rerun action', () => {
     phase: 'completed',
     counts: { pending: 0 },
   }), { label: '查看定稿记录', emphasis: 'secondary' })
+})
+
+test('review phase exposes the Agent shortcut only when Agent work is available', () => {
+  assert.equal(reviewAgentActionAvailable({ phase: 'awaitingReview' }), true)
+  assert.equal(reviewAgentActionAvailable({ phase: 'adjudicating' }), true)
+  assert.equal(reviewAgentActionAvailable({ phase: 'readyToRevise' }), true)
+  assert.equal(reviewAgentActionAvailable({ phase: 'readyToFinalize' }), false)
+  assert.equal(reviewAgentActionAvailable({
+    phase: 'readyToFinalize',
+    hardChecks: [{
+      code: 'review_input_unverified',
+      message: '当前审阅报告没有可验证的正文输入',
+    }],
+  }), true)
 })
 
 test('review rerun is driven by validation checks, not formal review findings', () => {
