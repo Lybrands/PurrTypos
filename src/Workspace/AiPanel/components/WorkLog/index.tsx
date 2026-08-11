@@ -1,5 +1,13 @@
 import React from "react";
 import { AlertCircleIcon, ChevronRightIcon } from '@/purr-components';
+import {
+  applyWorkLogAutoOpen,
+  getInitialWorkLogOpenState,
+  readWorkLogOpenState,
+  toggleWorkLogOpenState,
+  writeWorkLogOpenState,
+  type WorkLogOpenState,
+} from "./state";
 import "./index.scss";
 
 export interface WorkLogProps {
@@ -13,12 +21,7 @@ export interface WorkLogProps {
   children: React.ReactNode;
 }
 
-type OpenState = {
-  open: boolean;
-  manuallySet: boolean;
-};
-
-const openStateStore = new Map<string, OpenState>();
+const openStateStore = new Map<string, WorkLogOpenState>();
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
@@ -60,26 +63,36 @@ export default function WorkLog({
   hasError = false,
   children,
 }: WorkLogProps) {
-  const storedState = openStateStore.get(logKey);
-  const [open, setOpen] = React.useState(() => storedState?.open ?? autoOpen);
-  const manuallySetRef = React.useRef(storedState?.manuallySet ?? false);
+  const [openState, setOpenState] = React.useState(() =>
+    getInitialWorkLogOpenState(
+      openStateStore.get(logKey),
+      autoOpen,
+    ),
+  );
   const previousAutoOpenRef = React.useRef(autoOpen);
+  const contentId = React.useId();
   const now = useTicker(active && startedAt != null);
 
   React.useEffect(() => {
-    const stored = openStateStore.get(logKey);
-    manuallySetRef.current = stored?.manuallySet ?? false;
-    setOpen(stored?.open ?? autoOpen);
+    setOpenState(getInitialWorkLogOpenState(
+      readWorkLogOpenState(openStateStore, logKey),
+      autoOpen,
+    ));
     previousAutoOpenRef.current = autoOpen;
   }, [logKey]);
 
   React.useEffect(() => {
     const previousAutoOpen = previousAutoOpenRef.current;
     previousAutoOpenRef.current = autoOpen;
-    if (manuallySetRef.current || previousAutoOpen === autoOpen) return;
-    openStateStore.set(logKey, { open: autoOpen, manuallySet: false });
-    setOpen(autoOpen);
-  }, [autoOpen, logKey]);
+    const nextState = applyWorkLogAutoOpen(
+      openState,
+      previousAutoOpen,
+      autoOpen,
+    );
+    if (nextState === openState) return;
+    writeWorkLogOpenState(openStateStore, logKey, nextState);
+    setOpenState(nextState);
+  }, [autoOpen, logKey, openState]);
 
   const elapsedMs = active && startedAt != null
     ? Math.max(0, now - startedAt)
@@ -97,22 +110,22 @@ export default function WorkLog({
       : "用时";
 
   const toggleOpen = () => {
-    const nextOpen = !open;
-    manuallySetRef.current = true;
-    openStateStore.set(logKey, { open: nextOpen, manuallySet: true });
-    setOpen(nextOpen);
+    const nextState = toggleWorkLogOpenState(openState);
+    writeWorkLogOpenState(openStateStore, logKey, nextState);
+    setOpenState(nextState);
   };
 
   return (
     <section
-      className={`work-log ${open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
+      className={`work-log ${openState.open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
     >
       {hasDetails ? (
         <button
           type="button"
           className="work-log__toggle"
           onClick={toggleOpen}
-          aria-expanded={open}
+          aria-expanded={openState.open}
+          aria-controls={contentId}
         >
           <ChevronRightIcon className="work-log__chevron" />
           {hasError ? <AlertCircleIcon className="work-log__error-icon" /> : null}
@@ -123,7 +136,7 @@ export default function WorkLog({
           {active ? <span className="a-blink-dots">...</span> : null}
         </button>
       ) : (
-        <div className="work-log__toggle work-log__toggle--static" role="status">
+        <div className="work-log__toggle work-log__toggle--static">
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
@@ -132,7 +145,11 @@ export default function WorkLog({
         </div>
       )}
       {hasDetails ? (
-        <div className="work-log__collapsible">
+        <div
+          id={contentId}
+          className="work-log__collapsible"
+          hidden={!openState.open}
+        >
           <div className="work-log__body">{children}</div>
         </div>
       ) : null}
