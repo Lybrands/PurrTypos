@@ -55,7 +55,9 @@ def model_request_from_runtime(
         requirements or TaskCapabilityRequirements(
             reasoning_mode=reasoning_mode,
             tool_calling=FeatureRequirement.OPTIONAL,
-            structured_output_level="none",
+            structured_output_level=(
+                "json_object" if json_object_output else "none"
+            ),
             streaming_required=True,
             cancellation_required=True,
         ),

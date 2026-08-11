@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+import application.model_runtime as model_runtime
 import application.screenplay_structured_call as screenplay_structured_call
 from purra.contracts import (
     AgentMessage,
@@ -17,11 +18,7 @@ from purra.contracts import (
     ModelStreamChunk,
     ReasoningMode,
 )
-from purra.model_execution import ManagedModelExecutor, ManagedModelStream
-from purra.model_protocol import (
-    InvocationOutputLimit,
-    InvocationOutputLimitSource,
-)
+from purra.model_execution import ManagedModelExecutor
 from purra.errors import ModelGatewayError
 from purra.recovery import (
     FailureCategory,
@@ -58,7 +55,6 @@ from application.screenplay_agent_planner import (
     SqliteScreenplayTaskResolver,
 )
 from application.screenplay_structured_call import (
-    StreamedModelText,
     StructuredModelResult,
 )
 from application.screenplay_progress_stream import JsonStringFieldProjector
@@ -87,13 +83,6 @@ from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
 pytestmark = pytest.mark.asyncio
-
-_TEST_OUTPUT_LIMIT = InvocationOutputLimit(
-    max_tokens=32_768,
-    source=InvocationOutputLimitSource.USER_OVERRIDE,
-    profile_max_tokens=393_216,
-)
-
 
 async def test_draft_manifest_has_stable_scene_parts_and_digest():
     arguments = dict(
@@ -232,16 +221,6 @@ async def test_model_execution_progress_reaches_the_shared_stream_incrementally(
         '"sceneText":"这里是不会进入执行过程的完整正文"}]}'
     )
 
-    class Gateway:
-        async def stream(self, *_args):
-            async def chunks():
-                for start in range(0, len(raw), 7):
-                    yield ModelStreamChunk(
-                        content_delta=raw[start:start + 7],
-                    )
-
-            return ModelStream(chunks=chunks(), model="test-model")
-
     recorded_events: list[tuple[object, object]] = []
 
     class Controller:
@@ -249,14 +228,7 @@ async def test_model_execution_progress_reaches_the_shared_stream_incrementally(
             recorded_events.append((event_type, payload))
 
     projected: list[str] = []
-    raw_stream = await Gateway().stream()
-    result = await screenplay_structured_call._stream_text(
-        ManagedModelStream(
-            chunks=raw_stream.chunks,
-            model=raw_stream.model,
-            output_limit=_TEST_OUTPUT_LIMIT,
-            call_parameters=(),
-        ),
+    projection = screenplay_structured_call.StructuredChunkProjection(
         Controller(),
         execution_progress_fields={
             "executionSummary": "本集创作推演：",
@@ -264,6 +236,11 @@ async def test_model_execution_progress_reaches_the_shared_stream_incrementally(
         },
         emit_execution_progress=lambda delta: _append_async(projected, delta),
     )
+    for start in range(0, len(raw), 7):
+        await projection.observe(ModelStreamChunk(
+            content_delta=raw[start:start + 7],
+        ))
+    await projection.close()
 
     assert len(projected) >= 3
     assert max(map(len, projected)) <= VISIBLE_STREAM_CHUNK_CHARS
@@ -271,26 +248,13 @@ async def test_model_execution_progress_reaches_the_shared_stream_incrementally(
         "本集创作推演：先承接上一集的人物选择，再推动本集核心冲突。\n"
         "场景 s1 推演：人物目标受阻并产生转折。\n"
     )
-    assert result.projected_progress is True
-    assert result.content == raw
+    assert projection.projected_progress is True
     assert recorded_events == []
 
 
 async def test_raw_reasoning_is_diagnostic_only():
     reasoning = "先确认当前已完成的集数，再把范围限定为全部剩余剧集。"
     content = '{"executionSummary":"确定创作第 7 至 8 集。"}'
-
-    class Gateway:
-        async def stream(self, *_args):
-            async def chunks():
-                for start in range(0, len(reasoning), 6):
-                    yield ModelStreamChunk(
-                        reasoning_delta=reasoning[start:start + 6],
-                    )
-                for start in range(0, len(content), 6):
-                    yield ModelStreamChunk(content_delta=content[start:start + 6])
-
-            return ModelStream(chunks=chunks(), model="test-model")
 
     recorded_events: list[tuple[object, object]] = []
 
@@ -300,19 +264,21 @@ async def test_raw_reasoning_is_diagnostic_only():
 
     projected: list[str] = []
     diagnostics: list[dict[str, str]] = []
-    raw_stream = await Gateway().stream()
-    await screenplay_structured_call._stream_text(
-        ManagedModelStream(
-            chunks=raw_stream.chunks,
-            model=raw_stream.model,
-            output_limit=_TEST_OUTPUT_LIMIT,
-            call_parameters=(),
-        ),
+    projection = screenplay_structured_call.StructuredChunkProjection(
         Controller(),
         execution_progress_fields={"executionSummary": ""},
         emit_execution_progress=lambda delta: _append_async(projected, delta),
         emit_model_diagnostic=lambda chunk: _append_async(diagnostics, chunk),
     )
+    for start in range(0, len(reasoning), 6):
+        await projection.observe(ModelStreamChunk(
+            reasoning_delta=reasoning[start:start + 6],
+        ))
+    for start in range(0, len(content), 6):
+        await projection.observe(ModelStreamChunk(
+            content_delta=content[start:start + 6],
+        ))
+    await projection.close()
 
     visible = "".join(projected)
     assert reasoning not in visible
@@ -853,7 +819,9 @@ def _request(session_id: int, content: str):
     })
 
 
-async def test_screenplay_structured_calls_enable_supported_provider_json_mode():
+async def test_screenplay_structured_calls_enable_supported_provider_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
     runtime = _request(1, "测试 JSON mode").runtime
     runtime.options.update({
         "model": "deepseek-v4-flash",
@@ -862,11 +830,24 @@ async def test_screenplay_structured_calls_enable_supported_provider_json_mode()
     })
     runtime.baseURL = "https://api.deepseek.com"
 
+    requirements = []
+    real_preflight = model_runtime.preflight_capabilities
+
+    def capture_preflight(snapshot, requirement):
+        requirements.append(requirement)
+        real_preflight(snapshot, requirement)
+
+    monkeypatch.setattr(model_runtime, "preflight_capabilities", capture_preflight)
     structured = model_request_from_runtime(runtime, json_object_output=True)
     ordinary = model_request_from_runtime(runtime)
 
     assert structured.options["response_format"] == {"type": "json_object"}
+    assert structured.protocol_capabilities.json_schema_level == "json_object"
     assert "response_format" not in ordinary.options
+    assert [item.structured_output_level for item in requirements] == [
+        "json_object",
+        "none",
+    ]
 
 
 async def test_screenplay_task_preserves_managed_model_failure_code():
@@ -1030,30 +1011,49 @@ class _ModelGateway:
         )
 
 
+class _ScriptedModelGateway(_ModelGateway):
+    def __init__(self, api_key: str, rounds) -> None:
+        super().__init__(api_key)
+        self.rounds = list(rounds)
+
+    async def stream(self, messages, invocation, signal=None):
+        del signal
+        self.calls.append((tuple(messages), invocation))
+        self.invocations.append(invocation)
+        round_chunks = self.rounds.pop(0)
+
+        async def chunks():
+            for chunk in round_chunks:
+                yield chunk
+
+        return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+
 def _model_executor_factory(api_key: str) -> ManagedModelExecutor:
     return ManagedModelExecutor(_ModelGateway(api_key))
 
 
 async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
     malformed = '{"contentText":"角色说"少亲自来"。"}'
-    responses = iter((malformed, '```json\n{"answer":"ok"}\n```'))
-
-    async def fake_stream(*args, **kwargs):
-        del args, kwargs
-        return StreamedModelText(content=next(responses))
-
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", fake_stream)
     runtime = _request(session["id"], "测试结构化输出").runtime
     runtime.options.update({
         "model": "deepseek-v4-flash",
         "model_profile": "deepseek:deepseek-v4-flash",
         "thinking": {"type": "enabled"},
     })
-    gateway = _ModelGateway("secret")
+    gateway = _ScriptedModelGateway("secret", [
+        [
+            ModelStreamChunk(content_delta=malformed),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta='```json\n{"answer":"ok"}\n```'),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
         model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
@@ -1149,20 +1149,22 @@ async def test_truncated_structured_output_is_never_repaired_or_replayed(
 
 async def test_structured_model_renews_its_core_run_lease_during_slow_generation(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
 
-    async def slow_stream(*args, **kwargs):
-        del args, kwargs
-        await asyncio.sleep(0.65)
-        return StreamedModelText(content='{"answer":"ok"}')
+    class SlowGateway(_ScriptedModelGateway):
+        async def stream(self, messages, invocation, signal=None):
+            await asyncio.sleep(0.65)
+            return await super().stream(messages, invocation, signal)
 
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", slow_stream)
+    gateway = SlowGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"ok"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
     runtime = _request(session["id"], "测试慢速结构化输出").runtime
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=_model_executor_factory,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
         lease_duration_ms=300,
     ).run_json(
         runtime=runtime,
@@ -1192,17 +1194,14 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
 
 async def test_structured_model_preserves_the_frontend_thinking_option(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
     reasoning_modes = []
 
-    gateway = _ModelGateway("secret")
-
-    async def capture_stream(_stream, _controller, **_kwargs):
-        return StreamedModelText(content='{"answer":"ok"}')
-
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", capture_stream)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"ok"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
     runtime = _request(session["id"], "测试思考配置").runtime
     runtime.options.update({
         "model": "deepseek-v4-flash",
@@ -1253,20 +1252,20 @@ async def test_screenplay_uses_the_exact_profile_or_user_output_limit():
 
 async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
 
-    async def fail_stream(*_args, **_kwargs):
-        raise RuntimeError("provider disconnected")
+    class FailingGateway(_ModelGateway):
+        async def stream(self, *_args, **_kwargs):
+            raise RuntimeError("provider disconnected")
 
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", fail_stream)
+    gateway = FailingGateway("secret")
     runtime = _request(session["id"], "测试模型失败诊断").runtime
 
     with pytest.raises(RuntimeError, match="provider disconnected"):
         await screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            model_executor_factory=_model_executor_factory,
+            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
         ).run_json(
             runtime=runtime,
             session_id=session["id"],
@@ -1291,33 +1290,49 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
     assert rows[0]["run_id"] == rows[1]["run_id"]
 
 
-async def test_reasoning_only_output_is_not_accepted_as_business_output(
+async def test_reasoning_only_structured_output_retries_original_not_repair(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
+    expected = '{"action":"review"}'
+    gateway = _ScriptedModelGateway("secret", [
+        [
+            ModelStreamChunk(reasoning_delta=expected),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta=expected),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
 
-    async def reasoning_stream(*_args, **_kwargs):
-        return StreamedModelText(content="")
+    result = await screenplay_structured_call.ScreenplayStructuredCallService(
+        temp_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    ).run_json(
+        runtime=_request(session["id"], "测试 reasoning JSON").runtime,
+        session_id=session["id"],
+        prompt="测试 reasoning JSON",
+        system_instruction="只输出 JSON",
+        user_payload={},
+        binding_namespace="screenplay.agent.test",
+        binding_aggregate_id="project-test",
+        binding_command_id="reasoning-json-test",
+        phase="screenplay_intent_planning",
+        repair_instruction="修复 JSON",
+        validate=lambda value: value,
+    )
 
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", reasoning_stream)
-    with pytest.raises(ValueError, match="complete JSON object"):
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            model_executor_factory=_model_executor_factory,
-        ).run_json(
-            runtime=_request(session["id"], "测试 reasoning JSON").runtime,
-            session_id=session["id"],
-            prompt="测试 reasoning JSON",
-            system_instruction="只输出 JSON",
-            user_payload={},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="reasoning-json-test",
-            phase="screenplay_intent_planning",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
+    assert result.value == {"action": "review"}
+    assert await temp_db.fetch_all(
+        "SELECT json_extract(payload_json, '$.phase') AS phase "
+        "FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_type = 'model.call_recorded' ORDER BY id",
+        [result.run_id],
+    ) == [
+        {"phase": "screenplay_intent_planning"},
+        {"phase": "screenplay_intent_planning"},
+    ]
     rows = await temp_db.fetch_all(
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
     )
@@ -1326,24 +1341,103 @@ async def test_reasoning_only_output_is_not_accepted_as_business_output(
     assert not any("delta" in chunk for chunk in chunks)
 
 
+async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+    empty = [ModelStreamChunk(finish_reason=ModelFinishReason.STOP)]
+    gateway = _ScriptedModelGateway("secret", [empty, empty, empty])
+
+    with pytest.raises(ModelGatewayError) as captured:
+        await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        ).run_json(
+            runtime=_request(session["id"], "测试空 JSON").runtime,
+            session_id=session["id"],
+            prompt="测试空 JSON",
+            system_instruction="只输出 JSON",
+            user_payload={},
+            binding_namespace="screenplay.agent.test",
+            binding_aggregate_id="project-test",
+            binding_command_id="empty-json-test",
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+        )
+
+    assert captured.value.code == "empty_model_response"
+    assert len(gateway.invocations) == 3
+    assert await temp_db.fetch_all(
+        "SELECT json_extract(payload_json, '$.phase') AS phase "
+        "FROM ai_agent_run_events WHERE event_type = 'model.call_recorded' "
+        "ORDER BY id"
+    ) == [
+        {"phase": "screenplay_test"},
+        {"phase": "screenplay_test"},
+        {"phase": "screenplay_test"},
+    ]
+    chunks = [
+        json.loads(row["chunk_json"])
+        for row in await temp_db.fetch_all(
+            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+        )
+    ]
+    assert not any("delta" in chunk for chunk in chunks)
+
+
+async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [
+        [
+            ModelStreamChunk(content_delta="{invalid"),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta="still invalid"),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
+
+    with pytest.raises(ModelGatewayError) as captured:
+        await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        ).run_json(
+            runtime=_request(session["id"], "测试无效 JSON").runtime,
+            session_id=session["id"],
+            prompt="测试无效 JSON",
+            system_instruction="只输出 JSON",
+            user_payload={},
+            binding_namespace="screenplay.agent.test",
+            binding_aggregate_id="project-test",
+            binding_command_id="invalid-json-test",
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+        )
+
+    assert captured.value.code == "structured_output_invalid"
+    assert len(gateway.invocations) == 2
+
+
 async def test_generated_screenplay_body_never_becomes_a_chat_delta(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     _, _, session = await _project_and_session(temp_db)
 
-    async def generation_stream(*_args, **_kwargs):
-        return StreamedModelText(
-            content=(
-                '{"executionSummary":"先核对前集连续性，再按场景目标推进冲突。",'
-                '"sceneText":"这里是完整剧本正文"}'
-            ),
-        )
-
-    monkeypatch.setattr(screenplay_structured_call, "_stream_text", generation_stream)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta=(
+            '{"executionSummary":"先核对前集连续性，再按场景目标推进冲突。",'
+            '"sceneText":"这里是完整剧本正文"}'
+        )),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
     await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=_model_executor_factory,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
     ).run_json(
         runtime=_request(session["id"], "测试正文隔离").runtime,
         session_id=session["id"],
