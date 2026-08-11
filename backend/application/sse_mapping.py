@@ -70,14 +70,6 @@ def core_event_to_sse_chunk(event: AgentEvent) -> dict[str, Any] | None:
             terminal_payload["finalResponse"] = final_response
         return {terminal_names[event.type]: terminal_payload}
 
-    if event.type == CoreEventType.ASSISTANT_FINAL_DELTA:
-        return {"delta": str(payload.get("delta") or "")}
-    if event.type == CoreEventType.ASSISTANT_COMMENTARY_DELTA:
-        return {"commentaryDelta": str(payload.get("delta") or "")}
-    if event.type == CoreEventType.MODEL_CONTENT_DELTA:
-        return {"modelContentDelta": str(payload.get("delta") or "")}
-    if event.type == CoreEventType.MODEL_REASONING_DELTA:
-        return {"reasoningDelta": str(payload.get("delta") or "")}
     if event.type == CoreEventType.TOOL_CALLS_STARTED:
         return {
             "toolCalls": [

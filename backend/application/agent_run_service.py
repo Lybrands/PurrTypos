@@ -288,20 +288,11 @@ class AgentRunService:
                             # same canonical envelope on the parent Run so a
                             # reconnect/replay sees the exact child lifecycle,
                             # tool and terminal events that the live UI saw.
-                            # Raw token deltas intentionally remain transport-
-                            # only, matching the persistence policy of an
-                            # ordinary (non-delegated) Run; run.completed owns
-                            # the durable final response snapshot.
-                            if child_update.type not in {
-                                CoreEventType.MODEL_CONTENT_DELTA,
-                                CoreEventType.MODEL_REASONING_DELTA,
-                                CoreEventType.ASSISTANT_FINAL_DELTA,
-                            }:
-                                await composition.append_run_event(
-                                    str(child_lineage.parent_run_id),
-                                    CoreEventType.DELEGATION_EVENT,
-                                    dict(delegation_event.payload),
-                                )
+                            await composition.append_run_event(
+                                str(child_lineage.parent_run_id),
+                                CoreEventType.DELEGATION_EVENT,
+                                dict(delegation_event.payload),
+                            )
                             await publish(delegation_event)
                         if isinstance(child_update, AgentRunResult):
                             child_result = child_update
