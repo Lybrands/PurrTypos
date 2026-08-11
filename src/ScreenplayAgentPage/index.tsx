@@ -124,7 +124,7 @@ import {
 import RevisionLibraryModal from './RevisionLibraryModal'
 import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
 import {
-  reviewRequiresRerun,
+  reviewAgentActionAvailable,
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel'
 import { stageAgentAction } from './stageAgentAction'
@@ -2800,9 +2800,8 @@ export default function ScreenplayAgentPage({
     if (!reviewState?.reviewRevisionId) setReviewAdjudicationOpen(false)
   }, [reviewState?.reviewRevisionId])
   const reviewUsesAgentAction = openedProject?.active_stage !== 'review'
-    || reviewState?.phase === 'awaitingReview'
-    || reviewState?.phase === 'readyToRevise'
-    || reviewRequiresRerun(reviewState ?? {})
+    || !reviewState
+    || reviewAgentActionAvailable(reviewState)
   const showStageStartAction = openedProject?.active_stage !== 'completed'
     && reviewUsesAgentAction
   const stageStartActionDisabled = openedProject?.status === 'archived'
@@ -2853,9 +2852,8 @@ export default function ScreenplayAgentPage({
       || reviewMutationPending
       || (
         openedProject.active_stage === 'review'
-        && !reviewRequiresRerun(reviewState ?? {})
-        && reviewState?.phase !== 'awaitingReview'
-        && reviewState?.phase !== 'readyToRevise'
+        && reviewState
+        && !reviewAgentActionAvailable(reviewState)
       )
     ) {
       return

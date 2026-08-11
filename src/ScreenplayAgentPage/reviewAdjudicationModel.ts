@@ -67,6 +67,16 @@ export function reviewRequiresRerun(input: {
   return hasReviewRerunCheck(input.hardChecks)
 }
 
+export function reviewAgentActionAvailable(input: {
+  phase: ScreenplayV2ReviewPhase
+  hardChecks?: ReadonlyArray<{ code: string; message: string }>
+}): boolean {
+  if (reviewRequiresRerun(input)) return true
+  return input.phase === 'awaitingReview'
+    || input.phase === 'adjudicating'
+    || input.phase === 'readyToRevise'
+}
+
 export function reviewPrimaryAction(input: {
   phase: ScreenplayV2ReviewPhase
   recommendation: 'ready' | 'revise' | 'major_rework' | null
@@ -99,8 +109,8 @@ export function reviewWorkspaceEntry(input: {
   if (input.phase === 'awaitingReview') return null
   if (input.phase === 'adjudicating') {
     return {
-      label: `处理审阅意见（${input.counts.pending}）`,
-      emphasis: 'primary',
+      label: `查看审阅项（${input.counts.pending}）`,
+      emphasis: 'secondary',
     }
   }
   if (input.phase === 'readyToRevise') {

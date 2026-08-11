@@ -75,6 +75,16 @@ test('automatic stage actions contain only the clicked user action', async () =>
       input: {
         project: project({ active_stage: 'review' }),
         reviewState: {
+          phase: 'adjudicating' as const,
+          recommendation: 'ready' as const,
+        },
+      },
+      expected: '处理审阅意见',
+    },
+    {
+      input: {
+        project: project({ active_stage: 'review' }),
+        reviewState: {
           phase: 'readyToFinalize' as const,
           recommendation: 'revise' as const,
           hardChecks: [{
