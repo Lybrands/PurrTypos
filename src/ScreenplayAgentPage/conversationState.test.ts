@@ -27,6 +27,7 @@ function turn(overrides: Partial<ScreenplayConversationTurn> = {}): ScreenplayCo
     sessionId: 7,
     status: 'planning',
     userContent: '创作接下来三集',
+    stageCommand: null,
     assistantContent: '',
     runtimeProfile: { model: 'glm-5.2' },
     intent: null,

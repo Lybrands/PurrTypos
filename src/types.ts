@@ -232,6 +232,16 @@ export type ScreenplayV2DeliverableRole =
   | 'sceneList'
   | 'screenplayDraft'
   | 'review';
+export interface ScreenplayStageCommand {
+  kind: 'stage_action';
+  action: 'create' | 'revise' | 'review';
+  targetRole: ScreenplayV2DeliverableRole;
+  scope: {
+    kind: 'current_stage' | 'next_episodes' | 'episodes' | 'all_remaining';
+    count?: number;
+    episodeNumbers?: number[];
+  };
+}
 export interface ScreenplayV2RevisionSummary {
   id: string;
   deliverableId: string;
@@ -376,6 +386,7 @@ export interface ScreenplayConversationTurn {
   sessionId: number;
   status: ScreenplayConversationTurnStatus;
   userContent: string;
+  stageCommand: ScreenplayStageCommand | null;
   assistantContent: string;
   runtimeProfile: {
     apiProvider?: string;
@@ -1606,6 +1617,7 @@ export interface ElectronAPI {
     projectId: EntityId;
     sessionId: number;
     content: string;
+    stageCommand?: ScreenplayStageCommand;
     runtime: ScreenplayConversationRuntimeInput;
   }) => Promise<ApiResult<ScreenplayConversationTurn>>;
   getScreenplayConversationSnapshot: (data: {

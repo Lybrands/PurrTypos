@@ -4,6 +4,7 @@ import type {
   ScreenplayDraftEpisode,
   ScreenplayFormat,
   ScreenplayProject,
+  ScreenplayStageCommand,
 } from '../types.ts'
 import {
   draftEpisodeCountFromScope,
@@ -22,6 +23,28 @@ export interface StageAgentActionInput {
   documentEpisodes?: ScreenplayDocumentEpisode[]
   reviewState?: ReviewActionState
   draftScope?: ScreenplayDraftScope
+}
+
+export interface StageAgentAction {
+  label: string
+  stageCommand?: ScreenplayStageCommand
+}
+
+function action(
+  label: string,
+  commandAction: ScreenplayStageCommand['action'],
+  targetRole: ScreenplayStageCommand['targetRole'],
+  scope: ScreenplayStageCommand['scope'],
+): StageAgentAction {
+  return {
+    label,
+    stageCommand: {
+      kind: 'stage_action',
+      action: commandAction,
+      targetRole,
+      scope,
+    },
+  }
 }
 
 function fallbackReviewAction(documents: ScreenplayDocument[]): string {
@@ -50,21 +73,44 @@ export function stageAgentAction({
   documentEpisodes = [],
   reviewState,
   draftScope = 'next_episode',
-}: StageAgentActionInput): string {
-  if (project.active_stage === 'completed') return '创作已完成'
+}: StageAgentActionInput): StageAgentAction {
+  if (project.active_stage === 'completed') return { label: '创作已完成' }
   if (project.active_stage === 'orientation') {
-    return project.source_kind === 'book' ? '开始分析' : '生成创作简报'
+    return project.source_kind === 'book'
+      ? action('开始分析', 'create', 'sourceAnalysis', { kind: 'current_stage' })
+      : action('生成创作简报', 'create', 'creativeBrief', { kind: 'current_stage' })
   }
-  if (project.active_stage === 'brief') return '生成创作简报'
+  if (project.active_stage === 'brief') {
+    return action('生成创作简报', 'create', 'creativeBrief', { kind: 'current_stage' })
+  }
   if (project.active_stage === 'structure') {
-    return SERIES_FORMATS.has(project.format) ? '设计分集结构' : '设计故事节拍'
+    return action(
+      SERIES_FORMATS.has(project.format) ? '设计分集结构' : '设计故事节拍',
+      'create',
+      'structure',
+      { kind: 'current_stage' },
+    )
   }
-  if (project.active_stage === 'scenes') return '生成场景表'
+  if (project.active_stage === 'scenes') {
+    return action('生成场景表', 'create', 'sceneList', { kind: 'current_stage' })
+  }
   if (project.active_stage === 'draft') {
-    if (draftScope === 'all_remaining') return '创作全部剩余正文'
+    if (draftScope === 'all_remaining') {
+      return action(
+        '创作全部剩余正文',
+        'create',
+        'screenplayDraft',
+        { kind: 'all_remaining' },
+      )
+    }
     const draftEpisodeCount = draftEpisodeCountFromScope(draftScope)
     if (draftEpisodeCount != null && draftEpisodeCount > 1) {
-      return `连续创作 ${draftEpisodeCount} 集`
+      return action(
+        `连续创作 ${draftEpisodeCount} 集`,
+        'create',
+        'screenplayDraft',
+        { kind: 'next_episodes', count: draftEpisodeCount },
+      )
     }
     const sceneList = [...documents].reverse().find(
       (document) => document.kind === 'scene_list' && document.status === 'accepted',
@@ -76,9 +122,43 @@ export function stageAgentAction({
       (count, episode) => count + episode.scene_ids.length,
       0,
     )
-    if (sceneCount > 0 && completedCount >= sceneCount) return '完成剧本正文'
-    return SERIES_FORMATS.has(project.format) ? '创作下一集' : '创作正文'
+    if (sceneCount > 0 && completedCount >= sceneCount) {
+      return action(
+        '完成剧本正文',
+        'review',
+        'review',
+        { kind: 'current_stage' },
+      )
+    }
+    return action(
+      SERIES_FORMATS.has(project.format) ? '创作下一集' : '创作正文',
+      'create',
+      'screenplayDraft',
+      { kind: 'next_episodes', count: 1 },
+    )
   }
-  if (reviewState) return reviewPrimaryAction(reviewState).label
-  return fallbackReviewAction(documents)
+  if (reviewState) {
+    const reviewAction = reviewPrimaryAction(reviewState)
+    if (reviewAction.kind === 'startReview') {
+      return action(
+        reviewAction.label,
+        'review',
+        'review',
+        { kind: 'current_stage' },
+      )
+    }
+    if (reviewAction.kind === 'startRevision') {
+      return action(
+        reviewAction.label,
+        'revise',
+        'screenplayDraft',
+        { kind: 'current_stage' },
+      )
+    }
+    return { label: reviewAction.label }
+  }
+  const fallback = fallbackReviewAction(documents)
+  return fallback === '开始修订'
+    ? action(fallback, 'revise', 'screenplayDraft', { kind: 'current_stage' })
+    : action(fallback, 'review', 'review', { kind: 'current_stage' })
 }

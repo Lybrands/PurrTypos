@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import type { ScreenplayProject } from '../types.ts'
+import type {
+  ScreenplayDocument,
+  ScreenplayDocumentEpisode,
+  ScreenplayDraftEpisode,
+  ScreenplayProject,
+} from '../types.ts'
 
 function project(
   values: Partial<ScreenplayProject> & Pick<ScreenplayProject, 'active_stage'>,
@@ -39,37 +44,139 @@ test('automatic stage actions contain only the clicked user action', async () =>
           source_book_id: 'book-1',
         }),
       },
-      expected: '开始分析',
+      expected: {
+        label: '开始分析',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'sourceAnalysis',
+          scope: { kind: 'current_stage' },
+        },
+      },
+    },
+    {
+      input: { project: project({ active_stage: 'orientation' }) },
+      expected: {
+        label: '生成创作简报',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'creativeBrief',
+          scope: { kind: 'current_stage' },
+        },
+      },
     },
     {
       input: { project: project({ active_stage: 'brief' }) },
-      expected: '生成创作简报',
+      expected: {
+        label: '生成创作简报',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'creativeBrief',
+          scope: { kind: 'current_stage' },
+        },
+      },
     },
     {
       input: {
         project: project({ active_stage: 'structure', format: '连续剧' }),
       },
-      expected: '设计分集结构',
+      expected: {
+        label: '设计分集结构',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'structure',
+          scope: { kind: 'current_stage' },
+        },
+      },
     },
     {
       input: {
         project: project({ active_stage: 'structure', format: '电影' }),
       },
-      expected: '设计故事节拍',
+      expected: {
+        label: '设计故事节拍',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'structure',
+          scope: { kind: 'current_stage' },
+        },
+      },
+    },
+    {
+      input: { project: project({ active_stage: 'scenes' }) },
+      expected: {
+        label: '生成场景表',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'sceneList',
+          scope: { kind: 'current_stage' },
+        },
+      },
+    },
+    {
+      input: { project: project({ active_stage: 'draft', format: '连续剧' }) },
+      expected: {
+        label: '创作下一集',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'screenplayDraft',
+          scope: { kind: 'next_episodes', count: 1 },
+        },
+      },
     },
     {
       input: {
         project: project({ active_stage: 'draft', format: '连续剧' }),
         draftScope: 'next_3_episodes' as const,
       },
-      expected: '连续创作 3 集',
+      expected: {
+        label: '连续创作 3 集',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'screenplayDraft',
+          scope: { kind: 'next_episodes', count: 3 },
+        },
+      },
     },
     {
       input: {
         project: project({ active_stage: 'draft', format: '连续剧' }),
         draftScope: 'all_remaining' as const,
       },
-      expected: '创作全部剩余正文',
+      expected: {
+        label: '创作全部剩余正文',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'create',
+          targetRole: 'screenplayDraft',
+          scope: { kind: 'all_remaining' },
+        },
+      },
+    },
+    {
+      input: {
+        project: project({ active_stage: 'review' }),
+        reviewState: {
+          phase: 'awaitingReview' as const,
+          recommendation: null,
+        },
+      },
+      expected: {
+        label: '开始审阅',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'review',
+          targetRole: 'review',
+          scope: { kind: 'current_stage' },
+        },
+      },
     },
     {
       input: {
@@ -79,7 +186,25 @@ test('automatic stage actions contain only the clicked user action', async () =>
           recommendation: 'ready' as const,
         },
       },
-      expected: '处理审阅意见',
+      expected: { label: '处理审阅意见' },
+    },
+    {
+      input: {
+        project: project({ active_stage: 'review' }),
+        reviewState: {
+          phase: 'readyToRevise' as const,
+          recommendation: 'revise' as const,
+        },
+      },
+      expected: {
+        label: '开始修订',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'revise',
+          targetRole: 'screenplayDraft',
+          scope: { kind: 'current_stage' },
+        },
+      },
     },
     {
       input: {
@@ -93,7 +218,19 @@ test('automatic stage actions contain only the clicked user action', async () =>
           }],
         },
       },
-      expected: '重新审阅',
+      expected: {
+        label: '重新审阅',
+        stageCommand: {
+          kind: 'stage_action',
+          action: 'review',
+          targetRole: 'review',
+          scope: { kind: 'current_stage' },
+        },
+      },
+    },
+    {
+      input: { project: project({ active_stage: 'completed' }) },
+      expected: { label: '创作已完成' },
     },
   ]
 
@@ -102,8 +239,39 @@ test('automatic stage actions contain only the clicked user action', async () =>
   assert.deepEqual(actual, cases.map(({ expected }) => expected))
   for (const action of actual) {
     assert.doesNotMatch(
-      action,
+      action.label,
       /不得沿用|重点检查|并生成可应用|只有缺少/,
     )
   }
+})
+
+test('an exhausted draft advances through a formal review command', async () => {
+  const { stageAgentAction } = await import('./stageAgentAction.ts')
+  const sceneList = {
+    id: 'scene-list-1',
+    kind: 'scene_list',
+    status: 'accepted',
+  } as ScreenplayDocument
+  const documentEpisode = {
+    document_id: sceneList.id,
+    item_ids: ['scene-1'],
+  } as ScreenplayDocumentEpisode
+  const draftEpisode = {
+    scene_ids: ['scene-1'],
+  } as ScreenplayDraftEpisode
+
+  assert.deepEqual(stageAgentAction({
+    project: project({ active_stage: 'draft', format: '连续剧' }),
+    documents: [sceneList],
+    documentEpisodes: [documentEpisode],
+    draftEpisodes: [draftEpisode],
+  }), {
+    label: '完成剧本正文',
+    stageCommand: {
+      kind: 'stage_action',
+      action: 'review',
+      targetRole: 'review',
+      scope: { kind: 'current_stage' },
+    },
+  })
 })
