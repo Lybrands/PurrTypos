@@ -783,6 +783,58 @@ async def test_revise_current_stage_covers_every_existing_draft_episode():
     ) == tuple(range(1, 9))
 
 
+async def test_review_resolver_binds_every_episode_from_current_draft_head():
+    class Context:
+        def __init__(self):
+            self.requested_draft_revision_ids = []
+
+        async def head_revision_refs(self, project_id):
+            assert project_id == "project-review-current"
+            return ("draft-current", "review-old")
+
+        async def draft_revision_manifest(self, project_id, draft_revision_id):
+            assert project_id == "project-review-current"
+            self.requested_draft_revision_ids.append(draft_revision_id)
+            return {
+                1: ("ep01_s01",),
+                2: ("ep02_s01", "ep02_s02"),
+            }
+
+    context = Context()
+    resolver = object.__new__(SqliteScreenplayTaskResolver)
+    resolver._context = context
+
+    resolved = await resolver.resolve(
+        workspace={
+            "project": {
+                "id": "project-review-current",
+                "source": {"type": "original"},
+            },
+            "workflow": {
+                "stage": "review",
+                "heads": {
+                    "screenplayDraft": {"id": "draft-current"},
+                    "review": {"id": "review-old"},
+                },
+            },
+            "deliverables": [{"role": "review"}],
+            "candidates": [],
+        },
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.REVIEW,
+            instruction="重新审阅",
+            requested_deliverable="review",
+        ),
+    )
+
+    assert resolved.reviewed_draft_id == "draft-current"
+    assert resolved.episode_scene_ids == {
+        1: ("ep01_s01",),
+        2: ("ep02_s01", "ep02_s02"),
+    }
+    assert context.requested_draft_revision_ids == ["draft-current"]
+
+
 def _request(session_id: int, content: str):
     return SubmitScreenplayAgentTurnRequest.model_validate({
         "sessionId": session_id,
@@ -2110,6 +2162,19 @@ async def test_review_dimension_parts_aggregate_host_side(
     assert "第 1 集真实正文" in review_input["draftContentText"]
     assert review_input["scenePlan"]["scenes"][0]["id"] == "scene-1"
     assert review_input["contentDigest"] == "digest-episode-1"
+    assert len(tool_calls.user_payloads) == len(REVIEW_DIMENSIONS)
+    assert {
+        payload["reviewInput"]["contentDigest"]
+        for payload in tool_calls.user_payloads
+    } == {"digest-episode-1"}
+    assert all(
+        payload["reviewedDraftId"] == "draft-head"
+        and payload["reviewInput"]["draftRevisionId"] == "draft-head"
+        and "previousReview" not in payload
+        and "acceptedReview" not in payload
+        and "reviewReport" not in payload
+        for payload in tool_calls.user_payloads
+    )
     assert "按需调用工具读取" not in tool_calls.system_instructions[0]
 
 
