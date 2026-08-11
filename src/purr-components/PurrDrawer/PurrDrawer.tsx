@@ -1,5 +1,6 @@
 import React from 'react'
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
+import { getBlockingLayerStyles } from '../overlayLayer'
 import '../styles/dialog.scss'
 
 export interface PurrDrawerProps {
@@ -13,6 +14,7 @@ export interface PurrDrawerProps {
   closable?: boolean
   className?: string
   rootClassName?: string
+  zIndex?: number
 }
 
 /** 从视口侧边进入的非阻塞抽屉，焦点管理和退出行为由 Base UI 提供。 */
@@ -27,14 +29,16 @@ export function PurrDrawer({
   closable = true,
   className,
   rootClassName,
+  zIndex,
 }: PurrDrawerProps) {
   if (destroyOnHidden && !open) return null
 
+  const layerStyles = getBlockingLayerStyles('PurrDrawer', zIndex)
   return (
     <BaseDialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose?.() }}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="purr-dialog-backdrop purr-drawer-backdrop" />
-        <BaseDialog.Viewport className="purr-drawer-viewport">
+        <BaseDialog.Backdrop className="purr-dialog-backdrop purr-drawer-backdrop" style={layerStyles.backdrop} />
+        <BaseDialog.Viewport className="purr-drawer-viewport" style={layerStyles.surface}>
           <BaseDialog.Popup
             className={['purr-drawer', `purr-drawer--${placement}`, className, rootClassName].filter(Boolean).join(' ')}
             style={{ '--purr-drawer-width': typeof width === 'number' ? `${width}px` : width } as React.CSSProperties}

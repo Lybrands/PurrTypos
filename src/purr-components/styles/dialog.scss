@@ -27,7 +27,7 @@
 .purr-dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--purr-z-modal-backdrop);
   background: rgba(25, 19, 16, 0.42);
   animation: purr-dialog-backdrop-in 180ms ease-out;
   backdrop-filter: blur(6px) saturate(0.86);
@@ -36,7 +36,7 @@
 .purr-dialog-viewport {
   position: fixed;
   inset: 0;
-  z-index: 1001;
+  z-index: var(--purr-z-modal);
   display: grid;
   padding: 24px;
   place-items: center;
@@ -126,13 +126,14 @@
 }
 
 .purr-drawer-backdrop {
+  z-index: var(--purr-z-drawer-backdrop);
   background: rgba(25, 19, 16, 0.34);
 }
 
 .purr-drawer-viewport {
   position: fixed;
   inset: 0;
-  z-index: 1001;
+  z-index: var(--purr-z-drawer);
   overflow: hidden;
   pointer-events: none;
 }

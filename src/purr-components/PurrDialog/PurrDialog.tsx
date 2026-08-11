@@ -1,5 +1,6 @@
 import React from 'react'
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
+import { getBlockingLayerStyles } from '../overlayLayer'
 import '../styles/dialog.scss'
 
 export interface PurrDialogProps {
@@ -11,6 +12,7 @@ export interface PurrDialogProps {
   onOpenChange: (open: boolean) => void
   className?: string
   closable?: boolean
+  zIndex?: number
   styles?: {
     container?: React.CSSProperties
     header?: React.CSSProperties
@@ -31,13 +33,15 @@ export function PurrDialog({
   onOpenChange,
   className,
   closable = true,
+  zIndex,
   styles,
 }: PurrDialogProps) {
+  const layerStyles = getBlockingLayerStyles('PurrDialog', zIndex)
   return (
     <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="purr-dialog-backdrop" />
-        <BaseDialog.Viewport className="purr-dialog-viewport">
+        <BaseDialog.Backdrop className="purr-dialog-backdrop" style={layerStyles.backdrop} />
+        <BaseDialog.Viewport className="purr-dialog-viewport" style={layerStyles.surface}>
           <BaseDialog.Popup
             className={['purr-dialog', className].filter(Boolean).join(' ')}
             style={{

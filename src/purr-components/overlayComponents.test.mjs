@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
 let vite
@@ -21,6 +22,10 @@ function portalPositioner(root) {
   const children = React.Children.toArray(root.props.children)
   const portal = children.at(-1)
   return portal.props.children
+}
+
+function blockingLayers(root) {
+  return React.Children.toArray(root.props.children.props.children)
 }
 
 test('anchored overlays apply explicit z-index to their positioners', async () => {
@@ -83,4 +88,60 @@ test('tooltip content does not create the global stacking layer', async () => {
   const popup = portalPositioner(root).props.children
 
   assert.equal(popup.props.style?.zIndex, undefined)
+})
+
+test('blocking overlays apply the requested surface and derived backdrop layers', async () => {
+  const { PurrDialog } = await vite.ssrLoadModule(
+    '/src/purr-components/PurrDialog/PurrDialog.tsx',
+  )
+  const { PurrDrawer } = await vite.ssrLoadModule(
+    '/src/purr-components/PurrDrawer/PurrDrawer.tsx',
+  )
+  const { PurrModal } = await vite.ssrLoadModule(
+    '/src/purr-components/PurrModal/PurrModal.tsx',
+  )
+  const dialog = PurrDialog({
+    children: '正文',
+    onOpenChange: () => {},
+    open: true,
+    title: '弹窗',
+    zIndex: 1250,
+  })
+  const drawer = PurrDrawer({
+    children: '正文',
+    onClose: () => {},
+    open: true,
+    title: '抽屉',
+    zIndex: 1250,
+  })
+  const modal = PurrModal({
+    children: '正文',
+    onCancel: () => {},
+    open: true,
+    title: '模态框',
+    zIndex: 1250,
+  })
+
+  for (const root of [dialog, drawer]) {
+    const [backdrop, surface] = blockingLayers(root)
+    assert.equal(backdrop.props.style?.zIndex, 1240)
+    assert.equal(surface.props.style?.zIndex, 1250)
+  }
+  assert.equal(modal.props.zIndex, 1250)
+})
+
+test('toast provider owns the region layer and renders the shared toast classes', async () => {
+  const { PurrToastProvider } = await vite.ssrLoadModule(
+    '/src/purr-components/PurrToast/PurrToast.tsx',
+  )
+  const markup = renderToStaticMarkup(
+    React.createElement(
+      PurrToastProvider,
+      { zIndex: 1250 },
+      React.createElement('main', null, '应用'),
+    ),
+  )
+
+  assert.match(markup, /class="purr-toast-region"/)
+  assert.match(markup, /style="z-index:1250"/)
 })
