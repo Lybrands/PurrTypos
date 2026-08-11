@@ -930,18 +930,6 @@ function ChildRunList({
                     <pre>{child.commentary}</pre>
                   </details>
                 )}
-                {child.reasoning && (
-                  <details className="ai-dev-inspector__text-block">
-                    <summary>子 Agent 原始 reasoning <small>{child.reasoning.length} 字符</small></summary>
-                    <pre>{child.reasoning}</pre>
-                  </details>
-                )}
-                {child.modelContent && (
-                  <details className="ai-dev-inspector__text-block">
-                    <summary>子 Agent 原始 model content <small>{child.modelContent.length} 字符</small></summary>
-                    <pre>{child.modelContent}</pre>
-                  </details>
-                )}
                 {child.output && (
                   <details className="ai-dev-inspector__text-block">
                     <summary>子 Agent 输出 <small>{child.output.length} 字符</small></summary>
@@ -1109,18 +1097,6 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
         <details className="ai-dev-inspector__text-block">
           <summary>公开执行说明 <small>{run.commentary.length} 字符</small></summary>
           <pre>{run.commentary}</pre>
-        </details>
-      )}
-      {run.reasoning && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>供应商原始 reasoning <small>{run.reasoning.length} 字符</small></summary>
-          <pre>{run.reasoning}</pre>
-        </details>
-      )}
-      {run.modelContent && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>供应商原始 model content <small>{run.modelContent.length} 字符</small></summary>
-          <pre>{run.modelContent}</pre>
         </details>
       )}
       <details className="ai-dev-inspector__text-block" open>

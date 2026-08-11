@@ -1,9 +1,9 @@
-"""Ownership-safe async stream wrappers.
+"""Ownership-safe async stream wrappers for PurrA and its adapters.
 
 Python async generators do not execute their body or ``finally`` block when
-``aclose()`` is called before the first ``anext()``.  Provider streams are
-opened before their conversion generator is returned, so an explicit owner is
-needed to close that already-open resource on pre-start cancellation too.
+``aclose()`` is called before the first ``anext()``. Provider resources are
+already open at that point, so every transforming layer must explicitly own
+and close the resource below it.
 """
 
 from __future__ import annotations
@@ -57,9 +57,6 @@ class OwnedAsyncIterator(AsyncIterator[T], Generic[T]):
             self._close_task = asyncio.create_task(self._close_all())
             self._close_task.add_done_callback(_consume_task_result)
 
-        # The caller's cancellation remains authoritative, but it cannot
-        # strand the raw SDK stream half-closed.  Wait for the bounded cleanup
-        # task, then re-raise the first cancellation request.
         cancellation: asyncio.CancelledError | None = None
         while True:
             try:
@@ -103,9 +100,6 @@ async def close_async_resource(resource: Any) -> None:
                 close_task.add_done_callback(_consume_task_result)
                 raise
             if close_task not in done:
-                # A provider cleanup hook must not keep an already-terminal
-                # run alive forever. Cancellation is best-effort because an
-                # SDK close coroutine may itself be faulty.
                 close_task.cancel()
                 close_task.add_done_callback(_consume_task_result)
                 return
@@ -115,7 +109,7 @@ async def close_async_resource(resource: Any) -> None:
     except (GeneratorExit, StopAsyncIteration):
         pass
     except Exception:
-        # Cleanup details are private once the consumer selected an outcome.
+        # Cleanup is private once the consumer selected a public outcome.
         pass
 
 
@@ -140,3 +134,10 @@ def openai_chunk_is_terminal(chunk: Any) -> bool:
         isinstance(choice, dict) and choice.get("finish_reason") is not None
         for choice in choices
     )
+
+
+__all__ = [
+    "OwnedAsyncIterator",
+    "close_async_resource",
+    "openai_chunk_is_terminal",
+]

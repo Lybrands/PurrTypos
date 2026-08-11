@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AiAgentRunSnapshot } from "../../types.ts";
+import type { CanonicalOutputEvent } from "../../agent-runtime/canonicalOutput.ts";
 import {
   clearAiDebugRuns,
   getAiDebugSnapshot,
@@ -11,6 +12,65 @@ import {
   recordScreenplayAiDebugChunk,
   startAiDebugRun,
 } from "./store.ts";
+
+function canonicalEvent(
+  sequence: number,
+  overrides: Partial<CanonicalOutputEvent> = {},
+): CanonicalOutputEvent {
+  return {
+    eventId: `event-${sequence}`,
+    outputStreamId: null,
+    runId: "run-root",
+    turnId: "turn-1",
+    invocationId: null,
+    sequence,
+    source: "runtime",
+    kind: "runtime.event",
+    channel: "lifecycle",
+    visibility: "public",
+    payload: {},
+    occurredAt: `2026-08-12T08:00:0${sequence}Z`,
+    emittedAt: `2026-08-12T08:00:0${sequence}Z`,
+    ...overrides,
+  };
+}
+
+function modelOperation(
+  sequence: number,
+  runId: string,
+  operationId: string,
+  labelParams: Record<string, unknown> = {},
+): CanonicalOutputEvent {
+  return canonicalEvent(sequence, {
+    runId,
+    kind: "operation.started",
+    channel: "operation",
+    invocationId: `${operationId}-invocation`,
+    payload: {
+      operationId,
+      kind: "model",
+      startedAt: `2026-08-12T08:00:0${sequence}Z`,
+      display: { labelParams },
+    },
+  });
+}
+
+function providerDelta(
+  sequence: number,
+  runId: string,
+  channel: "commentary" | "final",
+  delta: string,
+): CanonicalOutputEvent {
+  return canonicalEvent(sequence, {
+    runId,
+    source: "provider",
+    kind: "provider.content_delta",
+    channel,
+    outputStreamId: `${runId}-${channel}`,
+    invocationId: `${runId}-${channel}-invocation`,
+    payload: { delta },
+  });
+}
 
 test('diagnostics group multiple Runs under their conversation turn', () => {
   clearAiDebugRuns();
@@ -101,7 +161,11 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
       type: 'run.started',
       runId: 'run-recovered',
       payload: {},
-      chunk: { agentRunStarted: { runId: 'run-recovered', status: 'running' } },
+      chunk: canonicalEvent(1, {
+        runId: 'run-recovered',
+        kind: 'run.lifecycle',
+        payload: { status: 'running' },
+      }),
     },
     {
       version: 1,
@@ -109,14 +173,10 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
       type: 'model.call_recorded',
       runId: 'run-recovered',
       payload: {},
-      chunk: {
-        modelInvocation: {
-          phase: 'planning',
-          count: 1,
-          toolNames: [],
-          parameters: { messageCount: 2 },
-        },
-      },
+      chunk: modelOperation(2, 'run-recovered', 'model-1', {
+        phase: 'planning',
+        messageCount: 2,
+      }),
     },
     {
       version: 1,
@@ -124,14 +184,10 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
       type: 'model.call_recorded',
       runId: 'run-recovered',
       payload: {},
-      chunk: {
-        modelInvocation: {
-          phase: 'planning',
-          count: 1,
-          toolNames: [],
-          parameters: { messageCount: 4 },
-        },
-      },
+      chunk: modelOperation(3, 'run-recovered', 'model-2', {
+        phase: 'planning',
+        messageCount: 4,
+      }),
     },
   ]);
 
@@ -192,15 +248,16 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
     enableAgentTools: true,
   });
   recordAiDebugChunk('live-before-detach', {
-    agentRunStarted: { runId: 'run-recovered', status: 'running' },
+    ...canonicalEvent(1, {
+      runId: 'run-recovered',
+      kind: 'run.lifecycle',
+      payload: { status: 'running' },
+    }),
   });
-  recordAiDebugChunk('live-before-detach', {
-    modelInvocation: {
-      phase: 'generation',
-      count: 1,
-      toolNames: [],
-    },
-  });
+  recordAiDebugChunk(
+    'live-before-detach',
+    modelOperation(2, 'run-recovered', 'live-model', { phase: 'generation' }),
+  );
 
   hydrateAiDebugRunSnapshot({
     snapshot: persistedSnapshot([{
@@ -209,13 +266,9 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
       type: 'model.call_recorded',
       runId: 'run-recovered',
       payload: {},
-      chunk: {
-        modelInvocation: {
-          phase: 'planning',
-          count: 1,
-          toolNames: [],
-        },
-      },
+      chunk: modelOperation(1, 'run-recovered', 'persisted-model', {
+        phase: 'planning',
+      }),
     }]),
     prompt: '继续创作三集',
     source: '剧本 Agent',
@@ -224,7 +277,7 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
   assert.equal(runs[0].id, 'screenplay-run-recovered');
-  assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['planning']);
+  assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['model']);
 });
 
 test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', () => {
@@ -238,7 +291,7 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
   };
   recordScreenplayAiDebugChunk({
     ...input,
-    chunk: { reasoningDelta: '实时片段' },
+    chunk: providerDelta(1, input.runId, 'commentary', '实时片段'),
   });
 
   hydrateAiDebugRunSnapshot({
@@ -254,21 +307,21 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
   const finishedAt = completed.finishedAt;
   assert.equal(completed.id, 'screenplay-run-terminal-race');
   assert.equal(completed.status, 'completed');
-  assert.equal(completed.reasoning, '实时片段');
+  assert.equal(completed.commentary, '实时片段');
   assert.ok(finishedAt);
 
   recordScreenplayAiDebugChunk({
     ...input,
-    chunk: { modelContentDelta: '晚到的历史片段' },
+    chunk: providerDelta(2, input.runId, 'final', '晚到的历史片段'),
   });
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
   assert.equal(runs[0].status, 'completed');
   assert.equal(runs[0].finishedAt, finishedAt);
-  assert.equal(runs[0].modelContent, '晚到的历史片段');
+  assert.equal(runs[0].output, '晚到的历史片段');
 });
 
-test("debug store preserves a rejected tool's concrete failure", () => {
+test("debug store preserves a canonical tool failure code", () => {
     clearAiDebugRuns();
     startAiDebugRun("screenplay-test", {
       apiKey: "key",
@@ -276,50 +329,45 @@ test("debug store preserves a rejected tool's concrete failure", () => {
       options: { model: "model" },
       enableAgentTools: true,
     });
-    recordAiDebugChunk("screenplay-test", {
-      toolCallsInProgress: true,
-      toolCalls: [{
-        id: "call-scope",
-        type: "function",
-        function: { name: "getSourceCharacters", arguments: "{}" },
-      }],
-    });
-    recordAiDebugChunk("screenplay-test", {
-      toolIndexCompleted: 0,
-      toolCallId: "call-scope",
-      toolName: "getSourceCharacters",
-      toolOutcome: "rejected",
-      toolErrorCode: "tool_scope_violation",
-    });
-    recordAiDebugChunk("screenplay-test", {
-      toolResults: [{
-        tool_call_id: "call-scope",
-        name: "getSourceCharacters",
-        content: JSON.stringify({
-          success: false,
-          errorCode: "tool_scope_violation",
-          error: "Character dossiers are outside the restricted adaptation range.",
-          diagnostics: {
-            stage: "schema_validation",
-            path: "$.sceneText",
-            actualChars: 24001,
-            maxChars: 24000,
-          },
-        }),
-      }],
-    });
+    recordAiDebugChunk("screenplay-test", canonicalEvent(1, {
+      kind: "operation.started",
+      channel: "operation",
+      payload: {
+        operationId: "operation-scope",
+        kind: "tool",
+        startedAt: "2026-08-12T08:00:01Z",
+        display: { labelParams: { toolName: "getSourceCharacters" } },
+      },
+    }));
+    recordAiDebugChunk("screenplay-test", canonicalEvent(2, {
+      source: "tool",
+      kind: "tool.event",
+      channel: "operation",
+      payload: {
+        operationId: "operation-scope",
+        toolCallId: "call-scope",
+        toolName: "getSourceCharacters",
+        status: "failed",
+      },
+    }));
+    recordAiDebugChunk("screenplay-test", canonicalEvent(3, {
+      kind: "operation.finished",
+      channel: "operation",
+      payload: {
+        operationId: "operation-scope",
+        status: "failed",
+        finishedAt: "2026-08-12T08:00:03Z",
+        durationMs: 2000,
+        errorCode: "tool_scope_violation",
+        display: {},
+      },
+    }));
 
     const tool = getAiDebugSnapshot().runs[0].tools[0];
     assert.equal(tool.status, "failed");
-    assert.equal(tool.outcome, "rejected");
+    assert.equal(tool.outcome, "failed");
     assert.equal(tool.errorCode, "tool_scope_violation");
-    assert.match(tool.errorMessage || "", /restricted adaptation range/);
-    assert.deepEqual(tool.diagnostics, {
-      stage: "schema_validation",
-      path: "$.sceneText",
-      actualChars: 24001,
-      maxChars: 24000,
-    });
+    assert.equal(tool.errorMessage, undefined);
 });
 
 test("debug store does not treat a successful tool message as an error", () => {
@@ -330,31 +378,28 @@ test("debug store does not treat a successful tool message as an error", () => {
     options: { model: "model" },
     enableAgentTools: true,
   });
-  recordAiDebugChunk("screenplay-success", {
-    toolCallsInProgress: true,
-    toolCalls: [{
-      id: "call-proposal",
-      type: "function",
-      function: { name: "proposeSourceAnalysis", arguments: "{}" },
-    }],
-  });
-  recordAiDebugChunk("screenplay-success", {
-    toolIndexCompleted: 0,
-    toolCallId: "call-proposal",
-    toolName: "proposeSourceAnalysis",
-    toolOutcome: "completed",
-  });
-  recordAiDebugChunk("screenplay-success", {
-    toolResults: [{
-      tool_call_id: "call-proposal",
-      name: "proposeSourceAnalysis",
-      content: JSON.stringify({
-        success: true,
-        status: "awaiting_user_review",
-        message: "Proposal delivered for user review.",
-      }),
-    }],
-  });
+  recordAiDebugChunk("screenplay-success", canonicalEvent(1, {
+    kind: "operation.started",
+    channel: "operation",
+    payload: {
+      operationId: "operation-proposal",
+      kind: "tool",
+      startedAt: "2026-08-12T08:00:01Z",
+      display: { labelParams: { toolName: "proposeSourceAnalysis" } },
+    },
+  }));
+  recordAiDebugChunk("screenplay-success", canonicalEvent(2, {
+    kind: "operation.finished",
+    channel: "operation",
+    payload: {
+      operationId: "operation-proposal",
+      status: "succeeded",
+      finishedAt: "2026-08-12T08:00:02Z",
+      durationMs: 1000,
+      errorCode: null,
+      display: {},
+    },
+  }));
 
   const tool = getAiDebugSnapshot().runs[0].tools[0];
   assert.equal(tool.status, "completed");
@@ -405,12 +450,11 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
     sessionId: 9,
     prompt: "继续创作下一集",
     model: "model",
-    chunk: {
-      agentRunStarted: {
-        runId: "run-live-screenplay",
-        status: "running",
-      },
-    },
+    chunk: canonicalEvent(1, {
+      runId: "run-live-screenplay",
+      kind: "run.lifecycle",
+      payload: { status: "running" },
+    }),
   });
   recordScreenplayAiDebugChunk({
     runId: "run-live-screenplay",
@@ -418,7 +462,12 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
     sessionId: 9,
     prompt: "继续创作下一集",
     model: "model",
-    chunk: { reasoningDelta: "先检查场景连续性" },
+    chunk: providerDelta(
+      2,
+      "run-live-screenplay",
+      "commentary",
+      "先检查场景连续性",
+    ),
   });
 
   const run = getAiDebugSnapshot().runs[0];
@@ -426,7 +475,7 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
   assert.equal(run.taskType, "剧本 Agent 任务");
   assert.equal(run.agentRunId, "run-live-screenplay");
   assert.equal(run.turnId, "turn-live-screenplay");
-  assert.equal(run.reasoning, "先检查场景连续性");
+  assert.equal(run.commentary, "先检查场景连续性");
 
   recordScreenplayAiDebugChunk({
     runId: "run-live-screenplay-writer",
@@ -434,7 +483,12 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
     sessionId: 9,
     prompt: "继续创作下一集",
     model: "model",
-    chunk: { commentaryDelta: "开始创作" },
+    chunk: providerDelta(
+      1,
+      "run-live-screenplay-writer",
+      "commentary",
+      "开始创作",
+    ),
   });
   const turns = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs);
   assert.equal(turns.length, 1);
@@ -464,17 +518,18 @@ test("durable child activity is accounted under the orchestration root", () => {
   });
   recordAiDebugChunk("screenplay-workflow", { done: true });
 
-  recordAiDebugRunContinuation("run-root", {
-    agentRunStarted: { runId: "run-child", status: "running" },
-  });
-  recordAiDebugRunContinuation("run-root", {
-    modelInvocation: {
+  recordAiDebugRunContinuation("run-root", canonicalEvent(1, {
+    runId: "run-child",
+    kind: "run.lifecycle",
+    payload: { status: "running" },
+  }));
+  recordAiDebugRunContinuation(
+    "run-root",
+    modelOperation(2, "run-child", "child-model", {
       phase: "generation",
-      count: 1,
       round: 1,
-      toolNames: [],
-    },
-  });
+    }),
+  );
   recordAiDebugRunContinuation("run-root", { done: true });
 
   const run = getAiDebugSnapshot().runs[0];
@@ -492,15 +547,19 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
     options: { model: "root-model" },
     enableAgentTools: true,
   });
-  recordAiDebugChunk("screenplay-multi-agent", {
-    agentRunStarted: { runId: "run-root", status: "running" },
-  });
-  recordAiDebugChunk("screenplay-multi-agent", {
-    agentDelegationCreated: {
-      runId: "run-root",
+  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(1, {
+    runId: "run-root",
+    kind: "run.lifecycle",
+    payload: { status: "running" },
+  }));
+  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(2, {
+    runId: "run-root",
+    kind: "delegation.event",
+    channel: "delegation",
+    payload: {
+      eventType: "status",
       delegationId: "delegation-writer-a",
       parentRunId: "run-root",
-      rootRunId: "run-root",
       childRunId: "run-child-a",
       agentRole: "screenplay_writer",
       agentTitle: "剧本 Writer · ep05",
@@ -511,12 +570,14 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
       required: true,
       priority: 0,
     },
-  });
-  recordAiDebugChunk("screenplay-multi-agent", {
-    agentSubRunEvent: {
-      runId: "run-root",
+  }));
+  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(3, {
+    runId: "run-root",
+    kind: "delegation.event",
+    channel: "delegation",
+    payload: {
+      eventType: "child_output",
       parentRunId: "run-root",
-      rootRunId: "run-root",
       delegationId: "delegation-writer-a",
       childRunId: "run-child-a",
       agentRole: "screenplay_writer",
@@ -524,17 +585,29 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
       objective: "创作第五集",
       unitId: "ep05",
       attempt: 2,
-      chunk: {
-        modelInvocation: {
-          phase: "generation",
-          count: 1,
-          round: 1,
-          toolNames: [],
-        },
-        reasoningDelta: "检查连续性",
-      },
+      event: modelOperation(1, "run-child-a", "child-a-model", {
+        phase: "generation",
+        round: 1,
+      }),
     },
-  });
+  }));
+  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(4, {
+    runId: "run-root",
+    kind: "delegation.event",
+    channel: "delegation",
+    payload: {
+      eventType: "child_output",
+      parentRunId: "run-root",
+      delegationId: "delegation-writer-a",
+      childRunId: "run-child-a",
+      agentRole: "screenplay_writer",
+      agentTitle: "剧本 Writer · ep05",
+      objective: "创作第五集",
+      unitId: "ep05",
+      attempt: 2,
+      event: providerDelta(2, "run-child-a", "commentary", "检查连续性"),
+    },
+  }));
 
   const run = getAiDebugSnapshot().runs[0];
   assert.equal(run.agentRunId, "run-root");
@@ -544,5 +617,5 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
   assert.equal(run.childRuns[0].unitId, "ep05");
   assert.equal(run.childRuns[0].attempt, 2);
   assert.equal(run.childRuns[0].modelCalls.length, 1);
-  assert.equal(run.childRuns[0].reasoning, "检查连续性");
+  assert.equal(run.childRuns[0].commentary, "检查连续性");
 });

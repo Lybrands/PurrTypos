@@ -11,7 +11,6 @@ from application.agent_composition import AgentComposition
 from application.composition_factory import create_agent_composition
 from application.screenplay_tool_calling import (
     ScreenplayToolCallingService,
-    _screenplay_chunk,
 )
 from database.connection import DatabaseConnection
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
@@ -28,11 +27,12 @@ from purra.contracts import (
     ModelStream,
     ModelStreamChunk,
     ReasoningMode,
+    RunStatus,
     ToolCallDelta,
 )
 from purra.errors import ModelGatewayError
 from purra.artifacts.errors import ArtifactValidationError
-from purra.events import AgentEvent, CoreEventType
+from purra.events import CoreEventType
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
 
@@ -766,7 +766,7 @@ class _HostPreparedSceneModelGateway:
         )
 
 
-async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body(
+async def test_screenplay_tool_run_publishes_no_host_text_and_redacts_candidate_body(
     screenplay_tool_db,
     monkeypatch,
 ):
@@ -810,12 +810,10 @@ async def test_screenplay_tool_run_streams_commentary_and_redacts_candidate_body
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
     )
     chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert any("commentaryDelta" in chunk for chunk in chunks)
-    tool_chunk = next(chunk for chunk in chunks if "toolCalls" in chunk)
-    arguments = tool_chunk["toolCalls"][0]["function"]["arguments"]
-    assert "<candidate payload omitted>" in arguments
-    assert "人物驱动简报" not in arguments
+    assert not any("commentaryDelta" in chunk for chunk in chunks)
+    assert not any("toolCalls" in chunk for chunk in chunks)
     assert not any("delta" in chunk for chunk in chunks)
+    assert "人物驱动简报" not in json.dumps(chunks, ensure_ascii=False)
     assert gateway.invocations
     assert all(
         invocation.reasoning_mode is ReasoningMode.DISABLED
@@ -941,14 +939,14 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
     )
     chunks = [json.loads(row["chunk_json"]) for row in rows]
     assert not any("toolCalls" in chunk for chunk in chunks)
-    commentary = "".join(
-        str(chunk.get("commentaryDelta") or "") for chunk in chunks
-    )
-    assert commentary.strip() == "落实追逐目标并完成穿墙钩子。"
+    assert not any("commentaryDelta" in chunk for chunk in chunks)
     assert "外景 石墙前" not in json.dumps(chunks, ensure_ascii=False)
-    completed = next(chunk["agentRunCompleted"] for chunk in chunks
-                     if "agentRunCompleted" in chunk)
-    assert "finalResponse" not in completed
+    completed = next(
+        chunk for chunk in chunks
+        if chunk.get("kind") == "run.lifecycle"
+        and chunk.get("payload", {}).get("status") == "done"
+    )
+    assert "finalResponse" not in completed["payload"]
     stored_run = await screenplay_tool_db.fetch_one(
         "SELECT status, final_response FROM ai_agent_runs WHERE id = ?",
         [result.run_id],
@@ -961,74 +959,14 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
     assert stored_artifact == {"status": "finalized"}
 
 
-def test_candidate_tool_projects_only_allowlisted_execution_summary():
-    arguments = json.dumps({
-        "candidate": {
-            "executionSummary": "核对人物目标、冲突和转折。",
-            "contentText": "不可出现在执行过程里的完整正文。",
-            "contentJson": {"private": "不可展示"},
-        },
-    }, ensure_ascii=False)
-    chunk = _screenplay_chunk(
-        AgentEvent(
-            type=CoreEventType.TOOL_CALLS_STARTED,
-            run_id="run-progress-projection",
-            payload={
-                "calls": [{
-                    "id": "call-write",
-                    "name": "writeScreenplayCandidatePart",
-                    "arguments_json": arguments,
-                }],
-                "in_progress": True,
-            },
-        ),
-        _context(),
-    )
-
-    assert chunk is not None
-    assert chunk["commentaryDelta"] == "核对人物目标、冲突和转折。\n"
-    serialized = json.dumps(chunk, ensure_ascii=False)
-    assert "完整正文" not in serialized
-    assert "不可展示" not in serialized
-    assert "<candidate payload omitted>" in serialized
-
-
-def test_candidate_tool_rejects_artifact_shaped_execution_summary():
-    arguments = json.dumps({
-        "candidate": {
-            "executionSummary": "contentText: 不得伪装成执行说明",
-            "contentText": "正文",
-        },
-    }, ensure_ascii=False)
-    chunk = _screenplay_chunk(
-        AgentEvent(
-            type=CoreEventType.TOOL_CALLS_STARTED,
-            run_id="run-progress-rejection",
-            payload={
-                "calls": [{
-                    "id": "call-write",
-                    "name": "writeScreenplayCandidatePart",
-                    "arguments_json": arguments,
-                }],
-                "in_progress": True,
-            },
-        ),
-        _context(),
-    )
-
-    assert chunk is not None
-    assert "commentaryDelta" not in chunk
-    assert "正文" not in json.dumps(chunk, ensure_ascii=False)
-
-
 async def test_candidate_and_run_completion_roll_back_as_one_commit(
     screenplay_tool_db,
     monkeypatch,
 ):
     class RejectAfterCandidateProjection:
-        async def project(self, run_id, event):
+        async def project(self, run_id, commit):
             del run_id
-            if event.type == CoreEventType.RUN_COMPLETED:
+            if commit.terminal_status is RunStatus.DONE:
                 raise RuntimeError("reject terminal projection")
             return None
 
@@ -1040,7 +978,7 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
     )
     composition = create_agent_composition(
         screenplay_tool_db,
-        event_projector=RejectAfterCandidateProjection(),
+        run_commit_projector=RejectAfterCandidateProjection(),
     )
     runtime = ScreenplayAgentRuntimeRequest.model_validate({
         "apiKey": "secret",

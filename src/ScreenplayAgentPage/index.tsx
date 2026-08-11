@@ -244,14 +244,8 @@ const ORIGINAL_BRIEF_STEPS: PurrStepItem<BriefStepKey>[] = [
 const LAST_OPENED_SCREENPLAY_PROJECT_STORAGE_KEY = 'purr-typos:last-opened-screenplay-project-id'
 const SCREENPLAY_AGENT_MODEL_STORAGE_KEY = 'purr-typos:screenplay-agent-model-id'
 const SCREENPLAY_ACTIVE_SESSION_STORAGE_PREFIX = 'purr-typos:screenplay-active-session:'
-const SCREENPLAY_DIAGNOSTIC_CHUNK_KEYS = new Set([
-  'model',
-  'modelContentDelta',
-  'reasoningDelta',
-])
-
 function screenplayChunkChangesConversation(chunk: AiStreamChunk): boolean {
-  return Object.keys(chunk).some((key) => !SCREENPLAY_DIAGNOSTIC_CHUNK_KEYS.has(key))
+  return Object.keys(chunk).some((key) => key !== 'model' && key !== 'streamId')
 }
 
 function backendTimestampMs(value?: string | null): number | null {
@@ -4145,7 +4139,6 @@ export default function ScreenplayAgentPage({
                         <ContextUsageIndicator
                           conversations={agentMessages}
                           selectedModelConfig={selectedAgentModelConfig}
-                          draft={agentPrompt}
                         />
                         {pausedConversationOperation ? (
                           <PurrButton

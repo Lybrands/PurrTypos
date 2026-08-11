@@ -5,12 +5,21 @@ packages, but complete execution is entered through this module.  Runtime
 implementation modules are not application entry points.
 """
 
-from purra.engine import AgentCore, AgentCoreRunOptions, CoreRunUpdate
+from purra.engine import AgentCore, AgentCoreRunOptions
 from purra.execution import AgentRunHandle
+from purra.model_execution import (
+    AgentModelResponseJudge,
+    AgentModelTask,
+    AgentModelTaskRunner,
+    AgentModelTextResult,
+)
 
 __all__ = [
     "AgentCore",
     "AgentCoreRunOptions",
     "AgentRunHandle",
-    "CoreRunUpdate",
+    "AgentModelResponseJudge",
+    "AgentModelTask",
+    "AgentModelTaskRunner",
+    "AgentModelTextResult",
 ]

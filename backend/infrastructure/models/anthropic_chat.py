@@ -24,7 +24,7 @@ from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
 )
-from utils.async_stream import OwnedAsyncIterator, openai_chunk_is_terminal
+from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)

@@ -27,37 +27,20 @@ from schemas.screenplay_agent import (
 
 
 router = APIRouter()
-_DIAGNOSTIC_CHUNK_KEYS = frozenset({
-    "model",
-    "modelContentDelta",
-    "reasoningDelta",
-})
 _STREAM_POLL_SECONDS = 0.04
 
 
 def _chunk_delivery_pages(page):
-    """Keep diagnostics batched while delivering public deltas individually."""
+    """Deliver committed canonical events without host-side buffering."""
 
-    batches = []
-    diagnostics = []
-    for item in page["chunks"]:
-        chunk = item.get("chunk") or {}
-        public = bool(set(chunk) - _DIAGNOSTIC_CHUNK_KEYS)
-        if public:
-            if diagnostics:
-                batches.append(diagnostics)
-                diagnostics = []
-            batches.append([item])
-        else:
-            diagnostics.append(item)
-    if diagnostics:
-        batches.append(diagnostics)
     return tuple({
         "kind": "agent_chunks",
-        "chunks": batch,
-        "nextCursor": int(batch[-1]["cursor"]),
-        "hasMore": bool(page["hasMore"] or index < len(batches) - 1),
-    } for index, batch in enumerate(batches))
+        "chunks": [item],
+        "nextCursor": int(item["cursor"]),
+        "hasMore": bool(
+            page["hasMore"] or index < len(page["chunks"]) - 1
+        ),
+    } for index, item in enumerate(page["chunks"]))
 
 
 def _chunk_replay_page(page):
@@ -81,13 +64,13 @@ def _service() -> ScreenplayAgentService:
         owner_id=composition.execution_owner_id,
         planner=ModelScreenplayIntentPlanner(
             db,
-            model_executor_factory=composition.create_managed_model_executor,
+            composition=composition,
         ),
         resolver=SqliteScreenplayTaskResolver(db),
         unit_executor_factory=lambda runtime: ScreenplayTaskUnitExecutor(
             db,
             runtime=runtime,
-            model_executor_factory=composition.create_managed_model_executor,
+            composition=composition,
             tool_calling_service=ScreenplayToolCallingService(
                 db,
                 composition=composition,

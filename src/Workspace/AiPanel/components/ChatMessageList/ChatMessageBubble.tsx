@@ -76,7 +76,9 @@ function ChatMessageBubbleInner({
     (message.commentary !== undefined && message.commentary !== "");
   const isEmpty =
     !message.content &&
+    !message.streamingContent &&
     !message.toolCallSegments?.length &&
+    !message.canonicalOutput?.operationOrder.length &&
     !message.delegations?.length &&
     !message.contextCompaction &&
     !message.error &&

@@ -717,7 +717,7 @@ async def test_output_limit_incompatible_with_context_fails_before_run_creation(
         UnsupportedModelFeatureError,
         match="output limit leaves no room",
     ) as captured:
-        async for _ in core.run(
+        async for _ in core._execute_run(
             request,
             options=replace(options, output_limit=incompatible),
         ):
@@ -807,7 +807,9 @@ async def test_durable_task_admission_dispatches_before_runtime_execution():
         long_task_dispatcher=dispatcher,
     )
 
-    updates = [update async for update in core.run(request, options=options)]
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -925,7 +927,9 @@ async def test_durable_progress_rebinds_persisted_steps_to_current_plan_ids():
         long_task_dispatcher=_Dispatcher(),
     )
 
-    updates = [update async for update in core.run(request, options=options)]
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
 
     assert isinstance(updates[-1], AgentRunResult)
     assert updates[-1].status is RunStatus.DONE
@@ -1028,7 +1032,9 @@ async def test_agent_plan_without_task_spec_still_enters_task_admission():
         },
     )
 
-    updates = [update async for update in core.run(request, options=options)]
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
 
     assert admission.calls == 1
     result = updates[-1]
@@ -1086,7 +1092,9 @@ async def test_durable_admission_rejects_uncovered_planner_steps():
         task_admission_evaluator=_Admission(),
     )
 
-    updates = [update async for update in core.run(request, options=options)]
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -1110,7 +1118,7 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
     updates = []
     approval_id = None
 
-    async for update in core.run(request, options=options):
+    async for update in core._execute_run(request, options=options):
         updates.append(update)
         if (
             isinstance(update, AgentEvent)
@@ -1160,6 +1168,7 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
         ("propose_change",),
         ("apply_change",),
         (),
+        *(((),) if not approve else ()),
     ]
     assert all(call.max_output_tokens == 1_024 for call in model.invocations)
     assert state.domain["value_seen_after_propose"] == "before"
@@ -1210,7 +1219,7 @@ async def test_engine_dispatches_registered_host_planned_tool_without_model():
     )
     updates = []
 
-    async for update in core.run(request, options=options):
+    async for update in core._execute_run(request, options=options):
         updates.append(update)
         if (
             isinstance(update, AgentEvent)
@@ -1281,7 +1290,9 @@ async def test_dynamic_planner_is_not_recalled_for_normal_success():
         planner=planner,
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -1324,7 +1335,9 @@ async def test_dynamic_planner_can_drop_tentative_steps_after_real_tool_result()
         replan_after_tools=frozenset({"read_resource"}),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -1395,7 +1408,9 @@ async def test_invalid_dynamic_replan_falls_back_to_trusted_remaining_plan():
         }),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -1453,7 +1468,9 @@ async def test_invalid_failure_replan_falls_back_to_safe_model_only_response():
         read_error_code="source_unavailable",
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -1462,7 +1479,7 @@ async def test_invalid_failure_replan_falls_back_to_safe_model_only_response():
     assert [
         tuple(schema.name for schema in call.tools)
         for call in model.invocations
-    ] == [("read_resource",), ()]
+    ] == [("read_resource",), (), ()]
     persisted_steps = repository.runs[result.run_id]["steps"]
     assert [(step.id, step.status) for step in persisted_steps] == [
         ("read", StepStatus.FAILED),
@@ -1541,7 +1558,9 @@ async def test_staged_context_runs_formal_retrieval_after_task_spec_planning():
     provider = _StagedProvider()
     core._context_provider = provider
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     assert updates[-1].status is RunStatus.DONE, repository.traces
     assert provider.calls == ["planning", "task"]
@@ -1630,7 +1649,9 @@ async def test_task_specific_context_demand_is_allocated_after_planning():
     provider = _TaskDemandProvider()
     core._context_provider = provider
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     assert updates[-1].status is RunStatus.DONE, repository.traces
     assert provider.task_demand_calls == 1
@@ -1701,7 +1722,9 @@ async def test_staged_context_missing_task_spec_falls_back_to_legacy_context():
     provider = _StagedProvider()
     core._context_provider = provider
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     assert updates[-1].status is RunStatus.DONE
     assert provider.calls == ["planning", "legacy"]
@@ -1743,7 +1766,7 @@ async def test_core_builds_host_planning_facts_before_planning_and_keeps_tool_gu
     }
 
     updates = []
-    async for update in core.run(request, options=options):
+    async for update in core._execute_run(request, options=options):
         updates.append(update)
         if (
             isinstance(update, AgentEvent)
@@ -1814,7 +1837,7 @@ async def test_core_offers_compression_hook_at_planning_and_model_boundaries():
     core._conversation_compactor = compactor
 
     updates = []
-    async for item in core.run(request, options=options):
+    async for item in core._execute_run(request, options=options):
         updates.append(item)
         if (
             isinstance(item, AgentEvent)
@@ -2000,7 +2023,9 @@ async def test_valid_context_constraints_reach_planner_without_narrowing_runtime
     core._context_provider = provider
     core._planning_policy = policy
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2064,7 +2089,9 @@ async def test_planning_policy_cannot_satisfy_a_tool_outside_request_scope():
     policy = ConstraintPlanningPolicy("unavailable_resource_reader")
     core._planning_policy = policy
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2098,7 +2125,9 @@ async def test_core_authority_rejects_custom_plan_for_context_satisfied_tool():
     policy = ConstraintPlanningPolicy("read_resource")
     core._planning_policy = policy
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2133,7 +2162,9 @@ async def test_core_authority_rejects_custom_plan_for_scope_excluded_tool():
     )
     core._planning_policy = policy
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2153,7 +2184,11 @@ async def test_standalone_core_cancels_during_approval_without_running_confirm_h
     signal = asyncio.Event()
     updates = []
 
-    async for update in core.run(request, options=options, signal=signal):
+    async for update in core._execute_run(
+        request,
+        options=options,
+        signal=signal,
+    ):
         updates.append(update)
         if (
             isinstance(update, AgentEvent)
@@ -2173,7 +2208,7 @@ async def test_standalone_core_cancels_during_approval_without_running_confirm_h
 @pytest.mark.asyncio
 async def test_closing_public_stream_persists_canceled_run_and_cleans_approval():
     core, request, options, repository, model, state = _core_fixture()
-    stream = core.run(request, options=options)
+    stream = core._execute_run(request, options=options)
     run_id = None
     while True:
         update = await anext(stream)
@@ -2193,7 +2228,7 @@ async def test_closing_public_stream_persists_canceled_run_and_cleans_approval()
 @pytest.mark.asyncio
 async def test_closing_immediately_after_run_started_never_leaves_a_running_run():
     core, request, options, repository, model, state = _core_fixture()
-    stream = core.run(request, options=options)
+    stream = core._execute_run(request, options=options)
     started = await anext(stream)
     assert isinstance(started, AgentEvent)
     assert started.type == CoreEventType.RUN_STARTED
@@ -2212,7 +2247,7 @@ async def test_outer_cancellation_after_atomic_begin_commit_closes_the_run():
     core, request, options, _, model, state = _core_fixture(
         repository=repository
     )
-    stream = core.run(request, options=options)
+    stream = core._execute_run(request, options=options)
     next_update = asyncio.create_task(anext(stream))
     await repository.committed.wait()
 
@@ -2234,7 +2269,7 @@ async def test_outer_cancellation_does_not_wait_for_precommit_begin_block():
     core, request, options, _, model, state = _core_fixture(
         repository=repository
     )
-    stream = core.run(request, options=options)
+    stream = core._execute_run(request, options=options)
     next_update = asyncio.create_task(anext(stream))
     await repository.entered.wait()
 
@@ -2258,7 +2293,7 @@ async def test_disconnect_surfaces_terminal_commit_failure_to_aclose_caller():
     core, request, options, _, model, state = _core_fixture(
         repository=repository
     )
-    stream = core.run(request, options=options)
+    stream = core._execute_run(request, options=options)
     started = await anext(stream)
     assert isinstance(started, AgentEvent)
     assert started.type == CoreEventType.RUN_STARTED
@@ -2277,7 +2312,9 @@ async def test_planner_failure_still_has_a_traceable_failed_run_and_one_result()
     core, request, options, repository, model, state = _core_fixture(
         invalid_plan=True
     )
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     event_types = [
         item.type for item in updates if isinstance(item, AgentEvent)
@@ -2321,7 +2358,9 @@ async def test_host_can_deny_model_only_fallback_for_invalid_plan():
         planning_policy=FailClosedPlanningPolicy(),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     event_types = [
         item.type for item in updates if isinstance(item, AgentEvent)
@@ -2347,7 +2386,9 @@ async def test_default_planner_tool_limit_tracks_runtime_round_capacity():
         runtime_limits=RuntimeLimits(max_model_rounds=1),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     planner_payload = json.loads(model.completions[0][0][1].content)
     assert planner_payload["maxToolSteps"] == 0
@@ -2376,7 +2417,9 @@ async def test_core_authority_rejects_custom_multi_tool_step_without_expansion()
         planner=StaticPlanner(unsafe_plan),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2409,7 +2452,9 @@ async def test_core_authority_reserves_one_runtime_round_for_final_response():
         runtime_limits=RuntimeLimits(max_model_rounds=3),
     )
 
-    updates = [item async for item in core.run(request, options=options)]
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2426,7 +2471,9 @@ async def test_runtime_domain_effect_cannot_inject_controller_owned_lifecycle_ev
         proposed_effect_type=CoreEventType.RUN_COMPLETED,
     )
 
-    updates = [update async for update in core.run(request, options=options)]
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
 
     result = updates[-1]
     assert isinstance(result, AgentRunResult)
@@ -2501,13 +2548,13 @@ async def test_reused_core_does_not_leak_request_scoped_response_judge():
     )
 
     first = [
-        update async for update in core.run(
+        update async for update in core._execute_run(
             request,
             options=AgentCoreRunOptions(response_judges=(judge,)),
         )
     ]
     second = [
-        update async for update in core.run(
+        update async for update in core._execute_run(
             request,
             options=AgentCoreRunOptions(),
         )

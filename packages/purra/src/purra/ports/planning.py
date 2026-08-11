@@ -103,4 +103,23 @@ class ResponseJudge(Protocol):
     ) -> ResponseValidationResult: ...
 
 
+@runtime_checkable
+class ResponseJudgePolicy(Protocol):
+    """Domain prompt/evaluator pair; PurrA owns the actual model call."""
+
+    def build_messages(
+        self,
+        *,
+        content: str,
+        messages: Sequence[AgentMessage],
+    ) -> tuple[AgentMessage, ...]: ...
+
+    def evaluate(
+        self,
+        *,
+        judgment_content: str,
+        candidate_content: str,
+    ) -> ResponseValidationResult: ...
+
+
 __all__ = [name for name in globals() if not name.startswith("_")]

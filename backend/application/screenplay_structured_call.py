@@ -1,8 +1,9 @@
-"""Screenplay structured-output adaptation over managed PurrA calls.
+"""Screenplay structured calls submitted through the complete PurrA pipeline.
 
-The screenplay product owns prompts, schemas, validation and visible progress.
-PurrA owns provider invocation construction, output-limit resolution,
-capability fallback and terminal-reason classification.
+The product owns the JSON protocol and validation only.  PurrA owns the Run,
+Provider invocation, private candidate transaction, recovery, timing and
+canonical journal.  Structured candidates are never projected into Assistant
+text.
 """
 
 from __future__ import annotations
@@ -11,27 +12,30 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
-from time import monotonic
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
+from purra.api import AgentCoreRunOptions
 from purra.contracts import (
     AgentMessage,
+    AgentRunRequest,
     MessageOrigin,
     MessageRole,
-    ModelStreamChunk,
+    ResponseValidationResult,
     RunBinding,
-    RunCreateParams,
     RunProvenance,
+    RunStatus,
 )
-from purra.events import AgentEvent, CoreEventType
 from purra.errors import ModelGatewayError
-from purra.model_execution import (
-    ManagedModelCall,
-    ManagedModelExecutor,
+from purra.output import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
 )
-from purra.run_controller import AgentRunController
+from purra.model_protocol import (
+    InvocationOutputLimit,
+    resolve_invocation_output_limit,
+)
 from purra.structured_output import parse_json_object
 from application.model_runtime import (
     model_request_from_runtime,
@@ -39,26 +43,10 @@ from application.model_runtime import (
     run_execution_intent,
 )
 from application.request_mapping import context_window_tokens
-from application.run_execution_control import RunExecutionSession
 from application.run_provenance import digest_model_endpoint
 from domains.screenplay_agent import ScreenplayIntentCommandMismatchError
+from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from application.screenplay_agent_stream import ScreenplayAgentChunkStore
-from application.screenplay_progress_stream import (
-    JsonStringFieldProjector,
-    VISIBLE_STREAM_CHUNK_CHARS,
-    visible_execution_progress,
-    visible_stream_chunks,
-)
-from infrastructure.persistence.run_execution_store import SqliteExecutionLeaseStore
-from infrastructure.persistence.sqlite_run_repository import (
-    DEFAULT_RUN_LEASE_DURATION_MS,
-    SqliteRunRepository,
-)
-
-
-class _Sink:
-    async def emit(self, event: AgentEvent) -> None:
-        del event
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,102 +55,55 @@ class StructuredModelResult:
     run_id: str
 
 
-class StructuredChunkProjection:
-    """Project diagnostics and selected public fields without owning output."""
+@dataclass(frozen=True, slots=True)
+class PublicModelResult:
+    text: str
+    run_id: str
+
+
+class _StructuredResultValidator:
+    """Capture only a candidate that passed the product JSON contract."""
 
     def __init__(
         self,
-        controller: AgentRunController,
         *,
-        execution_progress_fields: Mapping[str, str] | None = None,
-        emit_execution_progress: Callable[[str], Awaitable[None]] | None = None,
-        emit_model_diagnostic: (
-            Callable[[Mapping[str, Any]], Awaitable[None]] | None
-        ) = None,
+        repair_instruction: str,
+        validate: Callable[[dict[str, Any]], dict[str, Any]] | None,
     ) -> None:
-        self._controller = controller
-        self._execution_progress_fields = execution_progress_fields
-        self._emit_execution_progress = emit_execution_progress
-        self._emit_model_diagnostic = emit_model_diagnostic
-        self._progress_projector = JsonStringFieldProjector(
-            execution_progress_fields or {}
-        )
-        self._progress_buffer = ""
-        self._last_progress_flush = monotonic()
-        self.projected_progress = False
+        self._repair_instruction = str(repair_instruction or "").strip()
+        self._validate = validate
+        self.value: dict[str, Any] | None = None
+        self.error: Exception | None = None
 
-    async def observe(self, chunk: ModelStreamChunk) -> None:
-        if chunk.reasoning_delta and self._emit_model_diagnostic is not None:
-            await self._emit_model_diagnostic({
-                "reasoningDelta": chunk.reasoning_delta,
-            })
-        if chunk.content_delta:
-            if self._emit_model_diagnostic is not None:
-                await self._emit_model_diagnostic({
-                    "modelContentDelta": chunk.content_delta,
-                })
-            if (
-                self._execution_progress_fields
-                and self._emit_execution_progress is not None
-            ):
-                await self._emit_progress(
-                    self._progress_projector.feed(chunk.content_delta)
-                )
-        if chunk.usage is not None:
-            await self._controller.record_event(
-                CoreEventType.CONTEXT_USAGE_RECORDED,
-                {
-                    "inputTokens": chunk.usage.input_tokens,
-                    "outputTokens": chunk.usage.output_tokens,
-                    "totalTokens": chunk.usage.total_tokens,
-                    "reasoningOutputTokens": chunk.usage.reasoning_output_tokens,
-                },
+    def validate(
+        self,
+        *,
+        content: str,
+        messages: Sequence[AgentMessage],
+    ) -> ResponseValidationResult:
+        del messages
+        try:
+            value = dict(parse_json_object(content))
+            normalized = self._validate(value) if self._validate else value
+        except Exception as error:
+            if isinstance(error, Exception):
+                self.error = error
+            return ResponseValidationResult(
+                violation_code="screenplay.structured_output_invalid",
+                repair_guidance=(
+                    self._repair_instruction
+                    or "Return one complete JSON object matching the required protocol."
+                ),
             )
-
-    async def close(self) -> None:
-        await self._flush_progress()
-
-    async def _emit_progress(self, projected: str) -> None:
-        if not projected:
-            return
-        self.projected_progress = True
-        self._progress_buffer += projected
-        now = monotonic()
-        if (
-            "\n" in projected
-            or len(self._progress_buffer) >= VISIBLE_STREAM_CHUNK_CHARS
-            or now - self._last_progress_flush >= 0.04
-        ):
-            await self._flush_progress()
-
-    async def _flush_progress(self) -> None:
-        if (
-            not self._progress_buffer
-            or self._emit_execution_progress is None
-        ):
-            return
-        pending = self._progress_buffer
-        self._progress_buffer = ""
-        for fragment in visible_stream_chunks(pending):
-            await self._emit_execution_progress(fragment)
-        self._last_progress_flush = monotonic()
+        self.value = dict(normalized)
+        self.error = None
+        return ResponseValidationResult()
 
 
 class ScreenplayStructuredCallService:
-    def __init__(
-        self,
-        db,
-        *,
-        model_executor_factory: Callable[[str], ManagedModelExecutor],
-        lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
-    ) -> None:
+    def __init__(self, db, *, composition) -> None:
         self._db = db
-        self._model_executor_factory = model_executor_factory
-        self._repository = SqliteRunRepository(
-            db,
-            lease_duration_ms=lease_duration_ms,
-        )
-        self._execution_leases = SqliteExecutionLeaseStore(db)
+        self._composition = composition
 
     async def run_json(
         self,
@@ -186,64 +127,34 @@ class ScreenplayStructuredCallService:
         ) = None,
         signal=None,
     ) -> StructuredModelResult:
-        request = model_request_from_runtime(
+        # These former projection inputs remain accepted during call-site
+        # migration, but structured content can no longer create public text.
+        del execution_progress_fields, project_execution
+
+        model_request = model_request_from_runtime(
             runtime,
             json_object_output=True,
         )
-        model = request.model
-        managed_call = ManagedModelCall(
-            request=request,
-            reasoning_mode=reasoning_mode_from_options(runtime.options),
+        window = context_window_tokens(
+            runtime.contextWindow or runtime.options.get("context_window")
         )
-        model_executor = self._model_executor_factory(
-            runtime.apiKey.get_secret_value()
+        resolved_output_limit = resolve_invocation_output_limit(
+            model_request.capability_snapshot,
+            model_request.options.get("max_tokens"),
         )
-        controller = AgentRunController(
-            repository=self._repository,
-            event_sink=_Sink(),
-        )
-        await controller.begin(RunCreateParams(
-            session_id=session_id,
-            prompt=prompt,
-            mode=phase,
-            provenance=_provenance(runtime, user_payload),
-            binding=RunBinding(
-                namespace=binding_namespace,
-                aggregate_id=binding_aggregate_id,
-                command_id=binding_command_id,
-            ),
-        ))
-        if controller.run_id is None:
-            raise RuntimeError("structured model Run has no id")
-        turn_id = str(conversation_turn_id or binding_command_id or "").strip()
-        if not turn_id:
-            raise ValueError("screenplay structured call requires a Turn id")
-        chunks = ScreenplayAgentChunkStore(self._db)
-
-        async def emit_chunk(chunk: Mapping[str, Any]) -> None:
-            await chunks.append(
-                project_id=binding_aggregate_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                task_id=str(task_id or "").strip() or None,
-                run_id=controller.run_id,
-                chunk=chunk,
+        output_limit = resolved_output_limit
+        if output_limit.max_tokens >= window:
+            output_limit = InvocationOutputLimit(
+                max_tokens=max(1_024, window // 4),
+                source=output_limit.source,
+                profile_max_tokens=output_limit.profile_max_tokens,
             )
-
-        async def emit_public_text(field: str, value: object) -> None:
-            for fragment in visible_stream_chunks(value):
-                await emit_chunk({field: fragment})
-
-        execution = RunExecutionSession(
-            self._execution_leases,
-            owner_id=self._repository.owner_id,
-            lease_duration_ms=self._repository.lease_duration_ms,
-            external_signal=signal or asyncio.Event(),
+        validator = _StructuredResultValidator(
+            repair_instruction=repair_instruction,
+            validate=validate,
         )
-        try:
-            await execution.bind(controller.run_id)
-            await emit_chunk({"model": model})
-            messages = (
+        request = AgentRunRequest(
+            messages=(
                 AgentMessage(
                     role=MessageRole.SYSTEM,
                     content=system_instruction,
@@ -251,128 +162,267 @@ class ScreenplayStructuredCallService:
                 ),
                 AgentMessage(
                     role=MessageRole.USER,
-                    content=json.dumps(user_payload, ensure_ascii=False),
+                    content=json.dumps(
+                        user_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                 ),
+            ),
+            model=model_request,
+            domain_context=ScreenplayAgentDomainContext(
+                project_id=binding_aggregate_id,
+                task_id=str(task_id or binding_command_id),
+                unit_id=str(binding_command_id or phase),
+                target_role=phase,
+                expected_part_type="structured_private",
+                expected_part_key=phase,
+                tool_access="evidence_read",
+                locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
+            ).to_core_context(),
+            session_id=session_id,
+            mode=phase,
+            context_window=window,
+            tools_enabled=False,
+            metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
+        )
+        options = AgentCoreRunOptions(
+            output_limit=output_limit,
+            default_context_window_tokens=window,
+            model_supports_tools=False,
+            force_planned_tool_choice=False,
+            require_tool_call=False,
+            reasoning_mode=reasoning_mode_from_options(runtime.options),
+            provenance=_provenance(runtime, user_payload),
+            binding=RunBinding(
+                namespace=binding_namespace,
+                aggregate_id=binding_aggregate_id,
+                command_id=binding_command_id,
+            ),
+            response_validators=(validator,),
+            response_transaction_policy=ResponseTransactionPolicy(
+                mode=ResponseTransactionMode.VALIDATED_RESULT,
+                public_presentation=PublicPresentationMode.NONE,
+            ),
+        )
+        core = self._composition.create_core_for_request(
+            request,
+            runtime.apiKey.get_secret_value(),
+        )
+        handle = None
+        cancel_watcher: asyncio.Task[None] | None = None
+        try:
+            handle = await core.submit(request, options=options)
+            output_drain = self._start_output_drain(
+                handle,
+                project_id=binding_aggregate_id,
+                session_id=session_id,
+                turn_id=conversation_turn_id,
+                task_id=task_id,
             )
-            projected_execution = False
-
-            async def call(
-                active_messages: Sequence[AgentMessage],
-                call_phase: str,
-            ) -> str:
-                nonlocal projected_execution
-
-                async def record_attempt(
-                    parameters: Mapping[str, object],
-                ) -> None:
-                    await controller.record_event(
-                        CoreEventType.MODEL_CALL_RECORDED,
-                        {
-                            "phase": call_phase,
-                            "count": 1,
-                            "toolNames": [],
-                            "toolChoice": "none",
-                            "parameters": dict(parameters),
-                        },
-                    )
-
-                projection = StructuredChunkProjection(
-                    controller,
-                    execution_progress_fields=(
-                        execution_progress_fields
-                        if not projected_execution
-                        else None
-                    ),
-                    emit_execution_progress=lambda delta: emit_public_text(
-                        "commentaryDelta",
-                        delta,
-                    ),
-                    emit_model_diagnostic=emit_chunk,
+            if signal is not None and hasattr(signal, "wait"):
+                cancel_watcher = asyncio.create_task(
+                    _cancel_on_signal(signal, handle)
                 )
-                try:
-                    result = await model_executor.stream_text(
-                        active_messages,
-                        managed_call,
-                        execution.signal,
-                        on_attempt=record_attempt,
-                        on_chunk=projection.observe,
-                    )
-                    return result.content
-                finally:
-                    await projection.close()
-                    projected_execution = (
-                        projected_execution or projection.projected_progress
-                    )
-
-            def parse(candidate: str) -> dict[str, Any]:
-                value = dict(parse_json_object(candidate))
-                return validate(value) if validate is not None else value
-
-            candidate = await call(messages, phase)
-            if not candidate.strip():
-                raise RuntimeError("Core returned an empty structured candidate")
-            try:
-                value = parse(candidate)
-            except (TypeError, ValueError, json.JSONDecodeError) as first_error:
-                repaired = await call((
-                    AgentMessage(
-                        role=MessageRole.SYSTEM,
-                        content=(
-                            f"{system_instruction}\n\n{repair_instruction}\n"
-                            "只修复下面候选的 JSON 语法和协议字段，不重新分析或扩写"
-                            "业务内容；只返回修复后的完整 JSON 对象。"
-                        ),
-                        origin=MessageOrigin.HOST_CONTEXT,
-                    ),
-                    AgentMessage(role=MessageRole.USER, content=candidate),
-                ), f"{phase}_repair")
-                try:
-                    value = parse(repaired)
-                except ScreenplayIntentCommandMismatchError:
-                    raise
-                except (TypeError, ValueError, json.JSONDecodeError) as error:
-                    raise ModelGatewayError(
-                        str(error) or str(first_error),
-                        code="structured_output_invalid",
-                        retryable=False,
-                    ) from error
-
-            reply = (
-                str(value.get("reply") or "").strip()
-                if phase == "screenplay_intent_planning"
-                else ""
-            )
-            if project_execution is not None and not projected_execution:
-                for item in project_execution(value):
-                    progress = visible_execution_progress(item)
-                    if progress:
-                        await emit_public_text(
-                            "commentaryDelta",
-                            f"{progress}\n",
-                        )
-            if reply:
-                await emit_public_text("delta", reply)
-            await controller.complete(reply)
-            return StructuredModelResult(value, controller.run_id)
-        except asyncio.CancelledError:
-            snapshot = controller.snapshot
-            if snapshot is not None and not snapshot.terminal:
-                with suppress(Exception):
-                    await controller.cancel("screenplay_agent_canceled")
-            raise
-        except Exception as error:
-            snapshot = controller.snapshot
-            if snapshot is not None and not snapshot.terminal:
-                with suppress(Exception):
-                    await controller.fail(f"{phase}_failed")
-            with suppress(Exception):
-                await emit_chunk({"error": str(error) or "剧本模型调用失败。"})
-            raise
+            result = await handle.wait()
+            if output_drain is not None:
+                await output_drain
         finally:
-            await execution.close()
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
+            self._composition.release_core(core)
+
+        if result.status is RunStatus.CANCELED:
+            raise asyncio.CancelledError
+        if result.status is not RunStatus.DONE or validator.value is None:
+            if isinstance(
+                validator.error,
+                ScreenplayIntentCommandMismatchError,
+            ):
+                raise validator.error
+            error = validator.error
+            raise ModelGatewayError(
+                str(error or result.error or "structured output invalid"),
+                code=(
+                    "structured_output_invalid"
+                    if error is not None
+                    else str(result.error or "structured_output_invalid")
+                ),
+                retryable=False,
+            )
+        return StructuredModelResult(validator.value, handle.run_id)
+
+    async def run_public_text(
+        self,
+        *,
+        runtime,
+        session_id: int,
+        prompt: str,
+        system_instruction: str,
+        user_payload: Mapping[str, Any],
+        binding_namespace: str,
+        binding_aggregate_id: str,
+        binding_command_id: str,
+        phase: str,
+        task_id: str | None = None,
+        conversation_turn_id: str | None = None,
+        signal=None,
+    ) -> PublicModelResult:
+        model_request = model_request_from_runtime(runtime)
+        window = context_window_tokens(
+            runtime.contextWindow or runtime.options.get("context_window")
+        )
+        resolved_output_limit = resolve_invocation_output_limit(
+            model_request.capability_snapshot,
+            model_request.options.get("max_tokens"),
+        )
+        output_limit = resolved_output_limit
+        if output_limit.max_tokens >= window:
+            output_limit = InvocationOutputLimit(
+                max_tokens=max(1_024, window // 4),
+                source=output_limit.source,
+                profile_max_tokens=output_limit.profile_max_tokens,
+            )
+        request = AgentRunRequest(
+            messages=(
+                AgentMessage(
+                    role=MessageRole.SYSTEM,
+                    content=system_instruction,
+                    origin=MessageOrigin.HOST_CONTEXT,
+                ),
+                AgentMessage(
+                    role=MessageRole.USER,
+                    content=json.dumps(
+                        user_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+            ),
+            model=model_request,
+            domain_context=ScreenplayAgentDomainContext(
+                project_id=binding_aggregate_id,
+                task_id=str(task_id or binding_command_id),
+                unit_id=str(binding_command_id or phase),
+                target_role=phase,
+                expected_part_type="public_response",
+                expected_part_key=phase,
+                tool_access="evidence_read",
+                locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
+            ).to_core_context(),
+            session_id=session_id,
+            mode=phase,
+            context_window=window,
+            tools_enabled=False,
+            metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
+        )
+        options = AgentCoreRunOptions(
+            output_limit=output_limit,
+            default_context_window_tokens=window,
+            model_supports_tools=False,
+            force_planned_tool_choice=False,
+            require_tool_call=False,
+            reasoning_mode=reasoning_mode_from_options(runtime.options),
+            provenance=_provenance(
+                runtime,
+                user_payload,
+                output_contract="assistant_text",
+            ),
+            binding=RunBinding(
+                namespace=binding_namespace,
+                aggregate_id=binding_aggregate_id,
+                command_id=binding_command_id,
+            ),
+            response_transaction_policy=ResponseTransactionPolicy(
+                mode=ResponseTransactionMode.DIRECT_LIVE,
+                public_presentation=PublicPresentationMode.NONE,
+            ),
+        )
+        core = self._composition.create_core_for_request(
+            request,
+            runtime.apiKey.get_secret_value(),
+        )
+        cancel_watcher: asyncio.Task[None] | None = None
+        try:
+            handle = await core.submit(request, options=options)
+            output_drain = self._start_output_drain(
+                handle,
+                project_id=binding_aggregate_id,
+                session_id=session_id,
+                turn_id=conversation_turn_id,
+                task_id=task_id,
+            )
+            if signal is not None and hasattr(signal, "wait"):
+                cancel_watcher = asyncio.create_task(
+                    _cancel_on_signal(signal, handle)
+                )
+            result = await handle.wait()
+            if output_drain is not None:
+                await output_drain
+        finally:
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
+            self._composition.release_core(core)
+        if result.status is RunStatus.CANCELED:
+            raise asyncio.CancelledError
+        if result.status is not RunStatus.DONE:
+            raise ModelGatewayError(
+                str(result.error or "screenplay public response failed"),
+                code=str(result.error or "screenplay_public_response_failed"),
+                retryable=False,
+            )
+        text = str(result.final_response or "")
+        if not text.strip():
+            raise ModelGatewayError(
+                "screenplay public response was empty",
+                code="empty_model_response",
+                retryable=False,
+            )
+        return PublicModelResult(text=text, run_id=handle.run_id)
+
+    def _start_output_drain(
+        self,
+        handle,
+        *,
+        project_id: str,
+        session_id: int,
+        turn_id: str | None,
+        task_id: str | None,
+    ) -> asyncio.Task[None] | None:
+        if not str(turn_id or "").strip():
+            return None
+        chunks = ScreenplayAgentChunkStore(self._db)
+
+        async def _drain() -> None:
+            subscription = handle.subscribe(after_sequence=0)
+            try:
+                async for event in subscription:
+                    await chunks.append_output_event(
+                        project_id=project_id,
+                        session_id=session_id,
+                        turn_id=str(turn_id),
+                        task_id=task_id,
+                        event=event,
+                    )
+            finally:
+                await subscription.aclose()
+
+        return asyncio.create_task(_drain())
 
 
-def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
+async def _cancel_on_signal(signal, handle) -> None:
+    await signal.wait()
+    await handle.cancel("screenplay_agent_canceled")
+
+
+def _provenance(
+    runtime,
+    payload: Mapping[str, Any],
+    *,
+    output_contract: str = "json_object",
+) -> RunProvenance:
     model = str(runtime.options.get("model") or "").strip()
     profile = json.dumps(
         {
@@ -400,14 +450,14 @@ def _provenance(runtime, payload: Mapping[str, Any]) -> RunProvenance:
         execution_intent=run_execution_intent(
             request,
             reasoning_mode_from_options(runtime.options),
-            output_contract="json_object",
+            output_contract=output_contract,
             tool_protocol_contract="no_tools",
         ),
     )
 
 
 __all__ = [
+    "PublicModelResult",
     "ScreenplayStructuredCallService",
-    "StructuredChunkProjection",
     "StructuredModelResult",
 ]

@@ -222,6 +222,21 @@ class AgentRunController:
             state = self._require_started()
             await self._apply(RunStateMachine.complete(state, final_response))
 
+    async def complete_validated_result(
+        self,
+        validated_result: str,
+        *,
+        final_response: str = "",
+    ) -> None:
+        """Commit a private validated result without publishing it as text."""
+
+        async with self._mutation_lock:
+            state = self._require_started()
+            await self._apply(
+                RunStateMachine.complete(state, final_response),
+                validated_result=str(validated_result),
+            )
+
     async def complete_durable_execution(
         self,
         final_response: str = "",
@@ -265,7 +280,12 @@ class AgentRunController:
         state = self._require_started()
         return state.steps
 
-    async def _apply(self, transition: RunTransition) -> None:
+    async def _apply(
+        self,
+        transition: RunTransition,
+        *,
+        validated_result: str | None = None,
+    ) -> None:
         if not transition.changed:
             return
         before = self._require_started()
@@ -289,6 +309,7 @@ class AgentRunController:
                         if terminal_status is RunStatus.DONE
                         else None
                     ),
+                    validated_result=validated_result,
                     error=(
                         transition.after.error
                         if terminal_status is RunStatus.FAILED

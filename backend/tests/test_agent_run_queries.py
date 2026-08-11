@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,9 +14,11 @@ from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.agent_roles import build_writing_agent_role_registry
 from infrastructure.persistence.run_store import (
-    append_event,
     create_run,
     upsert_todos,
+)
+from infrastructure.persistence.sqlite_agent_output_repository import (
+    SqliteAgentOutputRepository,
 )
 from infrastructure.persistence.run_execution_store import (
     SqliteExecutionLeaseStore,
@@ -29,6 +32,13 @@ from infrastructure.persistence.sqlite_delegation_repository import (
 )
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import request_json
+from purra.output import (
+    AgentOutputEventDraft,
+    OutputChannel,
+    OutputEventKind,
+    OutputSource,
+    OutputVisibility,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -40,8 +50,10 @@ async def temp_db(tmp_path: Path):
     await db.init()
     set_db(db)
     checkpoint_store = SqliteCheckpointStore(db)
+    output_repository = SqliteAgentOutputRepository(db)
     set_agent_composition(SimpleNamespace(
         checkpoint_store=checkpoint_store,
+        output_repository=output_repository,
         delegation_repository=SqliteDelegationRepository(db),
         execution_lease_store=SqliteExecutionLeaseStore(db),
         agent_role_registry=build_writing_agent_role_registry(),
@@ -56,7 +68,31 @@ async def temp_db(tmp_path: Path):
 def _queries(db: DatabaseConnection) -> AgentRunQueryService:
     return AgentRunQueryService(
         SqliteCheckpointStore(db),
+        SqliteAgentOutputRepository(db),
         role_registry=build_writing_agent_role_registry(),
+    )
+
+
+async def _append_public_runtime_event(
+    db: DatabaseConnection,
+    run_id: str,
+    event_type: str,
+    data: dict,
+) -> None:
+    await SqliteAgentOutputRepository(db).append_event(
+        AgentOutputEventDraft(
+            run_id=run_id,
+            turn_id=None,
+            output_stream_id=None,
+            invocation_id=None,
+            source_event_key=f"fixture:{run_id}:{event_type}",
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.RUNTIME,
+            channel=OutputChannel.LIFECYCLE,
+            visibility=OutputVisibility.PUBLIC,
+            payload={"eventType": event_type, "data": data},
+            occurred_at=datetime.now(timezone.utc),
+        )
     )
 
 
@@ -78,7 +114,7 @@ async def _seed_run(db: DatabaseConnection) -> str:
         "suggestedTools": ["readThing"],
     }])
     for index in range(3):
-        await append_event(
+        await _append_public_runtime_event(
             db,
             run_id,
             f"fixture.event_{index + 1}",
@@ -155,65 +191,29 @@ async def test_run_snapshot_route_uses_the_same_resume_contract(temp_db):
     assert invalid.status_code == 422
 
 
-async def test_run_snapshot_reuses_live_sse_mapper_for_replay(temp_db):
-    run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="replay delegated tool",
-        mode="agent",
-    )
-    await append_event(
-        temp_db,
-        run_id,
-        "delegation.event",
-        {
-            "delegationId": "delegation-1",
-            "parentRunId": run_id,
-            "rootRunId": run_id,
-            "childRunId": "child-1",
-            "agentRole": "researcher",
-            "event": {
-                "type": "tool.calls_started",
-                "runId": "child-1",
-                "payload": {
-                    "calls": [{
-                        "id": "call-1",
-                        "name": "readSource",
-                        "arguments_json": "{}",
-                    }],
-                    "in_progress": True,
-                },
-            },
-        },
-    )
+async def test_run_snapshot_reuses_canonical_live_serializer_for_replay(temp_db):
+    run_id = await _seed_run(temp_db)
 
-    snapshot = await _queries(temp_db).get_snapshot(run_id)
+    snapshot = await _queries(temp_db).get_snapshot(run_id, limit=1)
 
     assert snapshot is not None
     assert snapshot["events"][0]["chunk"] == {
-        "agentSubRunEvent": {
-            "runId": run_id,
-            "parentRunId": run_id,
-            "rootRunId": run_id,
-            "delegationId": "delegation-1",
-            "childRunId": "child-1",
-            "agentRole": "researcher",
-            "agentTitle": None,
-            "objective": None,
-            "chunk": {
-                "toolCalls": [{
-                    "id": "call-1",
-                    "type": "function",
-                    "displayNames": {},
-                    "function": {
-                        "name": "readSource",
-                        "arguments": "{}",
-                    },
-                }],
-                "toolCallsInProgress": True,
-                "model": None,
-            },
+        "eventId": snapshot["events"][0]["chunk"]["eventId"],
+        "outputStreamId": None,
+        "runId": run_id,
+        "turnId": None,
+        "invocationId": None,
+        "sequence": 1,
+        "source": "runtime",
+        "kind": "runtime.event",
+        "channel": "lifecycle",
+        "visibility": "public",
+        "payload": {
+            "eventType": "fixture.event_1",
+            "data": {"index": 1},
         },
+        "occurredAt": snapshot["events"][0]["chunk"]["occurredAt"],
+        "emittedAt": snapshot["events"][0]["chunk"]["emittedAt"],
     }
 
 
@@ -270,7 +270,7 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert snapshot is not None
     assert snapshot["run"]["status"] == "canceled"
     assert snapshot["todos"][0]["status"] == "blocked"
-    assert snapshot["events"][-1]["type"] == "run.canceled"
+    assert snapshot["events"][-1]["type"] == "fixture.event_3"
 
 
 async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):

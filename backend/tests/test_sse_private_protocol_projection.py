@@ -1,65 +1,43 @@
-from application.sse_mapping import core_event_to_sse_chunk
-from purra.events import AgentEvent, CoreEventType
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from purra.output import (
+    AgentOutputEvent,
+    OutputChannel,
+    OutputEventKind,
+    OutputSource,
+    OutputVisibility,
+)
+from application.sse_mapping import canonical_output_to_sse_chunk
 
 
-def test_task_plan_hides_private_protocol_and_exposes_business_capability():
-    chunk = core_event_to_sse_chunk(AgentEvent(
-        type=CoreEventType.RUN_TODOS_UPDATED,
+def test_sse_does_not_apply_a_second_plan_projection():
+    now = datetime.now(timezone.utc)
+    event = AgentOutputEvent(
+        event_id="event-plan",
+        output_stream_id=None,
         run_id="run-1",
+        turn_id=None,
+        invocation_id=None,
+        sequence=1,
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.LIFECYCLE,
+        visibility=OutputVisibility.PUBLIC,
         payload={
-            "title": "生成场景表",
-            "status": "running",
-            "steps": [
-                {
-                    "id": "generate-protocol-1",
-                    "title": "开始场景表分批提案",
-                    "type": "write",
-                    "executor": "tool",
-                    "status": "running",
-                    "suggested_tools": ["beginSceneListArtifact"],
-                    "protocol_private": True,
-                    "planning_capability": "generateSceneList",
-                },
-                {
-                    "id": "generate",
-                    "title": "生成完整场景表",
-                    "type": "write",
-                    "executor": "tool",
-                    "status": "pending",
-                    "suggested_tools": ["finalizeSceneListProposal"],
-                    "planning_capability": "generateSceneList",
-                },
-            ],
-        },
-    ))
-
-    assert chunk is not None
-    steps = chunk["agentRunTodosUpdated"]["steps"]
-    assert len(steps) == 1
-    assert steps[0]["id"] == "generate"
-    assert steps[0]["suggestedTools"] == ["generateSceneList"]
-    assert steps[0]["planningCapability"] == "generateSceneList"
-    assert "protocolPrivate" not in steps[0]
-
-
-def test_private_protocol_step_updates_are_not_public_sse_events():
-    chunk = core_event_to_sse_chunk(AgentEvent(
-        type=CoreEventType.RUN_TODO_UPDATED,
-        run_id="run-1",
-        payload={
-            "step_id": "generate-protocol-1",
-            "step": {
-                "id": "generate-protocol-1",
-                "title": "追加场景表批次",
-                "type": "write",
-                "executor": "tool",
-                "status": "done",
-                "suggested_tools": ["appendSceneListBatch"],
-                "protocol_private": True,
-                "planning_capability": "generateSceneList",
+            "eventType": "run.todos_updated",
+            "data": {
+                "title": "生成场景表",
+                "steps": [{"id": "generate", "title": "生成完整场景表"}],
             },
-            "status": "running",
         },
-    ))
+        occurred_at=now,
+        emitted_at=now,
+    )
 
-    assert chunk is None
+    wire = canonical_output_to_sse_chunk(event)
+    assert wire is not None
+    assert wire["kind"] == "runtime.event"
+    assert wire["payload"] == event.payload
+    assert "agentRunTodosUpdated" not in wire

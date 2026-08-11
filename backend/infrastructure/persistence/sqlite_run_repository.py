@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Protocol, Sequence
+from typing import AsyncIterator, Sequence
 from uuid import uuid4
 
 from purra.contracts import (
@@ -36,12 +36,6 @@ from infrastructure.persistence.run_execution_store import now_ms
 DEFAULT_RUN_LEASE_DURATION_MS = 30_000
 
 
-class RunEventSideEffectProjector(Protocol):
-    """Temporary legacy projector removed with the old Run event path."""
-
-    async def project(self, run_id: RunId, event: AgentEvent) -> None: ...
-
-
 class SqliteRunRepository:
     def __init__(
         self,
@@ -50,7 +44,6 @@ class SqliteRunRepository:
         owner_id: str | None = None,
         lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
         delegation_repository: DelegationRepository | None = None,
-        event_projector: RunEventSideEffectProjector | None = None,
     ):
         self._db = db
         self._write_lock = asyncio.Lock()
@@ -59,7 +52,6 @@ class SqliteRunRepository:
         self._delegations = (
             delegation_repository or SqliteDelegationRepository(db)
         )
-        self._event_projector = event_projector
         if self._lease_duration_ms <= 0:
             raise ValueError("lease duration must be positive")
 
@@ -76,20 +68,33 @@ class SqliteRunRepository:
         params: RunCreateParams,
         started_event: AgentEvent,
     ) -> RunBeginResult:
+        async with self.write_transaction():
+            return await self.begin_in_ambient_transaction(
+                params,
+                started_event,
+            )
+
+    async def begin_in_ambient_transaction(
+        self,
+        params: RunCreateParams,
+        started_event: AgentEvent,
+        *,
+        persist_legacy_event: bool = True,
+    ) -> RunBeginResult:
         if started_event.run_id is not None:
             raise ContractViolationError("run.started template must not have a run_id")
         if started_event.type != CoreEventType.RUN_STARTED:
             raise ContractViolationError("run begin requires a run.started event")
-
-        async with self._write_lock:
-            async with self._db.transaction(cancellation_linearizable=True):
-                run_id = await self.create(params)
-                persisted_event = AgentEvent(
-                    type=started_event.type,
-                    run_id=run_id,
-                    payload=started_event.payload,
-                )
-                await self._append_event_unchecked(run_id, persisted_event)
+        if not self._db.current_task_owns_transaction():
+            raise RuntimeError("run begin requires an ambient transaction")
+        run_id = await self.create(params)
+        persisted_event = AgentEvent(
+            type=started_event.type,
+            run_id=run_id,
+            payload=started_event.payload,
+        )
+        if persist_legacy_event:
+            await self._append_event_unchecked(run_id, persisted_event)
         return RunBeginResult(run_id=run_id, event=persisted_event)
 
     async def commit(
@@ -287,20 +292,13 @@ class SqliteRunRepository:
     ) -> AgentEvent:
         if event.run_id is not None and event.run_id != run_id:
             raise ContractViolationError("event run_id does not match repository run_id")
-        persisted_event = event
-        if self._event_projector is not None:
-            projected_event = await self._event_projector.project(run_id, event)
-            if projected_event is not None:
-                raise ContractViolationError(
-                    "domain event projector must not replace event envelope"
-                )
         await run_store.append_event(
             self._db,
             run_id,
-            persisted_event.type,
-            thaw_json_mapping(persisted_event.payload),
+            event.type,
+            thaw_json_mapping(event.payload),
         )
-        return persisted_event
+        return event
 
     async def append_trace(self, run_id: RunId, trace: TraceRecord) -> None:
         await run_store.append_trace(

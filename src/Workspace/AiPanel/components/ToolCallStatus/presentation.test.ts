@@ -56,3 +56,19 @@ test('tool presentation omits cached rows and preserves context errors', async (
     text: '失败：无效章节— 信息有误（当前书籍章节目录中无对应章节或工具参数无效）',
   }])
 })
+
+test('tool presentation assigns completed and active timings to their own rows', async () => {
+  const { buildToolCallRows } = await import('./presentation.ts')
+
+  const rows = buildToolCallRows({
+    labels: ['读取人物资料', '检查人物弧光'],
+    completedToolCount: 1,
+    itemDurationsMs: [1250, null],
+    activeItemStartedAt: 5000,
+  })
+
+  assert.equal(rows[0].durationMs, 1250)
+  assert.equal(rows[0].startedAt, undefined)
+  assert.equal(rows[1].durationMs, undefined)
+  assert.equal(rows[1].startedAt, 5000)
+})

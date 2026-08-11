@@ -15,7 +15,7 @@ from application.conversation_compaction_contracts import (
     ConversationSummary,
     ConversationTurn,
 )
-from purra.model_execution import ManagedModelCall, ManagedModelExecutor
+from purra.api import AgentModelTask, AgentModelTaskRunner
 from purra.ports import CancellationSignal
 from purra.structured_output import (
     StructuredOutputParseError,
@@ -42,12 +42,12 @@ shape. Do not use Markdown, comments, or explanatory prose."""
 class ModelBackedConversationSummarizer:
     """Execute the semantic-summary model call behind Core's summarizer port."""
 
-    def __init__(self, model_executor: ManagedModelExecutor) -> None:
-        if not isinstance(model_executor, ManagedModelExecutor):
+    def __init__(self, model_tasks: AgentModelTaskRunner) -> None:
+        if not isinstance(model_tasks, AgentModelTaskRunner):
             raise TypeError(
-                "conversation summarizer requires a ManagedModelExecutor"
+                "conversation summarizer requires PurrA Run model tasks"
             )
-        self._model = model_executor
+        self._model = model_tasks
 
     async def summarize(
         self,
@@ -79,7 +79,7 @@ class ModelBackedConversationSummarizer:
                 ),
             ),
         )
-        call = ManagedModelCall(
+        call = AgentModelTask(
             request=request,
             reasoning_mode=ReasoningMode.DISABLED,
         )

@@ -23,8 +23,8 @@ from purra.context_orchestration.compaction import (
 )
 from purra.context_orchestration.contracts import ContextCompressionSettings
 from purra.api import AgentCore
+from purra.delegation import AgentCoreSubmitter, ChildRunRequestFactory
 from purra.events import AgentEvent, CoreEventType
-from purra.model_execution import ManagedModelExecutor
 from purra.ports import (
     ApprovalGateway,
     CheckpointStore,
@@ -33,10 +33,11 @@ from purra.ports import (
     ContextProvider,
     DelegationRepository,
     ExecutionLeaseStore,
+    ResponseJudgePolicy,
     ToolRegistration,
 )
+from purra.output.ports import AgentOutputRepository
 from purra.tools import InMemoryToolCatalog
-from application.response_judging import ModelBackedResponseJudge
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
 from application.agent_profile_registry import (
@@ -60,6 +61,12 @@ from infrastructure.models.model_conversation_summarizer import (
 )
 from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from infrastructure.persistence.sqlite_agent_output_repository import (
+    SqliteAgentOutputRepository,
+)
+from infrastructure.persistence.agent_output_publisher import (
+    InProcessAgentOutputPublisher,
+)
 from infrastructure.persistence.run_execution_store import (
     SqliteExecutionLeaseStore,
 )
@@ -118,7 +125,7 @@ class AgentComposition:
         execution_db=None,
         skills_dir: Path | None = None,
         writing: WritingDomainAdapter | None = None,
-        event_projector=None,
+        run_commit_projector=None,
         profile_registrations: Sequence[AgentProfileRegistration] = (),
         profile_extension_factories: Sequence[Callable[..., Any]] = (),
         provider_capabilities: ProviderCapabilityCache | None = None,
@@ -139,8 +146,13 @@ class AgentComposition:
         self._repository = SqliteRunRepository(
             db,
             delegation_repository=self._delegation_repository,
-            event_projector=event_projector,
         )
+        self._output_repository = SqliteAgentOutputRepository(
+            db,
+            run_repository=self._repository,
+            run_commit_projector=run_commit_projector,
+        )
+        self._output_publisher = InProcessAgentOutputPublisher()
         self._tool_idempotency_gateway = SqliteToolIdempotencyGateway(
             db,
             owner_id=self._repository.owner_id,
@@ -219,6 +231,7 @@ class AgentComposition:
         )
         self._approval_runs: dict[str, str] = {}
         self._background_run_tasks: set[asyncio.Task[None]] = set()
+        self._active_cores: set[AgentCore] = set()
         self._closed = False
 
     @property
@@ -260,6 +273,10 @@ class AgentComposition:
     @property
     def checkpoint_store(self) -> CheckpointStore:
         return self._checkpoint_store
+
+    @property
+    def output_repository(self) -> AgentOutputRepository:
+        return self._output_repository
 
     @property
     def long_task_repository(self) -> SqliteLongTaskRepository:
@@ -354,6 +371,9 @@ class AgentComposition:
         conversation_compactor: ConversationCompactor | None = None,
         context_provider_override: ContextProvider | None = None,
         long_task_executor=None,
+        delegation_repository: DelegationRepository | None = None,
+        child_core_submitter: AgentCoreSubmitter | None = None,
+        child_request_factory: ChildRunRequestFactory | None = None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -363,7 +383,6 @@ class AgentComposition:
                 on_required_tool_choice_unsupported
             ),
         )
-        model_executor = ManagedModelExecutor(model_gateway)
         registration = self._profile_registry.require(agent_profile)
         adapter = registration.adapter
         extension = self._profile_extensions_by_id.get(agent_profile)
@@ -374,29 +393,50 @@ class AgentComposition:
                 required_tool_names,
             )
         context_provider = context_provider_override or adapter.context_provider
+        context_provider_factory = None
         if (
             context_provider_override is None
             and agent_profile == "writing"
             and self._writing_context_source is not None
         ):
-            context_provider = WritingContextProvider(
-                self._writing_context_source.with_memory_reranker(
-                    ModelBackedMemoryReranker(model_executor)
+            context_provider = None
+            context_provider_factory = lambda model_tasks: (
+                WritingContextProvider(
+                    self._writing_context_source.with_memory_reranker(
+                        ModelBackedMemoryReranker(model_tasks)
+                    )
                 )
             )
-        if context_provider is None:
+        if context_provider is None and context_provider_factory is None:
             raise RuntimeError(
                 f"{agent_profile} ContextProvider is not configured"
             )
-        resolved_compactor = conversation_compactor or (
+        resolved_compactor = conversation_compactor
+        conversation_compactor_factory = None
+        if resolved_compactor is None and context_compression_hook is not None:
+            resolved_compactor = (
+                ContextCompressionCoordinator(
+                    context_compression_hook,
+                    context_compression_settings,
+                )
+            )
+        elif resolved_compactor is None:
+            conversation_compactor_factory = lambda model_tasks: (
+                ContextCompressionCoordinator(
+                    ConversationCompactionService(
+                        self._conversation_compaction_repository,
+                        ModelBackedConversationSummarizer(model_tasks),
+                    ),
+                    context_compression_settings,
+                )
+            )
+        resolved_compactor = resolved_compactor or (
             ContextCompressionCoordinator(
-                context_compression_hook
-                or ConversationCompactionService(
-                    self._conversation_compaction_repository,
-                    ModelBackedConversationSummarizer(model_executor),
-                ),
+                context_compression_hook,
                 context_compression_settings,
             )
+            if context_compression_hook is not None
+            else None
         )
         base_catalog = adapter.tool_catalog
         extras = tuple(extra_tool_registrations)
@@ -430,12 +470,14 @@ class AgentComposition:
                 registrations,
                 enablement=enabled_names,
             )
-        return AgentCore(
+        core = AgentCore(
             model_gateway=model_gateway,
             run_repository=self._repository,
             planning_policy=planning_policy,
             context_provider=context_provider,
+            context_provider_factory=context_provider_factory,
             conversation_compactor=resolved_compactor,
+            conversation_compactor_factory=conversation_compactor_factory,
             execution_state_factory=adapter.execution_state_factory,
             tool_catalog=tool_catalog,
             agent_role_guidance=agent_role_guidance,
@@ -459,7 +501,20 @@ class AgentComposition:
             runtime_limits=adapter.runtime_limits,
             recovery_policy=adapter.recovery_policy,
             tool_execution_limits=self._tool_execution_limits,
+            output_repository=self._output_repository,
+            output_publisher=self._output_publisher,
+            execution_lease_store=self._execution_lease_store,
+            execution_owner_id=self._repository.owner_id,
+            execution_lease_duration_ms=self._repository.lease_duration_ms,
+            delegation_repository=delegation_repository,
+            child_core_submitter=child_core_submitter,
+            child_request_factory=child_request_factory,
         )
+        self._active_cores.add(core)
+        return core
+
+    def release_core(self, core: AgentCore) -> None:
+        self._active_cores.discard(core)
 
     def create_core_for_request(
         self,
@@ -482,12 +537,11 @@ class AgentComposition:
             request
         ).adapter.agent_role_registry
 
-    def create_response_judges(
+    def create_response_judge_policies(
         self,
-        api_key: str,
         request: AgentRunRequest,
-    ) -> tuple[ModelBackedResponseJudge, ...]:
-        """Create request-scoped semantic judges with an isolated model call."""
+    ) -> tuple[ResponseJudgePolicy, ...]:
+        """Register domain semantics; PurrA owns the model invocation."""
 
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -496,24 +550,7 @@ class AgentComposition:
         judge_policy = writing_atomic_continuity_judge_policy(request)
         if judge_policy is None:
             return ()
-        return (
-            ModelBackedResponseJudge(
-                model_executor=self.create_managed_model_executor(api_key),
-                model_request=request.model,
-                policy=judge_policy,
-                context_window_tokens=request.context_window or 128_000,
-            ),
-        )
-
-    def create_managed_model_executor(
-        self,
-        api_key: str,
-    ) -> ManagedModelExecutor:
-        """Create the only host-visible boundary for bounded model sub-calls."""
-
-        if self._closed:
-            raise RuntimeError("Agent composition has been shut down")
-        return ManagedModelExecutor(ProviderModelGateway(api_key))
+        return (judge_policy,)
 
     def create_execution_session(self, signal) -> RunExecutionSession:
         return RunExecutionSession(
@@ -618,17 +655,6 @@ class AgentComposition:
             raise ValueError(f"Agent profile has no extension: {normalized}")
         return extension
 
-    async def append_run_event(
-        self,
-        run_id: str,
-        event_type: str,
-        payload: dict,
-    ) -> None:
-        await self._repository.append_event(
-            run_id,
-            AgentEvent(type=event_type, run_id=run_id, payload=payload),
-        )
-
     async def shutdown(self) -> None:
         """Fail closed and release all lifespan-owned live approval state."""
 
@@ -640,6 +666,13 @@ class AgentComposition:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._background_run_tasks.clear()
+        active_cores = tuple(self._active_cores)
+        self._active_cores.clear()
+        if active_cores:
+            await asyncio.gather(
+                *(core.close() for core in active_cores),
+                return_exceptions=True,
+            )
         for extension in self._profile_extensions:
             clear = getattr(extension, "clear_active_executions", None)
             if callable(clear):

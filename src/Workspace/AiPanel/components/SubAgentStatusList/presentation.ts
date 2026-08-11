@@ -1,3 +1,9 @@
+import type { AssistantTimelinePart } from "../ChatMessageList/assistantTimeline.ts";
+import {
+  groupConsecutiveWorkSteps,
+  type WorkLogTimelineItem,
+} from "../WorkLog/grouping.ts";
+
 export function presentableStructuredResponse(
   value: string | undefined,
 ): string {
@@ -19,4 +25,16 @@ export function presentableStructuredResponse(
     }
   }
   return content;
+}
+
+export function buildSubAgentTimelineItems(
+  timeline: AssistantTimelinePart[],
+  groupKeyPrefix: string,
+): WorkLogTimelineItem[] {
+  const visibleTimeline = timeline.filter((part) =>
+    part.type === "commentary"
+    || part.type === "text"
+    || part.type === "tools",
+  );
+  return groupConsecutiveWorkSteps(visibleTimeline, groupKeyPrefix);
 }

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -9,17 +8,11 @@ import pytest_asyncio
 
 from purra.contracts import (
     AgentRunResult,
-    ExecutionState,
     RunCreateParams,
     RunStatus,
-    ToolExecutionMode,
 )
-from purra.events import CoreEventType
-from application.agent_delegation_tool import build_delegation_tool_registration
 from application.agent_delegation_service import AgentDelegationService
-from application.agent_orchestrator import AgentOrchestrator
 from database.connection import DatabaseConnection
-from domains.agent_roles import AgentRoleDefinition, AgentRoleRegistry
 from domains.writing.agent_roles import build_writing_agent_role_registry
 from infrastructure.persistence import run_execution_store, run_store
 from infrastructure.persistence import delegation_store
@@ -301,153 +294,6 @@ async def test_depth_limit_rejects_unbounded_delegation(db):
         )
 
 
-@pytest.mark.asyncio
-async def test_orchestrator_runs_children_with_bounded_parallelism(db):
-    parent_run_id = await _parent(db)
-    service = _service(db)
-    for index in range(4):
-        await service.delegate(
-            parent_run_id=parent_run_id,
-            agent_role="researcher",
-            objective=f"task {index}",
-            priority=index,
-        )
-
-    active = 0
-    peak = 0
-
-    async def runner(view, lineage):
-        nonlocal active, peak
-        repository = SqliteRunRepository(db, owner_id="pool-worker")
-        child_run_id = await repository.create(RunCreateParams(
-            session_id=None,
-            prompt=view["objective"],
-            mode="agent",
-            lineage=lineage,
-        ))
-        active += 1
-        peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        await repository.transition(
-            child_run_id,
-            RunStatus.DONE,
-            final_response=f"finished {view['objective']}",
-        )
-        return AgentRunResult(
-            run_id=child_run_id,
-            status=RunStatus.DONE,
-            final_response=f"finished {view['objective']}",
-        )
-
-    snapshot = await AgentOrchestrator(service).run_queued(
-        parent_run_id=parent_run_id,
-        worker_id="pool-worker",
-        max_parallel_children=2,
-        runner=runner,
-    )
-
-    assert peak == 2
-    assert snapshot["aggregate"]["state"] == "ready"
-    assert snapshot["aggregate"]["counts"]["done"] == 4
-
-
-@pytest.mark.asyncio
-async def test_parent_delegation_tool_streams_lifecycle_and_returns_results(db):
-    parent_run_id = await _parent(db)
-    role_registry = build_writing_agent_role_registry()
-    service = AgentDelegationService(
-        SqliteDelegationRepository(db),
-        role_registry=role_registry,
-    )
-    published = []
-    active = 0
-    peak = 0
-
-    async def publish(event):
-        published.append(event)
-
-    async def runner(view, lineage):
-        nonlocal active, peak
-        repository = SqliteRunRepository(db, owner_id="parent-worker")
-        child_run_id = await repository.create(RunCreateParams(
-            session_id=None,
-            prompt=view["objective"],
-            mode="agent",
-            lineage=lineage,
-        ))
-        active += 1
-        peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        response = f"verified: {view['objective']}"
-        await repository.transition(
-            child_run_id,
-            RunStatus.DONE,
-            final_response=response,
-        )
-        return AgentRunResult(
-            run_id=child_run_id,
-            status=RunStatus.DONE,
-            final_response=response,
-        )
-
-    registration = build_delegation_tool_registration(
-        service=service,
-        role_registry=role_registry,
-        worker_id="parent-worker",
-        runner=runner,
-        publish=publish,
-        max_parallel_children=2,
-    )
-    role_enum = registration.schema.parameters["properties"]["delegations"][
-        "items"
-    ]["properties"]["agentRole"]["enum"]
-    assert set(role_enum) == {"researcher", "reviewer", "analyst"}
-    result = await registration.handler(
-        ExecutionState(run_id=parent_run_id),
-        {
-            "delegations": [
-                {
-                    "agentRole": "researcher",
-                    "objective": "collect evidence",
-                    "input": {"chapterId": 7},
-                    "priority": 2,
-                },
-                {
-                    "agentRole": "reviewer",
-                    "objective": "review the evidence",
-                    "priority": 1,
-                },
-            ],
-        },
-    )
-
-    payload = json.loads(result.content)
-    assert result.error_code is None
-    assert peak == 2
-    assert payload["state"] == "ready"
-    assert payload["counts"]["done"] == 2
-    assert len(payload["results"]) == 2
-    assert [event.type for event in published].count(
-        CoreEventType.DELEGATION_CREATED
-    ) == 2
-    assert [event.type for event in published].count(
-        CoreEventType.DELEGATION_CLAIMED
-    ) == 2
-    assert [event.type for event in published].count(
-        CoreEventType.DELEGATION_COMPLETED
-    ) == 2
-    assert all(event.run_id == parent_run_id for event in published)
-    created = next(
-        event for event in published
-        if event.type == CoreEventType.DELEGATION_CREATED
-        and event.payload["agentRole"] == "researcher"
-    )
-    assert created.payload["input"] == {"chapterId": 7}
-    assert created.payload["agentTitle"] == "研究 Agent"
-
-
 def test_writing_role_registry_drives_delegation_schema_and_titles():
     registry = build_writing_agent_role_registry()
 
@@ -456,36 +302,6 @@ def test_writing_role_registry_drives_delegation_schema_and_titles():
     assert {
         mode.value for mode in registry.require("analyst").allowed_tool_modes
     } == {"read"}
-
-
-def test_delegation_schema_uses_injected_product_roles_without_hardcoding():
-    registry = AgentRoleRegistry((AgentRoleDefinition(
-        id="continuity_checker",
-        title="连续性检查 Agent",
-        delegation_description="检查跨章节连续性",
-        instruction="Check continuity using trusted read-only evidence.",
-        allowed_tool_modes=frozenset({ToolExecutionMode.READ}),
-    ),))
-
-    async def unused_runner(_view, _lineage):
-        raise AssertionError("schema construction must not execute a child")
-
-    async def unused_publish(_event):
-        raise AssertionError("schema construction must not publish events")
-
-    registration = build_delegation_tool_registration(
-        service=object(),  # type: ignore[arg-type]
-        role_registry=registry,
-        worker_id="worker",
-        runner=unused_runner,
-        publish=unused_publish,
-    )
-    role_schema = registration.schema.parameters["properties"]["delegations"][
-        "items"
-    ]["properties"]["agentRole"]
-
-    assert tuple(role_schema["enum"]) == ("continuity_checker",)
-    assert "检查跨章节连续性" in registration.schema.description
 
 
 @pytest.mark.asyncio

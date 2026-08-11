@@ -142,6 +142,39 @@ async def test_repository_implements_the_output_port_and_creates_schema(
 
 
 @pytest.mark.asyncio
+async def test_run_begin_and_canonical_lifecycle_commit_together(output_db):
+    db, _run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+
+    begun, output = await repository.begin_run_lifecycle(
+        RunCreateParams(session_id=8, prompt="开始正式审阅", mode="agent"),
+        AgentEvent(
+            type=CoreEventType.RUN_STARTED,
+            payload={"status": RunStatus.RUNNING.value},
+        ),
+    )
+
+    run = await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [begun.run_id],
+    )
+    legacy = await db.fetch_all(
+        "SELECT id FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_id IS NULL",
+        [begun.run_id],
+    )
+    assert run == {"status": RunStatus.RUNNING.value}
+    assert begun.event.run_id == begun.run_id
+    assert output.kind is OutputEventKind.RUN_LIFECYCLE
+    assert output.payload["status"] == RunStatus.RUNNING.value
+    assert await repository.list_events(
+        begun.run_id,
+        after_sequence=0,
+    ) == (output,)
+    assert legacy == []
+
+
+@pytest.mark.asyncio
 async def test_append_allocates_turn_sequence_and_duplicate_source_is_idempotent(
     output_db,
 ):
@@ -290,7 +323,7 @@ async def test_run_terminal_and_canonical_event_commit_together(output_db):
         ),
     )
 
-    event = await repository.commit_run_lifecycle(
+    events = await repository.commit_run_lifecycle(
         run_id,
         commit,
         RunLifecycleOutputDraft(
@@ -311,7 +344,7 @@ async def test_run_terminal_and_canonical_event_commit_together(output_db):
         [run_id, CoreEventType.RUN_COMPLETED.value],
     )
     assert run == {"status": RunStatus.DONE.value}
-    assert await repository.list_events(run_id, after_sequence=0) == (event,)
+    assert await repository.list_events(run_id, after_sequence=0) == events
     assert legacy_terminal == []
 
 

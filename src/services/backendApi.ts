@@ -17,6 +17,8 @@ import {
   recordAiDebugChunk,
   startAiDebugRun,
 } from '../components/AiDevInspector/store'
+import { isCanonicalOutputEvent } from '../agent-runtime/canonicalOutput'
+import { presentAgentRunError } from '../agent-runtime/agentErrorPresentation'
 
 export type PlatformApiKey =
   | 'openXmindFile'
@@ -614,36 +616,67 @@ export const backendApi: BackendApi = {
           if (payload === '[DONE]') continue
           try {
             const chunk = JSON.parse(payload) as AiChunk
-            if (abortController.signal.aborted && chunk.done) chunk.aborted = true
+            const transport = chunk as AiChunk & {
+              done?: boolean
+              aborted?: boolean
+              error?: string
+              longTaskDispatched?: { taskId?: string }
+              runResult?: {
+                runId: string
+                status: string
+                errorCode?: string | null
+              }
+            }
+            if (abortController.signal.aborted && transport.done) {
+              transport.aborted = true
+            }
             observedAgentRunId =
-              chunk.agentRunStarted?.runId ||
-              chunk.agentRunTodosUpdated?.runId ||
-              chunk.agentRunTodoUpdated?.runId ||
-              chunk.agentRunCompleted?.runId ||
-              chunk.agentRunFailed?.runId ||
-              chunk.agentRunBlocked?.runId ||
-              chunk.agentRunCanceled?.runId ||
+              (isCanonicalOutputEvent(chunk) ? chunk.runId : undefined) ||
               observedAgentRunId
             observedErrorCode =
-              chunk.agentRunFailed?.error || observedErrorCode
+              transport.runResult?.errorCode ||
+              (isCanonicalOutputEvent(chunk)
+                && chunk.kind === 'run.lifecycle'
+                && typeof chunk.payload.errorCode === 'string'
+                ? chunk.payload.errorCode
+                : undefined) ||
+              observedErrorCode
             if (chunk.longTaskDispatched?.taskId) {
               observedTaskType = chunk.longTaskDispatched.kind === 'screenplay_draft_generation'
                 ? '持久化长任务 · 剧本正文分批创作'
                 : `持久化长任务 · ${chunk.longTaskDispatched.kind || '通用任务'}`
             }
             if (
-              chunk.delta?.trim()
-              || chunk.agentRunCompleted?.finalResponse?.trim()
-              || chunk.longTaskDispatched?.taskId
+              (isCanonicalOutputEvent(chunk)
+                && chunk.visibility === 'public'
+                && chunk.source === 'provider'
+                && chunk.kind === 'provider.content_delta'
+                && typeof chunk.payload.delta === 'string'
+                && chunk.payload.delta.trim())
+              ||
+              transport.longTaskDispatched?.taskId
             ) {
               receivedVisibleOutput = true
             }
-            if (chunk.done || chunk.error) receivedTerminalChunk = true
-            if (chunk.error) {
-              await attachErrorReport(chunk)
+            if (transport.done || transport.error) receivedTerminalChunk = true
+            if (
+              transport.done
+              && transport.runResult
+              && ['failed', 'blocked'].includes(transport.runResult.status)
+            ) {
+              await attachErrorReport(
+                transport,
+                presentAgentRunError(
+                  transport.runResult.status,
+                  transport.runResult.errorCode,
+                ),
+                transport.runResult.errorCode || undefined,
+              )
+            } else if (transport.error) {
+              await attachErrorReport(transport)
             } else if (
-              chunk.done &&
-              !chunk.aborted &&
+              transport.done &&
+              !transport.aborted &&
               !receivedVisibleOutput
             ) {
               await attachErrorReport(

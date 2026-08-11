@@ -24,6 +24,7 @@ from purra.output import (
     OutputSource,
     OutputStreamSpec,
     OutputVisibility,
+    RuntimeOutputEvent,
     ToolOutputEvent,
 )
 
@@ -279,4 +280,80 @@ async def test_reasoning_and_usage_are_diagnostic_not_public_text():
 
     assert repository.events[-1].kind is OutputEventKind.PROVIDER_REASONING_DELTA
     assert repository.events[-1].visibility is OutputVisibility.DIAGNOSTIC
+    assert publisher.published == []
+
+
+@pytest.mark.asyncio
+async def test_private_protocol_plan_steps_never_enter_public_journal():
+    repository = _Repository()
+    publisher = _Publisher()
+    processor = _processor_type()(repository, publisher)
+
+    await processor.accept_runtime_event(RuntimeOutputEvent(
+        event_id="runtime-plan",
+        run_id="run-1",
+        event_type="run.todos_updated",
+        payload={
+            "title": "生成场景表",
+            "steps": [
+                {
+                    "id": "private-protocol",
+                    "title": "追加内部批次",
+                    "protocol_private": True,
+                },
+                {
+                    "id": "public-capability",
+                    "title": "生成完整场景表",
+                    "protocol_private": False,
+                },
+            ],
+        },
+        occurred_at=_now(),
+    ))
+
+    assert repository.events[-1].payload["data"]["steps"] == (
+        {
+            "id": "public-capability",
+            "title": "生成完整场景表",
+            "protocol_private": False,
+        },
+    )
+
+    hidden = await processor.accept_runtime_event(RuntimeOutputEvent(
+        event_id="runtime-private-step",
+        run_id="run-1",
+        event_type="run.todo_updated",
+        payload={
+            "step_id": "private-protocol",
+            "step": {"id": "private-protocol", "protocol_private": True},
+        },
+        occurred_at=_now(),
+    ))
+
+    assert hidden is None
+    assert len(repository.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_private_runtime_protocol_events_never_enter_canonical_journal():
+    repository = _Repository()
+    publisher = _Publisher()
+    processor = _processor_type()(repository, publisher)
+
+    for index, event_type in enumerate((
+        "model.call_recorded",
+        "tool.calls_started",
+        "tool.results",
+        "delegation.claimed",
+    )):
+        hidden = await processor.accept_runtime_event(RuntimeOutputEvent(
+            event_id=f"private-{index}",
+            run_id="run-1",
+            event_type=event_type,
+            payload={"content": "private protocol payload"},
+            occurred_at=_now(),
+        ))
+        assert hidden is None
+
+    assert repository.events == []
     assert publisher.published == []

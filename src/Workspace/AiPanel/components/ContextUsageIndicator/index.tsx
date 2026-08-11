@@ -13,14 +13,11 @@ import "./index.scss";
 export interface ContextUsageIndicatorProps {
   conversations: ChatMessage[];
   selectedModelConfig: AiModelConfig | null;
-  /** 尚未发送的输入框内容，属于下一次请求的当前上下文。 */
-  draft?: string;
 }
 
 export default function ContextUsageIndicator({
   conversations,
   selectedModelConfig,
-  draft = "",
 }: ContextUsageIndicatorProps) {
   const windowTokens = contextWindowTokens(
     getDefaultModelContextWindow(selectedModelConfig),
@@ -29,13 +26,11 @@ export default function ContextUsageIndicator({
     () => calculateContextUsage({
       messages: conversations,
       windowTokens,
-      draft,
       modelConfigId: selectedModelConfig?.id,
       modelName: selectedModelConfig?.name,
     }),
     [
       conversations,
-      draft,
       selectedModelConfig?.id,
       selectedModelConfig?.name,
       windowTokens,

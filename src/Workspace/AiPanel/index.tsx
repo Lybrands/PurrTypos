@@ -539,7 +539,6 @@ export default function AiPanel({
                     <ContextUsageIndicator
                       conversations={conversations}
                       selectedModelConfig={selectedModelConfig}
-                      draft={prompt}
                     />
                     {loading ? (
                       <PurrButton

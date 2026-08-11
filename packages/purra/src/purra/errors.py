@@ -37,6 +37,12 @@ class OutputPersistenceError(CodedAgentCoreError):
     default_code = "output_persistence_failed"
 
 
+class RunCommitProjectionError(CodedAgentCoreError):
+    """A host-bound effect rejected the terminal Run transaction."""
+
+    default_code = "completion_projection_failed"
+
+
 class ResponseJudgeContractError(ContractViolationError):
     """A semantic judge response violates its declared verdict contract."""
 

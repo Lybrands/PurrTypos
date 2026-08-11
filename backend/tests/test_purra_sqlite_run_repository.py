@@ -34,47 +34,6 @@ class RecordingSink:
 
 
 @pytest.mark.asyncio
-async def test_domain_projector_cannot_replace_event_envelope(tmp_path: Path):
-    class ReplacingProjector:
-        async def project(self, run_id, event):
-            return AgentEvent(
-                type=event.type,
-                run_id=run_id,
-                payload={"replacement": True},
-            )
-
-    db = DatabaseConnection(tmp_path)
-    await db.init()
-    try:
-        repository = SqliteRunRepository(
-            db,
-            event_projector=ReplacingProjector(),
-        )
-        run_id = await repository.create(
-            RunCreateParams(session_id=None, prompt="project", mode="agent")
-        )
-        event = AgentEvent(
-            type=CoreEventType.MODEL_CALL_RECORDED,
-            run_id=run_id,
-            payload={"model": "original"},
-        )
-
-        with pytest.raises(
-            ContractViolationError,
-            match="must not replace event envelope",
-        ):
-            await repository.append_event(run_id, event)
-
-        rows = await db.fetch_all(
-            "SELECT id FROM ai_agent_run_events WHERE run_id = ?",
-            [run_id],
-        )
-        assert rows == []
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
 async def test_concurrent_terminal_commits_have_one_winner_and_one_outbox_event(
     sqlite_repository,
 ):

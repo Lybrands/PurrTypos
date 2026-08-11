@@ -777,6 +777,7 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
                 model=ModelRequest(provider="openai", model="requested-model"),
                 domain_context=DomainContext(namespace="test"),
             ),
+            output_limit=_limit(2_048),
             signal=signal,
         )
     ]
@@ -787,3 +788,37 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
     assert result.error_code == "request_canceled"
     assert raw_stream.next_calls == 0
     assert raw_stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_unknown_output_limit_before_provider_request(
+    monkeypatch,
+):
+    provider_called = False
+
+    async def _stream(*_args, **_kwargs):
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("unknown output limit must not reach the Provider")
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _stream,
+    )
+    runtime = AgentRuntime(model_gateway=ProviderModelGateway("secret"))
+    updates = [
+        update
+        async for update in runtime.run(
+            AgentRunRequest(
+                messages=(AgentMessage(role="user", content="hello"),),
+                model=ModelRequest(provider="openai", model="requested-model"),
+                domain_context=DomainContext(namespace="test"),
+            ),
+        )
+    ]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRuntimeResult)
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code == "model_output_limit_unknown"
+    assert provider_called is False

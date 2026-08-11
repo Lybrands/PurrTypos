@@ -12,7 +12,8 @@ from purra.contracts import (
     ModelFinishReason,
     ModelRequest,
 )
-from purra.model_execution import ManagedModelExecutor
+from purra.api import AgentModelTaskRunner
+from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from purra.model_protocol import generic_capability_snapshot
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.memory_reranking import MemoryCandidateCard
@@ -72,10 +73,17 @@ def _model_request() -> ModelRequest:
     )
 
 
+def _model_tasks(gateway) -> AgentModelTaskRunner:
+    return AgentModelTaskRunner(
+        AgentModelInvocationManager(gateway),
+        ModelInvocationContext(run_id="reranker-test-run"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_model_reranker_selects_only_host_candidates():
     gateway = _Gateway("record-2")
-    reranker = ModelBackedMemoryReranker(ManagedModelExecutor(gateway))
+    reranker = ModelBackedMemoryReranker(_model_tasks(gateway))
 
     result = await reranker.rerank(
         query="续写两人决裂后的对话",
@@ -103,7 +111,7 @@ async def test_model_reranker_selects_only_host_candidates():
 @pytest.mark.asyncio
 async def test_model_reranker_rejects_unknown_candidate_ids():
     gateway = _Gateway("invented-record")
-    reranker = ModelBackedMemoryReranker(ManagedModelExecutor(gateway))
+    reranker = ModelBackedMemoryReranker(_model_tasks(gateway))
 
     with pytest.raises(ValueError, match="unknown candidate"):
         await reranker.rerank(

@@ -27,6 +27,7 @@ from purra.run_controller import AgentRunController
 class RecordingRepository:
     def __init__(self):
         self.events: list[AgentEvent] = []
+        self.commits: list[RunCommit] = []
         self.traces: list[TraceRecord] = []
         self.steps: list[TaskStep] = []
         self.transitions: list[tuple[RunStatus, str | None, str | None]] = []
@@ -57,6 +58,7 @@ class RecordingRepository:
         run_id: str,
         commit: RunCommit,
     ) -> tuple[AgentEvent, ...]:
+        self.commits.append(commit)
         steps = list(self.steps)
         transitions = list(self.transitions)
         events = list(self.events)
@@ -386,6 +388,27 @@ async def test_terminal_persistence_failure_keeps_memory_running_and_emits_nothi
     assert controller.snapshot is before
     assert controller.status is RunStatus.RUNNING
     assert len(sink.events) == before_event_count
+
+
+@pytest.mark.asyncio
+async def test_validated_result_is_committed_privately_with_public_response_separate():
+    repository = RecordingRepository()
+    sink = RecordingSink()
+    controller = AgentRunController(repository=repository, event_sink=sink)
+    await controller.start(
+        RunCreateParams(session_id=None, prompt="validate", mode="agent")
+    )
+
+    await controller.complete_validated_result(
+        "private validated candidate",
+        final_response="public answer",
+    )
+
+    commit = repository.commits[-1]
+    assert commit.terminal_status is RunStatus.DONE
+    assert commit.validated_result == "private validated candidate"
+    assert commit.final_response == "public answer"
+    assert "private validated candidate" not in str(commit.events)
 
 
 @pytest.mark.asyncio
