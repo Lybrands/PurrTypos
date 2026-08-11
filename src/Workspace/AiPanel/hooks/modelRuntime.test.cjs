@@ -45,9 +45,9 @@ const {
 )
 const {
   buildAssistantTimeline,
+  getExecutionPanelPresentation,
   getAssistantProcessingLabel,
   getOperationGroupProgress,
-  groupConsecutiveWorkSteps,
 } = loadTypeScriptModule(
   path.join(__dirname, '../components/ChatMessageList/assistantTimeline.ts'),
 )
@@ -293,85 +293,59 @@ test('unassigned commentary stays after all recorded tools', () => {
   )
 })
 
-test('visible narrative is the only boundary between operation groups', () => {
-  const message = {
-    role: 'assistant',
-    content: '最终答复',
-    commentaryBlocks: ['这里是模型真实输出的阶段说明。'],
-    toolCallSegments: [
-      { commentaryBlockIndex: null, labels: ['读取人物'] },
-      { commentaryBlockIndex: null, labels: ['读取场景'] },
-      { commentaryBlockIndex: 0, labels: ['写入候选稿'] },
-      { commentaryBlockIndex: null, labels: ['校验候选稿'] },
-    ],
-  }
-  const timeline = buildAssistantTimeline(message, { messageIndex: 7 })
-  const workLog = timeline.filter((part) => part.type !== 'text')
-  const grouped = groupConsecutiveWorkSteps(workLog, 7)
-
-  assert.deepEqual(grouped.map((part) => part.type), [
-    'stepGroup',
-    'commentary',
-    'stepGroup',
-  ])
+test('execution panel exists before the first operation and remains before a final answer', () => {
   assert.deepEqual(
-    grouped.filter((part) => part.type === 'stepGroup')
-      .map((part) => part.parts.map((item) => item.type)),
-    [['tools', 'tools'], ['tools', 'tools']],
+    getExecutionPanelPresentation([], {
+      isStreaming: true,
+    }),
+    {
+      visible: true,
+      active: true,
+      autoOpen: true,
+      stepCount: 0,
+    },
   )
-})
 
-test('displayable operations merge across their technical event types', () => {
-  const parts = [
-    {
-      type: 'contextCompaction',
-      state: { status: 'completed', selectedTurnCount: 3 },
-    },
-    {
-      type: 'delegations',
-      items: [{
-        delegationId: 'delegation-1',
-        agentRole: 'researcher',
-        status: 'completed',
-      }],
-    },
-    {
-      type: 'tools',
-      segmentIndex: 0,
-      segment: { commentaryBlockIndex: null, labels: ['读取原作'] },
-    },
-  ]
-
-  const grouped = groupConsecutiveWorkSteps(parts, 3)
-
-  assert.equal(grouped.length, 1)
-  assert.equal(grouped[0].type, 'stepGroup')
-  assert.deepEqual(
-    grouped[0].parts.map((part) => part.type),
-    ['contextCompaction', 'delegations', 'tools'],
-  )
-})
-
-test('one visible operation still becomes one collapsible operation group', () => {
-  const grouped = groupConsecutiveWorkSteps([{
+  const completedParts = [{
     type: 'tools',
     segmentIndex: 0,
     segment: {
       commentaryBlockIndex: null,
-      labels: ['读取人物资料'],
-      completedToolCount: 1,
+      labels: ['缓存读取', '读取人物资料'],
+      cachedFlags: [true, false],
+      completedToolCount: 2,
     },
-  }], 4)
+  }]
 
-  assert.equal(grouped.length, 1)
-  assert.equal(grouped[0].type, 'stepGroup')
   assert.deepEqual(
-    grouped[0].parts.map((part) => part.type),
-    ['tools'],
+    getExecutionPanelPresentation(completedParts, {
+      isStreaming: false,
+      durationMs: 4200,
+    }),
+    {
+      visible: true,
+      active: false,
+      autoOpen: false,
+      stepCount: 1,
+    },
   )
 })
 
-test('operation group progress reports the active visible step frontier', () => {
+test('an empty historical Assistant turn does not invent an execution panel', () => {
+  assert.deepEqual(
+    getExecutionPanelPresentation([], {
+      isStreaming: false,
+    }),
+    {
+      visible: false,
+      active: false,
+      autoOpen: false,
+      stepCount: 0,
+    },
+  )
+})
+
+test('execution-panel progress reports the active visible step frontier', () => {
   const progress = getOperationGroupProgress([
     {
       type: 'tools',
@@ -402,7 +376,7 @@ test('operation group progress reports the active visible step frontier', () => 
   })
 })
 
-test('operation group progress excludes cached tool rows', () => {
+test('execution-panel progress excludes cached tool rows', () => {
   const progress = getOperationGroupProgress([{
     type: 'tools',
     segmentIndex: 0,
