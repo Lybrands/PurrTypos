@@ -75,6 +75,12 @@ from purra.model_invocation import (
 )
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
 from purra.output import AgentOutputIntent, OutputCommitMode
+from purra.operations import (
+    AgentOperationController,
+    OperationDisplay,
+    OperationKind,
+    OperationScope,
+)
 from purra.json_values import thaw_json_mapping
 from purra.recovery import EMPTY_RESPONSE_RETRY_GUIDANCE
 from purra.runtime_context import project_intermediate_tool_context
@@ -205,13 +211,18 @@ class AgentRuntime:
         context_compressor: ConversationCompactor | None = None,
         limits: RuntimeLimits = RuntimeLimits(),
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
+        operation_controller: AgentOperationController | None = None,
     ):
-        self._model_manager = AgentModelInvocationManager(model_gateway)
+        self._model_manager = AgentModelInvocationManager(
+            model_gateway,
+            operation_controller=operation_controller,
+        )
         self._tool_execution_gateway = tool_execution_gateway
         self._observer = observer
         self._context_compressor = context_compressor
         self._limits = limits
         self._recovery_policy = recovery_policy
+        self._operations = operation_controller
 
     async def run(
         self,
@@ -509,6 +520,9 @@ class AgentRuntime:
                                     if context_budget is not None
                                     else 1
                                 ),
+                            ),
+                            operation_scope=OperationScope(
+                                run_id=invocation_context.run_id,
                             ),
                         ),
                         signal,
@@ -1613,13 +1627,24 @@ class AgentRuntime:
                                 _exact_item_count_repair_guidance(exact_item_count)
                             )
 
-                    for validator in validators:
+                    for validator_index, validator in enumerate(validators):
+                        validation_operation_id = (
+                            await self._start_validation_operation(
+                                invocation_context.run_id,
+                                source="validator",
+                                index=validator_index,
+                            )
+                        )
                         try:
                             result = validator.validate(
                                 content=accumulator.content,
                                 messages=tuple(messages),
                             )
                         except Exception as error:
+                            await self._fail_validation_operation(
+                                validation_operation_id,
+                                "response_validator_error",
+                            )
                             await self._trace(
                                 "model_output",
                                 "response_validator_exception",
@@ -1637,6 +1662,10 @@ class AgentRuntime:
                             )
                             return
                         if not isinstance(result, ResponseValidationResult):
+                            await self._fail_validation_operation(
+                                validation_operation_id,
+                                "response_validator_contract_violation",
+                            )
                             await self._trace(
                                 "model_output",
                                 "response_validator_contract_violation",
@@ -1652,6 +1681,9 @@ class AgentRuntime:
                                 ),
                             )
                             return
+                        await self._succeed_validation_operation(
+                            validation_operation_id
+                        )
                         if result.accepted:
                             continue
                         violation_codes.append(str(result.violation_code))
@@ -1671,6 +1703,13 @@ class AgentRuntime:
                     if not violation_codes:
                         for judge_index, judge in enumerate(judges):
                             judge_started = perf_counter()
+                            validation_operation_id = (
+                                await self._start_validation_operation(
+                                    invocation_context.run_id,
+                                    source="judge",
+                                    index=judge_index,
+                                )
+                            )
                             yield AgentEvent(
                                 type=CoreEventType.MODEL_CALL_RECORDED,
                                 run_id=run_id,
@@ -1693,6 +1732,9 @@ class AgentRuntime:
                                     signal,
                                 )
                             except OperationCanceled:
+                                await self._cancel_validation_operation(
+                                    validation_operation_id,
+                                )
                                 await self._trace(
                                     "model_output",
                                     "response_judge_canceled",
@@ -1711,6 +1753,10 @@ class AgentRuntime:
                                 )
                                 return
                             except ResponseJudgeContractError as error:
+                                await self._fail_validation_operation(
+                                    validation_operation_id,
+                                    "response_judge_contract_violation",
+                                )
                                 await self._trace(
                                     "model_output",
                                     "response_judge_contract_violation",
@@ -1732,6 +1778,10 @@ class AgentRuntime:
                                 )
                                 return
                             except Exception as error:
+                                await self._fail_validation_operation(
+                                    validation_operation_id,
+                                    "response_judge_error",
+                                )
                                 await self._trace(
                                     "model_output",
                                     "response_judge_exception",
@@ -1751,6 +1801,10 @@ class AgentRuntime:
                                 )
                                 return
                             if not isinstance(result, ResponseValidationResult):
+                                await self._fail_validation_operation(
+                                    validation_operation_id,
+                                    "response_judge_contract_violation",
+                                )
                                 await self._trace(
                                     "model_output",
                                     "response_judge_contract_violation",
@@ -1770,6 +1824,9 @@ class AgentRuntime:
                                     ),
                                 )
                                 return
+                            await self._succeed_validation_operation(
+                                validation_operation_id
+                            )
                             await self._trace(
                                 "model_output",
                                 (
@@ -2158,6 +2215,7 @@ class AgentRuntime:
                     self._tool_execution_gateway,
                     ToolBatchRequest(
                         run_id=run_id,
+                        invocation_id=stream.receipt.invocation_id,
                         calls=calls,
                         allowed_tool_names=allowed_names,
                         state=state,
@@ -2472,6 +2530,52 @@ class AgentRuntime:
             return frozenset()
         all_names = frozenset(schema.name for schema in tools)
         return self._observer.future_allowed_tool_names() & all_names
+
+    async def _start_validation_operation(
+        self,
+        run_id: RunId,
+        *,
+        source: str,
+        index: int,
+    ) -> str | None:
+        if self._operations is None:
+            return None
+        receipt = await self._operations.start(
+            OperationKind.VALIDATION,
+            OperationScope(
+                run_id=run_id,
+                display=OperationDisplay(
+                    label_key="agent.operation.validation",
+                    label_params={"source": source, "index": index},
+                ),
+            ),
+        )
+        return receipt.operation_id
+
+    async def _succeed_validation_operation(
+        self,
+        operation_id: str | None,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.succeed(operation_id)
+
+    async def _fail_validation_operation(
+        self,
+        operation_id: str | None,
+        error_code: str,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.fail(operation_id, error_code)
+
+    async def _cancel_validation_operation(
+        self,
+        operation_id: str | None,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.cancel(
+                operation_id,
+                "response_validation_canceled",
+            )
 
     async def _decide_recovery(
         self,

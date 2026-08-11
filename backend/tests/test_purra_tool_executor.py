@@ -25,6 +25,7 @@ from purra.contracts import (
 from purra.events import CoreEventType
 from purra.errors import ContractViolationError
 from purra.ports import ToolExecutionGateway, ToolRegistration
+from purra.operations import AgentOperationController, OperationStatus
 from purra.tools.approval import InMemoryApprovalGateway
 from purra.tools.executor import CoreToolExecutor
 from purra.tools.registry import InMemoryToolCatalog
@@ -36,6 +37,15 @@ class RecordingSink:
 
     async def emit(self, event):
         self.events.append(event)
+
+
+class RecordingOperationOutput:
+    def __init__(self):
+        self.events = []
+
+    async def accept_operation_event(self, event):
+        self.events.append(event)
+        return event
 
 
 class Probe:
@@ -95,9 +105,11 @@ def _request(
     allowed=None,
     state=None,
     run_id="run-1",
+    invocation_id=None,
 ):
     return ToolBatchRequest(
         run_id=run_id,
+        invocation_id=invocation_id,
         calls=tuple(calls),
         allowed_tool_names=frozenset(
             allowed if allowed is not None else {call.name for call in calls}
@@ -145,6 +157,43 @@ async def test_same_name_read_calls_execute_sequentially_with_shared_state():
         CoreEventType.TOOL_CALL_COMPLETED,
         CoreEventType.TOOL_CALL_COMPLETED,
     ]
+
+
+@pytest.mark.asyncio
+async def test_each_executed_tool_call_has_one_authoritative_operation():
+    async def _read(state, arguments, signal=None):
+        del state, arguments, signal
+        return ToolHandlerResult('{"success":true}')
+
+    operation_output = RecordingOperationOutput()
+    executor = CoreToolExecutor(
+        InMemoryToolCatalog((_registration("readA", _read),)),
+        operation_controller=AgentOperationController(operation_output),
+    )
+
+    result = await executor.execute_batch(
+        _request(
+            _call("call-a", "readA"),
+            _call("call-b", "readA"),
+            invocation_id="invocation-1",
+        ),
+        RecordingSink(),
+    )
+
+    assert result.outcome is ToolBatchOutcome.COMPLETED
+    assert len(operation_output.events) == 4
+    first_started, first_finished, second_started, second_finished = (
+        operation_output.events
+    )
+    assert first_started.display["labelParams"] == {
+        "toolCallId": "call-a",
+        "toolName": "readA",
+    }
+    assert first_finished.operation_id == first_started.operation_id
+    assert first_started.invocation_id == "invocation-1"
+    assert first_finished.status is OperationStatus.SUCCEEDED
+    assert second_finished.operation_id == second_started.operation_id
+    assert second_finished.status is OperationStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

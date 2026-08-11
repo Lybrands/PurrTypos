@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -24,6 +25,7 @@ from purra.contracts import (
     ToolSchema,
 )
 from purra.events import AgentEvent, CoreEventType
+from purra.model_protocol import generic_capability_snapshot
 from purra.runtime import AgentRuntime, _stream_tool_batch
 
 
@@ -242,6 +244,9 @@ async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gatewa
 
             return ModelStream(chunks=chunks(), model="model")
 
+        async def complete(self, messages, invocation, signal=None):
+            raise AssertionError("runtime must use the streaming boundary")
+
     class BlockingToolGateway:
         async def execute_batch(self, request, event_sink, signal=None):
             try:
@@ -278,7 +283,15 @@ async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gatewa
     )
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="work"),),
-        model=ModelRequest(provider="test", model="model"),
+        model=ModelRequest(
+            provider="test",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=1_024,
+            ),
+        ),
         domain_context=DomainContext(namespace="test"),
         tools_enabled=True,
     )

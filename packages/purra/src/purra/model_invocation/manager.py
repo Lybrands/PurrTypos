@@ -9,9 +9,11 @@ from uuid import uuid4
 from purra.cancellation import await_with_cancellation
 from purra.contracts import (
     AgentMessage,
+    ModelCompletion,
     ModelFinishReason,
     ModelInvocation,
     ModelStreamChunk,
+    ToolCallDelta,
 )
 from purra.errors import ContractViolationError, ModelGatewayError
 from purra.model_call_parameters import describe_model_call
@@ -23,6 +25,12 @@ from purra.model_invocation.contracts import (
     ModelInvocationReceipt,
 )
 from purra.model_protocol import classify_model_termination
+from purra.operations import (
+    AgentOperationController,
+    OperationDisplay,
+    OperationKind,
+    OperationScope,
+)
 from purra.output import AgentOutputIntent, OutputCommitMode, OutputStreamSpec
 from purra.ports import CancellationSignal, ModelGateway
 
@@ -75,11 +83,13 @@ class AgentModelInvocationManager:
         gateway: ModelGateway,
         *,
         output_observer: ModelInvocationOutputObserver | None = None,
+        operation_controller: AgentOperationController | None = None,
     ) -> None:
         if not isinstance(gateway, ModelGateway):
             raise TypeError("model invocation manager requires a ModelGateway")
         self._gateway = gateway
         self._output = output_observer or _NullOutputObserver()
+        self._operations = operation_controller
 
     async def stream(
         self,
@@ -95,20 +105,32 @@ class AgentModelInvocationManager:
         receipt, spec = self._receipt_and_spec(messages, call, context, invocation)
         if on_attempt is not None:
             await on_attempt(receipt.call_parameters[0])
-        await self._output.open_model_stream(receipt, spec)
+        operation_id = await self._start_operation(receipt)
+        stream_opened = False
         try:
+            await self._output.open_model_stream(receipt, spec)
+            stream_opened = True
             stream = await await_with_cancellation(
                 self._gateway.stream(messages, invocation, signal),
                 signal,
             )
         except BaseException as error:
-            await self._output.abort_model_stream(
-                receipt.output_stream_id,
-                _error_code(error),
-            )
+            try:
+                if stream_opened:
+                    await self._output.abort_model_stream(
+                        receipt.output_stream_id,
+                        _error_code(error),
+                    )
+            finally:
+                await self._fail_operation(operation_id, error)
             raise
         return ManagedInvocationStream(
-            chunks=self._observe_chunks(stream.chunks, receipt, signal),
+            chunks=self._observe_chunks(
+                stream.chunks,
+                receipt,
+                signal,
+                operation_id,
+            ),
             receipt=receipt,
         )
 
@@ -126,8 +148,13 @@ class AgentModelInvocationManager:
         receipt, spec = self._receipt_and_spec(messages, call, context, invocation)
         if on_attempt is not None:
             await on_attempt(receipt.call_parameters[0])
-        await self._output.open_model_stream(receipt, spec)
+        operation_id = await self._start_operation(receipt)
+        stream_opened = False
+        output_settled = False
+        operation_settled = False
         try:
+            await self._output.open_model_stream(receipt, spec)
+            stream_opened = True
             completion = await await_with_cancellation(
                 self._gateway.complete(messages, invocation, signal),
                 signal,
@@ -154,19 +181,33 @@ class AgentModelInvocationManager:
                     code="unexpected_model_tool_calls",
                     retryable=False,
                 )
+            completion_chunk = _completion_chunk(completion)
+            if completion_chunk is not None:
+                await self._output.accept_provider_chunk(
+                    receipt.output_stream_id,
+                    completion_chunk,
+                )
             await self._output.finish_model_stream(
                 receipt.output_stream_id,
                 reason,
             )
+            output_settled = True
+            await self._succeed_operation(operation_id)
+            operation_settled = True
             return ManagedInvocationCompletion(
                 completion=completion,
                 receipt=receipt,
             )
         except BaseException as error:
-            await self._output.abort_model_stream(
-                receipt.output_stream_id,
-                _error_code(error),
-            )
+            try:
+                if stream_opened and not output_settled:
+                    await self._output.abort_model_stream(
+                        receipt.output_stream_id,
+                        _error_code(error),
+                    )
+            finally:
+                if not operation_settled:
+                    await self._fail_operation(operation_id, error)
             raise
 
     @staticmethod
@@ -230,10 +271,12 @@ class AgentModelInvocationManager:
         chunks: AsyncIterator[ModelStreamChunk],
         receipt: ModelInvocationReceipt,
         signal: CancellationSignal | None,
+        operation_id: str | None,
     ) -> AsyncIterator[ModelStreamChunk]:
         finish_reason: ModelFinishReason | None = None
         tool_indices: set[int] = set()
-        settled = False
+        output_settled = False
+        operation_settled = False
         try:
             while True:
                 try:
@@ -256,12 +299,19 @@ class AgentModelInvocationManager:
                             receipt.output_stream_id,
                             termination.error_code or "model_output_truncated",
                         )
+                        output_settled = True
+                        await self._fail_operation_code(
+                            operation_id,
+                            termination.error_code or "model_output_truncated",
+                        )
                     else:
                         await self._output.finish_model_stream(
                             receipt.output_stream_id,
                             finish_reason,
                         )
-                    settled = True
+                        output_settled = True
+                        await self._succeed_operation(operation_id)
+                    operation_settled = True
                     yield chunk
                     break
                 yield chunk
@@ -272,19 +322,78 @@ class AgentModelInvocationManager:
                     retryable=True,
                 )
         except BaseException as error:
-            await self._output.abort_model_stream(
-                receipt.output_stream_id,
-                _error_code(error),
-            )
-            settled = True
+            try:
+                if not output_settled:
+                    await self._output.abort_model_stream(
+                        receipt.output_stream_id,
+                        _error_code(error),
+                    )
+                    output_settled = True
+            finally:
+                if not operation_settled:
+                    await self._fail_operation(operation_id, error)
+                    operation_settled = True
             raise
         finally:
             await _close_async_iterator(chunks)
-            if not settled:
-                await self._output.abort_model_stream(
-                    receipt.output_stream_id,
-                    "invocation_consumer_closed",
-                )
+            try:
+                if not output_settled:
+                    await self._output.abort_model_stream(
+                        receipt.output_stream_id,
+                        "invocation_consumer_closed",
+                    )
+            finally:
+                if not operation_settled:
+                    await self._cancel_operation(
+                        operation_id,
+                        "invocation_consumer_closed",
+                    )
+
+    async def _start_operation(
+        self,
+        receipt: ModelInvocationReceipt,
+    ) -> str | None:
+        if self._operations is None:
+            return None
+        operation = await self._operations.start(
+            OperationKind.MODEL,
+            OperationScope(
+                run_id=receipt.run_id,
+                invocation_id=receipt.invocation_id,
+                display=OperationDisplay(
+                    label_key="agent.operation.model",
+                    label_params={"model": receipt.model},
+                ),
+            ),
+        )
+        return operation.operation_id
+
+    async def _succeed_operation(self, operation_id: str | None) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.succeed(operation_id)
+
+    async def _fail_operation(
+        self,
+        operation_id: str | None,
+        error: BaseException,
+    ) -> None:
+        await self._fail_operation_code(operation_id, _error_code(error))
+
+    async def _fail_operation_code(
+        self,
+        operation_id: str | None,
+        error_code: str,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.fail(operation_id, error_code)
+
+    async def _cancel_operation(
+        self,
+        operation_id: str | None,
+        error_code: str,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.cancel(operation_id, error_code)
 
 
 def _invocation(call: AgentModelCall) -> ModelInvocation:
@@ -303,6 +412,34 @@ def _invocation(call: AgentModelCall) -> ModelInvocation:
         output_limit=call.output_limit,
         reasoning_mode=call.reasoning_mode,
     )
+
+
+def _completion_chunk(completion: ModelCompletion) -> ModelStreamChunk | None:
+    content = completion.message.content
+    content_delta = content if isinstance(content, str) else ""
+    chunk = ModelStreamChunk(
+        content_delta=content_delta,
+        reasoning_delta=completion.message.reasoning or "",
+        tool_call_deltas=tuple(
+            ToolCallDelta(
+                index=index,
+                id=call.id,
+                type="function",
+                name=call.name,
+                arguments_fragment=call.arguments_json,
+            )
+            for index, call in enumerate(completion.message.tool_calls)
+        ),
+        usage=completion.usage,
+    )
+    if not (
+        chunk.content_delta
+        or chunk.reasoning_delta
+        or chunk.tool_call_deltas
+        or chunk.usage is not None
+    ):
+        return None
+    return chunk
 
 
 def _error_code(error: BaseException) -> str:

@@ -36,6 +36,12 @@ from application.conversation_compaction_contracts import (
 from purra.errors import ContextOverflowError, ContractViolationError
 from purra.model_execution import ManagedModelExecutor
 from purra.model_protocol import generic_capability_snapshot
+from purra.operations import (
+    AgentOperationController,
+    OperationKind,
+    OperationScope,
+    OperationStatus,
+)
 from purra.planner import build_planner_messages
 from application.conversation_compaction import (
     ConversationCompactionService,
@@ -95,6 +101,15 @@ class _Gateway:
 
     async def stream(self, messages, invocation, signal=None):  # pragma: no cover
         raise AssertionError("conversation compaction must not stream")
+
+
+class _OperationOutput:
+    def __init__(self):
+        self.events = []
+
+    async def accept_operation_event(self, event):
+        self.events.append(event)
+        return event
 
 
 def _turns(count: int) -> tuple[ConversationTurn, ...]:
@@ -217,6 +232,27 @@ async def test_core_default_uses_recent_twenty_message_window_only_without_hook(
     assert result.request.messages[-1].content == "current"
     assert result.compression_state_version is None
     assert result.diagnostics["strategy"] == "recent_messages"
+
+
+@pytest.mark.asyncio
+async def test_compaction_has_one_authoritative_operation_lifecycle():
+    turns = _turns(30)
+    output = _OperationOutput()
+    coordinator = ContextCompressionCoordinator(
+        operation_controller=AgentOperationController(output),
+    )
+
+    result = await coordinator.prepare(
+        _request(turns),
+        operation_scope=OperationScope(run_id="run-1"),
+    )
+
+    assert result.outcome == "compacted_default_trim"
+    assert len(output.events) == 2
+    started, finished = output.events
+    assert started.kind is OperationKind.CONTEXT_COMPACTION
+    assert finished.operation_id == started.operation_id
+    assert finished.status is OperationStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

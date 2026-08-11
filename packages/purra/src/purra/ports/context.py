@@ -10,6 +10,7 @@ from purra.context_orchestration.contracts import (
     ConversationCompactionResult,
 )
 from purra.context_orchestration.ledger import ContextCompactionBudget
+from purra.operations.contracts import OperationScope
 from purra.contracts import (
     AgentRunRequest,
     ContextBudget,
@@ -97,6 +98,7 @@ class ConversationCompactor(Protocol):
             Callable[[Mapping[str, Any]], Awaitable[None]] | None
         ) = None,
         budget: ContextCompactionBudget | None = None,
+        operation_scope: OperationScope | None = None,
     ) -> ConversationCompactionResult: ...
 
 
