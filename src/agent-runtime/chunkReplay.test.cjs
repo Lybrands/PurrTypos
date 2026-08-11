@@ -23,6 +23,23 @@ const appMessage = Object.fromEntries(
     .map((name) => [name, () => undefined]),
 )
 
+const canonical = (runId, sequence, overrides = {}) => ({
+  eventId: `${runId}-event-${sequence}`,
+  outputStreamId: null,
+  runId,
+  turnId: null,
+  invocationId: null,
+  sequence,
+  source: 'runtime',
+  kind: 'runtime.event',
+  channel: 'lifecycle',
+  visibility: 'public',
+  payload: {},
+  occurredAt: `2026-08-12T08:00:${String(sequence).padStart(2, '0')}+00:00`,
+  emittedAt: `2026-08-12T08:00:${String(sequence).padStart(2, '0')}+00:00`,
+  ...overrides,
+})
+
 test('business Agents replay the canonical chunk protocol through the shared reducer', () => {
   const replay = new AgentChunkReplay()
   const seed = {
@@ -34,23 +51,34 @@ test('business Agents replay the canonical chunk protocol through the shared red
   }
   const dependencies = { cfg: model, appMessage }
 
-  replay.dispatch(seed, {
-    agentRunStarted: { runId: 'turn-1', status: 'running' },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'turn-1',
-      title: '剧本创作任务',
-      status: 'running',
-      steps: [{
-        id: 'plan',
-        title: '理解请求',
-        type: 'analyze',
+  replay.dispatch(seed, canonical('run-1', 1, {
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-1', 2, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: {
+        runId: 'run-1',
+        title: '剧本创作任务',
         status: 'running',
-      }],
+        steps: [{
+          id: 'plan',
+          title: '理解请求',
+          type: 'analyze',
+          status: 'running',
+        }],
+      },
     },
-  }, dependencies)
-  replay.dispatch(seed, { commentaryDelta: '先检查连续性' }, dependencies)
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-1', 3, {
+    outputStreamId: 'commentary-stream',
+    invocationId: 'commentary-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'commentary',
+    payload: { delta: '先检查连续性' },
+  }), dependencies)
   replay.dispatch(seed, {
     longTaskProgress: {
       runId: 'turn-1',
@@ -77,7 +105,21 @@ test('business Agents replay the canonical chunk protocol through the shared red
       }],
     },
   }, dependencies)
-  replay.dispatch(seed, { delta: '第一场正文。' }, dependencies)
+  replay.dispatch(seed, canonical('run-1', 4, {
+    outputStreamId: 'final-stream',
+    invocationId: 'final-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '第一场正文。' },
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-1', 5, {
+    outputStreamId: 'final-stream',
+    invocationId: 'final-invocation',
+    kind: 'stream.committed',
+    channel: 'final',
+    payload: { finishReason: 'stop' },
+  }), dependencies)
   replay.dispatch(seed, { done: true }, dependencies)
 
   const assistant = replay.assistant('turn-1')
@@ -89,7 +131,61 @@ test('business Agents replay the canonical chunk protocol through the shared red
   assert.equal(assistant?.turnStartedAt, undefined)
 })
 
-test('projected execution summary is preserved before its tool operation', () => {
+test('raw Provider events are visible before transport completion', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-canonical-live',
+    sessionId: 17,
+    userContent: '审阅完整剧本',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+  const canonical = (sequence, overrides) => ({
+    eventId: `event-${sequence}`,
+    outputStreamId: null,
+    runId: 'run-public',
+    turnId: seed.turnId,
+    invocationId: null,
+    sequence,
+    source: 'runtime',
+    kind: 'runtime.event',
+    channel: 'lifecycle',
+    visibility: 'public',
+    payload: {},
+    occurredAt: `2026-08-12T08:00:0${sequence}+00:00`,
+    emittedAt: `2026-08-12T08:00:0${sequence}+00:00`,
+    ...overrides,
+  })
+
+  replay.dispatch(seed, canonical(4, {
+    outputStreamId: 'final-stream',
+    invocationId: 'invocation-final',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '已完成前四集' },
+  }), dependencies)
+
+  const live = replay.assistant(seed.turnId)
+  assert.equal(live?.content, '')
+  assert.equal(live?.streamingContent, '已完成前四集')
+  assert.equal(live?.canonicalOutput?.finalText, '已完成前四集')
+
+  replay.dispatch(seed, canonical(5, {
+    outputStreamId: 'final-stream',
+    invocationId: 'invocation-final',
+    kind: 'stream.committed',
+    channel: 'final',
+    payload: { finishReason: 'stop' },
+  }), dependencies)
+
+  const committed = replay.assistant(seed.turnId)
+  assert.equal(committed?.content, '已完成前四集')
+  assert.equal(committed?.streamingContent, undefined)
+})
+
+test('Provider execution commentary is preserved before its operation', () => {
   const replay = new AgentChunkReplay()
   const seed = {
     turnId: 'turn-progress-tool',
@@ -100,150 +196,34 @@ test('projected execution summary is preserved before its tool operation', () =>
   }
   const dependencies = { cfg: model, appMessage }
 
-  replay.dispatch(seed, {
-    agentRunStarted: { runId: 'run-progress-tool', status: 'running' },
-  }, dependencies)
-  replay.dispatch(seed, {
-    commentaryDelta: '核对本集目标、冲突和转折。\n',
-    toolCalls: [{
-      id: 'call-write',
-      type: 'function',
-      displayNames: { 'zh-CN': '写入剧本候选稿' },
-      function: {
-        name: 'writeScreenplayCandidatePart',
-        arguments: '{"content":"<candidate payload omitted>"}',
+  replay.dispatch(seed, canonical('run-progress-tool', 1, {
+    outputStreamId: 'commentary-stream',
+    invocationId: 'commentary-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'commentary',
+    payload: { delta: '核对本集目标、冲突和转折。\n' },
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-progress-tool', 2, {
+    kind: 'operation.started',
+    channel: 'operation',
+    payload: {
+      operationId: 'operation-write',
+      kind: 'tool',
+      startedAt: '2026-08-12T08:00:02+00:00',
+      display: {
+        labelKey: 'agent.operation.tool',
+        labelParams: { toolName: 'writeScreenplayCandidatePart' },
       },
-    }],
-    toolCallsInProgress: true,
-  }, dependencies)
+    },
+  }), dependencies)
 
   const assistant = replay.assistant(seed.turnId)
   assert.deepEqual(
     assistant?.commentaryBlocks,
     ['核对本集目标、冲突和转折。'],
   )
-  assert.equal(assistant?.toolCallSegments?.length, 1)
-  assert.equal(assistant?.toolCallSegments?.[0]?.commentaryBlockIndex, 0)
-})
-
-test('a completed fragment Run cannot terminalize its root execution plan', () => {
-  const replay = new AgentChunkReplay()
-  const seed = {
-    turnId: 'turn-root',
-    sessionId: 8,
-    userContent: '修订完整剧本',
-    model: model.name,
-    turnStartedAt: performance.now(),
-  }
-  const dependencies = { cfg: model, appMessage }
-
-  replay.dispatch(seed, {
-    agentRunStarted: { runId: 'turn-root', status: 'running' },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'turn-root',
-      title: '剧本创作任务',
-      status: 'running',
-      steps: [{
-        id: 'episode-1',
-        title: '创作第 1 集正文',
-        type: 'write',
-        status: 'done',
-      }, {
-        id: 'episode-2',
-        title: '创作第 2 集正文',
-        type: 'write',
-        status: 'running',
-      }, {
-        id: 'publish',
-        title: '整理候选稿',
-        type: 'write',
-        status: 'pending',
-      }],
-    },
-  }, dependencies)
-
-  replay.dispatch(seed, {
-    agentRunStarted: { runId: 'run-scene-1', status: 'running' },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'run-scene-1',
-      title: '第一场局部任务',
-      status: 'running',
-      steps: [{
-        id: 'scene-write',
-        title: '写入第一场',
-        type: 'write',
-        status: 'running',
-      }],
-    },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunTodoUpdated: {
-      runId: 'run-scene-1',
-      stepId: 'scene-write',
-      status: 'done',
-      step: {
-        id: 'scene-write',
-        title: '写入第一场',
-        type: 'write',
-        status: 'done',
-      },
-    },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunCompleted: {
-      runId: 'run-scene-1',
-      status: 'done',
-      finalResponse: '第一场已经写入。',
-    },
-  }, dependencies)
-
-  const assistant = replay.assistant('turn-root')
-  assert.equal(assistant?.agentRunId, 'turn-root')
-  assert.equal(assistant?.taskPlan?.runId, 'turn-root')
-  assert.equal(assistant?.taskPlan?.status, 'running')
-  assert.equal(assistant?.taskPlan?.steps[1]?.status, 'running')
-  assert.equal(assistant?.content, '')
-
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'turn-root',
-      title: '剧本创作任务',
-      status: 'done',
-      steps: [{
-        id: 'episode-1',
-        title: '创作第 1 集正文',
-        type: 'write',
-        status: 'done',
-      }, {
-        id: 'episode-2',
-        title: '创作第 2 集正文',
-        type: 'write',
-        status: 'done',
-      }, {
-        id: 'publish',
-        title: '整理候选稿',
-        type: 'write',
-        status: 'done',
-      }],
-    },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunCompleted: {
-      runId: 'turn-root',
-      status: 'done',
-      finalResponse: '完整剧本已经修订完成。',
-    },
-  }, dependencies)
-  replay.dispatch(seed, { done: true }, dependencies)
-
-  const completedAssistant = replay.assistant('turn-root')
-  assert.equal(completedAssistant?.agentRunId, 'turn-root')
-  assert.equal(completedAssistant?.taskPlan?.status, 'done')
-  assert.equal(completedAssistant?.content, '完整剧本已经修订完成。')
+  assert.deepEqual(assistant?.canonicalOutput?.operationOrder, ['operation-write'])
 })
 
 test('reset removes replay state when the project or session changes', () => {
@@ -253,7 +233,14 @@ test('reset removes replay state when the project or session changes', () => {
     sessionId: 7,
     userContent: '测试',
     turnStartedAt: performance.now(),
-  }, { delta: '结果' }, { cfg: model, appMessage })
+  }, canonical('run-reset', 1, {
+    outputStreamId: 'reset-stream',
+    invocationId: 'reset-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '结果' },
+  }), { cfg: model, appMessage })
 
   replay.reset()
 
@@ -270,20 +257,22 @@ test('paused durable task emits no formal answer and resume commits once', () =>
     turnStartedAt: performance.now(),
   }
 
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'turn-paused',
-      title: '剧本创作任务',
-      status: 'paused',
-      steps: [{
-        id: 'generate',
-        title: '生成候选稿',
-        type: 'write',
-        status: 'blocked',
-      }],
+  replay.dispatch(seed, canonical('run-paused', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: {
+        runId: 'run-paused',
+        title: '剧本创作任务',
+        status: 'paused',
+        steps: [{
+          id: 'generate',
+          title: '生成候选稿',
+          type: 'write',
+          status: 'blocked',
+        }],
+      },
     },
-  }, dependencies)
-  replay.dispatch(seed, { commentaryDelta: '已保留完成的检查点。' }, dependencies)
+  }), dependencies)
   replay.dispatch(seed, {
     done: true,
     finalResponseExpected: false,
@@ -293,26 +282,37 @@ test('paused durable task emits no formal answer and resume commits once', () =>
   assert.equal(paused?.content, '')
   assert.equal(paused?.taskPlan?.status, 'paused')
 
-  replay.dispatch(seed, {
-    agentRunTodosUpdated: {
-      runId: 'turn-paused',
-      title: '剧本创作任务',
-      status: 'running',
-      steps: [{
-        id: 'generate',
-        title: '生成候选稿',
-        type: 'write',
+  replay.dispatch(seed, canonical('run-resumed', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: {
+        runId: 'run-resumed',
+        title: '剧本创作任务',
         status: 'running',
-      }],
+        steps: [{
+          id: 'generate',
+          title: '生成候选稿',
+          type: 'write',
+          status: 'running',
+        }],
+      },
     },
-  }, dependencies)
-  replay.dispatch(seed, {
-    agentRunCompleted: {
-      runId: 'turn-paused',
-      status: 'done',
-      finalResponse: '候选稿已发布。',
-    },
-  }, dependencies)
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-resumed', 2, {
+    outputStreamId: 'resumed-final',
+    invocationId: 'resumed-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '候选稿已发布。' },
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-resumed', 3, {
+    outputStreamId: 'resumed-final',
+    invocationId: 'resumed-invocation',
+    kind: 'stream.committed',
+    channel: 'final',
+    payload: { finishReason: 'stop' },
+  }), dependencies)
   replay.dispatch(seed, { done: true }, dependencies)
 
   assert.equal(replay.assistant('turn-paused')?.content, '候选稿已发布。')

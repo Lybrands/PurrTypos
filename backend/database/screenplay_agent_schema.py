@@ -221,12 +221,9 @@ async def init_screenplay_agent_schema(db) -> None:
         await db.execute(
             "ALTER TABLE screenplay_agent_chunks ADD COLUMN task_id TEXT DEFAULT NULL"
         )
-    # This project is still in test phase: v1 leaked structured model payloads
-    # into the conversation, so those transport rows are discarded rather
-    # than kept behind a compatibility parser.
-    await db.execute(
-        "DELETE FROM screenplay_agent_chunks WHERE protocol_version < 2"
-    )
+    # Legacy protocol rows remain unreadable, but schema initialization must
+    # never delete them. Their exact IDs are handled only by the digest-locked
+    # screenplay runtime cleanup after an approved dry-run.
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_agent_chunks_session "
         "ON screenplay_agent_chunks(project_id, session_id, id)"

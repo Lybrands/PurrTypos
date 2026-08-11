@@ -19,7 +19,8 @@ from purra.contracts import (
     ModelStreamChunk,
     ReasoningMode,
 )
-from purra.model_execution import ManagedModelExecutor
+from purra.api import AgentCore
+from purra.tools import InMemoryToolCatalog
 from purra.errors import ModelGatewayError
 from purra.recovery import (
     FailureCategory,
@@ -56,11 +57,10 @@ from application.screenplay_agent_planner import (
     SqliteScreenplayTaskResolver,
 )
 from application.screenplay_structured_call import (
+    PublicModelResult,
     StructuredModelResult,
 )
-from application.screenplay_progress_stream import JsonStringFieldProjector
 from application.screenplay_tool_calling import ScreenplayCandidateRunResult
-from application.screenplay_progress_stream import VISIBLE_STREAM_CHUNK_CHARS
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from database.screenplay_agent_schema import init_screenplay_agent_schema
@@ -81,11 +81,59 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
+from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from infrastructure.persistence.sqlite_agent_output_repository import (
+    SqliteAgentOutputRepository,
+)
+from infrastructure.persistence.agent_output_publisher import (
+    InProcessAgentOutputPublisher,
+)
+from infrastructure.persistence.run_execution_store import SqliteExecutionLeaseStore
+from domains.screenplay_agent.adapter import (
+    ScreenplayExecutionStateFactory,
+    ScreenplayHostContextProvider,
+    ScreenplayToolLoopPolicy,
+)
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
 pytestmark = pytest.mark.asyncio
+
+
+class _CoreComposition:
+    def __init__(self, db, gateway) -> None:
+        self._gateway = gateway
+        self._runs = SqliteRunRepository(db)
+        self._outputs = SqliteAgentOutputRepository(
+            db,
+            run_repository=self._runs,
+        )
+        self._publisher = InProcessAgentOutputPublisher()
+        self._leases = SqliteExecutionLeaseStore(db)
+
+    def create_core_for_request(self, request, api_key):
+        del request, api_key
+        return AgentCore(
+            model_gateway=self._gateway,
+            run_repository=self._runs,
+            planning_policy=ScreenplayToolLoopPolicy(),
+            context_provider=ScreenplayHostContextProvider(),
+            execution_state_factory=ScreenplayExecutionStateFactory(),
+            tool_catalog=InMemoryToolCatalog(()),
+            output_repository=self._outputs,
+            output_publisher=self._publisher,
+            execution_lease_store=self._leases,
+            execution_owner_id=self._runs.owner_id,
+            execution_lease_duration_ms=self._runs.lease_duration_ms,
+        )
+
+    def release_core(self, core) -> None:
+        del core
+
+
+def _core_composition(db, gateway):
+    return _CoreComposition(db, gateway)
 
 async def test_draft_manifest_has_stable_scene_parts_and_digest():
     arguments = dict(
@@ -168,134 +216,6 @@ async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode(
     )
     assert validation.dependencies == tuple(part.id for part in dimension_parts)
     assert compiled.recipe.max_parallelism == 5
-
-
-async def test_execution_progress_is_projected_before_the_json_is_complete():
-    projector = JsonStringFieldProjector({
-        "executionSummary": "第 4 集创作推演：",
-        "processSummary": "",
-    })
-
-    first = projector.feed(
-        '{"executionSummary":"承接上一集，先建立人物目标'
-    )
-    second = projector.feed(
-        '，再升级冲突。","scenes":[{"sceneId":"s1",'
-        '"processSummary":"场景 s1 推演：让目标受阻并留下转折。",'
-    )
-    hidden = projector.feed('"sceneText":"正文不应进入过程区"}')
-
-    assert first == "第 4 集创作推演：承接上一集，先建立人物目标"
-    assert second == (
-        "，再升级冲突。\n"
-        "场景 s1 推演：让目标受阻并留下转折。\n"
-    )
-    assert hidden == ""
-
-
-async def test_execution_progress_projection_caps_model_summary_at_600_chars():
-    projector = JsonStringFieldProjector({"executionSummary": ""})
-
-    visible = projector.feed(json.dumps({
-        "executionSummary": "概" * 700,
-        "action": "answer",
-    }, ensure_ascii=False))
-
-    assert visible == ("概" * 600) + "\n"
-
-
-async def test_execution_progress_projection_omits_blank_string_values():
-    projector = JsonStringFieldProjector({
-        "executionSummary": "",
-        "processSummary": "场景推演：",
-    })
-
-    visible = projector.feed(
-        '{"executionSummary":"","processSummary":""}'
-    )
-
-    assert visible == ""
-
-
-async def test_model_execution_progress_reaches_the_shared_stream_incrementally():
-    raw = (
-        '{"executionSummary":"先承接上一集的人物选择，再推动本集核心冲突。",'
-        '"scenes":[{"processSummary":"场景 s1 推演：人物目标受阻并产生转折。",'
-        '"sceneText":"这里是不会进入执行过程的完整正文"}]}'
-    )
-
-    recorded_events: list[tuple[object, object]] = []
-
-    class Controller:
-        async def record_event(self, event_type, payload):
-            recorded_events.append((event_type, payload))
-
-    projected: list[str] = []
-    projection = screenplay_structured_call.StructuredChunkProjection(
-        Controller(),
-        execution_progress_fields={
-            "executionSummary": "本集创作推演：",
-            "processSummary": "",
-        },
-        emit_execution_progress=lambda delta: _append_async(projected, delta),
-    )
-    for start in range(0, len(raw), 7):
-        await projection.observe(ModelStreamChunk(
-            content_delta=raw[start:start + 7],
-        ))
-    await projection.close()
-
-    assert len(projected) >= 3
-    assert max(map(len, projected)) <= VISIBLE_STREAM_CHUNK_CHARS
-    assert "".join(projected) == (
-        "本集创作推演：先承接上一集的人物选择，再推动本集核心冲突。\n"
-        "场景 s1 推演：人物目标受阻并产生转折。\n"
-    )
-    assert projection.projected_progress is True
-    assert recorded_events == []
-
-
-async def test_raw_reasoning_is_diagnostic_only():
-    reasoning = "先确认当前已完成的集数，再把范围限定为全部剩余剧集。"
-    content = '{"executionSummary":"确定创作第 7 至 8 集。"}'
-
-    recorded_events: list[tuple[object, object]] = []
-
-    class Controller:
-        async def record_event(self, event_type, payload):
-            recorded_events.append((event_type, payload))
-
-    projected: list[str] = []
-    diagnostics: list[dict[str, str]] = []
-    projection = screenplay_structured_call.StructuredChunkProjection(
-        Controller(),
-        execution_progress_fields={"executionSummary": ""},
-        emit_execution_progress=lambda delta: _append_async(projected, delta),
-        emit_model_diagnostic=lambda chunk: _append_async(diagnostics, chunk),
-    )
-    for start in range(0, len(reasoning), 6):
-        await projection.observe(ModelStreamChunk(
-            reasoning_delta=reasoning[start:start + 6],
-        ))
-    for start in range(0, len(content), 6):
-        await projection.observe(ModelStreamChunk(
-            content_delta=content[start:start + 6],
-        ))
-    await projection.close()
-
-    visible = "".join(projected)
-    assert reasoning not in visible
-    assert visible == "确定创作第 7 至 8 集。\n"
-    assert "executionSummary" not in visible
-    assert "{" not in visible
-    assert recorded_events == []
-    assert "".join(
-        chunk.get("reasoningDelta", "") for chunk in diagnostics
-    ) == reasoning
-
-
-async def _append_async(target: list, value) -> None:
-    target.append(value)
 
 
 async def test_stage_command_accepts_only_the_same_action_role_and_scope():
@@ -462,13 +382,7 @@ async def test_turn_start_does_not_emit_a_host_authored_plan(
             "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
         )
     ]
-    assert chunks == [{
-        "agentRunStarted": {
-            "runId": turn["id"],
-            "status": "running",
-            "goal": "继续完成第七集。",
-        },
-    }]
+    assert chunks == []
 
 
 async def test_service_persists_the_validated_stage_command_with_the_turn(
@@ -501,12 +415,12 @@ async def test_service_persists_the_validated_stage_command_with_the_turn(
     assert turn["stageCommand"] == payload["stageCommand"]
 
 
-async def test_planner_projects_model_owned_summary_without_a_host_prefix(
+async def test_planner_structured_fields_never_become_public_text(
     temp_db: DatabaseConnection,
 ):
     projects, workspace, session = await _project_and_session(temp_db)
     planner_output = json.dumps({
-        "executionSummary": "确认当前阶段后直接回答，不创建交付物。",
+        "debugNote": "确认当前阶段后直接回答，不创建交付物。",
         "action": "answer",
         "instruction": "说明当前阶段",
         "scope": {"kind": "current_stage"},
@@ -520,9 +434,14 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
         async def stream(self, messages, invocation, signal=None):
             del messages, signal
             self.invocations.append(invocation)
+            response = (
+                planner_output
+                if len(self.invocations) == 1
+                else "当前处于创作简报阶段。"
+            )
 
             async def chunks():
-                yield ModelStreamChunk(content_delta=planner_output)
+                yield ModelStreamChunk(content_delta=response)
                 yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
 
             return ModelStream(chunks=chunks(), model=invocation.request.model)
@@ -530,7 +449,7 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
     gateway = PlannerGateway("secret")
     planner = ModelScreenplayIntentPlanner(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     )
     service = ScreenplayAgentService(
         temp_db,
@@ -558,10 +477,10 @@ async def test_planner_projects_model_owned_summary_without_a_host_prefix(
     visible = "".join(
         chunk.get("commentaryDelta", "") for chunk in chunks
     )
-    assert visible == "确认当前阶段后直接回答，不创建交付物。\n"
+    assert visible == ""
 
 
-async def test_planner_allows_missing_execution_summary_without_fallback_copy(
+async def test_planner_without_private_note_adds_no_fallback_copy(
     temp_db: DatabaseConnection,
 ):
     projects, workspace, session = await _project_and_session(temp_db)
@@ -579,9 +498,14 @@ async def test_planner_allows_missing_execution_summary_without_fallback_copy(
         async def stream(self, messages, invocation, signal=None):
             del messages, signal
             self.invocations.append(invocation)
+            response = (
+                planner_output
+                if len(self.invocations) == 1
+                else "当前处于创作简报阶段。"
+            )
 
             async def chunks():
-                yield ModelStreamChunk(content_delta=planner_output)
+                yield ModelStreamChunk(content_delta=response)
                 yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
 
             return ModelStream(chunks=chunks(), model=invocation.request.model)
@@ -592,7 +516,7 @@ async def test_planner_allows_missing_execution_summary_without_fallback_copy(
         owner_id="optional-model-summary-test",
         planner=ModelScreenplayIntentPlanner(
             temp_db,
-            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+            composition=_core_composition(temp_db, gateway),
         ),
         resolver=SqliteScreenplayTaskResolver(temp_db),
         unit_executor_factory=lambda _runtime: object(),
@@ -619,7 +543,7 @@ async def test_planner_allows_missing_execution_summary_without_fallback_copy(
     )
     assert not any("commentaryDelta" in chunk for chunk in chunks)
     assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
-    assert len(gateway.invocations) == 1
+    assert len(gateway.invocations) == 2
 
 
 async def test_final_response_unit_metadata_does_not_duplicate_the_response():
@@ -682,20 +606,20 @@ async def test_final_response_composition_receives_only_public_candidate_facts(
         def __init__(self) -> None:
             self.calls = []
 
-        async def run_json(self, **kwargs):
+        async def run_public_text(self, **kwargs):
             self.calls.append(kwargs)
-            value = kwargs["validate"]({
-                "finalResponse": (
+            return PublicModelResult(
+                (
                     "第 4 至 5 集候选稿已经完成，并保留了上一集的结尾伏笔。"
                     "可以在候选稿区域查看并继续编辑。"
                 ),
-            })
-            return StructuredModelResult(value, "run-final-response")
+                "run-final-response",
+            )
 
     models = CapturingModels()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        model_executor_factory=_model_executor_factory,
+        composition=object(),
     )
     executor._models = models  # type: ignore[assignment]
     task = {
@@ -777,18 +701,16 @@ async def test_final_response_composition_receives_only_public_candidate_facts(
         "constraints": ["每集结尾留下问题"],
         "preserve": ["保留上一集结尾伏笔"],
         "candidates": [
+                {
+                    "episodeNumber": 4,
+                    "title": "重逢",
+                    "sceneCount": 2,
+                },
             {
-                "episodeNumber": 4,
-                "title": "重逢",
-                "sceneCount": 2,
-                "executionSummary": "承接上一集选择并完成本集转折。",
-            },
-            {
-                "episodeNumber": 5,
-                "title": "追问",
-                "sceneCount": 1,
-                "executionSummary": "推进新冲突并留下后续问题。",
-            },
+                    "episodeNumber": 5,
+                    "title": "追问",
+                    "sceneCount": 1,
+                },
         ],
     }
     serialized = json.dumps(payload, ensure_ascii=False)
@@ -1175,10 +1097,6 @@ class _ScriptedModelGateway(_ModelGateway):
         return ModelStream(chunks=chunks(), model=invocation.request.model)
 
 
-def _model_executor_factory(api_key: str) -> ManagedModelExecutor:
-    return ManagedModelExecutor(_ModelGateway(api_key))
-
-
 def _planner_answer_json(reply: str = "没有待修复 JSON") -> str:
     return json.dumps({
         "action": "answer",
@@ -1219,7 +1137,7 @@ async def test_planner_repairs_schema_valid_intent_that_violates_stage_command(
     ])
     planner = ModelScreenplayIntentPlanner(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     )
     command = ScreenplayStageCommand.from_mapping({
         "kind": "stage_action",
@@ -1260,7 +1178,7 @@ async def test_planner_preserves_command_mismatch_after_failed_repair(
     ])
     planner = ModelScreenplayIntentPlanner(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     )
     command = ScreenplayStageCommand.from_mapping({
         "kind": "stage_action",
@@ -1288,10 +1206,13 @@ async def test_planner_omits_required_command_for_free_text(
     gateway = _ScriptedModelGateway("secret", [[
         ModelStreamChunk(content_delta=_planner_answer_json("正常回答")),
         ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ], [
+        ModelStreamChunk(content_delta="正常回答"),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
     ]])
     planner = ModelScreenplayIntentPlanner(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     )
 
     planned = await planner.plan(
@@ -1332,7 +1253,7 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     ])
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     ).run_json(
         runtime=runtime,
         session_id=session["id"],
@@ -1354,10 +1275,10 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     ]
     assert [[message.role.value for message in messages] for messages, _ in gateway.calls] == [
         ["system", "user"],
-        ["system", "user"],
+        ["system", "user", "assistant", "developer"],
     ]
-    assert gateway.calls[1][0][1].content == malformed
-    assert "question" not in str(gateway.calls[1][0][1].content)
+    assert gateway.calls[1][0][-2].content == malformed
+    assert "question" not in str(gateway.calls[1][0][-2].content)
     assert await temp_db.fetch_one(
         "SELECT status, binding_namespace, final_response "
         "FROM ai_agent_runs WHERE id = ?",
@@ -1377,7 +1298,7 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
         "FROM ai_agent_run_events WHERE run_id = ? "
         "AND event_type = 'model.call_recorded' ORDER BY id",
         [result.run_id],
-    ) == [{"count": 2}, {"count": 2}]
+    ) == [{"count": 2}, {"count": 4}]
 
 
 async def test_truncated_structured_output_is_never_repaired_or_replayed(
@@ -1400,7 +1321,7 @@ async def test_truncated_structured_output_is_never_repaired_or_replayed(
     with pytest.raises(ModelGatewayError) as captured:
         await screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+            composition=_core_composition(temp_db, gateway),
         ).run_json(
             runtime=_request(session["id"], "测试截断输出").runtime,
             session_id=session["id"],
@@ -1440,8 +1361,7 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
     runtime = _request(session["id"], "测试慢速结构化输出").runtime
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
-        lease_duration_ms=300,
+        composition=_core_composition(temp_db, gateway),
     ).run_json(
         runtime=runtime,
         session_id=session["id"],
@@ -1487,7 +1407,7 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
 
     await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     ).run_json(
         runtime=runtime,
         session_id=session["id"],
@@ -1538,10 +1458,10 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
     gateway = FailingGateway("secret")
     runtime = _request(session["id"], "测试模型失败诊断").runtime
 
-    with pytest.raises(RuntimeError, match="provider disconnected"):
+    with pytest.raises(ModelGatewayError) as captured:
         await screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+            composition=_core_composition(temp_db, gateway),
         ).run_json(
             runtime=runtime,
             session_id=session["id"],
@@ -1556,14 +1476,13 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
             validate=lambda value: value,
         )
 
-    rows = await temp_db.fetch_all(
-        "SELECT run_id, chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    )
-    assert [json.loads(row["chunk_json"]) for row in rows] == [
-        {"model": "planner-model"},
-        {"error": "provider disconnected"},
-    ]
-    assert rows[0]["run_id"] == rows[1]["run_id"]
+    assert captured.value.code == "model_gateway_error"
+    assert await temp_db.fetch_all(
+        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+    ) == []
+    assert await temp_db.fetch_one(
+        "SELECT status FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
+    ) == {"status": "failed"}
 
 
 async def test_reasoning_only_structured_output_retries_original_not_repair(
@@ -1584,7 +1503,7 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
 
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     ).run_json(
         runtime=_request(session["id"], "测试 reasoning JSON").runtime,
         session_id=session["id"],
@@ -1606,15 +1525,14 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
         "AND event_type = 'model.call_recorded' ORDER BY id",
         [result.run_id],
     ) == [
-        {"phase": "screenplay_intent_planning"},
-        {"phase": "screenplay_intent_planning"},
+        {"phase": "generation"},
+        {"phase": "generation"},
     ]
     rows = await temp_db.fetch_all(
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
     )
     chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert chunks[0] == {"model": "planner-model"}
-    assert not any("delta" in chunk for chunk in chunks)
+    assert chunks == []
 
 
 async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
@@ -1627,7 +1545,7 @@ async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
     with pytest.raises(ModelGatewayError) as captured:
         await screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+            composition=_core_composition(temp_db, gateway),
         ).run_json(
             runtime=_request(session["id"], "测试空 JSON").runtime,
             session_id=session["id"],
@@ -1649,9 +1567,9 @@ async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
         "FROM ai_agent_run_events WHERE event_type = 'model.call_recorded' "
         "ORDER BY id"
     ) == [
-        {"phase": "screenplay_test"},
-        {"phase": "screenplay_test"},
-        {"phase": "screenplay_test"},
+        {"phase": "generation"},
+        {"phase": "generation"},
+        {"phase": "generation"},
     ]
     chunks = [
         json.loads(row["chunk_json"])
@@ -1680,7 +1598,7 @@ async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
     with pytest.raises(ModelGatewayError) as captured:
         await screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+            composition=_core_composition(temp_db, gateway),
         ).run_json(
             runtime=_request(session["id"], "测试无效 JSON").runtime,
             session_id=session["id"],
@@ -1706,14 +1624,13 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
 
     gateway = _ScriptedModelGateway("secret", [[
         ModelStreamChunk(content_delta=(
-            '{"executionSummary":"先核对前集连续性，再按场景目标推进冲突。",'
-            '"sceneText":"这里是完整剧本正文"}'
+            '{"sceneText":"这里是完整剧本正文"}'
         )),
         ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
     ]])
-    await screenplay_structured_call.ScreenplayStructuredCallService(
+    result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+        composition=_core_composition(temp_db, gateway),
     ).run_json(
         runtime=_request(session["id"], "测试正文隔离").runtime,
         session_id=session["id"],
@@ -1726,24 +1643,14 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
         phase="screenplay_episode_generation",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
-        project_execution=lambda value: (
-            value["executionSummary"],
-            f"sceneText: {value['sceneText']}",
-        ),
+        project_execution=lambda value: (f"sceneText: {value['sceneText']}",),
     )
 
     rows = await temp_db.fetch_all(
         "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
     )
-    chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert chunks[0] == {"model": "planner-model"}
-    commentary = [
-        chunk["commentaryDelta"]
-        for chunk in chunks[1:]
-        if "commentaryDelta" in chunk
-    ]
-    assert "".join(commentary) == "先核对前集连续性，再按场景目标推进冲突。\n"
-    assert max(map(len, commentary)) <= VISIBLE_STREAM_CHUNK_CHARS
+    assert result.value == {"sceneText": "这里是完整剧本正文"}
+    assert rows == []
 
 
 async def test_screenplay_stream_replays_materialized_shared_chunks(
@@ -1867,7 +1774,7 @@ async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay
     assert captured.value.status_code == 409
 
 
-async def test_legacy_chunks_that_leaked_model_json_are_discarded(
+async def test_legacy_chunks_stay_quarantined_until_approved_cleanup(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
@@ -1900,7 +1807,7 @@ async def test_legacy_chunks_that_leaked_model_json_are_discarded(
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM screenplay_agent_chunks "
         "WHERE protocol_version < 2"
-    ) == {"count": 0}
+    ) == {"count": 1}
 
 
 async def test_restart_exposes_an_abandoned_turn_as_a_terminal_failure(
@@ -2092,14 +1999,6 @@ async def test_review_episode_context_reads_the_requested_immutable_revision(
 class _StructuredDraftModels:
     async def run_json(self, **kwargs):
         payload = kwargs["user_payload"]
-        if kwargs["phase"] == "screenplay_final_response_composition":
-            value = kwargs["validate"]({
-                "finalResponse": (
-                    "第 1 至 2 集候选稿已经完成。"
-                    "可以在候选稿区域查看并继续编辑。"
-                ),
-            })
-            return StructuredModelResult(value, "run-final-response")
         number = int(payload["episodeNumber"])
         if kwargs["phase"] == "screenplay_scene_generation":
             scene = payload["scenePlan"]
@@ -2119,6 +2018,13 @@ class _StructuredDraftModels:
             "continuitySummary": f"第 {number} 集连续性",
         })
         return StructuredModelResult(value, f"run-metadata-{number}")
+
+    async def run_public_text(self, **kwargs):
+        del kwargs
+        return PublicModelResult(
+            "第 1 至 2 集候选稿已经完成。可以在候选稿区域查看并继续编辑。",
+            "run-final-response",
+        )
 
 
 class _CheckpointingToolCalls:
@@ -2772,7 +2678,7 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
     )
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        model_executor_factory=_model_executor_factory,
+        composition=object(),
     )
     executor._models = _StructuredDraftModels()
 
@@ -2780,7 +2686,7 @@ async def test_production_resolver_and_executor_publish_one_native_candidate(
         unit = ScreenplayTaskUnitExecutor(
             temp_db,
             runtime=runtime,
-            model_executor_factory=_model_executor_factory,
+            composition=object(),
         )
         unit._delegate = executor
         return unit

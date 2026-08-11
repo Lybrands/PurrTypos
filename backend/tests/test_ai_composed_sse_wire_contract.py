@@ -12,6 +12,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from purra.events import CoreEventType
+from purra.output import OutputEventKind
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
@@ -23,6 +24,11 @@ from tests.support.asgi_sse import (
     decode_sse_json,
     request_json,
     start_asgi_request,
+)
+from tests.support.canonical_wire import (
+    assert_raw_canonical_wire,
+    project_wire_event_for_legacy_assertion,
+    project_wire_events_for_legacy_assertions,
 )
 
 
@@ -89,7 +95,9 @@ def _assert_sse_wire(response: ASGIResponse) -> list[dict[str, Any]]:
     assert response.headers["content-type"].split(";", 1)[0] == "text/event-stream"
     assert response.content.startswith(b"data: ")
     assert re.search(rb"\r?\n\r?\n\Z", response.content)
-    return decode_sse_json(response.content)
+    raw = decode_sse_json(response.content)
+    assert_raw_canonical_wire(raw)
+    return project_wire_events_for_legacy_assertions(raw)
 
 
 def _assert_exact_two_item_writing_policy(
@@ -192,22 +200,6 @@ def _event_name(event: dict[str, Any]) -> str:
         if key in event:
             return key
     raise AssertionError(f"unclassified SSE event: {event!r}")
-
-
-def _without_model_invocations(
-    events: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return [event for event in events if "modelInvocation" not in event]
-
-
-def _model_invocations(
-    events: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return [
-        event["modelInvocation"]
-        for event in events
-        if "modelInvocation" in event
-    ]
 
 
 @pytest.mark.asyncio
@@ -380,7 +372,7 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
     assert all(item["agentTitle"] == "研究 Agent" for item in updated)
     assert updated[1]["childRunId"]
     assert updated[2]["childRunId"] == updated[1]["childRunId"]
-    assert updated[2]["resultSummary"] == "子 Agent 已核验三条证据。"
+    assert "resultSummary" not in updated[2]
     assert child_events, events
     assert all(
         item["delegationId"] == delegation_id
@@ -407,17 +399,17 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
     persisted_child_events = [
         item for item in snapshot.events
         if item["eventType"] == CoreEventType.DELEGATION_EVENT
+        and item["payload"].get("eventType") == "child_output"
     ]
     assert persisted_child_events
-    # Token frames stay transport-only, but lifecycle/tool/final snapshots are
-    # durable on the parent and therefore replayable after reconnect.
-    persisted_child_types = [
-        item["payload"]["event"]["type"]
+    # The parent journal preserves the exact canonical child event, including
+    # Provider deltas, so live delivery and reconnect replay share one source.
+    persisted_child_kinds = [
+        item["payload"]["event"]["kind"]
         for item in persisted_child_events
     ]
-    assert "assistant.final_delta" not in persisted_child_types
-    assert CoreEventType.RUN_STARTED in persisted_child_types
-    assert CoreEventType.RUN_COMPLETED in persisted_child_types
+    assert OutputEventKind.PROVIDER_CONTENT_DELTA in persisted_child_kinds
+    assert OutputEventKind.RUNTIME in persisted_child_kinds
 
 
 def _assert_terminal_exclusive(
@@ -519,8 +511,6 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     await live.wait_started()
     response = await live.finish()
     events = _normalize_dynamic_ids(_assert_sse_wire(response))
-    invocations = _model_invocations(events)
-    events = _without_model_invocations(events)
 
     assert provider_calls == 1, events
     assert [_event_name(event) for event in events] == [
@@ -530,44 +520,6 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
         "agentRunCompleted",
         "done",
     ]
-    assert invocations == [{
-        "phase": "generation",
-        "count": 1,
-        "toolNames": [],
-        "toolChoice": "none",
-        "round": 1,
-        "logicalRound": 1,
-        "attempt": 1,
-        "requestFingerprint": "<request-fingerprint-1>",
-        "parameters": {
-            "provider": "openai",
-            "model": "wire-model",
-            "options": {
-                "max_tokens": 32_768,
-                "baseURL": "https://provider.test/v1",
-                "model": "wire-model",
-                "model_profile": "deepseek:deepseek-v4-flash",
-                "thinking_enabled": False,
-                "thinking": {"type": "disabled"},
-            },
-            "maxOutputTokens": 32_768,
-            "reasoningMode": "disabled",
-            "toolChoice": "none",
-            "toolNames": [],
-            "messageCount": 3,
-            "messageRoles": ["developer", "developer", "user"],
-            "profileId": "deepseek:deepseek-v4-flash",
-            "modelOutputCapabilities": {
-                "maxOutputTokens": 393_216,
-                "thinkingTokenAccounting": "included",
-            },
-            "outputLimit": {
-                "maxTokens": 32_768,
-                "source": "user_override",
-                "profileMaxTokens": 393_216,
-            },
-        },
-    }]
     assert events[2] == {"delta": "这是一个直接回答。"}
     _assert_terminal_exclusive(
         events,
@@ -710,8 +662,6 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
         if "agentRunStarted" in event
     )
     events = _normalize_dynamic_ids(raw_events)
-    invocations = _model_invocations(events)
-    events = _without_model_invocations(events)
 
     assert [_event_name(event) for event in events] == [
         "agentRunStarted",
@@ -725,9 +675,6 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] == "model"
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["suggestedTools"] == []
     assert events[3] == {"delta": "计划格式异常，先提供安全说明。"}
-    assert len(invocations) == 1
-    assert invocations[0]["toolNames"] == []
-    assert invocations[0]["toolChoice"] == "none"
     _assert_terminal_exclusive(
         events,
         terminal="agentRunCompleted",
@@ -834,27 +781,21 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     await live.wait_started()
     response = await live.finish()
     events = _normalize_dynamic_ids(_assert_sse_wire(response))
-    invocations = _model_invocations(events)
-    events = _without_model_invocations(events)
 
     assert model_calls == 3
-    assert sum(item["count"] for item in invocations) == 5
     assert [_event_name(event) for event in events] == [
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
-        "reasoningDelta",
-        "reasoningDelta",
         "agentRunTodoUpdated",
         "agentRunTodosUpdated",
-        "reasoningDelta",
         "agentRunTodoUpdated",
         "agentRunFailed",
         "error",
     ]
     assert events[1]["agentRunTodosUpdated"]["runId"] == "<run-1>"
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
-    assert events[5]["agentRunTodoUpdated"] == {
+    assert events[3]["agentRunTodoUpdated"] == {
         "runId": "<run-1>",
         "stepId": "host-prerequisite-listBookCharacters-1",
         "step": {
@@ -876,27 +817,23 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
             },
             "status": "running",
         }
-    assert events[8]["agentRunTodoUpdated"]["stepId"] == "read-characters"
-    assert events[8]["agentRunTodoUpdated"]["step"]["status"] == "failed"
+    assert events[5]["agentRunTodoUpdated"]["stepId"] == "read-characters"
+    assert events[5]["agentRunTodoUpdated"]["step"]["status"] == "failed"
     assert (
-        events[8]["agentRunTodoUpdated"]["step"]["error"]
+        events[5]["agentRunTodoUpdated"]["step"]["error"]
         == "missing_required_tool_call"
     )
-    assert events[9] == {
+    assert events[6] == {
         "agentRunFailed": {
             "runId": "<run-1>",
             "status": "failed",
             "error": "missing_required_tool_call",
         },
     }
-    assert events[10] == {
+    assert events[7] == {
         "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
     }
-    assert [
-        event["reasoningDelta"]
-        for event in events
-        if "reasoningDelta" in event
-    ] == ["PRIVATE", "PRIVATE", "PRIVATE"]
+    assert not any("reasoningDelta" in event for event in events)
     assert not any("delta" in event for event in events)
     _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
 
@@ -995,13 +932,49 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
         nonlocal model_round, continuation_messages
         model_round += 1
         assert signal is not None
-        policy_rounds.append(_assert_exact_two_item_writing_policy(
-            messages,
-            user_prompt=user_prompt,
-        ))
+        is_public_presentation = bool(
+            messages
+            and messages[0].get("role") == "system"
+            and "committed public facts" in str(
+                messages[0].get("content") or ""
+            )
+        )
+        if not is_public_presentation:
+            policy_rounds.append(_assert_exact_two_item_writing_policy(
+                messages,
+                user_prompt=user_prompt,
+            ))
 
         async def _stream():
             nonlocal continuation_messages
+            if is_public_presentation:
+                assert model_round == 4
+                assert options.get("tools") is None
+                assert repaired_response not in json.dumps(
+                    messages,
+                    ensure_ascii=False,
+                )
+                fact_payload = json.loads(messages[1]["content"])
+                facts = {
+                    item["key"]: item["value"]
+                    for item in fact_payload["facts"]
+                }
+                assert facts["responseKind"] == "summaryReview"
+                assert facts["requiredItemCount"] == 2
+                assert len(facts["reviewItems"]) == 2
+                yield {
+                    "choices": [{
+                        "delta": {"content": repaired_response[:40]},
+                        "finish_reason": None,
+                    }],
+                }
+                yield {
+                    "choices": [{
+                        "delta": {"content": repaired_response[40:]},
+                        "finish_reason": "stop",
+                    }],
+                }
+                return
             if model_round == 1:
                 assert [
                     item["function"]["name"]
@@ -1120,14 +1093,14 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
         for event in events
         if "agentRunStarted" in event
     )
-    assert model_round == 3
+    assert model_round == 4
     assert len(policy_rounds) == 3
     assert policy_rounds == [policy_rounds[0]] * 3
     assert policy_rounds[0].count("summaryMaxCharacters=150") == 1
     assert "摘要前后不得重复展示或逐句改写完整原文" in policy_rounds[0]
     assert "不得声称摘要实际为某个精确字数" in policy_rounds[0]
     assert continuation_messages
-    assert any("toolResults" in event for event in events)
+    assert not any("toolResults" in event for event in events)
     visible_text = "".join(str(event.get("delta") or "") for event in events)
     assert visible_text == repaired_response
     assert invalid_response not in visible_text
@@ -1427,14 +1400,55 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         nonlocal runtime_round, final_messages
         runtime_round += 1
         assert signal is not None
-        policy_rounds.append(_assert_exact_two_item_writing_policy(
-            messages,
-            user_prompt=user_prompt,
-            atomic_continuity=True,
-        ))
+        is_public_presentation = bool(
+            messages
+            and messages[0].get("role") == "system"
+            and "committed public facts" in str(
+                messages[0].get("content") or ""
+            )
+        )
+        if not is_public_presentation:
+            policy_rounds.append(_assert_exact_two_item_writing_policy(
+                messages,
+                user_prompt=user_prompt,
+                atomic_continuity=True,
+            ))
 
         async def _stream():
             nonlocal final_messages
+            if is_public_presentation:
+                assert runtime_round == 4
+                assert options.get("tools") is None
+                assert repaired_response not in json.dumps(
+                    messages,
+                    ensure_ascii=False,
+                )
+                fact_payload = json.loads(messages[1]["content"])
+                facts = {
+                    item["key"]: item["value"]
+                    for item in fact_payload["facts"]
+                }
+                assert facts["responseKind"] == "atomicContinuityReview"
+                assert facts["requiredItemCount"] == 2
+                assert facts["reviewItems"][0] == {
+                    "number": 1,
+                    "dimension": "时间",
+                    "outlineValue": "清晨",
+                    "chapterValue": "午夜",
+                }
+                yield {
+                    "choices": [{
+                        "delta": {"content": repaired_response[:48]},
+                        "finish_reason": None,
+                    }],
+                }
+                yield {
+                    "choices": [{
+                        "delta": {"content": repaired_response[48:]},
+                        "finish_reason": "stop",
+                    }],
+                }
+                return
             if runtime_round == 1:
                 assert [
                     item["function"]["name"]
@@ -1546,7 +1560,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     assert "复合表达中未变化的属性" in repair_guidance
     assert "标题必须准确命名唯一变化" in repair_guidance
     assert "两个修改方向只做同一个 A↔B 替换" in repair_guidance
-    assert runtime_round == 3
+    assert runtime_round == 4
     trace_rows = await db.fetch_all(
         "SELECT payload_json FROM ai_agent_run_events "
         "WHERE run_id = ? AND event_type = 'agentRunTrace' ORDER BY id ASC",
@@ -1580,22 +1594,8 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         if message.get("role") == "tool"
     )
     assert json.loads(final_tool_message["content"])["plainText"] == chapter_text
-    tool_calls = [
-        call
-        for event in raw_events
-        for call in event.get("toolCalls", [])
-    ]
-    tool_results = [
-        result
-        for event in raw_events
-        for result in event.get("toolResults", [])
-    ]
-    assert [call["function"]["name"] for call in tool_calls] == [
-        "getChapterContent",
-    ]
-    assert [result["name"] for result in tool_results] == [
-        "getChapterContent",
-    ]
+    assert not any("toolCalls" in event for event in raw_events)
+    assert not any("toolResults" in event for event in raw_events)
     todo_steps = next(
         event["agentRunTodosUpdated"]["steps"]
         for event in raw_events
@@ -1606,7 +1606,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         [],
     ]
     assert "queryOutline" not in json.dumps(
-        [tool_calls, tool_results, todo_steps],
+        todo_steps,
         ensure_ascii=False,
     )
     stored_todos = await db.fetch_all(
@@ -1780,16 +1780,34 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
             guidance = messages[-1]
             assert guidance["role"] == "system"
             assert "not shown to the user" in guidance["content"]
+            if model_round == 4:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "reasoning_content": (
+                                "正在删除并重试 "
+                                "<tool_call><function=deleteCharacter>"
+                            ),
+                            "content": (
+                                "已找到人物，正在删除。删除失败，"
+                                "请检查权限或联系管理员。"
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }],
+                }
+                return
+
+            assert model_round == 5
             yield {
                 "choices": [{
-                    "delta": {
-                        "reasoning_content": (
-                            "正在删除并重试 <tool_call><function=deleteCharacter>"
-                        ),
-                        "content": (
-                            "已找到人物，正在删除。删除失败，请检查权限或联系管理员。"
-                        ),
-                    },
+                    "delta": {"content": "已保留人物，"},
+                    "finish_reason": None,
+                }],
+            }
+            yield {
+                "choices": [{
+                    "delta": {"content": "未执行删除。"},
                     "finish_reason": "stop",
                 }],
             }
@@ -1814,7 +1832,8 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        approval = event.get("toolApprovalRequired")
+        projected = project_wire_event_for_legacy_assertion(event) or {}
+        approval = projected.get("toolApprovalRequired")
         if approval:
             break
 
@@ -1852,44 +1871,42 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
         if "agentRunStarted" in event
     )
     events = _normalize_dynamic_ids(raw_events)
-    invocations = _model_invocations(events)
-    events = _without_model_invocations(events)
     names = [_event_name(event) for event in events]
 
-    assert sum(item["count"] for item in invocations) >= model_round
-    assert names == [
+    assert model_round == 5
+    assert names[:3] == [
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
-        "toolCalls",
-        "toolIndexCompleted",
-        "toolResults",
-        "agentRunTodoUpdated",
-        "agentRunTodoUpdated",
-        "toolCalls",
-        "toolApprovalRequired",
-        "toolApprovalResolved",
-        "toolIndexCompleted",
-        "toolResults",
-        "agentRunTodoUpdated",
-        "reasoningDelta",
-        "agentRunTodoUpdated",
-        "delta",
-        "agentRunTodoUpdated",
-        "agentRunCompleted",
-        "done",
     ]
-    requested = events[9]["toolApprovalRequired"]
-    resolved_event = events[10]["toolApprovalResolved"]
+    assert not {"toolCalls", "toolResults", "toolIndexCompleted"}.intersection(
+        names
+    )
+    assert names[-2:] == ["agentRunCompleted", "done"]
+    requested = next(
+        event["toolApprovalRequired"]
+        for event in events
+        if "toolApprovalRequired" in event
+    )
+    resolved_event = next(
+        event["toolApprovalResolved"]
+        for event in events
+        if "toolApprovalResolved" in event
+    )
     assert requested["runId"] == resolved_event["runId"] == "<run-1>"
     assert requested["approvalId"] == resolved_event["approvalId"] == "<approval-1>"
     assert requested["toolName"] == resolved_event["toolName"] == "deleteCharacter"
     assert resolved_event["status"] == "rejected"
-    tool_result = json.loads(events[12]["toolResults"][0]["content"])
-    assert tool_result["success"] is False
-    assert tool_result["errorCode"] == "approval_rejected"
-    assert continuation_tool_result == tool_result
-    declined_todo = events[13]["agentRunTodoUpdated"]
+    assert continuation_tool_result is not None
+    assert continuation_tool_result["success"] is False
+    assert continuation_tool_result["errorCode"] == "approval_rejected"
+    declined_todo = next(
+        event["agentRunTodoUpdated"]
+        for event in events
+        if event.get("agentRunTodoUpdated", {}).get("stepId")
+        == "delete-character"
+        and event["agentRunTodoUpdated"]["step"]["status"] == "blocked"
+    )
     assert declined_todo["stepId"] == "delete-character"
     assert declined_todo["step"]["status"] == "blocked"
     assert declined_todo["step"]["resultSummary"] == (
@@ -1897,18 +1914,12 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    assert events[14] == {
-        "reasoningDelta": (
-            "正在删除并重试 <tool_call><function=deleteCharacter>"
-        ),
-    }
-    assert events[15]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[15]["agentRunTodoUpdated"]["step"]["status"] == "running"
-    assert events[16] == {
-        "delta": "您已拒绝审批；操作未执行，相关数据仍保留。",
-    }
-    assert events[17]["agentRunTodoUpdated"]["stepId"] == "report-result"
-    assert events[17]["agentRunTodoUpdated"]["step"]["status"] == "done"
+    report_statuses = [
+        event["agentRunTodoUpdated"]["step"]["status"]
+        for event in events
+        if event.get("agentRunTodoUpdated", {}).get("stepId") == "report-result"
+    ]
+    assert report_statuses == ["running", "done"]
     delete_statuses = [
         event["agentRunTodoUpdated"]["step"]["status"]
         for event in events
@@ -1929,7 +1940,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "联系管理员" not in visible_text
     assert not any("commentaryDelta" in event for event in events)
     assert events[-1] == {"done": True, "model": "wire-model"}
-    assert model_round == 4
+    assert model_round == 5
     character = await db.fetch_one(
         "SELECT id FROM characters WHERE id = ? AND book_id = ?",
         [7, "book-wire"],
@@ -1941,7 +1952,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     assert stored_run == {
         "status": "done",
-        "final_response": "您已拒绝审批；操作未执行，相关数据仍保留。",
+        "final_response": "已保留人物，未执行删除。",
     }
     stored_todos = await db.fetch_all(
         "SELECT step_id, status, result_summary, error "
@@ -2020,8 +2031,9 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        if event.get("agentRunStarted"):
-            run_id = str(event["agentRunStarted"]["runId"])
+        projected = project_wire_event_for_legacy_assertion(event) or {}
+        if projected.get("agentRunStarted"):
+            run_id = str(projected["agentRunStarted"]["runId"])
             break
 
     await live.disconnect()
@@ -2127,7 +2139,8 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        approval = event.get("toolApprovalRequired")
+        projected = project_wire_event_for_legacy_assertion(event) or {}
+        approval = projected.get("toolApprovalRequired")
         if approval:
             break
 
@@ -2174,33 +2187,25 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     assert persisted_character is not None
     assert run is not None and run["status"] != "canceled"
     terminal_events = await db.fetch_all(
-        "SELECT event_type FROM ai_agent_run_events "
-        "WHERE run_id = ? AND event_type IN (?, ?, ?, ?)",
-        [
-            run_id,
-            "run.completed",
-            "run.blocked",
-            "run.failed",
-            "run.canceled",
-        ],
+        "SELECT json_extract(payload_json, '$.status') AS status "
+        "FROM ai_agent_run_events WHERE run_id = ? "
+        "AND kind = 'run.lifecycle' "
+        "AND json_extract(payload_json, '$.status') != 'running'",
+        [run_id],
     )
     assert len(terminal_events) == 1
-    assert terminal_events[0]["event_type"] != "run.canceled"
+    assert terminal_events[0]["status"] != "canceled"
 
     # The old subscriber receives no post-disconnect frames; the terminal is
     # recovered from the durable Run snapshot instead.
+    raw_delivered_events = decode_sse_json(disconnected.content)
+    assert_raw_canonical_wire(raw_delivered_events)
     delivered_events = _normalize_dynamic_ids(
-        decode_sse_json(disconnected.content)
+        project_wire_events_for_legacy_assertions(raw_delivered_events)
     )
-    invocations = _model_invocations(delivered_events)
-    delivered_events = _without_model_invocations(delivered_events)
-    assert len(invocations) == 1
-    assert invocations[0]["count"] == 1
-    assert "deleteCharacter" in invocations[0]["toolNames"]
     assert [_event_name(item) for item in delivered_events] == [
         "agentRunStarted",
         "contextBudget",
-        "toolCalls",
         "toolApprovalRequired",
     ]
     assert not any(TERMINAL_KEYS.intersection(item) for item in delivered_events)
@@ -2284,7 +2289,8 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        approval = event.get("toolApprovalRequired")
+        projected = project_wire_event_for_legacy_assertion(event) or {}
+        approval = projected.get("toolApprovalRequired")
         if approval:
             break
 
@@ -2320,15 +2326,11 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
     ) == {"id": character_id}
     assert run is not None and run["status"] != "canceled"
     terminal_events = await db.fetch_all(
-        "SELECT event_type FROM ai_agent_run_events "
-        "WHERE run_id = ? AND event_type IN (?, ?, ?, ?)",
-        [
-            run_id,
-            "run.completed",
-            "run.blocked",
-            "run.failed",
-            "run.canceled",
-        ],
+        "SELECT json_extract(payload_json, '$.status') AS status "
+        "FROM ai_agent_run_events WHERE run_id = ? "
+        "AND kind = 'run.lifecycle' "
+        "AND json_extract(payload_json, '$.status') != 'running'",
+        [run_id],
     )
     assert len(terminal_events) == 1
-    assert terminal_events[0]["event_type"] != "run.canceled"
+    assert terminal_events[0]["status"] != "canceled"

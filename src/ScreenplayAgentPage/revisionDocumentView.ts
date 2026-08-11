@@ -11,7 +11,6 @@ const KEY_LABELS: Record<string, string> = {
   episodeCount: '集数',
   episodeNumber: '集数',
   evidence: '依据',
-  executionSummary: '创作说明',
   fields: '创作设定',
   goal: '目标',
   issues: '问题',
@@ -23,7 +22,6 @@ const KEY_LABELS: Record<string, string> = {
   objective: '目标',
   plot: '情节',
   premise: '核心设想',
-  processSummary: '场景推进',
   recommendation: '建议',
   risks: '改编风险',
   sceneText: '正文',
@@ -43,6 +41,8 @@ const KEY_LABELS: Record<string, string> = {
 
 const HIDDEN_KEYS = new Set([
   'contentDigest',
+  'executionSummary',
+  'processSummary',
   'schemaVersion',
   'sourceRunId',
   'storageMode',

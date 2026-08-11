@@ -7,27 +7,10 @@ const { loadTypeScriptModule } = require('../../../../scripts/load-typescript-mo
 
 const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, 'streamOptions.ts'))
 const {
-  handleDelta,
-  handleCommentaryDelta,
-} = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/streaming.ts'),
-)
-const { handleToolCallsInProgress } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/toolStart.ts'),
-)
-const {
-  handleAgentDelegation,
-  handleAgentRunTerminal,
   handleLongTaskDispatched,
   handleLongTaskProgress,
 } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/agentRun.ts'),
-)
-const { handleContextBudget, handleContextCompaction } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/context.ts'),
-)
-const { handleAgentSubRunEvent } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/subAgent.ts'),
+  path.join(__dirname, 'chunkHandlers/durableTask.ts'),
 )
 const {
   EMPTY_RESPONSE_MESSAGE,
@@ -49,6 +32,7 @@ const {
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
   getOperationGroupProgress,
+  groupConsecutiveWorkSteps,
 } = loadTypeScriptModule(
   path.join(__dirname, '../components/ChatMessageList/assistantTimeline.ts'),
 )
@@ -69,6 +53,9 @@ const {
   calculateContextUsage,
 } = loadTypeScriptModule(
   path.join(__dirname, '../contextUsage.ts'),
+)
+const { projectContextBudget } = loadTypeScriptModule(
+  path.join(__dirname, '../../../agent-runtime/contextBudgetProjection.ts'),
 )
 const {
   getActiveTaskPlan,
@@ -175,102 +162,6 @@ test('renderer never sends its legacy output budget to PurrA', () => {
   assert.equal(Object.hasOwn(configured.options, 'max_tokens'), false)
 })
 
-test('answer deltas stay buffered while commentary continues and commit only on done', () => {
-  let conversations = [{ role: 'assistant', content: '', commentary: '' }]
-  let loading = true
-  const acc = {
-    commentary: '',
-    response: '',
-    commentaryBlocks: [],
-    commentaryDurationsMs: [],
-    toolCallSegments: [],
-  }
-  const ctx = {
-    acc,
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-    flushCommits: () => {},
-    setConversations: (updater) => {
-      conversations = updater(conversations)
-    },
-    setLoading: (next) => {
-      loading = next
-    },
-    cleanup: () => {},
-    persistConversation: false,
-  }
-
-  handleCommentaryDelta({ commentaryDelta: '正在核对人物连续性。\n' }, ctx)
-  assert.equal(acc.commentary, '正在核对人物连续性。\n')
-  assert.equal(conversations[0].commentary, '正在核对人物连续性。\n')
-
-  handleDelta({ delta: '最终答案' }, ctx)
-  assert.equal(acc.response, '最终答案')
-  assert.equal(conversations[0].content, '')
-
-  handleCommentaryDelta({ commentaryDelta: '继续完成剩余步骤。' }, ctx)
-  assert.equal(conversations[0].content, '')
-  assert.equal(
-    conversations[0].commentary,
-    '正在核对人物连续性。\n继续完成剩余步骤。',
-  )
-
-  assert.equal(handleDone({ done: true }, ctx), true)
-  assert.equal(conversations[0].content, '最终答案')
-  assert.deepEqual(
-    conversations[0].commentaryBlocks,
-    ['正在核对人物连续性。\n继续完成剩余步骤。'],
-  )
-  assert.equal(loading, false)
-})
-
-test('commentary and tool calls keep their actual interleaved order', () => {
-  let conversations = [{ role: 'assistant', content: '', commentary: '' }]
-  const acc = {
-    commentary: '',
-    response: '',
-    commentaryBlocks: [],
-    commentaryDurationsMs: [],
-    toolCallSegments: [],
-  }
-  const ctx = {
-    acc,
-    writingChapters: [],
-    availableOutlines: [],
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-  const toolChunk = (name) => ({
-    toolCalls: [{
-      id: `${name}-call`,
-      function: { name, arguments: '{}' },
-    }],
-    toolCallsInProgress: true,
-  })
-
-  handleToolCallsInProgress(toolChunk('listBookCharacters'), ctx)
-  handleCommentaryDelta({ commentaryDelta: '读取列表后继续判断' }, ctx)
-  handleToolCallsInProgress(toolChunk('getBookCharacters'), ctx)
-
-  assert.equal(
-    conversations[0].toolCallSegments[0].commentaryBlockIndex,
-    null,
-  )
-  assert.equal(
-    conversations[0].toolCallSegments[1].commentaryBlockIndex,
-    0,
-  )
-  assert.deepEqual(
-    buildAssistantTimeline(conversations[0], { messageIndex: 0 })
-      .map((part) => part.type),
-    ['tools', 'commentary', 'tools'],
-  )
-})
-
 test('unassigned commentary stays after all recorded tools', () => {
   const message = {
     role: 'assistant',
@@ -295,6 +186,32 @@ test('unassigned commentary stays after all recorded tools', () => {
       loading: true,
     }).map((part) => part.type),
     ['tools', 'tools', 'commentary'],
+  )
+})
+
+test('active child timelines stream ordinary text without exposing the root answer', () => {
+  const message = {
+    role: 'assistant',
+    content: '已经输出的子 Run 文案',
+  }
+  const streamingOptions = {
+    messageIndex: 0,
+    isStreaming: true,
+    isLastAssistant: true,
+    loading: true,
+  }
+
+  assert.equal(
+    buildAssistantTimeline(message, streamingOptions)
+      .some((part) => part.type === 'text'),
+    false,
+  )
+  assert.deepEqual(
+    buildAssistantTimeline(message, {
+      ...streamingOptions,
+      allowStreamingText: true,
+    }).filter((part) => part.type === 'text'),
+    [{ type: 'text', md: '已经输出的子 Run 文案' }],
   )
 })
 
@@ -477,6 +394,7 @@ test('execution-panel progress reports the active visible step frontier', () => 
     completed: 2,
     current: 3,
     active: true,
+    parallel: false,
   })
 })
 
@@ -497,7 +415,47 @@ test('execution-panel progress excludes cached tool rows', () => {
     completed: 1,
     current: 1,
     active: false,
+    parallel: false,
   })
+})
+
+test('consecutive operations stay as direct rows under the single execution panel', () => {
+  assert.equal(typeof groupConsecutiveWorkSteps, 'function')
+  const grouped = groupConsecutiveWorkSteps([
+    {
+      type: 'commentary',
+      md: '先检查正文。',
+      regionKey: 'commentary-0',
+    },
+    {
+      type: 'tools',
+      segmentIndex: 0,
+      segment: {
+        commentaryBlockIndex: 0,
+        labels: ['写入剧本候选稿', '检查剧本候选稿'],
+      },
+    },
+    {
+      type: 'tools',
+      segmentIndex: 1,
+      segment: {
+        commentaryBlockIndex: null,
+        labels: ['发布候选稿'],
+      },
+    },
+  ], 'turn-6')
+
+  assert.deepEqual(grouped.map((item) => item.type), [
+    'commentary',
+    'tools',
+    'tools',
+  ])
+  assert.deepEqual(
+    grouped
+      .filter((part) => part.type === 'tools')
+      .flatMap((part) => part.segment.labels),
+    ['写入剧本候选稿', '检查剧本候选稿', '发布候选稿'],
+  )
 })
 
 test('durable task progress stays out of the work log', () => {
@@ -548,193 +506,7 @@ test('durable task progress stays out of the work log', () => {
   )
 })
 
-test('delegation lifecycle chunks update the visible assistant work log', () => {
-  let conversations = [{ role: 'assistant', content: '' }]
-  const acc = {}
-  const ctx = {
-    acc,
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-
-  handleAgentDelegation({
-    agentDelegationCreated: {
-      runId: 'parent-1',
-      delegationId: 'delegation-1',
-      parentRunId: 'parent-1',
-      rootRunId: 'parent-1',
-      childRunId: null,
-      agentRole: 'researcher',
-      agentTitle: '资料核验 Agent',
-      objective: 'collect evidence',
-      status: 'queued',
-      required: true,
-      priority: 1,
-    },
-  }, ctx)
-  handleAgentDelegation({
-    agentDelegationUpdated: {
-      runId: 'parent-1',
-      delegationId: 'delegation-1',
-      parentRunId: 'parent-1',
-      rootRunId: 'parent-1',
-      childRunId: 'child-1',
-      agentRole: 'researcher',
-      agentTitle: '资料核验 Agent',
-      objective: 'collect evidence',
-      status: 'done',
-      required: true,
-      priority: 1,
-      resultSummary: 'three verified facts',
-    },
-  }, ctx)
-
-  assert.equal(acc.agentRunId, 'parent-1')
-  assert.equal(acc.delegations.length, 1)
-  assert.equal(acc.delegations[0].status, 'done')
-  assert.equal(acc.delegations[0].childRunId, 'child-1')
-  assert.equal(acc.delegations[0].agentTitle, '资料核验 Agent')
-  assert.equal(conversations[0].delegations.length, 1)
-  assert.equal(conversations[0].delegations[0].resultSummary, 'three verified facts')
-})
-
-test('interleaved child run deltas stay isolated by delegation', () => {
-  let conversations = [{ role: 'assistant', content: '' }]
-  const acc = {
-    response: '',
-    commentary: '',
-    sessionId: 1,
-    needsTitle: false,
-    userText: 'coordinate',
-    model: 'test-model',
-    turnStartedAt: performance.now(),
-  }
-  const setConversations = (next) => {
-    conversations = typeof next === 'function' ? next(conversations) : next
-  }
-  const ctx = {
-    acc,
-    sessionId: 1,
-    cfg: {},
-    apiModelName: 'test-model',
-    writingChapters: [],
-    availableOutlines: [],
-    setConversations,
-    scheduleCommit: setConversations,
-    flushCommits: () => {},
-    setLoading: () => {},
-    setSessions: () => {},
-    appMessage: {},
-    isVisibleSession: () => true,
-    cleanup: () => {},
-  }
-  const dispatchNested = (chunk, childCtx) => {
-    handleDelta(chunk, childCtx)
-  }
-  const emit = (delegationId, childRunId, delta) => {
-    handleAgentSubRunEvent({
-      agentSubRunEvent: {
-        runId: 'parent-1',
-        parentRunId: 'parent-1',
-        rootRunId: 'parent-1',
-        delegationId,
-        childRunId,
-        agentRole: 'screenplay-writer',
-        agentTitle: `Writer ${delegationId}`,
-        objective: `write ${delegationId}`,
-        chunk: { delta },
-      },
-    }, ctx, dispatchNested)
-  }
-
-  emit('a', 'child-a', 'A1')
-  emit('b', 'child-b', 'B1')
-  emit('a', 'child-a', 'A2')
-
-  const activities = conversations[0].subAgentActivities
-  assert.equal(activities.length, 2)
-  assert.equal(
-    activities.find((item) => item.delegationId === 'a').message.content,
-    'A1A2',
-  )
-  assert.equal(
-    activities.find((item) => item.delegationId === 'b').message.content,
-    'B1',
-  )
-  assert.equal(
-    acc.subAgentActivities.find((item) => item.delegationId === 'a').message.content,
-    'A1A2',
-  )
-  assert.equal(acc.response, '')
-})
-
-test('context lifecycle chunks update the visible assistant work log', () => {
-  let conversations = [{ role: 'assistant', content: '' }]
-  const acc = {}
-  const ctx = {
-    acc,
-    cfg: { id: 'model-test' },
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-
-  handleContextCompaction({
-    contextCompaction: {
-      status: 'running',
-      selectedTurnCount: 4,
-    },
-  }, ctx)
-  handleContextBudget({
-    contextBudget: {
-      windowTokens: 200000,
-      estimatedInputTokens: 12000,
-      toolSchemaTokens: 1000,
-      outputReserveTokens: 8000,
-      safetyReserveTokens: 1000,
-      runtimeReserveTokens: 1000,
-      droppedMessages: 0,
-      projectedTotalTokens: 23000,
-      overflowTokens: 0,
-    },
-  }, ctx)
-  handleContextBudget({
-    contextBudget: {
-      actualInputTokens: 12500,
-      actualOutputTokens: 500,
-      actualTotalTokens: 13000,
-      actualUsageRound: 1,
-      usageSource: 'provider',
-    },
-  }, ctx)
-
-  assert.equal(acc.contextCompaction.status, 'running')
-  assert.equal(conversations[0].contextCompaction.selectedTurnCount, 4)
-  assert.equal(acc.contextBudget.estimatedInputTokens, 12000)
-  assert.equal(acc.contextBudget.actualInputTokens, 12500)
-  assert.equal(acc.contextBudget.windowTokens, 200000)
-  assert.equal(acc.contextBudget.modelConfigId, 'model-test')
-  assert.equal(acc.contextBudget.modelName, 'test-model')
-  assert.equal(conversations[0].contextBudget.toolSchemaTokens, 1000)
-})
-
 test('a newly prepared request clears the previous provider usage snapshot', () => {
-  let conversations = [{ role: 'assistant', content: '' }]
-  const acc = {}
-  const ctx = {
-    acc,
-    cfg: { id: 'model-test' },
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-
   const preparedBudget = (estimatedInputTokens) => ({
     windowTokens: 200000,
     estimatedInputTokens,
@@ -747,25 +519,21 @@ test('a newly prepared request clears the previous provider usage snapshot', () 
     overflowTokens: 0,
   })
 
-  handleContextBudget({
-    contextBudget: preparedBudget(12000),
-  }, ctx)
-  handleContextBudget({
-    contextBudget: {
+  let budget = projectContextBudget(undefined, preparedBudget(12000), {
+    configId: 'model-test',
+    name: 'test-model',
+  })
+  budget = projectContextBudget(budget, {
       actualInputTokens: 12500,
       actualOutputTokens: 500,
       actualTotalTokens: 13000,
       actualUsageRound: 1,
       usageSource: 'provider',
-    },
-  }, ctx)
-  handleContextBudget({
-    contextBudget: preparedBudget(18000),
-  }, ctx)
+  })
+  budget = projectContextBudget(budget, preparedBudget(18000))
 
-  assert.equal(acc.contextBudget.estimatedInputTokens, 18000)
-  assert.equal(acc.contextBudget.actualInputTokens, undefined)
-  assert.equal(conversations[0].contextBudget.actualInputTokens, undefined)
+  assert.equal(budget.estimatedInputTokens, 18000)
+  assert.equal(budget.actualInputTokens, undefined)
 })
 
 test('context indicator uses the final prepared input estimate including tool schemas', () => {
@@ -953,7 +721,34 @@ test('active request switches to actual usage once the provider reports it', () 
   assert.equal(usage.source, 'provider')
 })
 
-test('current input draft is included before the request is sent', () => {
+test('context indicator grows with the assistant content already streamed', () => {
+  const baseParams = {
+    messages: [{
+      role: 'assistant',
+      content: '',
+      model: 'test-model',
+      contextBudget: {
+        windowTokens: 200000,
+        actualInputTokens: 1234,
+      },
+    }],
+    windowTokens: 200000,
+    modelName: 'test-model',
+  }
+  const beforeStreaming = calculateContextUsage(baseParams)
+  const afterStreaming = calculateContextUsage({
+    ...baseParams,
+    messages: [{
+      ...baseParams.messages[0],
+      streamingContent: '这是已经接收的流式回答',
+    }],
+  })
+
+  assert.ok(afterStreaming.usedTokens > beforeStreaming.usedTokens)
+  assert.equal(afterStreaming.source, 'provider')
+})
+
+test('current input draft is excluded until the request is sent', () => {
   const baseParams = {
     messages: [
       { role: 'user', content: '已有问题' },
@@ -968,7 +763,7 @@ test('current input draft is included before the request is sent', () => {
     draft: '这是输入框里尚未发送的新问题',
   })
 
-  assert.ok(withDraft.usedTokens > withoutDraft.usedTokens)
+  assert.equal(withDraft.usedTokens, withoutDraft.usedTokens)
   assert.equal(withDraft.source, 'estimate')
 })
 
@@ -1183,8 +978,9 @@ test('manual abort replaces an empty response with an explicit notice', () => {
   }
 
   assert.equal(handleDone({ done: true, aborted: true }, ctx), true)
-  assert.equal(conversations[0].content, MANUAL_ABORT_MESSAGE)
-  assert.equal(acc.response, MANUAL_ABORT_MESSAGE)
+  assert.equal(conversations[0].content, '')
+  assert.equal(conversations[0].termination, MANUAL_ABORT_MESSAGE)
+  assert.equal(acc.response, '')
   assert.equal(loading, false)
   assert.equal(cleanedUp, true)
 })
@@ -1265,50 +1061,15 @@ test('completed stream without visible model content becomes an explicit failure
   }
 
   assert.equal(handleDone({ done: true }, ctx), true)
-  assert.equal(conversations[0].content, EMPTY_RESPONSE_MESSAGE)
-  assert.equal(conversations[0].isError, true)
-  assert.equal(acc.response, EMPTY_RESPONSE_MESSAGE)
+  assert.equal(conversations[0].content, '')
+  assert.equal(conversations[0].error, EMPTY_RESPONSE_MESSAGE)
+  assert.equal(conversations[0].isError, false)
+  assert.equal(acc.response, '')
   assert.equal(loading, false)
   assert.equal(outcome, 'failed')
 })
 
-test('run completion text remains a fallback until the root turn is done', () => {
-  let conversations = [{ role: 'assistant', content: '' }]
-  const acc = {
-    response: '',
-    commentary: '',
-    bookId: 1,
-    sessionId: 0,
-    chapterId: 1,
-    needsTitle: false,
-    userText: 'continue screenplay',
-    model: '',
-    turnStartedAt: performance.now(),
-    commentaryBlocks: [],
-    commentaryDurationsMs: [],
-  }
-  const ctx = {
-    acc,
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
-
-  handleAgentRunTerminal({
-    agentRunCompleted: {
-      runId: 'run-host-result',
-      status: 'done',
-      finalResponse: '当前阶段已经变化，请刷新后重试。',
-    },
-  }, ctx)
-
-  assert.equal(acc.response, '')
-  assert.equal(acc.pendingFinalResponse, '当前阶段已经变化，请刷新后重试。')
-  assert.equal(conversations[0].content, '')
-})
-
-test('durable root terminal uses the same final-answer path as an ordinary run', () => {
+test('durable task metadata does not replace Provider-authored final text', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   let outcome
   const acc = {
@@ -1351,13 +1112,7 @@ test('durable root terminal uses the same final-answer path as an ordinary run',
       completedUnits: 0,
     },
   }, ctx)
-  handleAgentRunTerminal({
-    agentRunCompleted: {
-      runId: 'run-1',
-      status: 'done',
-      finalResponse: '已恢复原有长篇正文任务，将从上次检查点继续。',
-    },
-  }, ctx)
+  acc.response = '已恢复原有长篇正文任务，将从上次检查点继续。'
   assert.equal(conversations[0].content, '')
   assert.equal(handleDone({ done: true }, ctx), true)
   assert.equal(acc.longTaskId, 'task-1')

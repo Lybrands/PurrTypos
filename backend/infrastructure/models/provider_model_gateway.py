@@ -24,7 +24,7 @@ from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 from purra.ports import CancellationSignal
 from infrastructure.models import provider_router
-from utils.async_stream import OwnedAsyncIterator
+from purra.stream_ownership import OwnedAsyncIterator
 
 
 class ProviderModelGateway:

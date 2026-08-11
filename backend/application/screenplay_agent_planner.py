@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
-from purra.model_execution import ManagedModelExecutor
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_agent_service import (
     PlannedScreenplayIntent,
@@ -26,7 +26,6 @@ from exceptions import AppError
 _PLANNER_INSTRUCTION = """你是剧本 Agent 的语义规划器。理解用户真正想做什么，不做创作执行。
 你必须只输出一个 JSON 对象，不要 Markdown，不要额外文字：
 {
-  "executionSummary": "可选。确有必要时用 1 至 3 句简述如何理解意图、选择动作和确定范围；不需要公开概述时省略或填空字符串，不得复述内部协议",
   "action": "answer|create|revise|review",
   "instruction": "忠实且完整的执行指令",
   "scope": {
@@ -47,12 +46,15 @@ _PLANNER_INSTRUCTION = """你是剧本 Agent 的语义规划器。理解用户�
 4. 不臆造项目状态。可以参考提供的项目和已接受交付物回答，但不能声称尚未执行的创作已经完成。
 5. instruction 必须保留用户意图，不能缩成无意义的动词。
 6. 用户说“刚才那版”“上一版”时，结合 candidateDeliverables 判断具体交付物。
-7. executionSummary 缺失或为空是合法的，不得仅因此修复输出或拒绝执行。
-8. 若输入含 requiredStageCommand，它是宿主不可变约束；action、requestedDeliverable 和 scope 必须精确一致，不得降级为 answer。
+7. 若输入含 requiredStageCommand，它是宿主不可变约束；action、requestedDeliverable 和 scope 必须精确一致，不得降级为 answer。
 """
 
 _PLANNER_REPAIR = """上一个输出不符合剧本意图协议。不要重新展开分析，立即输出唯一的合法 JSON 对象；
-字段枚举、scope 条件、answer 的 reply 以及非 answer 时 reply=null 都必须严格满足协议；executionSummary 仍为可选。"""
+字段枚举、scope 条件、answer 的 reply 以及非 answer 时 reply=null 都必须严格满足协议。"""
+
+_ANSWER_INSTRUCTION = """你负责直接回答用户关于当前剧本项目的问题。
+只依据宿主提供的项目上下文、近期对话和本轮用户消息作答；不调用工具，不声称执行了未发生的操作，
+不暴露内部协议、规划 JSON、标识符或推理过程。自然、简洁地直接回答用户。"""
 
 
 class ModelScreenplayIntentPlanner:
@@ -60,12 +62,12 @@ class ModelScreenplayIntentPlanner:
         self,
         db,
         *,
-        model_executor_factory: Callable[[str], ManagedModelExecutor],
+        composition,
     ) -> None:
         self._context = ScreenplayAgentContextQuery(db)
         self._models = ScreenplayStructuredCallService(
             db,
-            model_executor_factory=model_executor_factory,
+            composition=composition,
         )
 
     async def plan(
@@ -81,13 +83,14 @@ class ModelScreenplayIntentPlanner:
     ) -> PlannedScreenplayIntent:
         project = workspace.get("project") or {}
         project_id = str(project.get("id") or "")
+        planning_context = await self._context.planning_context(workspace)
         result = await self._models.run_json(
             runtime=runtime,
             session_id=session_id,
             prompt=user_content,
             system_instruction=_PLANNER_INSTRUCTION,
             user_payload={
-                "projectContext": await self._context.planning_context(workspace),
+                "projectContext": planning_context,
                 "recentConversation": list(history[-12:]),
                 "userMessage": user_content,
                 **(
@@ -103,13 +106,35 @@ class ModelScreenplayIntentPlanner:
             phase="screenplay_intent_planning",
             repair_instruction=_PLANNER_REPAIR,
             validate=lambda value: _validate_intent(value, stage_command),
-            execution_progress_fields={
-                "executionSummary": "",
-            },
         )
+        intent = ScreenplayIntent.from_mapping(result.value)
+        run_id = result.run_id
+        if intent.action is ScreenplayIntentAction.ANSWER:
+            public = await self._models.run_public_text(
+                runtime=runtime,
+                session_id=session_id,
+                prompt=user_content,
+                system_instruction=_ANSWER_INSTRUCTION,
+                user_payload={
+                    "projectContext": planning_context,
+                    "recentConversation": list(history[-12:]),
+                    "userMessage": user_content,
+                    "answerIntent": {
+                        "instruction": intent.instruction,
+                        "constraints": list(intent.constraints),
+                    },
+                },
+                binding_namespace="screenplay.agent.turn.response",
+                binding_aggregate_id=project_id,
+                binding_command_id=f"{turn_id}:response",
+                phase="screenplay_answer",
+                conversation_turn_id=turn_id,
+            )
+            intent = replace(intent, reply=public.text)
+            run_id = public.run_id
         return PlannedScreenplayIntent(
-            intent=ScreenplayIntent.from_mapping(result.value),
-            run_id=result.run_id,
+            intent=intent,
+            run_id=run_id,
         )
 
 

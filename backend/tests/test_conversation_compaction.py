@@ -34,7 +34,8 @@ from application.conversation_compaction_contracts import (
     ConversationTurn,
 )
 from purra.errors import ContextOverflowError, ContractViolationError
-from purra.model_execution import ManagedModelExecutor
+from purra.api import AgentModelTaskRunner
+from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from purra.model_protocol import generic_capability_snapshot
 from purra.operations import (
     AgentOperationController,
@@ -182,9 +183,16 @@ def _coordinator(
     return ContextCompressionCoordinator(
         ConversationCompactionService(
             repository,
-            ModelBackedConversationSummarizer(ManagedModelExecutor(gateway)),
+            ModelBackedConversationSummarizer(_model_tasks(gateway)),
         ),
         settings,
+    )
+
+
+def _model_tasks(gateway) -> AgentModelTaskRunner:
+    return AgentModelTaskRunner(
+        AgentModelInvocationManager(gateway),
+        ModelInvocationContext(run_id="compaction-test-run"),
     )
 
 
@@ -308,7 +316,7 @@ async def test_application_bounds_semantic_passes_before_emergency_projection():
     coordinator = ContextCompressionCoordinator(
         ConversationCompactionService(
             repository,
-            ModelBackedConversationSummarizer(ManagedModelExecutor(gateway)),
+            ModelBackedConversationSummarizer(_model_tasks(gateway)),
             policy,
         )
     )

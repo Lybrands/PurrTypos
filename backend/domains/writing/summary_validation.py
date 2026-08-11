@@ -231,6 +231,12 @@ def _extract_summary(content: str) -> str:
     return "\n".join(body).strip()
 
 
+def extract_validated_summary(content: str) -> str:
+    """Project the summary field from an already validated Writing result."""
+
+    return _extract_summary(str(content or ""))
+
+
 def _plain_heading(line: str) -> str:
     value = _MARKDOWN_HEADING_PREFIX.sub("", str(line or "").strip())
     value = value.replace("**", "").replace("__", "")

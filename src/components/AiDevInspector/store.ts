@@ -4,6 +4,10 @@ import type {
   AiErrorReportStatus,
   ElectronAPI,
 } from "../../types";
+import {
+  isCanonicalOutputEvent,
+  type CanonicalOutputEvent,
+} from "../../agent-runtime/canonicalOutput.ts";
 
 type AiStreamRequest = Parameters<ElectronAPI["aiChatStream"]>[0];
 export type AiDebugChunk = Parameters<
@@ -92,8 +96,6 @@ export interface AiDebugChildRun {
   model?: string;
   output: string;
   commentary: string;
-  reasoning: string;
-  modelContent: string;
   modelCalls: AiDebugModelCall[];
   tools: AiDebugTool[];
   events: AiDebugEvent[];
@@ -121,8 +123,6 @@ export interface AiDebugRun {
   model?: string;
   output: string;
   commentary: string;
-  reasoning: string;
-  modelContent: string;
   modelCalls: AiDebugModelCall[];
   tools: AiDebugTool[];
   events: AiDebugEvent[];
@@ -308,49 +308,6 @@ function sanitizeValue(value: unknown, key = "", depth = 0): unknown {
   return String(value);
 }
 
-function parseArguments(value: string): unknown {
-  if (!value.trim()) return {};
-  try {
-    return sanitizeValue(JSON.parse(value));
-  } catch {
-    return value;
-  }
-}
-
-function parseToolResult(value: unknown): unknown {
-  if (typeof value !== "string") return sanitizeValue(value);
-  try {
-    return sanitizeValue(JSON.parse(value));
-  } catch {
-    return value;
-  }
-}
-
-function toolResultFailure(value: unknown): {
-  errorCode?: string;
-  errorMessage?: string;
-  diagnostics?: Record<string, unknown>;
-} | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const result = value as Record<string, unknown>;
-  const errorCode = String(result.errorCode ?? result.error_code ?? "").trim();
-  const explicitError = String(result.error ?? "").trim();
-  const failed = result.success === false || Boolean(errorCode) || Boolean(explicitError);
-  if (!failed) return null;
-  const errorMessage = explicitError || String(result.message ?? "").trim();
-  const diagnostics =
-    result.diagnostics &&
-    typeof result.diagnostics === "object" &&
-    !Array.isArray(result.diagnostics)
-      ? result.diagnostics as Record<string, unknown>
-      : undefined;
-  return {
-    errorCode: errorCode || undefined,
-    errorMessage: errorMessage || undefined,
-    diagnostics,
-  };
-}
-
 function sourceLabel(streamId: string): string {
   if (streamId.startsWith("chat-")) return "主对话";
   if (streamId.startsWith("screenplay-")) return "剧本 Agent 对话";
@@ -374,113 +331,91 @@ function updatedTaskType(run: AiDebugRun, chunk: AiDebugChunk): string {
       ? "持久化长任务 · 剧本正文分批创作"
       : `持久化长任务 · ${chunk.longTaskDispatched.kind || "通用任务"}`;
   }
-  if (chunk.taskAdmission?.mode === "durable") {
-    return "持久化长任务 · 正在派发";
-  }
   return run.taskType;
 }
 
 function compactEventPayload(chunk: AiDebugChunk): unknown {
   const payload = sanitizeValue(chunk) as Record<string, unknown>;
-  for (const key of [
-    "delta",
-    "commentaryDelta",
-    "reasoningDelta",
-    "modelContentDelta",
-  ]) {
-    const value = payload[key];
-    if (typeof value === "string" && value.length > 1_200) {
-      payload[key] = `${value.slice(0, 1_200)}…`;
+  const eventPayload = payload.payload;
+  if (eventPayload && typeof eventPayload === "object") {
+    const next = { ...(eventPayload as Record<string, unknown>) };
+    if (typeof next.delta === "string" && next.delta.length > 1_200) {
+      next.delta = `${next.delta.slice(0, 1_200)}…`;
     }
-  }
-  const results = payload.toolResults;
-  if (Array.isArray(results)) {
-    payload.toolResults = results.map((item) => {
-      if (!item || typeof item !== "object") return item;
-      const next = { ...(item as Record<string, unknown>) };
-      if (typeof next.content === "string" && next.content.length > 4_000) {
-        next.content = `${next.content.slice(0, 4_000)}…`;
-      }
-      return next;
-    });
+    payload.payload = next;
   }
   return payload;
 }
 
 function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
+  if (isCanonicalOutputEvent(chunk)) {
+    if (chunk.kind === "provider.content_delta") {
+      return chunk.channel === "final"
+        ? { type: "response", label: "收到 Provider 最终回答增量" }
+        : { type: "commentary", label: "收到 Provider 执行说明增量" };
+    }
+    if (chunk.kind === "operation.started") {
+      return { type: "operation", label: "操作已开始" };
+    }
+    if (chunk.kind === "operation.finished") {
+      return { type: "operation", label: "操作已结束" };
+    }
+    if (chunk.kind === "delegation.event") {
+      return { type: "delegation", label: "子 Agent 事件" };
+    }
+    if (chunk.kind === "run.lifecycle") {
+      return { type: "agent", label: "Agent Run 状态已更新" };
+    }
+    if (chunk.kind === "runtime.event") {
+      const eventType = String(chunk.payload.eventType || "");
+      if (eventType === "approval.requested") {
+        return { type: "approval", label: "工具等待批准" };
+      }
+      if (eventType === "approval.resolved") {
+        const data = chunk.payload.data as Record<string, unknown> | undefined;
+        return {
+          type: "approval",
+          label: `工具审批：${String(data?.status || "resolved")}`,
+        };
+      }
+    }
+    return { type: "event", label: `Agent 事件 · ${chunk.kind}` };
+  }
   if (chunk.error) return { type: "error", label: chunk.error };
   if (chunk.done && chunk.errorReport) {
     return { type: "error", label: chunk.errorReport.errorMessage };
   }
   if (chunk.aborted) return { type: "aborted", label: "流已中止" };
   if (chunk.done) return { type: "done", label: "本轮完成" };
-  if (chunk.toolApprovalRequired) {
-    return { type: "approval", label: "工具等待批准" };
-  }
-  if (chunk.toolApprovalResolved) {
-    return { type: "approval", label: `工具审批：${chunk.toolApprovalResolved.status}` };
-  }
-  if (chunk.toolCallsInProgress) {
-    const names = (chunk.toolCalls ?? []).map((item) => item.function.name).filter(Boolean);
-    return { type: "tool_start", label: `调用工具：${names.join("、") || "未知工具"}` };
-  }
-  if (chunk.toolResults?.length) {
-    return { type: "tool_result", label: `收到 ${chunk.toolResults.length} 个工具结果` };
-  }
-  if (typeof chunk.toolIndexCompleted === "number") {
-    return { type: "tool_complete", label: `第 ${chunk.toolIndexCompleted + 1} 个工具完成` };
-  }
-  if (chunk.agentRunStarted) return { type: "agent", label: "Agent Run 已开始" };
-  if (chunk.agentRunTodosUpdated) return { type: "plan", label: "任务计划已生成" };
-  if (chunk.agentRunTodoUpdated) return { type: "plan", label: "任务步骤已更新" };
-  if (
-    chunk.agentRunCompleted ||
-    chunk.agentRunFailed ||
-    chunk.agentRunBlocked ||
-    chunk.agentRunCanceled
-  ) {
-    return { type: "agent", label: "Agent Run 状态已更新" };
-  }
-  if (chunk.agentDelegationCreated || chunk.agentDelegationUpdated) {
-    return { type: "delegation", label: "子 Agent 状态已更新" };
-  }
-  if (chunk.contextCompaction) return { type: "context", label: "上下文压缩状态已更新" };
-  if (chunk.contextBudget) return { type: "context", label: "上下文预算已更新" };
   if (chunk.longTaskDispatched) {
     return { type: "long_task", label: "持久化长任务已创建" };
   }
-  if (chunk.taskAdmission) {
-    return { type: "task_admission", label: `任务准入：${chunk.taskAdmission.mode}` };
-  }
-  if (chunk.modelInvocation) {
-    const count = Math.max(1, Number(chunk.modelInvocation.count) || 1);
-    const names = chunk.modelInvocation.toolNames?.filter(Boolean) ?? [];
-    return {
-      type: "model_call",
-      label: `大模型调用 ×${count}${names.length ? ` · ${names.length} 个工具` : ""}`,
-    };
-  }
-  if (chunk.commentaryDelta) {
-    return { type: "commentary", label: "收到公开执行说明" };
-  }
-  if (chunk.reasoningDelta) {
-    return { type: "reasoning", label: "收到模型推理增量" };
-  }
-  if (chunk.modelContentDelta) {
-    return { type: "model_content", label: "收到模型原始内容增量" };
-  }
-  if (chunk.delta) return { type: "response", label: "收到最终回答增量" };
   return { type: "event", label: "收到运行事件" };
 }
 
 function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   if (FINAL_STATUSES.has(run.status)) return run.status;
+  if (isCanonicalOutputEvent(chunk)) {
+    if (chunk.kind === "run.lifecycle") {
+      const status = String(chunk.payload.status || "");
+      if (status === "done") return "completed";
+      if (status === "failed" || status === "blocked") return "failed";
+      if (status === "canceled") return "aborted";
+    }
+    if (chunk.kind === "provider.content_delta") {
+      return chunk.channel === "final" ? "responding" : "planning";
+    }
+    if (chunk.kind === "operation.started") {
+      return chunk.payload.kind === "tool" ? "tool" : "thinking";
+    }
+    const runtime = canonicalRuntimeData(chunk);
+    if (runtime?.eventType === "approval.requested") return "awaiting_approval";
+    if (runtime?.eventType === "approval.resolved") return "tool";
+    return run.status;
+  }
   if (chunk.error) return "failed";
   if (chunk.done && chunk.errorReport && !chunk.aborted) return "failed";
   if (chunk.aborted) return "aborted";
-  if (chunk.agentRunCompleted) return "completed";
-  if (chunk.agentRunFailed || chunk.agentRunBlocked) return "failed";
-  if (chunk.agentRunCanceled) return "aborted";
   if (run.status === "dispatched") return run.status;
   if (chunk.longTaskDispatched) return "dispatched";
   if (chunk.done) {
@@ -488,15 +423,6 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       ? "dispatched"
       : "completed";
   }
-  if (chunk.toolApprovalRequired) return "awaiting_approval";
-  if (chunk.toolCallsInProgress || chunk.toolResults?.length) return "tool";
-  if (chunk.reasoningDelta) return "thinking";
-  if (chunk.commentaryDelta) return "planning";
-  if (chunk.delta) return "responding";
-  if (chunk.agentRunTodosUpdated || chunk.agentRunTodoUpdated || chunk.agentRunStarted) {
-    return "planning";
-  }
-  if (chunk.contextBudget || chunk.contextCompaction) return "preparing";
   return run.status;
 }
 
@@ -518,70 +444,44 @@ function upsertTools(
   now: number,
 ): AiDebugTool[] {
   let tools = run.tools;
-  if (chunk.toolCallsInProgress && chunk.toolCalls?.length) {
-    const batchIndex =
-      tools.length === 0 ? 0 : Math.max(...tools.map((tool) => tool.batchIndex)) + 1;
-    const nextTools = chunk.toolCalls.map((call, index): AiDebugTool => ({
-      id: call.id || `${run.id}-${batchIndex}-${index}`,
-      batchIndex,
-      index,
-      name: call.function.name || "未知工具",
-      argumentsText: call.function.arguments || "{}",
-      argumentsValue: parseArguments(call.function.arguments || "{}"),
-      status: "running",
-      cached: false,
-      startedAt: now,
-    }));
-    tools = [...tools, ...nextTools];
-  }
-
-  if (chunk.toolResults?.length) {
-    tools = tools.map((tool) => {
-      const result = chunk.toolResults?.find(
-        (item) =>
-          item.tool_call_id === tool.id ||
-          (!item.tool_call_id && item.name === tool.name && tool.status === "running"),
-      );
-      if (!result) return tool;
-      const parsedResult = parseToolResult(result.content);
-      const failure = toolResultFailure(parsedResult);
-      return {
+  if (isCanonicalOutputEvent(chunk)) {
+    const operationId = String(chunk.payload.operationId || "");
+    if (
+      chunk.kind === "operation.started"
+      && chunk.payload.kind === "tool"
+      && operationId
+    ) {
+      const display = chunk.payload.display as Record<string, unknown> | undefined;
+      const params = display?.labelParams as Record<string, unknown> | undefined;
+      tools = [...tools, {
+        id: operationId,
+        batchIndex: tools.length,
+        index: 0,
+        name: String(params?.toolName || "工具操作"),
+        argumentsText: "{}",
+        argumentsValue: {},
+        status: "running",
+        cached: false,
+        startedAt: Date.parse(String(chunk.payload.startedAt || chunk.occurredAt)),
+      }];
+    } else if (chunk.kind === "operation.finished" && operationId) {
+      const status = String(chunk.payload.status || "");
+      tools = tools.map((tool) => tool.id === operationId ? {
         ...tool,
-        result: parsedResult,
-        status: failure ? "failed" as const : tool.status,
-        completedAt: failure ? tool.completedAt ?? now : tool.completedAt,
-        errorCode: failure?.errorCode ?? tool.errorCode,
-        errorMessage: failure?.errorMessage ?? tool.errorMessage,
-        diagnostics: failure?.diagnostics ?? tool.diagnostics,
-      };
-    });
-  }
-
-  if (typeof chunk.toolIndexCompleted === "number") {
-    const batchIndex =
-      tools.length === 0 ? -1 : Math.max(...tools.map((tool) => tool.batchIndex));
-    const failed = Boolean(
-      chunk.toolErrorCode ||
-      ["failed", "rejected", "canceled"].includes(chunk.toolOutcome || ""),
-    );
-    tools = tools.map((tool) => {
-      const matches = chunk.toolCallId
-        ? tool.id === chunk.toolCallId
-        : tool.batchIndex === batchIndex && tool.index === chunk.toolIndexCompleted;
-      if (!matches) return tool;
-      return {
+        status: status === "succeeded" ? "completed" : "failed",
+        completedAt: Date.parse(
+          String(chunk.payload.finishedAt || chunk.occurredAt),
+        ),
+        outcome: status,
+        errorCode: String(chunk.payload.errorCode || "") || undefined,
+      } : tool);
+    } else if (chunk.kind === "tool.event" && operationId) {
+      tools = tools.map((tool) => tool.id === operationId ? {
         ...tool,
-        status: failed ? "failed" as const : "completed" as const,
-        cached: chunk.toolFromCache === true,
-        completedAt: now,
-        outcome: chunk.toolOutcome ?? tool.outcome,
-        errorCode: chunk.toolErrorCode ?? tool.errorCode,
-        exceptionType: chunk.toolExceptionType ?? tool.exceptionType,
-      };
-    });
-  }
-
-  if (chunk.error) {
+        name: String(chunk.payload.toolName || tool.name),
+      } : tool);
+    }
+  } else if (chunk.error) {
     tools = tools.map((tool) =>
       tool.status === "running"
         ? { ...tool, status: "failed" as const, completedAt: now }
@@ -596,44 +496,32 @@ function appendModelCall(
   chunk: AiDebugChunk,
   now: number,
 ): AiDebugModelCall[] {
-  const invocation = chunk.modelInvocation;
-  if (!invocation) return run.modelCalls;
-  const toolNames = [...new Set(
-    (invocation.toolNames ?? [])
-      .map((name) => String(name || "").trim())
-      .filter(Boolean),
-  )];
+  if (
+    !isCanonicalOutputEvent(chunk)
+    || chunk.kind !== "operation.started"
+    || chunk.payload.kind !== "model"
+  ) return run.modelCalls;
+  const operationId = String(chunk.payload.operationId || "");
+  if (!operationId || run.modelCalls.some((call) => call.id === operationId)) {
+    return run.modelCalls;
+  }
+  const display = chunk.payload.display as Record<string, unknown> | undefined;
+  const parameters = display?.labelParams as Record<string, unknown> | undefined;
   return [...run.modelCalls, {
-    id: `${run.id}-model-${run.modelCalls.length + 1}`,
+    id: operationId,
     at: now,
-    phase: String(invocation.phase || "generation"),
-    count: Math.max(1, Number(invocation.count) || 1),
-    toolNames,
-    toolChoice: invocation.toolChoice,
-    round: invocation.round,
-    logicalRound: invocation.logicalRound,
-    attempt: invocation.attempt,
-    revision: invocation.revision,
-    judgeIndex: invocation.judgeIndex,
-    parameters: invocation.parameters
-      ? sanitizeValue(invocation.parameters) as Record<string, unknown>
+    phase: "model",
+    count: 1,
+    toolNames: [],
+    parameters: parameters
+      ? sanitizeValue(parameters) as Record<string, unknown>
       : undefined,
   }];
 }
 
 function getAgentRunId(chunk: AiDebugChunk): string | undefined {
-  return (
-    chunk.agentRunStarted?.runId ||
-    chunk.agentRunTodosUpdated?.runId ||
-    chunk.agentRunTodoUpdated?.runId ||
-    chunk.agentRunCompleted?.runId ||
-    chunk.agentRunFailed?.runId ||
-    chunk.agentRunBlocked?.runId ||
-    chunk.agentRunCanceled?.runId ||
-    chunk.agentDelegationCreated?.runId ||
-    chunk.agentDelegationUpdated?.runId ||
-    chunk.longTaskDispatched?.runId ||
-    chunk.taskAdmission?.runId
+  return isCanonicalOutputEvent(chunk) ? chunk.runId : (
+    chunk.longTaskDispatched?.runId
   );
 }
 
@@ -647,16 +535,6 @@ function delegationStatus(
   if (status === "running" || status === "claimed") return "thinking";
   if (status === "queued") return "preparing";
   return current;
-}
-
-function childChunkStatus(
-  child: AiDebugChildRun,
-  chunk: AiDebugChunk,
-): AiDebugRunStatus {
-  if (chunk.agentRunCompleted) return "completed";
-  if (chunk.agentRunFailed || chunk.agentRunBlocked || chunk.error) return "failed";
-  if (chunk.agentRunCanceled || chunk.aborted) return "aborted";
-  return nextStatus(child as unknown as AiDebugRun, chunk);
 }
 
 function delegationMetadata(value: unknown): {
@@ -699,17 +577,15 @@ function updateChildRuns(
   chunk: AiDebugChunk,
   now: number,
 ): AiDebugChildRun[] {
-  const envelope = chunk.agentSubRunEvent;
-  const lifecycle = delegationMetadata(
-    chunk.agentDelegationCreated ?? chunk.agentDelegationUpdated,
-  );
-  const metadata = envelope
-    ? delegationMetadata({
-        ...envelope,
-        status: undefined,
-      })
-    : lifecycle;
+  if (
+    !isCanonicalOutputEvent(chunk)
+    || chunk.kind !== "delegation.event"
+  ) return run.childRuns;
+  const metadata = delegationMetadata(chunk.payload);
   if (!metadata) return run.childRuns;
+  const childEvent = isCanonicalOutputEvent(chunk.payload.event)
+    ? chunk.payload.event
+    : null;
   const index = run.childRuns.findIndex(
     (item) => item.delegationId === metadata.delegationId,
   );
@@ -729,8 +605,6 @@ function updateChildRuns(
     updatedAt: now,
     output: "",
     commentary: "",
-    reasoning: "",
-    modelContent: "",
     modelCalls: [],
     tools: [],
     events: [],
@@ -746,42 +620,39 @@ function updateChildRuns(
     attempt: metadata.attempt || base.attempt,
     updatedAt: now,
   };
-  if (envelope?.chunk) {
-    const childChunk = envelope.chunk as AiDebugChunk;
-    const status = childChunkStatus(next, childChunk);
+  if (childEvent) {
+    const status = nextStatus(next as unknown as AiDebugRun, childEvent);
     const terminal = TERMINAL_STATUSES.has(status);
+    const delta = childEvent.kind === "provider.content_delta"
+      ? String(childEvent.payload.delta || "")
+      : "";
     next = {
       ...next,
       status,
       finishedAt: terminal ? next.finishedAt ?? now : next.finishedAt,
-      childRunId: envelope.childRunId || getAgentRunId(childChunk) || next.childRunId,
-      model: childChunk.model || next.model,
-      output: next.output + (childChunk.delta || ""),
-      commentary: next.commentary + (childChunk.commentaryDelta || ""),
-      reasoning: next.reasoning + (childChunk.reasoningDelta || ""),
-      modelContent: next.modelContent + (childChunk.modelContentDelta || ""),
-      modelCalls: appendModelCall(next as unknown as AiDebugRun, childChunk, now),
-      tools: upsertTools(next as unknown as AiDebugRun, childChunk, now),
-      events: appendEvent(next as unknown as AiDebugRun, childChunk, now),
+      childRunId: childEvent.runId || next.childRunId,
+      output: next.output + (childEvent.channel === "final" ? delta : ""),
+      commentary: next.commentary + (
+        childEvent.channel === "commentary" ? delta : ""
+      ),
+      modelCalls: appendModelCall(
+        next as unknown as AiDebugRun,
+        childEvent,
+        now,
+      ),
+      tools: upsertTools(next as unknown as AiDebugRun, childEvent, now),
+      events: appendEvent(next as unknown as AiDebugRun, childEvent, now),
       eventCount: next.eventCount + 1,
-      contextBudget: childChunk.contextBudget
-        ? {
-            ...(next.contextBudget as Record<string, unknown> | undefined),
-            ...childChunk.contextBudget,
-          }
-        : next.contextBudget,
-      contextCompaction: childChunk.contextCompaction ?? next.contextCompaction,
-      error: childChunk.error || childChunk.errorReport?.errorMessage || next.error,
     };
-  } else if (lifecycle) {
-    const status = delegationStatus(lifecycle.status, next.status);
+  } else {
+    const status = delegationStatus(metadata.status, next.status);
     next = {
       ...next,
       status,
       finishedAt: TERMINAL_STATUSES.has(status)
         ? next.finishedAt ?? now
         : next.finishedAt,
-      error: lifecycle.error || next.error,
+      error: metadata.error || next.error,
     };
   }
   if (index < 0) return [...run.childRuns, next];
@@ -797,6 +668,34 @@ function upsertDebugDelegation(items: unknown[], value: unknown): unknown[] {
   const sanitized = sanitizeValue(value);
   if (index < 0) return [...items, sanitized];
   return items.map((item, itemIndex) => itemIndex === index ? sanitized : item);
+}
+
+function canonicalRuntimeData(event: CanonicalOutputEvent | null): {
+  eventType: string;
+  data: Record<string, unknown>;
+} | null {
+  if (event?.kind !== "runtime.event") return null;
+  const eventType = String(event.payload.eventType || "");
+  const data = event.payload.data;
+  if (!eventType || !data || typeof data !== "object" || Array.isArray(data)) {
+    return null;
+  }
+  return { eventType, data: data as Record<string, unknown> };
+}
+
+function canonicalModel(event: CanonicalOutputEvent | null): string | undefined {
+  if (event?.kind !== "operation.started" || event.payload.kind !== "model") {
+    return undefined;
+  }
+  const display = event.payload.display;
+  if (!display || typeof display !== "object" || Array.isArray(display)) {
+    return undefined;
+  }
+  const params = (display as Record<string, unknown>).labelParams;
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return undefined;
+  }
+  return String((params as Record<string, unknown>).model || "") || undefined;
 }
 
 export function startAiDebugRun(
@@ -825,8 +724,6 @@ export function startAiDebugRun(
     model: request.options?.model,
     output: "",
     commentary: "",
-    reasoning: "",
-    modelContent: "",
     modelCalls: [],
     tools: [],
     events: [{
@@ -917,12 +814,9 @@ export function hydrateAiDebugRunSnapshot(data: {
         meta: { recovered: true },
       },
       model: snapshot.run.provenance.modelName ?? undefined,
-      // Raw screenplay deltas are not part of the Run snapshot event stream.
-      // Preserve any already observed text while rebuilding structured state.
+      // Preserve Provider-authored public text already observed before detach.
       output: existing?.output ?? '',
       commentary: existing?.commentary ?? '',
-      reasoning: existing?.reasoning ?? '',
-      modelContent: existing?.modelContent ?? '',
       modelCalls: [],
       tools: [],
       events: [{
@@ -992,31 +886,42 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
     const status = nextStatus(run, chunk);
     const terminal = TERMINAL_STATUSES.has(status);
     const runId = getAgentRunId(chunk);
-    const delegation =
-      chunk.agentDelegationCreated ?? chunk.agentDelegationUpdated;
-    const approval =
-      chunk.toolApprovalRequired ?? chunk.toolApprovalResolved;
+    const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
+    const delta = canonicalEvent?.kind === "provider.content_delta"
+      ? String(canonicalEvent.payload.delta || "")
+      : "";
+    const runtimeData = canonicalRuntimeData(canonicalEvent);
+    const delegation = canonicalEvent?.kind === "delegation.event"
+      ? canonicalEvent.payload
+      : null;
+    const approval = runtimeData?.eventType.startsWith("approval.")
+      ? { eventType: runtimeData.eventType, ...runtimeData.data }
+      : null;
     return {
       ...run,
       status,
       taskType: updatedTaskType(run, chunk),
       updatedAt: now,
       finishedAt: terminal ? run.finishedAt ?? now : run.finishedAt,
-      model: chunk.model || run.model,
-      output: run.output + (chunk.delta || ""),
-      commentary: run.commentary + (chunk.commentaryDelta || ""),
-      reasoning: run.reasoning + (chunk.reasoningDelta || ""),
-      modelContent: run.modelContent + (chunk.modelContentDelta || ""),
+      model: canonicalModel(canonicalEvent) || chunk.model || run.model,
+      output: run.output + (canonicalEvent?.channel === "final" ? delta : ""),
+      commentary: run.commentary + (
+        canonicalEvent?.channel === "commentary" ? delta : ""
+      ),
       modelCalls: appendModelCall(run, chunk, now),
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
       eventCount: run.eventCount + 1,
-      contextBudget: chunk.contextBudget
-        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...chunk.contextBudget }
+      contextBudget: runtimeData?.eventType.startsWith("context.")
+        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
         : run.contextBudget,
-      contextCompaction: chunk.contextCompaction ?? run.contextCompaction,
+      contextCompaction: runtimeData?.eventType.startsWith("conversation.compaction.")
+        ? runtimeData.data
+        : run.contextCompaction,
       agentRunId: runId || run.agentRunId,
-      agentPlan: chunk.agentRunTodosUpdated ?? chunk.agentRunTodoUpdated ?? run.agentPlan,
+      agentPlan: runtimeData?.eventType.startsWith("run.todo")
+        ? runtimeData.data
+        : run.agentPlan,
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
@@ -1053,12 +958,6 @@ export function recordScreenplayAiDebugChunk(data: {
     }, {
       turnId: data.turnId,
     });
-    recordAiDebugChunk(streamId, {
-      agentRunStarted: {
-        runId: data.runId,
-        status: "running",
-      },
-    });
   }
   recordAiDebugChunk(streamId, data.chunk);
 }
@@ -1088,32 +987,43 @@ export function recordAiDebugRunContinuation(
                 chunk,
               );
     const terminal = TERMINAL_STATUSES.has(status);
-    const delegation =
-      chunk.agentDelegationCreated ?? chunk.agentDelegationUpdated;
-    const approval =
-      chunk.toolApprovalRequired ?? chunk.toolApprovalResolved;
+    const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
+    const delta = canonicalEvent?.kind === "provider.content_delta"
+      ? String(canonicalEvent.payload.delta || "")
+      : "";
+    const runtimeData = canonicalRuntimeData(canonicalEvent);
+    const delegation = canonicalEvent?.kind === "delegation.event"
+      ? canonicalEvent.payload
+      : null;
+    const approval = runtimeData?.eventType.startsWith("approval.")
+      ? { eventType: runtimeData.eventType, ...runtimeData.data }
+      : null;
     return {
       ...run,
       status,
       taskType: updatedTaskType(run, chunk),
       updatedAt: now,
       finishedAt: terminal ? run.finishedAt ?? now : undefined,
-      model: chunk.model || run.model,
-      output: run.output + (chunk.delta || ""),
-      commentary: run.commentary + (chunk.commentaryDelta || ""),
-      reasoning: run.reasoning + (chunk.reasoningDelta || ""),
-      modelContent: run.modelContent + (chunk.modelContentDelta || ""),
+      model: canonicalModel(canonicalEvent) || chunk.model || run.model,
+      output: run.output + (canonicalEvent?.channel === "final" ? delta : ""),
+      commentary: run.commentary + (
+        canonicalEvent?.channel === "commentary" ? delta : ""
+      ),
       modelCalls: appendModelCall(run, chunk, now),
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
       eventCount: run.eventCount + 1,
-      contextBudget: chunk.contextBudget
-        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...chunk.contextBudget }
+      contextBudget: runtimeData?.eventType.startsWith("context.")
+        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
         : run.contextBudget,
-      contextCompaction: chunk.contextCompaction ?? run.contextCompaction,
+      contextCompaction: runtimeData?.eventType.startsWith("conversation.compaction.")
+        ? runtimeData.data
+        : run.contextCompaction,
       // Never replace the orchestration root with the current child Run id.
       agentRunId: rootAgentRunId,
-      agentPlan: chunk.agentRunTodosUpdated ?? chunk.agentRunTodoUpdated ?? run.agentPlan,
+      agentPlan: runtimeData?.eventType.startsWith("run.todo")
+        ? runtimeData.data
+        : run.agentPlan,
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,

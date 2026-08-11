@@ -4,7 +4,10 @@ import type { AiSubAgentActivity, ChatMessage } from "../../hooks/chat.types";
 import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import { buildAssistantTimeline } from "../ChatMessageList/assistantTimeline";
-import { presentableStructuredResponse } from "./presentation";
+import {
+  buildSubAgentTimelineItems,
+  presentableStructuredResponse,
+} from "./presentation";
 
 const STATUS_LABELS: Record<AiAgentDelegation["status"], string> = {
   queued: "等待中",
@@ -47,14 +50,19 @@ export default function SubAgentStatusList({
           const activityMessage = activity?.message
             ? presentableChildMessage(activity.message)
             : undefined;
-          const timeline = activityMessage
+          const rawTimeline = activityMessage
             ? buildAssistantTimeline(activityMessage, {
                 messageIndex: itemIndex,
                 isStreaming: active,
                 isLastAssistant: true,
                 loading: active,
+                allowStreamingText: true,
               })
             : [];
+          const timeline = buildSubAgentTimelineItems(
+            rawTimeline,
+            `delegation-${item.delegationId}`,
+          );
           return (
             <div
               className={`work-log__subagent work-log__subagent--${item.status}`}
@@ -93,6 +101,10 @@ export default function SubAgentStatusList({
                         completedToolCount={part.isLive
                           ? part.segment.completedToolCount ?? 0
                           : part.segment.labels.length}
+                        itemDurationsMs={part.segment.itemDurationsMs}
+                        activeItemStartedAt={part.isLive
+                          ? part.segment.activeItemStartedAt
+                          : undefined}
                       />
                     );
                   }

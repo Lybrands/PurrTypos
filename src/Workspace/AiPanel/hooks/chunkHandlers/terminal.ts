@@ -3,15 +3,28 @@ import { normalizeApiProvider } from "../../../../modelCatalog";
 import { type AiTaskPlan, type ChatMessage } from "../chat.types";
 import {
   EMPTY_RESPONSE_MESSAGE,
-  synthesizeAssistantTextFromToolSegments,
 } from "../chatHistory";
-import { finalizeCommentaryBlock } from "./streaming";
 import type { ChunkHandler } from "./types";
+import { presentAgentRunError } from "../../../../agent-runtime/agentErrorPresentation";
 
 const getServices = () => import('@/services').then((module) => module.services)
 
 export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
 export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
+
+export const handleRunResultTerminal: ChunkHandler = (chunk, ctx) => {
+  if (!chunk.done || !chunk.runResult) return;
+  const { status, errorCode } = chunk.runResult;
+  if (status === "failed" || status === "blocked") {
+    return handleError({
+      ...chunk,
+      error: presentAgentRunError(status, errorCode),
+    }, ctx);
+  }
+  if (status === "canceled") {
+    return handleDone({ ...chunk, aborted: true }, ctx);
+  }
+};
 
 /**
  * 错误终态：保留公开执行说明和工具过程，并附上终止原因。
@@ -20,16 +33,8 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
   if (!chunk.error) return;
   const { acc } = ctx;
   const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
-  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
-  const finalCommentary = (acc.commentary || "").trim();
-  let savedCommentaryBlocks = acc.commentaryBlocks ?? [];
-  let savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
-  if (finalCommentary) {
-    const finalized = finalizeCommentaryBlock(ctx, finalCommentary);
-    savedCommentaryBlocks = finalized.blocks;
-    savedCommentaryDurations = finalized.durations;
-    acc.commentary = "";
-  }
+  const savedCommentaryBlocks = acc.commentaryBlocks ?? [];
+  const savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
   ctx.flushCommits();
 
   if (ctx.isVisibleSession()) {
@@ -61,6 +66,7 @@ export const handleError: ChunkHandler = (chunk, ctx) => {
         content: hasInspectableProcess
           ? acc.response || cm.content || ""
           : merged.content ?? cm.content,
+        streamingContent: undefined,
         commentary: "",
         commentaryStartedAt: undefined,
         commentaryBlocks: savedCommentaryBlocks.length
@@ -94,39 +100,21 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done) return;
   const { acc } = ctx;
   const durationMs = Math.max(0, Math.round(performance.now() - acc.turnStartedAt));
-  acc.toolCallSegments = finalizeToolDurations(acc.toolCallSegments);
   ctx.flushCommits();
   if (chunk.model) acc.model = chunk.model;
   if (chunk.aborted) {
     acc.taskPlan = markTaskPlanAborted(acc.taskPlan);
   }
-  const finalModelResponse = acc.response || acc.pendingFinalResponse || "";
+  const finalModelResponse = acc.response || "";
   const hasVisibleModelResponse = Boolean(finalModelResponse.trim());
   const finalResponseExpected = chunk.finalResponseExpected !== false;
   const emptyResponse = (
     finalResponseExpected && !chunk.aborted && !hasVisibleModelResponse
   );
 
-  const finalCommentary = (acc.commentary || "").trim();
-  let savedCommentaryBlocks = acc.commentaryBlocks ?? [];
-  let savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
-  if (finalCommentary) {
-    const finalized = finalizeCommentaryBlock(ctx, finalCommentary);
-    savedCommentaryBlocks = finalized.blocks;
-    savedCommentaryDurations = finalized.durations;
-  }
-
-  let resolvedAssistantContent = !finalResponseExpected
-    ? finalModelResponse
-    : emptyResponse
-    ? EMPTY_RESPONSE_MESSAGE
-    : finalModelResponse ||
-      synthesizeAssistantTextFromToolSegments({
-          role: "assistant",
-          content: "",
-          toolCallSegments: acc.toolCallSegments,
-        } as ChatMessage).trim() ||
-      (chunk.aborted ? MANUAL_ABORT_MESSAGE : "");
+  const savedCommentaryBlocks = acc.commentaryBlocks ?? [];
+  const savedCommentaryDurations = acc.commentaryDurationsMs ?? [];
+  let resolvedAssistantContent = finalModelResponse;
 
   if (ctx.isVisibleSession()) {
     ctx.setConversations((prev) => {
@@ -144,28 +132,15 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
         const accContent = finalModelResponse.trim();
         let finalContent = currentContent;
         if (!currentContent.trim()) {
-          if (!finalResponseExpected) {
+          if (accContent) {
             finalContent = finalModelResponse;
-          } else if (emptyResponse) {
-            finalContent = EMPTY_RESPONSE_MESSAGE;
-          } else if (accContent) {
-            finalContent = finalModelResponse;
-          } else {
-            const synthesized =
-              synthesizeAssistantTextFromToolSegments(cm).trim();
-            if (synthesized) {
-              finalContent = synthesized;
-            } else {
-              finalContent = chunk.aborted
-                ? MANUAL_ABORT_MESSAGE
-                : "内容同步中。";
-            }
           }
         }
         resolvedAssistantContent = finalContent;
         next[next.length - 1] = {
           ...last,
           content: finalContent,
+          streamingContent: undefined,
           model: acc.model || undefined,
           durationMs,
           turnStartedAt: undefined,
@@ -175,19 +150,22 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           commentaryDurationsMs: commentaryDurationsMs?.length
             ? commentaryDurationsMs
             : undefined,
+          toolCallSegments: acc.toolCallSegments ?? cm.toolCallSegments,
           taskPlan:
             acc.taskPlan ??
             (chunk.aborted ? markTaskPlanAborted(cm.taskPlan) : cm.taskPlan),
           longTaskId: acc.longTaskId ?? cm.longTaskId,
           termination:
-            chunk.aborted && hasVisibleModelResponse
+            chunk.aborted
               ? MANUAL_ABORT_MESSAGE
               : undefined,
           toolCalling: false,
           errorReport: emptyResponse
             ? chunk.errorReport ?? cm.errorReport
             : cm.errorReport,
-          ...(emptyResponse ? { isError: true } : {}),
+          ...(emptyResponse
+            ? { error: EMPTY_RESPONSE_MESSAGE, isError: false }
+            : {}),
         };
       }
       return next;
@@ -205,7 +183,6 @@ export const handleDone: ChunkHandler = (chunk, ctx) => {
           : "completed",
   );
   acc.response = resolvedAssistantContent;
-  acc.pendingFinalResponse = undefined;
 
   if (ctx.persistConversation !== false) {
     saveConversationIfNeeded(ctx, savedCommentaryBlocks, savedCommentaryDurations);
@@ -247,7 +224,8 @@ function saveConversationIfNeeded(
         acc.taskPlan ||
         savedCommentaryBlocks.length > 0 ||
         (acc.toolCallSegments?.length ?? 0) > 0 ||
-        acc.longTaskId,
+        acc.longTaskId ||
+        acc.canonicalOutput,
     );
   if (!shouldSave) return;
 
@@ -320,21 +298,6 @@ function saveConversationIfNeeded(
           : "本轮对话未能写入本地库（保存接口异常）。",
       );
     });
-}
-
-function finalizeToolDurations(
-  segments: ChatMessage["toolCallSegments"],
-): ChatMessage["toolCallSegments"] {
-  if (!segments?.length) return segments;
-  const now = performance.now();
-  return segments.map((segment) => {
-    if (segment.durationMs != null || segment.startedAt == null) return segment;
-    const { startedAt, ...rest } = segment;
-    return {
-      ...rest,
-      durationMs: Math.max(0, Math.round(now - startedAt)),
-    };
-  });
 }
 
 function findConversationMessageIndex(

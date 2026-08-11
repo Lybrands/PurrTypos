@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,7 +14,6 @@ from purra.artifacts import ArtifactStatus
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
-    AgentRunResult,
     MessageOrigin,
     MessageRole,
     RunBinding,
@@ -24,8 +22,12 @@ from purra.contracts import (
     RunStatus,
 )
 from purra.errors import ModelGatewayError
-from purra.events import AgentEvent, CoreEventType
 from purra.model_protocol import resolve_invocation_output_limit
+from purra.output import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
+)
 
 from application.model_runtime import (
     model_request_from_runtime,
@@ -38,11 +40,9 @@ from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from domains.screenplay_agent.candidate_projection import (
     candidate_completion_projection,
 )
-from application.screenplay_agent_stream import ScreenplayAgentChunkStore
-from application.screenplay_progress_stream import visible_execution_progress
-from application.sse_mapping import core_event_to_sse_chunk
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from infrastructure.screenplay import ScreenplayCandidateArtifacts
+from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +54,8 @@ class ScreenplayCandidateRunResult:
 class ScreenplayToolCallingService:
     def __init__(self, db, *, composition) -> None:
         self._composition = composition
-        self._chunks = ScreenplayAgentChunkStore(db)
         self._candidates = ScreenplayCandidateArtifacts(db)
+        self._chunks = ScreenplayAgentChunkStore(db)
 
     async def run_candidate(
         self,
@@ -125,71 +125,41 @@ class ScreenplayToolCallingService:
                     host_candidate_template=host_candidate_template,
                 ),
             ),
+            response_transaction_policy=ResponseTransactionPolicy(
+                mode=ResponseTransactionMode.VALIDATED_RESULT,
+                public_presentation=PublicPresentationMode.NONE,
+            ),
         )
         api_key = runtime.apiKey.get_secret_value()
         core = self._composition.create_core_for_request(
             request,
             api_key,
         )
-        external_signal = signal or asyncio.Event()
-        execution = self._composition.create_execution_session(external_signal)
-        stream = core.run(request, options=options, signal=execution.signal)
-        result: AgentRunResult | None = None
-        run_id: str | None = None
-        public_progress_seen = False
-        host_progress = visible_execution_progress(
-            (host_candidate_template or {}).get("processSummary")
-        )
-        host_progress_emitted = False
+        handle = None
+        cancel_watcher: asyncio.Task[None] | None = None
         try:
-            async for update in stream:
-                run_id = update.run_id or run_id
-                if run_id:
-                    await execution.bind(run_id)
-                if isinstance(update, AgentEvent):
-                    self._composition.observe_event(update)
-                    chunk = _screenplay_chunk(
-                        update,
-                        domain_context,
-                        include_candidate_progress=not public_progress_seen,
-                    )
-                    if chunk:
-                        await self._chunks.append(
-                            project_id=domain_context.project_id,
-                            session_id=session_id,
-                            turn_id=conversation_turn_id,
-                            task_id=domain_context.task_id,
-                            run_id=run_id,
-                            chunk=chunk,
-                        )
-                        public_progress_seen = public_progress_seen or bool(
-                            str(chunk.get("commentaryDelta") or "").strip()
-                        )
-                    if (
-                        host_progress
-                        and not host_progress_emitted
-                        and update.type == CoreEventType.RUN_STARTED
-                    ):
-                        await self._chunks.append(
-                            project_id=domain_context.project_id,
-                            session_id=session_id,
-                            turn_id=conversation_turn_id,
-                            task_id=domain_context.task_id,
-                            run_id=run_id,
-                            chunk={"commentaryDelta": f"{host_progress}\n"},
-                        )
-                        host_progress_emitted = True
-                        public_progress_seen = True
-                else:
-                    result = update
+            handle = await core.submit(request, options=options)
+            output_drain = asyncio.create_task(self._drain_output(
+                handle,
+                project_id=domain_context.project_id,
+                session_id=session_id,
+                turn_id=conversation_turn_id,
+                task_id=domain_context.task_id,
+            ))
+            if signal is not None and hasattr(signal, "wait"):
+                cancel_watcher = asyncio.create_task(
+                    _cancel_on_signal(signal, handle)
+                )
+            result = await handle.wait()
+            await output_drain
         finally:
-            with suppress(Exception):
-                await stream.aclose()
-            if run_id:
-                await self._composition.release_run(run_id)
-            await execution.close()
-        if result is None or run_id is None:
-            raise RuntimeError("screenplay tool Run returned no terminal result")
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
+            self._composition.release_core(core)
+        if handle is None:
+            raise RuntimeError("screenplay tool Run returned no handle")
+        run_id = handle.run_id
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError
         if result.status is not RunStatus.DONE:
@@ -224,65 +194,32 @@ class ScreenplayToolCallingService:
         candidate = public_candidate
         return ScreenplayCandidateRunResult(run_id=run_id, candidate=candidate)
 
-
-def _screenplay_chunk(
-    event: AgentEvent,
-    context: ScreenplayAgentDomainContext,
-    *,
-    include_candidate_progress: bool = True,
-) -> dict[str, Any] | None:
-    # Candidate payload and the model's short terminal acknowledgement are not
-    # conversation content. Commentary, reasoning diagnostics and tool events
-    # remain canonical PurrA chunks.
-    chunk = core_event_to_sse_chunk(event)
-    if not chunk:
-        return None
-    completed = chunk.get("agentRunCompleted")
-    if isinstance(completed, dict):
-        # A checkpoint Run is internal execution progress, not the task's
-        # formal answer. The task publishes one conclusion only after every
-        # durable unit has completed.
-        completed.pop("finalResponse", None)
-    calls = chunk.get("toolCalls")
-    if isinstance(calls, list):
-        progress_items: list[str] = []
-        for call in calls:
-            function = call.get("function") if isinstance(call, dict) else None
-            if (
-                isinstance(function, dict)
-                and function.get("name") == "writeScreenplayCandidatePart"
-            ):
-                if include_candidate_progress:
-                    progress = _candidate_execution_progress(
-                        function.get("arguments")
-                    )
-                    if progress and progress not in progress_items:
-                        progress_items.append(progress)
-                function["arguments"] = json.dumps({
-                    "partType": context.expected_part_type,
-                    "partKey": context.expected_part_key,
-                    "content": "<candidate payload omitted>",
-                }, ensure_ascii=False, separators=(",", ":"))
-        if progress_items:
-            chunk["commentaryDelta"] = "\n".join(progress_items) + "\n"
-    return chunk
+    async def _drain_output(
+        self,
+        handle,
+        *,
+        project_id: str,
+        session_id: int,
+        turn_id: str,
+        task_id: str,
+    ) -> None:
+        subscription = handle.subscribe(after_sequence=0)
+        try:
+            async for event in subscription:
+                await self._chunks.append_output_event(
+                    project_id=project_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    event=event,
+                )
+        finally:
+            await subscription.aclose()
 
 
-def _candidate_execution_progress(arguments: object) -> str:
-    try:
-        decoded = json.loads(str(arguments or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ""
-    if not isinstance(decoded, Mapping):
-        return ""
-    candidate = decoded.get("candidate")
-    if not isinstance(candidate, Mapping):
-        return ""
-    for field in ("executionSummary", "processSummary"):
-        progress = visible_execution_progress(candidate.get(field))
-        if progress:
-            return progress
-    return ""
+async def _cancel_on_signal(signal, handle) -> None:
+    await signal.wait()
+    await handle.cancel("screenplay_agent_canceled")
 
 
 def _provenance(runtime, payload: Mapping[str, Any], window: int) -> RunProvenance:

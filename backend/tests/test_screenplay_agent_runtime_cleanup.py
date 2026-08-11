@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+
+from database.connection import DatabaseConnection
+from database.crud.screenplay_agent_runtime_cleanup import (
+    CleanupApplyInjectedFailure,
+    apply_cleanup,
+    build_cleanup_plan,
+)
+
+
+@pytest_asyncio.fixture
+async def cleanup_db(tmp_path: Path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        await _seed(db)
+        yield db
+    finally:
+        await db.close()
+
+
+async def _seed(db: DatabaseConnection) -> None:
+    for project_id in ("project-target", "project-other"):
+        await db.execute(
+            "INSERT INTO screenplay_projects (id, title) VALUES (?, ?)",
+            [project_id, project_id],
+        )
+    await db.execute(
+        "INSERT INTO ai_sessions (id, title, screenplay_project_id) "
+        "VALUES (10, 'target', 'project-target'), (20, 'other', 'project-other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_conversations (id, session_id, prompt, response) VALUES "
+        "(100, 10, 'private target prompt', 'private target response'), "
+        "(200, 20, 'private other prompt', 'private other response')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, conversation_id, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, root_run_id) VALUES "
+        "('run-target', 10, 100, 'target', 'screenplay.agent.turn', "
+        "'project-target', 'turn-target', 'run-target'), "
+        "('run-child', NULL, NULL, 'child', 'screenplay.agent.task', "
+        "'project-target', 'task-target:unit-1', 'run-target'), "
+        "('run-other', 20, 200, 'other', 'screenplay.agent.turn', "
+        "'project-other', 'turn-other', 'run-other')"
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET parent_run_id = 'run-target' "
+        "WHERE id = 'run-child'"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, user_content, "
+        "planner_run_id, operation_id) VALUES "
+        "('turn-target', 'project-target', 10, 'command-target', 'private', "
+        "'run-target', 'operation-target'), "
+        "('turn-other', 'project-other', 20, 'command-other', 'private', "
+        "'run-other', 'operation-other')"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_agent_operations "
+        "(id, turn_id, project_id, session_id, long_task_id, target_role, "
+        "manifest_digest) VALUES "
+        "('operation-target', 'turn-target', 'project-target', 10, "
+        "'task-target', 'review', 'digest-target'), "
+        "('operation-other', 'turn-other', 'project-other', 20, "
+        "'task-other', 'review', 'digest-other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, created_by_run_id) VALUES "
+        "('work-target', 'purrtypos.screenplay', 'screenplay.review', "
+        "'project-target', 'run-target'), "
+        "('work-other', 'purrtypos.screenplay', 'screenplay.review', "
+        "'project-other', 'run-other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "total_units) VALUES "
+        "('task-target', 'work-target', 'purrtypos.screenplay', "
+        "'screenplay.review', 'project-target', 'run-target', 1), "
+        "('task-other', 'work-other', 'purrtypos.screenplay', "
+        "'screenplay.review', 'project-other', 'run-other', 1)"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, run_id) VALUES "
+        "('task-target', 'unit-1', 'unit-1', 1, 'run-child'), "
+        "('task-other', 'unit-1', 'unit-1', 1, 'run-other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_work_item_runs "
+        "(work_item_id, run_id, relation, work_item_revision) VALUES "
+        "('work-target', 'run-target', 'created', 1), "
+        "('work-other', 'run-other', 'created', 1)"
+    )
+    for index in range(4):
+        await db.execute(
+            "INSERT INTO screenplay_agent_chunks "
+            "(project_id, session_id, turn_id, run_id, chunk_json) "
+            "VALUES ('project-target', 10, 'turn-target', 'run-target', ?)",
+            [f'{{"index":{index}}}'],
+        )
+    await db.execute(
+        "INSERT INTO screenplay_agent_chunks "
+        "(project_id, session_id, turn_id, run_id, chunk_json) VALUES "
+        "('project-other', 20, 'turn-other', 'run-other', '{}')"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_agent_events "
+        "(project_id, session_id, turn_id, task_id, event_type) VALUES "
+        "('project-target', 10, 'turn-target', 'task-target', 'legacy'), "
+        "('project-other', 20, 'turn-other', 'task-other', 'legacy')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_run_todos (run_id, step_id, title) VALUES "
+        "('run-target', 'step-target', 'target'), "
+        "('run-other', 'step-other', 'other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_run_events (run_id, event_type) VALUES "
+        "('run-target', 'legacy'), ('run-child', 'legacy'), "
+        "('run-other', 'legacy')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_approvals "
+        "(id, run_id, tool_call_id, tool_name, title, risk_level, expires_at_ms) "
+        "VALUES ('approval-target', 'run-target', 'call-target', 'tool', "
+        "'target', 'low', 1), ('approval-other', 'run-other', 'call-other', "
+        "'tool', 'other', 'low', 1)"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, run_id, created_by_run_id) VALUES "
+        "('artifact-target', 'purrtypos.screenplay', 'review', "
+        "'project-target', 'run-target', 'run-target')"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_deliverables (id, project_id, role) VALUES "
+        "('deliverable-target', 'project-target', 'cleanup-review')"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_revisions "
+        "(id, project_id, deliverable_id, revision_no, content_digest, "
+        "created_by, agent_task_id) VALUES "
+        "('revision-target', 'project-target', 'deliverable-target', 1, "
+        "'content-digest', 'screenplay_agent_task', 'task-target')"
+    )
+    await db.execute(
+        "INSERT INTO screenplay_review_decisions "
+        "(project_id, review_revision_id, draft_revision_id, issue_id, "
+        "status, actor) VALUES "
+        "('project-target', 'revision-target', 'revision-target', "
+        "'issue-1', 'accepted', 'user')"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_resolves_exact_relationships_without_text_matching(cleanup_db):
+    plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
+
+    assert plan.table_counts["screenplay_agent_chunks"] == 4
+    assert plan.run_ids == ("run-child", "run-target")
+    assert "run-other" not in plan.run_ids
+    assert plan.table_counts["ai_conversations"] == 1
+    assert plan.protected_counts["ai_agent_artifacts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_domain_documents_artifacts_and_review_decisions(
+    cleanup_db,
+):
+    plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
+    await apply_cleanup(
+        cleanup_db,
+        plan.digest,
+        project_ids=("project-target",),
+    )
+
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM screenplay_revisions WHERE id = 'revision-target'"
+    )
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM ai_agent_artifacts WHERE id = 'artifact-target'"
+    )
+    assert await cleanup_db.fetch_one(
+        "SELECT issue_id FROM screenplay_review_decisions WHERE issue_id = 'issue-1'"
+    )
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM ai_agent_runs WHERE id = 'run-target'"
+    ) is None
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM ai_agent_runs WHERE id = 'run-other'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_rolls_back_every_table_after_any_delete_failure(cleanup_db):
+    plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
+    before = await cleanup_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_chunks"
+    )
+
+    with pytest.raises(CleanupApplyInjectedFailure):
+        await apply_cleanup(
+            cleanup_db,
+            plan.digest,
+            project_ids=("project-target",),
+            fail_after_table=2,
+        )
+
+    after = await cleanup_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_chunks"
+    )
+    assert after == before
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM ai_agent_runs WHERE id = 'run-target'"
+    )

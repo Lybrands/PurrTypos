@@ -75,10 +75,6 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
         execution_owner_id = "route-composition-owner"
 
         @staticmethod
-        def create_managed_model_executor(_api_key):
-            return object()
-
-        @staticmethod
         def track_background_run(_task):
             return None
 
@@ -132,9 +128,7 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     conversation_routes._service()
     captured_service["unit_executor_factory"](object())
 
-    assert captured_executor["model_executor_factory"] is (
-        composition.create_managed_model_executor
-    )
+    assert captured_executor["composition"] is composition
     assert captured_executor["tool_calling_service"] is not None
 
 
@@ -476,31 +470,30 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
     }
 
 
-async def test_chunk_delivery_keeps_diagnostics_batched_and_public_text_live():
+async def test_chunk_delivery_keeps_every_canonical_event_live():
     items = [
-        {"cursor": 1, "chunk": {"reasoningDelta": "a"}},
-        {"cursor": 2, "chunk": {"modelContentDelta": "b"}},
-        {"cursor": 3, "chunk": {"commentaryDelta": "核"}},
-        {"cursor": 4, "chunk": {"commentaryDelta": "对"}},
-        {"cursor": 5, "chunk": {"modelContentDelta": "c"}},
+        {"cursor": 1, "chunk": {"kind": "operation.started"}},
+        {"cursor": 2, "chunk": {"kind": "provider.content_delta"}},
+        {"cursor": 3, "chunk": {"kind": "provider.content_delta"}},
+        {"cursor": 4, "chunk": {"kind": "operation.finished"}},
     ]
 
     pages = conversation_routes._chunk_delivery_pages({
         "chunks": items,
-        "nextCursor": 5,
+        "nextCursor": 4,
         "hasMore": False,
     })
 
-    assert [len(page["chunks"]) for page in pages] == [2, 1, 1, 1]
-    assert [page["nextCursor"] for page in pages] == [2, 3, 4, 5]
+    assert [len(page["chunks"]) for page in pages] == [1, 1, 1, 1]
+    assert [page["nextCursor"] for page in pages] == [1, 2, 3, 4]
     assert [page["hasMore"] for page in pages] == [True, True, True, False]
 
 
 async def test_chunk_replay_keeps_persisted_history_in_one_batch():
     items = [
-        {"cursor": 1, "chunk": {"reasoningDelta": "a"}},
-        {"cursor": 2, "chunk": {"commentaryDelta": "核"}},
-        {"cursor": 3, "chunk": {"commentaryDelta": "对"}},
+        {"cursor": 1, "chunk": {"kind": "operation.started"}},
+        {"cursor": 2, "chunk": {"kind": "provider.content_delta"}},
+        {"cursor": 3, "chunk": {"kind": "operation.finished"}},
     ]
 
     page = conversation_routes._chunk_replay_page({

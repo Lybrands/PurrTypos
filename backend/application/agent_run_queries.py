@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from purra.contracts import AgentDelegation, DelegationAggregation
-from purra.events import AgentEvent
 from purra.ports import CheckpointStore
 from purra.json_values import thaw_json_mapping
-from application.sse_mapping import core_event_to_sse_chunk
+from purra.output import OutputVisibility
+from purra.output.ports import AgentOutputRepository
+from application.sse_mapping import canonical_output_to_sse_chunk
 from domains.agent_roles import AgentRoleRegistry
 
 
@@ -21,10 +22,12 @@ class AgentRunQueryService:
     def __init__(
         self,
         store: CheckpointStore,
+        output_repository: AgentOutputRepository,
         *,
         role_registry: AgentRoleRegistry | None = None,
     ) -> None:
         self._store = store
+        self._output = output_repository
         self._role_registry = role_registry
 
     async def get_snapshot(
@@ -46,36 +49,36 @@ class AgentRunQueryService:
 
         checkpoint = await self._store.load(
             normalized_run_id,
-            after_event_id=normalized_after,
-            limit=normalized_limit,
+            after_event_id=0,
+            limit=1,
         )
         if checkpoint is None:
             return None
 
+        output_page = await self._output.list_events(
+            normalized_run_id,
+            after_sequence=normalized_after,
+            limit=normalized_limit + 1,
+        )
+        has_more = len(output_page) > normalized_limit
+        output_events = output_page[:normalized_limit]
         envelopes = []
-        for event in checkpoint.events:
-            event_type = str(event.get("eventType") or "")
-            payload = thaw_json_mapping(event.get("payload") or {})
-            mapped_chunk = core_event_to_sse_chunk(
-                AgentEvent(
-                    type=event_type,
-                    run_id=normalized_run_id,
-                    payload=payload,
-                ),
-            )
+        for event in output_events:
+            if event.visibility is not OutputVisibility.PUBLIC:
+                continue
+            mapped_chunk = canonical_output_to_sse_chunk(event)
+            if mapped_chunk is None:  # pragma: no cover - serializer invariant
+                continue
+            payload = thaw_json_mapping(event.payload)
             envelope = {
                 "version": RUN_SNAPSHOT_VERSION,
-                "cursor": int(event.get("id") or 0),
-                "type": event_type,
+                "cursor": event.sequence,
+                "type": str(payload.get("eventType") or event.kind.value),
                 "runId": normalized_run_id,
                 "payload": payload,
-                "createdAt": event.get("createTime"),
+                "createdAt": event.emitted_at.isoformat(),
+                "chunk": mapped_chunk,
             }
-            if mapped_chunk is not None:
-                # Live delivery and history recovery are both produced by the
-                # one canonical Core-event -> public-chunk mapper.  Consumers
-                # never need to maintain a second replay-only converter.
-                envelope["chunk"] = mapped_chunk
             envelopes.append(envelope)
         aggregation = _aggregate_delegations(
             checkpoint.delegations,
@@ -96,8 +99,12 @@ class AgentRunQueryService:
                 ],
                 "aggregate": _aggregation_view(aggregation),
             },
-            "nextCursor": checkpoint.next_cursor,
-            "hasMore": checkpoint.has_more,
+            "nextCursor": (
+                output_events[-1].sequence
+                if output_events
+                else normalized_after
+            ),
+            "hasMore": has_more,
         }
 
 

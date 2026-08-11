@@ -14,16 +14,23 @@ from purra.contracts import (
     RunLineage,
 )
 from purra.api import AgentCoreRunOptions
-from purra.ports import ResponseJudge
+from purra.output import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
+)
+from purra.ports import ResponseJudgePolicy
 from domains.writing.context import writing_context_claims
 from domains.writing.contracts import (
     WRITING_DOMAIN_NAMESPACE,
     WritingDomainContext,
 )
 from domains.writing.response import (
+    writing_response_contract_for_request,
     writing_response_constraints,
     writing_response_validators,
 )
+from domains.writing.public_facts import WritingPublicFactsProvider
 from schemas.ai import ChatStreamRequest
 from infrastructure.models.profiles.registry import resolve_model_profile
 from application.model_runtime import reasoning_mode_from_options
@@ -179,7 +186,7 @@ def writing_run_options(
     force_planned_tool_choice: bool = True,
     provenance: RunProvenance | None = None,
     lineage: RunLineage | None = None,
-    response_judges: Sequence[ResponseJudge] = (),
+    response_judge_policies: Sequence[ResponseJudgePolicy] = (),
     agent_role: str | None = None,
     output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
@@ -187,6 +194,14 @@ def writing_run_options(
     output_limit = resolve_invocation_output_limit(
         request.model.capability_snapshot,
         request.model.options.get("max_tokens"),
+    )
+    response_constraints = writing_response_constraints(request)
+    response_validators = writing_response_validators(request)
+    judge_policies = tuple(response_judge_policies)
+    requires_validated_result = bool(
+        response_constraints.exact_top_level_item_count is not None
+        or response_validators
+        or judge_policies
     )
     return AgentCoreRunOptions(
         context_claims=writing_context_claims(request),
@@ -196,9 +211,24 @@ def writing_run_options(
         reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,
         lineage=lineage,
-        response_constraints=writing_response_constraints(request),
-        response_validators=writing_response_validators(request),
-        response_judges=tuple(response_judges),
+        response_constraints=response_constraints,
+        response_validators=response_validators,
+        response_judge_policies=judge_policies,
+        response_transaction_policy=(
+            ResponseTransactionPolicy(
+                mode=ResponseTransactionMode.VALIDATED_RESULT,
+                public_presentation=PublicPresentationMode.MODEL_LIVE,
+            )
+            if requires_validated_result
+            else None
+        ),
+        committed_result_facts_provider=(
+            WritingPublicFactsProvider(
+                writing_response_contract_for_request(request)
+            )
+            if requires_validated_result
+            else None
+        ),
     )
 
 
@@ -209,7 +239,7 @@ def agent_run_options(
     force_planned_tool_choice: bool = True,
     provenance: RunProvenance | None = None,
     lineage: RunLineage | None = None,
-    response_judges: Sequence[ResponseJudge] = (),
+    response_judge_policies: Sequence[ResponseJudgePolicy] = (),
     agent_role: str | None = None,
     output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
@@ -223,7 +253,7 @@ def agent_run_options(
         force_planned_tool_choice=force_planned_tool_choice,
         provenance=provenance,
         lineage=lineage,
-        response_judges=response_judges,
+        response_judge_policies=response_judge_policies,
         agent_role=agent_role,
         output_work_units=output_work_units,
     )

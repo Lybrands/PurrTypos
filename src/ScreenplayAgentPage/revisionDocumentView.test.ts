@@ -61,3 +61,17 @@ test('authored Markdown remains the source of truth when it exists', () => {
 test('empty structured content has a readable empty state', () => {
   assert.equal(structuredContentToMarkdown({ schemaVersion: 1 }), '*暂无可阅读的正文内容*')
 })
+
+test('legacy host execution summaries are not presented as authored document text', () => {
+  const markdown = structuredContentToMarkdown({
+    executionSummary: '已按既定模板完成审阅。',
+    scenes: [{
+      title: '码头重逢',
+      processSummary: '建立目标并推进冲突。',
+      sceneText: '雨幕里，两人隔着码头对望。',
+    }],
+  })
+
+  assert.doesNotMatch(markdown, /既定模板|建立目标并推进冲突/)
+  assert.match(markdown, /雨幕里，两人隔着码头对望/)
+})

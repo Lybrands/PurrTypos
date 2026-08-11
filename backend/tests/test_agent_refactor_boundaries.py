@@ -92,7 +92,6 @@ SCREENPLAY_DOMAIN_DATABASE_DEBT: set[tuple[str, str]] = set()
 GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS = {
     "application/agent_composition.py": 0,
     "application/agent_delegation_service.py": 0,
-    "application/agent_orchestrator.py": 0,
     "application/agent_run_queries.py": 0,
     "application/agent_run_service.py": 0,
     "application/request_mapping.py": 0,

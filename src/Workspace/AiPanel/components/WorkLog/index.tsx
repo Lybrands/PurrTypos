@@ -15,6 +15,9 @@ export interface WorkLogProps {
   active: boolean;
   autoOpen: boolean;
   stepCount: number;
+  currentStepCount?: number;
+  completedStepCount?: number;
+  parallel?: boolean;
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
@@ -58,6 +61,9 @@ export default function WorkLog({
   active,
   autoOpen,
   stepCount,
+  currentStepCount = 0,
+  completedStepCount = 0,
+  parallel = false,
   startedAt,
   durationMs,
   hasError = false,
@@ -104,7 +110,11 @@ export default function WorkLog({
       ? formatDuration(elapsedMs)
       : null;
   const title = active
-    ? "正在进行"
+    ? stepCount > 0
+      ? parallel
+        ? `已完成 ${completedStepCount}/${stepCount} 项`
+        : `正在执行第 ${Math.max(1, currentStepCount)}/${stepCount} 步`
+      : "正在进行"
     : stepCount > 0
       ? `执行了 ${stepCount} 个步骤`
       : "用时";

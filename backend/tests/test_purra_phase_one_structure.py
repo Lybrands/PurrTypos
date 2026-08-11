@@ -21,6 +21,7 @@ PACKAGE_LINE_CAPS = {
 
 MOVED_TOP_LEVEL_DEFINITIONS = {
     "runtime/orchestrator.py": {
+        "_agent_model_call",
         "_ModelRoundAccumulator",
         "_PendingProviderAttempt",
         "_QueueEventSink",
@@ -37,6 +38,9 @@ MOVED_TOP_LEVEL_DEFINITIONS = {
     },
     "engine/orchestrator.py": {
         "AgentCoreRunOptions",
+        "_AugmentedToolCatalog",
+        "_BufferedEventSink",
+        "_DynamicPlanningOrchestrator",
         "_assemble_messages",
         "_bind_event_to_run",
         "_compile_task_context_request",
@@ -47,11 +51,13 @@ MOVED_TOP_LEVEL_DEFINITIONS = {
         "_merge_context_claims",
         "_planned_tool_names",
         "_planning_tool_guidance",
+        "_runtime_output_event",
         "_validate_context_allocations",
         "_validate_plan_authority",
         "_validate_planning_constraints",
         "_validate_task_admission_coverage",
         "_validate_task_constraint_refinement",
+        "_safe_model_only_plan",
     },
     "contracts/__init__.py": {
         "ApprovalDecision",
@@ -83,10 +89,13 @@ MOVED_TOP_LEVEL_DEFINITIONS = {
 REQUIRED_CORE_MODULES = {
     "contracts/enums.py",
     "contracts/host.py",
+    "engine/canonical_sink.py",
     "engine/context_phase.py",
     "engine/durable_execution.py",
+    "engine/dynamic_planning.py",
     "engine/options.py",
     "engine/planning_validation.py",
+    "engine/tool_catalog.py",
     "ports/context.py",
     "ports/model.py",
     "ports/persistence.py",

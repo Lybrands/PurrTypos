@@ -16,9 +16,16 @@ from purra.contracts import (
     ToolChoiceMode,
 )
 from purra.errors import ModelGatewayError
-from purra.model_execution import ManagedModelExecutor
+from purra.api import AgentModelResponseJudge, AgentModelTaskRunner
+from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from purra.model_protocol import generic_capability_snapshot
-from application.response_judging import ModelBackedResponseJudge
+
+
+def _model_tasks(gateway) -> AgentModelTaskRunner:
+    return AgentModelTaskRunner(
+        AgentModelInvocationManager(gateway),
+        ModelInvocationContext(run_id="judge-test-run"),
+    )
 
 
 class _Gateway:
@@ -59,8 +66,8 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     gateway = _Gateway()
     policy = _Policy()
     signal = asyncio.Event()
-    judge = ModelBackedResponseJudge(
-        model_executor=ManagedModelExecutor(gateway),
+    judge = AgentModelResponseJudge(
+        model_tasks=_model_tasks(gateway),
             model_request=ModelRequest(
                 provider="fixture",
                 model="writer-model",
@@ -135,8 +142,8 @@ async def test_model_backed_judge_fails_closed_on_an_unexpected_tool_call():
             )
 
     with pytest.raises(ModelGatewayError) as captured:
-        await ModelBackedResponseJudge(
-            model_executor=ManagedModelExecutor(_ToolCallingGateway()),
+        await AgentModelResponseJudge(
+            model_tasks=_model_tasks(_ToolCallingGateway()),
             model_request=ModelRequest(
                 provider="fixture",
                 model="model",
