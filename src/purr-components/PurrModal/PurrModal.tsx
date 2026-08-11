@@ -42,14 +42,11 @@ export function PurrModal({
   okButtonProps,
   cancelButtonProps,
   width,
-  destroyOnHidden,
   closable = true,
   className,
   rootClassName,
   styles,
 }: PurrModalProps) {
-  if (destroyOnHidden && !open) return null
-
   const resolvedFooter = footer === null
     ? undefined
     : footer ?? (
