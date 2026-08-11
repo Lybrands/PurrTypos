@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -51,6 +52,7 @@ from purra.host_planned_tool_gateway import HostPlannedToolGateway
 from purra.model_protocol import (
     InvocationOutputLimit,
     InvocationOutputLimitSource,
+    generic_capability_snapshot,
 )
 from purra.ports import (
     ModelGateway,
@@ -209,7 +211,15 @@ def _request(
 ) -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role="user", content=user_text),),
-        model=ModelRequest(provider="openai", model="model"),
+        model=ModelRequest(
+            provider="openai",
+            model="model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="test:model",
+                max_output_tokens=32_000,
+            ),
+        ),
         domain_context=DomainContext(namespace="test"),
         context_window=context_window,
         tools_enabled=tools_enabled,
@@ -1774,7 +1784,7 @@ async def test_runtime_retries_buffered_partial_stream_with_frozen_inputs():
         and update.type == CoreEventType.ASSISTANT_FINAL_DELTA
     ] == ["1. final"]
     assert model.message_rounds[0] == model.message_rounds[1]
-    assert model.invocations[0] is model.invocations[1]
+    assert model.invocations[0] == model.invocations[1]
     terminal_traces = [
         trace
         for trace in observer.traces
@@ -1859,7 +1869,7 @@ async def test_runtime_discards_half_tool_delta_before_retry_and_executes_once()
     assert len(tools.requests) == 1
     assert len(tools.requests[0].calls) == 1
     assert observer.started_tools == [("readA",)]
-    assert model.invocations[0] is model.invocations[1]
+    assert model.invocations[0] == model.invocations[1]
     retry_trace = next(
         trace
         for trace in observer.traces
@@ -1933,7 +1943,7 @@ async def test_runtime_never_reexecutes_completed_tool_during_repair_retry():
     assert len(tools.requests) == 1
     assert observer.started_tools == [("writeA",)]
     assert observer.completed_tool_rounds == 1
-    assert model.invocations[2] is model.invocations[3]
+    assert model.invocations[2] == model.invocations[3]
     assert model.invocations[2].tools == ()
     assert model.message_rounds[2] == model.message_rounds[3]
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
