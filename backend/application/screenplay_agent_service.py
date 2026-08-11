@@ -50,6 +50,7 @@ from domains.screenplay_agent import (
     OperationUsage,
     ScreenplayIntent,
     ScreenplayIntentAction,
+    ScreenplayIntentCommandMismatchError,
     ScreenplayOperationCreateCommand,
     ScreenplayStageCommand,
 )
@@ -106,6 +107,7 @@ class ScreenplayIntentPlanner(Protocol):
         workspace: Mapping[str, Any],
         history: Sequence[Mapping[str, str]],
         user_content: str,
+        stage_command: ScreenplayStageCommand | None,
         runtime,
         session_id: int,
         turn_id: str,
@@ -200,6 +202,11 @@ class ScreenplayAgentService:
         if turn is None:
             return
         try:
+            stage_command = (
+                ScreenplayStageCommand.from_mapping(turn["stageCommand"])
+                if turn.get("stageCommand") is not None
+                else None
+            )
             workspace = await self._projects.get_workspace(turn["projectId"])
             snapshot = await self._repository.get_snapshot(
                 project_id=turn["projectId"],
@@ -219,10 +226,13 @@ class ScreenplayAgentService:
                 workspace=workspace,
                 history=history,
                 user_content=turn["userContent"],
+                stage_command=stage_command,
                 runtime=runtime,
                 session_id=turn["sessionId"],
                 turn_id=turn_id,
             )
+            if stage_command is not None:
+                stage_command.require_compatible(planned.intent)
             await self._repository.record_intent(
                 turn_id,
                 intent=planned.intent,
@@ -604,7 +614,14 @@ class ScreenplayAgentService:
             else:
                 await self._repository.fail_turn(
                     turn_id,
-                    code="screenplay_intent_failed",
+                    code=(
+                        code
+                        if isinstance(
+                            error,
+                            ScreenplayIntentCommandMismatchError,
+                        )
+                        else "screenplay_intent_failed"
+                    ),
                     message=message,
                 )
             await self._stream.terminal(turn_id)
@@ -766,6 +783,8 @@ class ScreenplayAgentService:
 
 
 def _task_failure(error: Exception) -> tuple[str, str]:
+    if isinstance(error, ScreenplayIntentCommandMismatchError):
+        return error.code, str(error)
     if not isinstance(error, ModelGatewayError):
         return "screenplay_task_failed", str(error) or "剧本任务执行失败。"
     message = _task_failure_message(error.code)

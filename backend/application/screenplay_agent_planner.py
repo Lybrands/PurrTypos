@@ -18,6 +18,7 @@ from domains.screenplay_agent.contracts import (
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayScopeKind,
+    ScreenplayStageCommand,
 )
 from exceptions import AppError
 
@@ -47,6 +48,7 @@ _PLANNER_INSTRUCTION = """你是剧本 Agent 的语义规划器。理解用户�
 5. instruction 必须保留用户意图，不能缩成无意义的动词。
 6. 用户说“刚才那版”“上一版”时，结合 candidateDeliverables 判断具体交付物。
 7. executionSummary 缺失或为空是合法的，不得仅因此修复输出或拒绝执行。
+8. 若输入含 requiredStageCommand，它是宿主不可变约束；action、requestedDeliverable 和 scope 必须精确一致，不得降级为 answer。
 """
 
 _PLANNER_REPAIR = """上一个输出不符合剧本意图协议。不要重新展开分析，立即输出唯一的合法 JSON 对象；
@@ -72,6 +74,7 @@ class ModelScreenplayIntentPlanner:
         workspace: Mapping[str, Any],
         history: Sequence[Mapping[str, str]],
         user_content: str,
+        stage_command: ScreenplayStageCommand | None,
         runtime,
         session_id: int,
         turn_id: str,
@@ -87,6 +90,11 @@ class ModelScreenplayIntentPlanner:
                 "projectContext": await self._context.planning_context(workspace),
                 "recentConversation": list(history[-12:]),
                 "userMessage": user_content,
+                **(
+                    {"requiredStageCommand": stage_command.to_mapping()}
+                    if stage_command is not None
+                    else {}
+                ),
             },
             binding_namespace="screenplay.agent.turn",
             binding_aggregate_id=project_id,
@@ -94,7 +102,7 @@ class ModelScreenplayIntentPlanner:
             conversation_turn_id=turn_id,
             phase="screenplay_intent_planning",
             repair_instruction=_PLANNER_REPAIR,
-            validate=_validate_intent,
+            validate=lambda value: _validate_intent(value, stage_command),
             execution_progress_fields={
                 "executionSummary": "",
             },
@@ -284,8 +292,14 @@ class SqliteScreenplayTaskResolver:
         return remaining[:count]
 
 
-def _validate_intent(value: dict[str, Any]) -> dict[str, Any]:
-    return ScreenplayIntent.from_mapping(value).to_mapping()
+def _validate_intent(
+    value: dict[str, Any],
+    stage_command: ScreenplayStageCommand | None,
+) -> dict[str, Any]:
+    intent = ScreenplayIntent.from_mapping(value)
+    if stage_command is not None:
+        stage_command.require_compatible(intent)
+    return intent.to_mapping()
 
 
 __all__ = ["ModelScreenplayIntentPlanner", "SqliteScreenplayTaskResolver"]

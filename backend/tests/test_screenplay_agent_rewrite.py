@@ -67,7 +67,9 @@ from database.screenplay_agent_schema import init_screenplay_agent_schema
 from domains.screenplay_agent import (
     ScreenplayIntent,
     ScreenplayIntentAction,
+    ScreenplayIntentCommandMismatchError,
     ScreenplayIntentScope,
+    ScreenplayStageCommand,
 )
 from domains.screenplay_agent.contracts import ScreenplayScopeKind
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
@@ -1175,6 +1177,136 @@ class _ScriptedModelGateway(_ModelGateway):
 
 def _model_executor_factory(api_key: str) -> ManagedModelExecutor:
     return ManagedModelExecutor(_ModelGateway(api_key))
+
+
+def _planner_answer_json(reply: str = "没有待修复 JSON") -> str:
+    return json.dumps({
+        "action": "answer",
+        "instruction": "说明没有待修复 JSON",
+        "scope": {"kind": "current_stage"},
+        "constraints": [],
+        "preserve": [],
+        "requestedDeliverable": None,
+        "reply": reply,
+    }, ensure_ascii=False)
+
+
+def _planner_review_json() -> str:
+    return json.dumps({
+        "action": "review",
+        "instruction": "审阅当前完整剧本",
+        "scope": {"kind": "current_stage"},
+        "constraints": [],
+        "preserve": [],
+        "requestedDeliverable": "review",
+        "reply": None,
+    }, ensure_ascii=False)
+
+
+async def test_planner_repairs_schema_valid_intent_that_violates_stage_command(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [
+        [
+            ModelStreamChunk(content_delta=_planner_answer_json()),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta=_planner_review_json()),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
+    planner = ModelScreenplayIntentPlanner(
+        temp_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    )
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    })
+
+    planned = await planner.plan(
+        workspace=workspace,
+        history=(),
+        user_content="开始审阅",
+        stage_command=command,
+        runtime=_request(session["id"], "开始审阅").runtime,
+        session_id=session["id"],
+        turn_id="turn-review-command",
+    )
+
+    assert planned.intent.action is ScreenplayIntentAction.REVIEW
+    assert len(gateway.invocations) == 2
+    first_payload = json.loads(str(gateway.calls[0][0][1].content))
+    assert first_payload["requiredStageCommand"] == command.to_mapping()
+
+
+async def test_planner_preserves_command_mismatch_after_failed_repair(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [
+        [
+            ModelStreamChunk(content_delta=_planner_answer_json()),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta=_planner_answer_json("仍然是回答")),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
+    planner = ModelScreenplayIntentPlanner(
+        temp_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    )
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    })
+
+    with pytest.raises(ScreenplayIntentCommandMismatchError):
+        await planner.plan(
+            workspace=workspace,
+            history=(),
+            user_content="开始审阅",
+            stage_command=command,
+            runtime=_request(session["id"], "开始审阅").runtime,
+            session_id=session["id"],
+            turn_id="turn-review-command-mismatch",
+        )
+
+
+async def test_planner_omits_required_command_for_free_text(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta=_planner_answer_json("正常回答")),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    planner = ModelScreenplayIntentPlanner(
+        temp_db,
+        model_executor_factory=lambda _api_key: ManagedModelExecutor(gateway),
+    )
+
+    planned = await planner.plan(
+        workspace=workspace,
+        history=(),
+        user_content="现在到哪一步？",
+        stage_command=None,
+        runtime=_request(session["id"], "现在到哪一步？").runtime,
+        session_id=session["id"],
+        turn_id="turn-free-text",
+    )
+
+    assert planned.intent.action is ScreenplayIntentAction.ANSWER
+    first_payload = json.loads(str(gateway.calls[0][0][1].content))
+    assert "requiredStageCommand" not in first_payload
 
 
 async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
