@@ -158,6 +158,7 @@ from purra.task_admission import (
     TaskAdmissionEvaluator,
 )
 from purra.timing import duration_ms as _duration_ms
+from purra.operations import AgentOperationController, OperationScope
 
 
 CoreRunUpdate = AgentEvent | AgentRunResult
@@ -191,13 +192,17 @@ class AgentCore:
         runtime_limits: RuntimeLimits = RuntimeLimits(),
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
         tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(),
+        operation_controller: AgentOperationController | None = None,
     ) -> None:
         self._model_gateway = model_gateway
         self._repository = run_repository
         self._runtime_limits = runtime_limits
         self._recovery_policy = recovery_policy
-        self._conversation_compactor = (
-            conversation_compactor or ContextCompressionCoordinator()
+        self._operations = operation_controller
+        self._conversation_compactor = conversation_compactor or (
+            ContextCompressionCoordinator(
+                operation_controller=operation_controller,
+            )
         )
         self._task_admission_evaluator = task_admission_evaluator
         self._long_task_dispatcher = long_task_dispatcher
@@ -218,6 +223,7 @@ class AgentCore:
                     max(1, runtime_limits.max_model_rounds),
                 ),
             ),
+            operation_controller=operation_controller,
         )
         self._planning_policy = planning_policy or _DefaultPlanningPolicy()
         self._context_provider = context_provider or _EmptyContextProvider()
@@ -236,6 +242,7 @@ class AgentCore:
             self._approval_gateway,
             tool_execution_limits,
             tool_idempotency_gateway,
+            operation_controller,
         )
 
     async def resolve_approval(
@@ -394,6 +401,9 @@ class AgentCore:
                                     output_reserve_tokens=(
                                         reserved_budget.output_reserve_tokens
                                     ),
+                                ),
+                                operation_scope=OperationScope(
+                                    run_id=controller.run_id,
                                 ),
                             ),
                             signal,
@@ -630,7 +640,12 @@ class AgentCore:
                 planning_kind: PlanningKind | None = None
                 if should_plan:
                     planning = await await_with_cancellation(
-                        self._planner.create_plan(request, capabilities, signal),
+                        self._planner.create_plan(
+                            request,
+                            capabilities,
+                            signal,
+                            run_id=controller.run_id,
+                        ),
                         signal,
                     )
                     if planning.model_call_parameters:
@@ -1095,6 +1110,9 @@ class AgentCore:
                                 on_compaction_started=(
                                     notify_optimization_started
                                 ),
+                                operation_scope=OperationScope(
+                                    run_id=controller.run_id,
+                                ),
                             ),
                             signal,
                         )
@@ -1401,6 +1419,7 @@ class AgentCore:
                 context_compressor=self._conversation_compactor,
                 limits=self._runtime_limits,
                 recovery_policy=self._recovery_policy,
+                operation_controller=self._operations,
             )
             runtime_result: AgentRuntimeResult | None = None
             try:
@@ -1643,6 +1662,7 @@ class _DynamicPlanningOrchestrator:
                         last_tool_outcome=outcome,
                     ),
                     signal,
+                    run_id=self._controller.run_id,
                 ),
                 signal,
             )

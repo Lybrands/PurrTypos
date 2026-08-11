@@ -1375,6 +1375,7 @@ class ToolBatchRequest:
     calls: tuple[ToolCall, ...]
     allowed_tool_names: frozenset[str]
     state: ExecutionState
+    invocation_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "calls", tuple(self.calls))
@@ -1385,6 +1386,11 @@ class ToolBatchRequest:
         )
         if not self.calls:
             raise ValueError("tool batch requires at least one call")
+        object.__setattr__(
+            self,
+            "invocation_id",
+            _optional_text(self.invocation_id),
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,6 +6,7 @@ import pytest
 
 from purra.contracts import (
     AgentMessage,
+    ModelCompletion,
     ModelFinishReason,
     ModelRequest,
     ModelStream,
@@ -14,6 +15,11 @@ from purra.contracts import (
 )
 from purra.errors import ContractViolationError
 from purra.model_protocol import generic_capability_snapshot
+from purra.operations import (
+    AgentOperationController,
+    OperationKind,
+    OperationStatus,
+)
 from purra.output import (
     AgentOutputIntent,
     OutputCommitMode,
@@ -62,6 +68,16 @@ class _Gateway:
         raise AssertionError("complete should not be called")
 
 
+class _CompletionGateway(_Gateway):
+    async def complete(self, messages, invocation, signal=None):
+        del messages, invocation, signal
+        return ModelCompletion(
+            message=AgentMessage(role="assistant", content='{"plan":true}'),
+            model="model",
+            finish_reason=ModelFinishReason.STOP,
+        )
+
+
 class _Observer:
     def __init__(self):
         self.opened = []
@@ -80,6 +96,25 @@ class _Observer:
 
     async def abort_model_stream(self, output_stream_id, error_code):
         self.aborted.append((output_stream_id, error_code))
+
+
+class _OperationOutput:
+    def __init__(self):
+        self.events = []
+
+    async def accept_operation_event(self, event):
+        self.events.append(event)
+        return event
+
+
+class _FailingOpenObserver(_Observer):
+    async def open_model_stream(self, receipt, spec):
+        del receipt, spec
+        raise OSError("journal unavailable")
+
+    async def abort_model_stream(self, output_stream_id, error_code):
+        del output_stream_id, error_code
+        raise ContractViolationError("cannot abort an unopened stream")
 
 
 @pytest.mark.asyncio
@@ -154,3 +189,96 @@ async def test_provider_chunks_are_forwarded_once_and_finish_after_terminal():
         (managed.receipt.output_stream_id, ModelFinishReason.STOP)
     ]
     assert observer.aborted == []
+
+
+@pytest.mark.asyncio
+async def test_every_provider_attempt_has_one_authoritative_model_operation():
+    AgentModelCall, AgentModelInvocationManager, ModelInvocationContext = _types()
+    operation_output = _OperationOutput()
+    manager = AgentModelInvocationManager(
+        _Gateway(),
+        output_observer=_Observer(),
+        operation_controller=AgentOperationController(operation_output),
+    )
+    managed = await manager.stream(
+        (),
+        AgentModelCall(
+            request=_request(),
+            output_intent=AgentOutputIntent.FINAL_PUBLIC,
+            commit_mode=OutputCommitMode.LIVE,
+            reasoning_mode=ReasoningMode.DISABLED,
+        ),
+        ModelInvocationContext(run_id="run-1"),
+    )
+
+    assert [event.kind for event in operation_output.events] == [
+        OperationKind.MODEL,
+    ]
+    await anext(managed.chunks)
+    terminal = await anext(managed.chunks)
+
+    assert terminal.finish_reason is ModelFinishReason.STOP
+    assert len(operation_output.events) == 2
+    started, finished = operation_output.events
+    assert finished.operation_id == started.operation_id
+    assert finished.invocation_id == managed.receipt.invocation_id
+    assert finished.status is OperationStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_stream_open_failure_still_closes_model_operation_once():
+    AgentModelCall, AgentModelInvocationManager, ModelInvocationContext = _types()
+    operation_output = _OperationOutput()
+    controller = AgentOperationController(operation_output)
+    manager = AgentModelInvocationManager(
+        _Gateway(),
+        output_observer=_FailingOpenObserver(),
+        operation_controller=controller,
+    )
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        await manager.stream(
+            (),
+            AgentModelCall(
+                request=_request(),
+                output_intent=AgentOutputIntent.FINAL_PUBLIC,
+                commit_mode=OutputCommitMode.LIVE,
+                reasoning_mode=ReasoningMode.DISABLED,
+            ),
+            ModelInvocationContext(run_id="run-1"),
+        )
+
+    assert len(operation_output.events) == 2
+    assert operation_output.events[-1].status is OperationStatus.FAILED
+    assert controller.running_operation_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_private_completion_is_observed_before_stream_commit():
+    AgentModelCall, AgentModelInvocationManager, ModelInvocationContext = _types()
+    observer = _Observer()
+    manager = AgentModelInvocationManager(
+        _CompletionGateway(),
+        output_observer=observer,
+    )
+
+    completed = await manager.complete(
+        (),
+        AgentModelCall(
+            request=_request(),
+            output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+            commit_mode=OutputCommitMode.PRIVATE,
+            requires_full_text_validation=True,
+            reasoning_mode=ReasoningMode.DISABLED,
+        ),
+        ModelInvocationContext(run_id="run-1"),
+    )
+
+    assert observer.accepted == [(
+        completed.receipt.output_stream_id,
+        ModelStreamChunk(content_delta='{"plan":true}'),
+    )]
+    assert observer.finished == [(
+        completed.receipt.output_stream_id,
+        ModelFinishReason.STOP,
+    )]

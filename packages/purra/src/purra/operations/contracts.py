@@ -38,6 +38,63 @@ _TERMINAL_STATUSES = frozenset({
     OperationStatus.CANCELED,
 })
 
+_LIFECYCLE_DISPLAY_FIELDS = frozenset({
+    "operationid",
+    "status",
+    "startedat",
+    "finishedat",
+    "durationms",
+    "errorcode",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class OperationDisplay:
+    """Stable presentation hints that cannot claim lifecycle ownership."""
+
+    label_key: str | None = None
+    label_params: Mapping[str, Any] = field(default_factory=dict)
+    resource_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "label_key", optional_text(self.label_key))
+        object.__setattr__(self, "resource_ref", optional_text(self.resource_ref))
+        params = freeze_json_mapping(self.label_params)
+        forbidden = {
+            str(key).replace("_", "").lower()
+            for key in params
+        }.intersection(_LIFECYCLE_DISPLAY_FIELDS)
+        if forbidden:
+            raise ValueError("operation display cannot include a lifecycle field")
+        object.__setattr__(self, "label_params", params)
+
+    def as_mapping(self) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.label_key is not None:
+            payload["labelKey"] = self.label_key
+        if self.label_params:
+            payload["labelParams"] = self.label_params
+        if self.resource_ref is not None:
+            payload["resourceRef"] = self.resource_ref
+        return freeze_json_mapping(payload)
+
+
+@dataclass(frozen=True, slots=True)
+class OperationScope:
+    run_id: RunId
+    invocation_id: str | None = None
+    display: OperationDisplay = field(default_factory=OperationDisplay)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", required_text(self.run_id, "run id"))
+        object.__setattr__(
+            self,
+            "invocation_id",
+            optional_text(self.invocation_id),
+        )
+        if not isinstance(self.display, OperationDisplay):
+            raise TypeError("operation scope requires OperationDisplay")
+
 
 @dataclass(frozen=True, slots=True)
 class OperationStarted:
@@ -109,6 +166,41 @@ class OperationFinished:
             "display",
             freeze_json_mapping(self.display),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OperationReceipt:
+    operation_id: str
+    kind: OperationKind
+    run_id: RunId
+    invocation_id: str | None
+    started_at: datetime
+    started_event: OperationStarted
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "operation_id",
+            required_text(self.operation_id, "operation id"),
+        )
+        object.__setattr__(self, "kind", OperationKind(self.kind))
+        object.__setattr__(self, "run_id", required_text(self.run_id, "run id"))
+        object.__setattr__(
+            self,
+            "invocation_id",
+            optional_text(self.invocation_id),
+        )
+        _require_aware(self.started_at, "started_at")
+        if not isinstance(self.started_event, OperationStarted):
+            raise TypeError("operation receipt requires its started event")
+        if (
+            self.started_event.operation_id != self.operation_id
+            or self.started_event.kind is not self.kind
+            or self.started_event.run_id != self.run_id
+            or self.started_event.invocation_id != self.invocation_id
+            or self.started_event.started_at != self.started_at
+        ):
+            raise ValueError("operation receipt does not match its started event")
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

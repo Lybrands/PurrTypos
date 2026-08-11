@@ -31,6 +31,12 @@ from purra.contracts import (
 from purra.errors import ContractViolationError
 from purra.events import AgentEvent, CoreEventType
 from purra.json_values import thaw_json_mapping
+from purra.operations import (
+    AgentOperationController,
+    OperationDisplay,
+    OperationKind,
+    OperationScope,
+)
 from purra.ports import (
     ApprovalGateway,
     CancellationSignal,
@@ -68,6 +74,7 @@ class CoreToolExecutor:
         approval_gateway: ApprovalGateway | None = None,
         limits: ToolExecutionLimits = ToolExecutionLimits(),
         idempotency_gateway: ToolIdempotencyGateway | None = None,
+        operation_controller: AgentOperationController | None = None,
     ) -> None:
         registrations = validate_tool_contract(catalog.registrations())
         self._registrations = MappingProxyType({
@@ -77,6 +84,7 @@ class CoreToolExecutor:
         self._approval_gateway = approval_gateway
         self._limits = limits
         self._idempotency_gateway = idempotency_gateway
+        self._operations = operation_controller
 
     async def execute_batch(
         self,
@@ -205,6 +213,7 @@ class CoreToolExecutor:
                     results,
                     cache_hits,
                 )
+            operation_id = await self._start_tool_operation(request, parsed)
 
             scope_failure = await self._validate_scope(
                 registration,
@@ -222,6 +231,11 @@ class CoreToolExecutor:
                         if code == "tool_scope_violation"
                         else ToolBatchOutcome.FAILED
                     )
+                )
+                await self._finish_tool_operation(
+                    operation_id,
+                    outcome,
+                    code,
                 )
                 return await _failed_call_batch(
                     request,
@@ -242,6 +256,11 @@ class CoreToolExecutor:
 
             # Defense in depth: authorization never comes from mutable state.
             if parsed.call.name not in request.allowed_tool_names:
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.REJECTED,
+                    "tool_not_authorized",
+                )
                 return await _failed_call_batch(
                     request,
                     event_sink,
@@ -295,6 +314,11 @@ class CoreToolExecutor:
                         result,
                         approval_batch_outcome,
                         normalized_argument_paths=parsed.normalized_argument_paths,
+                    )
+                    await self._finish_tool_operation(
+                        operation_id,
+                        approval_batch_outcome,
+                        code,
                     )
                     if approval_batch_outcome in {
                         ToolBatchOutcome.CANCELED,
@@ -350,6 +374,11 @@ class CoreToolExecutor:
                     ),
                 )
             except OperationCanceled:
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.CANCELED,
+                    "tool_execution_canceled",
+                )
                 return await self._canceled_result(
                     request,
                     event_sink,
@@ -359,8 +388,18 @@ class CoreToolExecutor:
                     cache_hits,
                 )
             except asyncio.CancelledError:
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.CANCELED,
+                    "tool_execution_canceled",
+                )
                 raise
             except Exception as error:
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.FAILED,
+                    "tool_execution_failed",
+                )
                 return await _failed_call_batch(
                     request,
                     event_sink,
@@ -378,6 +417,11 @@ class CoreToolExecutor:
                 )
 
             if not isinstance(handler_result, ToolHandlerResult):
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.FAILED,
+                    "invalid_tool_result",
+                )
                 return await _failed_call_batch(
                     request,
                     event_sink,
@@ -440,6 +484,11 @@ class CoreToolExecutor:
                     results=results,
                     cache_hits=cache_hits,
                 )
+                await self._finish_tool_operation(
+                    operation_id,
+                    ToolBatchOutcome.FAILED,
+                    handler_error,
+                )
                 return _batch_result(
                     results,
                     ToolBatchOutcome.FAILED,
@@ -470,12 +519,60 @@ class CoreToolExecutor:
                 call_outcome,
                 normalized_argument_paths=parsed.normalized_argument_paths,
             )
+            await self._finish_tool_operation(
+                operation_id,
+                call_outcome,
+                None,
+            )
 
         return _batch_result(
             results,
             aggregate_outcomes(outcomes),
             cache_hits,
         )
+
+    async def _start_tool_operation(
+        self,
+        request: ToolBatchRequest,
+        parsed: ParsedToolCall,
+    ) -> str | None:
+        if self._operations is None or request.run_id is None:
+            return None
+        receipt = await self._operations.start(
+            OperationKind.TOOL,
+            OperationScope(
+                run_id=request.run_id,
+                invocation_id=request.invocation_id,
+                display=OperationDisplay(
+                    label_key="agent.operation.tool",
+                    label_params={
+                        "toolCallId": parsed.call.id,
+                        "toolName": parsed.call.name,
+                    },
+                ),
+            ),
+        )
+        return receipt.operation_id
+
+    async def _finish_tool_operation(
+        self,
+        operation_id: str | None,
+        outcome: ToolBatchOutcome,
+        error_code: str | None,
+    ) -> None:
+        if self._operations is None or operation_id is None:
+            return
+        if outcome in {
+            ToolBatchOutcome.COMPLETED,
+            ToolBatchOutcome.PROGRESSED,
+        }:
+            await self._operations.succeed(operation_id)
+            return
+        code = normalize_error_code(error_code or outcome.value)
+        if outcome is ToolBatchOutcome.CANCELED:
+            await self._operations.cancel(operation_id, code)
+            return
+        await self._operations.fail(operation_id, code)
 
     async def _validate_scope(
         self,
