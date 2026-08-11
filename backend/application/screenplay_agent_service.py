@@ -51,6 +51,7 @@ from domains.screenplay_agent import (
     ScreenplayIntent,
     ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
+    ScreenplayStageCommand,
 )
 from application.screenplay_manifest_compiler import (
     compile_screenplay_manifest,
@@ -165,6 +166,13 @@ class ScreenplayAgentService:
             project_id=str(project_id or "").strip(),
             session_id=request.sessionId,
             content=request.content,
+            stage_command=(
+                ScreenplayStageCommand.from_mapping(
+                    request.stageCommand.model_dump(mode="json")
+                ).to_mapping()
+                if request.stageCommand is not None
+                else None
+            ),
             runtime_profile={
                 "provider": request.runtime.apiProvider,
                 "model": str(request.runtime.options.get("model") or ""),

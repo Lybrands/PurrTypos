@@ -163,6 +163,73 @@ async def test_turn_endpoint_passes_only_user_text_to_the_rewritten_service(monk
     assert service.dispatched == [("spaturn-route", "route-model")]
 
 
+async def test_turn_endpoint_accepts_a_typed_stage_command(monkeypatch):
+    service = _Service()
+    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+    app = FastAPI()
+    app.include_router(screenplay_router, prefix="/api")
+
+    response = await _post(app, _body(stageCommand={
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    }))
+
+    assert response.status_code == 202
+    command = service.submissions[0]["request"].stageCommand
+    assert command is not None
+    assert command.targetRole == "review"
+    assert command.scope.kind == "current_stage"
+
+
+@pytest.mark.parametrize("stage_command", [
+    {
+        "kind": "stage_action",
+        "action": "answer",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "review",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "review",
+        "scope": {"kind": "current_stage"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "next_episodes"},
+    },
+    {
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "screenplayDraft",
+        "scope": {"kind": "all_remaining", "count": 2},
+    },
+])
+async def test_turn_endpoint_rejects_invalid_stage_commands(
+    monkeypatch,
+    stage_command,
+):
+    service = _Service()
+    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+    app = FastAPI()
+    app.include_router(screenplay_router, prefix="/api")
+
+    response = await _post(app, _body(stageCommand=stage_command))
+
+    assert response.status_code == 422
+    assert service.submissions == []
+
+
 async def test_turn_endpoint_rejects_the_removed_frontend_operation_contract(monkeypatch):
     service = _Service()
     monkeypatch.setattr(conversation_routes, "_service", lambda: service)

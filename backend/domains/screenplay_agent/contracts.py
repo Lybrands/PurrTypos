@@ -14,6 +14,10 @@ class ScreenplayIntentAction(StrEnum):
     REVIEW = "review"
 
 
+class ScreenplayIntentCommandMismatchError(ValueError):
+    code = "screenplay_intent_command_mismatch"
+
+
 class ScreenplayScopeKind(StrEnum):
     CURRENT_STAGE = "current_stage"
     NEXT_EPISODES = "next_episodes"
@@ -152,6 +156,79 @@ class ScreenplayIntent:
             ),
             **({"reply": self.reply} if self.reply else {}),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenplayStageCommand:
+    action: ScreenplayIntentAction
+    target_role: str
+    scope: ScreenplayIntentScope
+    kind: str = "stage_action"
+
+    def __post_init__(self) -> None:
+        action = ScreenplayIntentAction(self.action)
+        target_role = _text(self.target_role)
+        kind = _text(self.kind)
+        if kind != "stage_action":
+            raise ValueError("screenplay stage command kind is invalid")
+        if action is ScreenplayIntentAction.ANSWER:
+            raise ValueError("screenplay stage command cannot be answer")
+        if target_role not in SCREENPLAY_DELIVERABLE_ROLES:
+            raise ValueError("screenplay stage command target is invalid")
+        if not isinstance(self.scope, ScreenplayIntentScope):
+            raise TypeError("screenplay stage command scope is invalid")
+        if action is ScreenplayIntentAction.REVIEW and target_role != "review":
+            raise ValueError("review stage command requires review target")
+        if action is not ScreenplayIntentAction.REVIEW and target_role == "review":
+            raise ValueError("review target requires review action")
+        _validate_stage_scope(self.scope)
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "target_role", target_role)
+        object.__setattr__(self, "kind", kind)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ScreenplayStageCommand":
+        return cls(
+            kind=_text(value.get("kind")),
+            action=ScreenplayIntentAction(_text(value.get("action"))),
+            target_role=_text(value.get("targetRole")),
+            scope=ScreenplayIntentScope.from_mapping(value.get("scope")),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "action": self.action.value,
+            "targetRole": self.target_role,
+            "scope": self.scope.to_mapping(),
+        }
+
+    def require_compatible(self, intent: ScreenplayIntent) -> None:
+        if not isinstance(intent, ScreenplayIntent):
+            raise TypeError("screenplay stage command requires an Intent")
+        if (
+            intent.action is not self.action
+            or intent.requested_deliverable != self.target_role
+            or intent.scope.kind is not self.scope.kind
+            or intent.scope.count != self.scope.count
+            or intent.scope.episode_numbers != self.scope.episode_numbers
+        ):
+            raise ScreenplayIntentCommandMismatchError(
+                "stage command does not match planned screenplay intent"
+            )
+
+
+def _validate_stage_scope(scope: ScreenplayIntentScope) -> None:
+    if scope.kind is ScreenplayScopeKind.NEXT_EPISODES:
+        if scope.episode_numbers:
+            raise ValueError("next_episodes stage command cannot list episodes")
+        return
+    if scope.kind is ScreenplayScopeKind.EPISODES:
+        if scope.count is not None:
+            raise ValueError("episodes stage command cannot include count")
+        return
+    if scope.count is not None or scope.episode_numbers:
+        raise ValueError("stage command scope contains incompatible fields")
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +375,9 @@ class ReviewEpisodeResult:
 __all__ = [
     "ScreenplayIntent",
     "ScreenplayIntentAction",
+    "ScreenplayIntentCommandMismatchError",
     "ScreenplayIntentScope",
+    "ScreenplayStageCommand",
     "ScreenplayScopeKind",
     "SCREENPLAY_DELIVERABLE_ROLES",
     "ReviewEpisodeInputRef",

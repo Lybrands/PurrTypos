@@ -5,7 +5,9 @@ from domains.screenplay_agent.contracts import (
     ReviewEpisodeResult,
     ScreenplayIntent,
     ScreenplayIntentAction,
+    ScreenplayIntentCommandMismatchError,
     ScreenplayIntentScope,
+    ScreenplayStageCommand,
 )
 from domains.screenplay_agent.operation import (
     OperationUsage,
@@ -23,7 +25,9 @@ __all__ = [
     "OperationUsage",
     "ScreenplayIntent",
     "ScreenplayIntentAction",
+    "ScreenplayIntentCommandMismatchError",
     "ScreenplayIntentScope",
+    "ScreenplayStageCommand",
     "ScreenplayOperationCreateCommand",
     "ScreenplayOperationRecord",
     "ScreenplayOperationStatus",

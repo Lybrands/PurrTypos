@@ -10,6 +10,46 @@ from database.connection import DatabaseConnection
 pytestmark = pytest.mark.asyncio
 
 
+async def test_startup_adds_nullable_stage_command_to_existing_turns(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, user_content) "
+        "VALUES ('legacy-stage-command-turn', 'project', 1, 'command', '旧消息')"
+    )
+    columns = {
+        str(column["name"])
+        for column in await first.fetch_all(
+            "PRAGMA table_info(screenplay_agent_turns)"
+        )
+    }
+    if "stage_command_json" in columns:
+        await first.execute(
+            "ALTER TABLE screenplay_agent_turns DROP COLUMN stage_command_json"
+        )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        columns = {
+            str(column["name"])
+            for column in await reopened.fetch_all(
+                "PRAGMA table_info(screenplay_agent_turns)"
+            )
+        }
+        assert "stage_command_json" in columns
+        assert await reopened.fetch_one(
+            "SELECT stage_command_json FROM screenplay_agent_turns "
+            "WHERE id = 'legacy-stage-command-turn'"
+        ) == {"stage_command_json": None}
+    finally:
+        await reopened.close()
+
+
 async def test_startup_drops_discarded_conversation_tables_without_erasing_receipts(
     tmp_path: Path,
 ):
