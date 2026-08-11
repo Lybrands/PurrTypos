@@ -7,6 +7,7 @@ import pytest
 
 from purra.contracts import (
     AgentMessage,
+    MessageRole,
     ModelCompletion,
     ModelFinishReason,
     ModelRequest,
@@ -58,6 +59,25 @@ class _Gateway:
         async def chunks():
             yield ModelStreamChunk(content_delta="done")
             yield ModelStreamChunk(finish_reason=self.finish_reason)
+
+        return ModelStream(chunks=chunks(), model="model")
+
+
+class _ScriptedStreamGateway(_Gateway):
+    def __init__(self, rounds):
+        super().__init__()
+        self.rounds = list(rounds)
+        self.message_rounds = []
+
+    async def stream(self, messages, invocation, signal=None):
+        del signal
+        self.message_rounds.append(tuple(messages))
+        self.invocations.append(invocation)
+        round_chunks = self.rounds.pop(0)
+
+        async def chunks():
+            for chunk in round_chunks:
+                yield chunk
 
         return ModelStream(chunks=chunks(), model="model")
 
@@ -124,6 +144,88 @@ def test_stream_rejects_truncation_after_preserving_diagnostic_chunks():
                 observed.append(chunk)
         assert captured.value.code == "model_output_truncated"
         assert "".join(chunk.content_delta for chunk in observed) == "done"
+        assert len(gateway.invocations) == 1
+
+    asyncio.run(run())
+
+
+def test_stream_text_retries_reasoning_only_without_changing_mode():
+    async def run():
+        gateway = _ScriptedStreamGateway([
+            [
+                ModelStreamChunk(reasoning_delta='{"answer":"hidden"}'),
+                ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+            ],
+            [
+                ModelStreamChunk(content_delta='{"answer":"visible"}'),
+                ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+            ],
+        ])
+        observed = []
+
+        async def observe(chunk):
+            observed.append(chunk)
+
+        result = await ManagedModelExecutor(gateway).stream_text(
+            (AgentMessage(role=MessageRole.USER, content="return JSON"),),
+            _call(),
+            on_chunk=observe,
+        )
+
+        assert result.content == '{"answer":"visible"}'
+        assert result.reasoning == ""
+        assert result.attempts == 2
+        assert len(observed) == 4
+        assert [item.reasoning_mode for item in gateway.invocations] == [
+            ReasoningMode.DISABLED,
+            ReasoningMode.DISABLED,
+        ]
+        replay = gateway.message_rounds[1]
+        assert replay[-2].role is MessageRole.ASSISTANT
+        assert replay[-2].reasoning == '{"answer":"hidden"}'
+        assert replay[-1].role is MessageRole.DEVELOPER
+        assert "reasoning alone" in str(replay[-1].content)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reasoning", ["private analysis", ""])
+def test_stream_text_rejects_repeated_empty_official_responses(reasoning):
+    async def run():
+        empty_round = [
+            *(
+                [ModelStreamChunk(reasoning_delta=reasoning)]
+                if reasoning
+                else []
+            ),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ]
+        gateway = _ScriptedStreamGateway([
+            empty_round,
+            empty_round,
+            empty_round,
+        ])
+
+        with pytest.raises(ModelGatewayError) as captured:
+            await ManagedModelExecutor(gateway).stream_text((), _call())
+
+        assert captured.value.code == "empty_model_response"
+        assert len(gateway.invocations) == 3
+
+    asyncio.run(run())
+
+
+def test_stream_text_never_retries_length_termination():
+    async def run():
+        gateway = _ScriptedStreamGateway([[
+            ModelStreamChunk(reasoning_delta="unfinished"),
+            ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH),
+        ]])
+
+        with pytest.raises(ModelGatewayError) as captured:
+            await ManagedModelExecutor(gateway).stream_text((), _call())
+
+        assert captured.value.code == "model_output_truncated"
         assert len(gateway.invocations) == 1
 
     asyncio.run(run())

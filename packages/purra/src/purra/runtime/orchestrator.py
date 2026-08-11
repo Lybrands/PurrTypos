@@ -70,6 +70,7 @@ from purra.host_planned_tool_gateway import (
 from purra.model_call_parameters import describe_model_call
 from purra.model_protocol import InvocationOutputLimit, classify_model_termination
 from purra.json_values import thaw_json_mapping
+from purra.recovery import EMPTY_RESPONSE_RETRY_GUIDANCE
 from purra.runtime_context import project_intermediate_tool_context
 from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
@@ -176,13 +177,6 @@ _MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
     "provider's native structured tool-call protocol. Include one stable call id, "
     "one currently exposed tool name, and one complete JSON object for arguments. "
     "Do not emit XML-like tool markup or an argument dump as ordinary text."
-)
-_EMPTY_RESPONSE_RETRY_GUIDANCE = (
-    "Your preceding model round ended after internal reasoning without any "
-    "user-visible response. Continue the task now. If more evidence is required, "
-    "use one of the currently exposed tools through a valid structured call; "
-    "otherwise provide a complete visible answer in the user's language. Do not "
-    "return reasoning alone."
 )
 _DEFERRED_ACTION_RETRY_GUIDANCE = (
     "Your preceding response only announced work you intended to do later and "
@@ -1616,7 +1610,7 @@ class AgentRuntime:
                             ),
                             AgentMessage(
                                 role=MessageRole.DEVELOPER,
-                                content=_EMPTY_RESPONSE_RETRY_GUIDANCE,
+                                content=EMPTY_RESPONSE_RETRY_GUIDANCE,
                             ),
                         ))
                         continue
