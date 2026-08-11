@@ -43,7 +43,6 @@ class CoreEventType(StrEnum):
 class CoreCommandType(StrEnum):
     APPROVAL_RESOLVE = "approval.resolve"
     RUN_CANCEL = "run.cancel"
-    CLIENT_DISCONNECTED = "client.disconnected"
 
 
 @dataclass(frozen=True, slots=True)
