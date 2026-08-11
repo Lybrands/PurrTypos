@@ -4,84 +4,6 @@
   font-size: var(--font-size-sm);
 }
 
-.work-log__toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  min-height: 30px;
-  padding: 3px 2px 7px;
-  border: 0;
-  border-bottom: 1px solid var(--border-light);
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  line-height: 1.55;
-  text-align: left;
-  cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease;
-
-  &:hover,
-  &:focus-visible {
-    color: var(--text-secondary);
-    border-bottom-color: var(--border);
-  }
-
-  &:focus-visible {
-    outline: none;
-  }
-}
-
-.work-log__duration {
-  font-variant-numeric: tabular-nums;
-}
-
-.work-log__toggle--static {
-  cursor: default;
-
-  &:hover {
-    color: var(--text-muted);
-    border-bottom-color: var(--border-light);
-  }
-}
-
-.work-log__chevron {
-  flex-shrink: 0;
-  font-size: 10px;
-  transition: transform 0.2s ease;
-}
-
-.work-log--open .work-log__chevron {
-  transform: rotate(90deg);
-}
-
-.work-log__error-icon {
-  flex-shrink: 0;
-  color: var(--danger);
-}
-
-.work-log__collapsible {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 0.22s ease;
-}
-
-.work-log--open .work-log__collapsible {
-  grid-template-rows: 1fr;
-}
-
-.work-log__body {
-  min-height: 0;
-  overflow: hidden;
-  padding: 0 2px;
-}
-
-.work-log--open .work-log__body {
-  padding-top: 9px;
-  padding-bottom: 5px;
-  overflow: visible;
-}
-
 .work-log__commentary {
   margin: 5px 0 8px;
   color: var(--text-secondary);
@@ -127,19 +49,6 @@
 
 .work-log__context-compaction--failed .purr-icon {
   color: var(--danger);
-}
-
-.work-log__plan {
-  margin: 5px 0 9px;
-}
-
-.work-log__plan-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  color: var(--text-secondary);
-  font-weight: var(--font-weight-medium);
 }
 
 .work-log__plan-count {
@@ -256,10 +165,6 @@
   color: var(--danger);
 }
 
-.work-log__body > .bubble-tool-calls {
-  margin: 5px 0 7px;
-}
-
 .work-log-step-group {
   margin: 5px 0 8px;
 }
@@ -303,11 +208,6 @@
   transform: rotate(90deg);
 }
 
-.work-log-step-group__count {
-  opacity: 0.72;
-  font-variant-numeric: tabular-nums;
-}
-
 .work-log-step-group__duration {
   margin-left: -1px;
   opacity: 0.72;
@@ -345,10 +245,4 @@
 .work-log-step-group--open .work-log-step-group__body {
   padding-top: 3px;
   padding-bottom: 3px;
-}
-
-.work-log-step-group__body > .bubble-tool-calls {
-  margin: 3px 0;
-  padding-left: 0;
-  border-left: 0;
 }

@@ -1,56 +1,6 @@
-/* Codex 风格执行时间线：摘要始终可见，具体操作按需展开。 */
-.bubble-tool-calls {
-  position: relative;
-  margin: 5px 0 7px;
-  padding-left: 14px;
-  border-left: 1px solid var(--border);
-}
-
-.bubble-tool-call-summary.purr-button {
-  height: auto;
-  min-height: 0;
-  padding: 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  line-height: 1.55;
-
-  &:hover,
-  &:focus {
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .purr-button__icon {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  span:not(.purr-button__icon) {
-    color: currentColor;
-  }
-}
-
-.bubble-tool-call-chevron {
-  flex-shrink: 0;
-  color: inherit;
-  font-size: 10px;
-  transition: transform 0.2s ease;
-}
-
-.bubble-tool-call-chevron--open {
-  transform: rotate(90deg);
-}
-
-.bubble-tool-call-duration {
-  margin-left: 4px;
-  color: var(--text-muted) !important;
-  opacity: .72;
-  font-variant-numeric: tabular-nums;
-}
-
 .bubble-tool-call-details {
-  margin-top: 3px;
-  padding: 3px 0 2px 16px;
+  margin: 3px 0;
+  padding: 0;
 }
 
 .bubble-tool-call-line {
