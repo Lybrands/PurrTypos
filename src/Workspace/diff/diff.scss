@@ -6,7 +6,7 @@
   /* 必须用确实存在的设计 token；之前误写 var(--bg) 不存在，
      fallback 到 transparent 会让下方 Lexical 编辑器透出来。 */
   background: var(--bg-panel);
-  z-index: 10;
+  z-index: 9;
   /* 确保完全盖住 Lexical 编辑器 */
   overflow: hidden;
 }

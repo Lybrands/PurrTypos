@@ -159,7 +159,7 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
           },
           enableFreeDrag: false,
           initRootNodePosition: ['left', 'center'],
-          nodeTextEditZIndex: 1000,
+          nodeTextEditZIndex: 9,
           expandBtnSize: 16,
           customNoteContentShow: {
             show(content: string, left: number, top: number) {
@@ -180,7 +180,7 @@ export default function MindMapView({ chapters, rootTitle, xmindData }: MindMapV
                   word-break: break-word;
                   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
                   border: 1px solid #334155;
-                  z-index: 9999;
+                  z-index: var(--purr-z-tooltip);
                   display: none;
                   pointer-events: none;
                 `

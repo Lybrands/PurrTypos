@@ -1,6 +1,6 @@
 // Ghost text 虚影（光标右侧半透明）
 .ghost-completion {
-  z-index: 1050;
+  z-index: var(--purr-z-floating);
   pointer-events: none;
   display: flex;
   align-items: center;
