@@ -972,7 +972,7 @@ test('task header does not reuse a completed plan from the previous turn', () =>
   assert.equal(getActiveTaskPlan(conversations, true), undefined)
 })
 
-test('task progress never presents a non-linear item index as completion', () => {
+test('sequential task progress presents the current visible step ordinal', () => {
   const plan = {
     title: 'execute plan',
     status: 'running',
@@ -989,9 +989,10 @@ test('task progress never presents a non-linear item index as completion', () =>
   assert.equal(progress.completed, 1)
   assert.equal(progress.total, 4)
   assert.equal(progress.currentStep.id, 'three')
+  assert.equal(progress.currentStepIndex, 3)
   assert.deepEqual(progress.runningSteps.map((step) => step.id), ['three'])
   assert.equal(progress.percent, 25)
-  assert.equal(getTaskPlanCountLabel(plan), '已完成 1/4')
+  assert.equal(getTaskPlanCountLabel(plan), '第 3/4 步')
 })
 
 test('task progress exposes concurrent Planner Agent steps as one frontier', () => {
@@ -1013,6 +1014,60 @@ test('task progress exposes concurrent Planner Agent steps as one frontier', () 
   assert.equal(progress.currentStep.id, 'write-5')
   assert.equal(progress.completed, 0)
   assert.equal(progress.total, 4)
+})
+
+test('parallel task progress presents concurrency and completed count', () => {
+  const plan = {
+    title: 'parallel plan',
+    status: 'running',
+    steps: [
+      { id: 'read-1', title: 'read 1', type: 'read', status: 'done' },
+      { id: 'read-2', title: 'read 2', type: 'read', status: 'done' },
+      { id: 'write-3', title: 'write 3', type: 'write', status: 'running' },
+      { id: 'write-4', title: 'write 4', type: 'write', status: 'running' },
+      { id: 'write-5', title: 'write 5', type: 'write', status: 'running' },
+      { id: 'submit', title: 'submit', type: 'write', status: 'pending' },
+    ],
+  }
+
+  assert.equal(getTaskPlanCountLabel(plan), '并行 3 项 · 已完成 2/6')
+})
+
+test('planned task progress points at the next sequential step', () => {
+  const plan = {
+    title: 'planned task',
+    status: 'planned',
+    steps: [
+      { id: 'one', title: 'one', type: 'read', status: 'pending' },
+      { id: 'two', title: 'two', type: 'analyze', status: 'pending' },
+      { id: 'three', title: 'three', type: 'write', status: 'pending' },
+      { id: 'four', title: 'four', type: 'review', status: 'pending' },
+    ],
+  }
+
+  assert.equal(getTaskPlanCountLabel(plan), '第 1/4 步')
+})
+
+test('completed task capsule exists only while the final answer is streaming', () => {
+  const plan = {
+    title: 'completed task',
+    status: 'done',
+    steps: [
+      { id: 'one', title: 'one', type: 'read', status: 'done' },
+      { id: 'two', title: 'two', type: 'analyze', status: 'done' },
+      { id: 'three', title: 'three', type: 'write', status: 'done' },
+      { id: 'four', title: 'four', type: 'review', status: 'done' },
+    ],
+  }
+  const conversations = [{ role: 'assistant', content: '总结输出中', taskPlan: plan }]
+
+  assert.equal(getTaskPlanCountLabel(plan), '已完成 4/4')
+  assert.equal(getActiveTaskPlan(conversations, true), plan)
+  assert.equal(getActiveTaskPlan(conversations, false), undefined)
+  assert.equal(getActiveTaskPlan([
+    ...conversations,
+    { role: 'assistant', content: '新的历史消息' },
+  ], true), undefined)
 })
 
 test('manual abort replaces an empty response with an explicit notice', () => {
