@@ -16,6 +16,7 @@ import ErrorReportNotice from "./ErrorReportNotice";
 import { parseStructuredQuestions } from "../../structuredQuestions";
 import {
   buildAssistantTimeline,
+  getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
   type AssistantTimelinePart,
@@ -136,6 +137,7 @@ function AssistantMessageBodyInner({
     isStreaming,
     durationMs: message.durationMs,
   });
+  const executionPanelLogKey = getExecutionPanelLogKey(message);
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
@@ -245,9 +247,9 @@ function AssistantMessageBodyInner({
 
   return (
     <div className="bubble-assistant-body">
-      {executionPanel.visible ? (
+      {executionPanel.visible && executionPanelLogKey ? (
         <WorkLog
-          logKey={message.agentRunId || `${index}-work-log`}
+          logKey={executionPanelLogKey}
           active={executionPanel.active}
           autoOpen={executionPanel.autoOpen}
           stepCount={executionPanel.stepCount}

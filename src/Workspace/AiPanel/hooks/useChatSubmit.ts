@@ -156,6 +156,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       const assistantPlaceholder = {
         role: "assistant" as const,
         content: "",
+        clientTurnId: createAiStreamId("turn"),
         turnStartedAt,
         commentary: "",
       };

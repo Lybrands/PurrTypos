@@ -135,6 +135,27 @@ export function getExecutionPanelPresentation(
   };
 }
 
+export function getExecutionPanelLogKey(
+  message: Pick<
+    ChatMessage,
+    "clientTurnId" | "conversationId" | "agentRunId" | "turnStartedAt"
+  >,
+): string | null {
+  if (message.clientTurnId) {
+    return `client-turn-${message.clientTurnId}-work-log`;
+  }
+  if (message.conversationId != null) {
+    return `conversation-${message.conversationId}-work-log`;
+  }
+  if (message.agentRunId) {
+    return `agent-run-${message.agentRunId}-work-log`;
+  }
+  if (message.turnStartedAt != null) {
+    return `live-turn-${message.turnStartedAt}-work-log`;
+  }
+  return null;
+}
+
 export function buildAssistantTimeline(
   message: ChatMessage,
   opts: BuildAssistantTimelineOptions,
