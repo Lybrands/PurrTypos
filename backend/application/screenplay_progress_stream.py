@@ -75,7 +75,8 @@ class JsonStringFieldProjector:
                 if decoded is _STRING_CLOSED:
                     self._in_string = False
                     if self._capturing_key is not None:
-                        output.append("\n")
+                        if self._captured_chars > 0:
+                            output.append("\n")
                         self._capturing_key = None
                         self._captured_chars = 0
                     else:
@@ -89,6 +90,10 @@ class JsonStringFieldProjector:
                         if self._captured_chars < self._max_value_chars:
                             safe = _safe_visible_char(decoded)
                             if safe:
+                                if self._captured_chars == 0:
+                                    output.append(
+                                        self._prefixes[self._capturing_key]
+                                    )
                                 output.append(safe)
                                 self._captured_chars += len(safe)
                     elif len(self._scanned) <= 64:
@@ -111,7 +116,6 @@ class JsonStringFieldProjector:
                 self._value_key = None
                 if char == '"':
                     self._begin_string(capturing_key=value_key)
-                    output.append(self._prefixes[value_key])
                     continue
 
             if char == '"':

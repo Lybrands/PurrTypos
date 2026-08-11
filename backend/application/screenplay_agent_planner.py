@@ -25,7 +25,7 @@ from exceptions import AppError
 _PLANNER_INSTRUCTION = """你是剧本 Agent 的语义规划器。理解用户真正想做什么，不做创作执行。
 你必须只输出一个 JSON 对象，不要 Markdown，不要额外文字：
 {
-  "executionSummary": "用 1 至 3 句说明如何理解用户意图、选择动作和确定范围，不得复述内部协议",
+  "executionSummary": "可选。确有必要时用 1 至 3 句简述如何理解意图、选择动作和确定范围；不需要公开概述时省略或填空字符串，不得复述内部协议",
   "action": "answer|create|revise|review",
   "instruction": "忠实且完整的执行指令",
   "scope": {
@@ -46,10 +46,11 @@ _PLANNER_INSTRUCTION = """你是剧本 Agent 的语义规划器。理解用户�
 4. 不臆造项目状态。可以参考提供的项目和已接受交付物回答，但不能声称尚未执行的创作已经完成。
 5. instruction 必须保留用户意图，不能缩成无意义的动词。
 6. 用户说“刚才那版”“上一版”时，结合 candidateDeliverables 判断具体交付物。
+7. executionSummary 缺失或为空是合法的，不得仅因此修复输出或拒绝执行。
 """
 
 _PLANNER_REPAIR = """上一个输出不符合剧本意图协议。不要重新展开分析，立即输出唯一的合法 JSON 对象；
-executionSummary、字段枚举、scope 条件、answer 的 reply 以及非 answer 时 reply=null 都必须严格满足协议。"""
+字段枚举、scope 条件、answer 的 reply 以及非 answer 时 reply=null 都必须严格满足协议；executionSummary 仍为可选。"""
 
 
 class ModelScreenplayIntentPlanner:
@@ -284,11 +285,6 @@ class SqliteScreenplayTaskResolver:
 
 
 def _validate_intent(value: dict[str, Any]) -> dict[str, Any]:
-    execution_summary = " ".join(
-        str(value.get("executionSummary") or "").split()
-    )
-    if not execution_summary or len(execution_summary) > 600:
-        raise ValueError("planner executionSummary is required and must be concise")
     return ScreenplayIntent.from_mapping(value).to_mapping()
 
 
