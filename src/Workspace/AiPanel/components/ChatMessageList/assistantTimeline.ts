@@ -47,6 +47,13 @@ export type WorkLogTimelineItem =
       parts: TimelineOperationPart[];
     };
 
+export interface OperationGroupProgress {
+  total: number;
+  completed: number;
+  current: number;
+  active: boolean;
+}
+
 export interface BuildAssistantTimelineOptions {
   messageIndex: number;
   isStreaming?: boolean;
@@ -68,15 +75,11 @@ export function groupConsecutiveWorkSteps(
 
   const flushSteps = () => {
     if (stepParts.length === 0) return;
-    items.push(
-      stepParts.length === 1
-        ? stepParts[0]
-        : {
-            type: "stepGroup",
-            groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
-            parts: stepParts,
-          },
-    );
+    items.push({
+      type: "stepGroup",
+      groupKey: `${messageIndex}-work-steps-${groupStartIndex}`,
+      parts: stepParts,
+    });
     stepParts = [];
   };
 
@@ -103,6 +106,54 @@ export function groupConsecutiveWorkSteps(
   });
   flushSteps();
   return items;
+}
+
+export function getOperationGroupProgress(
+  parts: TimelineOperationPart[],
+): OperationGroupProgress {
+  let total = 0;
+  let completed = 0;
+  let activeCount = 0;
+
+  for (const part of parts) {
+    if (part.type === "tools") {
+      const visibleIndexes = part.segment.labels.flatMap((_label, index) =>
+        part.segment.cachedFlags?.[index] ? [] : [index],
+      );
+      const completedToolCount = part.isLive
+        ? Math.max(0, part.segment.completedToolCount ?? 0)
+        : part.segment.labels.length;
+      total += visibleIndexes.length;
+      completed += visibleIndexes.filter(
+        (index) => index < completedToolCount,
+      ).length;
+      if (part.isLive) activeCount += 1;
+      continue;
+    }
+    if (part.type === "contextCompaction") {
+      total += 1;
+      if (part.state.status === "running") activeCount += 1;
+      else completed += 1;
+      continue;
+    }
+    total += Math.max(1, part.items.length);
+    completed += part.items.filter((item) =>
+      ["done", "failed", "canceled"].includes(item.status),
+    ).length;
+    activeCount += part.items.filter((item) =>
+      ["queued", "claimed", "running"].includes(item.status),
+    ).length;
+  }
+
+  const active = activeCount > 0;
+  return {
+    total,
+    completed,
+    current: active
+      ? Math.min(total, completed + Math.max(1, activeCount))
+      : completed,
+    active,
+  };
 }
 
 export function buildAssistantTimeline(

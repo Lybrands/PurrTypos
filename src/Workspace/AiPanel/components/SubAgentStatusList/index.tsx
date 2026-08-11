@@ -93,9 +93,6 @@ export default function SubAgentStatusList({
                         completedToolCount={part.isLive
                           ? part.segment.completedToolCount ?? 0
                           : part.segment.labels.length}
-                        startedAt={part.segment.startedAt}
-                        durationMs={part.segment.durationMs}
-                        streaming={Boolean(part.isLive)}
                       />
                     );
                   }

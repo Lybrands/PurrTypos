@@ -9,7 +9,7 @@ import Markdown from "../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import SettingDiffCard from "../SettingDiffCard";
 import ToolApprovalCard from "../ToolApprovalCard";
-import WorkLog, { WorkLogStepGroup } from "../WorkLog";
+import { WorkLogStepGroup } from "../WorkLog";
 import SubAgentStatusList from "../SubAgentStatusList";
 import StructuredQuestionCard from "../StructuredQuestionCard";
 import ErrorReportNotice from "./ErrorReportNotice";
@@ -17,6 +17,7 @@ import { parseStructuredQuestions } from "../../structuredQuestions";
 import {
   buildAssistantTimeline,
   getAssistantProcessingLabel,
+  getOperationGroupProgress,
   groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
   type TimelineOperationPart,
@@ -116,14 +117,6 @@ function operationIsActive(part: TimelineOperationPart): boolean {
   );
 }
 
-function operationStepCount(part: TimelineOperationPart): number {
-  if (part.type === "contextCompaction") return 1;
-  if (part.type === "delegations") return Math.max(1, part.items.length);
-  return part.segment.labels.filter(
-    (_label, labelIndex) => !part.segment.cachedFlags?.[labelIndex],
-  ).length;
-}
-
 function AssistantMessageBodyInner({
   index,
   message,
@@ -154,7 +147,6 @@ function AssistantMessageBodyInner({
     () => groupConsecutiveWorkSteps(workLogParts, index),
     [workLogParts, index],
   );
-  const hasAnswerContent = answerParts.length > 0;
   const hasWorkLog = workLogItems.length > 0;
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
@@ -196,9 +188,6 @@ function AssistantMessageBodyInner({
         labelOutcomes={seg.labelOutcomes}
         cachedFlags={seg.cachedFlags}
         completedToolCount={toolCompletedCount}
-        startedAt={seg.startedAt}
-        durationMs={seg.durationMs}
-        streaming={Boolean(part.isLive)}
       />
     );
   };
@@ -250,18 +239,12 @@ function AssistantMessageBodyInner({
 
   return (
     <div className="bubble-assistant-body">
-      {isStreaming || hasWorkLog ? (
-        <WorkLog
-          logKey={message.agentRunId || `${index}-work-log`}
-          active={isStreaming}
-          autoOpen={isStreaming && hasWorkLog && !hasAnswerContent}
-          startedAt={message.turnStartedAt}
-          durationMs={message.durationMs}
-          hasError={workLogHasError(workLogParts)}
-        >
+      {hasWorkLog ? (
+        <div className="work-log">
           {workLogItems.map((part, partIndex) => {
             if (part.type === "stepGroup") {
               const activePart = part.parts.find(operationIsActive);
+              const progress = getOperationGroupProgress(part.parts);
               const completedDurationMs = part.parts.reduce(
                 (total, item) =>
                   total + (
@@ -275,17 +258,15 @@ function AssistantMessageBodyInner({
                 <WorkLogStepGroup
                   key={part.groupKey}
                   groupKey={part.groupKey}
-                  stepCount={part.parts.reduce(
-                    (total, item) => total + operationStepCount(item),
-                    0,
-                  )}
+                  stepCount={progress.total}
+                  currentStepCount={progress.current}
                   completedDurationMs={completedDurationMs}
                   activeStartedAt={
                     activePart?.type === "tools"
                       ? activePart.segment.startedAt
                       : undefined
                   }
-                  active={Boolean(activePart)}
+                  active={progress.active}
                   hasError={workLogHasError(part.parts)}
                 >
                   {part.parts.map((item, itemIndex) =>
@@ -312,7 +293,7 @@ function AssistantMessageBodyInner({
             }
             return null;
           })}
-        </WorkLog>
+        </div>
       ) : null}
 
       {!showPlaceholder &&

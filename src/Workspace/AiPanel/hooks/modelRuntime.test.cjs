@@ -46,6 +46,7 @@ const {
 const {
   buildAssistantTimeline,
   getAssistantProcessingLabel,
+  getOperationGroupProgress,
   groupConsecutiveWorkSteps,
 } = loadTypeScriptModule(
   path.join(__dirname, '../components/ChatMessageList/assistantTimeline.ts'),
@@ -349,6 +350,76 @@ test('displayable operations merge across their technical event types', () => {
     grouped[0].parts.map((part) => part.type),
     ['contextCompaction', 'delegations', 'tools'],
   )
+})
+
+test('one visible operation still becomes one collapsible operation group', () => {
+  const grouped = groupConsecutiveWorkSteps([{
+    type: 'tools',
+    segmentIndex: 0,
+    segment: {
+      commentaryBlockIndex: null,
+      labels: ['读取人物资料'],
+      completedToolCount: 1,
+    },
+  }], 4)
+
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0].type, 'stepGroup')
+  assert.deepEqual(
+    grouped[0].parts.map((part) => part.type),
+    ['tools'],
+  )
+})
+
+test('operation group progress reports the active visible step frontier', () => {
+  const progress = getOperationGroupProgress([
+    {
+      type: 'tools',
+      segmentIndex: 0,
+      segment: {
+        commentaryBlockIndex: null,
+        labels: ['读取人物资料', '读取场景资料'],
+        durationMs: 1200,
+      },
+    },
+    {
+      type: 'tools',
+      segmentIndex: 1,
+      isLive: true,
+      segment: {
+        commentaryBlockIndex: null,
+        labels: ['检查人物弧光', '检查结构节奏', '检查对白', '写入候选稿'],
+        completedToolCount: 0,
+      },
+    },
+  ])
+
+  assert.deepEqual(progress, {
+    total: 6,
+    completed: 2,
+    current: 3,
+    active: true,
+  })
+})
+
+test('operation group progress excludes cached tool rows', () => {
+  const progress = getOperationGroupProgress([{
+    type: 'tools',
+    segmentIndex: 0,
+    segment: {
+      commentaryBlockIndex: null,
+      labels: ['缓存读取', '真实读取'],
+      cachedFlags: [true, false],
+      completedToolCount: 2,
+    },
+  }])
+
+  assert.deepEqual(progress, {
+    total: 1,
+    completed: 1,
+    current: 1,
+    active: false,
+  })
 })
 
 test('durable task progress stays out of the work log', () => {
