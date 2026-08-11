@@ -6,7 +6,6 @@ import json
 from collections.abc import Mapping
 
 from purra.events import AgentEvent, CoreEventType
-from purra.json_values import thaw_json_mapping
 
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE,
@@ -37,7 +36,7 @@ class ScreenplayCandidateCompletionProjector:
         self,
         run_id: str,
         event: AgentEvent,
-    ) -> AgentEvent | None:
+    ) -> None:
         if event.type != CoreEventType.RUN_COMPLETED:
             return None
         row = await self._db.fetch_one(
@@ -81,14 +80,6 @@ class ScreenplayCandidateCompletionProjector:
                 "UPDATE ai_agent_runs SET final_response = '' WHERE id = ?",
                 [run_id],
             )
-            payload = thaw_json_mapping(event.payload)
-            payload["final_response"] = ""
-            return AgentEvent(
-                type=event.type,
-                run_id=event.run_id,
-                payload=payload,
-            )
-        return None
 
 
 def _json_mapping(value: object) -> dict[str, object]:
