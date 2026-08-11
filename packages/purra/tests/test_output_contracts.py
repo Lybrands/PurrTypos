@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from purra.contracts import RunStatus
+
 
 def _contracts():
     try:
@@ -158,3 +160,36 @@ def test_output_timestamps_must_include_timezone():
             payload={"status": "running"},
             occurred_at=datetime(2026, 8, 11),
         )
+
+
+def test_public_stream_commit_can_be_runtime_metadata_without_public_text():
+    contracts = _contracts()
+
+    draft = contracts.AgentOutputEventDraft(
+        run_id="run-1",
+        turn_id="turn-1",
+        output_stream_id="output-1",
+        invocation_id="invocation-1",
+        source_event_key="output-1:committed",
+        source=contracts.OutputSource.RUNTIME,
+        kind=contracts.OutputEventKind.STREAM_COMMITTED,
+        channel=contracts.OutputChannel.FINAL,
+        visibility=contracts.OutputVisibility.PUBLIC,
+        payload={"finishReason": "stop"},
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    assert "delta" not in draft.payload
+
+
+def test_run_lifecycle_draft_requires_stable_source_event_key():
+    contracts = _contracts()
+
+    draft = contracts.RunLifecycleOutputDraft(
+        source_event_key="run:run-1:done",
+        status=RunStatus.DONE,
+        payload={"status": "done"},
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    assert draft.source_event_key == "run:run-1:done"

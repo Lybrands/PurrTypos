@@ -5,22 +5,21 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from purra.contracts import RunId
-from purra.events import AgentEvent
+from purra.output.contracts import DomainEffectOutput
 
 
 @runtime_checkable
 class DomainEventProjector(Protocol):
-    """Project one opaque host event inside the repository transaction.
+    """Project one typed domain effect inside the output transaction.
 
-    Returning ``None`` preserves the original event. Returning an event
-    replaces the public/persisted event without teaching Core its semantics.
+    The projector never receives or returns the canonical event envelope.
     """
 
     async def project(
         self,
         run_id: RunId,
-        event: AgentEvent,
-    ) -> AgentEvent | None: ...
+        effect: DomainEffectOutput,
+    ) -> None: ...
 
 
 __all__ = ["DomainEventProjector"]

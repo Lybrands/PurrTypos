@@ -261,11 +261,17 @@ class AgentOutputEvent:
 
 @dataclass(frozen=True, slots=True)
 class RunLifecycleOutputDraft:
+    source_event_key: str
     status: RunStatus
     payload: Mapping[str, Any]
     occurred_at: datetime
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "source_event_key",
+            required_text(self.source_event_key, "source event key"),
+        )
         object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
         _require_aware(self.occurred_at, "occurred_at")
@@ -315,7 +321,14 @@ def _validate_public_text(
     output_stream_id: str | None,
     invocation_id: str | None,
 ) -> None:
-    if visibility is not OutputVisibility.PUBLIC or channel not in _TEXT_CHANNELS:
+    if (
+        visibility is not OutputVisibility.PUBLIC
+        or channel not in _TEXT_CHANNELS
+        or (
+            kind is not OutputEventKind.PROVIDER_CONTENT_DELTA
+            and "delta" not in payload
+        )
+    ):
         return
     if source is not OutputSource.PROVIDER:
         raise ValueError("public text requires provider source")

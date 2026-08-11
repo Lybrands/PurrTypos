@@ -4,6 +4,7 @@ Schema initialisation & migrations – port of initDatabase() from database.js.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +19,69 @@ async def _try_exec(db: DatabaseConnection, sql: str) -> None:
         await db.execute(sql)
     except Exception:
         pass
+
+
+def _utc_iso(value: object) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+async def _migrate_agent_lifecycle_events(db: DatabaseConnection) -> None:
+    """Give historical lifecycle rows stable canonical replay identities."""
+    lifecycle_types = (
+        "run.started",
+        "run.todos_updated",
+        "run.todo_updated",
+        "run.completed",
+        "run.blocked",
+        "run.failed",
+        "run.canceled",
+    )
+    placeholders = ", ".join("?" for _ in lifecycle_types)
+    rows = await db.fetch_all(
+        "SELECT id, run_id, create_time FROM ai_agent_run_events "
+        f"WHERE event_id IS NULL AND event_type IN ({placeholders}) "
+        "ORDER BY run_id, id",
+        lifecycle_types,
+    )
+    if not rows:
+        return
+
+    maxima = {
+        str(row["run_id"]): int(row.get("max_sequence") or 0)
+        for row in await db.fetch_all(
+            "SELECT run_id, MAX(sequence) AS max_sequence "
+            "FROM ai_agent_run_events WHERE sequence IS NOT NULL "
+            "GROUP BY run_id"
+        )
+    }
+    async with db.transaction():
+        for row in rows:
+            run_id = str(row["run_id"])
+            sequence = maxima.get(run_id, 0) + 1
+            maxima[run_id] = sequence
+            row_id = int(row["id"])
+            timestamp = _utc_iso(row.get("create_time"))
+            await db.execute(
+                "UPDATE ai_agent_run_events SET "
+                "event_id = ?, sequence = ?, source = 'runtime', "
+                "kind = 'run.lifecycle', channel = 'lifecycle', "
+                "visibility = 'public', occurred_at = ?, emitted_at = ?, "
+                "source_event_key = ? WHERE id = ? AND event_id IS NULL",
+                [
+                    f"legacy-run-event-{row_id}",
+                    sequence,
+                    timestamp,
+                    timestamp,
+                    f"legacy-run-event:{row_id}",
+                    row_id,
+                ],
+            )
 
 
 # 人物设定 Markdown 化迁移：旧表单字段 → profile_md 的小节布局
@@ -453,11 +517,112 @@ async def init_schema(db: DatabaseConnection) -> None:
         run_id TEXT NOT NULL,
         event_type TEXT NOT NULL,
         payload_json TEXT DEFAULT NULL,
+        event_id TEXT DEFAULT NULL,
+        turn_id TEXT DEFAULT NULL,
+        invocation_id TEXT DEFAULT NULL,
+        output_stream_id TEXT DEFAULT NULL,
+        sequence INTEGER DEFAULT NULL,
+        source TEXT DEFAULT NULL,
+        kind TEXT DEFAULT NULL,
+        channel TEXT DEFAULT NULL,
+        visibility TEXT DEFAULT NULL,
+        occurred_at TEXT DEFAULT NULL,
+        emitted_at TEXT DEFAULT NULL,
+        source_event_key TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    for column in (
+        "event_id TEXT DEFAULT NULL",
+        "turn_id TEXT DEFAULT NULL",
+        "invocation_id TEXT DEFAULT NULL",
+        "output_stream_id TEXT DEFAULT NULL",
+        "sequence INTEGER DEFAULT NULL",
+        "source TEXT DEFAULT NULL",
+        "kind TEXT DEFAULT NULL",
+        "channel TEXT DEFAULT NULL",
+        "visibility TEXT DEFAULT NULL",
+        "occurred_at TEXT DEFAULT NULL",
+        "emitted_at TEXT DEFAULT NULL",
+        "source_event_key TEXT DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_run_events ADD COLUMN {column}",
+        )
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_run_events_run_type
         ON ai_agent_run_events(run_id, event_type, id)
+    """)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_run_events_event_id
+        ON ai_agent_run_events(event_id)
+        WHERE event_id IS NOT NULL
+    """)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_run_events_source_key
+        ON ai_agent_run_events(source_event_key)
+        WHERE source_event_key IS NOT NULL
+    """)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_run_events_turn_sequence
+        ON ai_agent_run_events(COALESCE(turn_id, run_id), sequence)
+        WHERE sequence IS NOT NULL
+    """)
+    await _migrate_agent_lifecycle_events(db)
+    await db.execute(
+        "DROP TRIGGER IF EXISTS ai_agent_run_events_canonical_immutable"
+    )
+    await db.execute("""CREATE TRIGGER ai_agent_run_events_canonical_immutable
+        BEFORE UPDATE OF
+            event_id,
+            run_id,
+            turn_id,
+            invocation_id,
+            output_stream_id,
+            sequence,
+            source,
+            kind,
+            channel,
+            visibility,
+            occurred_at,
+            source_event_key
+        ON ai_agent_run_events
+        WHEN OLD.event_id IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'canonical agent output event is immutable');
+        END
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_output_streams (
+        id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL,
+        turn_id TEXT DEFAULT NULL,
+        invocation_id TEXT NOT NULL UNIQUE,
+        intent TEXT NOT NULL,
+        commit_mode TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        finish_reason TEXT DEFAULT NULL,
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_output_streams_run
+        ON ai_agent_output_streams(run_id, create_time, id)
+    """)
+    await db.execute(
+        "DROP TRIGGER IF EXISTS ai_agent_output_streams_identity_immutable"
+    )
+    await db.execute("""CREATE TRIGGER ai_agent_output_streams_identity_immutable
+        BEFORE UPDATE OF
+            run_id,
+            turn_id,
+            invocation_id,
+            intent,
+            commit_mode
+        ON ai_agent_output_streams
+        BEGIN
+            SELECT RAISE(ABORT, 'agent output stream identity is immutable');
+        END
     """)
     # ── ai_error_reports ─────────────────────────────────────────
     # Error reports are compact indexes over existing Run/event evidence.

@@ -19,14 +19,10 @@ class _ChainedEventProjector:
         self._projectors = tuple(projectors)
 
     async def project(self, run_id, event):
-        current = event
-        replaced = False
         for projector in self._projectors:
-            projected = await projector.project(run_id, current)
+            projected = await projector.project(run_id, event)
             if projected is not None:
-                current = projected
-                replaced = True
-        return current if replaced else None
+                raise TypeError("domain event projector must return None")
 
 
 def create_agent_composition(
