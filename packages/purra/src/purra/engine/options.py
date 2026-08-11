@@ -17,6 +17,12 @@ from purra.normalization import (
     positive_int,
 )
 from purra.model_protocol import InvocationOutputLimit
+from purra.output.contracts import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
+)
+from purra.output.ports import CommittedResultFactsProvider
 from purra.ports import ResponseJudge, ResponseValidator
 
 
@@ -40,6 +46,8 @@ class AgentCoreRunOptions:
     response_constraints: ResponseConstraints = ResponseConstraints()
     response_validators: tuple[ResponseValidator, ...] = ()
     response_judges: tuple[ResponseJudge, ...] = ()
+    response_transaction_policy: ResponseTransactionPolicy | None = None
+    committed_result_facts_provider: CommittedResultFactsProvider | None = None
 
     def __post_init__(self) -> None:
         claims = tuple(self.context_claims)
@@ -100,3 +108,58 @@ class AgentCoreRunOptions:
         if any(not isinstance(item, ResponseJudge) for item in judges):
             raise TypeError("response judges must implement ResponseJudge")
         object.__setattr__(self, "response_judges", judges)
+        policy = self.response_transaction_policy
+        if policy is not None and not isinstance(
+            policy,
+            ResponseTransactionPolicy,
+        ):
+            raise TypeError(
+                "response transaction policy must be ResponseTransactionPolicy"
+            )
+        facts_provider = self.committed_result_facts_provider
+        if facts_provider is not None and not isinstance(
+            facts_provider,
+            CommittedResultFactsProvider,
+        ):
+            raise TypeError(
+                "committed result facts provider must implement facts_for"
+            )
+        requires_full_text = bool(
+            self.response_constraints.exact_top_level_item_count is not None
+            or validators
+            or judges
+        )
+        if (
+            policy is not None
+            and policy.mode is ResponseTransactionMode.DIRECT_LIVE
+            and requires_full_text
+        ):
+            raise ValueError(
+                "direct-live response cannot require full-text validation"
+            )
+        if (
+            policy is not None
+            and policy.public_presentation
+            is PublicPresentationMode.MODEL_LIVE
+            and facts_provider is None
+        ):
+            raise ValueError(
+                "model-live public presentation requires a facts provider"
+            )
+
+    @property
+    def resolved_response_transaction_policy(self) -> ResponseTransactionPolicy:
+        if self.response_transaction_policy is not None:
+            return self.response_transaction_policy
+        requires_full_text = bool(
+            self.response_constraints.exact_top_level_item_count is not None
+            or self.response_validators
+            or self.response_judges
+        )
+        return ResponseTransactionPolicy(
+            mode=(
+                ResponseTransactionMode.VALIDATED_RESULT
+                if requires_full_text
+                else ResponseTransactionMode.DIRECT_LIVE
+            )
+        )
