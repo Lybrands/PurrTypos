@@ -31,21 +31,33 @@ export function getTaskPlanProgress(plan: AiTaskPlan) {
       (step) => step.status === "blocked" || step.status === "failed",
     ) ||
     steps.find((step) => step.status === "pending");
+  const currentStepIndex = currentStep ? steps.indexOf(currentStep) + 1 : 0;
   return {
     total,
     completed,
     runningSteps,
     currentStep,
+    currentStepIndex,
     percent: total > 0 ? Math.round((completed / total) * 100) : 0,
   };
 }
 
 export function getTaskPlanCountLabel(plan: AiTaskPlan): string {
-  const { completed, total, runningSteps } = getTaskPlanProgress(plan);
+  const {
+    completed,
+    total,
+    runningSteps,
+    currentStep,
+    currentStepIndex,
+  } = getTaskPlanProgress(plan);
   const active = plan.status === "planned" || plan.status === "running";
-  return active && runningSteps.length > 1
-    ? `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`
-    : `已完成 ${completed}/${total}`;
+  if (active && runningSteps.length > 1) {
+    return `并行 ${runningSteps.length} 项 · 已完成 ${completed}/${total}`;
+  }
+  if (active && currentStep && currentStepIndex > 0) {
+    return `第 ${currentStepIndex}/${total} 步`;
+  }
+  return `已完成 ${completed}/${total}`;
 }
 
 export function shouldShowTaskPlan(plan: AiTaskPlan): boolean {
