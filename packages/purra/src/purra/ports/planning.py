@@ -53,6 +53,8 @@ class TaskPlanner(Protocol):
         request: AgentRunRequest,
         capabilities: PlanningCapabilities,
         signal: CancellationSignal | None = None,
+        *,
+        run_id: str | None = None,
     ) -> PlanningResult: ...
 
 
@@ -66,6 +68,8 @@ class DynamicTaskPlanner(Protocol):
         capabilities: PlanningCapabilities,
         turn: PlanningTurn,
         signal: CancellationSignal | None = None,
+        *,
+        run_id: str | None = None,
     ) -> PlanningResult: ...
 
 

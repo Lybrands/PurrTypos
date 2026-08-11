@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -26,6 +27,13 @@ from purra.contracts import (
     MessageRole,
 )
 from purra.errors import ContextOverflowError, ContractViolationError
+from purra.cancellation import OperationCanceled
+from purra.operations import (
+    AgentOperationController,
+    OperationDisplay,
+    OperationKind,
+    OperationScope,
+)
 from purra.ports import CancellationSignal, ContextCompressionHook
 
 
@@ -41,6 +49,7 @@ class ContextCompressionCoordinator:
         self,
         hook: ContextCompressionHook | None = None,
         settings: ContextCompressionSettings = ContextCompressionSettings(),
+        operation_controller: AgentOperationController | None = None,
     ) -> None:
         if hook is not None and not isinstance(hook, ContextCompressionHook):
             raise TypeError("context compression hook has an invalid contract")
@@ -48,6 +57,7 @@ class ContextCompressionCoordinator:
             raise TypeError("context compression settings are required")
         self._hook = hook
         self._settings = settings
+        self._operations = operation_controller
 
     @property
     def hook(self) -> ContextCompressionHook | None:
@@ -66,6 +76,7 @@ class ContextCompressionCoordinator:
             Callable[[Mapping[str, Any]], Awaitable[None]] | None
         ) = None,
         budget: ContextCompactionBudget | None = None,
+        operation_scope: OperationScope | None = None,
     ) -> ConversationCompactionResult:
         snapshot = budget or _default_budget(request)
         message_tokens = estimate_agent_messages_tokens(request.messages)
@@ -101,6 +112,53 @@ class ContextCompressionCoordinator:
             compression_required=compression_required,
             trigger_reason=trigger_reason,
         )
+
+        operation_id = await self._start_compaction_operation(
+            operation_scope,
+            snapshot.phase,
+        )
+        try:
+            result = await self._prepare_result(
+                request,
+                compression,
+                signal,
+                on_compaction_started=on_compaction_started,
+                snapshot=snapshot,
+                message_tokens=message_tokens,
+                context_tokens=context_tokens,
+                available_message_tokens=available_message_tokens,
+                projected_input_tokens=projected_input_tokens,
+                pressure_ratio=pressure_ratio,
+                compression_required=compression_required,
+                trigger_reason=trigger_reason,
+            )
+        except (OperationCanceled, asyncio.CancelledError):
+            await self._cancel_compaction_operation(operation_id)
+            raise
+        except Exception as error:
+            await self._fail_compaction_operation(operation_id, error)
+            raise
+        await self._succeed_compaction_operation(operation_id)
+        return result
+
+    async def _prepare_result(
+        self,
+        request: AgentRunRequest,
+        compression: ContextCompressionRequest,
+        signal: CancellationSignal | None,
+        *,
+        on_compaction_started: (
+            Callable[[Mapping[str, Any]], Awaitable[None]] | None
+        ),
+        snapshot: ContextCompactionBudget,
+        message_tokens: int,
+        context_tokens: int,
+        available_message_tokens: int,
+        projected_input_tokens: int,
+        pressure_ratio: float,
+        compression_required: bool,
+        trigger_reason: str,
+    ) -> ConversationCompactionResult:
 
         if compression_required and on_compaction_started is not None:
             await on_compaction_started({
@@ -187,6 +245,62 @@ class ContextCompressionCoordinator:
             retained_raw_turn_count=result.retained_raw_turn_count,
             diagnostics=diagnostics,
         )
+
+    async def _start_compaction_operation(
+        self,
+        scope: OperationScope | None,
+        phase: ContextCompactionPhase,
+    ) -> str | None:
+        if self._operations is None:
+            return None
+        if not isinstance(scope, OperationScope):
+            raise ContractViolationError(
+                "context compaction operation requires a run scope"
+            )
+        receipt = await self._operations.start(
+            OperationKind.CONTEXT_COMPACTION,
+            OperationScope(
+                run_id=scope.run_id,
+                invocation_id=scope.invocation_id,
+                display=OperationDisplay(
+                    label_key="agent.operation.context_compaction",
+                    label_params={"phase": phase.value},
+                    resource_ref=scope.display.resource_ref,
+                ),
+            ),
+        )
+        return receipt.operation_id
+
+    async def _succeed_compaction_operation(
+        self,
+        operation_id: str | None,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.succeed(operation_id)
+
+    async def _cancel_compaction_operation(
+        self,
+        operation_id: str | None,
+    ) -> None:
+        if self._operations is not None and operation_id is not None:
+            await self._operations.cancel(
+                operation_id,
+                "context_compaction_canceled",
+            )
+
+    async def _fail_compaction_operation(
+        self,
+        operation_id: str | None,
+        error: Exception,
+    ) -> None:
+        if self._operations is None or operation_id is None:
+            return
+        code = str(
+            getattr(error, "reason_code", "")
+            or getattr(error, "code", "")
+            or "context_compaction_failed"
+        )
+        await self._operations.fail(operation_id, code)
 
 
 def _default_budget(request: AgentRunRequest) -> ContextCompactionBudget:

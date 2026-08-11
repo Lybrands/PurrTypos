@@ -31,6 +31,11 @@ from purra.engine import AgentCoreRunOptions
 from purra.errors import ResponseJudgeContractError
 from purra.events import AgentEvent, CoreEventType
 from purra.model_protocol import generic_capability_snapshot
+from purra.operations import (
+    AgentOperationController,
+    OperationKind,
+    OperationStatus,
+)
 from purra.ports import ResponseJudge
 from purra.runtime import AgentRuntime
 
@@ -132,6 +137,15 @@ class _TraceObserver:
 
     async def on_tool_round_completed(self, outcome=None):
         del outcome
+
+
+class _OperationOutput:
+    def __init__(self):
+        self.events = []
+
+    async def accept_operation_event(self, event):
+        self.events.append(event)
+        return event
 
 
 def _request(*, tools_enabled: bool = False) -> AgentRunRequest:
@@ -264,6 +278,38 @@ async def test_injected_validator_withholds_and_repairs_once_without_domain_logi
     assert deltas == []
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == repaired
+
+
+@pytest.mark.asyncio
+async def test_each_validator_call_has_one_validation_operation():
+    output = _OperationOutput()
+    controller = AgentOperationController(output)
+    validator = _NoBundledAnswer()
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=_ScriptedModelGateway(("valid response",)),
+            operation_controller=controller,
+        ),
+        response_validators=(validator,),
+    )
+
+    validation_starts = [
+        event
+        for event in output.events
+        if getattr(event, "kind", None) is OperationKind.VALIDATION
+    ]
+    assert len(validation_starts) == 1
+    validation_terminals = [
+        event
+        for event in output.events
+        if getattr(event, "operation_id", None)
+        == validation_starts[0].operation_id
+        and getattr(event, "status", None) is not None
+    ]
+    assert len(validation_terminals) == 1
+    assert validation_terminals[0].status is OperationStatus.SUCCEEDED
+    assert _result(updates).outcome is RuntimeOutcome.COMPLETED
 
 
 @pytest.mark.asyncio

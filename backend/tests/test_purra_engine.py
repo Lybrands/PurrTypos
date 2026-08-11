@@ -292,7 +292,15 @@ class StaticPlanner:
     def __init__(self, plan: TaskPlan):
         self.plan = plan
 
-    async def create_plan(self, request, capabilities, signal=None):
+    async def create_plan(
+        self,
+        request,
+        capabilities,
+        signal=None,
+        *,
+        run_id=None,
+    ):
+        del run_id
         return PlanningResult(kind=PlanningKind.PLANNED, plan=self.plan)
 
 
@@ -302,10 +310,22 @@ class CapturePlanner(StaticPlanner):
         self.capabilities = None
         self.call_count = 0
 
-    async def create_plan(self, request, capabilities, signal=None):
+    async def create_plan(
+        self,
+        request,
+        capabilities,
+        signal=None,
+        *,
+        run_id=None,
+    ):
         self.capabilities = capabilities
         self.call_count += 1
-        return await super().create_plan(request, capabilities, signal)
+        return await super().create_plan(
+            request,
+            capabilities,
+            signal,
+            run_id=run_id,
+        )
 
 
 class StopAfterObservationPlanner(StaticPlanner):
@@ -321,8 +341,10 @@ class StopAfterObservationPlanner(StaticPlanner):
         capabilities,
         turn,
         signal=None,
+        *,
+        run_id=None,
     ):
-        del request, capabilities, signal
+        del request, capabilities, signal, run_id
         self.turns.append(turn)
         return PlanningResult(
             kind=PlanningKind.DIRECT_RESPONSE,
@@ -353,8 +375,10 @@ class InvalidAfterObservationPlanner(StaticPlanner):
         capabilities,
         turn,
         signal=None,
+        *,
+        run_id=None,
     ):
-        del request, capabilities, signal
+        del request, capabilities, signal, run_id
         self.turns.append(turn)
         raise InvalidPlannerOutputError(
             "planner output is missing needsTodos",
@@ -1129,10 +1153,7 @@ async def test_standalone_core_runs_read_propose_confirm_and_terminal_flow(appro
     assert result.final_response == (
         "Applied the approved change."
         if approve
-        else (
-            "You rejected the approval. The operation was not executed, and "
-            "the related data remains unchanged."
-        )
+        else "The proposed change was not applied."
     )
     assert [tuple(schema.name for schema in call.tools) for call in model.invocations] == [
         ("read_resource",),

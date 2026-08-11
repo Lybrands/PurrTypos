@@ -40,6 +40,7 @@ from purra.model_invocation import (
     ModelInvocationContext,
 )
 from purra.output import AgentOutputIntent, OutputCommitMode
+from purra.operations import AgentOperationController
 from purra.plan_constraints import (
     agent_assignment_coverage_violations,
 )
@@ -367,8 +368,12 @@ class AgentPlanner:
         self,
         model_gateway: ModelGateway,
         limits: PlannerLimits = PlannerLimits(),
+        operation_controller: AgentOperationController | None = None,
     ):
-        self._model_manager = AgentModelInvocationManager(model_gateway)
+        self._model_manager = AgentModelInvocationManager(
+            model_gateway,
+            operation_controller=operation_controller,
+        )
         self._limits = limits
 
     async def create_plan(
@@ -376,6 +381,8 @@ class AgentPlanner:
         request: AgentRunRequest,
         capabilities: PlanningCapabilities,
         signal: CancellationSignal | None = None,
+        *,
+        run_id: str | None = None,
     ) -> PlanningResult:
         return await self._create_from_messages(
             request,
@@ -384,6 +391,7 @@ class AgentPlanner:
             self._limits,
             signal,
             turn=None,
+            run_id=run_id,
         )
 
     async def revise_plan(
@@ -392,6 +400,8 @@ class AgentPlanner:
         capabilities: PlanningCapabilities,
         turn: PlanningTurn,
         signal: CancellationSignal | None = None,
+        *,
+        run_id: str | None = None,
     ) -> PlanningResult:
         max_tool_steps = min(
             self._limits.max_tool_steps,
@@ -410,6 +420,7 @@ class AgentPlanner:
             limits,
             signal,
             turn=turn,
+            run_id=run_id,
         )
 
     async def _create_from_messages(
@@ -421,11 +432,13 @@ class AgentPlanner:
         signal: CancellationSignal | None,
         *,
         turn: PlanningTurn | None,
+        run_id: str | None,
     ) -> PlanningResult:
         completion, model_call_parameters = await self._complete(
             messages,
             request,
             signal,
+            run_id=run_id,
         )
         active_messages = messages
         for repair_attempt in range(limits.max_repair_attempts + 1):
@@ -451,6 +464,7 @@ class AgentPlanner:
                     limits,
                     error,
                     signal,
+                    run_id=run_id,
                 )
                 model_call_parameters += repair_call_parameters
         return PlanningResult(
@@ -489,6 +503,8 @@ class AgentPlanner:
         limits: PlannerLimits,
         error: InvalidPlannerOutputError,
         signal: CancellationSignal | None,
+        *,
+        run_id: str | None,
     ) -> tuple[
         ModelCompletion,
         tuple[Mapping[str, Any], ...],
@@ -510,6 +526,7 @@ class AgentPlanner:
             repair_messages,
             request,
             signal,
+            run_id=run_id,
         )
         return completion, parameters, repair_messages
 
@@ -518,6 +535,8 @@ class AgentPlanner:
         messages: tuple[AgentMessage, ...],
         request: AgentRunRequest,
         signal: CancellationSignal | None,
+        *,
+        run_id: str | None,
     ) -> tuple[ModelCompletion, tuple[Mapping[str, Any], ...]]:
         result = await self._model_manager.complete(
             messages,
@@ -528,7 +547,9 @@ class AgentPlanner:
                 requires_full_text_validation=True,
                 reasoning_mode=ReasoningMode.DISABLED,
             ),
-            ModelInvocationContext(run_id=f"planner-{uuid4().hex}"),
+            ModelInvocationContext(
+                run_id=run_id or f"planner-{uuid4().hex}",
+            ),
             signal,
         )
         return result.completion, result.receipt.call_parameters
