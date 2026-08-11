@@ -20,6 +20,7 @@ import {
   pendingReviewFindingIds,
   reviewPrimaryAction,
   reviewRequiresRerun,
+  reviewVersionLabel,
   type ReviewBatchDecisionStatus,
 } from './reviewAdjudicationModel'
 
@@ -104,6 +105,7 @@ export default function ReviewAdjudicationPanel({
   const action = reviewPrimaryAction(review)
   const finalizeDisabledReason = finalizationDisabledReason(review)
   const reviewInvalid = reviewRequiresRerun(review)
+  const versionLabel = reviewVersionLabel(review.reviewRevisionId)
 
   const openDecision = (
     issueIds: string[],
@@ -147,7 +149,7 @@ export default function ReviewAdjudicationPanel({
             {review.recommendation
               ? RECOMMENDATION_LABELS[review.recommendation]
               : '等待生成当前剧本的审阅报告'}
-            {review.reviewRevisionId ? ` · 审阅版本 ${review.reviewRevisionId.slice(-8)}` : ''}
+            {versionLabel ? ` · ${versionLabel}` : ''}
           </p>
         </div>
         <div className="screenplay-review-adjudication__summary" aria-label="审阅处理进度">
