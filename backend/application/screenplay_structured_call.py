@@ -41,6 +41,7 @@ from application.model_runtime import (
 from application.request_mapping import context_window_tokens
 from application.run_execution_control import RunExecutionSession
 from application.run_provenance import digest_model_endpoint
+from domains.screenplay_agent import ScreenplayIntentCommandMismatchError
 from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 from application.screenplay_progress_stream import (
     JsonStringFieldProjector,
@@ -327,6 +328,8 @@ class ScreenplayStructuredCallService:
                 ), f"{phase}_repair")
                 try:
                     value = parse(repaired)
+                except ScreenplayIntentCommandMismatchError:
+                    raise
                 except (TypeError, ValueError, json.JSONDecodeError) as error:
                     raise ModelGatewayError(
                         str(error) or str(first_error),

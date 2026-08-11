@@ -829,6 +829,67 @@ async def test_screenplay_answer_turn_does_not_create_a_durable_task(screenplay_
 
 
 @pytest.mark.asyncio
+async def test_formal_review_command_can_never_complete_as_answer(screenplay_db):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-command-guard-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Command guard",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="screenplay-command-guard-test",
+        planner=_Planner(ScreenplayIntent(
+            action=ScreenplayIntentAction.ANSWER,
+            instruction="说明没有 JSON",
+            reply="没有待修复 JSON",
+        )),
+        resolver=_Resolver(),
+        unit_executor_factory=lambda _runtime: None,
+        projects=projects,
+    )
+    request = SubmitScreenplayAgentTurnRequest.model_validate({
+        "sessionId": session["id"],
+        "content": "开始审阅",
+        "stageCommand": {
+            "kind": "stage_action",
+            "action": "review",
+            "targetRole": "review",
+            "scope": {"kind": "current_stage"},
+        },
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "options": {"model": "fixture-model"},
+        },
+    })
+    turn = await service.submit_turn(
+        command_id="formal-review-command",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    await service.execute_turn(turn["id"], request.runtime)
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    projected = snapshot["turns"][0]
+    assert projected["status"] == "failed"
+    assert projected["error"]["code"] == "screenplay_intent_command_mismatch"
+    assert projected["assistantContent"] == ""
+    assert projected["intent"] is None
+    assert snapshot["operations"] == []
+    assert snapshot["tasks"] == []
+
+
+@pytest.mark.asyncio
 async def test_screenplay_execution_uses_purra_task_without_job_state(
     screenplay_db,
 ):
