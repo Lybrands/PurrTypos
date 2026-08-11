@@ -8,6 +8,7 @@ import {
   reviewAgentActionAvailable,
   reviewPrimaryAction,
   reviewRequiresRerun,
+  reviewVersionLabel,
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel.ts'
 
@@ -148,6 +149,15 @@ test('review phase exposes the Agent shortcut only when Agent work is available'
       message: '当前审阅报告没有可验证的正文输入',
     }],
   }), true)
+})
+
+test('review version label never exposes the internal revision identifier', () => {
+  const internalId = 'review-internal-secret-1234'
+  const label = reviewVersionLabel(internalId)
+
+  assert.equal(label, '当前审阅版本')
+  assert.equal(reviewVersionLabel(null), '')
+  assert.doesNotMatch(label, /internal|secret|1234/)
 })
 
 test('review rerun is driven by validation checks, not formal review findings', () => {
