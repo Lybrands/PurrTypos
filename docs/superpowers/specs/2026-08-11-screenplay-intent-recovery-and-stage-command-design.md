@@ -2,7 +2,7 @@
 
 日期：2026-08-11
 
-状态：待用户审阅
+状态：已确认
 
 范围：剧本阶段按钮、Conversation Turn、意图 Planner、PurrA 托管模型调用、结构化 JSON 修复与 Turn/Operation 提交边界
 
@@ -20,7 +20,7 @@
 
 ## 目标
 
-1. “开始审阅”等确定性阶段按钮保留不可被模型改写的业务边界，同时继续经过统一 Planner 和任务系统。
+1. “开始审阅”等确定性正式阶段按钮保留不可被模型改写的业务边界，同时继续经过统一 Planner 和任务系统。
 2. 自由文本仍由模型完成意图判断，不依赖固定短语或前端枚举自然语言。
 3. reasoning-only、empty、invalid JSON、schema invalid、truncated 和 provider failure 具有不同终态与恢复路径。
 4. 只有存在非空候选时才允许 JSON repair；空输出不得进入 repair。
@@ -33,6 +33,7 @@
 - 不恢复长篇自动模板，不把业务规则重新塞进用户消息。
 - 不按“开始审阅”等固定中文短语在后端猜测命令类型。
 - 不让阶段按钮绕过 Planner；Planner 仍负责生成完整 instruction、约束整理和公开概述。
+- 不把“处理审阅意见”等普通对话快捷入口强制转换成正式 Operation。
 - 不解析或公开 chain-of-thought。
 - 不修改已完成历史 Turn；事故记录继续作为审计事实保留。
 - 不重写完整 Agent Runtime，也不为剧本建立第二套通用 Runtime。
@@ -54,7 +55,7 @@
 
 ## 核心不变量
 
-1. 按钮文字只用于对话展示；`stageCommand` 才是确定性按钮的业务边界。
+1. 正式阶段按钮的文字只用于对话展示；`stageCommand` 才是该按钮的业务边界。
 2. `stageCommand.action` 不允许为 `answer`。
 3. Planner 可以补全意图，但不得改变 `stageCommand` 指定的 action、targetRole 或精确范围。
 4. 自由文本 Turn 没有 `stageCommand`，仍可规划为 answer/create/revise/review。
@@ -89,7 +90,8 @@ type ScreenplayStageCommand = {
 
 规则：
 
-- 自动阶段按钮和批量正文按钮提交 `stageCommand`；自由输入省略。
+- 创建、修订或审阅交付物的正式阶段按钮和批量正文按钮提交 `stageCommand`；自由输入省略。
+- “处理审阅意见”等只触发普通对话的快捷入口省略 `stageCommand`，允许 Planner 合法返回 answer，并且不得创建 Operation。
 - `content` 继续保存并显示用户实际点击的简短动作，例如“开始审阅”。
 - 前端通过项目 Workspace 和按钮本身生成枚举值，不从按钮 label 反向解析。
 - 后端在持久化前校验 action、targetRole、scope 的组合；非法组合拒绝入队。
