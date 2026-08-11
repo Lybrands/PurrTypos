@@ -17,6 +17,7 @@ export interface PurrConfirmOptions {
   confirmVariant?: 'primary' | 'danger'
   cancelText?: React.ReactNode
   actions?: PurrConfirmAction[]
+  zIndex?: number
 }
 
 export type PurrConfirmApi = (options: PurrConfirmOptions) => Promise<PurrConfirmResult>
@@ -59,6 +60,7 @@ export function PurrConfirmProvider({ children }: { children: React.ReactNode })
       {children}
       {options && (
         <PurrDialog
+          zIndex={options.zIndex}
           open
           title={options.title}
           onOpenChange={(open) => { if (!open) finish('cancel') }}

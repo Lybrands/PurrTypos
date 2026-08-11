@@ -1,4 +1,5 @@
 import React from 'react'
+import { getOverlayLayerStyle } from '../overlayLayer'
 import '../styles/purr.scss'
 
 export type PurrToastLevel = 'success' | 'error' | 'warning' | 'info'
@@ -34,7 +35,12 @@ export function usePurrToast(): PurrToastApi {
   return purrToast
 }
 
-export function PurrToastProvider({ children }: { children: React.ReactNode }) {
+export interface PurrToastProviderProps {
+  children: React.ReactNode
+  zIndex?: number
+}
+
+export function PurrToastProvider({ children, zIndex }: PurrToastProviderProps) {
   const [messages, setMessages] = React.useState<PurrToastMessage[]>([])
   const nextKey = React.useRef(0)
   const dismiss = React.useCallback((key: number) => {
@@ -62,9 +68,14 @@ export function PurrToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <>
       {children}
-      <div className="purr-purrToast-region" aria-live="polite" aria-atomic="true">
+      <div
+        className="purr-toast-region"
+        style={getOverlayLayerStyle('PurrToastProvider', zIndex)}
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {messages.map((message) => (
-          <div key={message.key} className={`purr-purrToast purr-purrToast--${message.level}`} role={message.level === 'error' ? 'alert' : 'status'}>
+          <div key={message.key} className={`purr-toast purr-toast--${message.level}`} role={message.level === 'error' ? 'alert' : 'status'}>
             <span className="purr-toast__icon" aria-hidden>{levelIcon[message.level]}</span>
             <span className="purr-toast__content">{message.content}</span>
             <button

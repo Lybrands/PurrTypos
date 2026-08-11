@@ -20,6 +20,7 @@ export interface PurrModalProps {
   maskClosable?: boolean
   className?: string
   rootClassName?: string
+  zIndex?: number
   styles?: {
     container?: React.CSSProperties
     header?: React.CSSProperties
@@ -45,6 +46,7 @@ export function PurrModal({
   closable = true,
   className,
   rootClassName,
+  zIndex,
   styles,
 }: PurrModalProps) {
   const resolvedFooter = footer === null
@@ -60,6 +62,7 @@ export function PurrModal({
 
   return (
     <PurrDialog
+      zIndex={zIndex}
       open={open}
       title={title}
       width={width}
