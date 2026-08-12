@@ -17,13 +17,40 @@ BACKEND_DIR = ROOT_DIR / "backend"
 PURRA_DIR = ROOT_DIR / "packages" / "purra" / "src" / "purra"
 SCREENPLAY_DOMAIN_DIR = BACKEND_DIR / "domains" / "screenplay"
 GENERIC_CHUNK_HANDLER_DIR = (
-    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chunkHandlers"
+    ROOT_DIR / "src" / "agent-runtime" / "chunkHandlers"
+)
+SHARED_AGENT_FRONTEND_DIRS = (
+    ROOT_DIR / "src" / "agent-runtime",
+    ROOT_DIR / "src" / "components" / "AgentConversation",
+)
+LEGACY_AGENT_UI_PATHS = (
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "ChatMessageList",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "WorkLog",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "TaskPlanCard",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "Markdown",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "ModelPicker",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "components" / "ContextUsageIndicator",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chat.types.ts",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chunkHandlers",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chatHistory.ts",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "streamOptions.ts",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "taskPlanSelection.ts",
+    ROOT_DIR / "src" / "Workspace" / "AiPanel" / "contextUsage.ts",
 )
 SCREENPLAY_CONVERSATION_FRONTEND_FILES = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationClient.ts",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
 )
 SCREENPLAY_PAGE = ROOT_DIR / "src" / "ScreenplayAgentPage" / "index.tsx"
+SCREENPLAY_CONVERSATION_CONTROLLER = (
+    ROOT_DIR
+    / "src"
+    / "ScreenplayAgentPage"
+    / "useScreenplayConversationController.ts"
+)
+SHARED_AGENT_CONVERSATION_PANEL = (
+    ROOT_DIR / "src" / "components" / "AgentConversation" / "Panel.tsx"
+)
 SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
     BACKEND_DIR / "application" / "screenplay_agent_planner.py",
     BACKEND_DIR / "application" / "screenplay_agent_service.py",
@@ -33,18 +60,17 @@ SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
     ROOT_DIR
     / "src"
-    / "Workspace"
-    / "AiPanel"
     / "components"
-    / "ChatMessageList"
-    / "AssistantMessageBody.tsx",
+    / "AgentConversation"
+    / "AssistantOutput"
+    / "index.tsx",
     ROOT_DIR
     / "src"
-    / "Workspace"
-    / "AiPanel"
     / "components"
-    / "ChatMessageList"
-    / "assistantTimeline.ts",
+    / "AgentConversation"
+    / "AssistantOutput"
+    / "timeline.ts",
+    SCREENPLAY_CONVERSATION_CONTROLLER,
 )
 PHASE_FOUR_REMOVED_PATHS = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
@@ -221,7 +247,6 @@ def test_generic_ai_router_product_routes_can_only_shrink():
 
 def test_generic_frontend_screenplay_debt_can_only_shrink():
     generic_paths = [
-        ROOT_DIR / "src" / "Workspace" / "AiPanel" / "hooks" / "chat.types.ts",
         *sorted(GENERIC_CHUNK_HANDLER_DIR.glob("*.ts")),
     ]
     violations: list[str] = []
@@ -235,6 +260,31 @@ def test_generic_frontend_screenplay_debt_can_only_shrink():
     assert not violations, "Generic frontend screenplay debt grew:\n" + "\n".join(
         violations
     )
+
+
+def test_shared_agent_frontend_never_depends_on_product_directories():
+    violations: list[str] = []
+    for directory in SHARED_AGENT_FRONTEND_DIRS:
+        for path in sorted((*directory.rglob("*.ts"), *directory.rglob("*.tsx"))):
+            text = path.read_text(encoding="utf-8")
+            if (
+                "Workspace/AiPanel" in text
+                or "ScreenplayAgentPage" in text
+                or "/services" in text
+            ):
+                violations.append(path.relative_to(ROOT_DIR).as_posix())
+    assert not violations, "Shared Agent frontend imports product code:\n" + "\n".join(
+        violations
+    )
+
+
+def test_legacy_agent_ui_paths_are_removed():
+    restored = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in LEGACY_AGENT_UI_PATHS
+        if path.exists()
+    ]
+    assert not restored, "Legacy Agent UI paths returned:\n" + "\n".join(restored)
 
 
 def test_rewritten_screenplay_agent_routes_are_complete():
@@ -317,13 +367,20 @@ def test_screenplay_page_consumes_the_shared_agent_chunk_runtime():
         "proposalProvenance",
     }
     source = SCREENPLAY_PAGE.read_text(encoding="utf-8")
+    controller_source = SCREENPLAY_CONVERSATION_CONTROLLER.read_text(
+        encoding="utf-8"
+    )
+    panel_source = SHARED_AGENT_CONVERSATION_PANEL.read_text(encoding="utf-8")
     violations = sorted(token for token in forbidden if token in source)
     assert not violations, "Legacy screenplay page runtime returned: " + ", ".join(
         violations
     )
     assert "AgentChunkReplay" in source
     assert "onChunks:" in source
-    assert "onEditMessage={editAgentMessage}" in source
+    assert "editMessage: (index, content) => runAgent(content, index)" in source
+    assert "actions: bindings.actions" in controller_source
+    assert "onEditMessage={controller.actions.editMessage}" in panel_source
+    assert "controller={screenplayConversationController}" in source
     assert "truncateFromTurn" in source
 
 

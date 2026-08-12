@@ -2,7 +2,7 @@ import { services } from '@/services'
 import React from "react";
 import { usePurrToast } from '@/purr-components';
 import type { AiSession, EntityId } from "../../../types";
-import type { ChatMessage } from "./chat.types";
+import type { AgentConversationMessage } from "../../../agent-runtime/contracts";
 
 // "setting" 为历史存储值，对应 UI 上的「全局对话」（不绑章节、整本书共享）
 export type ChatSessionScope = "chapter" | "setting";
@@ -16,8 +16,8 @@ interface UseAiSessionsParams {
   chapterId: EntityId | null | undefined;
   /** 会话作用域：chapter = 按章节隔离（默认）；setting = 不绑章节的全局会话 */
   scope?: ChatSessionScope;
-  conversations: ChatMessage[];
-  setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  conversations: AgentConversationMessage[];
+  setConversations: React.Dispatch<React.SetStateAction<AgentConversationMessage[]>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
@@ -34,7 +34,7 @@ export function useAiSessions({
   const [activeSessionId, setActiveSessionIdState] = React.useState<
     number | null
   >(null);
-  const [prependedHistory, setPrependedHistory] = React.useState<ChatMessage[]>(
+  const [prependedHistory, setPrependedHistory] = React.useState<AgentConversationMessage[]>(
     [],
   );
   /** 当前 book+scope(+chapter) 维度的会话列表是否已完成首次拉取 */
