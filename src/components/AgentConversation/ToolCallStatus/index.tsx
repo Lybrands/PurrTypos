@@ -6,7 +6,7 @@ import {
   EditIcon,
   FileSearchIcon,
 } from '@/purr-components'
-import type { ToolCallLabelOutcome } from '../../hooks/chat.types'
+import type { ToolCallLabelOutcome } from '../../../agent-runtime/contracts'
 import {
   buildToolCallRows,
   type ToolCallRow,

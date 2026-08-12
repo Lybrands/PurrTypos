@@ -4,16 +4,17 @@ import {
   AlertCircleIcon,
   LoadingIcon,
 } from '@/purr-components';
-import { type ChatMessage } from "../../hooks";
-import Markdown from "../Markdown";
+import type { AgentConversationMessage } from "../../../agent-runtime";
+import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import Markdown from "../../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
-import SettingDiffCard from "../SettingDiffCard";
-import ToolApprovalCard from "../ToolApprovalCard";
-import WorkLog from "../WorkLog";
-import SubAgentStatusList from "../SubAgentStatusList";
-import StructuredQuestionCard from "../StructuredQuestionCard";
-import ErrorReportNotice from "./ErrorReportNotice";
-import { parseStructuredQuestions } from "../../structuredQuestions";
+import ToolApproval from "../ToolApproval";
+import ExecutionLog from "../ExecutionLog";
+import DelegationStatus from "../DelegationStatus";
+import StructuredQuestion from "../StructuredQuestion";
+import ErrorReportNotice from "../ErrorReportNotice";
+import { parseStructuredQuestions } from "../StructuredQuestion/parser";
+import { getErrorNoticeMessage } from "./errorNoticeMessage";
 import {
   buildAssistantTimeline,
   getExecutionPanelLogKey,
@@ -23,18 +24,24 @@ import {
   type AssistantTimelinePart,
   type TimelineOperationPart,
   type TimelineStepPart,
-} from "./assistantTimeline";
-import type { CanonicalOperation } from "../../../../agent-runtime/canonicalOutput";
-import "./AssistantMessageBody.scss";
+} from "./timeline";
+import "./index.scss";
 
-export interface AssistantMessageBodyProps {
+export interface AssistantOutputProps {
   index: number;
-  message: ChatMessage;
+  message: AgentConversationMessage;
   loading: boolean;
   isLastAssistant: boolean;
   showPlaceholder: boolean;
   setScrolledUpByReason: (nextValue: boolean, reason: string) => void;
   onStructuredAnswer?: (answer: string) => void;
+  onResolveToolApproval: (
+    approvalId: string,
+    approved: boolean,
+  ) => Promise<{ success: boolean; error?: string }>;
+  onSubmitErrorReport?: (
+    reportId: string,
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 const PROCESSING_STANDBY_DELAY_MS = 1000;
@@ -115,17 +122,6 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   });
 }
 
-function operationIsActive(part: TimelineOperationPart): boolean {
-  if (part.type === "operation") return part.operation.status === "running";
-  if (part.type === "tools") return Boolean(part.isLive);
-  if (part.type === "contextCompaction") {
-    return part.state.status === "running";
-  }
-  return part.items.some((item) =>
-    ["queued", "claimed", "running"].includes(item.status),
-  );
-}
-
 function CanonicalOperationRow({
   operation,
   label,
@@ -185,7 +181,7 @@ function formatOperationDuration(ms: number): string {
   return remainder ? `${minutes}分${remainder}秒` : `${minutes}分钟`;
 }
 
-function AssistantMessageBodyInner({
+function AssistantOutputInner({
   index,
   message,
   loading,
@@ -193,7 +189,9 @@ function AssistantMessageBodyInner({
   showPlaceholder,
   setScrolledUpByReason,
   onStructuredAnswer,
-}: AssistantMessageBodyProps) {
+  onResolveToolApproval,
+  onSubmitErrorReport,
+}: AssistantOutputProps) {
   const isStreaming = loading && isLastAssistant;
   const handleWheelUp = () =>
     setScrolledUpByReason(true, "commentary-wheel-up");
@@ -210,18 +208,19 @@ function AssistantMessageBodyInner({
   );
 
   const answerParts = timeline.filter((part) => part.type === "text");
-  const workLogParts = timeline.filter(isVisibleWorkLogPart);
-  const executionPanel = getExecutionPanelPresentation(workLogParts, {
+  const executionLogParts = timeline.filter(isVisibleWorkLogPart);
+  const executionPanel = getExecutionPanelPresentation(executionLogParts, {
     isStreaming,
     durationMs: message.durationMs,
   });
-  const executionPanelLogKey = getExecutionPanelLogKey(message);
-  const workLogItems = React.useMemo(
+  const executionPanelLogKey = getExecutionPanelLogKey(message)
+    ?? `message-${index}-execution-log`;
+  const executionLogItems = React.useMemo(
     () => groupConsecutiveWorkSteps(
-      workLogParts,
-      executionPanelLogKey ?? `message-${index}`,
+      executionLogParts,
+      executionPanelLogKey,
     ),
-    [executionPanelLogKey, index, workLogParts],
+    [executionLogParts, executionPanelLogKey],
   );
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
@@ -314,7 +313,7 @@ function AssistantMessageBodyInner({
     }
     if (part.type === "delegations") {
       return (
-        <SubAgentStatusList
+        <DelegationStatus
           key={key}
           items={part.items}
           activities={message.subAgentActivities}
@@ -324,7 +323,7 @@ function AssistantMessageBodyInner({
     return renderStepPart(part);
   };
 
-  const renderWorkLogItem = (
+  const renderExecutionLogItem = (
     part: ReturnType<typeof groupConsecutiveWorkSteps>[number],
     partIndex: number,
   ) => {
@@ -345,8 +344,8 @@ function AssistantMessageBodyInner({
 
   return (
     <div className="bubble-assistant-body">
-      {executionPanel.visible && executionPanelLogKey ? (
-        <WorkLog
+      {executionPanel.visible ? (
+        <ExecutionLog
           key={executionPanelLogKey}
           logKey={executionPanelLogKey}
           title={executionPanel.title}
@@ -354,20 +353,20 @@ function AssistantMessageBodyInner({
           autoOpen={executionPanel.autoOpen}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
-          hasError={workLogHasError(workLogParts)}
+          hasError={workLogHasError(executionLogParts)}
         >
-          {workLogItems.map(renderWorkLogItem)}
-        </WorkLog>
+          {executionLogItems.map(renderExecutionLogItem)}
+        </ExecutionLog>
       ) : null}
 
-      {!showPlaceholder &&
+      {!message.isError && !showPlaceholder &&
         answerParts.map((part, partIndex) => {
           if (part.type !== "text") return null;
           const structuredQuestions = isStreaming
             ? null
             : parseStructuredQuestions(part.md);
           return structuredQuestions ? (
-            <StructuredQuestionCard
+            <StructuredQuestion
               key={`questions-${partIndex}`}
               questions={structuredQuestions}
               disabled={loading}
@@ -389,10 +388,13 @@ function AssistantMessageBodyInner({
           <span>{processingLabel}</span>
         </div>
       ) : null}
-      {message.error ? (
+      {message.isError || message.error ? (
         <ErrorReportNotice
-          message={`生成中断：${message.error}`}
+          message={message.isError
+            ? getErrorNoticeMessage(message)
+            : `生成中断：${message.error}`}
           report={message.errorReport}
+          onSubmitErrorReport={onSubmitErrorReport}
         />
       ) : null}
       {message.termination ? (
@@ -400,14 +402,15 @@ function AssistantMessageBodyInner({
           {message.termination}
         </div>
       ) : null}
-      {(message.settingDiffCards || []).map((card) => (
-        <SettingDiffCard key={card.sessionKey} card={card} />
-      ))}
       {(message.toolApprovals || []).map((approval) => (
-        <ToolApprovalCard key={approval.approvalId} approval={approval} />
+        <ToolApproval
+          key={approval.approvalId}
+          approval={approval}
+          onResolve={onResolveToolApproval}
+        />
       ))}
     </div>
   );
 }
 
-export default React.memo(AssistantMessageBodyInner);
+export default React.memo(AssistantOutputInner);

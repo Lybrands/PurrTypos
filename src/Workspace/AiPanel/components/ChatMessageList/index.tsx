@@ -69,6 +69,13 @@ export interface ChatMessageListProps {
   onAbort: () => void;
   onAddFavorite: (prompt: string, content: string) => void;
   onStructuredAnswer: (answer: string) => void;
+  onResolveToolApproval: (
+    approvalId: string,
+    approved: boolean,
+  ) => Promise<{ success: boolean; error?: string }>;
+  onSubmitErrorReport?: (
+    reportId: string,
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 export default function ChatMessageList({
@@ -95,6 +102,8 @@ export default function ChatMessageList({
   onAbort,
   onAddFavorite,
   onStructuredAnswer,
+  onResolveToolApproval,
+  onSubmitErrorReport,
 }: ChatMessageListProps) {
   const scrollerCleanupRef = React.useRef<(() => void) | null>(null);
   const turnIndexItems = React.useMemo(
@@ -247,6 +256,8 @@ export default function ChatMessageList({
               onAbort={onAbort}
               onAddFavorite={onAddFavorite}
               onStructuredAnswer={onStructuredAnswer}
+              onResolveToolApproval={onResolveToolApproval}
+              onSubmitErrorReport={onSubmitErrorReport}
               setScrolledUpByReason={setScrolledUpByReason}
             />
           );

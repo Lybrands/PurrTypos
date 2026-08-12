@@ -1,17 +1,20 @@
-import { services } from '@/services'
 import React from "react";
 import { PurrButton, PurrCard, PurrSpace, PurrTag } from '@/purr-components';
 import { CheckIcon, CloseIcon } from '@/purr-components';
-import type { ToolApprovalRequest } from "../../../../types";
+import type { ToolApprovalRequest } from "../../../types";
 import "./ToolApprovalCard.scss";
 
 type ApprovalState = "pending" | "submitting" | "approved" | "rejected" | "error";
 
-interface ToolApprovalCardProps {
+export interface ToolApprovalProps {
   approval: ToolApprovalRequest;
+  onResolve: (
+    approvalId: string,
+    approved: boolean,
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
-export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
+export default function ToolApproval({ approval, onResolve }: ToolApprovalProps) {
   const serverState: ApprovalState =
     approval.status === "approved" || approval.status === "rejected"
       ? approval.status
@@ -36,10 +39,7 @@ export default function ToolApprovalCard({ approval }: ToolApprovalCardProps) {
   const decide = async (approved: boolean) => {
     if (state !== "pending") return;
     setState("submitting");
-    const result = await services.ai.resolveAiToolApproval({
-      approvalId: approval.approvalId,
-      approved,
-    });
+    const result = await onResolve(approval.approvalId, approved);
     if (result.success) {
       setState(approved ? "approved" : "rejected");
       return;

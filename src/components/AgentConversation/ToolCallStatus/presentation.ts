@@ -1,4 +1,4 @@
-import type { ToolCallLabelOutcome } from '../../hooks/chat.types.ts'
+import type { ToolCallLabelOutcome } from '../../../agent-runtime/contracts.ts'
 
 export type ToolRowPhase = 'done' | 'running' | 'pending'
 

@@ -328,6 +328,16 @@ export default function AiPanel({
     [doSubmit, pinNewTurnToTop],
   );
 
+  const handleResolveToolApproval = React.useCallback((
+    approvalId: string,
+    approved: boolean,
+  ) => services.ai.resolveAiToolApproval({ approvalId, approved }), []);
+
+  const handleSubmitErrorReport = React.useCallback(
+    (reportId: string) => services.ai.submitAiErrorReport({ reportId }),
+    [],
+  );
+
   const handleEditSend = React.useCallback(
     (editIndex: number, content?: string) => {
       const raw = content ?? getEditTextareaValue() ?? editingMessageDraftRef.current;
@@ -474,6 +484,8 @@ export default function AiPanel({
             onAbort={handleAbort}
             onAddFavorite={handleAddFavorite}
             onStructuredAnswer={handleStructuredAnswer}
+            onResolveToolApproval={handleResolveToolApproval}
+            onSubmitErrorReport={handleSubmitErrorReport}
           />
             </div>
           </div>

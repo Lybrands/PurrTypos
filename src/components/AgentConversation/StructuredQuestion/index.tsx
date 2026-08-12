@@ -1,17 +1,17 @@
 import React from "react";
-import type { StructuredQuestion } from "../../structuredQuestions";
+import type { StructuredQuestion } from "./parser";
 
-interface StructuredQuestionCardProps {
+interface StructuredQuestionProps {
   questions: StructuredQuestion[];
   disabled?: boolean;
   onAnswer?: (answer: string) => void;
 }
 
-export default function StructuredQuestionCard({
+export default function StructuredQuestion({
   questions,
   disabled = false,
   onAnswer,
-}: StructuredQuestionCardProps) {
+}: StructuredQuestionProps) {
   const [selections, setSelections] = React.useState<Record<number, string>>({});
   const multiple = questions.length > 1;
   const allSelected =

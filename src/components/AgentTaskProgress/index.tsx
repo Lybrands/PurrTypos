@@ -11,7 +11,7 @@ import type { AiTaskPlan } from '../../agent-runtime'
 import {
   getTaskPlanLabel,
   TaskPlanSteps,
-} from '../../Workspace/AiPanel/components/TaskPlanCard'
+} from '../AgentConversation/TaskProgress/TaskPlanCard'
 import {
   getTaskPlanCountLabel,
   getTaskPlanProgress,

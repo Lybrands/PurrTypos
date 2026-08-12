@@ -14,7 +14,7 @@ import {
 } from '@/purr-components'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
-import Markdown from '../Workspace/AiPanel/components/Markdown'
+import Markdown from '../components/Markdown'
 import type {
   EntityId,
   ScreenplayV2DeliverableRole,
