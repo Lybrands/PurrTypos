@@ -3,6 +3,7 @@ import { services } from '@/services'
 import React from 'react'
 import { usePurrToast, type PurrDropdownItem } from '@/purr-components'
 import type { AiModelConfig, Conversation, SettingDiffCardState } from '../../types'
+import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
 import { AgentConversationPanel } from '../../components/AgentConversation'
 import { useWorkspace } from '../WorkspaceContext'
@@ -13,7 +14,6 @@ import {
   useMemorySelection,
   usePromptTemplateContext,
   useChatSubmit,
-  type ChatMessage,
   type ChatSessionScope,
 } from './hooks'
 import { getChatSessionRuntime } from './hooks/chatRuntimeStore'
@@ -78,7 +78,7 @@ export default function AiPanel({
     writingChapters,
   } = useWorkspace()
   const [prompt, setPrompt] = React.useState('')
-  const [conversations, setConversations] = React.useState<ChatMessage[]>([])
+  const [conversations, setConversations] = React.useState<AgentConversationMessage[]>([])
   const [loading, setLoading] = React.useState(false)
   const [conversationInitializing, setConversationInitializing] = React.useState(false)
   const [chatScope, setChatScope] = React.useState<ChatSessionScope>('chapter')
@@ -97,7 +97,7 @@ export default function AiPanel({
     && (chatScope === 'setting' || chapterId != null)
 
   const addAssistantAttachment = React.useCallback((
-    message: ChatMessage,
+    message: AgentConversationMessage,
     card: SettingDiffCardState,
   ) => {
     addBookAssistantAttachment(message, card)

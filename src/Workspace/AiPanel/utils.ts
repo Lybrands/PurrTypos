@@ -5,7 +5,7 @@ import {
   type ChatAgentMode,
 } from '../../types.ts'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants.ts'
-import type { ChatMessage } from './hooks/chat.types.ts'
+import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import { KNOWN_TOOL_CALL_LABELS } from '../../components/AgentConversation/toolCallLabels.ts'
 
 function normalizeStoredToolCallLabel(label: string): string {
@@ -87,8 +87,10 @@ export function saveModelPrefs(
   }
 }
 
-/** 将接口返回的 Conversation[] 转为 ChatMessage[] */
-export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
+/** 将接口返回的 Conversation[] 转为共享 Agent 对话消息。 */
+export function parseConversationsFromApi(
+  data: Conversation[],
+): AgentConversationMessage[] {
   return data
     .map((item) => {
       let commentaryBlocks: string[] | undefined
@@ -101,7 +103,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
       if (!commentaryBlocks && item.commentary?.trim()) {
         commentaryBlocks = [item.commentary.trim()]
       }
-      let taskPlan: ChatMessage['taskPlan']
+      let taskPlan: AgentConversationMessage['taskPlan']
       if (item.task_plan) {
         try {
           const parsed = JSON.parse(item.task_plan) as unknown
@@ -112,7 +114,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
             typeof (parsed as { status?: unknown }).status === 'string' &&
             Array.isArray((parsed as { steps?: unknown }).steps)
           ) {
-            taskPlan = parsed as ChatMessage['taskPlan']
+            taskPlan = parsed as AgentConversationMessage['taskPlan']
           }
         } catch (_) {}
       }
@@ -128,7 +130,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
           }
         } catch (_) {}
       }
-      let assistantMsg: ChatMessage = {
+      let assistantMsg: AgentConversationMessage = {
         role: 'assistant',
         content: item.response,
         conversationId: item.id,
@@ -141,15 +143,15 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
         commentaryDurationsMs,
         taskPlan,
         contextCompaction: parseJsonObject<
-          NonNullable<ChatMessage['contextCompaction']>
+          NonNullable<AgentConversationMessage['contextCompaction']>
         >(item.context_compaction),
         contextBudget: parseJsonObject<
-          NonNullable<ChatMessage['contextBudget']>
+          NonNullable<AgentConversationMessage['contextBudget']>
         >(item.context_budget),
       }
       const agentProcess = parseJsonObject<{
-        delegations?: ChatMessage['delegations']
-        subAgentActivities?: ChatMessage['subAgentActivities']
+        delegations?: AgentConversationMessage['delegations']
+        subAgentActivities?: AgentConversationMessage['subAgentActivities']
       }>(item.agent_process)
       if (Array.isArray(agentProcess?.delegations)) {
         assistantMsg.delegations = agentProcess.delegations
@@ -160,7 +162,7 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
       const rawSegments = item.tool_call_segments
       if (rawSegments) {
         try {
-          const parsedSegments = JSON.parse(rawSegments) as ChatMessage['toolCallSegments']
+          const parsedSegments = JSON.parse(rawSegments) as AgentConversationMessage['toolCallSegments']
           const segments = Array.isArray(parsedSegments)
             ? parsedSegments.map((segment) => ({
                 ...segment,

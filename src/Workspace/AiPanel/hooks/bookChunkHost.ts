@@ -8,13 +8,13 @@ import type {
 } from '../../../agent-runtime/chunkHandlers/types'
 import { normalizeApiProvider } from '../../../modelCatalog'
 import type { AiModelConfig, AiSession, EntityId } from '../../../types'
+import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
 import {
   countQueuedForSession,
   getSettledSessionActivity,
   type ChatSessionActivity,
   type QueuedChatSubmission,
 } from './chatQueue'
-import type { ChatMessage } from './chat.types'
 import {
   handleChapterCreated,
   handleProposedChapterDiff,
@@ -31,10 +31,10 @@ export interface BookChunkHostDependencies {
   needsTitle: boolean
   modelConfig: AiModelConfig
   apiModelName: string
-  readMessages(): ChatMessage[]
-  replaceMessages(messages: ChatMessage[]): void
+  readMessages(): AgentConversationMessage[]
+  replaceMessages(messages: AgentConversationMessage[]): void
   scheduleCommit(
-    updater: (messages: ChatMessage[]) => ChatMessage[],
+    updater: (messages: AgentConversationMessage[]) => AgentConversationMessage[],
   ): void
   flushCommits(): void
   setRunning(running: boolean): void
@@ -202,7 +202,7 @@ function attachConversationId(
 }
 
 function findConversationMessageIndex(
-  messages: ChatMessage[],
+  messages: AgentConversationMessage[],
   userText: string,
   assistantContent: string,
 ): number {

@@ -10,7 +10,7 @@ import {
   subscribeAgentConversationRuntime,
   updateAgentConversationMessages,
 } from '../../../agent-runtime/runtimeStore'
-import type { ChatMessage } from './chat.types'
+import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
 import type {
   ChatSessionActivity,
   QueuedChatSubmission,
@@ -18,7 +18,7 @@ import type {
 
 export interface ChatSessionRuntime {
   sessionId: number
-  messages: ChatMessage[]
+  messages: AgentConversationMessage[]
   loading: boolean
   activity?: ChatSessionActivity
   streamId?: string
@@ -54,7 +54,7 @@ export function getChatSessionRuntime(
   if (!runtime) return undefined
   return {
     sessionId: runtime.sessionId as number,
-    messages: runtime.messages as ChatMessage[],
+    messages: runtime.messages,
     loading: runtime.running,
     activity: runtime.activity as ChatSessionActivity | undefined,
     streamId: runtime.streamId,
@@ -64,18 +64,18 @@ export function getChatSessionRuntime(
 
 export function replaceChatRuntimeMessages(
   sessionId: number,
-  messages: ChatMessage[],
+  messages: AgentConversationMessage[],
 ): void {
   replaceAgentConversationMessages(sessionId, messages)
 }
 
 export function updateChatRuntimeMessages(
   sessionId: number,
-  updater: (messages: ChatMessage[]) => ChatMessage[],
+  updater: (messages: AgentConversationMessage[]) => AgentConversationMessage[],
 ): void {
   updateAgentConversationMessages(
     sessionId,
-    (messages) => updater(messages as ChatMessage[]),
+    updater,
   )
 }
 
