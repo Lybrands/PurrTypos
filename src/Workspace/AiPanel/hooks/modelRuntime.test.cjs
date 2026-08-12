@@ -35,6 +35,7 @@ const {
   setChatRuntimeActivity,
   setChatRuntimeLoading,
   setChatRuntimeStreamId,
+  subscribeChatRuntime,
   updateChatRuntimeMessages,
 } = loadTypeScriptModule(
   path.join(__dirname, 'chatRuntimeStore.ts'),
@@ -488,4 +489,37 @@ test('chat runtime keeps concurrent sessions isolated across panel lifecycles', 
   )
 
   clearChatRuntime(secondSessionId)
+})
+
+test('clearing chat runtime notifies once after runtime and queue are consistent', () => {
+  const sessionId = 91003
+  replaceChatRuntimeMessages(sessionId, [
+    { role: 'user', content: 'request' },
+    { role: 'assistant', content: '' },
+  ])
+  replaceChatRuntimeQueue([
+    {
+      content: 'queued follow-up',
+      sessionId,
+      selectedModel: 'test',
+      selectedModelConfig: {},
+      agentEnabled: false,
+      associatedChapterIds: [],
+      associatedOutlineIds: [],
+      selectedMemoryIds: [],
+      selectedForeshadowingIds: [],
+    },
+  ])
+  const snapshots = []
+  const unsubscribe = subscribeChatRuntime(() => {
+    snapshots.push({
+      runtime: getChatSessionRuntime(sessionId),
+      queue: getChatRuntimeQueue().filter((item) => item.sessionId === sessionId),
+    })
+  })
+
+  clearChatRuntime(sessionId)
+  unsubscribe()
+
+  assert.deepEqual(snapshots, [{ runtime: undefined, queue: [] }])
 })

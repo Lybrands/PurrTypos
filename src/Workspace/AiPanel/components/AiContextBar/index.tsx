@@ -11,8 +11,7 @@ import type { EntityId } from "../../../../types";
 /**
  * 关联上下文栏的绑定集合 —— 关联章节/大纲选择、本书设定/伏笔选择、popover 开合。
  *
- * 这一组 prop 是高度内聚的整体，会从 AiPanel 一路透传到 ChatMessageBubble 里的
- * AiContextBar。打成一个对象后沿途只需传一个 prop，叶子处用 `{...bindings}` 展开。
+ * 这一组 prop 是高度内聚的整体，由 book conversation extension 透传给 AiContextBar。
  */
 export interface AiContextBarBindings {
   associatedChapterIds: EntityId[];

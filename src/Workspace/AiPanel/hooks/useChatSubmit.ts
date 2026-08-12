@@ -76,6 +76,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     selectedForeshadowingIds,
     sessionScope = "chapter",
+    onAssistantAttachment,
   } = params;
 
   const appMessage = usePurrToast();
@@ -347,6 +348,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           preservePrompt: true,
         })
       },
+      onAssistantAttachment,
     });
     const ctx: AgentChunkRuntimeContext = {
       acc,
@@ -430,6 +432,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     sessionScope,
     appMessage,
     replaceQueuedSubmissions,
+    onAssistantAttachment,
   ]);
   handleSubmitRef.current = handleSubmit;
 
