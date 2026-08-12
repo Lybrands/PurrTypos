@@ -13,6 +13,7 @@ import { getAssistantRenderableMarkdown } from "../../rendering";
 import MessageEditor from "../MessageEditor";
 import AssistantMessageBody from "./AssistantMessageBody";
 import ErrorReportNotice from "./ErrorReportNotice";
+import { getErrorNoticeMessage } from './errorNoticeMessage'
 import type { ChatMessageListProps } from "./index";
 
 export interface ChatMessageBubbleProps
@@ -74,6 +75,9 @@ function ChatMessageBubbleInner({
   const hasAnyCommentary =
     hasCommentaryBlocks ||
     (message.commentary !== undefined && message.commentary !== "");
+  const errorNoticeMessage = message.role === 'assistant' && message.isError
+    ? getErrorNoticeMessage(message)
+    : ''
   const isEmpty =
     !message.content &&
     !message.streamingContent &&
@@ -81,7 +85,7 @@ function ChatMessageBubbleInner({
     !message.canonicalOutput?.operationOrder.length &&
     !message.delegations?.length &&
     !message.contextCompaction &&
-    !message.error &&
+    !errorNoticeMessage &&
     !hasAnyCommentary;
   const isLastAssistant =
     isLast && message.role === "assistant" && !message.isError;
@@ -184,7 +188,7 @@ function ChatMessageBubbleInner({
         )}
       {message.role === "assistant" && message.isError && (
         <ErrorReportNotice
-          message={String(message.content || "")}
+          message={errorNoticeMessage}
           report={message.errorReport}
         />
       )}

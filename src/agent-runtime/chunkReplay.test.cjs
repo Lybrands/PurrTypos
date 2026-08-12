@@ -327,6 +327,40 @@ test('reset removes replay state when the project or session changes', () => {
   assert.equal(replay.assistant('turn-1'), undefined)
 })
 
+test('replay projects a completed turn only once across duplicate terminal chunks', () => {
+  const replay = new AgentChunkReplay()
+  const dependencies = { cfg: model, appMessage }
+  const seed = {
+    turnId: 'turn-duplicate-terminal',
+    sessionId: 7,
+    userContent: '测试重复终态',
+    turnStartedAt: performance.now(),
+  }
+
+  replay.dispatch(seed, canonical('run-duplicate-terminal', 1, {
+    outputStreamId: 'duplicate-final',
+    invocationId: 'duplicate-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '唯一终稿。' },
+  }), dependencies)
+  replay.dispatch(seed, canonical('run-duplicate-terminal', 2, {
+    outputStreamId: 'duplicate-final',
+    invocationId: 'duplicate-invocation',
+    kind: 'stream.committed',
+    channel: 'final',
+    payload: { finishReason: 'stop' },
+  }), dependencies)
+  replay.dispatch(seed, { done: true, model: 'first-terminal-model' }, dependencies)
+  const firstTerminalMessage = replay.assistant(seed.turnId)
+
+  replay.dispatch(seed, { done: true, model: 'late-terminal-model' }, dependencies)
+
+  assert.equal(replay.assistant(seed.turnId)?.model, 'first-terminal-model')
+  assert.deepEqual(replay.assistant(seed.turnId), firstTerminalMessage)
+})
+
 test('paused durable task emits no formal answer and resume commits once', () => {
   const replay = new AgentChunkReplay()
   const dependencies = { cfg: model, appMessage }
@@ -356,11 +390,18 @@ test('paused durable task emits no formal answer and resume commits once', () =>
   replay.dispatch(seed, {
     done: true,
     finalResponseExpected: false,
+    model: 'paused-model',
+  }, dependencies)
+  replay.dispatch(seed, {
+    done: true,
+    finalResponseExpected: false,
+    model: 'late-paused-model',
   }, dependencies)
 
   const paused = replay.assistant('turn-paused')
   assert.equal(paused?.content, '')
   assert.equal(paused?.taskPlan?.status, 'paused')
+  assert.equal(paused?.model, 'paused-model')
 
   replay.dispatch(seed, canonical('run-resumed', 1, {
     payload: {
@@ -393,7 +434,8 @@ test('paused durable task emits no formal answer and resume commits once', () =>
     channel: 'final',
     payload: { finishReason: 'stop' },
   }), dependencies)
-  replay.dispatch(seed, { done: true }, dependencies)
+  replay.dispatch(seed, { done: true, model: 'resumed-model' }, dependencies)
 
   assert.equal(replay.assistant('turn-paused')?.content, '候选稿已发布。')
+  assert.equal(replay.assistant('turn-paused')?.model, 'resumed-model')
 })
