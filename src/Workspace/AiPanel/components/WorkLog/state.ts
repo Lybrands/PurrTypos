@@ -9,15 +9,15 @@ export function getInitialWorkLogOpenState(
   stored: WorkLogOpenState | undefined,
   autoOpen: boolean,
 ): WorkLogOpenState {
-  return stored ?? { open: autoOpen, manuallySet: false };
+  if (stored?.manuallySet) return stored;
+  return { open: autoOpen, manuallySet: false };
 }
 
 export function applyWorkLogAutoOpen(
   state: WorkLogOpenState,
-  previousAutoOpen: boolean,
   autoOpen: boolean,
 ): WorkLogOpenState {
-  if (state.manuallySet || previousAutoOpen === autoOpen) return state;
+  if (state.manuallySet || state.open === autoOpen) return state;
   return { open: autoOpen, manuallySet: false };
 }
 

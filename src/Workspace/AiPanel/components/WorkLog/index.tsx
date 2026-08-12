@@ -69,7 +69,6 @@ export default function WorkLog({
       autoOpen,
     ),
   );
-  const previousAutoOpenRef = React.useRef(autoOpen);
   const contentId = React.useId();
   const now = useTicker(active && startedAt != null);
 
@@ -78,15 +77,11 @@ export default function WorkLog({
       readWorkLogOpenState(openStateStore, logKey),
       autoOpen,
     ));
-    previousAutoOpenRef.current = autoOpen;
   }, [logKey]);
 
   React.useEffect(() => {
-    const previousAutoOpen = previousAutoOpenRef.current;
-    previousAutoOpenRef.current = autoOpen;
     const nextState = applyWorkLogAutoOpen(
       openState,
-      previousAutoOpen,
       autoOpen,
     );
     if (nextState === openState) return;

@@ -255,6 +255,45 @@ test('execution panel exists before the first operation and remains before a fin
   )
 })
 
+test('user execution timeline excludes internal model operations', () => {
+  const message = {
+    role: 'assistant',
+    content: '最终答复',
+    canonicalOutput: {
+      commentaryBlocks: [],
+      operationOrder: ['model-1', 'tool-1'],
+      operations: {
+        'model-1': {
+          operationId: 'model-1',
+          kind: 'model',
+          firstSequence: 1,
+          status: 'done',
+          display: { labelParams: {} },
+        },
+        'tool-1': {
+          operationId: 'tool-1',
+          kind: 'tool',
+          firstSequence: 2,
+          status: 'done',
+          display: { labelParams: { toolName: 'read_document' } },
+        },
+      },
+    },
+  }
+
+  const timeline = buildAssistantTimeline(message, { messageIndex: 0 })
+  const operations = timeline.filter((part) => part.type === 'operation')
+
+  assert.deepEqual(
+    operations.map((part) => part.operation.kind),
+    ['tool'],
+  )
+  assert.equal(
+    getExecutionPanelPresentation(timeline, { isStreaming: false }).stepCount,
+    1,
+  )
+})
+
 test('an empty historical Assistant turn does not invent an execution panel', () => {
   assert.deepEqual(
     getExecutionPanelPresentation([], {
@@ -308,7 +347,24 @@ test('work log follows auto-open transitions before a manual choice', () => {
 
   assert.deepEqual(initial, { open: true, manuallySet: false })
   assert.deepEqual(
-    applyWorkLogAutoOpen(initial, true, false),
+    applyWorkLogAutoOpen(initial, false),
+    { open: false, manuallySet: false },
+  )
+})
+
+test('non-manual stale open state cannot expand later tool batches', () => {
+  const {
+    applyWorkLogAutoOpen,
+    getInitialWorkLogOpenState,
+  } = loadWorkLogState()
+  const staleAutoOpened = { open: true, manuallySet: false }
+
+  assert.deepEqual(
+    getInitialWorkLogOpenState(staleAutoOpened, false),
+    { open: false, manuallySet: false },
+  )
+  assert.deepEqual(
+    applyWorkLogAutoOpen(staleAutoOpened, false),
     { open: false, manuallySet: false },
   )
 })
@@ -325,7 +381,7 @@ test('work log keeps a manual choice across later auto-open transitions', () => 
 
   assert.deepEqual(manuallyCollapsed, { open: false, manuallySet: true })
   assert.deepEqual(
-    applyWorkLogAutoOpen(manuallyCollapsed, false, true),
+    applyWorkLogAutoOpen(manuallyCollapsed, true),
     { open: false, manuallySet: true },
   )
 })
