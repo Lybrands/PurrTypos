@@ -1,27 +1,16 @@
 import { services } from '@/services'
 import React from 'react'
 import AppHeader from '../components/AppHeader'
-import AgentConversation from '../components/AgentConversation/ConversationViewport'
-import AgentComposer from '../components/AgentConversation/Composer'
-import AgentConversationIndex, {
-  type AgentConversationActivity,
-} from '../components/AgentConversation/ConversationIndex'
-import { toAgentConversationSession } from '../components/AgentConversation/sessionView'
-import AgentTaskProgress from '../components/AgentConversation/TaskProgress'
+import { AgentConversationPanel } from '../components/AgentConversation'
 import {
   hydrateAiDebugRunSnapshot,
   recordScreenplayAiDebugChunk,
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
-import ContextUsageIndicator from '../components/AgentConversation/Composer/ContextUsageIndicator'
 import Markdown from '../components/Markdown'
-import ModelPicker, {
-  type ModelRuntimeConfigPatch,
-} from '../components/AgentConversation/Composer/ModelPicker'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
-  ArrowUpIcon,
   BookIcon,
   PurrButton,
   PurrChoiceCard,
@@ -41,13 +30,11 @@ import {
   PurrInputNumber,
   PurrMultiSelect,
   LoadingIcon,
-  MessageIcon,
   PurrModal,
   PlusIcon,
   RefreshIcon,
   RobotIcon,
   SearchIcon,
-  StopCircleIcon,
   PurrSegmented,
   PurrSelect,
   PurrSteps,
@@ -84,7 +71,7 @@ import type {
 } from '../types'
 import {
   AgentChunkReplay,
-  getAgentConversationCapabilities,
+  type AgentConversationActivity,
   type AiStreamChunk,
   type AgentConversationMessage,
 } from '../agent-runtime'
@@ -136,6 +123,12 @@ import {
   documentFromRevision,
   draftEpisodesFromRevision,
 } from './revisionProposal'
+import { useScreenplayConversationExtensions } from './ScreenplayConversationExtensions'
+import {
+  useScreenplayConversationController,
+  type ScreenplayConversationBindings,
+  type ScreenplayQueuedSubmission,
+} from './useScreenplayConversationController'
 import './index.scss'
 
 type EntryStage = 'source' | 'brief' | 'handoff' | 'project'
@@ -161,19 +154,13 @@ interface ScreenplayLaunchDraft {
 interface ScreenplayAgentPageProps {
   books: Book[]
   modelConfigs: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: ModelRuntimeConfigPatch) => void
+  onUpdateModelConfig?: (
+    id: string,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+  ) => void
   onOpenBookshelf: () => void
   onOpenSettings: () => void
   onBack: () => void
-}
-
-interface ScreenplayQueuedSubmission {
-  id: string
-  projectId: string
-  sessionId: number
-  content: string
-  runtime: ScreenplayConversationRuntimeInput
-  stageCommand?: ScreenplayStageCommand
 }
 
 const FORMAT_OPTIONS: ScreenplayFormat[] = ['短片', '电影', '单集剧', '连续剧', '竖屏短剧']
@@ -669,9 +656,6 @@ export default function ScreenplayAgentPage({
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
   const [agentChunkHydrating, setAgentChunkHydrating] = React.useState(false)
-  const [agentConversationIndexOpen, setAgentConversationIndexOpen] = React.useState(true)
-  const [editingAgentSessionId, setEditingAgentSessionId] = React.useState<number | null>(null)
-  const [editingAgentSessionTitle, setEditingAgentSessionTitle] = React.useState('')
   const [acceptingAgentRevisionId, setAcceptingAgentRevisionId] = React.useState<
     EntityId | null
   >(null)
@@ -744,12 +728,6 @@ export default function ScreenplayAgentPage({
         : canonical
     }) ?? []
   ), [agentChunkVersion, agentConversationState])
-  const agentConversationSessions = React.useMemo(
-    () => agentSessions.map((session) => (
-      toAgentConversationSession(session, session.create_time)
-    )),
-    [agentSessions],
-  )
   const activeConversationTask = React.useMemo(() => (
     [...(agentConversationState?.tasks ?? [])].reverse().find(
       (task) => task.status === 'queued' || task.status === 'running',
@@ -2025,27 +2003,27 @@ export default function ScreenplayAgentPage({
     openedProject,
   ])
 
-  const saveAgentSessionTitle = React.useCallback(async () => {
-    if (editingAgentSessionId == null) return
-    const title = editingAgentSessionTitle.trim()
+  const renameAgentSession = React.useCallback(async (
+    sessionId: number,
+    nextTitle: string,
+  ) => {
+    const title = nextTitle.trim()
     if (!title) {
       message.warning('对话名称不能为空')
-      setEditingAgentSessionId(null)
       return
     }
     const result = await services.sessions.updateSessionTitle({
-      sessionId: editingAgentSessionId,
+      sessionId,
       title,
     })
     if (result.success) {
       setAgentSessions((current) => current.map((session) => (
-        session.id === editingAgentSessionId ? { ...session, title } : session
+        session.id === sessionId ? { ...session, title } : session
       )))
     } else {
       message.error(result.error || '更新对话名称失败')
     }
-    setEditingAgentSessionId(null)
-  }, [editingAgentSessionId, editingAgentSessionTitle, message])
+  }, [message])
 
   const stopAgent = React.useCallback(async (): Promise<boolean> => {
     const targetTurnId = cancellableConversationOperation?.turnId
@@ -2680,15 +2658,6 @@ export default function ScreenplayAgentPage({
       : '确定故事最先从哪个方向开始探索',
   }
   const milestone = openedProject ? nextMilestone(openedProject) : null
-  const selectedAgentModelConfig = React.useMemo(
-    () => modelConfigs.find((model) => model.id === selectedModelId) ?? null,
-    [modelConfigs, selectedModelId],
-  )
-  const agentConversationCapabilities = getAgentConversationCapabilities({
-    running: agentRunning || agentSubmitting,
-    readOnly: openedProject?.status === 'archived',
-    sessionLoading: agentSessionLoading || agentChunkHydrating,
-  })
   const activeAgentTaskPlan = React.useMemo(
     () => getActiveTaskPlan(
       agentMessages,
@@ -2800,6 +2769,99 @@ export default function ScreenplayAgentPage({
   const agentArtifactVersion = [...agentTurnArtifacts.values()]
     .map((artifact) => `${artifact.revisionId}:${artifact.status}`)
     .join('|')
+  const screenplayConversationActions = React.useMemo<
+    ScreenplayConversationBindings['actions']
+  >(() => ({
+    selectSession: (sessionId) => {
+      if (typeof sessionId === 'number') switchAgentSession(sessionId)
+    },
+    createSession: createAgentSession,
+    closeSession: (sessionId) => {
+      const session = agentSessions.find((item) => item.id === sessionId)
+      if (session) return closeAgentSession(session)
+    },
+    renameSession: (sessionId, title) => {
+      if (typeof sessionId === 'number') return renameAgentSession(sessionId, title)
+    },
+    send: (content) => runAgent(content),
+    abort: () => void stopAgent(),
+    resume: resumeAgent,
+    editMessage: (index, content) => runAgent(content, index),
+    resolveToolApproval: (approvalId, approved) => (
+      services.ai.resolveAiToolApproval({ approvalId, approved })
+    ),
+    onSubmitErrorReport: (reportId) => (
+      services.ai.submitAiErrorReport({ reportId })
+    ),
+  }), [
+    agentSessions,
+    closeAgentSession,
+    createAgentSession,
+    renameAgentSession,
+    resumeAgent,
+    runAgent,
+    stopAgent,
+    switchAgentSession,
+  ])
+  const screenplayConversationBindings = React.useMemo<
+    ScreenplayConversationBindings | null
+  >(() => openedProject ? ({
+    project: openedProject,
+    sessions: agentSessions,
+    activeSessionId: agentSessionId,
+    messages: agentMessages,
+    activities: agentSessionActivities,
+    queuedSubmissions: activeQueuedSubmissions,
+    prompt: agentPrompt,
+    setPrompt: setAgentPrompt,
+    initializing: projectLoading || agentSessionLoading || agentChunkHydrating,
+    running: agentRunning || agentSubmitting,
+    stopping: Boolean(cancelPendingConversationOperation || agentCancelSubmitting),
+    paused: Boolean(pausedConversationOperation),
+    resuming: agentResumeSubmitting,
+    attachmentsVersion: agentArtifactVersion,
+    modelConfigs,
+    selectedModelId,
+    setSelectedModelId,
+    updateModel: onUpdateModelConfig,
+    openModelSettings: onOpenSettings,
+    taskPlan: activeAgentTaskPlan ?? undefined,
+    actions: screenplayConversationActions,
+  }) : null, [
+    activeAgentTaskPlan,
+    activeQueuedSubmissions,
+    agentArtifactVersion,
+    agentCancelSubmitting,
+    agentChunkHydrating,
+    agentMessages,
+    agentPrompt,
+    agentResumeSubmitting,
+    agentRunning,
+    agentSessionActivities,
+    agentSessionId,
+    agentSessionLoading,
+    agentSessions,
+    agentSubmitting,
+    cancelPendingConversationOperation,
+    modelConfigs,
+    onOpenSettings,
+    onUpdateModelConfig,
+    openedProject,
+    pausedConversationOperation,
+    projectLoading,
+    screenplayConversationActions,
+    selectedModelId,
+  ])
+  const screenplayConversationController = useScreenplayConversationController(
+    screenplayConversationBindings,
+  )
+  const screenplayConversationExtensions = useScreenplayConversationExtensions({
+    projectTitle: openedProject?.title ?? '',
+    stageLabel: openedProject ? STAGE_LABELS[openedProject.active_stage] : '',
+    messages: agentConversationState?.messages,
+    artifacts: agentTurnArtifacts,
+    renderArtifact: renderAgentArtifact,
+  })
   const hasPendingAgentProposal = Boolean(
     projectWorkspace?.candidates.some((revision) => revision.agentTaskId),
   )
@@ -2927,17 +2989,6 @@ export default function ScreenplayAgentPage({
   const handleDraftBatchAction = React.useCallback((action: DraftBatchAction) => {
     startDraftRange(action.key)
   }, [startDraftRange])
-  const editAgentMessage = React.useCallback((
-    messageIndex: number,
-    content: string,
-  ) => {
-    const messageToEdit = agentConversationState?.messages[messageIndex]
-    if (!messageToEdit || messageToEdit.role !== 'user') return
-    void runAgent(
-      content,
-      messageIndex,
-    )
-  }, [agentConversationState, runAgent])
   const openCustomDraftRange = React.useCallback(() => {
     if (maxCustomDraftEpisodeCount < 2) return
     setCustomDraftEpisodeCount(Math.min(3, maxCustomDraftEpisodeCount))
@@ -4019,208 +4070,12 @@ export default function ScreenplayAgentPage({
                 </header>
 
                 <div className="screenplay-agent-studio__body">
-                  {agentConversationIndexOpen ? (
-                    <AgentConversationIndex
-                      sessions={agentConversationSessions}
-                      activeSessionId={agentSessionId}
-                      editingSessionId={editingAgentSessionId}
-                      editingTitle={editingAgentSessionTitle}
-                      isCurrentSessionEmpty={agentMessages.length === 0}
-                      disabled={agentConversationCapabilities.sessionNavigationDisabled}
-                      sessionActivities={agentSessionActivities}
-                      onActiveSessionChange={switchAgentSession}
-                      onEditingSessionIdChange={setEditingAgentSessionId}
-                      onEditingTitleChange={setEditingAgentSessionTitle}
-                      onSaveTitle={() => void saveAgentSessionTitle()}
-                      onNewSession={() => void createAgentSession()}
-                      onCloseSession={(session) => void closeAgentSession(session)}
-                      onCollapse={() => setAgentConversationIndexOpen(false)}
-                      context={(
-                        <div className="screenplay-conversation-context">
-                          <span><VideoCameraIcon /></span>
-                          <div>
-                            <small>当前项目</small>
-                            <strong title={openedProject.title}>{openedProject.title}</strong>
-                            <span>{STAGE_LABELS[openedProject.active_stage]}</span>
-                          </div>
-                        </div>
-                      )}
-                    />
-                  ) : (
-                    <PurrTooltip title="展开对话列表" placement="right">
-                      <PurrButton
-                        type="text"
-                        className="screenplay-conversation-index-reopen"
-                        icon={<MessageIcon />}
-                        onClick={() => setAgentConversationIndexOpen(true)}
-                        aria-label="展开对话列表"
-                      />
-                    </PurrTooltip>
-                  )}
-                  <div className="screenplay-agent-studio__chat">
-                <AgentConversation
-                  messages={agentMessages}
-                  loading={agentRunning || agentSubmitting}
-                  initializing={projectLoading || agentSessionLoading || agentChunkHydrating}
-                  emptyTitle="从当前任务开始"
-                  emptyDescription="发送后会实时展示执行过程、素材读取和结果。"
-                  afterAssistantMessage={(_message, index) => {
-                    const entry = agentConversationState?.messages[index]
-                    const artifact = entry?.role === 'assistant'
-                      ? agentTurnArtifacts.get(entry.turnId)
-                      : undefined
-                    return artifact ? renderAgentArtifact(artifact) : null
-                  }}
-                  messageAttachmentsVersion={agentArtifactVersion}
-                  onEditMessage={editAgentMessage}
-                  onStructuredAnswer={(answer) => void runAgent(answer)}
-                  onResolveToolApproval={(approvalId, approved) => (
-                    services.ai.resolveAiToolApproval({ approvalId, approved })
-                  )}
-                  onSubmitErrorReport={(reportId) => (
-                    services.ai.submitAiErrorReport({ reportId })
-                  )}
-                />
-
-                <AgentComposer
-                  className="screenplay-agent-studio__compose"
-                  value={agentPrompt}
-                  onChange={setAgentPrompt}
-                  onSubmit={runAgent}
-                  autoSize={{ minRows: 1, maxRows: 5 }}
-                  disabled={agentConversationCapabilities.inputDisabled}
-                  submitDisabled={
-                    !agentPrompt.trim()
-                    || openedProject.status === 'archived'
-                    || !selectedModelId
-                  }
-                  floatingContent={activeAgentTaskPlan ? (
-                    <AgentTaskProgress
-                      plan={activeAgentTaskPlan}
-                      placement="topLeft"
+                  {screenplayConversationController ? (
+                    <AgentConversationPanel
+                      controller={screenplayConversationController}
+                      extensions={screenplayConversationExtensions}
                     />
                   ) : null}
-                  supplementaryContent={activeQueuedSubmissions.length > 0 ? (
-                    <div className="chat-queued-messages" aria-label="待发送消息">
-                      {activeQueuedSubmissions.slice(0, 3).map((submission, index) => (
-                        <div className="chat-queued-message" key={submission.id}>
-                          <span>待发送 {index + 1}</span>
-                          <span title={submission.content}>{submission.content}</span>
-                        </div>
-                      ))}
-                      {activeQueuedSubmissions.length > 3 ? (
-                        <div className="chat-queued-more">
-                          另有 {activeQueuedSubmissions.length - 3} 条消息排队
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  placeholder="输入希望 Agent 完成的任务"
-                  ariaLabel="输入希望剧本 Agent 完成的任务"
-                  footer={(
-                    <div className="screenplay-agent-studio__actions">
-                      <div className="screenplay-agent-studio__compose-left">
-                        {modelConfigs.length > 0 ? (
-                          <ModelPicker
-                            className="screenplay-agent-model"
-                            modelConfigs={modelConfigs}
-                            selectedModelId={selectedModelId}
-                            onModelChange={setSelectedModelId}
-                            onUpdateModelConfig={onUpdateModelConfig}
-                            disabled={openedProject.status === 'archived'}
-                          />
-                        ) : (
-                          <PurrButton
-                            type="text"
-                            size="small"
-                            disabled={openedProject.status === 'archived'}
-                            onClick={onOpenSettings}
-                          >
-                            配置模型
-                          </PurrButton>
-                        )}
-                        {openedProject.status === 'archived' ? (
-                          <span className="screenplay-agent-studio__compose-hint">
-                            当前项目只读
-                          </span>
-                        ) : openedProject.source_kind === 'original' ? (
-                          <span className="screenplay-agent-studio__compose-hint">
-                            使用当前项目与已有版本
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="screenplay-agent-studio__compose-right">
-                        <ContextUsageIndicator
-                          conversations={agentMessages}
-                          selectedModelConfig={selectedAgentModelConfig}
-                        />
-                        {pausedConversationOperation ? (
-                          <PurrButton
-                            type="default"
-                            size="small"
-                            icon={<RefreshIcon size={15} />}
-                            loading={agentResumeSubmitting}
-                            disabled={
-                              openedProject.status === 'archived'
-                              || !selectedModelId
-                              || agentResumeSubmitting
-                            }
-                            onClick={resumeAgent}
-                          >
-                            继续执行
-                          </PurrButton>
-                        ) : null}
-                        {agentRunning
-                          || cancellableConversationOperation
-                          || cancelPendingConversationOperation
-                          || agentCancelSubmitting ? (
-                          <PurrTooltip title={
-                            cancelPendingConversationOperation || agentCancelSubmitting
-                              ? '正在停止'
-                              : agentResumeSubmitting
-                                ? '正在继续执行'
-                              : '停止生成'
-                          }>
-                            <PurrButton
-                              type="text"
-                              shape="circle"
-                              className="agent-composer__stop"
-                              icon={<StopCircleIcon size={18} />}
-                              onClick={stopAgent}
-                              disabled={Boolean(
-                                cancelPendingConversationOperation
-                                || agentCancelSubmitting
-                                || agentResumeSubmitting,
-                              )}
-                              aria-label="停止生成"
-                            />
-                          </PurrTooltip>
-                        ) : null}
-                        <PurrTooltip title={agentRunning || agentSubmitting
-                          ? '加入发送队列 (Enter)'
-                          : '发送 (Enter)'}>
-                          <PurrButton
-                            type="primary"
-                            shape="circle"
-                            className="agent-composer__send"
-                            icon={<ArrowUpIcon style={{ fontSize: 16 }} />}
-                            disabled={
-                              !agentPrompt.trim()
-                              || openedProject.status === 'archived'
-                              || !selectedModelId
-                              || pausedConversationOperation != null
-                              || agentResumeSubmitting
-                            }
-                            onClick={() => runAgent()}
-                            aria-label="发送"
-                          />
-                        </PurrTooltip>
-                      </div>
-                    </div>
-                  )}
-                />
-
-                  </div>
                 </div>
               </section>
 
