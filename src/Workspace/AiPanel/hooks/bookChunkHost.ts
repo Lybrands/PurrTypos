@@ -22,6 +22,7 @@ import {
 } from './bookChunkSideEffects'
 import { handleProposedSettingDiff } from './bookSettingDiff'
 import type { BookSettingDiffAttachmentHandler } from './bookSettingDiff'
+import { associateBookAssistantAttachmentIdentities } from '../bookAssistantAttachments'
 
 export interface BookChunkHostDependencies {
   sessionId: number
@@ -123,6 +124,12 @@ function persistTerminalSnapshot(
   dependencies: BookChunkHostDependencies,
 ): void {
   const assistant = dependencies.readMessages().at(-1)
+  const assistantIdentity = assistant
+    ? {
+        ...assistant,
+        agentRunId: assistant.agentRunId || snapshot.agentRunId,
+      }
+    : undefined
   void services.conversations.saveConversation({
     sessionId: dependencies.sessionId,
     bookId: dependencies.bookId ?? undefined,
@@ -154,8 +161,16 @@ function persistTerminalSnapshot(
   }).then((result) => {
     if (result?.success) {
       const conversationId = result.data?.id
-      if (typeof conversationId === 'number' && dependencies.isVisible()) {
-        attachConversationId(snapshot, conversationId, dependencies)
+      if (typeof conversationId === 'number') {
+        if (assistantIdentity) {
+          associateBookAssistantAttachmentIdentities(assistantIdentity, {
+            ...assistantIdentity,
+            conversationId,
+          })
+        }
+        if (dependencies.isVisible()) {
+          attachConversationId(snapshot, conversationId, dependencies)
+        }
       }
       return
     }

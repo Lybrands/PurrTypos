@@ -20,39 +20,54 @@ export interface HistoryRequestCoordinator {
   activate(): void
   deactivate(): void
   beginLatest(): number
-  captureLatest(): number
   invalidateLatest(): void
   isCurrent(request: number): boolean
+  beginMutation(): number
+  completeMutation(scopeRequest: number): boolean
+  isCurrentScope(scopeRequest: number): boolean
   isMounted(): boolean
   runOnce<T>(key: string, operation: () => Promise<T>): Promise<T>
 }
 
 export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
-  let generation = 0
+  let loadGeneration = 0
+  let scopeGeneration = 0
   let active = false
   const inFlight = new Map<string, Promise<unknown>>()
   return {
     activate() {
       active = true
-      generation += 1
+      scopeGeneration += 1
+      loadGeneration += 1
     },
     deactivate() {
       active = false
-      generation += 1
+      scopeGeneration += 1
+      loadGeneration += 1
       inFlight.clear()
     },
     beginLatest() {
-      generation += 1
-      return generation
-    },
-    captureLatest() {
-      return generation
+      loadGeneration += 1
+      return loadGeneration
     },
     invalidateLatest() {
-      generation += 1
+      scopeGeneration += 1
+      loadGeneration += 1
     },
     isCurrent(request) {
-      return active && request === generation
+      return active && request === loadGeneration
+    },
+    beginMutation() {
+      loadGeneration += 1
+      return scopeGeneration
+    },
+    completeMutation(scopeRequest) {
+      if (!active || scopeRequest !== scopeGeneration) return false
+      loadGeneration += 1
+      return true
+    },
+    isCurrentScope(scopeRequest) {
+      return active && scopeRequest === scopeGeneration
     },
     isMounted() {
       return active
@@ -90,8 +105,6 @@ export interface BookConversationBindings {
   initializing: boolean
   running: boolean
   stopping?: boolean
-  paused?: boolean
-  resuming?: boolean
   attachmentsVersion?: string | number
   scopeAvailable?: boolean
   modelConfigs: AiModelConfig[]
@@ -182,8 +195,8 @@ export function createBookConversationController(
       initializing: bindings.initializing,
       running: bindings.running,
       stopping: bindings.stopping ?? false,
-      paused: bindings.paused ?? false,
-      resuming: bindings.resuming ?? false,
+      paused: false,
+      resuming: false,
       attachmentsVersion: bindings.attachmentsVersion,
       history: {
         sessions: bindings.historySessions.map((session) => (
@@ -286,21 +299,25 @@ export function useBookConversationController({
   const deleteHistorySession = React.useCallback(async (id: string | number) => {
     const session = historySessions.find((item) => item.id === id)
     if (!session) return
-    const request = historyRequests.captureLatest()
     await historyRequests.runOnce(`session:${session.id}`, async () => {
+      const scopeRequest = historyRequests.beginMutation()
+      if (historyRequests.isCurrentScope(scopeRequest)) setHistoryLoading(false)
       try {
         const result = await historyService.deleteSession({ sessionId: session.id })
-        if (!historyRequests.isCurrent(request)) return
         if (!result.success) {
-          setHistoryError(result.error || '删除历史对话失败')
+          if (historyRequests.isCurrentScope(scopeRequest)) {
+            setHistoryError(result.error || '删除历史对话失败')
+          }
           return
         }
+        if (!historyRequests.completeMutation(scopeRequest)) return
+        setHistoryLoading(false)
         setHistorySessions((current) => (
           current.filter((item) => item.id !== session.id)
         ))
         onDeleteFromHistory(session)
       } catch {
-        if (historyRequests.isCurrent(request)) {
+        if (historyRequests.isCurrentScope(scopeRequest)) {
           setHistoryError('删除历史对话失败，请稍后重试')
         }
       }
