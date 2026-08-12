@@ -19,7 +19,6 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
-  getOperationGroupProgress,
   groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
   type TimelineOperationPart,
@@ -224,14 +223,6 @@ function AssistantMessageBodyInner({
     ),
     [executionPanelLogKey, index, workLogParts],
   );
-  const executionProgress = getOperationGroupProgress(
-    workLogParts.filter((part): part is TimelineOperationPart =>
-      part.type === "tools"
-      || part.type === "operation"
-      || part.type === "delegations"
-      || part.type === "contextCompaction",
-    ),
-  );
   const processingLabel = getAssistantProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
@@ -358,12 +349,9 @@ function AssistantMessageBodyInner({
         <WorkLog
           key={executionPanelLogKey}
           logKey={executionPanelLogKey}
+          title={executionPanel.title}
           active={executionPanel.active}
           autoOpen={executionPanel.autoOpen}
-          stepCount={executionPanel.stepCount}
-          currentStepCount={executionProgress.current}
-          completedStepCount={executionProgress.completed}
-          parallel={executionProgress.parallel}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
           hasError={workLogHasError(workLogParts)}

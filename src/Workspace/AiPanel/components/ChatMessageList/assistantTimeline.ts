@@ -131,6 +131,7 @@ export interface ExecutionPanelPresentation {
   active: boolean;
   autoOpen: boolean;
   stepCount: number;
+  title: string;
 }
 
 function isTimelineOperationPart(
@@ -147,13 +148,20 @@ export function getExecutionPanelPresentation(
   input: { isStreaming: boolean; durationMs?: number },
 ): ExecutionPanelPresentation {
   const progress = getOperationGroupProgress(parts.filter(isTimelineOperationPart));
+  const active = input.isStreaming;
+  const stepCount = progress.total;
   return {
-    visible: input.isStreaming
+    visible: active
       || parts.length > 0
       || (input.durationMs != null && input.durationMs > 0),
-    active: input.isStreaming,
-    autoOpen: input.isStreaming,
-    stepCount: progress.total,
+    active,
+    autoOpen: false,
+    stepCount,
+    title: active
+      ? "正在进行"
+      : stepCount > 0
+        ? `执行了 ${stepCount} 个步骤`
+        : "用时",
   };
 }
 
