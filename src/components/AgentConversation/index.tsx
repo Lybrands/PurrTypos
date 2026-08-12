@@ -1,6 +1,6 @@
 import React from 'react'
 import { LoadingIcon, RobotIcon } from '@/purr-components'
-import type { ChatMessage } from '../../agent-runtime'
+import type { AgentConversationMessage } from '../../agent-runtime'
 import AssistantMessageBody from '../../Workspace/AiPanel/components/ChatMessageList/AssistantMessageBody'
 import ErrorReportNotice from '../../Workspace/AiPanel/components/ChatMessageList/ErrorReportNotice'
 import AgentConversationTurnIndex, {
@@ -18,14 +18,14 @@ import {
 import './index.scss'
 
 export interface AgentConversationProps {
-  messages: ChatMessage[]
+  messages: AgentConversationMessage[]
   loading: boolean
   /** 历史消息及其持久化执行过程仍在恢复时，避免先绘制不完整内容。 */
   initializing?: boolean
   emptyTitle?: string
   emptyDescription?: string
   /** 将业务操作附着到产生它的助手消息，而不是整个会话末尾。 */
-  afterAssistantMessage?: (message: ChatMessage, index: number) => React.ReactNode
+  afterAssistantMessage?: (message: AgentConversationMessage, index: number) => React.ReactNode
   /** 消息附件状态变化时，触发仍在跟随输出的会话继续滚动。 */
   messageAttachmentsVersion?: string | number
   /** 编辑历史提问后，从该轮重新开始对话。 */
