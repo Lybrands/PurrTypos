@@ -7,3 +7,9 @@ export function getErrorNoticeMessage(
     || message.content.trim()
     || '本轮执行失败'
 }
+
+export function hasRenderableErrorMessage(
+  message: Pick<AgentConversationMessage, 'content' | 'error' | 'isError'>,
+): boolean {
+  return message.isError === true || Boolean(message.error?.trim())
+}

@@ -44,7 +44,7 @@ export interface AgentAccumulator {
   subAgentAccumulators?: Record<string, AgentAccumulator>
   canonicalOutput?: CanonicalOutputState
   terminalSettlement?: {
-    phase: 'settling' | 'settled'
+    phase: 'projecting' | 'delivered' | 'settled'
     outcome?: AgentRunOutcome
     runId?: string
   }

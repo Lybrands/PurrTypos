@@ -12,7 +12,11 @@ function createTestChunkContext(
   initialMessages: AgentConversationMessage[],
   overrides: Pick<
     Partial<AgentChunkHost>,
-    'flushCommits' | 'onHostChunk' | 'onSettled' | 'setRunning'
+    | 'flushCommits'
+    | 'onHostChunk'
+    | 'onSettled'
+    | 'replaceMessages'
+    | 'setRunning'
   > = {},
 ) {
   let messages = initialMessages
@@ -21,6 +25,7 @@ function createTestChunkContext(
     readMessages: () => messages,
     replaceMessages: (next) => {
       replacementCount += 1
+      overrides.replaceMessages?.(next)
       messages = next
     },
     scheduleCommit: (updater) => { messages = updater(messages) },
@@ -111,7 +116,11 @@ test('an early transport error stays out of content and remains visible in metad
   assert.equal(message?.error, '上游连接失败')
 })
 
-for (const failingHostMethod of ['flushCommits', 'onSettled'] as const) {
+for (const failingHostMethod of [
+  'flushCommits',
+  'replaceMessages',
+  'setRunning',
+] as const) {
   test(`terminal settlement retries after ${failingHostMethod} throws`, () => {
     let shouldThrow = true
     const settled: string[] = []
@@ -127,10 +136,13 @@ for (const failingHostMethod of ['flushCommits', 'onSettled'] as const) {
       flushCommits: failingHostMethod === 'flushCommits'
         ? failOnce
         : () => undefined,
-      onSettled: (outcome) => {
-        if (failingHostMethod === 'onSettled') failOnce()
-        settled.push(outcome)
-      },
+      replaceMessages: failingHostMethod === 'replaceMessages'
+        ? failOnce
+        : undefined,
+      setRunning: failingHostMethod === 'setRunning'
+        ? failOnce
+        : undefined,
+      onSettled: (outcome) => settled.push(outcome),
     })
     harness.context.acc.response = '可重试的模型终稿'
 
@@ -147,3 +159,30 @@ for (const failingHostMethod of ['flushCommits', 'onSettled'] as const) {
     )
   })
 }
+
+test('onSettled is delivered at most once even when the host throws', () => {
+  const deliveries: string[] = []
+  let shouldThrow = true
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => {
+      deliveries.push(outcome)
+      if (!shouldThrow) return
+      shouldThrow = false
+      throw new Error('host failed after side effect')
+    },
+  })
+  harness.context.acc.response = '已投影终稿'
+
+  assert.throws(
+    () => dispatchAgentChunk({ done: true }, harness.context),
+    /host failed after side effect/,
+  )
+  dispatchAgentChunk({ done: true }, harness.context)
+
+  assert.deepEqual(deliveries, ['completed'])
+  assert.equal(harness.readReplacementCount(), 1)
+  assert.equal(harness.readMessages().at(-1)?.content, '已投影终稿')
+})
