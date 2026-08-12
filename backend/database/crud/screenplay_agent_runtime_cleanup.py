@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -451,6 +452,62 @@ async def write_read_only_report(
     return plan
 
 
+async def apply_existing_database(
+    database_path: Path,
+    plan_digest: str,
+    *,
+    project_ids: Sequence[str] | None = None,
+) -> ScreenplayRuntimeCleanupPlan:
+    """Apply an approved plan without running application schema migrations."""
+
+    database_path = database_path.expanduser().resolve()
+    connection = await aiosqlite.connect(database_path)
+    connection.row_factory = aiosqlite.Row
+    db = _ExistingDatabase(connection)
+    try:
+        return await apply_cleanup(
+            db,
+            plan_digest,
+            project_ids=project_ids,
+        )
+    finally:
+        await connection.close()
+
+
+async def retire_legacy_output_tables(database_path: Path) -> tuple[str, ...]:
+    """Drop retired stores only after the approved cleanup made them empty."""
+
+    database_path = database_path.expanduser().resolve()
+    connection = await aiosqlite.connect(database_path)
+    connection.row_factory = aiosqlite.Row
+    db = _ExistingDatabase(connection)
+    retired = ("screenplay_agent_chunks", "screenplay_agent_events")
+    try:
+        async with db.transaction(cancellation_linearizable=True):
+            existing = {
+                str(row["name"])
+                for row in await db.fetch_all(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('screenplay_agent_chunks', "
+                    "'screenplay_agent_events')"
+                )
+            }
+            for table in retired:
+                if table not in existing:
+                    continue
+                row = await db.fetch_one(f"SELECT COUNT(*) AS count FROM {table}")
+                if int((row or {}).get("count") or 0) != 0:
+                    raise RuntimeError(
+                        f"refusing to retire non-empty legacy table: {table}"
+                    )
+            for table in retired:
+                if table in existing:
+                    await db.execute(f"DROP TABLE {table}")
+            return tuple(table for table in retired if table in existing)
+    finally:
+        await connection.close()
+
+
 class _ReadOnlyDatabase:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
@@ -459,6 +516,46 @@ class _ReadOnlyDatabase:
         cursor = await self._connection.execute(sql, params)
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def fetch_one(self, sql: str, params=()):
+        cursor = await self._connection.execute(sql, params)
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+
+class _ExistingDatabase(_ReadOnlyDatabase):
+    """Small transaction adapter deliberately excluding schema initialization."""
+
+    @asynccontextmanager
+    async def transaction(self, **_options):
+        await self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield self
+        except BaseException:
+            await _await_uninterruptibly(self._connection.rollback())
+            raise
+        else:
+            await _await_uninterruptibly(self._connection.commit())
+
+    async def execute(self, sql: str, params=()) -> None:
+        await self._connection.execute(sql, params)
+
+
+async def _await_uninterruptibly(awaitable) -> None:
+    task = asyncio.create_task(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as error:
+            if task.done():
+                task.result()
+                raise
+            if cancellation is None:
+                cancellation = error
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _table_columns(db) -> dict[str, frozenset[str]]:
@@ -756,11 +853,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--project-id", action="append", dest="project_ids")
+    parser.add_argument("--apply-digest")
+    parser.add_argument("--retire-legacy-output-tables", action="store_true")
     return parser.parse_args()
 
 
 async def _main() -> None:
     args = _parse_args()
+    if args.retire_legacy_output_tables:
+        retired = await retire_legacy_output_tables(args.database)
+        print(json.dumps({"retiredTables": retired}, ensure_ascii=False))
+        return
+    if args.apply_digest:
+        plan = await apply_existing_database(
+            args.database,
+            args.apply_digest,
+            project_ids=args.project_ids,
+        )
+        print(json.dumps({
+            "appliedPlanDigest": plan.digest,
+            "deletedCounts": plan.table_counts,
+        }, ensure_ascii=False, sort_keys=True))
+        return
     plan = await write_read_only_report(
         args.database,
         args.output,

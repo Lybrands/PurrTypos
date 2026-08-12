@@ -563,9 +563,12 @@ async def init_schema(db: DatabaseConnection) -> None:
         ON ai_agent_run_events(source_event_key)
         WHERE source_event_key IS NOT NULL
     """)
+    await db.execute(
+        "DROP INDEX IF EXISTS idx_ai_agent_run_events_turn_sequence"
+    )
     await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_ai_agent_run_events_turn_sequence
-        ON ai_agent_run_events(COALESCE(turn_id, run_id), sequence)
+        idx_ai_agent_run_events_run_sequence
+        ON ai_agent_run_events(run_id, sequence)
         WHERE sequence IS NOT NULL
     """)
     await _migrate_agent_lifecycle_events(db)

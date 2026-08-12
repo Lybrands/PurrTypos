@@ -217,6 +217,7 @@ class AgentCore:
         recovery_policy: RecoveryPolicy = RecoveryPolicy(),
         tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(),
         operation_controller: AgentOperationController | None = None,
+        output_processor: AgentOutputProcessor | None = None,
         output_repository: AgentOutputRepository | None = None,
         output_publisher: AgentOutputPublisher | None = None,
         execution_lease_store: ExecutionLeaseStore | None = None,
@@ -233,7 +234,7 @@ class AgentCore:
             raise ValueError(
                 "canonical output repository and publisher must be configured together"
             )
-        self._output_processor = (
+        self._output_processor = output_processor or (
             AgentOutputProcessor(output_repository, output_publisher)
             if output_repository is not None and output_publisher is not None
             else None
@@ -486,13 +487,17 @@ class AgentCore:
                     session_id=request.session_id,
                     prompt=request.latest_user_text(),
                     mode=request.mode,
+                    turn_id=options.turn_id,
                     provenance=options.provenance,
                     lineage=options.lineage, binding=options.binding,
                 )
             )
             model_tasks = AgentModelTaskRunner(
                 self._model_invocations,
-                ModelInvocationContext(run_id=controller.run_id),
+                ModelInvocationContext(
+                    run_id=controller.run_id,
+                    turn_id=options.turn_id,
+                ),
             )
             context_provider = (
                 self._context_provider_factory(model_tasks)
@@ -1676,6 +1681,7 @@ class AgentCore:
                     ),
                     execution_state=state,
                     run_id=controller.run_id,
+                    turn_id=options.turn_id,
                     context_budget=budget,
                     output_limit=output_limit,
                     scope_tools_to_observer=(plan is not None),
@@ -1785,6 +1791,7 @@ class AgentCore:
                                 request=request.model,
                                 context=ModelInvocationContext(
                                     run_id=controller.run_id,
+                                    turn_id=options.turn_id,
                                 ),
                                 signal=signal,
                             )

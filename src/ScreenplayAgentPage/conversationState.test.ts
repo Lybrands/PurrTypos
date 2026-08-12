@@ -3,7 +3,6 @@ import test from 'node:test'
 import type {
   ScreenplayAgentTask,
   ScreenplayAgentChunkPage,
-  ScreenplayConversationEvent,
   ScreenplayConversationStreamEvent,
   ScreenplayConversationSnapshot,
   ScreenplayConversationTurn,
@@ -534,20 +533,6 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
       snapshotReads += 1
       return { success: true, data: snapshot(completedTurn, completedTask, 13) }
     },
-    listScreenplayConversationEvents: async () => ({
-      success: true,
-      data: {
-        events: [{
-          cursor: 13,
-          turnId: 'turn-1',
-          taskId: 'task-1',
-          type: 'screenplay.agent.task.completed',
-          payload: {},
-        }],
-        nextCursor: 13,
-        hasMore: false,
-      },
-    }),
     watchScreenplayConversationEvents: () => () => undefined,
     cancelScreenplayConversationTurn: async () => ({
       success: true,
@@ -611,16 +596,12 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
   assert.equal(resumed.revision, 2)
 })
 
-test('screenplay SSE routes business invalidation and shared Agent chunks independently', () => {
+test('screenplay SSE uses canonical Agent chunks as its only invalidation', () => {
   let onEvent: ((event: ScreenplayConversationStreamEvent) => void) | undefined
   let closed = false
   const client = new ScreenplayConversationClient({
     submitScreenplayConversationTurn: async () => ({ success: true, data: turn() }),
     getScreenplayConversationSnapshot: async () => ({ success: true, data: snapshot() }),
-    listScreenplayConversationEvents: async () => ({
-      success: true,
-      data: { events: [], nextCursor: 12, hasMore: false },
-    }),
     watchScreenplayConversationEvents: (input) => {
       onEvent = input.onEvent
       return () => { closed = true }
@@ -664,18 +645,6 @@ test('screenplay SSE routes business invalidation and shared Agent chunks indepe
     onInvalidate: () => { invalidations += 1 },
     onChunks: (page) => { chunkPages.push(page) },
   })
-  const event = (cursor: number): ScreenplayConversationEvent => ({
-    cursor,
-    turnId: 'turn-1',
-    taskId: 'task-1',
-    type: 'updated',
-    payload: {},
-  })
-
-  onEvent?.(event(12))
-  onEvent?.(event(13))
-  onEvent?.(event(13))
-  onEvent?.(event(14))
   const chunkPage: ScreenplayAgentChunkPage = {
     kind: 'agent_chunks',
     chunks: [],
@@ -686,7 +655,7 @@ test('screenplay SSE routes business invalidation and shared Agent chunks indepe
   onEvent?.(chunkPage)
   stop()
 
-  assert.equal(invalidations, 2)
+  assert.equal(invalidations, 1)
   assert.equal(chunkPages.length, 1)
   assert.equal(closed, true)
 })

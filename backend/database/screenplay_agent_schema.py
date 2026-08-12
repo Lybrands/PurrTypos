@@ -167,68 +167,6 @@ async def init_screenplay_agent_schema(db) -> None:
         "WHERE status IN ('queued', 'planning', 'running')"
     )
 
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_agent_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id TEXT NOT NULL,
-        session_id INTEGER NOT NULL,
-        turn_id TEXT DEFAULT NULL,
-        task_id TEXT DEFAULT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL DEFAULT '{}',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_agent_events_session "
-        "ON screenplay_agent_events(project_id, session_id, id)"
-    )
-    event_columns = {
-        str(column["name"])
-        for column in await db.fetch_all("PRAGMA table_info(screenplay_agent_events)")
-    }
-    if "task_id" not in event_columns:
-        await db.execute(
-            "ALTER TABLE screenplay_agent_events ADD COLUMN task_id TEXT DEFAULT NULL"
-        )
-
-    # Materialized shared Agent chunks are the conversation transport and
-    # recovery source. Core Run events remain the diagnostic source of truth;
-    # the frontend never parses their screenplay-specific structured output.
-    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_agent_chunks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id TEXT NOT NULL,
-        session_id INTEGER NOT NULL,
-        turn_id TEXT NOT NULL,
-        task_id TEXT DEFAULT NULL,
-        run_id TEXT DEFAULT NULL,
-        protocol_version INTEGER NOT NULL DEFAULT 2,
-        chunk_json TEXT NOT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    chunk_columns = {
-        str(column["name"])
-        for column in await db.fetch_all("PRAGMA table_info(screenplay_agent_chunks)")
-    }
-    if "run_id" not in chunk_columns:
-        await db.execute(
-            "ALTER TABLE screenplay_agent_chunks ADD COLUMN run_id TEXT DEFAULT NULL"
-        )
-    if "protocol_version" not in chunk_columns:
-        await db.execute(
-            "ALTER TABLE screenplay_agent_chunks ADD COLUMN "
-            "protocol_version INTEGER NOT NULL DEFAULT 1"
-        )
-    if "task_id" not in chunk_columns:
-        await db.execute(
-            "ALTER TABLE screenplay_agent_chunks ADD COLUMN task_id TEXT DEFAULT NULL"
-        )
-    # Legacy protocol rows remain unreadable, but schema initialization must
-    # never delete them. Their exact IDs are handled only by the digest-locked
-    # screenplay runtime cleanup after an approved dry-run.
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screenplay_agent_chunks_session "
-        "ON screenplay_agent_chunks(project_id, session_id, id)"
-    )
-
     await _migrate_legacy_task_outputs(db)
 
     # Test-phase migration: the discarded Job engine owns no accepted document
@@ -241,14 +179,6 @@ async def init_screenplay_agent_schema(db) -> None:
         legacy_turn_ids = [str(row["id"]) for row in legacy_turns]
         if legacy_turn_ids:
             marks = ",".join("?" for _ in legacy_turn_ids)
-            await db.execute(
-                f"DELETE FROM screenplay_agent_events WHERE turn_id IN ({marks})",
-                legacy_turn_ids,
-            )
-            await db.execute(
-                f"DELETE FROM screenplay_agent_chunks WHERE turn_id IN ({marks})",
-                legacy_turn_ids,
-            )
             await db.execute(
                 f"DELETE FROM screenplay_agent_turns WHERE id IN ({marks})",
                 legacy_turn_ids,

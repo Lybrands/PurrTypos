@@ -182,22 +182,6 @@ class SqliteScreenplayOperationFinalizer:
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                 [revision_id, receipt_id, operation.id],
             )
-            await self._db.execute(
-                "INSERT INTO screenplay_agent_events "
-                "(project_id, session_id, turn_id, task_id, event_type, payload_json) "
-                "VALUES (?, ?, ?, ?, 'screenplay.agent.task.completed', ?)",
-                [
-                    operation.project_id,
-                    operation.session_id,
-                    operation.turn_id,
-                    operation.long_task_id,
-                    _dump({
-                        "taskId": operation.long_task_id,
-                        "revisionId": revision_id,
-                        "finalizationReceiptId": receipt_id,
-                    }),
-                ],
-            )
             receipt = ScreenplayOperationFinalizationReceipt(
                 id=receipt_id,
                 operation_id=operation.id,

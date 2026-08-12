@@ -147,7 +147,12 @@ async def test_run_begin_and_canonical_lifecycle_commit_together(output_db):
     repository = _repository(db, run_repository=runs)
 
     begun, output = await repository.begin_run_lifecycle(
-        RunCreateParams(session_id=8, prompt="开始正式审阅", mode="agent"),
+        RunCreateParams(
+            session_id=8,
+            prompt="开始正式审阅",
+            mode="agent",
+            turn_id="turn-review",
+        ),
         AgentEvent(
             type=CoreEventType.RUN_STARTED,
             payload={"status": RunStatus.RUNNING.value},
@@ -166,12 +171,38 @@ async def test_run_begin_and_canonical_lifecycle_commit_together(output_db):
     assert run == {"status": RunStatus.RUNNING.value}
     assert begun.event.run_id == begun.run_id
     assert output.kind is OutputEventKind.RUN_LIFECYCLE
+    assert output.turn_id == "turn-review"
     assert output.payload["status"] == RunStatus.RUNNING.value
     assert await repository.list_events(
         begun.run_id,
         after_sequence=0,
     ) == (output,)
     assert legacy == []
+
+
+@pytest.mark.asyncio
+async def test_session_cursor_replays_public_events_without_domain_coupling(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    repository = _repository(db)
+    await repository.open_stream(_stream(run_id))
+    public = await repository.append_event(
+        _delta(run_id, source_event_key="provider:session:1", text="甲")
+    )
+
+    page = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+
+    assert len(page) == 1
+    assert page[0][0] > 0
+    assert page[0][1] == public
+    assert await repository.list_session_events(
+        session_id=7,
+        after_cursor=page[0][0],
+    ) == ()
 
 
 @pytest.mark.asyncio

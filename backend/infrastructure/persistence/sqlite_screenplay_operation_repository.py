@@ -513,28 +513,6 @@ class SqliteScreenplayOperationRepository:
                     "SELECT changes() AS count"
                 )
                 changed = int((changed_row or {}).get("count") or 0) == 1
-            if changed:
-                task_id = operation.long_task_id if operation is not None else None
-                await self._db.execute(
-                    "INSERT INTO screenplay_agent_events "
-                    "(project_id, session_id, turn_id, task_id, event_type, "
-                    "payload_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        str(turn["project_id"]),
-                        int(turn["session_id"]),
-                        normalized_turn_id,
-                        task_id,
-                        (
-                            "screenplay.agent.task.canceled"
-                            if operation is not None
-                            else "screenplay.agent.turn.canceled"
-                        ),
-                        _dump({
-                            "taskId": task_id,
-                            "cancelReceiptId": normalized_receipt,
-                        }),
-                    ],
-                )
             return await self._current_cancel_receipt(
                 normalized_turn_id,
                 receipt_id=normalized_receipt,

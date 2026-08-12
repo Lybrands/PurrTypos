@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import aiosqlite
 import pytest
 import pytest_asyncio
 
@@ -9,7 +10,9 @@ from database.connection import DatabaseConnection
 from database.crud.screenplay_agent_runtime_cleanup import (
     CleanupApplyInjectedFailure,
     apply_cleanup,
+    apply_existing_database,
     build_cleanup_plan,
+    retire_legacy_output_tables,
 )
 
 
@@ -25,6 +28,7 @@ async def cleanup_db(tmp_path: Path):
 
 
 async def _seed(db: DatabaseConnection) -> None:
+    await _create_legacy_output_tables(db)
     for project_id in ("project-target", "project-other"):
         await db.execute(
             "INSERT INTO screenplay_projects (id, title) VALUES (?, ?)",
@@ -162,6 +166,31 @@ async def _seed(db: DatabaseConnection) -> None:
     )
 
 
+async def _create_legacy_output_tables(db: DatabaseConnection) -> None:
+    """Recreate retired stores only inside the one-time cleanup fixture."""
+    await db.execute("""CREATE TABLE screenplay_agent_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        session_id INTEGER NOT NULL,
+        turn_id TEXT NOT NULL,
+        task_id TEXT DEFAULT NULL,
+        run_id TEXT DEFAULT NULL,
+        protocol_version INTEGER NOT NULL DEFAULT 2,
+        chunk_json TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE TABLE screenplay_agent_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        session_id INTEGER NOT NULL,
+        turn_id TEXT DEFAULT NULL,
+        task_id TEXT DEFAULT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+
 @pytest.mark.asyncio
 async def test_dry_run_resolves_exact_relationships_without_text_matching(cleanup_db):
     plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
@@ -223,3 +252,86 @@ async def test_cleanup_rolls_back_every_table_after_any_delete_failure(cleanup_d
     assert await cleanup_db.fetch_one(
         "SELECT id FROM ai_agent_runs WHERE id = 'run-target'"
     )
+
+
+@pytest.mark.asyncio
+async def test_existing_database_apply_does_not_run_schema_initialization(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    await _seed(db)
+    plan = await build_cleanup_plan(db, project_ids=("project-target",))
+    path = db.get_db_path()
+    await db.close()
+
+    await apply_existing_database(
+        path,
+        plan.digest,
+        project_ids=("project-target",),
+    )
+
+    reopened = await aiosqlite.connect(path)
+    try:
+        target = await (await reopened.execute(
+            "SELECT COUNT(*) FROM screenplay_agent_chunks "
+            "WHERE project_id = 'project-target'"
+        )).fetchone()
+        other = await (await reopened.execute(
+            "SELECT COUNT(*) FROM screenplay_agent_chunks "
+            "WHERE project_id = 'project-other'"
+        )).fetchone()
+    finally:
+        await reopened.close()
+    assert target == (0,)
+    assert other == (1,)
+
+
+@pytest.mark.asyncio
+async def test_legacy_tables_retire_only_when_both_are_empty(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    await _create_legacy_output_tables(db)
+    path = db.get_db_path()
+    await db.close()
+
+    assert await retire_legacy_output_tables(path) == (
+        "screenplay_agent_chunks",
+        "screenplay_agent_events",
+    )
+    reopened = await aiosqlite.connect(path)
+    try:
+        tables = await (await reopened.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('screenplay_agent_chunks', 'screenplay_agent_events')"
+        )).fetchall()
+    finally:
+        await reopened.close()
+    assert tables == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_table_retirement_rolls_back_when_one_store_has_rows(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    await _create_legacy_output_tables(db)
+    await db.execute(
+        "INSERT INTO screenplay_agent_events "
+        "(project_id, session_id, event_type) VALUES ('project', 1, 'legacy')"
+    )
+    path = db.get_db_path()
+    await db.close()
+
+    with pytest.raises(RuntimeError, match="non-empty legacy table"):
+        await retire_legacy_output_tables(path)
+
+    reopened = await aiosqlite.connect(path)
+    try:
+        tables = await (await reopened.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('screenplay_agent_chunks', 'screenplay_agent_events')"
+        )).fetchall()
+    finally:
+        await reopened.close()
+    assert {row[0] for row in tables} == {
+        "screenplay_agent_chunks",
+        "screenplay_agent_events",
+    }

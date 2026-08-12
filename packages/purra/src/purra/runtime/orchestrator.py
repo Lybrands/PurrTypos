@@ -245,6 +245,7 @@ class AgentRuntime:
         response_transaction_mode: ResponseTransactionMode | None = None,
         execution_state: ExecutionState | None = None,
         run_id: RunId | None = None,
+        turn_id: str | None = None,
         context_budget: ContextBudget | None = None,
         output_limit: InvocationOutputLimit | None = None,
         round_input_tokens: int | None = None,
@@ -261,6 +262,7 @@ class AgentRuntime:
         messages = list(request.messages)
         invocation_context = ModelInvocationContext(
             run_id=str(run_id or f"runtime-{uuid4().hex}"),
+            turn_id=turn_id,
         )
         if not request.model.protocol_capabilities.reasoning_mode_is_supported(
             reasoning_mode
