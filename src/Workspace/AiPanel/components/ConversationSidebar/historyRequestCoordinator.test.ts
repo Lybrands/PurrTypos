@@ -10,6 +10,7 @@ function deferred<T>() {
 
 test('only the latest history request may commit or clear loading', () => {
   const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
   const oldRequest = coordinator.beginLatest()
   const latestRequest = coordinator.beginLatest()
   let loading = true
@@ -34,11 +35,12 @@ test('only the latest history request may commit or clear loading', () => {
   assert.equal(coordinator.isCurrent(latestRequest), false)
 })
 
-test('unmount prevents pending requests from mutating component state', () => {
+test('deactivate prevents pending requests from mutating component state', () => {
   const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
   const request = coordinator.beginLatest()
 
-  coordinator.unmount()
+  coordinator.deactivate()
 
   assert.equal(coordinator.isMounted(), false)
   assert.equal(coordinator.isCurrent(request), false)
@@ -46,6 +48,7 @@ test('unmount prevents pending requests from mutating component state', () => {
 
 test('duplicate deletion runs the service and callback only once per session', async () => {
   const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
   const pending = deferred<void>()
   let serviceCalls = 0
   let deleteCallbacks = 0
@@ -67,4 +70,39 @@ test('duplicate deletion runs the service and callback only once per session', a
   await deleteSession()
   assert.equal(serviceCalls, 2)
   assert.equal(deleteCallbacks, 2)
+})
+
+test('StrictMode cleanup invalidates old work and a second setup accepts new work', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  const beforeFirstSetup = coordinator.captureLatest()
+  coordinator.activate()
+  assert.equal(coordinator.captureLatest(), beforeFirstSetup + 1)
+  const oldRequest = coordinator.beginLatest()
+  const oldPending = deferred<void>()
+  let oldDeleteCallbacks = 0
+  const oldDelete = coordinator.runOnce('session:old', async () => {
+    await oldPending.promise
+    if (coordinator.isCurrent(oldRequest)) oldDeleteCallbacks += 1
+  })
+
+  const beforeCleanup = coordinator.captureLatest()
+  coordinator.deactivate()
+  assert.equal(coordinator.captureLatest(), beforeCleanup + 1)
+  assert.equal(coordinator.isCurrent(oldRequest), false)
+
+  const beforeSecondSetup = coordinator.captureLatest()
+  coordinator.activate()
+  assert.equal(coordinator.captureLatest(), beforeSecondSetup + 1)
+  assert.equal(coordinator.isCurrent(oldRequest), false)
+  const newRequest = coordinator.beginLatest()
+  let newDeleteCallbacks = 0
+  await coordinator.runOnce('session:new', async () => {
+    if (coordinator.isCurrent(newRequest)) newDeleteCallbacks += 1
+  })
+
+  assert.equal(coordinator.isCurrent(newRequest), true)
+  assert.equal(newDeleteCallbacks, 1)
+  oldPending.resolve()
+  await oldDelete
+  assert.equal(oldDeleteCallbacks, 0)
 })

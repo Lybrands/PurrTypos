@@ -1,19 +1,28 @@
 export interface HistoryRequestCoordinator {
+  activate(): void
+  deactivate(): void
   beginLatest(): number
   captureLatest(): number
   invalidateLatest(): void
   isCurrent(request: number): boolean
   isMounted(): boolean
-  unmount(): void
   runOnce<T>(key: string, operation: () => Promise<T>): Promise<T>
 }
 
 export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
   let generation = 0
-  let mounted = true
+  let mounted = false
   const inFlight = new Map<string, Promise<unknown>>()
 
   return {
+    activate() {
+      mounted = true
+      generation += 1
+    },
+    deactivate() {
+      mounted = false
+      generation += 1
+    },
     beginLatest() {
       generation += 1
       return generation
@@ -29,10 +38,6 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
     },
     isMounted() {
       return mounted
-    },
-    unmount() {
-      mounted = false
-      generation += 1
     },
     runOnce<T>(key: string, operation: () => Promise<T>): Promise<T> {
       const existing = inFlight.get(key) as Promise<T> | undefined
