@@ -1736,10 +1736,12 @@ class RunCreateParams:
     provenance: RunProvenance | None = None
     lineage: RunLineage | None = None
     binding: RunBinding | None = None
+    turn_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "prompt", str(self.prompt or ""))
         object.__setattr__(self, "mode", _optional_text(self.mode))
+        object.__setattr__(self, "turn_id", _optional_text(self.turn_id))
         if self.provenance is not None and not isinstance(
             self.provenance,
             RunProvenance,

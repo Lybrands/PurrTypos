@@ -12,7 +12,9 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Protocol
+from uuid import uuid4
 
 from purra.contracts import (
     AgentMessage,
@@ -41,6 +43,7 @@ from purra.task_admission import (
     LongTaskExecutionStatus,
     TaskAdmissionDecision,
 )
+from purra.output import RuntimeOutputEvent
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
@@ -77,7 +80,6 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
 from infrastructure.persistence.sqlite_work_item_repository import (
     SqliteWorkItemRepository,
 )
-from application.screenplay_agent_stream import ScreenplayAgentChunkProjector
 
 
 _ACTIVE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -133,6 +135,7 @@ class ScreenplayAgentService:
         resolver: ScreenplayTaskResolver,
         unit_executor_factory: Callable[[Any], object],
         projects,
+        output_processor=None,
         track_background=None,
     ) -> None:
         self._db = db
@@ -141,12 +144,12 @@ class ScreenplayAgentService:
             owner_id=owner_id,
         )
         self._owner_id = str(owner_id)
-        self._stream = ScreenplayAgentChunkProjector(db)
         self._planner = planner
         self._resolver = resolver
         self._unit_executor_factory = unit_executor_factory
         self._projects = projects
         self._track_background = track_background
+        self._output_processor = output_processor
         self._long_tasks = SqliteLongTaskRepository(db)
         self._operations = SqliteScreenplayOperationRepository(db)
         self._work_items = SqliteWorkItemRepository(db)
@@ -181,7 +184,6 @@ class ScreenplayAgentService:
                 "contextWindow": request.runtime.contextWindow,
             },
         )
-        await self._stream.started(str(turn["id"]))
         return turn
 
     def dispatch_turn(self, turn_id: str, runtime) -> asyncio.Task[None]:
@@ -197,7 +199,6 @@ class ScreenplayAgentService:
     async def execute_turn(self, turn_id: str, runtime) -> None:
         if not await self._repository.claim_turn(turn_id):
             return
-        await self._stream.plan(turn_id)
         turn = await self._repository.load_turn(turn_id)
         if turn is None:
             return
@@ -238,13 +239,11 @@ class ScreenplayAgentService:
                 intent=planned.intent,
                 planner_run_id=planned.run_id,
             )
-            await self._stream.plan(turn_id)
             if planned.intent.action is ScreenplayIntentAction.ANSWER:
                 await self._repository.complete_answer(
                     turn_id,
                     planned.intent.reply or "",
                 )
-                await self._stream.terminal(turn_id)
                 return
             resolved = await self._resolver.resolve(
                 workspace=workspace,
@@ -344,7 +343,6 @@ class ScreenplayAgentService:
                 task_id=receipt.task_id,
                 target_role=compiled.target_role,
             )
-            await self._stream.plan(turn_id)
             await self._execute_attached_operation(
                 dispatcher=dispatcher,
                 turn=turn,
@@ -416,7 +414,6 @@ class ScreenplayAgentService:
                 }),
                 worker_id=self._owner_id,
             )
-            await self._stream.plan(operation.turn_id)
             await self._execute_attached_operation(
                 dispatcher=dispatcher,
                 turn=turn,
@@ -445,7 +442,10 @@ class ScreenplayAgentService:
             result = await dispatcher.execute(
                 task_id,
                 parent_run_id=planner_run_id,
-                observer=lambda update: self._observe_task(turn_id, update),
+                observer=lambda update: self._publish_task_update(
+                    turn_id,
+                    update,
+                ),
             )
         finally:
             await self._sync_operation_usage(
@@ -472,7 +472,6 @@ class ScreenplayAgentService:
                 code=code,
                 message=message,
             )
-            await self._stream.terminal(turn_id)
             return
         if result.status is LongTaskExecutionStatus.CANCELED:
             cancel_receipt = await self._operations.request_cancel(
@@ -485,7 +484,6 @@ class ScreenplayAgentService:
                 turn_id,
                 receipt_id=cancel_receipt.id,
             )
-            await self._stream.terminal(turn_id)
             return
         if result.status is LongTaskExecutionStatus.FAILED:
             code = result.error or "screenplay_task_failed"
@@ -504,7 +502,6 @@ class ScreenplayAgentService:
                 code=code,
                 message=message,
             )
-            await self._stream.terminal(turn_id)
             return
         candidate_refs = []
         for step in recipe.steps:
@@ -530,7 +527,6 @@ class ScreenplayAgentService:
                 final_response_ref=final_response_ref,
             )
         )
-        await self._stream.terminal(turn_id)
 
     async def _sync_operation_usage(
         self,
@@ -627,14 +623,6 @@ class ScreenplayAgentService:
                     ),
                     message=message,
                 )
-            await self._stream.terminal(turn_id)
-
-    async def _observe_task(
-        self,
-        turn_id: str,
-        update: LongTaskExecutionUpdate,
-    ) -> None:
-        await self._stream.task_progress(turn_id, update.event)
 
     async def cancel_turn(self, turn_id: str, *, idempotency_key: str):
         try:
@@ -678,8 +666,26 @@ class ScreenplayAgentService:
             turn_id,
             receipt_id=receipt.id,
         )
-        await self._stream.terminal(turn_id)
         return settled.to_mapping()
+
+    async def _publish_task_update(
+        self,
+        turn_id: str,
+        update: LongTaskExecutionUpdate,
+    ) -> None:
+        if self._output_processor is None:
+            return
+        run_id = str(update.event.run_id or "").strip()
+        if not run_id:
+            raise RuntimeError("long task progress requires its parent Run")
+        await self._output_processor.accept_runtime_event(RuntimeOutputEvent(
+            event_id=f"long-task-{uuid4().hex}",
+            run_id=run_id,
+            turn_id=turn_id,
+            event_type=str(update.event.type),
+            payload=update.event.payload,
+            occurred_at=datetime.now(timezone.utc),
+        ))
 
     async def prepare_resume(self, operation_id: str, *, idempotency_key: str, request):
         operation = await self._operations.load(operation_id)
@@ -768,22 +774,6 @@ class ScreenplayAgentService:
                 str(operation.get("taskId") or "")
             )
         return snapshot
-
-    async def list_events(
-        self,
-        *,
-        project_id: str,
-        session_id: int,
-        after: int,
-        limit: int,
-    ):
-        return await self._repository.list_events(
-            project_id=project_id,
-            session_id=session_id,
-            after=after,
-            limit=limit,
-        )
-
 
 def _task_failure(error: Exception) -> tuple[str, str]:
     if isinstance(error, ScreenplayIntentCommandMismatchError):

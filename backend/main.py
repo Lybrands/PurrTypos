@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 import webbrowser
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # The Agent framework is an independent monorepo package. Source deployments
@@ -126,15 +126,6 @@ async def lifespan(application: FastAPI):
             db,
             owner_id="screenplay-startup-recovery",
         ).recover_after_restart()
-        if recovered_turn_ids:
-            from application.screenplay_agent_stream import (
-                ScreenplayAgentChunkProjector,
-            )
-
-            projector = ScreenplayAgentChunkProjector(db)
-            for turn_id in recovered_turn_ids:
-                with suppress(Exception):
-                    await projector.terminal(turn_id)
         if recovered_turn_ids:
             logging.getLogger(__name__).warning(
                 "Failed %s credential-bound screenplay Turn(s) after restart",

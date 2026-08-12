@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -71,6 +72,7 @@ class AgentOutputProcessor:
         self._recovery = recovery_observer
         self._streams: dict[str, OutputStreamSpec] = {}
         self._chunk_indices: dict[str, int] = {}
+        self._run_turn_ids: dict[str, str | None] = {}
 
     async def open_model_stream(
         self,
@@ -111,6 +113,7 @@ class AgentOutputProcessor:
             raise
         except Exception as error:
             raise await self._persistence_error("unbound", error) from error
+        self._run_turn_ids[begun.run_id] = params.turn_id
         await self._publish_if_visible(output)
         return begun
 
@@ -247,7 +250,7 @@ class AgentOutputProcessor:
         if isinstance(event, OperationStarted):
             draft = AgentOutputEventDraft(
                 run_id=event.run_id,
-                turn_id=None,
+                turn_id=self._run_turn_ids.get(event.run_id),
                 output_stream_id=None,
                 invocation_id=event.invocation_id,
                 source_event_key=f"operation:{event.operation_id}:started",
@@ -266,7 +269,7 @@ class AgentOutputProcessor:
         elif isinstance(event, OperationFinished):
             draft = AgentOutputEventDraft(
                 run_id=event.run_id,
-                turn_id=None,
+                turn_id=self._run_turn_ids.get(event.run_id),
                 output_stream_id=None,
                 invocation_id=event.invocation_id,
                 source_event_key=f"operation:{event.operation_id}:finished",
@@ -299,10 +302,11 @@ class AgentOutputProcessor:
                 "run lifecycle commit requires one bound run id"
             )
         run_id = next(iter(run_ids))
+        event = replace(event, turn_id=self._run_turn_ids.get(run_id))
         related_drafts = tuple(
             AgentOutputEventDraft(
                 run_id=run_id,
-                turn_id=None,
+                turn_id=self._run_turn_ids.get(run_id),
                 output_stream_id=None,
                 invocation_id=None,
                 source_event_key=(
@@ -346,7 +350,7 @@ class AgentOutputProcessor:
             raise TypeError("output processor requires a ToolOutputEvent")
         return await self._append(AgentOutputEventDraft(
             run_id=event.run_id,
-            turn_id=None,
+            turn_id=self._run_turn_ids.get(event.run_id),
             output_stream_id=None,
             invocation_id=event.invocation_id,
             source_event_key=(
@@ -373,7 +377,7 @@ class AgentOutputProcessor:
             raise TypeError("output processor requires a DomainEffectOutput")
         return await self._append(AgentOutputEventDraft(
             run_id=event.run_id,
-            turn_id=None,
+            turn_id=self._run_turn_ids.get(event.run_id),
             output_stream_id=None,
             invocation_id=None,
             source_event_key=f"domain:{event.effect_id}",
@@ -399,7 +403,11 @@ class AgentOutputProcessor:
             return None
         return await self._append(AgentOutputEventDraft(
             run_id=event.run_id,
-            turn_id=None,
+            turn_id=(
+                event.turn_id
+                if event.turn_id is not None
+                else self._run_turn_ids.get(event.run_id)
+            ),
             output_stream_id=None,
             invocation_id=None,
             source_event_key=f"runtime:{event.event_id}",
@@ -469,7 +477,7 @@ class AgentOutputProcessor:
             raise TypeError("output processor requires a DelegationOutputEvent")
         return await self._append(AgentOutputEventDraft(
             run_id=event.parent_run_id,
-            turn_id=None,
+            turn_id=self._run_turn_ids.get(event.parent_run_id),
             output_stream_id=None,
             invocation_id=None,
             source_event_key=f"delegation-status:{event.event_id}",

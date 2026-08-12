@@ -42,7 +42,6 @@ from domains.screenplay_agent.candidate_projection import (
 )
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from infrastructure.screenplay import ScreenplayCandidateArtifacts
-from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +54,6 @@ class ScreenplayToolCallingService:
     def __init__(self, db, *, composition) -> None:
         self._composition = composition
         self._candidates = ScreenplayCandidateArtifacts(db)
-        self._chunks = ScreenplayAgentChunkStore(db)
 
     async def run_candidate(
         self,
@@ -110,6 +108,7 @@ class ScreenplayToolCallingService:
             },
         )
         options = AgentCoreRunOptions(
+            turn_id=conversation_turn_id,
             output_limit=output_limit,
             default_context_window_tokens=window,
             force_planned_tool_choice=False,
@@ -139,19 +138,11 @@ class ScreenplayToolCallingService:
         cancel_watcher: asyncio.Task[None] | None = None
         try:
             handle = await core.submit(request, options=options)
-            output_drain = asyncio.create_task(self._drain_output(
-                handle,
-                project_id=domain_context.project_id,
-                session_id=session_id,
-                turn_id=conversation_turn_id,
-                task_id=domain_context.task_id,
-            ))
             if signal is not None and hasattr(signal, "wait"):
                 cancel_watcher = asyncio.create_task(
                     _cancel_on_signal(signal, handle)
                 )
             result = await handle.wait()
-            await output_drain
         finally:
             if cancel_watcher is not None:
                 cancel_watcher.cancel()
@@ -193,29 +184,6 @@ class ScreenplayToolCallingService:
                 ) from error
         candidate = public_candidate
         return ScreenplayCandidateRunResult(run_id=run_id, candidate=candidate)
-
-    async def _drain_output(
-        self,
-        handle,
-        *,
-        project_id: str,
-        session_id: int,
-        turn_id: str,
-        task_id: str,
-    ) -> None:
-        subscription = handle.subscribe(after_sequence=0)
-        try:
-            async for event in subscription:
-                await self._chunks.append_output_event(
-                    project_id=project_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    task_id=task_id,
-                    event=event,
-                )
-        finally:
-            await subscription.aclose()
-
 
 async def _cancel_on_signal(signal, handle) -> None:
     await signal.wait()

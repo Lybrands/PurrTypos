@@ -13,6 +13,8 @@ import application.screenplay_structured_call as screenplay_structured_call
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
+    RunCreateParams,
+    RunStatus,
     ModelCompletion,
     ModelFinishReason,
     ModelStream,
@@ -20,6 +22,7 @@ from purra.contracts import (
     ReasoningMode,
 )
 from purra.api import AgentCore
+from purra.events import AgentEvent, CoreEventType
 from purra.tools import InMemoryToolCatalog
 from purra.errors import ModelGatewayError
 from purra.recovery import (
@@ -34,7 +37,7 @@ from application.screenplay_agent_service import (
     _task_failure,
 )
 from application.model_runtime import model_request_from_runtime
-from application.screenplay_agent_stream import ScreenplayAgentChunkStore
+from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
@@ -134,6 +137,16 @@ class _CoreComposition:
 
 def _core_composition(db, gateway):
     return _CoreComposition(db, gateway)
+
+
+async def _public_text_events(db, run_id: str | None = None):
+    where = "AND run_id = ?" if run_id else ""
+    return await db.fetch_all(
+        "SELECT * FROM ai_agent_run_events WHERE event_id IS NOT NULL "
+        "AND visibility = 'public' AND kind = 'provider.content_delta' "
+        f"{where} ORDER BY id",
+        [run_id] if run_id else [],
+    )
 
 async def test_draft_manifest_has_stable_scene_parts_and_digest():
     arguments = dict(
@@ -376,13 +389,7 @@ async def test_turn_start_does_not_emit_a_host_authored_plan(
         request=request,
     )
 
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await temp_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
-    assert chunks == []
+    assert await _public_text_events(temp_db) == []
 
 
 async def test_service_persists_the_validated_stage_command_with_the_turn(
@@ -468,16 +475,12 @@ async def test_planner_structured_fields_never_become_public_text(
 
     await service.execute_turn(turn["id"], request.runtime)
 
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await temp_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
     visible = "".join(
-        chunk.get("commentaryDelta", "") for chunk in chunks
+        json.loads(str(row["payload_json"]))["delta"]
+        for row in await _public_text_events(temp_db)
     )
-    assert visible == ""
+    assert visible == "当前处于创作简报阶段。"
+    assert "debugNote" not in visible
 
 
 async def test_planner_without_private_note_adds_no_fallback_copy(
@@ -531,17 +534,15 @@ async def test_planner_without_private_note_adds_no_fallback_copy(
 
     await service.execute_turn(turn["id"], request.runtime)
 
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await temp_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
     snapshot = await service.get_snapshot(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
     )
-    assert not any("commentaryDelta" in chunk for chunk in chunks)
+    visible = "".join(
+        json.loads(str(row["payload_json"]))["delta"]
+        for row in await _public_text_events(temp_db)
+    )
+    assert visible == "当前处于创作简报阶段。"
     assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
     assert len(gateway.invocations) == 2
 
@@ -1477,9 +1478,7 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
         )
 
     assert captured.value.code == "model_gateway_error"
-    assert await temp_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    ) == []
+    assert await _public_text_events(temp_db) == []
     assert await temp_db.fetch_one(
         "SELECT status FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
     ) == {"status": "failed"}
@@ -1528,11 +1527,7 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
         {"phase": "generation"},
         {"phase": "generation"},
     ]
-    rows = await temp_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    )
-    chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert chunks == []
+    assert await _public_text_events(temp_db) == []
 
 
 async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
@@ -1571,13 +1566,7 @@ async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
         {"phase": "generation"},
         {"phase": "generation"},
     ]
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await temp_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
-    assert not any("delta" in chunk for chunk in chunks)
+    assert await _public_text_events(temp_db) == []
 
 
 async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
@@ -1646,14 +1635,11 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
         project_execution=lambda value: (f"sceneText: {value['sceneText']}",),
     )
 
-    rows = await temp_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    )
     assert result.value == {"sceneText": "这里是完整剧本正文"}
-    assert rows == []
+    assert await _public_text_events(temp_db, result.run_id) == []
 
 
-async def test_screenplay_stream_replays_materialized_shared_chunks(
+async def test_screenplay_stream_replays_canonical_output_journal(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
@@ -1670,20 +1656,23 @@ async def test_screenplay_stream_replays_materialized_shared_chunks(
         stage_command=None,
         runtime_profile={"provider": "openai", "model": "test"},
     )
-    chunks = ScreenplayAgentChunkStore(temp_db)
-    await chunks.append(
-        project_id=project_id,
-        session_id=session["id"],
-        turn_id=turn["id"],
-        run_id="run-screenplay-stream",
-        chunk={"commentaryDelta": "先分析现有剧情"},
+    runs = SqliteRunRepository(temp_db)
+    outputs = SqliteAgentOutputRepository(temp_db, run_repository=runs)
+    begun, canonical = await outputs.begin_run_lifecycle(
+        RunCreateParams(
+            session_id=session["id"],
+            prompt="创作下一集",
+            mode="agent",
+            turn_id=turn["id"],
+        ),
+        AgentEvent(
+            type=CoreEventType.RUN_STARTED,
+            payload={"status": RunStatus.RUNNING.value},
+        ),
     )
-    await chunks.append(
-        project_id=project_id,
-        session_id=session["id"],
-        turn_id=turn["id"],
-        run_id="run-screenplay-stream",
-        chunk={"delta": "正文增量"},
+    chunks = ScreenplayCanonicalOutputQuery(
+        temp_db,
+        output_repository=outputs,
     )
 
     page = await chunks.list_chunks(
@@ -1693,28 +1682,31 @@ async def test_screenplay_stream_replays_materialized_shared_chunks(
 
     assert page["hasMore"] is False
     assert page["nextCursor"] > 0
-    assert page["chunks"][0] == {
+    assert page["chunks"] == [{
         "cursor": page["chunks"][0]["cursor"],
-        "runId": "run-screenplay-stream",
+        "runId": begun.run_id,
         "turnId": turn["id"],
         "taskId": None,
         "userContent": "创作下一集",
         "model": "test",
         "turnCreatedAt": page["chunks"][0]["turnCreatedAt"],
-        "chunk": {"commentaryDelta": "先分析现有剧情"},
+        "chunk": {
+            "eventId": canonical.event_id,
+            "outputStreamId": None,
+            "runId": begun.run_id,
+            "turnId": turn["id"],
+            "invocationId": None,
+            "sequence": 1,
+            "source": "runtime",
+            "kind": "run.lifecycle",
+            "channel": "lifecycle",
+            "visibility": "public",
+            "payload": {"status": "running"},
+            "occurredAt": canonical.occurred_at.isoformat(),
+            "emittedAt": canonical.emitted_at.isoformat(),
+        },
         "createdAt": page["chunks"][0]["createdAt"],
-    }
-    assert page["chunks"][1] == {
-        "cursor": page["nextCursor"],
-        "runId": "run-screenplay-stream",
-        "turnId": turn["id"],
-        "taskId": None,
-        "userContent": "创作下一集",
-        "model": "test",
-        "turnCreatedAt": page["chunks"][1]["turnCreatedAt"],
-        "chunk": {"delta": "正文增量"},
-        "createdAt": page["chunks"][1]["createdAt"],
-    }
+    }]
 
 
 async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay(
@@ -1774,40 +1766,15 @@ async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay
     assert captured.value.status_code == 409
 
 
-async def test_legacy_chunks_stay_quarantined_until_approved_cleanup(
+async def test_retired_output_tables_are_not_recreated_by_schema_init(
     temp_db: DatabaseConnection,
 ):
-    _, workspace, session = await _project_and_session(temp_db)
-    repository = SqliteScreenplayAgentRepository(
-        temp_db,
-        owner_id="screenplay-chunk-migration-test",
-    )
-    turn = await repository.begin_turn(
-        command_id="legacy-chunk-turn",
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-        content="生成候选稿",
-        stage_command=None,
-        runtime_profile={"provider": "openai", "model": "test"},
-    )
-    await temp_db.execute(
-        "INSERT INTO screenplay_agent_chunks "
-        "(project_id, session_id, turn_id, protocol_version, chunk_json) "
-        "VALUES (?, ?, ?, 1, ?)",
-        [
-            workspace["project"]["id"],
-            session["id"],
-            turn["id"],
-            '{"commentaryDelta":"{\\\"sceneText\\\":\\\"正文\\\"}"}',
-        ],
-    )
-
     await init_screenplay_agent_schema(temp_db)
 
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_agent_chunks "
-        "WHERE protocol_version < 2"
-    ) == {"count": 1}
+    assert await temp_db.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('screenplay_agent_events', 'screenplay_agent_chunks')"
+    ) == []
 
 
 async def test_restart_exposes_an_abandoned_turn_as_a_terminal_failure(

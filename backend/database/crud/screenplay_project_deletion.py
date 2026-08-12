@@ -21,16 +21,6 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
         if session_ids:
             placeholders = ",".join("?" for _ in session_ids)
             await db.execute(
-                f"DELETE FROM screenplay_agent_events "
-                f"WHERE session_id IN ({placeholders})",
-                session_ids,
-            )
-            await db.execute(
-                f"DELETE FROM screenplay_agent_chunks "
-                f"WHERE session_id IN ({placeholders})",
-                session_ids,
-            )
-            await db.execute(
                 f"DELETE FROM screenplay_agent_turns "
                 f"WHERE session_id IN ({placeholders})",
                 session_ids,

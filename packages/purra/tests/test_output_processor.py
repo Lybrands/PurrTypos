@@ -335,6 +335,26 @@ async def test_private_protocol_plan_steps_never_enter_public_journal():
 
 
 @pytest.mark.asyncio
+async def test_external_runtime_event_keeps_its_explicit_turn_association():
+    repository = _Repository()
+    publisher = _Publisher()
+    processor = _processor_type()(repository, publisher)
+
+    event = await processor.accept_runtime_event(RuntimeOutputEvent(
+        event_id="runtime-long-task-progress",
+        run_id="run-parent",
+        turn_id="turn-product",
+        event_type="long_task.progress",
+        payload={"taskId": "task-1", "completedUnits": 1},
+        occurred_at=_now(),
+    ))
+
+    assert event is not None
+    assert event.turn_id == "turn-product"
+    assert publisher.published == [event]
+
+
+@pytest.mark.asyncio
 async def test_private_runtime_protocol_events_never_enter_canonical_journal():
     repository = _Repository()
     publisher = _Publisher()

@@ -31,6 +31,7 @@ class AgentCoreRunOptions:
     """Per-run generic limits; domain content remains in injected adapters."""
 
     context_claims: tuple[ContextBudgetClaim, ...] = ()
+    turn_id: str | None = None
     output_limit: InvocationOutputLimit | None = None
     default_context_window_tokens: int = 128_000
     safety_reserve_tokens: int | None = None
@@ -56,6 +57,8 @@ class AgentCoreRunOptions:
         if len(names) != len(set(names)):
             raise ValueError("context claim names must be unique")
         object.__setattr__(self, "context_claims", claims)
+        normalized_turn_id = str(self.turn_id or "").strip() or None
+        object.__setattr__(self, "turn_id", normalized_turn_id)
         object.__setattr__(
             self,
             "default_context_window_tokens",
