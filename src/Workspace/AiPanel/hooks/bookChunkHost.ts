@@ -21,6 +21,7 @@ import {
   handleSettingUpdated,
 } from './bookChunkSideEffects'
 import { handleProposedSettingDiff } from './bookSettingDiff'
+import type { BookSettingDiffAttachmentHandler } from './bookSettingDiff'
 
 export interface BookChunkHostDependencies {
   sessionId: number
@@ -46,6 +47,7 @@ export interface BookChunkHostDependencies {
   setActivity(activity: ChatSessionActivity): void
   isSessionRunning(): boolean
   submitQueued(submission: QueuedChatSubmission): void
+  onAssistantAttachment?: BookSettingDiffAttachmentHandler
   persistConversation?: boolean
 }
 
@@ -59,7 +61,11 @@ export function createBookChunkHost(
     flushCommits: dependencies.flushCommits,
     setRunning: dependencies.setRunning,
     isVisible: dependencies.isVisible,
-    onHostChunk: (chunk) => dispatchBookChunk(chunk, host),
+    onHostChunk: (chunk) => dispatchBookChunk(
+      chunk,
+      host,
+      dependencies.onAssistantAttachment,
+    ),
     onSettled: (outcome, snapshot) => {
       dependencies.unsubscribe()
       dependencies.clearStream()
@@ -73,9 +79,13 @@ export function createBookChunkHost(
   return host
 }
 
-function dispatchBookChunk(chunk: AiStreamChunk, host: AgentChunkHost): void {
+function dispatchBookChunk(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+  onAssistantAttachment?: BookSettingDiffAttachmentHandler,
+): void {
   handleProposedChapterDiff(chunk, host)
-  handleProposedSettingDiff(chunk, host)
+  handleProposedSettingDiff(chunk, host, onAssistantAttachment)
   handleChapterCreated(chunk, host)
   handleSettingUpdated(chunk, host)
 }

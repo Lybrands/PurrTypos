@@ -4,7 +4,6 @@ import {
   type EntityId,
   type ChatAgentMode,
 } from '../../types'
-import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
 import { KNOWN_TOOL_CALL_LABELS } from '../../components/AgentConversation/toolCallLabels'
@@ -86,16 +85,6 @@ export function saveModelPrefs(
   } catch {
     // ignore
   }
-}
-
-/** 根据 modelKey 显示模型名称；可传入自定义配置列表优先匹配，有昵称时显示昵称 */
-export function formatModelName(modelKey?: string, modelConfigs?: AiModelConfig[]): string {
-  if (!modelKey) return '未知模型'
-  if (modelConfigs?.length) {
-    const c = modelConfigs.find((m) => m.id === modelKey)
-    if (c) return (c.nickname?.trim() || c.name) || '未命名'
-  }
-  return modelKey
 }
 
 /** 将接口返回的 Conversation[] 转为 ChatMessage[] */

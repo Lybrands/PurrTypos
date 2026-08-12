@@ -2,8 +2,6 @@ export { useAssociatedContext, type UseAssociatedContextParams } from "./useAsso
 export { useAiModelPrefs } from "./useAiModelPrefs";
 export { useAiSessions, type ChatSessionScope } from "./useAiSessions";
 export { useMemorySelection } from "./useMemorySelection";
-export { useChatScroll } from "./useChatScroll";
-export { useMessageEditing } from "./useMessageEditing";
 export {
   usePromptTemplateContext,
   type UsePromptTemplateContextParams,
