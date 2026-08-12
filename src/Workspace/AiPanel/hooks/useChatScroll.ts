@@ -6,7 +6,7 @@ import {
   observeScrollBottom,
   type ScrollFollowState,
 } from "../../../components/AgentConversation/scrollFollowPolicy";
-import type { ChatMessage } from "./chat.types";
+import type { AgentConversationMessage } from "../../../agent-runtime";
 
 /**
  * 聊天滚动 / 跟随 + 输入区拖拽高度的整组 UI 状态。
@@ -23,7 +23,7 @@ export function useChatScroll({
   combinedData,
 }: {
   loading: boolean;
-  combinedData: ChatMessage[];
+  combinedData: AgentConversationMessage[];
 }) {
   const virtuosoRef = React.useRef<VirtuosoHandle>(null);
   /** 用户主动上滚后为 true，不再自动滚到底部；滚回底部或点击「回到底部」后恢复为 false。 */
@@ -108,9 +108,7 @@ export function useChatScroll({
 
   const streamFollowKey = React.useMemo(() => {
     if (!loading || userHasScrolledUp || combinedData.length === 0) return "";
-    const last = combinedData[combinedData.length - 1] as
-      | ChatMessage
-      | undefined;
+    const last = combinedData[combinedData.length - 1];
     if (!last || last.role !== "assistant" || last.isError) return "";
     return [
       combinedData.length,

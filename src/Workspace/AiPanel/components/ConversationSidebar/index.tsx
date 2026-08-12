@@ -1,5 +1,7 @@
 import React from 'react'
-import AgentConversationIndex from '@/components/AgentConversationIndex'
+import { services } from '@/services'
+import AgentConversationIndex from '@/components/AgentConversation/ConversationIndex'
+import type { AgentConversationSession } from '@/components/AgentConversation'
 import { ReadIcon, PurrSegmented } from '@/purr-components'
 import type { AiSession, EntityId } from '../../../../types'
 import {
@@ -7,7 +9,9 @@ import {
   type ChatSessionActivity,
   type ChatSessionScope,
 } from '../../hooks'
-import SessionHistoryPopover from '../SessionHistoryPopover'
+import SessionHistory, {
+  type AgentConversationHistoryController,
+} from '@/components/AgentConversation/ConversationIndex/SessionHistory'
 import './index.scss'
 
 interface ConversationSidebarProps {
@@ -57,6 +61,87 @@ export default function ConversationSidebar({
   onDeleteFromHistory,
   onCollapse,
 }: ConversationSidebarProps) {
+  const [historySessions, setHistorySessions] = React.useState<AiSession[]>([])
+  const [historyLoading, setHistoryLoading] = React.useState(false)
+  const [historyError, setHistoryError] = React.useState<string>()
+
+  const loadSessionHistory = React.useCallback(async () => {
+    if (bookId == null) {
+      setHistorySessions([])
+      setHistoryError('请先选择书籍')
+      return
+    }
+    setHistoryLoading(true)
+    setHistoryError(undefined)
+    try {
+      const result = await services.sessions.getSessions(
+        scope === 'setting'
+          ? { bookId, includeClosed: true, scope: 'setting' }
+          : { bookId, chapterId: chapterId ?? null, includeClosed: true },
+      )
+      if (!result.success) {
+        setHistorySessions([])
+        setHistoryError(result.error || '历史对话加载失败')
+        return
+      }
+      setHistorySessions(result.data)
+    } catch {
+      setHistorySessions([])
+      setHistoryError('历史对话加载失败，请稍后重试')
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [bookId, chapterId, scope])
+
+  const openHistorySession = React.useCallback((id: string | number) => {
+    const session = historySessions.find((item) => item.id === id)
+    if (session) onOpenFromHistory(session)
+  }, [historySessions, onOpenFromHistory])
+
+  const deleteHistorySession = React.useCallback(async (id: string | number) => {
+    const session = historySessions.find((item) => item.id === id)
+    if (!session) return
+    try {
+      const result = await services.sessions.deleteSession({ sessionId: session.id })
+      if (!result.success) {
+        setHistoryError(result.error || '删除历史对话失败')
+        return
+      }
+      setHistorySessions((current) => current.filter((item) => item.id !== session.id))
+      onDeleteFromHistory(session)
+    } catch {
+      setHistoryError('删除历史对话失败，请稍后重试')
+    }
+  }, [historySessions, onDeleteFromHistory])
+
+  const historyController = React.useMemo<AgentConversationHistoryController>(() => ({
+    conversation: {
+      activeSessionId,
+      history: {
+        sessions: historySessions.map<AgentConversationSession>((session) => ({
+          id: session.id,
+          title: session.title,
+          createdAt: session.create_time,
+        })),
+        loading: historyLoading,
+        error: historyError,
+      },
+    },
+    actions: {
+      loadSessionHistory,
+      openHistorySession,
+      deleteSession: deleteHistorySession,
+    },
+  }), [
+    activeSessionId,
+    deleteHistorySession,
+    historyError,
+    historyLoading,
+    historySessions,
+    loadSessionHistory,
+    openHistorySession,
+  ])
+
   return (
     <AgentConversationIndex
       sessions={sessions}
@@ -75,14 +160,7 @@ export default function ConversationSidebar({
       getActivityLabel={getSessionActivityLabel}
       emptyDescription={scope === 'chapter' && chapterId == null ? '先选择一个章节' : '暂无对话'}
       extraActions={(
-        <SessionHistoryPopover
-          bookId={bookId}
-          chapterId={scope === 'setting' ? null : chapterId}
-          scope={scope}
-          activeSessionId={activeSessionId}
-          onOpen={onOpenFromHistory}
-          onDelete={onDeleteFromHistory}
-        />
+        <SessionHistory controller={historyController} />
       )}
       context={(
         <>

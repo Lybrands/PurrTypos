@@ -13,40 +13,35 @@ import {
   PurrInput,
   PurrTooltip,
 } from '@/purr-components'
-import type { AiSession } from '../../types'
+import type {
+  AgentConversationActivity,
+  AgentSessionId,
+} from '../../../agent-runtime'
+import type { AgentConversationSession } from '../controller'
 import './index.scss'
 
-export type AgentConversationActivityState =
-  | 'running'
-  | 'paused'
-  | 'queued'
-  | 'completed'
-  | 'failed'
-  | 'canceled'
+export type { AgentConversationActivity } from '../../../agent-runtime'
 
-export interface AgentConversationActivity {
-  state: AgentConversationActivityState
-  queuedCount: number
-}
-
-interface AgentConversationIndexProps {
-  sessions: AiSession[]
-  activeSessionId: number | null
-  editingSessionId: number | null
+interface AgentConversationIndexProps<
+  TSession extends AgentConversationSession = AgentConversationSession,
+> {
+  sessions: TSession[]
+  activeSessionId: TSession['id'] | null
+  editingSessionId: TSession['id'] | null
   editingTitle: string
   isCurrentSessionEmpty?: boolean
   disabled?: boolean
   context?: React.ReactNode
   extraActions?: React.ReactNode
-  sessionActivities?: Record<number, AgentConversationActivity>
+  sessionActivities?: Partial<Record<AgentSessionId, AgentConversationActivity>>
   getActivityLabel?: (activity: AgentConversationActivity) => string
   emptyDescription?: React.ReactNode
-  onActiveSessionChange: (sessionId: number) => void
-  onEditingSessionIdChange: (sessionId: number | null) => void
+  onActiveSessionChange: (sessionId: TSession['id']) => void
+  onEditingSessionIdChange: (sessionId: TSession['id'] | null) => void
   onEditingTitleChange: (title: string) => void
   onSaveTitle: () => void
   onNewSession: () => void
-  onCloseSession: (session: AiSession) => void
+  onCloseSession: (session: TSession) => void
   onCollapse: () => void
 }
 
@@ -80,7 +75,9 @@ function defaultActivityLabel(activity: AgentConversationActivity) {
   return '已终止'
 }
 
-export default function AgentConversationIndex({
+export default function AgentConversationIndex<
+  TSession extends AgentConversationSession = AgentConversationSession,
+>({
   sessions,
   activeSessionId,
   editingSessionId,
@@ -99,7 +96,7 @@ export default function AgentConversationIndex({
   onNewSession,
   onCloseSession,
   onCollapse,
-}: AgentConversationIndexProps) {
+}: AgentConversationIndexProps<TSession>) {
   const hasBlankSession = sessions.length > 0 && isCurrentSessionEmpty
 
   return (
@@ -182,7 +179,7 @@ export default function AgentConversationIndex({
                 )}
                 <div className="agent-conversation-index__subline">
                   <span className="agent-conversation-index__time">
-                    {formatSessionTime(session.create_time)}
+                    {formatSessionTime(session.createdAt)}
                   </span>
                   {activity ? (
                     <span

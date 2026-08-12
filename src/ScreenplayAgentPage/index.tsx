@@ -1,22 +1,22 @@
 import { services } from '@/services'
 import React from 'react'
 import AppHeader from '../components/AppHeader'
-import AgentConversation from '../components/AgentConversation'
-import AgentComposer from '../components/AgentComposer'
+import AgentConversation from '../components/AgentConversation/ConversationViewport'
+import AgentComposer from '../components/AgentConversation/Composer'
 import AgentConversationIndex, {
   type AgentConversationActivity,
-} from '../components/AgentConversationIndex'
-import AgentTaskProgress from '../components/AgentTaskProgress'
+} from '../components/AgentConversation/ConversationIndex'
+import AgentTaskProgress from '../components/AgentConversation/TaskProgress'
 import {
   hydrateAiDebugRunSnapshot,
   recordScreenplayAiDebugChunk,
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
-import ContextUsageIndicator from '../Workspace/AiPanel/components/ContextUsageIndicator'
+import ContextUsageIndicator from '../components/AgentConversation/Composer/ContextUsageIndicator'
 import Markdown from '../components/Markdown'
 import ModelPicker, {
   type ModelRuntimeConfigPatch,
-} from '../Workspace/AiPanel/components/ModelPicker'
+} from '../components/AgentConversation/Composer/ModelPicker'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
