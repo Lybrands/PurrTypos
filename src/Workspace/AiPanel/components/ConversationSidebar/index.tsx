@@ -74,7 +74,10 @@ export default function ConversationSidebar({
     [sessions],
   )
 
-  React.useEffect(() => () => historyRequests.unmount(), [historyRequests])
+  React.useEffect(() => {
+    historyRequests.activate()
+    return () => historyRequests.deactivate()
+  }, [historyRequests])
 
   React.useEffect(() => {
     historyRequests.invalidateLatest()
