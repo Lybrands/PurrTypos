@@ -33,7 +33,7 @@ import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
 import ContextUsageIndicator from "./components/ContextUsageIndicator";
-import { getActiveTaskPlan } from "./taskPlanSelection";
+import { getActiveTaskPlan } from "../../agent-runtime/taskPlan";
 import { getChatSessionRuntime } from "./hooks/chatRuntimeStore";
 import "./index.scss";
 

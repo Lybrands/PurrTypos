@@ -24,7 +24,7 @@ import InlineEditLayer from './InlineEditLayer'
 import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
 import ModelPicker from '../AiPanel/components/ModelPicker'
 import { normalizeApiProvider } from '../../modelCatalog'
-import { buildStreamOptions } from '../AiPanel/hooks/streamOptions'
+import { buildStreamOptions } from '../../agent-runtime/streamOptions'
 import { createAiStreamId } from '../../utils/aiStream'
 import './index.scss'
 

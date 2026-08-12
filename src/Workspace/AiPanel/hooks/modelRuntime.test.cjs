@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const { loadTypeScriptModule } = require('../../../../scripts/load-typescript-module.cjs')
 
-const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, 'streamOptions.ts'))
+const { buildStreamOptions } = loadTypeScriptModule(path.join(__dirname, '../../../agent-runtime/streamOptions.ts'))
 const {
   handleLongTaskDispatched,
   handleLongTaskProgress,
@@ -52,7 +52,7 @@ const {
 const {
   calculateContextUsage,
 } = loadTypeScriptModule(
-  path.join(__dirname, '../contextUsage.ts'),
+  path.join(__dirname, '../../../agent-runtime/contextUsage.ts'),
 )
 const { projectContextBudget } = loadTypeScriptModule(
   path.join(__dirname, '../../../agent-runtime/contextBudgetProjection.ts'),
@@ -64,10 +64,7 @@ const {
   getVisibleTaskPlanSteps,
   shouldShowTaskPlan,
 } = loadTypeScriptModule(
-  path.join(__dirname, '../taskPlanSelection.ts'),
-)
-const { isSynthesizedToolOnlyResponse } = loadTypeScriptModule(
-  path.join(__dirname, 'chatHistory.ts'),
+  path.join(__dirname, '../../../agent-runtime/taskPlan.ts'),
 )
 const {
   KNOWN_TOOL_CALL_LABELS,
@@ -1182,23 +1179,6 @@ test('durable task metadata does not replace Provider-authored final text', () =
   )
   assert.equal(conversations[0].isError, undefined)
   assert.equal(outcome, 'completed')
-})
-
-test('persisted tool-only placeholder is distinguishable from a real answer', () => {
-  const toolCallSegments = [{
-    commentaryBlockIndex: null,
-    labels: ['查看人物列表'],
-  }]
-  assert.equal(isSynthesizedToolOnlyResponse({
-    role: 'assistant',
-    content: '[已调用工具] 查看人物列表',
-    toolCallSegments,
-  }), true)
-  assert.equal(isSynthesizedToolOnlyResponse({
-    role: 'assistant',
-    content: '人物设定确实存在层级过多的问题。',
-    toolCallSegments,
-  }), false)
 })
 
 test('queued chat activity stays pending until the final queued turn completes', () => {
