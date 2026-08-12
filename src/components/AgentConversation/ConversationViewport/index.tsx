@@ -15,6 +15,8 @@ import {
 import type { AgentConversationMessage } from '../../../agent-runtime'
 import AssistantOutput from '../AssistantOutput'
 import { hasRenderableErrorMessage } from '../AssistantOutput/errorNoticeMessage'
+import { buildAssistantCopyView } from '../assistantCopy'
+import AgentMessageCopyButton from '../MessageCopyButton'
 import AgentMessageEditor from '../MessageEditor'
 import AgentUserMessageBody from '../UserMessageBody'
 import { assistantMessageVisible } from '../messageVisibility'
@@ -114,6 +116,7 @@ function hasVisibleAssistantContent(message: AgentConversationMessage): boolean 
     || message.toolCallSegments?.length
     || message.delegations?.length
     || message.contextCompaction
+    || message.canonicalOutput?.finalText
     || message.canonicalOutput?.commentaryBlocks.length
     || message.canonicalOutput?.operationOrder.length
     || message.toolApprovals?.length
@@ -325,6 +328,16 @@ export default function ConversationViewport({
     const hasVisibleContent = hasVisibleAssistantContent(message)
     const hasStatus = Boolean(hasRenderableErrorMessage(message) || message.termination)
     const attachment = afterAssistantMessage?.(message, index)
+    const isLastAssistant = isLast && !message.isError
+    const showPlaceholder = Boolean(
+      isLastAssistant && loading && !hasVisibleContent && !hasStatus,
+    )
+    const copyView = buildAssistantCopyView({
+      message,
+      isLastAssistant,
+      loading,
+      showPlaceholder,
+    })
     if (!assistantMessageVisible({
       hasVisibleContent,
       hasAttachment: Boolean(attachment),
@@ -340,8 +353,8 @@ export default function ConversationViewport({
             index={index}
             message={message}
             loading={loading}
-            isLastAssistant={isLast}
-            showPlaceholder={Boolean(isLast && loading && !hasVisibleContent && !hasStatus)}
+            isLastAssistant={isLastAssistant}
+            showPlaceholder={showPlaceholder}
             setScrolledUpByReason={(value) => {
               if (value) detachFromOutput()
             }}
@@ -352,6 +365,15 @@ export default function ConversationViewport({
         ) : null}
         {attachment ? (
           <div className="agent-conversation__artifact">{attachment}</div>
+        ) : null}
+        {copyView.visible ? (
+          <div className="agent-conversation__assistant-footer">
+            <AgentMessageCopyButton
+              content={copyView.plainText}
+              markdownContent={copyView.markdown}
+              label="复制回复纯文本"
+            />
+          </div>
         ) : null}
       </article>
     )

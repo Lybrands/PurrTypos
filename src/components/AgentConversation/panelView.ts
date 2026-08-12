@@ -1,4 +1,5 @@
 import type { AgentSubmitMode, AiTaskPlan } from '../../agent-runtime'
+import type { AiModelConfig } from '../../types'
 import { getTaskPlanCountLabel } from '../../agent-runtime/taskPlan.ts'
 
 export interface AgentConversationPanelViewInput {
@@ -6,6 +7,9 @@ export interface AgentConversationPanelViewInput {
   queuedCount: number
   taskPlan?: AiTaskPlan
   submitMode: AgentSubmitMode
+  selectedModel: Pick<AiModelConfig, 'id'> | null
+  inputDisabled: boolean
+  resuming: boolean
 }
 
 export interface AgentConversationPanelView {
@@ -13,12 +17,16 @@ export interface AgentConversationPanelView {
   queueLabel: string
   showTaskProgress: boolean
   taskCountLabel: string
+  resumeDisabled: boolean
 }
 
 export function buildAgentConversationPanelView({
   queuedCount,
   taskPlan,
   submitMode,
+  selectedModel,
+  inputDisabled,
+  resuming,
 }: AgentConversationPanelViewInput): AgentConversationPanelView {
   const showTaskProgress = Boolean(
     taskPlan
@@ -29,5 +37,6 @@ export function buildAgentConversationPanelView({
     queueLabel: queuedCount > 0 ? `排队 ${queuedCount}` : '',
     showTaskProgress,
     taskCountLabel: taskPlan ? getTaskPlanCountLabel(taskPlan) : '',
+    resumeDisabled: inputDisabled || resuming || !selectedModel,
   }
 }
