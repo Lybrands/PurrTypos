@@ -6,10 +6,10 @@ import type {
   AgentChunkHost,
   AiStreamChunk,
 } from '../../../agent-runtime/chunkHandlers/types'
-import type { ChatMessage } from './chat.types'
+import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
 
 export type BookSettingDiffAttachmentHandler = (
-  message: ChatMessage,
+  message: AgentConversationMessage,
   card: SettingDiffCardState,
 ) => void
 
@@ -68,10 +68,10 @@ export function handleProposedSettingDiff(
   if (assistant) onAssistantAttachment?.(assistant, card)
 
   host.scheduleCommit((prev) => {
-    const next = [...prev] as ChatMessage[];
+    const next = [...prev];
     for (let i = next.length - 1; i >= 0; i--) {
       if (next[i].role !== "assistant") continue;
-      const msg = next[i] as ChatMessage;
+      const msg = next[i];
       if (p.kind === "character" && proposedName && msg.toolCallSegments?.length) {
         const segments = msg.toolCallSegments.map((seg) => ({
           ...seg,

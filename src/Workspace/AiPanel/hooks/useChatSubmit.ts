@@ -2,11 +2,8 @@ import { services } from '@/services'
 import React from "react";
 import { usePurrToast } from '@/purr-components';
 import {
-  type ChatMessage,
-  type ToolCallLabelOutcome,
-  type ToolCallSegment,
-  type UseChatSubmitParams,
-} from "./chat.types";
+  type AgentConversationMessage,
+} from "../../../agent-runtime/contracts";
 import {
   buildHistoryConverter,
   createCommitScheduler,
@@ -36,13 +33,48 @@ import {
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
 import { createBookChunkHost } from './bookChunkHost'
+import type {
+  AiModelConfig,
+  AiSession,
+  EntityId,
+  Outline,
+  SettingDiffCardState,
+} from '../../../types'
 
-export {
-  type ChatMessage,
-  type ToolCallLabelOutcome,
-  type ToolCallSegment,
-  type UseChatSubmitParams,
-};
+export interface UseChatSubmitParams {
+  /** 当前选中的模型配置（含 apiKey、baseUrl、name）；为空时无法发送 */
+  selectedModelConfig: AiModelConfig | null
+  prompt: string
+  setPrompt: React.Dispatch<React.SetStateAction<string>>
+  loading: boolean
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>
+  conversations: AgentConversationMessage[]
+  setConversations: React.Dispatch<React.SetStateAction<AgentConversationMessage[]>>
+  bookId: EntityId | null | undefined
+  chapterId: EntityId | null | undefined
+  activeSessionId: number | null
+  setActiveSessionId: React.Dispatch<React.SetStateAction<number | null>>
+  sessions: AiSession[]
+  setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>
+  associatedChapterIds: EntityId[]
+  associatedOutlineIds: EntityId[]
+  writingChapters: { id: EntityId; title: string }[]
+  availableOutlines: Outline[]
+  currentChapterTitle?: string
+  selectedModel: string
+  agentEnabled: boolean
+  selectedMemoryIds?: (number | string)[]
+  selectedForeshadowingIds?: (number | string)[]
+  /**
+   * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
+   * 默认 chapter（必须先选章节）。
+   */
+  sessionScope?: "chapter" | "setting"
+  onAssistantAttachment?: (
+    message: AgentConversationMessage,
+    card: SettingDiffCardState,
+  ) => void
+}
 
 type ChatSubmitOverride = {
   editIndex?: number;
@@ -236,7 +268,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       getChatSessionRuntime(sessionId)?.messages ?? conversations;
 
     // 立刻把用户消息 + 助手占位推到运行存储，并进入 loading
-    let nextConversations: ChatMessage[];
+    let nextConversations: AgentConversationMessage[];
     if (isResend) {
       nextConversations = [
         ...baseConversations.slice(0, submitOverride.editIndex!),
@@ -308,7 +340,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const streamId = createAiStreamId(`chat-${sessionId}`);
     setChatRuntimeStreamId(sessionId, streamId);
     const runtimeSetConversations: React.Dispatch<
-      React.SetStateAction<ChatMessage[]>
+      React.SetStateAction<AgentConversationMessage[]>
     > = (next) => {
       if (typeof next === "function") {
         updateChatRuntimeMessages(sessionId, next);

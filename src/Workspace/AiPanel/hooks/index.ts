@@ -8,8 +8,6 @@ export {
 } from "./usePromptTemplateContext";
 export {
   useChatSubmit,
-  type ChatMessage,
-  type ToolCallSegment,
   type UseChatSubmitParams,
 } from "./useChatSubmit";
 export {
