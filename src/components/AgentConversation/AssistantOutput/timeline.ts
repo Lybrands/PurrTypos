@@ -214,9 +214,15 @@ export function buildAssistantTimeline(
       part: AssistantTimelinePart;
     }> = [];
     if (message.contextCompaction) {
-      const compactionOperation = canonicalOutput.operationOrder
-        .map((operationId) => canonicalOutput.operations[operationId])
-        .find((operation) => operation?.kind === "context_compaction");
+      const compactionOperation = canonicalOutput.operationOrder.reduce<
+        CanonicalOperation | undefined
+      >((latest, operationId) => {
+        const operation = canonicalOutput.operations[operationId];
+        return operation?.kind === "context_compaction"
+          && (!latest || operation.firstSequence > latest.firstSequence)
+          ? operation
+          : latest;
+      }, undefined);
       const compactionRuntime = canonicalOutput.latestRuntimeEvent;
       canonicalParts.push({
         sequence: compactionOperation?.firstSequence
