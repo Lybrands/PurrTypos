@@ -14,8 +14,6 @@ import type {
 export const MANUAL_ABORT_MESSAGE = '本轮对话已由你手动终止。'
 export { EMPTY_RESPONSE_MESSAGE } from '../chatHistory.ts'
 
-const terminalContexts = new WeakSet<AgentChunkRuntimeContext>()
-
 export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done || !chunk.runResult) return
   const { status, errorCode } = chunk.runResult
@@ -32,32 +30,83 @@ export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
 
 export const handleError: AgentChunkHandler = (chunk, context) => {
   if (!chunk.error) return
-  if (!beginTerminal(context)) return true
-  const { acc, host } = context
-  const durationMs = elapsedDuration(context)
-  const commentaryBlocks = acc.commentaryBlocks ?? []
-  const commentaryDurationsMs = acc.commentaryDurationsMs ?? []
-  const response = acc.response || ''
+  return withTerminalSettlement(context, () => {
+    const { acc, host } = context
+    const durationMs = elapsedDuration(context)
+    const commentaryBlocks = acc.commentaryBlocks ?? []
+    const commentaryDurationsMs = acc.commentaryDurationsMs ?? []
+    const response = acc.response || ''
 
-  host.flushCommits()
-  if (host.isVisible()) {
-    replaceLastAssistant(context, (message) => {
-      const hasInspectableProcess = Boolean(
-        response.trim()
-          || commentaryBlocks.length
-          || (acc.toolCallSegments?.length ?? message.toolCallSegments?.length ?? 0)
-          || acc.taskPlan
-          || message.taskPlan
-          || acc.delegations?.length
-          || message.delegations?.length
-          || message.subAgentActivities?.length
-          || acc.contextCompaction
-          || message.contextCompaction,
-      )
-      return {
+    host.flushCommits()
+    if (host.isVisible()) {
+      replaceLastAssistant(context, (message) => {
+        const hasInspectableProcess = Boolean(
+          response.trim()
+            || commentaryBlocks.length
+            || (acc.toolCallSegments?.length ?? message.toolCallSegments?.length ?? 0)
+            || acc.taskPlan
+            || message.taskPlan
+            || acc.delegations?.length
+            || message.delegations?.length
+            || message.subAgentActivities?.length
+            || acc.contextCompaction
+            || message.contextCompaction,
+        )
+        return {
+          ...message,
+          content: response,
+          streamingContent: undefined,
+          commentary: '',
+          commentaryStartedAt: undefined,
+          commentaryBlocks: commentaryBlocks.length
+            ? commentaryBlocks
+            : message.commentaryBlocks,
+          commentaryDurationsMs: commentaryDurationsMs.length
+            ? commentaryDurationsMs
+            : message.commentaryDurationsMs,
+          toolCallSegments: acc.toolCallSegments ?? message.toolCallSegments,
+          taskPlan: acc.taskPlan ?? message.taskPlan,
+          durationMs,
+          turnStartedAt: undefined,
+          toolCalling: false,
+          errorReport: chunk.errorReport ?? message.errorReport,
+          error: chunk.error,
+          isError: !hasInspectableProcess,
+        }
+      })
+    }
+
+    acc.response = response
+    return { outcome: 'failed', durationMs }
+  })
+}
+
+export const handleDone: AgentChunkHandler = (chunk, context) => {
+  if (!chunk.done) return
+  return withTerminalSettlement(context, () => {
+    const { acc, host } = context
+    const durationMs = elapsedDuration(context)
+
+    host.flushCommits()
+    if (chunk.model) acc.model = chunk.model
+    if (chunk.aborted) acc.taskPlan = markTaskPlanAborted(acc.taskPlan)
+
+    const response = acc.response || ''
+    const finalResponseExpected = chunk.finalResponseExpected !== false
+    const emptyResponse = finalResponseExpected
+      && !chunk.aborted
+      && !response.trim()
+    const commentaryBlocks = acc.commentaryBlocks ?? []
+    const commentaryDurationsMs = acc.commentaryDurationsMs ?? []
+
+    if (host.isVisible()) {
+      replaceLastAssistant(context, (message) => ({
         ...message,
         content: response,
         streamingContent: undefined,
+        model: acc.model || undefined,
+        durationMs,
+        turnStartedAt: undefined,
         commentary: '',
         commentaryStartedAt: undefined,
         commentaryBlocks: commentaryBlocks.length
@@ -67,87 +116,55 @@ export const handleError: AgentChunkHandler = (chunk, context) => {
           ? commentaryDurationsMs
           : message.commentaryDurationsMs,
         toolCallSegments: acc.toolCallSegments ?? message.toolCallSegments,
-        taskPlan: acc.taskPlan ?? message.taskPlan,
-        durationMs,
-        turnStartedAt: undefined,
+        taskPlan: acc.taskPlan
+          ?? (chunk.aborted ? markTaskPlanAborted(message.taskPlan) : message.taskPlan),
+        longTaskId: acc.longTaskId ?? message.longTaskId,
+        termination: chunk.aborted ? MANUAL_ABORT_MESSAGE : undefined,
         toolCalling: false,
-        errorReport: chunk.errorReport ?? message.errorReport,
-        error: chunk.error,
-        isError: !hasInspectableProcess,
-      }
-    })
-  }
+        errorReport: emptyResponse
+          ? chunk.errorReport ?? message.errorReport
+          : message.errorReport,
+        ...(emptyResponse
+          ? { error: EMPTY_RESPONSE_MESSAGE, isError: false }
+          : {}),
+      }))
+    }
 
-  acc.response = response
-  settle(context, 'failed', durationMs)
-  return true
+    acc.response = response
+    const outcome: AgentRunOutcome = !finalResponseExpected
+      ? 'paused'
+      : chunk.aborted
+        ? 'canceled'
+        : emptyResponse
+          ? 'failed'
+          : 'completed'
+    return { outcome, durationMs }
+  })
 }
 
-export const handleDone: AgentChunkHandler = (chunk, context) => {
-  if (!chunk.done) return
-  if (!beginTerminal(context)) return true
-  const { acc, host } = context
-  const durationMs = elapsedDuration(context)
-
-  host.flushCommits()
-  if (chunk.model) acc.model = chunk.model
-  if (chunk.aborted) acc.taskPlan = markTaskPlanAborted(acc.taskPlan)
-
-  const response = acc.response || ''
-  const finalResponseExpected = chunk.finalResponseExpected !== false
-  const emptyResponse = finalResponseExpected
-    && !chunk.aborted
-    && !response.trim()
-  const commentaryBlocks = acc.commentaryBlocks ?? []
-  const commentaryDurationsMs = acc.commentaryDurationsMs ?? []
-
-  if (host.isVisible()) {
-    replaceLastAssistant(context, (message) => ({
-      ...message,
-      content: response,
-      streamingContent: undefined,
-      model: acc.model || undefined,
-      durationMs,
-      turnStartedAt: undefined,
-      commentary: '',
-      commentaryStartedAt: undefined,
-      commentaryBlocks: commentaryBlocks.length
-        ? commentaryBlocks
-        : message.commentaryBlocks,
-      commentaryDurationsMs: commentaryDurationsMs.length
-        ? commentaryDurationsMs
-        : message.commentaryDurationsMs,
-      toolCallSegments: acc.toolCallSegments ?? message.toolCallSegments,
-      taskPlan: acc.taskPlan
-        ?? (chunk.aborted ? markTaskPlanAborted(message.taskPlan) : message.taskPlan),
-      longTaskId: acc.longTaskId ?? message.longTaskId,
-      termination: chunk.aborted ? MANUAL_ABORT_MESSAGE : undefined,
-      toolCalling: false,
-      errorReport: emptyResponse
-        ? chunk.errorReport ?? message.errorReport
-        : message.errorReport,
-      ...(emptyResponse
-        ? { error: EMPTY_RESPONSE_MESSAGE, isError: false }
-        : {}),
-    }))
+function withTerminalSettlement(
+  context: AgentChunkRuntimeContext,
+  project: () => { outcome: AgentRunOutcome; durationMs: number },
+): true {
+  const { acc } = context
+  if (acc.terminalSettlement) return true
+  acc.terminalSettlement = {
+    phase: 'settling',
+    runId: acc.agentRunId,
   }
-
-  acc.response = response
-  const outcome: AgentRunOutcome = !finalResponseExpected
-    ? 'paused'
-    : chunk.aborted
-      ? 'canceled'
-      : emptyResponse
-        ? 'failed'
-        : 'completed'
-  settle(context, outcome, durationMs)
-  return true
-}
-
-function beginTerminal(context: AgentChunkRuntimeContext): boolean {
-  if (terminalContexts.has(context)) return false
-  terminalContexts.add(context)
-  return true
+  try {
+    const { outcome, durationMs } = project()
+    settle(context, outcome, durationMs)
+    acc.terminalSettlement = {
+      phase: 'settled',
+      outcome,
+      runId: acc.agentRunId,
+    }
+    return true
+  } catch (error) {
+    acc.terminalSettlement = undefined
+    throw error
+  }
 }
 
 function replaceLastAssistant(
