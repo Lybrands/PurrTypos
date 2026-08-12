@@ -10,9 +10,9 @@ import {
 import {
   buildHistoryConverter,
   createCommitScheduler,
-  dispatchChunk,
-  type AccState,
-  type ChunkCtx,
+  dispatchAgentChunk,
+  initialAgentAccumulator,
+  type AgentChunkRuntimeContext,
 } from "../../../agent-runtime";
 import { buildStreamOptions } from "../../../agent-runtime/streamOptions";
 import { normalizeApiProvider } from "../../../modelCatalog";
@@ -35,6 +35,7 @@ import {
   updateChatRuntimeMessages,
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
+import { createBookChunkHost } from './bookChunkHost'
 
 export {
   type ChatMessage,
@@ -69,8 +70,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setSessions,
     associatedChapterIds,
     associatedOutlineIds,
-    writingChapters,
-    availableOutlines,
     currentChapterTitle,
     selectedModel,
     agentEnabled,
@@ -295,25 +294,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       currentSessionTitle.trim() === "" || currentSessionTitle === "新对话";
     const needsTitle =
       !hasHistoryBeforeThisQuestion && isUntitledSession;
-    const acc: AccState = {
-      response: "",
-      commentary: "",
-      bookId,
+    const acc = initialAgentAccumulator({
       sessionId,
-      chapterId,
-      needsTitle,
       userText,
-      model: "",
       turnStartedAt,
-      toolCallSegments: undefined,
-      commentaryBlocks: [],
-      commentaryDurationsMs: [],
-      agentRunId: undefined,
-      taskPlan: undefined,
-      delegations: undefined,
-      contextCompaction: undefined,
-      contextBudget: undefined,
-    };
+    });
     const { options: streamOptions, apiModelName } = buildStreamOptions({
       cfg,
       selectedModel: requestSelectedModel,
@@ -332,67 +317,50 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     };
     let unsubscribe = (): void => {};
     const { scheduleCommit, flushCommits } = createCommitScheduler(
-      runtimeSetConversations,
+      (updater) => runtimeSetConversations(updater),
     );
-    const ctx: ChunkCtx = {
-      acc,
+    const host = createBookChunkHost({
       sessionId,
-      cfg,
+      bookId,
+      chapterId,
+      needsTitle,
+      modelConfig: cfg,
       apiModelName,
-      writingChapters,
-      availableOutlines,
-      setConversations: runtimeSetConversations,
+      readMessages: () => getChatSessionRuntime(sessionId)?.messages ?? [],
+      replaceMessages: (messages) => replaceChatRuntimeMessages(sessionId, messages),
       scheduleCommit,
       flushCommits,
-      setLoading: (next) => setChatRuntimeLoading(sessionId, next),
-      setSessions,
+      setRunning: (running) => setChatRuntimeLoading(sessionId, running),
+      isVisible: () => true,
+      setSessions: (updater) => setSessions(updater),
       appMessage,
-      isVisibleSession: () => true,
-      cleanup: (outcome) => {
-        flushCommits();
-        unsubscribe();
-        setChatRuntimeStreamId(sessionId, undefined);
-        const queuedCount = countQueuedForSession(
-          getChatRuntimeQueue(),
-          sessionId,
-        );
-        setChatRuntimeActivity(
-          sessionId,
-          getSettledSessionActivity(outcome, queuedCount),
-        );
-        if (outcome === "completed" && queuedCount === 0) {
-          appMessage.success("对话已完成");
-        }
-        if (queuedCount > 0) {
-          queueMicrotask(() => {
-            const queue = getChatRuntimeQueue();
-            const nextIndex = queue.findIndex(
-              (submission) => submission.sessionId === sessionId,
-            );
-            const submitQueued = handleSubmitRef.current;
-            if (
-              nextIndex < 0 ||
-              !submitQueued ||
-              getChatSessionRuntime(sessionId)?.loading
-            ) {
-              return;
-            }
-            const nextSubmission = queue[nextIndex];
-            replaceChatRuntimeQueue(
-              queue.filter((_submission, index) => index !== nextIndex),
-            );
-            submitQueued({
-              content: nextSubmission.content,
-              queuedContext: nextSubmission,
-              preservePrompt: true,
-            });
-          });
-        }
+      unsubscribe: () => unsubscribe(),
+      clearStream: () => setChatRuntimeStreamId(sessionId, undefined),
+      getQueue: getChatRuntimeQueue,
+      replaceQueue: replaceChatRuntimeQueue,
+      setActivity: (activity) => setChatRuntimeActivity(sessionId, activity),
+      isSessionRunning: () => Boolean(getChatSessionRuntime(sessionId)?.loading),
+      submitQueued: (submission) => {
+        handleSubmitRef.current?.({
+          content: submission.content,
+          queuedContext: submission,
+          preservePrompt: true,
+        })
       },
+    });
+    const ctx: AgentChunkRuntimeContext = {
+      acc,
+      sessionId,
+      modelIdentity: {
+        configId: cfg.id,
+        name: apiModelName,
+      },
+      host,
+      now: () => performance.now(),
     };
     unsubscribe = services.ai.onAiChunk(
       (chunk) => {
-        dispatchChunk(chunk, ctx);
+        dispatchAgentChunk(chunk, ctx);
       },
       streamId,
     );
@@ -449,8 +417,6 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     activeSessionId,
     associatedChapterIds,
     associatedOutlineIds,
-    writingChapters,
-    availableOutlines,
     sessions,
     selectedModel,
     agentEnabled,

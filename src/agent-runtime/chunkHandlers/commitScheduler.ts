@@ -1,9 +1,12 @@
-import type React from "react";
-import type { ChatMessage } from "../chat.types";
+import type { AgentConversationMessage } from '../contracts.ts'
 
 export type ConversationUpdater = (
-  prev: ChatMessage[],
-) => ChatMessage[];
+  prev: AgentConversationMessage[],
+) => AgentConversationMessage[]
+
+export type ConversationMessageSetter = (
+  updater: ConversationUpdater,
+) => void
 
 export interface CommitScheduler {
   scheduleCommit: (updater: ConversationUpdater) => void;
@@ -12,7 +15,7 @@ export interface CommitScheduler {
 
 /** 每帧最多一次 setConversations，合并同帧内多个 chunk updater */
 export function createCommitScheduler(
-  setConversations: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
+  setConversations: ConversationMessageSetter,
 ): CommitScheduler {
   const pending: ConversationUpdater[] = [];
   let rafId: number | null = null;
