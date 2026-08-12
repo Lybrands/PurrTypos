@@ -8,6 +8,12 @@ const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.c
 const { AgentChunkReplay } = loadTypeScriptModule(
   path.join(__dirname, 'chunkReplay.ts'),
 )
+const {
+  getActiveTaskPlan,
+  getTaskPlanCountLabel,
+} = loadTypeScriptModule(
+  path.join(__dirname, '../Workspace/AiPanel/taskPlanSelection.ts'),
+)
 
 const model = {
   id: 'model-1',
@@ -129,6 +135,80 @@ test('business Agents replay the canonical chunk protocol through the shared red
   assert.equal(assistant?.longTaskId, 'task-1')
   assert.equal(assistant?.durationMs != null && assistant.durationMs >= 200, true)
   assert.equal(assistant?.turnStartedAt, undefined)
+})
+
+test('canonical long-task progress restores the execution status plan without todo events', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-long-task-only',
+    sessionId: 534,
+    userContent: '分析原作',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+
+  replay.dispatch(seed, canonical('run-long-task-only', 1, {
+    payload: {
+      eventType: 'long_task.progress',
+      data: {
+        taskId: 'longtask-1',
+        status: 'running',
+        revision: 6,
+        totalUnits: 4,
+        completedUnits: 1,
+        failedUnits: 0,
+        units: [{
+          id: 'document:evidence',
+          position: 0,
+          kind: 'collect_evidence',
+          status: 'completed',
+          attempt: 1,
+          maxAttempts: 2,
+        }, {
+          id: 'section:characters',
+          position: 1,
+          kind: 'generate_document_section',
+          status: 'claimed',
+          attempt: 1,
+          maxAttempts: 4,
+        }, {
+          id: 'section:story',
+          position: 2,
+          kind: 'generate_document_section',
+          status: 'claimed',
+          attempt: 1,
+          maxAttempts: 4,
+        }, {
+          id: 'compose-final-response',
+          position: 3,
+          kind: 'compose_final_response',
+          status: 'pending',
+          attempt: 0,
+          maxAttempts: 2,
+        }],
+      },
+    },
+  }), dependencies)
+
+  const assistant = replay.assistant(seed.turnId)
+  assert.equal(assistant?.longTaskId, 'longtask-1')
+  assert.equal(assistant?.taskPlan?.status, 'running')
+  assert.deepEqual(
+    assistant?.taskPlan?.steps.map((step) => [step.id, step.type, step.status]),
+    [
+      ['document:evidence', 'read', 'done'],
+      ['section:characters', 'write', 'running'],
+      ['section:story', 'write', 'running'],
+      ['compose-final-response', 'write', 'pending'],
+    ],
+  )
+  assert.equal(getActiveTaskPlan([assistant], true), assistant.taskPlan)
+  assert.equal(
+    getTaskPlanCountLabel(assistant.taskPlan),
+    '并行 2 项 · 已完成 1/4',
+  )
+  assert.equal(getActiveTaskPlan([assistant], false), assistant.taskPlan)
 })
 
 test('raw Provider events are visible before transport completion', () => {
