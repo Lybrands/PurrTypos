@@ -350,8 +350,6 @@ export default function AiPanel({
     setPrompt,
     initializing: Boolean(scopeAvailable && (!sessionsLoaded || conversationInitializing)),
     running: loading,
-    paused: activeSessionId != null
-      && sessionActivities[activeSessionId]?.state === 'paused',
     attachmentsVersion,
     scopeAvailable,
     modelConfigs,

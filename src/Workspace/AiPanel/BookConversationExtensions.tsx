@@ -17,7 +17,7 @@ import AiContextBar, {
 import SettingDiffCard from './components/SettingDiffCard'
 import type { PromptTemplateContext } from './promptTemplates'
 import {
-  bookAttachmentKey,
+  getBookAssistantAttachmentsForMessage,
   type BookAssistantAttachmentStore,
 } from './bookAssistantAttachments'
 import type { ChatSessionScope } from './hooks/useAiSessions'
@@ -113,8 +113,9 @@ export function useBookConversationExtensions({
       </>
     ),
     renderAssistantAttachment: (message, index) => {
-      const key = bookAttachmentKey(message)
-      const cards = !message.isError && key ? attachments[key] ?? [] : []
+      const cards = message.isError
+        ? []
+        : getBookAssistantAttachmentsForMessage(attachments, message)
       const previous = messages[index - 1]
       const favoriteContent = getAssistantRenderableMarkdown(message).trim()
       const canFavorite = Boolean(

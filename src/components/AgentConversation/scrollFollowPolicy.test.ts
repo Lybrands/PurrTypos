@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   advanceLiveTurnCursor,
+  agentConversationMessageKey,
   createScrollFollowState,
   detachScrollFollow,
   observeScrollBottom,
@@ -145,4 +146,30 @@ test('an assistant without stable live identity never triggers a pin', () => {
 
   assert.deepEqual(observed.cursor, {})
   assert.equal(observed.anchorIndex, undefined)
+})
+
+test('viewport keys distinguish user and assistant messages in one durable turn', () => {
+  const userMessage = {
+    role: 'user' as const,
+    content: '同一回合问题',
+    clientTurnId: 'durable-turn-1',
+  }
+  const assistantMessage = {
+    role: 'assistant' as const,
+    content: '同一回合回答',
+    clientTurnId: 'durable-turn-1',
+  }
+
+  assert.equal(
+    agentConversationMessageKey(0, userMessage),
+    'client:durable-turn-1:user',
+  )
+  assert.equal(
+    agentConversationMessageKey(1, assistantMessage),
+    'client:durable-turn-1:assistant',
+  )
+  assert.notEqual(
+    agentConversationMessageKey(0, userMessage),
+    agentConversationMessageKey(1, assistantMessage),
+  )
 })
