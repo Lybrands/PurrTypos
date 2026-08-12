@@ -7,7 +7,6 @@
 export type {
   AgentConversationActivity,
   AgentConversationMessage,
-  AgentConversationMessage as ChatMessage,
   AgentQueuedSubmission,
   AgentSessionId,
   AiSubAgentActivity,
