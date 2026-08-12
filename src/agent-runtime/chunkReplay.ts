@@ -1,12 +1,13 @@
-import type { AiModelConfig } from '../types'
+import type { AiModelConfig } from '../types.ts'
+import type { AgentConversationMessage } from './contracts.ts'
 import {
-  dispatchChunk,
-  type AccState,
+  dispatchAgentChunk,
+  initialAgentAccumulator,
+  type AgentAccumulator,
+  type AgentChunkHost,
+  type AgentChunkRuntimeContext,
   type AiStreamChunk,
-  type ChunkCtx,
-} from '../Workspace/AiPanel/hooks/chunkHandlers'
-import type { AppMessage } from '../Workspace/AiPanel/hooks/chunkHandlers/types'
-import type { ChatMessage } from '../Workspace/AiPanel/hooks/chat.types'
+} from './chunkHandlers/index.ts'
 
 export interface AgentChunkTurnSeed {
   turnId: string
@@ -16,20 +17,17 @@ export interface AgentChunkTurnSeed {
   turnStartedAt: number
 }
 
-/**
- * Shared replay/live runtime for business Agents that receive the canonical
- * Agent chunk protocol from a durable backend stream.
- */
+/** Replays canonical Agent chunks through the same business-agnostic reducer as live runs. */
 export class AgentChunkReplay {
-  private readonly accumulators = new Map<string, AccState>()
-  private readonly assistants = new Map<string, ChatMessage>()
+  private readonly accumulators = new Map<string, AgentAccumulator>()
+  private readonly assistants = new Map<string, AgentConversationMessage>()
 
   reset(): void {
     this.accumulators.clear()
     this.assistants.clear()
   }
 
-  assistant(turnId: string): ChatMessage | undefined {
+  assistant(turnId: string): AgentConversationMessage | undefined {
     return this.assistants.get(turnId)
   }
 
@@ -38,68 +36,60 @@ export class AgentChunkReplay {
     chunk: AiStreamChunk,
     dependencies: {
       cfg: AiModelConfig
-      appMessage: AppMessage
+      appMessage?: unknown
     },
-  ): ChatMessage {
-    const acc = this.accumulators.get(seed.turnId) ?? this.createAccumulator(seed)
+  ): AgentConversationMessage {
+    const acc = this.accumulators.get(seed.turnId)
+      ?? initialAgentAccumulator({
+        sessionId: seed.sessionId,
+        userText: seed.userContent,
+        model: seed.model,
+        turnStartedAt: seed.turnStartedAt,
+      })
     this.accumulators.set(seed.turnId, acc)
-    const apply = (updater: (messages: ChatMessage[]) => ChatMessage[]) => {
-      const current = this.assistants.get(seed.turnId) ?? {
-        role: 'assistant' as const,
+
+    let messages: AgentConversationMessage[] = [
+      { role: 'user', content: seed.userContent },
+      this.assistants.get(seed.turnId) ?? {
+        role: 'assistant',
         content: '',
         model: seed.model,
         turnStartedAt: seed.turnStartedAt,
-      }
-      const next = updater([
-        { role: 'user', content: seed.userContent },
-        current,
-      ])
-      const assistant = next.at(-1)
-      if (assistant?.role === 'assistant') this.assistants.set(seed.turnId, assistant)
-    }
-    const ctx: ChunkCtx = {
-      acc,
-      sessionId: seed.sessionId,
-      cfg: dependencies.cfg,
-      apiModelName: seed.model || dependencies.cfg.name,
-      writingChapters: [],
-      availableOutlines: [],
-      setConversations: (value) => {
-        apply((messages) => (
-          typeof value === 'function' ? value(messages) : value
-        ))
       },
+    ]
+    const replaceMessages = (next: AgentConversationMessage[]) => {
+      messages = next
+      const assistant = next.at(-1)
+      if (assistant?.role === 'assistant') {
+        this.assistants.set(seed.turnId, assistant)
+      }
+    }
+    const apply = (
+      updater: (current: AgentConversationMessage[]) => AgentConversationMessage[],
+    ) => replaceMessages(updater(messages))
+    const host: AgentChunkHost = {
+      readMessages: () => messages,
+      replaceMessages,
       scheduleCommit: apply,
       flushCommits: () => undefined,
-      setLoading: () => undefined,
-      setSessions: () => undefined,
-      appMessage: dependencies.appMessage,
-      isVisibleSession: () => true,
-      persistConversation: false,
-      cleanup: () => undefined,
+      setRunning: () => undefined,
+      isVisible: () => true,
+      onHostChunk: () => undefined,
+      onSettled: () => undefined,
     }
-    dispatchChunk(chunk, ctx)
-    return this.assistants.get(seed.turnId) ?? {
-      role: 'assistant',
-      content: '',
-      model: seed.model,
-      turnStartedAt: seed.turnStartedAt,
-    }
-  }
-
-  private createAccumulator(seed: AgentChunkTurnSeed): AccState {
-    return {
-      response: '',
-      commentary: '',
-      bookId: null,
+    const context: AgentChunkRuntimeContext = {
+      acc,
       sessionId: seed.sessionId,
-      chapterId: null,
-      needsTitle: false,
-      userText: seed.userContent,
-      model: seed.model || '',
-      turnStartedAt: seed.turnStartedAt,
-      commentaryBlocks: [],
-      commentaryDurationsMs: [],
+      modelIdentity: {
+        configId: dependencies.cfg.id,
+        name: seed.model || dependencies.cfg.name,
+      },
+      host,
+      persistConversation: false,
+      now: () => performance.now(),
     }
+
+    dispatchAgentChunk(chunk, context)
+    return this.assistants.get(seed.turnId) ?? messages[1]
   }
 }

@@ -1,12 +1,22 @@
-import type { ProposedSettingDiff, SettingDiffCardState } from "../../../../types";
-import type { ChunkHandler } from "./types";
+import type {
+  ProposedSettingDiff,
+  SettingDiffCardState,
+} from '../../../types'
+import type {
+  AgentChunkHost,
+  AiStreamChunk,
+} from '../../../agent-runtime/chunkHandlers/types'
+import type { ChatMessage } from './chat.types'
 
 /**
  * AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议：
  * 由 SettingDiffProvider 监听并 startDiff，用户在 SettingPanel 审阅后 commit。
  */
-export const handleProposedSettingDiff: ChunkHandler = (chunk, ctx) => {
-  if (!chunk.proposedSettingDiff || !ctx.isVisibleSession()) return;
+export function handleProposedSettingDiff(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (!chunk.proposedSettingDiff || !host.isVisible()) return;
   const p = chunk.proposedSettingDiff as ProposedSettingDiff;
   if (!p.kind) return;
 
@@ -46,11 +56,11 @@ export const handleProposedSettingDiff: ChunkHandler = (chunk, ctx) => {
     status: "pending",
   };
 
-  ctx.setConversations((prev) => {
-    const next = [...prev];
+  host.scheduleCommit((prev) => {
+    const next = [...prev] as ChatMessage[];
     for (let i = next.length - 1; i >= 0; i--) {
       if (next[i].role !== "assistant") continue;
-      const msg = next[i];
+      const msg = next[i] as ChatMessage;
       const cards = [...(msg.settingDiffCards || [])];
       const existingIdx = cards.findIndex((c) => c.sessionKey === sessionKey);
       if (existingIdx >= 0) cards[existingIdx] = card;
@@ -72,4 +82,4 @@ export const handleProposedSettingDiff: ChunkHandler = (chunk, ctx) => {
     }
     return next;
   });
-};
+}
