@@ -7,8 +7,8 @@ import {
 } from '@/purr-components';
 import { StopCircleIcon } from '@/purr-components';
 import { PurrButton, PurrTooltip, usePurrToast, type PurrDropdownItem } from '@/purr-components';
-import AgentComposer from '../../components/AgentComposer'
-import AgentTaskProgress from '../../components/AgentTaskProgress'
+import AgentComposer from '../../components/AgentConversation/Composer'
+import AgentTaskProgress from '../../components/AgentConversation/TaskProgress'
 import { getAgentConversationCapabilities } from '../../agent-runtime/conversationCapabilities'
 import type {
   AiModelConfig,
@@ -32,7 +32,7 @@ import AiContextBar, { type AiContextBarBindings } from "./components/AiContextB
 import AiComposeBottom, {
   type ModelSelectionBindings,
 } from "./components/AiComposeBottom";
-import ContextUsageIndicator from "./components/ContextUsageIndicator";
+import ContextUsageIndicator from "../../components/AgentConversation/Composer/ContextUsageIndicator";
 import { getActiveTaskPlan } from "../../agent-runtime/taskPlan";
 import { getChatSessionRuntime } from "./hooks/chatRuntimeStore";
 import "./index.scss";

@@ -7,11 +7,11 @@ import {
   calculateContextUsage,
   formatContextTokens,
 } from "../../../../agent-runtime/contextUsage";
-import type { ChatMessage } from "../../hooks/chat.types";
+import type { AgentConversationMessage } from "../../../../agent-runtime";
 import "./index.scss";
 
 export interface ContextUsageIndicatorProps {
-  conversations: ChatMessage[];
+  conversations: AgentConversationMessage[];
   selectedModelConfig: AiModelConfig | null;
 }
 

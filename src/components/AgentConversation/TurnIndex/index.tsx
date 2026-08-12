@@ -1,7 +1,7 @@
 import React from 'react'
 import { PurrPopover } from '@/purr-components'
-import type { AgentConversationMessage } from '../../agent-runtime'
-import Markdown from '../Markdown'
+import type { AgentConversationMessage } from '../../../agent-runtime'
+import Markdown from '../../Markdown'
 import './index.scss'
 
 export interface AgentConversationTurnIndexItem {

@@ -1,6 +1,6 @@
 import React from 'react'
 import { PurrSelect } from '@/purr-components'
-import ModelPicker, { type ModelRuntimeConfigPatch } from '../ModelPicker'
+import ModelPicker, { type ModelRuntimeConfigPatch } from '@/components/AgentConversation/Composer/ModelPicker'
 import './index.scss'
 import type { AiModelConfig, ChatAgentMode } from '../../../../types'
 
