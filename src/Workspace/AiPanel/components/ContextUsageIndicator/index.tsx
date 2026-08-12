@@ -6,7 +6,7 @@ import { getDefaultModelContextWindow } from "../../../../models/runtime";
 import {
   calculateContextUsage,
   formatContextTokens,
-} from "../../contextUsage";
+} from "../../../../agent-runtime/contextUsage";
 import type { ChatMessage } from "../../hooks/chat.types";
 import "./index.scss";
 

@@ -15,7 +15,7 @@ import {
 import {
   getTaskPlanCountLabel,
   getTaskPlanProgress,
-} from '../../Workspace/AiPanel/taskPlanSelection'
+} from '../../agent-runtime/taskPlan'
 import { localizeTaskPlan } from './localization'
 import './index.scss'
 

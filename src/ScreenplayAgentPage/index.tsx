@@ -87,8 +87,8 @@ import {
   type AiStreamChunk,
   type ChatMessage,
 } from '../agent-runtime'
-import { buildStreamOptions } from '../Workspace/AiPanel/hooks/streamOptions'
-import { getActiveTaskPlan } from '../Workspace/AiPanel/taskPlanSelection'
+import { buildStreamOptions } from '../agent-runtime/streamOptions'
+import { getActiveTaskPlan } from '../agent-runtime/taskPlan'
 import {
   buildDraftBatchActions,
   draftScopeForEpisodeCount,

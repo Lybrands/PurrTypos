@@ -14,7 +14,7 @@ import {
   type AccState,
   type ChunkCtx,
 } from "../../../agent-runtime";
-import { buildStreamOptions } from "./streamOptions";
+import { buildStreamOptions } from "../../../agent-runtime/streamOptions";
 import { normalizeApiProvider } from "../../../modelCatalog";
 import {
   countQueuedForSession,

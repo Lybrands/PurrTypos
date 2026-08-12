@@ -12,7 +12,7 @@ import {
   getTaskPlanCountLabel,
   getTaskPlanProgress,
   getVisibleTaskPlanSteps,
-} from "../../taskPlanSelection";
+} from "../../../../agent-runtime/taskPlan";
 import "./index.scss";
 
 export interface TaskPlanCardProps {

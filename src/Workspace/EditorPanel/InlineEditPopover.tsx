@@ -12,7 +12,7 @@ import ModelPicker from '../AiPanel/components/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
 import { normalizeApiProvider } from '../../modelCatalog'
 import { createAiStreamId } from '../../utils/aiStream'
-import { buildStreamOptions } from '../AiPanel/hooks/streamOptions'
+import { buildStreamOptions } from '../../agent-runtime/streamOptions'
 
 export interface InlineCapture {
   text: string
