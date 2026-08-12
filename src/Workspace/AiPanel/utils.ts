@@ -3,10 +3,10 @@ import {
   type Conversation,
   type EntityId,
   type ChatAgentMode,
-} from '../../types'
-import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
-import type { ChatMessage } from './hooks'
-import { KNOWN_TOOL_CALL_LABELS } from '../../components/AgentConversation/toolCallLabels'
+} from '../../types.ts'
+import { AI_MODEL_PREFS_KEY_PREFIX } from './constants.ts'
+import type { ChatMessage } from './hooks/chat.types.ts'
+import { KNOWN_TOOL_CALL_LABELS } from '../../components/AgentConversation/toolCallLabels.ts'
 
 function normalizeStoredToolCallLabel(label: string): string {
   return KNOWN_TOOL_CALL_LABELS[

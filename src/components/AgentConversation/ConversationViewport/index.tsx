@@ -22,6 +22,7 @@ import AgentUserMessageBody from '../UserMessageBody'
 import { assistantMessageVisible } from '../messageVisibility'
 import {
   advanceLiveTurnCursor,
+  agentConversationMessageKey,
   createScrollFollowState,
   detachScrollFollow,
   observeScrollBottom,
@@ -101,13 +102,6 @@ function findTurnAtDataIndex(
     activeIndex = index
   }
   return activeIndex
-}
-
-function messageKey(index: number, message: AgentConversationMessage): React.Key {
-  if (message.clientTurnId) return `client:${message.clientTurnId}`
-  if (message.conversationId != null) return `conversation:${message.conversationId}`
-  if (message.agentRunId) return `run:${message.agentRunId}`
-  return `message:${index}`
 }
 
 function hasVisibleAssistantContent(message: AgentConversationMessage): boolean {
@@ -460,7 +454,7 @@ export default function ConversationViewport({
           rangeChanged={handleVisibleRangeChange}
           atBottomThreshold={40}
           atBottomStateChange={handleAtBottomStateChange}
-          computeItemKey={messageKey}
+          computeItemKey={agentConversationMessageKey}
           components={VIRTUOSO_COMPONENTS}
           itemContent={renderMessage}
         />

@@ -52,6 +52,20 @@ export interface LiveTurnObservation {
   anchorIndex?: number
 }
 
+export function agentConversationMessageKey(
+  index: number,
+  message: AgentConversationMessage,
+): string {
+  if (message.clientTurnId) {
+    return `client:${message.clientTurnId}:${message.role}`
+  }
+  if (message.conversationId != null) {
+    return `conversation:${message.conversationId}:${message.role}`
+  }
+  if (message.agentRunId) return `run:${message.agentRunId}:${message.role}`
+  return `message:${index}:${message.role}`
+}
+
 function stableAssistantTurnKey(
   message: AgentConversationMessage,
 ): string | undefined {

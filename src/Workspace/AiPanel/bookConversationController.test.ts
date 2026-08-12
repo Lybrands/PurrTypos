@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   addBookAssistantAttachment,
+  associateBookAssistantAttachmentIdentities,
   bookAttachmentKey,
   getBookAssistantAttachments,
+  getBookAssistantAttachmentsForMessage,
   getBookAssistantAttachmentsVersion,
   reduceBookAssistantAttachment,
   resolveStoredBookAssistantAttachments,
@@ -15,6 +17,8 @@ import type {
   AgentConversationMessage,
 } from '../../agent-runtime/contracts.ts'
 import type { AiModelConfig, AiSession } from '../../types.ts'
+import type { Conversation } from '../../types.ts'
+import { parseConversationsFromApi } from './utils.ts'
 import {
   createBookConversationController,
   createHistoryRequestCoordinator,
@@ -211,6 +215,76 @@ test('book attachment store does not notify or mutate without a stable turn key'
   assert.equal(getBookAssistantAttachments(), snapshot)
 })
 
+test('attachment survives live identity persistence and API message rebuild', () => {
+  const liveMessage: AgentConversationMessage = {
+    role: 'assistant',
+    content: '已更新人物',
+    clientTurnId: 'turn-persist-alias',
+    agentRunId: 'run-persist-alias',
+  }
+  addBookAssistantAttachment(liveMessage, {
+    sessionKey: 'character:persist-alias',
+    kind: 'character',
+    title: '人物设定',
+    status: 'pending',
+  })
+
+  assert.equal(
+    getBookAssistantAttachments()['run:run-persist-alias'][0].sessionKey,
+    'character:persist-alias',
+  )
+  associateBookAssistantAttachmentIdentities(liveMessage, {
+    ...liveMessage,
+    conversationId: 501,
+  })
+
+  const rebuilt = parseConversationsFromApi([{
+    id: 501,
+    session_id: 7,
+    chapter_id: 'chapter-1',
+    prompt: '更新人物',
+    response: '已更新人物',
+    agent_run_id: 'run-persist-alias',
+  } as Conversation]).at(-1)!
+  assert.equal(rebuilt.clientTurnId, undefined)
+  assert.equal(rebuilt.conversationId, 501)
+  assert.equal(
+    getBookAssistantAttachmentsForMessage(
+      getBookAssistantAttachments(),
+      rebuilt,
+    )[0].sessionKey,
+    'character:persist-alias',
+  )
+})
+
+test('API message falls through an empty conversation key to its run alias', () => {
+  addBookAssistantAttachment({
+    role: 'assistant',
+    content: '',
+    agentRunId: 'run-fallback-alias',
+  }, {
+    sessionKey: 'background:fallback-alias',
+    kind: 'background',
+    title: '故事背景',
+    status: 'pending',
+  })
+
+  const rebuilt: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    conversationId: 999,
+    agentRunId: 'run-fallback-alias',
+  }
+  assert.equal(bookAttachmentKey(rebuilt), 'conversation:999')
+  assert.equal(
+    getBookAssistantAttachmentsForMessage(
+      getBookAssistantAttachments(),
+      rebuilt,
+    )[0].sessionKey,
+    'background:fallback-alias',
+  )
+})
+
 test('book adapter exposes only display queue entries', () => {
   assert.deepEqual(
     toBookQueuedSubmissions(7, ['第一条', '第二条']),
@@ -264,6 +338,24 @@ test('book adapter derives queue capabilities and chapter send availability', ()
     submitMode: 'queue',
   })
   assert.equal(unavailable.composer.submitDisabled, true)
+})
+
+test('paused book activity is terminal and the panel contract accepts a new request', () => {
+  const pausedInput: BookConversationBindings & { paused: true } = {
+    ...bindings,
+    prompt: '继续新任务',
+    paused: true,
+    activities: {
+      7: { state: 'paused', queuedCount: 0 },
+    },
+  }
+  const controller = createBookConversationController(pausedInput)
+
+  assert.equal(controller.conversation.paused, false)
+  assert.equal(controller.conversation.resuming, false)
+  assert.equal(controller.capabilities.inputDisabled, false)
+  assert.equal(controller.composer.submitDisabled, false)
+  assert.equal(controller.actions.resume, undefined)
 })
 
 test('book history coordinator ignores stale lifecycle work and deduplicates deletes', async () => {
@@ -341,4 +433,103 @@ test('book history coordinator isolates same-key deletes across lifecycles', asy
   stalePending.resolve()
   currentPending.resolve()
   await Promise.all([staleDelete, currentDelete])
+})
+
+test('history delete invalidates an earlier load and removes the active session once', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const loadPending = deferred<AiSession[]>()
+  const deletePending = deferred<void>()
+  let visible = [historySessions[0]]
+  let activeCleanupCount = 0
+
+  const loadRequest = coordinator.beginLatest()
+  const load = loadPending.promise.then((result) => {
+    if (coordinator.isCurrent(loadRequest)) visible = result
+  })
+  const remove = coordinator.runOnce('session:8', async () => {
+    const scopeRequest = coordinator.beginMutation()
+    await deletePending.promise
+    if (!coordinator.completeMutation(scopeRequest)) return
+    visible = visible.filter((session) => session.id !== 8)
+    activeCleanupCount += 1
+  })
+
+  deletePending.resolve()
+  await remove
+  loadPending.resolve([historySessions[0]])
+  await load
+
+  assert.deepEqual(visible, [])
+  assert.equal(activeCleanupCount, 1)
+})
+
+test('a later history load cannot overwrite a successful current-scope delete', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const deletePending = deferred<void>()
+  const loadPending = deferred<AiSession[]>()
+  let visible = [historySessions[0]]
+  let activeCleanupCount = 0
+
+  const remove = coordinator.runOnce('session:8', async () => {
+    const scopeRequest = coordinator.beginMutation()
+    await deletePending.promise
+    if (!coordinator.completeMutation(scopeRequest)) return
+    visible = visible.filter((session) => session.id !== 8)
+    activeCleanupCount += 1
+  })
+  const loadRequest = coordinator.beginLatest()
+  const load = loadPending.promise.then((result) => {
+    if (coordinator.isCurrent(loadRequest)) visible = result
+  })
+
+  deletePending.resolve()
+  await remove
+  loadPending.resolve([historySessions[0]])
+  await load
+
+  assert.deepEqual(visible, [])
+  assert.equal(activeCleanupCount, 1)
+})
+
+test('scope invalidation blocks old history delete cleanup', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const deletePending = deferred<void>()
+  let visible = [historySessions[0]]
+  let activeCleanupCount = 0
+
+  const remove = coordinator.runOnce('session:8', async () => {
+    const scopeRequest = coordinator.beginMutation()
+    await deletePending.promise
+    if (!coordinator.completeMutation(scopeRequest)) return
+    visible = []
+    activeCleanupCount += 1
+  })
+  coordinator.invalidateLatest()
+  visible = [{ ...historySessions[0], id: 9, title: '新作用域' }]
+  deletePending.resolve()
+  await remove
+
+  assert.deepEqual(visible.map((session) => session.id), [9])
+  assert.equal(activeCleanupCount, 0)
+})
+
+test('scope invalidation blocks an old deferred history load', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const loadPending = deferred<AiSession[]>()
+  let visible = [historySessions[0]]
+  const loadRequest = coordinator.beginLatest()
+  const load = loadPending.promise.then((result) => {
+    if (coordinator.isCurrent(loadRequest)) visible = result
+  })
+
+  coordinator.invalidateLatest()
+  visible = [{ ...historySessions[0], id: 9, title: '新作用域' }]
+  loadPending.resolve([{ ...historySessions[0], title: '旧作用域' }])
+  await load
+
+  assert.deepEqual(visible.map((session) => session.id), [9])
 })
