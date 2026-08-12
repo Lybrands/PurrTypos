@@ -12,7 +12,7 @@ function createTestChunkContext(
   initialMessages: AgentConversationMessage[],
   overrides: Pick<
     Partial<AgentChunkHost>,
-    'onHostChunk' | 'onSettled' | 'setRunning'
+    'flushCommits' | 'onHostChunk' | 'onSettled' | 'setRunning'
   > = {},
 ) {
   let messages = initialMessages
@@ -24,7 +24,7 @@ function createTestChunkContext(
       messages = next
     },
     scheduleCommit: (updater) => { messages = updater(messages) },
-    flushCommits: () => undefined,
+    flushCommits: overrides.flushCommits ?? (() => undefined),
     setRunning: overrides.setRunning ?? (() => undefined),
     isVisible: () => true,
     onHostChunk: overrides.onHostChunk,
@@ -110,3 +110,40 @@ test('an early transport error stays out of content and remains visible in metad
   assert.equal(message?.isError, true)
   assert.equal(message?.error, '上游连接失败')
 })
+
+for (const failingHostMethod of ['flushCommits', 'onSettled'] as const) {
+  test(`terminal settlement retries after ${failingHostMethod} throws`, () => {
+    let shouldThrow = true
+    const settled: string[] = []
+    const failOnce = () => {
+      if (!shouldThrow) return
+      shouldThrow = false
+      throw new Error(`${failingHostMethod} failed`)
+    }
+    const harness = createTestChunkContext([
+      { role: 'user', content: '问题' },
+      { role: 'assistant', content: '' },
+    ], {
+      flushCommits: failingHostMethod === 'flushCommits'
+        ? failOnce
+        : () => undefined,
+      onSettled: (outcome) => {
+        if (failingHostMethod === 'onSettled') failOnce()
+        settled.push(outcome)
+      },
+    })
+    harness.context.acc.response = '可重试的模型终稿'
+
+    assert.throws(
+      () => dispatchAgentChunk({ done: true }, harness.context),
+      new RegExp(`${failingHostMethod} failed`),
+    )
+    dispatchAgentChunk({ done: true }, harness.context)
+
+    assert.deepEqual(settled, ['completed'])
+    assert.equal(
+      harness.readMessages().at(-1)?.content,
+      '可重试的模型终稿',
+    )
+  })
+}

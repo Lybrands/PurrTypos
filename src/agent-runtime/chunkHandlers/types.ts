@@ -43,6 +43,11 @@ export interface AgentAccumulator {
   subAgentActivities?: AiSubAgentActivity[]
   subAgentAccumulators?: Record<string, AgentAccumulator>
   canonicalOutput?: CanonicalOutputState
+  terminalSettlement?: {
+    phase: 'settling' | 'settled'
+    outcome?: AgentRunOutcome
+    runId?: string
+  }
 }
 
 export function initialAgentAccumulator(input: {

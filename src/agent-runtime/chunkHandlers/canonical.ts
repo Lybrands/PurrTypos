@@ -22,6 +22,16 @@ export function handleCanonicalOutput(
 ): boolean {
   if (!isCanonicalOutputEvent(chunk)) return false
 
+  const terminalSettlement = ctx.acc.terminalSettlement
+  if (
+    terminalSettlement?.phase === 'settled'
+    && terminalSettlement.outcome === 'paused'
+    && chunk.runId
+    && chunk.runId !== terminalSettlement.runId
+  ) {
+    ctx.acc.terminalSettlement = undefined
+  }
+
   const state = reduceCanonicalOutput(
     ctx.acc.canonicalOutput ?? initialCanonicalOutputState(),
     chunk,
