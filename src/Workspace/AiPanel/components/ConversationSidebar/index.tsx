@@ -2,6 +2,7 @@ import React from 'react'
 import { services } from '@/services'
 import AgentConversationIndex from '@/components/AgentConversation/ConversationIndex'
 import type { AgentConversationSession } from '@/components/AgentConversation'
+import { toAgentConversationSession } from '@/components/AgentConversation/sessionView'
 import { ReadIcon, PurrSegmented } from '@/purr-components'
 import type { AiSession, EntityId } from '../../../../types'
 import {
@@ -12,6 +13,7 @@ import {
 import SessionHistory, {
   type AgentConversationHistoryController,
 } from '@/components/AgentConversation/ConversationIndex/SessionHistory'
+import { createHistoryRequestCoordinator } from './historyRequestCoordinator'
 import './index.scss'
 
 interface ConversationSidebarProps {
@@ -64,21 +66,43 @@ export default function ConversationSidebar({
   const [historySessions, setHistorySessions] = React.useState<AiSession[]>([])
   const [historyLoading, setHistoryLoading] = React.useState(false)
   const [historyError, setHistoryError] = React.useState<string>()
+  const [historyRequests] = React.useState(createHistoryRequestCoordinator)
+  const visibleSessions = React.useMemo(
+    () => sessions.map((session) => (
+      toAgentConversationSession(session, session.create_time)
+    )),
+    [sessions],
+  )
+
+  React.useEffect(() => () => historyRequests.unmount(), [historyRequests])
+
+  React.useEffect(() => {
+    historyRequests.invalidateLatest()
+    setHistorySessions([])
+    setHistoryLoading(false)
+    setHistoryError(undefined)
+  }, [bookId, chapterId, historyRequests, scope])
 
   const loadSessionHistory = React.useCallback(async () => {
+    const request = historyRequests.beginLatest()
     if (bookId == null) {
-      setHistorySessions([])
-      setHistoryError('请先选择书籍')
+      if (historyRequests.isCurrent(request)) {
+        setHistorySessions([])
+        setHistoryError('请先选择书籍')
+      }
       return
     }
-    setHistoryLoading(true)
-    setHistoryError(undefined)
+    if (historyRequests.isCurrent(request)) {
+      setHistoryLoading(true)
+      setHistoryError(undefined)
+    }
     try {
       const result = await services.sessions.getSessions(
         scope === 'setting'
           ? { bookId, includeClosed: true, scope: 'setting' }
           : { bookId, chapterId: chapterId ?? null, includeClosed: true },
       )
+      if (!historyRequests.isCurrent(request)) return
       if (!result.success) {
         setHistorySessions([])
         setHistoryError(result.error || '历史对话加载失败')
@@ -86,12 +110,14 @@ export default function ConversationSidebar({
       }
       setHistorySessions(result.data)
     } catch {
-      setHistorySessions([])
-      setHistoryError('历史对话加载失败，请稍后重试')
+      if (historyRequests.isCurrent(request)) {
+        setHistorySessions([])
+        setHistoryError('历史对话加载失败，请稍后重试')
+      }
     } finally {
-      setHistoryLoading(false)
+      if (historyRequests.isCurrent(request)) setHistoryLoading(false)
     }
-  }, [bookId, chapterId, scope])
+  }, [bookId, chapterId, historyRequests, scope])
 
   const openHistorySession = React.useCallback((id: string | number) => {
     const session = historySessions.find((item) => item.id === id)
@@ -101,28 +127,32 @@ export default function ConversationSidebar({
   const deleteHistorySession = React.useCallback(async (id: string | number) => {
     const session = historySessions.find((item) => item.id === id)
     if (!session) return
-    try {
-      const result = await services.sessions.deleteSession({ sessionId: session.id })
-      if (!result.success) {
-        setHistoryError(result.error || '删除历史对话失败')
-        return
+    const request = historyRequests.captureLatest()
+    await historyRequests.runOnce(`session:${session.id}`, async () => {
+      try {
+        const result = await services.sessions.deleteSession({ sessionId: session.id })
+        if (!historyRequests.isCurrent(request)) return
+        if (!result.success) {
+          setHistoryError(result.error || '删除历史对话失败')
+          return
+        }
+        setHistorySessions((current) => current.filter((item) => item.id !== session.id))
+        onDeleteFromHistory(session)
+      } catch {
+        if (historyRequests.isCurrent(request)) {
+          setHistoryError('删除历史对话失败，请稍后重试')
+        }
       }
-      setHistorySessions((current) => current.filter((item) => item.id !== session.id))
-      onDeleteFromHistory(session)
-    } catch {
-      setHistoryError('删除历史对话失败，请稍后重试')
-    }
-  }, [historySessions, onDeleteFromHistory])
+    })
+  }, [historyRequests, historySessions, onDeleteFromHistory])
 
   const historyController = React.useMemo<AgentConversationHistoryController>(() => ({
     conversation: {
       activeSessionId,
       history: {
-        sessions: historySessions.map<AgentConversationSession>((session) => ({
-          id: session.id,
-          title: session.title,
-          createdAt: session.create_time,
-        })),
+        sessions: historySessions.map<AgentConversationSession>((session) => (
+          toAgentConversationSession(session, session.create_time)
+        )),
         loading: historyLoading,
         error: historyError,
       },
@@ -144,7 +174,7 @@ export default function ConversationSidebar({
 
   return (
     <AgentConversationIndex
-      sessions={sessions}
+      sessions={visibleSessions}
       activeSessionId={activeSessionId}
       sessionActivities={sessionActivities}
       isCurrentSessionEmpty={isCurrentSessionEmpty}

@@ -57,11 +57,13 @@ function ComposerFooter({
   extensions,
   queueLabel,
   submitLabel,
+  resumeDisabled,
 }: {
   controller: AgentConversationController
   extensions?: AgentConversationExtensions
   queueLabel: string
   submitLabel: string
+  resumeDisabled: boolean
 }) {
   const { capabilities, composer, conversation, actions } = controller
   const showStop = conversation.running
@@ -108,7 +110,7 @@ function ComposerFooter({
             size="small"
             icon={<RefreshIcon size={15} />}
             loading={conversation.resuming}
-            disabled={capabilities.inputDisabled || conversation.resuming}
+            disabled={resumeDisabled}
             onClick={() => void actions.resume?.()}
           >
             继续执行
@@ -159,6 +161,9 @@ export default function AgentConversationPanel({
     queuedCount: controller.conversation.queuedSubmissions.length,
     taskPlan: controller.composer.taskPlan,
     submitMode: controller.capabilities.submitMode,
+    selectedModel: controller.composer.selectedModel,
+    inputDisabled: controller.capabilities.inputDisabled,
+    resuming: controller.conversation.resuming,
   })
 
   const setIndexOpen = React.useCallback((open: boolean) => {
@@ -253,6 +258,7 @@ export default function AgentConversationPanel({
               extensions={extensions}
               queueLabel={view.queueLabel}
               submitLabel={view.submitLabel}
+              resumeDisabled={view.resumeDisabled}
             />
           )}
         />

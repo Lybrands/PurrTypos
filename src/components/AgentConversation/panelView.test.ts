@@ -8,6 +8,9 @@ test('panel shows queue mode and hides a terminal task capsule', () => {
     queuedCount: 2,
     taskPlan: { title: '完成', status: 'done', steps: [] },
     submitMode: 'queue',
+    selectedModel: { id: 'configured' },
+    inputDisabled: false,
+    resuming: false,
   })
   assert.equal(view.submitLabel, '加入发送队列')
   assert.equal(view.queueLabel, '排队 2')
@@ -28,6 +31,31 @@ test('panel keeps sequential and parallel task labels in the shared selector', (
       ],
     },
     submitMode: 'send',
+    selectedModel: { id: 'configured' },
+    inputDisabled: false,
+    resuming: false,
   })
   assert.equal(sequential.taskCountLabel, '第 2/3 步')
+})
+
+test('resume remains disabled until a model is selected', () => {
+  const withoutModel = buildAgentConversationPanelView({
+    running: false,
+    queuedCount: 0,
+    submitMode: 'send',
+    selectedModel: null,
+    inputDisabled: false,
+    resuming: false,
+  })
+  const withModel = buildAgentConversationPanelView({
+    running: false,
+    queuedCount: 0,
+    submitMode: 'send',
+    selectedModel: { id: 'configured' },
+    inputDisabled: false,
+    resuming: false,
+  })
+
+  assert.equal(withoutModel.resumeDisabled, true)
+  assert.equal(withModel.resumeDisabled, false)
 })

@@ -1,37 +1,55 @@
 import React from 'react'
-import { CheckIcon, CopyIcon, PurrButton, PurrTooltip } from '@/purr-components'
+import {
+  CheckIcon,
+  CopyIcon,
+  PurrButton,
+  PurrDropdown,
+  PurrTooltip,
+} from '@/purr-components'
 import './MessageActionButton.scss'
 
 export interface AgentMessageCopyButtonProps {
   content: string
+  markdownContent?: string
   label?: string
 }
 
 /** 对话历史消息统一使用的复制入口。 */
 export default function AgentMessageCopyButton({
   content,
+  markdownContent,
   label = '复制消息',
 }: AgentMessageCopyButtonProps) {
-  const [copied, setCopied] = React.useState(false)
+  const [copiedFormat, setCopiedFormat] = React.useState<'plain' | 'markdown' | null>(null)
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   React.useEffect(() => () => {
     if (timerRef.current) clearTimeout(timerRef.current)
   }, [])
 
-  const copyMessage = React.useCallback(async () => {
+  const copyMessage = React.useCallback(async (
+    value: string,
+    format: 'plain' | 'markdown',
+  ) => {
     try {
-      await navigator.clipboard.writeText(content)
-      setCopied(true)
+      await navigator.clipboard.writeText(value)
+      setCopiedFormat(format)
       if (timerRef.current) clearTimeout(timerRef.current)
-      timerRef.current = setTimeout(() => setCopied(false), 1400)
+      timerRef.current = setTimeout(() => setCopiedFormat(null), 1400)
     } catch {
-      setCopied(false)
+      setCopiedFormat(null)
     }
-  }, [content])
+  }, [])
 
-  const feedbackLabel = copied ? '已复制' : label
-  return (
+  const copied = copiedFormat != null
+  const feedbackLabel = copiedFormat
+    ? markdownContent
+      ? `已复制${copiedFormat === 'plain' ? '纯文本' : ' Markdown'}`
+      : '已复制'
+    : markdownContent
+      ? '复制纯文本 · 右键选择格式'
+      : label
+  const button = (
     <PurrTooltip title={feedbackLabel}>
       <PurrButton
         type="text"
@@ -40,9 +58,34 @@ export default function AgentMessageCopyButton({
           ? <CheckIcon style={{ fontSize: 12 }} />
           : <CopyIcon style={{ fontSize: 12 }} />}
         className={`agent-message-action-button${copied ? ' is-copied' : ''}`}
-        aria-label={feedbackLabel}
-        onClick={() => void copyMessage()}
+        aria-label={label}
+        onClick={() => void copyMessage(content, 'plain')}
       />
     </PurrTooltip>
+  )
+  if (!markdownContent) return button
+
+  return (
+    <PurrDropdown
+      trigger={['contextMenu']}
+      menu={{
+        items: [
+          {
+            key: 'copy-plain',
+            label: '复制纯文本',
+            icon: <CopyIcon />,
+            onClick: () => void copyMessage(content, 'plain'),
+          },
+          {
+            key: 'copy-markdown',
+            label: '复制 Markdown',
+            icon: <CopyIcon />,
+            onClick: () => void copyMessage(markdownContent, 'markdown'),
+          },
+        ],
+      }}
+    >
+      {button}
+    </PurrDropdown>
   )
 }

@@ -116,6 +116,13 @@
   margin: 12px 0 0;
 }
 
+.agent-conversation__assistant-footer {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  margin-top: 2px;
+}
+
 .agent-conversation__scroll-to-bottom.purr-button {
   position: absolute;
   z-index: 4;
