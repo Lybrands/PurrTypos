@@ -149,12 +149,19 @@ function withTerminalSettlement(
   const { acc } = context
   if (acc.terminalSettlement) return true
   acc.terminalSettlement = {
-    phase: 'settling',
+    phase: 'projecting',
     runId: acc.agentRunId,
   }
   try {
     const { outcome, durationMs } = project()
-    settle(context, outcome, durationMs)
+    context.host.setRunning(false)
+    const snapshot = terminalSnapshot(context, durationMs)
+    acc.terminalSettlement = {
+      phase: 'delivered',
+      outcome,
+      runId: acc.agentRunId,
+    }
+    context.host.onSettled(outcome, snapshot)
     acc.terminalSettlement = {
       phase: 'settled',
       outcome,
@@ -162,7 +169,9 @@ function withTerminalSettlement(
     }
     return true
   } catch (error) {
-    acc.terminalSettlement = undefined
+    if (acc.terminalSettlement?.phase === 'projecting') {
+      acc.terminalSettlement = undefined
+    }
     throw error
   }
 }
@@ -181,15 +190,6 @@ function replaceLastAssistant(
 
 function elapsedDuration(context: AgentChunkRuntimeContext): number {
   return Math.max(0, Math.round(context.now() - context.acc.turnStartedAt))
-}
-
-function settle(
-  context: AgentChunkRuntimeContext,
-  outcome: AgentRunOutcome,
-  durationMs: number,
-): void {
-  context.host.setRunning(false)
-  context.host.onSettled(outcome, terminalSnapshot(context, durationMs))
 }
 
 function terminalSnapshot(

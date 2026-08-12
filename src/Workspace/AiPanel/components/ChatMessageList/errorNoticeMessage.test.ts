@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getErrorNoticeMessage } from './errorNoticeMessage.ts'
+import {
+  getErrorNoticeMessage,
+  hasRenderableErrorMessage,
+} from './errorNoticeMessage.ts'
 
 test('error notice exposes metadata when terminal content is intentionally empty', () => {
   assert.equal(
@@ -15,4 +18,12 @@ test('error notice keeps legacy content and a stable fallback', () => {
     '旧版错误正文',
   )
   assert.equal(getErrorNoticeMessage({ content: '' }), '本轮执行失败')
+})
+
+test('ordinary empty-response metadata keeps the assistant bubble visible', () => {
+  assert.equal(hasRenderableErrorMessage({
+    content: '',
+    error: '模型未返回可见内容。',
+    isError: false,
+  }), true)
 })

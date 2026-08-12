@@ -439,3 +439,53 @@ test('paused durable task emits no formal answer and resume commits once', () =>
   assert.equal(replay.assistant('turn-paused')?.content, '候选稿已发布。')
   assert.equal(replay.assistant('turn-paused')?.model, 'resumed-model')
 })
+
+test('paused resume switches the canonical root once and blocks late same-run terminal chunks', () => {
+  const replay = new AgentChunkReplay()
+  const dependencies = { cfg: model, appMessage }
+  const seed = {
+    turnId: 'turn-paused-twice',
+    sessionId: 8,
+    userContent: '暂停后继续，再次暂停',
+    turnStartedAt: performance.now(),
+  }
+
+  replay.dispatch(seed, canonical('run-a', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: { runId: 'run-a', title: 'A', status: 'paused', steps: [] },
+    },
+  }), dependencies)
+  replay.dispatch(seed, { done: true, finalResponseExpected: false }, dependencies)
+
+  replay.dispatch(seed, canonical('run-b', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: { runId: 'run-b', title: 'B', status: 'running', steps: [] },
+    },
+  }), dependencies)
+  assert.equal(replay.assistant(seed.turnId)?.agentRunId, 'run-b')
+  assert.equal(replay.assistant(seed.turnId)?.canonicalOutput?.runId, 'run-b')
+
+  replay.dispatch(seed, {
+    done: true,
+    finalResponseExpected: false,
+    model: 'run-b-paused-model',
+  }, dependencies)
+  replay.dispatch(seed, canonical('run-b', 2, {
+    payload: {
+      eventType: 'run.todo_updated',
+      data: { runId: 'run-b', stepId: 'late', step: null },
+    },
+  }), dependencies)
+  replay.dispatch(seed, {
+    done: true,
+    finalResponseExpected: false,
+    model: 'late-run-b-model',
+  }, dependencies)
+
+  const assistant = replay.assistant(seed.turnId)
+  assert.equal(assistant?.model, 'run-b-paused-model')
+  assert.equal(assistant?.agentRunId, 'run-b')
+  assert.equal(assistant?.canonicalOutput?.runId, 'run-b')
+})
