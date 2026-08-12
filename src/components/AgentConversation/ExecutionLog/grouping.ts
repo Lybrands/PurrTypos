@@ -1,11 +1,11 @@
-import type { AssistantTimelinePart } from "../ChatMessageList/assistantTimeline.ts";
+import type { AssistantTimelinePart } from "../AssistantOutput/timeline.ts";
 
-export type WorkLogTimelineItem = AssistantTimelinePart;
+export type ExecutionLogTimelineItem = AssistantTimelinePart;
 
 export function groupConsecutiveWorkSteps(
   parts: AssistantTimelinePart[],
   _groupKeyPrefix: string,
-): WorkLogTimelineItem[] {
+): ExecutionLogTimelineItem[] {
   return parts.filter((part) => {
     if (
       part.type === "tools"

@@ -1,9 +1,11 @@
-import { getAssistantRenderableMarkdown } from "../../rendering";
-import type { ChatMessage, ToolCallSegment } from "../../hooks/chat.types";
-import type { CanonicalOperation } from "../../../../agent-runtime/canonicalOutput";
-import { toolCallDisplayRow } from "../../hooks/toolCallLabels";
-export { groupConsecutiveWorkSteps } from "../WorkLog/grouping";
-export type { WorkLogTimelineItem } from "../WorkLog/grouping";
+import type {
+  AgentConversationMessage,
+  ToolCallSegment,
+} from "../../../agent-runtime/contracts";
+import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import { toolCallDisplayRow } from "../toolCallLabels.ts";
+export { groupConsecutiveWorkSteps } from "../ExecutionLog/grouping.ts";
+export type { ExecutionLogTimelineItem } from "../ExecutionLog/grouping.ts";
 
 export type TimelineCommentaryPart = {
   type: "commentary";
@@ -23,11 +25,11 @@ export type TimelineToolsPart = {
 export type TimelineTextPart = { type: "text"; md: string };
 export type TimelineDelegationsPart = {
   type: "delegations";
-  items: NonNullable<ChatMessage["delegations"]>;
+  items: NonNullable<AgentConversationMessage["delegations"]>;
 };
 export type TimelineContextCompactionPart = {
   type: "contextCompaction";
-  state: NonNullable<ChatMessage["contextCompaction"]>;
+  state: NonNullable<AgentConversationMessage["contextCompaction"]>;
 };
 export type TimelineCanonicalOperationPart = {
   type: "operation";
@@ -67,7 +69,9 @@ export interface BuildAssistantTimelineOptions {
   allowStreamingText?: boolean;
 }
 
-export function getAssistantProcessingLabel(_message: ChatMessage): string {
+export function getAssistantProcessingLabel(
+  _message: AgentConversationMessage,
+): string {
   return "";
 }
 
@@ -167,7 +171,7 @@ export function getExecutionPanelPresentation(
 
 export function getExecutionPanelLogKey(
   message: Pick<
-    ChatMessage,
+    AgentConversationMessage,
     "clientTurnId" | "conversationId" | "agentRunId" | "turnStartedAt"
   >,
 ): string | null {
@@ -187,7 +191,7 @@ export function getExecutionPanelLogKey(
 }
 
 export function buildAssistantTimeline(
-  message: ChatMessage,
+  message: AgentConversationMessage,
   opts: BuildAssistantTimelineOptions,
 ): AssistantTimelinePart[] {
   const parts: AssistantTimelinePart[] = [];
@@ -239,7 +243,7 @@ export function buildAssistantTimeline(
       .sort((left, right) => left.sequence - right.sequence)
       .forEach(({ part }) => parts.push(part));
 
-    const canonicalMarkdown = isStreaming
+    const canonicalMarkdown = message.canonicalOutput.finalStreamStatus === "open"
       ? message.streamingContent || message.content
       : message.content;
     if (canonicalMarkdown.trim()) {
@@ -290,7 +294,7 @@ export function buildAssistantTimeline(
     appendCommentary(blockIndex, "tail");
   });
 
-  const assistantMarkdown = getAssistantRenderableMarkdown(message);
+  const assistantMarkdown = message.content;
   // Defense in depth: even stale/replayed state must not expose answer text
   // while the root turn is still receiving process events.
   if (

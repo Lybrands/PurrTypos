@@ -1,5 +1,5 @@
 import type { AiTaskPlan, AiTaskStep } from '../../agent-runtime'
-import { KNOWN_TOOL_CALL_LABELS } from '../../Workspace/AiPanel/hooks/toolCallLabels.ts'
+import { KNOWN_TOOL_CALL_LABELS } from '../AgentConversation/toolCallLabels.ts'
 
 const HAN_TEXT = /[\u3400-\u9fff]/
 const LATIN_TEXT = /[A-Za-z]/

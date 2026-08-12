@@ -13,7 +13,7 @@ import {
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
 import ContextUsageIndicator from '../Workspace/AiPanel/components/ContextUsageIndicator'
-import Markdown from '../Workspace/AiPanel/components/Markdown'
+import Markdown from '../components/Markdown'
 import ModelPicker, {
   type ModelRuntimeConfigPatch,
 } from '../Workspace/AiPanel/components/ModelPicker'
@@ -4066,6 +4066,13 @@ export default function ScreenplayAgentPage({
                   }}
                   messageAttachmentsVersion={agentArtifactVersion}
                   onEditMessage={editAgentMessage}
+                  onStructuredAnswer={(answer) => void runAgent(answer)}
+                  onResolveToolApproval={(approvalId, approved) => (
+                    services.ai.resolveAiToolApproval({ approvalId, approved })
+                  )}
+                  onSubmitErrorReport={(reportId) => (
+                    services.ai.submitAiErrorReport({ reportId })
+                  )}
                 />
 
                 <AgentComposer

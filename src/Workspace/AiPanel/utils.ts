@@ -7,7 +7,7 @@ import {
 import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
-import { KNOWN_TOOL_CALL_LABELS } from './hooks/toolCallLabels'
+import { KNOWN_TOOL_CALL_LABELS } from '../../components/AgentConversation/toolCallLabels'
 
 function normalizeStoredToolCallLabel(label: string): string {
   return KNOWN_TOOL_CALL_LABELS[

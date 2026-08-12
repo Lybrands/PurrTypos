@@ -6,17 +6,16 @@ import {
 import { PurrButton, PurrDropdown, PurrTooltip, usePurrToast } from '@/purr-components';
 import React from "react";
 import AgentUserMessageBody from "@/components/AgentConversation/UserMessageBody";
+import AssistantOutput from "@/components/AgentConversation/AssistantOutput";
+import {
+  hasRenderableErrorMessage,
+} from '@/components/AgentConversation/AssistantOutput/errorNoticeMessage'
 import { markdownToPlainText } from "../../../../utils/markdown";
 import { formatModelName } from "../../utils";
 import { type ChatMessage } from "../../hooks";
 import { getAssistantRenderableMarkdown } from "../../rendering";
 import MessageEditor from "../MessageEditor";
-import AssistantMessageBody from "./AssistantMessageBody";
-import ErrorReportNotice from "./ErrorReportNotice";
-import {
-  getErrorNoticeMessage,
-  hasRenderableErrorMessage,
-} from './errorNoticeMessage'
+import SettingDiffCard from "../SettingDiffCard";
 import type { ChatMessageListProps } from "./index";
 
 export interface ChatMessageBubbleProps
@@ -36,6 +35,8 @@ export interface ChatMessageBubbleProps
     | "onAbort"
     | "onAddFavorite"
     | "onStructuredAnswer"
+    | "onResolveToolApproval"
+    | "onSubmitErrorReport"
     | "setScrolledUpByReason"
   > {
   index: number;
@@ -65,6 +66,8 @@ function ChatMessageBubbleInner({
   onAbort,
   onAddFavorite,
   onStructuredAnswer,
+  onResolveToolApproval,
+  onSubmitErrorReport,
   setScrolledUpByReason,
 }: ChatMessageBubbleProps) {
   const appMessage = usePurrToast();
@@ -78,16 +81,18 @@ function ChatMessageBubbleInner({
   const hasAnyCommentary =
     hasCommentaryBlocks ||
     (message.commentary !== undefined && message.commentary !== "");
-  const errorNoticeMessage = message.role === 'assistant' && message.isError
-    ? getErrorNoticeMessage(message)
-    : ''
   const isEmpty =
     !message.content &&
     !message.streamingContent &&
     !message.toolCallSegments?.length &&
     !message.canonicalOutput?.operationOrder.length &&
+    !message.canonicalOutput?.commentaryBlocks.length &&
     !message.delegations?.length &&
     !message.contextCompaction &&
+    !message.toolApprovals?.length &&
+    !message.settingDiffCards?.length &&
+    !message.termination &&
+    !(message.durationMs != null && message.durationMs > 0) &&
     !hasRenderableErrorMessage(message) &&
     !hasAnyCommentary;
   const isLastAssistant =
@@ -189,22 +194,23 @@ function ChatMessageBubbleInner({
             } : undefined}
           />
         )}
-      {message.role === "assistant" && message.isError && (
-        <ErrorReportNotice
-          message={errorNoticeMessage}
-          report={message.errorReport}
-        />
-      )}
-      {message.role === "assistant" && !message.isError && (
-        <AssistantMessageBody
-          index={index}
-          message={message}
-          loading={loading}
-          isLastAssistant={isLastAssistant}
-          showPlaceholder={showPlaceholder}
-          setScrolledUpByReason={setScrolledUpByReason}
-          onStructuredAnswer={onStructuredAnswer}
-        />
+      {message.role === "assistant" && (
+        <>
+          <AssistantOutput
+            index={index}
+            message={message}
+            loading={loading}
+            isLastAssistant={isLastAssistant}
+            showPlaceholder={showPlaceholder}
+            setScrolledUpByReason={setScrolledUpByReason}
+            onStructuredAnswer={onStructuredAnswer}
+            onResolveToolApproval={onResolveToolApproval}
+            onSubmitErrorReport={onSubmitErrorReport}
+          />
+          {!message.isError && (message.settingDiffCards || []).map((card) => (
+            <SettingDiffCard key={card.sessionKey} card={card} />
+          ))}
+        </>
       )}
       {message.role === "assistant" &&
         !message.isError &&

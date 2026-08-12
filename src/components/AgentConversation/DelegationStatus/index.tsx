@@ -1,9 +1,12 @@
 import React from "react";
-import type { AiAgentDelegation } from "../../../../types";
-import type { AiSubAgentActivity, ChatMessage } from "../../hooks/chat.types";
-import Markdown from "../Markdown";
+import type { AiAgentDelegation } from "../../../types";
+import type {
+  AgentConversationMessage,
+  AiSubAgentActivity,
+} from "../../../agent-runtime/contracts";
+import Markdown from "../../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
-import { buildAssistantTimeline } from "../ChatMessageList/assistantTimeline";
+import { buildAssistantTimeline } from "../AssistantOutput/timeline";
 import {
   buildSubAgentTimelineItems,
   presentableStructuredResponse,
@@ -18,14 +21,16 @@ const STATUS_LABELS: Record<AiAgentDelegation["status"], string> = {
   canceled: "已取消",
 };
 
-function presentableChildMessage(message: ChatMessage): ChatMessage {
+function presentableChildMessage(
+  message: AgentConversationMessage,
+): AgentConversationMessage {
   return {
     ...message,
     content: presentableStructuredResponse(message.content),
   };
 }
 
-export default function SubAgentStatusList({
+export default function DelegationStatus({
   items,
   activities = [],
 }: {

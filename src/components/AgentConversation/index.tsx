@@ -1,8 +1,8 @@
 import React from 'react'
 import { LoadingIcon, RobotIcon } from '@/purr-components'
 import type { AgentConversationMessage } from '../../agent-runtime'
-import AssistantMessageBody from '../../Workspace/AiPanel/components/ChatMessageList/AssistantMessageBody'
-import ErrorReportNotice from '../../Workspace/AiPanel/components/ChatMessageList/ErrorReportNotice'
+import AssistantOutput from './AssistantOutput'
+import { hasRenderableErrorMessage } from './AssistantOutput/errorNoticeMessage'
 import AgentConversationTurnIndex, {
   buildAgentConversationTurnIndex,
   type AgentConversationTurnIndexItem,
@@ -30,6 +30,14 @@ export interface AgentConversationProps {
   messageAttachmentsVersion?: string | number
   /** 编辑历史提问后，从该轮重新开始对话。 */
   onEditMessage?: (messageIndex: number, content: string) => void | Promise<void>
+  onStructuredAnswer?: (answer: string) => void
+  onResolveToolApproval: (
+    approvalId: string,
+    approved: boolean,
+  ) => Promise<{ success: boolean; error?: string }>
+  onSubmitErrorReport?: (
+    reportId: string,
+  ) => Promise<{ success: boolean; error?: string }>
 }
 
 export default function AgentConversation({
@@ -41,6 +49,9 @@ export default function AgentConversation({
   afterAssistantMessage,
   messageAttachmentsVersion,
   onEditMessage,
+  onStructuredAnswer,
+  onResolveToolApproval,
+  onSubmitErrorReport,
 }: AgentConversationProps) {
   const viewportRef = React.useRef<HTMLDivElement | null>(null)
   const scrollFollowStateRef = React.useRef(createScrollFollowState())
@@ -201,13 +212,18 @@ export default function AgentConversation({
             if (message.role !== 'assistant') return null
             const hasVisibleContent = Boolean(
               message.content
+              || message.streamingContent
               || message.commentary
               || message.toolCallSegments?.length
               || message.delegations?.length
               || message.contextCompaction
+              || message.canonicalOutput?.commentaryBlocks.length
+              || message.canonicalOutput?.operationOrder.length
+              || message.toolApprovals?.length
+              || (message.durationMs != null && message.durationMs > 0)
             )
             const hasStatus = Boolean(
-              message.isError || message.termination || message.error,
+              hasRenderableErrorMessage(message) || message.termination,
             )
             const attachment = afterAssistantMessage?.(message, index)
             if (!assistantMessageVisible({
@@ -219,13 +235,8 @@ export default function AgentConversation({
             })) return null
             return (
               <article className="agent-conversation__message is-assistant" key={`message-${index}`}>
-                {message.isError ? (
-                  <ErrorReportNotice
-                    message={message.error || '本轮执行失败'}
-                    report={message.errorReport}
-                  />
-                ) : hasVisibleContent || hasStatus || (isLast && loading) ? (
-                  <AssistantMessageBody
+                {hasVisibleContent || hasStatus || (isLast && loading) ? (
+                  <AssistantOutput
                     index={index}
                     message={message}
                     loading={loading}
@@ -233,13 +244,15 @@ export default function AgentConversation({
                     showPlaceholder={Boolean(
                       isLast
                       && loading
-                      && !message.content
-                      && !message.commentary
-                      && !message.toolCallSegments?.length
+                      && !hasVisibleContent
+                      && !hasStatus
                     )}
                     setScrolledUpByReason={(value) => {
                       if (value) detachFromOutput()
                     }}
+                    onStructuredAnswer={onStructuredAnswer}
+                    onResolveToolApproval={onResolveToolApproval}
+                    onSubmitErrorReport={onSubmitErrorReport}
                   />
                 ) : null}
                 {attachment ? (
