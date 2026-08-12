@@ -223,8 +223,9 @@ test('execution panel exists before the first operation and remains before a fin
     {
       visible: true,
       active: true,
-      autoOpen: true,
+      autoOpen: false,
       stepCount: 0,
+      title: '正在进行',
     },
   )
 
@@ -249,6 +250,7 @@ test('execution panel exists before the first operation and remains before a fin
       active: false,
       autoOpen: false,
       stepCount: 1,
+      title: '执行了 1 个步骤',
     },
   )
 })
@@ -263,6 +265,7 @@ test('an empty historical Assistant turn does not invent an execution panel', ()
       active: false,
       autoOpen: false,
       stepCount: 0,
+      title: '用时',
     },
   )
 })

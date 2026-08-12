@@ -12,12 +12,9 @@ import "./index.scss";
 
 export interface WorkLogProps {
   logKey: string;
+  title: string;
   active: boolean;
   autoOpen: boolean;
-  stepCount: number;
-  currentStepCount?: number;
-  completedStepCount?: number;
-  parallel?: boolean;
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
@@ -58,12 +55,9 @@ function useTicker(enabled: boolean): number {
 
 export default function WorkLog({
   logKey,
+  title,
   active,
   autoOpen,
-  stepCount,
-  currentStepCount = 0,
-  completedStepCount = 0,
-  parallel = false,
   startedAt,
   durationMs,
   hasError = false,
@@ -109,16 +103,6 @@ export default function WorkLog({
     : elapsedMs != null && elapsedMs > 0
       ? formatDuration(elapsedMs)
       : null;
-  const title = active
-    ? stepCount > 0
-      ? parallel
-        ? `已完成 ${completedStepCount}/${stepCount} 项`
-        : `正在执行第 ${Math.max(1, currentStepCount)}/${stepCount} 步`
-      : "正在进行"
-    : stepCount > 0
-      ? `执行了 ${stepCount} 个步骤`
-      : "用时";
-
   const toggleOpen = () => {
     const nextState = toggleWorkLogOpenState(openState);
     writeWorkLogOpenState(openStateStore, logKey, nextState);
