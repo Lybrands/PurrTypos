@@ -12,7 +12,7 @@ const {
   getActiveTaskPlan,
   getTaskPlanCountLabel,
 } = loadTypeScriptModule(
-  path.join(__dirname, '../Workspace/AiPanel/taskPlanSelection.ts'),
+  path.join(__dirname, 'taskPlan.ts'),
 )
 
 const model = {

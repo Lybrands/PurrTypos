@@ -7,10 +7,6 @@ import {
 import type { AiModelConfig } from '../../types'
 import { AI_MODEL_PREFS_KEY_PREFIX } from './constants'
 import type { ChatMessage } from './hooks'
-import {
-  EMPTY_RESPONSE_MESSAGE,
-  isSynthesizedToolOnlyResponse,
-} from './hooks/chatHistory'
 import { KNOWN_TOOL_CALL_LABELS } from './hooks/toolCallLabels'
 
 function normalizeStoredToolCallLabel(label: string): string {
@@ -186,13 +182,6 @@ export function parseConversationsFromApi(data: Conversation[]): ChatMessage[] {
             : []
           if (Array.isArray(segments) && segments.length > 0) {
             assistantMsg = { ...assistantMsg, toolCallSegments: segments }
-            if (isSynthesizedToolOnlyResponse(assistantMsg)) {
-              assistantMsg = {
-                ...assistantMsg,
-                content: EMPTY_RESPONSE_MESSAGE,
-                isError: true,
-              }
-            }
           }
         } catch (_) {}
       }

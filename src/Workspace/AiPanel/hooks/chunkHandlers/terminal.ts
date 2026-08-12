@@ -3,14 +3,14 @@ import { normalizeApiProvider } from "../../../../modelCatalog";
 import { type AiTaskPlan, type ChatMessage } from "../chat.types";
 import {
   EMPTY_RESPONSE_MESSAGE,
-} from "../chatHistory";
+} from "../../../../agent-runtime/chatHistory";
 import type { ChunkHandler } from "./types";
 import { presentAgentRunError } from "../../../../agent-runtime/agentErrorPresentation";
 
 const getServices = () => import('@/services').then((module) => module.services)
 
 export const MANUAL_ABORT_MESSAGE = "本轮对话已由你手动终止。";
-export { EMPTY_RESPONSE_MESSAGE } from "../chatHistory";
+export { EMPTY_RESPONSE_MESSAGE } from "../../../../agent-runtime/chatHistory";
 
 export const handleRunResultTerminal: ChunkHandler = (chunk, ctx) => {
   if (!chunk.done || !chunk.runResult) return;
