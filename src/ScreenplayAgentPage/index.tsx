@@ -85,7 +85,7 @@ import {
   AgentChunkReplay,
   getAgentConversationCapabilities,
   type AiStreamChunk,
-  type ChatMessage,
+  type AgentConversationMessage,
 } from '../agent-runtime'
 import { buildStreamOptions } from '../agent-runtime/streamOptions'
 import { getActiveTaskPlan } from '../agent-runtime/taskPlan'
@@ -291,7 +291,7 @@ function turnTiming(
   turn: ScreenplayConversationTurn,
   operation?: ScreenplayOperationProjection,
   task?: ScreenplayAgentTask,
-): Pick<ChatMessage, 'durationMs' | 'turnStartedAt'> {
+): Pick<AgentConversationMessage, 'durationMs' | 'turnStartedAt'> {
   const terminal = operation
     ? ['paused', 'succeeded', 'failed', 'canceled'].includes(operation.status)
     : ['paused', 'completed', 'failed', 'canceled'].includes(
@@ -697,7 +697,7 @@ export default function ScreenplayAgentPage({
     () => new ScreenplayConversationClient(services.screenplay),
     [],
   )
-  const agentMessages = React.useMemo<ChatMessage[]>(() => (
+  const agentMessages = React.useMemo<AgentConversationMessage[]>(() => (
     agentConversationState?.messages.map((entry) => {
       const turn = agentConversationState.turns.find((item) => item.id === entry.turnId)
       const task = agentConversationState.tasks.find((item) => item.turnId === entry.turnId)
@@ -707,7 +707,7 @@ export default function ScreenplayAgentPage({
       const streamed = entry.role === 'assistant'
         ? agentChunkReplayRef.current.assistant(entry.turnId)
         : undefined
-      const canonical: ChatMessage = {
+      const canonical: AgentConversationMessage = {
         role: entry.role,
         content: entry.content,
         sentAt: entry.createdAt || undefined,

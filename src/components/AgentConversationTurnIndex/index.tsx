@@ -1,6 +1,6 @@
 import React from 'react'
 import { PurrPopover } from '@/purr-components'
-import type { ChatMessage } from '../../agent-runtime'
+import type { AgentConversationMessage } from '../../agent-runtime'
 import Markdown from '../../Workspace/AiPanel/components/Markdown'
 import './index.scss'
 
@@ -51,12 +51,12 @@ function markdownPreview(value: string | undefined, fallback: string, maxLength:
 }
 
 export function buildAgentConversationTurnIndex(
-  messages: ChatMessage[],
+  messages: AgentConversationMessage[],
 ): AgentConversationTurnIndexItem[] {
   const turns: AgentConversationTurnIndexItem[] = []
   messages.forEach((message, dataIndex) => {
     if (message.role !== 'user') return
-    let assistant: ChatMessage | undefined
+    let assistant: AgentConversationMessage | undefined
     for (let index = dataIndex + 1; index < messages.length; index += 1) {
       const candidate = messages[index]
       if (candidate.role === 'user') break
