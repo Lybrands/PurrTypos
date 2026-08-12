@@ -10,15 +10,22 @@ import type { AgentConversationMessage } from './contracts.ts'
 
 function createTestChunkContext(
   initialMessages: AgentConversationMessage[],
-  overrides: Pick<Partial<AgentChunkHost>, 'onHostChunk' | 'onSettled'> = {},
+  overrides: Pick<
+    Partial<AgentChunkHost>,
+    'onHostChunk' | 'onSettled' | 'setRunning'
+  > = {},
 ) {
   let messages = initialMessages
+  let replacementCount = 0
   const host: AgentChunkHost = {
     readMessages: () => messages,
-    replaceMessages: (next) => { messages = next },
+    replaceMessages: (next) => {
+      replacementCount += 1
+      messages = next
+    },
     scheduleCommit: (updater) => { messages = updater(messages) },
     flushCommits: () => undefined,
-    setRunning: () => undefined,
+    setRunning: overrides.setRunning ?? (() => undefined),
     isVisible: () => true,
     onHostChunk: overrides.onHostChunk,
     onSettled: overrides.onSettled ?? (() => undefined),
@@ -36,6 +43,7 @@ function createTestChunkContext(
       now: () => 100,
     },
     readMessages: () => messages,
+    readReplacementCount: () => replacementCount,
   }
 }
 
@@ -65,4 +73,40 @@ test('runtime invokes injected host chunk handling without knowing book events',
   const chunk = { settingUpdated: { kind: 'character' as const } }
   dispatchAgentChunk(chunk, harness.context)
   assert.deepEqual(received, [chunk])
+})
+
+test('a runtime context settles only once across duplicate terminal chunks', () => {
+  const settled: string[] = []
+  const running: boolean[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    setRunning: (next) => running.push(next),
+    onSettled: (outcome) => settled.push(outcome),
+  })
+  harness.context.acc.response = '模型终稿'
+
+  dispatchAgentChunk({ done: true }, harness.context)
+  const firstTerminalMessage = harness.readMessages().at(-1)
+  dispatchAgentChunk({ error: '迟到的 transport error' }, harness.context)
+
+  assert.deepEqual(settled, ['completed'])
+  assert.deepEqual(running, [false])
+  assert.equal(harness.readReplacementCount(), 1)
+  assert.deepEqual(harness.readMessages().at(-1), firstTerminalMessage)
+})
+
+test('an early transport error stays out of content and remains visible in metadata', () => {
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ])
+
+  dispatchAgentChunk({ error: '上游连接失败' }, harness.context)
+
+  const message = harness.readMessages().at(-1)
+  assert.equal(message?.content, '')
+  assert.equal(message?.isError, true)
+  assert.equal(message?.error, '上游连接失败')
 })

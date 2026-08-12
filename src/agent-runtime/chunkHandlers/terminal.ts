@@ -14,6 +14,8 @@ import type {
 export const MANUAL_ABORT_MESSAGE = '本轮对话已由你手动终止。'
 export { EMPTY_RESPONSE_MESSAGE } from '../chatHistory.ts'
 
+const terminalContexts = new WeakSet<AgentChunkRuntimeContext>()
+
 export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done || !chunk.runResult) return
   const { status, errorCode } = chunk.runResult
@@ -30,6 +32,7 @@ export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
 
 export const handleError: AgentChunkHandler = (chunk, context) => {
   if (!chunk.error) return
+  if (!beginTerminal(context)) return true
   const { acc, host } = context
   const durationMs = elapsedDuration(context)
   const commentaryBlocks = acc.commentaryBlocks ?? []
@@ -69,9 +72,8 @@ export const handleError: AgentChunkHandler = (chunk, context) => {
         turnStartedAt: undefined,
         toolCalling: false,
         errorReport: chunk.errorReport ?? message.errorReport,
-        ...(hasInspectableProcess
-          ? { error: chunk.error, isError: false }
-          : { isError: true }),
+        error: chunk.error,
+        isError: !hasInspectableProcess,
       }
     })
   }
@@ -83,6 +85,7 @@ export const handleError: AgentChunkHandler = (chunk, context) => {
 
 export const handleDone: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done) return
+  if (!beginTerminal(context)) return true
   const { acc, host } = context
   const durationMs = elapsedDuration(context)
 
@@ -138,6 +141,12 @@ export const handleDone: AgentChunkHandler = (chunk, context) => {
         ? 'failed'
         : 'completed'
   settle(context, outcome, durationMs)
+  return true
+}
+
+function beginTerminal(context: AgentChunkRuntimeContext): boolean {
+  if (terminalContexts.has(context)) return false
+  terminalContexts.add(context)
   return true
 }
 
