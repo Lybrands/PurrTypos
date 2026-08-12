@@ -435,6 +435,50 @@ test('book history coordinator isolates same-key deletes across lifecycles', asy
   await Promise.all([staleDelete, currentDelete])
 })
 
+test('book history coordinator isolates same-key deletes across scope changes', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const stalePending = deferred<void>()
+  const currentPending = deferred<void>()
+  let visible = [historySessions[0]]
+  let calls = 0
+  let staleCleanups = 0
+  let currentCleanups = 0
+
+  const staleDelete = coordinator.runOnce('session:8', async () => {
+    calls += 1
+    const scopeRequest = coordinator.beginMutation()
+    await stalePending.promise
+    if (!coordinator.completeMutation(scopeRequest)) return
+    visible = []
+    staleCleanups += 1
+  })
+
+  coordinator.invalidateLatest()
+  coordinator.invalidateLatest()
+  visible = [historySessions[0]]
+  const currentDelete = coordinator.runOnce('session:8', async () => {
+    calls += 1
+    const scopeRequest = coordinator.beginMutation()
+    await currentPending.promise
+    if (!coordinator.completeMutation(scopeRequest)) return
+    visible = []
+    currentCleanups += 1
+  })
+
+  stalePending.resolve()
+  await staleDelete
+  assert.deepEqual(visible.map((session) => session.id), [8])
+  currentPending.resolve()
+  await currentDelete
+
+  assert.notEqual(currentDelete, staleDelete)
+  assert.equal(calls, 2)
+  assert.equal(staleCleanups, 0)
+  assert.equal(currentCleanups, 1)
+  assert.deepEqual(visible, [])
+})
+
 test('history delete invalidates an earlier load and removes the active session once', async () => {
   const coordinator = createHistoryRequestCoordinator()
   coordinator.activate()
