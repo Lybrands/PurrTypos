@@ -37,8 +37,6 @@ export function useAiSessions({
   const [prependedHistory, setPrependedHistory] = React.useState<ChatMessage[]>(
     [],
   );
-  const [editingTabId, setEditingTabId] = React.useState<number | null>(null);
-  const [editingTitle, setEditingTitle] = React.useState("");
   /** 当前 book+scope(+chapter) 维度的会话列表是否已完成首次拉取 */
   const [sessionsLoaded, setSessionsLoaded] = React.useState(false);
   const loadKeyRef = React.useRef<string>("");
@@ -172,25 +170,25 @@ export function useAiSessions({
       ? (sessions.find((s) => s.id === activeSessionId)?.title ?? "新对话")
       : "新对话";
 
-  const handleSaveTabTitle = React.useCallback(async () => {
-    if (editingTabId == null) return;
-    const title = editingTitle.trim();
-    if (!title) {
+  const handleRenameSession = React.useCallback(async (
+    sessionId: number,
+    title: string,
+  ) => {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
       appMessage.warning("名称不能为空");
-      setEditingTabId(null);
       return;
     }
     const res = await services.sessions.updateSessionTitle({
-      sessionId: editingTabId,
-      title,
+      sessionId,
+      title: nextTitle,
     });
     if (res.success) {
-      setSessions((prev) =>
-        prev.map((s) => (s.id === editingTabId ? { ...s, title } : s)),
-      );
+      setSessions((prev) => prev.map((session) => (
+        session.id === sessionId ? { ...session, title: nextTitle } : session
+      )));
     }
-    setEditingTabId(null);
-  }, [editingTabId, editingTitle, appMessage]);
+  }, [appMessage]);
 
   return {
     sessions,
@@ -200,15 +198,11 @@ export function useAiSessions({
     setActiveSessionId,
     prependedHistory,
     setPrependedHistory,
-    editingTabId,
-    setEditingTabId,
-    editingTitle,
-    setEditingTitle,
     handleNewSession,
     handleCloseTab,
     handleOpenFromHistory,
     handleDeleteFromHistory,
     currentSessionTitle,
-    handleSaveTabTitle,
+    handleRenameSession,
   };
 }

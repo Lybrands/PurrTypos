@@ -19,10 +19,7 @@ export type {
   ToolCallSegment,
 } from "../../../agent-runtime/contracts";
 
-export interface ChatMessage extends AgentConversationMessage {
-  /** AI 提议的设定 diff 卡片（人物 / 故事背景） */
-  settingDiffCards?: SettingDiffCardState[];
-}
+export type ChatMessage = AgentConversationMessage;
 
 export interface UseChatSubmitParams {
   /** 当前选中的模型配置（含 apiKey、baseUrl、name）；为空时无法发送 */
@@ -53,4 +50,8 @@ export interface UseChatSubmitParams {
    * 默认 chapter（必须先选章节）。
    */
   sessionScope?: "chapter" | "setting";
+  onAssistantAttachment?: (
+    message: AgentConversationMessage,
+    card: SettingDiffCardState,
+  ) => void;
 }

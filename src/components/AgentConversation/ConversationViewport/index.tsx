@@ -21,9 +21,11 @@ import AgentMessageEditor from '../MessageEditor'
 import AgentUserMessageBody from '../UserMessageBody'
 import { assistantMessageVisible } from '../messageVisibility'
 import {
+  advanceLiveTurnCursor,
   createScrollFollowState,
   detachScrollFollow,
   observeScrollBottom,
+  type LiveTurnCursor,
   type ScrollFollowState,
 } from '../scrollFollowPolicy'
 import AgentConversationTurnIndex, {
@@ -140,6 +142,9 @@ export default function ConversationViewport({
   const virtuosoRef = React.useRef<VirtuosoHandle>(null)
   const scrollerCleanupRef = React.useRef<(() => void) | null>(null)
   const scrollFollowStateRef = React.useRef<ScrollFollowState>(createScrollFollowState())
+  const liveTurnCursorRef = React.useRef<LiveTurnCursor>()
+  const liveTurnPinFrameRef = React.useRef<number | null>(null)
+  const liveTurnPinPendingRef = React.useRef(false)
   const isAtBottomRef = React.useRef(true)
   const [userDetached, setUserDetached] = React.useState(false)
   const [isAtBottom, setIsAtBottom] = React.useState(true)
@@ -235,7 +240,12 @@ export default function ConversationViewport({
     }
   }, [detachFromOutput])
 
-  React.useEffect(() => () => scrollerCleanupRef.current?.(), [])
+  React.useEffect(() => () => {
+    scrollerCleanupRef.current?.()
+    if (liveTurnPinFrameRef.current != null) {
+      cancelAnimationFrame(liveTurnPinFrameRef.current)
+    }
+  }, [])
 
   React.useEffect(() => {
     if (loading) setEditingMessageIndex(null)
@@ -243,11 +253,45 @@ export default function ConversationViewport({
 
   React.useEffect(() => {
     if (!initializing) return
+    liveTurnCursorRef.current = undefined
     setActiveTurnIndex(0)
     isAtBottomRef.current = true
     setIsAtBottom(true)
     applyScrollFollowState(createScrollFollowState())
   }, [applyScrollFollowState, initializing])
+
+  React.useEffect(() => {
+    if (initializing) {
+      if (liveTurnPinFrameRef.current != null) {
+        cancelAnimationFrame(liveTurnPinFrameRef.current)
+        liveTurnPinFrameRef.current = null
+      }
+      liveTurnPinPendingRef.current = false
+      liveTurnCursorRef.current = undefined
+      return
+    }
+    const observation = advanceLiveTurnCursor(liveTurnCursorRef.current, messages)
+    liveTurnCursorRef.current = observation.cursor
+    if (observation.anchorIndex == null) return
+
+    isAtBottomRef.current = true
+    setIsAtBottom(true)
+    applyScrollFollowState(createScrollFollowState())
+    liveTurnPinPendingRef.current = true
+    if (liveTurnPinFrameRef.current != null) {
+      cancelAnimationFrame(liveTurnPinFrameRef.current)
+    }
+    const anchorIndex = observation.anchorIndex
+    liveTurnPinFrameRef.current = requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: anchorIndex,
+        align: 'start',
+        behavior: 'auto',
+      })
+      liveTurnPinFrameRef.current = null
+      liveTurnPinPendingRef.current = false
+    })
+  }, [applyScrollFollowState, initializing, messages])
 
   React.useEffect(() => {
     setActiveTurnIndex((current) => (
@@ -259,6 +303,7 @@ export default function ConversationViewport({
 
   React.useEffect(() => {
     if (initializing || userDetached || messages.length === 0) return
+    if (liveTurnPinPendingRef.current) return
     const frame = requestAnimationFrame(() => {
       if (scrollFollowStateRef.current.userDetached) return
       virtuosoRef.current?.scrollToIndex({

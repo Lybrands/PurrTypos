@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import type {
   AgentConversationActivity,
   AgentConversationMessage,
 } from '../agent-runtime/contracts.ts'
 import type { AiModelConfig, AiSession, ScreenplayProject } from '../types.ts'
+import { advanceLiveTurnCursor } from '../components/AgentConversation/scrollFollowPolicy.ts'
 import {
   createScreenplayConversationController,
   type ScreenplayConversationBindings,
@@ -117,4 +119,26 @@ test('screenplay adapter derives archived conversation capabilities', () => {
     sessionNavigationDisabled: true,
     submitMode: 'queue',
   })
+})
+
+test('durable screenplay turn ids distinguish fast turns with the same timestamp', () => {
+  const pageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8')
+  assert.match(pageSource, /clientTurnId:\s*entry\.turnId/)
+
+  const createdAt = '2026-08-12 12:00:00'
+  const firstTurn: AgentConversationMessage[] = [
+    { role: 'user', content: '第一问', sentAt: createdAt, clientTurnId: 'turn-1' },
+    { role: 'assistant', content: '', sentAt: createdAt, clientTurnId: 'turn-1' },
+  ]
+  const secondTurn: AgentConversationMessage[] = [
+    ...firstTurn,
+    { role: 'user', content: '第二问', sentAt: createdAt, clientTurnId: 'turn-2' },
+    { role: 'assistant', content: '', sentAt: createdAt, clientTurnId: 'turn-2' },
+  ]
+  const first = advanceLiveTurnCursor(undefined, firstTurn)
+  const second = advanceLiveTurnCursor(first.cursor, secondTurn)
+
+  assert.deepEqual(first.cursor, { key: 'client:turn-1' })
+  assert.deepEqual(second.cursor, { key: 'client:turn-2' })
+  assert.equal(second.anchorIndex, 2)
 })

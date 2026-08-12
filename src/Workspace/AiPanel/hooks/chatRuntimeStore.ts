@@ -115,11 +115,11 @@ export function replaceChatRuntimeQueue(queue: QueuedChatSubmission[]): void {
 
 export function clearChatRuntime(sessionId: number): void {
   const hadRuntime = getAgentConversationRuntime(sessionId) != null
-  clearAgentConversationRuntime(sessionId)
   const nextQueue = queuedSubmissions.filter(
     (submission) => submission.sessionId !== sessionId,
   )
-  if (nextQueue.length === queuedSubmissions.length) return
-  queuedSubmissions = nextQueue
-  if (!hadRuntime) emitQueueChange()
+  const queueChanged = nextQueue.length !== queuedSubmissions.length
+  if (queueChanged) queuedSubmissions = nextQueue
+  clearAgentConversationRuntime(sessionId)
+  if (!hadRuntime && queueChanged) emitQueueChange()
 }

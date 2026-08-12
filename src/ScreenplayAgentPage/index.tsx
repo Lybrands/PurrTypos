@@ -695,6 +695,7 @@ export default function ScreenplayAgentPage({
       const canonical: AgentConversationMessage = {
         role: entry.role,
         content: entry.content,
+        clientTurnId: entry.turnId,
         sentAt: entry.createdAt || undefined,
         agentRunId: entry.runId || undefined,
         model: entry.model || undefined,

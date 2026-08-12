@@ -57,7 +57,7 @@ interface WorkspaceProps {
   enableVolume?: boolean
   onBack?: () => void
   onGoHome?: () => void
-  onOpenSettings?: () => void
+  onOpenSettings: () => void
   modelConfigs?: AiModelConfig[]
   onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
   syncOutlineChapter?: boolean
@@ -66,7 +66,7 @@ interface WorkspaceProps {
 
 type WorkspaceFullscreenPanel = 'right' | null
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps = {}) {
+export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps) {
   const {
     panelState,
     updateFloating,
@@ -463,6 +463,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
             <AiPanel
               modelConfigs={modelConfigs}
               onUpdateModelConfig={onUpdateModelConfig}
+              onOpenModelSettings={onOpenSettings}
               conversationSidebarOpen={panelState.conversation.open}
               onConversationSidebarOpenChange={(open) => updateFloating('conversation', { open })}
               onReady={onReady}
