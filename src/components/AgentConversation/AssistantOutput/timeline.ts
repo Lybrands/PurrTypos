@@ -316,9 +316,14 @@ export function buildAssistantTimeline(
   segments.forEach((segment, segmentIndex) => {
     appendCommentary(segment.commentaryBlockIndex, `tool-${segmentIndex}`);
     if (segment.labels.length === 0) return;
+    const timedSegment = segment.itemDurationsMs == null
+      && segment.labels.length === 1
+      && segment.durationMs != null
+      ? { ...segment, itemDurationsMs: [segment.durationMs] }
+      : segment;
     parts.push({
       type: "tools",
-      segment,
+      segment: timedSegment,
       segmentIndex,
       isLive:
         Boolean(isLastAssistant) &&

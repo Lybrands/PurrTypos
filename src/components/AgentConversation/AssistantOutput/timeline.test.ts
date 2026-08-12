@@ -539,6 +539,24 @@ test('consecutive legacy operations remain direct rows under one panel', () => {
   )
 })
 
+test('a persisted single-operation batch keeps its recorded row timing', () => {
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '模型原文',
+    toolCallSegments: [{
+      labels: ['查看章节内容'],
+      commentaryBlockIndex: null,
+      durationMs: 8598,
+    }],
+  }, {
+    messageIndex: 0,
+    isStreaming: false,
+  })
+
+  const toolPart = timeline.find((part) => part.type === 'tools')
+  assert.deepEqual(toolPart?.segment.itemDurationsMs, [8598])
+})
+
 test('runtime metadata never becomes host-authored assistant copy', () => {
   const states: AgentConversationMessage[] = [
     { role: 'assistant', content: '' },
