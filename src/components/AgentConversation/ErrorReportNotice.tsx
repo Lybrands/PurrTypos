@@ -1,16 +1,19 @@
 import React from "react";
-import type { AiErrorReport } from "../../../../types";
-import { services } from "../../../../services";
-import { recordAiDebugErrorReportStatus } from "../../../../components/AiDevInspector/store";
+import type { AiErrorReport } from "../../types";
+import { recordAiDebugErrorReportStatus } from "../AiDevInspector/store";
 
 export interface ErrorReportNoticeProps {
   message: string;
   report?: AiErrorReport;
+  onSubmitErrorReport?: (
+    reportId: string,
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 export default function ErrorReportNotice({
   message,
   report,
+  onSubmitErrorReport,
 }: ErrorReportNoticeProps) {
   const [status, setStatus] = React.useState(report?.status);
   const [busy, setBusy] = React.useState(false);
@@ -22,13 +25,11 @@ export default function ErrorReportNotice({
   }, [report?.id, report?.status]);
 
   const submit = async () => {
-    if (!report || busy || status !== "captured") return;
+    if (!report || !onSubmitErrorReport || busy || status !== "captured") return;
     setBusy(true);
     setFeedback("");
     try {
-      const result = await services.ai.submitAiErrorReport({
-        reportId: report.id,
-      });
+      const result = await onSubmitErrorReport(report.id);
       if (!result.success) {
         setFeedback(result.error || "上报失败");
         return;
@@ -60,7 +61,7 @@ export default function ErrorReportNotice({
         <div className="bubble-error-report">
           <code className="bubble-error-report-id">错误报告 {report.id}</code>
           <button type="button" onClick={copyId}>复制编号</button>
-          {status === "captured" ? (
+          {status === "captured" && onSubmitErrorReport ? (
             <button type="button" onClick={submit} disabled={busy}>
               {busy ? "处理中…" : "加入待排查"}
             </button>

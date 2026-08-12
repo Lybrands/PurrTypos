@@ -1,5 +1,5 @@
-import type { Outline, EntityId } from "../../../types";
-import type { ToolCallLabelOutcome } from "./chat.types";
+import type { Outline, EntityId } from "../../types";
+import type { ToolCallLabelOutcome } from "../../agent-runtime/contracts";
 
 /** 旧会话和旧后端事件的兼容文案；新事件优先使用 ToolSchema.display_names。 */
 export const KNOWN_TOOL_CALL_LABELS = {

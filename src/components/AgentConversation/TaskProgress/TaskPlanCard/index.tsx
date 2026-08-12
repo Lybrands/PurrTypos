@@ -7,7 +7,7 @@ import {
   ChevronRightIcon,
 } from '@/purr-components';
 import React from "react";
-import type { AiTaskPlan, AiTaskStep } from "../../hooks/chat.types";
+import type { AiTaskPlan, AiTaskStep } from "../../../../agent-runtime/contracts";
 import {
   getTaskPlanCountLabel,
   getTaskPlanProgress,

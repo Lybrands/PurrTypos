@@ -1,4 +1,4 @@
-import type { AgentConversationMessage } from '../../../../agent-runtime/contracts.ts'
+import type { AgentConversationMessage } from '../../../agent-runtime/contracts.ts'
 
 export function getErrorNoticeMessage(
   message: Pick<AgentConversationMessage, 'content' | 'error'>,

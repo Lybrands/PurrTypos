@@ -1,16 +1,16 @@
 import React from "react";
 import { AlertCircleIcon, ChevronRightIcon } from '@/purr-components';
 import {
-  applyWorkLogAutoOpen,
-  getInitialWorkLogOpenState,
-  readWorkLogOpenState,
-  toggleWorkLogOpenState,
-  writeWorkLogOpenState,
-  type WorkLogOpenState,
+  applyExecutionLogAutoOpen,
+  getInitialExecutionLogOpenState,
+  readExecutionLogOpenState,
+  toggleExecutionLogOpenState,
+  writeExecutionLogOpenState,
+  type ExecutionLogOpenState,
 } from "./state";
 import "./index.scss";
 
-export interface WorkLogProps {
+export interface ExecutionLogProps {
   logKey: string;
   title: string;
   active: boolean;
@@ -21,7 +21,7 @@ export interface WorkLogProps {
   children: React.ReactNode;
 }
 
-const openStateStore = new Map<string, WorkLogOpenState>();
+const openStateStore = new Map<string, ExecutionLogOpenState>();
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
@@ -53,7 +53,7 @@ function useTicker(enabled: boolean): number {
   return now;
 }
 
-export default function WorkLog({
+export default function ExecutionLog({
   logKey,
   title,
   active,
@@ -62,9 +62,9 @@ export default function WorkLog({
   durationMs,
   hasError = false,
   children,
-}: WorkLogProps) {
+}: ExecutionLogProps) {
   const [openState, setOpenState] = React.useState(() =>
-    getInitialWorkLogOpenState(
+    getInitialExecutionLogOpenState(
       openStateStore.get(logKey),
       autoOpen,
     ),
@@ -73,19 +73,19 @@ export default function WorkLog({
   const now = useTicker(active && startedAt != null);
 
   React.useEffect(() => {
-    setOpenState(getInitialWorkLogOpenState(
-      readWorkLogOpenState(openStateStore, logKey),
+    setOpenState(getInitialExecutionLogOpenState(
+      readExecutionLogOpenState(openStateStore, logKey),
       autoOpen,
     ));
   }, [logKey]);
 
   React.useEffect(() => {
-    const nextState = applyWorkLogAutoOpen(
+    const nextState = applyExecutionLogAutoOpen(
       openState,
       autoOpen,
     );
     if (nextState === openState) return;
-    writeWorkLogOpenState(openStateStore, logKey, nextState);
+    writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
   }, [autoOpen, logKey, openState]);
 
@@ -99,8 +99,8 @@ export default function WorkLog({
       ? formatDuration(elapsedMs)
       : null;
   const toggleOpen = () => {
-    const nextState = toggleWorkLogOpenState(openState);
-    writeWorkLogOpenState(openStateStore, logKey, nextState);
+    const nextState = toggleExecutionLogOpenState(openState);
+    writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
   };
 
