@@ -7,15 +7,15 @@ import {
   PurrPopover,
   type PurrPopoverProps,
 } from '@/purr-components'
-import type { AiTaskPlan } from '../../agent-runtime'
+import type { AiTaskPlan } from '../../../agent-runtime'
 import {
   getTaskPlanLabel,
   TaskPlanSteps,
-} from '../AgentConversation/TaskProgress/TaskPlanCard'
+} from './TaskPlanCard'
 import {
   getTaskPlanCountLabel,
   getTaskPlanProgress,
-} from '../../agent-runtime/taskPlan'
+} from '../../../agent-runtime/taskPlan'
 import { localizeTaskPlan } from './localization'
 import './index.scss'
 

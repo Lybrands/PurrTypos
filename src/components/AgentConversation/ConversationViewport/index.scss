@@ -1,5 +1,6 @@
 .agent-conversation-shell {
   position: relative;
+  flex: 1;
   min-height: 0;
   overflow: hidden;
 }
@@ -13,6 +14,11 @@
     linear-gradient(180deg, color-mix(in srgb, var(--accent-light) 13%, transparent), transparent 110px),
     var(--bg-surface);
   scrollbar-width: thin;
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
 }
 
 .agent-conversation-shell:has(.chat-turn-index) .agent-conversation {
@@ -108,6 +114,14 @@
   width: 100%;
   max-width: none;
   margin: 12px 0 0;
+}
+
+.agent-conversation__scroll-to-bottom.purr-button {
+  position: absolute;
+  z-index: 4;
+  right: 18px;
+  bottom: 18px;
+  box-shadow: var(--shadow-md);
 }
 
 @media (max-width: 720px) {

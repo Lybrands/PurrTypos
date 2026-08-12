@@ -7,7 +7,7 @@ import type { AiModelConfig, EntityId } from "../../../../types";
 import AgentConversationTurnIndex, {
   buildAgentConversationTurnIndex,
   type AgentConversationTurnIndexItem,
-} from '../../../../components/AgentConversationTurnIndex';
+} from '../../../../components/AgentConversation/TurnIndex';
 import { type ChatMessage } from "../../hooks";
 import { type AiContextBarBindings } from "../AiContextBar";
 import { type ModelSelectionBindings } from "../AiComposeBottom";
