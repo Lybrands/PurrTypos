@@ -51,6 +51,126 @@ test('canonical timeline filters model operations and groups consecutive work on
   }).title, '正在进行')
 })
 
+test('canonical timeline retains compaction and sequenced delegation without duplicating operations', () => {
+  const base = initialCanonicalOutputState()
+  const delegation = {
+    delegationId: 'delegation-1',
+    parentRunId: 'run-1',
+    rootRunId: 'run-1',
+    childRunId: 'run-child-1',
+    agentRole: 'reviewer',
+    agentTitle: '审阅 Agent',
+    objective: '检查连续性',
+    unitId: null,
+    attempt: null,
+    status: 'running' as const,
+    required: true,
+    priority: 0,
+    resultSummary: null,
+    error: null,
+  }
+  const message: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    contextCompaction: { status: 'completed', compactedTurnCount: 4 },
+    delegations: [delegation],
+    canonicalOutput: {
+      ...base,
+      commentaryBlocks: [{
+        outputStreamId: 'commentary-1',
+        firstSequence: 1,
+        lastSequence: 1,
+        startedAt: '2026-08-12T00:00:00Z',
+        text: '先检查素材。',
+        committed: true,
+        aborted: false,
+      }],
+      operationOrder: [
+        'compaction-1',
+        'model-1',
+        'tool-1',
+        'delegation-operation-1',
+      ],
+      operations: {
+        'compaction-1': {
+          operationId: 'compaction-1',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'context_compaction',
+          firstSequence: 0,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: {} },
+        },
+        'model-1': {
+          operationId: 'model-1',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'model',
+          firstSequence: 2,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: {} },
+        },
+        'tool-1': {
+          operationId: 'tool-1',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'tool',
+          firstSequence: 3,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: {} },
+        },
+        'delegation-operation-1': {
+          operationId: 'delegation-operation-1',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'delegation',
+          firstSequence: 4,
+          status: 'running',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: {} },
+        },
+      },
+      delegationOrder: ['delegation-1'],
+      delegations: {
+        'delegation-1': {
+          delegationId: 'delegation-1',
+          firstSequence: 4,
+          parentRunId: 'run-1',
+          childRunId: 'run-child-1',
+          agentRole: 'reviewer',
+          agentTitle: '审阅 Agent',
+          objective: '检查连续性',
+          status: 'running',
+          errorCode: null,
+          output: initialCanonicalOutputState(),
+        },
+      },
+    },
+  }
+
+  const timeline = buildAssistantTimeline(message, { messageIndex: 0 })
+  assert.deepEqual(timeline.map((part) => part.type), [
+    'contextCompaction',
+    'commentary',
+    'operation',
+    'delegations',
+  ])
+  assert.deepEqual(
+    timeline
+      .filter((part) => part.type === 'operation')
+      .map((part) => part.operation.kind),
+    ['tool'],
+  )
+  assert.deepEqual(
+    groupConsecutiveWorkSteps(timeline, 'turn-canonical')
+      .map((part) => part.type),
+    ['contextCompaction', 'commentary', 'operation', 'delegations'],
+  )
+})
+
 test('canonical timeline preserves commentary sequence and the real provider stream', () => {
   const base = initialCanonicalOutputState()
   const message: AgentConversationMessage = {

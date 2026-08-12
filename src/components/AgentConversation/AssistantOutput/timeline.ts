@@ -208,11 +208,38 @@ export function buildAssistantTimeline(
   const emittedBlocks = new Set<number>();
 
   if (message.canonicalOutput) {
+    const canonicalOutput = message.canonicalOutput;
     const canonicalParts: Array<{
       sequence: number;
       part: AssistantTimelinePart;
     }> = [];
-    message.canonicalOutput.commentaryBlocks
+    if (message.contextCompaction) {
+      const compactionOperation = canonicalOutput.operationOrder
+        .map((operationId) => canonicalOutput.operations[operationId])
+        .find((operation) => operation?.kind === "context_compaction");
+      const compactionRuntime = canonicalOutput.latestRuntimeEvent;
+      canonicalParts.push({
+        sequence: compactionOperation?.firstSequence
+          ?? (compactionRuntime?.eventType.startsWith("conversation.compaction.")
+            ? compactionRuntime.sequence
+            : Number.NEGATIVE_INFINITY),
+        part: { type: "contextCompaction", state: message.contextCompaction },
+      });
+    }
+    if (message.delegations?.length) {
+      const delegationSequences = message.delegations.flatMap((delegation) => {
+        const sequence = canonicalOutput.delegations[delegation.delegationId]
+          ?.firstSequence;
+        return sequence == null ? [] : [sequence];
+      });
+      canonicalParts.push({
+        sequence: delegationSequences.length > 0
+          ? Math.min(...delegationSequences)
+          : Number.NEGATIVE_INFINITY,
+        part: { type: "delegations", items: message.delegations },
+      });
+    }
+    canonicalOutput.commentaryBlocks
       .filter((block) => !block.aborted && block.text.trim())
       .forEach((block) => {
         canonicalParts.push({
@@ -225,11 +252,16 @@ export function buildAssistantTimeline(
           },
         });
     });
-    message.canonicalOutput.operationOrder.forEach((operationId) => {
-      const operation = message.canonicalOutput?.operations[operationId];
+    canonicalOutput.operationOrder.forEach((operationId) => {
+      const operation = canonicalOutput.operations[operationId];
       // Model lifecycle stays canonical for timing, cancellation and diagnostics,
       // but it is not a user-facing execution step.
-      if (!operation || operation.kind === "model") return;
+      if (
+        !operation
+        || operation.kind === "model"
+        || (operation.kind === "context_compaction" && message.contextCompaction)
+        || (operation.kind === "delegation" && message.delegations?.length)
+      ) return;
       canonicalParts.push({
         sequence: operation.firstSequence,
         part: {
@@ -243,7 +275,7 @@ export function buildAssistantTimeline(
       .sort((left, right) => left.sequence - right.sequence)
       .forEach(({ part }) => parts.push(part));
 
-    const canonicalMarkdown = message.canonicalOutput.finalStreamStatus === "open"
+    const canonicalMarkdown = canonicalOutput.finalStreamStatus === "open"
       ? message.streamingContent || message.content
       : message.content;
     if (canonicalMarkdown.trim()) {
