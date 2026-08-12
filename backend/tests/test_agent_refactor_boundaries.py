@@ -9,6 +9,7 @@ fail until the architecture review deliberately changes this guard.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 
@@ -71,6 +72,7 @@ SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
     / "AssistantOutput"
     / "timeline.ts",
     SCREENPLAY_CONVERSATION_CONTROLLER,
+    SCREENPLAY_PAGE,
 )
 PHASE_FOUR_REMOVED_PATHS = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
@@ -149,6 +151,12 @@ def _relative_backend(path: Path) -> str:
 
 def _screenplay_count(path: Path) -> int:
     return path.read_text(encoding="utf-8").casefold().count("screenplay")
+
+
+def _source_between(source: str, start: str, end: str) -> str:
+    assert source.count(start) == 1, f"Expected one source anchor: {start}"
+    assert source.count(end) == 1, f"Expected one source anchor: {end}"
+    return source.split(start, 1)[1].split(end, 1)[0]
 
 
 def _class_fields(path: Path, class_name: str) -> set[str]:
@@ -353,6 +361,21 @@ def test_screenplay_conversation_never_invents_assistant_copy():
     assert "assistant_content=result.final_response" not in service
 
 
+def test_screenplay_page_projects_durable_content_from_the_canonical_entry():
+    source = SCREENPLAY_PAGE.read_text(encoding="utf-8")
+    projection = _source_between(
+        source,
+        "  const agentMessages = React.useMemo<AgentConversationMessage[]>(() => (",
+        "  const activeConversationTask = React.useMemo",
+    )
+
+    assert len(re.findall(r"\bcontent:\s*entry\.content\s*,", projection)) == 1
+    assert re.search(
+        r"\bcontent:\s*operation\s*\?\s*canonical\.content\s*:",
+        projection,
+    )
+
+
 def test_screenplay_page_consumes_the_shared_agent_chunk_runtime():
     forbidden = {
         "aiChatStream",
@@ -367,21 +390,66 @@ def test_screenplay_page_consumes_the_shared_agent_chunk_runtime():
         "proposalProvenance",
     }
     source = SCREENPLAY_PAGE.read_text(encoding="utf-8")
-    controller_source = SCREENPLAY_CONVERSATION_CONTROLLER.read_text(
-        encoding="utf-8"
-    )
-    panel_source = SHARED_AGENT_CONVERSATION_PANEL.read_text(encoding="utf-8")
     violations = sorted(token for token in forbidden if token in source)
     assert not violations, "Legacy screenplay page runtime returned: " + ", ".join(
         violations
     )
     assert "AgentChunkReplay" in source
     assert "onChunks:" in source
-    assert "editMessage: (index, content) => runAgent(content, index)" in source
-    assert "actions: bindings.actions" in controller_source
-    assert "onEditMessage={controller.actions.editMessage}" in panel_source
-    assert "controller={screenplayConversationController}" in source
     assert "truncateFromTurn" in source
+
+
+def test_screenplay_edit_wiring_reaches_the_shared_panel_controller():
+    source = SCREENPLAY_PAGE.read_text(encoding="utf-8")
+    controller_source = SCREENPLAY_CONVERSATION_CONTROLLER.read_text(
+        encoding="utf-8"
+    )
+    panel_source = SHARED_AGENT_CONVERSATION_PANEL.read_text(encoding="utf-8")
+    actions = _source_between(
+        source,
+        "  const screenplayConversationActions = React.useMemo<",
+        "  const screenplayConversationBindings = React.useMemo<",
+    )
+    bindings = _source_between(
+        source,
+        "  const screenplayConversationBindings = React.useMemo<",
+        "  const screenplayConversationController = useScreenplayConversationController(",
+    )
+    controller = _source_between(
+        source,
+        "  const screenplayConversationController = useScreenplayConversationController(",
+        "  const screenplayConversationExtensions = useScreenplayConversationExtensions(",
+    )
+    controller_mapping = _source_between(
+        controller_source,
+        "export function createScreenplayConversationController(",
+        "export function useScreenplayConversationController(",
+    )
+    controller_hook = controller_source.split(
+        "export function useScreenplayConversationController(",
+        1,
+    )[1]
+
+    assert re.search(
+        r"\beditMessage:\s*\(index,\s*content\)\s*=>\s*"
+        r"runAgent\(content,\s*index\)\s*,",
+        actions,
+    )
+    assert re.search(r"\bactions:\s*screenplayConversationActions\s*,", bindings)
+    assert re.search(r"^\s*screenplayConversationBindings,\s*\)$", controller)
+    assert len(re.findall(
+        r"\{screenplayConversationController\s*\?\s*\(\s*"
+        r"<AgentConversationPanel\s+"
+        r"controller=\{screenplayConversationController\}",
+        source,
+    )) == 1
+    assert re.search(r"\bactions:\s*bindings\.actions\s*,", controller_mapping)
+    assert re.search(
+        r"createScreenplayConversationController\(bindings\)",
+        controller_hook,
+    )
+    assert re.search(r"\[bindings\]", controller_hook)
+    assert "onEditMessage={controller.actions.editMessage}" in panel_source
 
 
 def test_phase_four_removed_compatibility_modules_stay_deleted():
