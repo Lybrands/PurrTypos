@@ -220,10 +220,12 @@ export function buildAssistantTimeline(
             regionKey: `${messageIndex}-canonical-commentary-${block.outputStreamId}`,
           },
         });
-      });
+    });
     message.canonicalOutput.operationOrder.forEach((operationId) => {
       const operation = message.canonicalOutput?.operations[operationId];
-      if (!operation) return;
+      // Model lifecycle stays canonical for timing, cancellation and diagnostics,
+      // but it is not a user-facing execution step.
+      if (!operation || operation.kind === "model") return;
       canonicalParts.push({
         sequence: operation.firstSequence,
         part: {
@@ -322,7 +324,6 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     return toolCallDisplayRow(toolName, {}, [], []).label;
   }
   const labels: Record<string, string> = {
-    model: "调用模型",
     validation: "校验输出",
     context_compaction: "压缩上下文",
     delegation: "委派子 Agent",
