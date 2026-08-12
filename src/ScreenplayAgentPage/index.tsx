@@ -6,6 +6,7 @@ import AgentComposer from '../components/AgentConversation/Composer'
 import AgentConversationIndex, {
   type AgentConversationActivity,
 } from '../components/AgentConversation/ConversationIndex'
+import { toAgentConversationSession } from '../components/AgentConversation/sessionView'
 import AgentTaskProgress from '../components/AgentConversation/TaskProgress'
 import {
   hydrateAiDebugRunSnapshot,
@@ -743,6 +744,12 @@ export default function ScreenplayAgentPage({
         : canonical
     }) ?? []
   ), [agentChunkVersion, agentConversationState])
+  const agentConversationSessions = React.useMemo(
+    () => agentSessions.map((session) => (
+      toAgentConversationSession(session, session.create_time)
+    )),
+    [agentSessions],
+  )
   const activeConversationTask = React.useMemo(() => (
     [...(agentConversationState?.tasks ?? [])].reverse().find(
       (task) => task.status === 'queued' || task.status === 'running',
@@ -4014,7 +4021,7 @@ export default function ScreenplayAgentPage({
                 <div className="screenplay-agent-studio__body">
                   {agentConversationIndexOpen ? (
                     <AgentConversationIndex
-                      sessions={agentSessions}
+                      sessions={agentConversationSessions}
                       activeSessionId={agentSessionId}
                       editingSessionId={editingAgentSessionId}
                       editingTitle={editingAgentSessionTitle}
