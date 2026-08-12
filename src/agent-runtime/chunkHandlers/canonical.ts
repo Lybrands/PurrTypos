@@ -1,24 +1,24 @@
 import type {
   AiAgentDelegation,
   AiContextCompactionState,
-} from '../../../../types'
+} from '../../types.ts'
 import {
   initialCanonicalOutputState,
   isCanonicalOutputEvent,
   reduceCanonicalOutput,
-} from '../../../../agent-runtime/canonicalOutput'
-import { projectContextBudget } from '../../../../agent-runtime/contextBudgetProjection'
+} from '../canonicalOutput.ts'
+import { projectContextBudget } from '../contextBudgetProjection.ts'
 import type {
+  AgentConversationMessage,
   AiSubAgentActivity,
   AiTaskPlan,
   AiTaskStep,
-  ChatMessage,
-} from '../chat.types'
-import type { AiStreamChunk, ChunkCtx } from './types'
+} from '../contracts.ts'
+import type { AgentChunkRuntimeContext, AiStreamChunk } from './types.ts'
 
 export function handleCanonicalOutput(
   chunk: AiStreamChunk,
-  ctx: ChunkCtx,
+  ctx: AgentChunkRuntimeContext,
 ): boolean {
   if (!isCanonicalOutputEvent(chunk)) return false
 
@@ -44,12 +44,12 @@ export function handleCanonicalOutput(
     delegationActivity(state.delegations[delegationId]),
   )
 
-  if (ctx.isVisibleSession()) {
-    ctx.scheduleCommit((previous) => {
+  if (ctx.host.isVisible()) {
+    ctx.host.scheduleCommit((previous) => {
       const next = [...previous]
       const last = next.at(-1)
       if (!last || last.role !== 'assistant') return previous
-      const message = last as ChatMessage
+      const message = last as AgentConversationMessage
       const finalCommitted = state.finalStreamStatus === 'committed'
       next[next.length - 1] = {
         ...message,
@@ -86,7 +86,7 @@ export function handleCanonicalOutput(
 }
 
 function applyCanonicalRuntimeView(
-  ctx: ChunkCtx,
+  ctx: AgentChunkRuntimeContext,
   runtime: {
     eventType: string
     data: Record<string, unknown>
@@ -153,7 +153,7 @@ function applyCanonicalRuntimeView(
     ctx.acc.contextBudget = projectContextBudget(
       ctx.acc.contextBudget,
       data,
-      { configId: ctx.cfg?.id, name: ctx.apiModelName },
+      ctx.modelIdentity,
     )
     return
   }
@@ -372,7 +372,7 @@ function delegationView(
 
 function delegationActivity(
   value: Parameters<typeof delegationView>[0] & {
-    output: import('../../../../agent-runtime/canonicalOutput').CanonicalOutputState
+    output: import('../canonicalOutput.ts').CanonicalOutputState
   },
 ): AiSubAgentActivity {
   const committed = value.output.finalStreamStatus === 'committed'

@@ -39,13 +39,30 @@ export {
   type StreamRequestOptions,
 } from './streamOptions'
 export {
-  dispatchChunk,
-  type AccState,
+  createCommitScheduler,
+  dispatchAgentChunk,
+  initialAgentAccumulator,
+  type AgentAccumulator,
+  type AgentChunkHost,
+  type AgentChunkRuntimeContext,
+  type AgentModelIdentity,
+  type AgentRunOutcome,
+  type AgentTerminalSnapshot,
   type AiStreamChunk,
-  type ChunkCtx,
-} from '../Workspace/AiPanel/hooks/chunkHandlers'
-export { createCommitScheduler } from '../Workspace/AiPanel/hooks/chunkHandlers/commitScheduler'
-export { parseConversationsFromApi } from '../Workspace/AiPanel/utils'
+} from './chunkHandlers/index'
+export {
+  clearAgentConversationRuntime,
+  getAgentConversationActivities,
+  getAgentConversationRuntime,
+  getAgentConversationRuntimeVersion,
+  replaceAgentConversationMessages,
+  setAgentConversationActivity,
+  setAgentConversationRunning,
+  setAgentConversationStreamId,
+  subscribeAgentConversationRuntime,
+  updateAgentConversationMessages,
+  type AgentConversationRuntime,
+} from './runtimeStore'
 export {
   getAgentConversationCapabilities,
   type AgentConversationCapabilities,

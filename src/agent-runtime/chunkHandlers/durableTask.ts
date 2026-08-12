@@ -1,21 +1,21 @@
-import type { ChatMessage } from '../chat.types'
-import type { ChunkHandler } from './types'
+import type { AgentConversationMessage } from '../contracts.ts'
+import type { AgentChunkHandler } from './types.ts'
 
 function updateLastAssistant(
-  ctx: Parameters<ChunkHandler>[1],
-  updater: (message: ChatMessage) => ChatMessage,
+  ctx: Parameters<AgentChunkHandler>[1],
+  updater: (message: AgentConversationMessage) => AgentConversationMessage,
 ): void {
-  if (!ctx.isVisibleSession()) return
-  ctx.scheduleCommit((previous) => {
+  if (!ctx.host.isVisible()) return
+  ctx.host.scheduleCommit((previous) => {
     const next = [...previous]
     const last = next.at(-1)
     if (!last || last.role !== 'assistant') return previous
-    next[next.length - 1] = updater(last as ChatMessage)
+    next[next.length - 1] = updater(last)
     return next
   })
 }
 
-export const handleLongTaskDispatched: ChunkHandler = (chunk, ctx) => {
+export const handleLongTaskDispatched: AgentChunkHandler = (chunk, ctx) => {
   const dispatched = chunk.longTaskDispatched
   if (!dispatched?.taskId) return
   ctx.acc.longTaskId = dispatched.taskId
@@ -25,7 +25,7 @@ export const handleLongTaskDispatched: ChunkHandler = (chunk, ctx) => {
   }))
 }
 
-export const handleLongTaskProgress: ChunkHandler = (chunk, ctx) => {
+export const handleLongTaskProgress: AgentChunkHandler = (chunk, ctx) => {
   const progress = chunk.longTaskProgress
   if (!progress?.taskId) return
   ctx.acc.longTaskId = progress.taskId

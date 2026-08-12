@@ -10,14 +10,14 @@ const {
   handleLongTaskDispatched,
   handleLongTaskProgress,
 } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/durableTask.ts'),
+  path.join(__dirname, '../../../agent-runtime/chunkHandlers/durableTask.ts'),
 )
 const {
   EMPTY_RESPONSE_MESSAGE,
   handleDone,
   MANUAL_ABORT_MESSAGE,
 } = loadTypeScriptModule(
-  path.join(__dirname, 'chunkHandlers/terminal.ts'),
+  path.join(__dirname, '../../../agent-runtime/chunkHandlers/terminal.ts'),
 )
 const {
   countQueuedForSession,
@@ -61,6 +61,30 @@ const {
 const loadWorkLogState = () => loadTypeScriptModule(
   path.join(__dirname, '../components/WorkLog/state.ts'),
 )
+
+function createAgentChunkContext({
+  acc,
+  readMessages,
+  replaceMessages,
+  setRunning = () => {},
+  onSettled = () => {},
+}) {
+  return {
+    acc,
+    sessionId: acc.sessionId ?? 0,
+    modelIdentity: { name: 'test-model' },
+    now: () => performance.now(),
+    host: {
+      readMessages,
+      replaceMessages,
+      scheduleCommit: (updater) => replaceMessages(updater(readMessages())),
+      flushCommits: () => {},
+      setRunning,
+      isVisible: () => true,
+      onSettled,
+    },
+  }
+}
 
 test('legacy tool label fallback remains localized for persisted sessions', () => {
   for (const name of Object.keys(KNOWN_TOOL_CALL_LABELS)) {
@@ -503,13 +527,11 @@ test('consecutive operations stay as direct rows under the single execution pane
 test('durable task progress stays out of the work log', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   const acc = {}
-  const ctx = {
+  const ctx = createAgentChunkContext({
     acc,
-    isVisibleSession: () => true,
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-  }
+    readMessages: () => conversations,
+    replaceMessages: (messages) => { conversations = messages },
+  })
 
   handleLongTaskProgress({
     longTaskProgress: {
@@ -585,32 +607,20 @@ test('manual abort replaces an empty response with an explicit notice', () => {
   const acc = {
     response: '',
     commentary: '',
-    bookId: 1,
     sessionId: 0,
-    chapterId: 1,
-    needsTitle: false,
     userText: 'stop this response',
     model: '',
     turnStartedAt: performance.now(),
     commentaryBlocks: [],
     commentaryDurationsMs: [],
   }
-  const ctx = {
+  const ctx = createAgentChunkContext({
     acc,
-    cfg: {},
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    flushCommits: () => {},
-    setConversations: (updater) => {
-      conversations = updater(conversations)
-    },
-    setLoading: (next) => {
-      loading = next
-    },
-    cleanup: () => {
-      cleanedUp = true
-    },
-  }
+    readMessages: () => conversations,
+    replaceMessages: (messages) => { conversations = messages },
+    setRunning: (next) => { loading = next },
+    onSettled: () => { cleanedUp = true },
+  })
 
   assert.equal(handleDone({ done: true, aborted: true }, ctx), true)
   assert.equal(conversations[0].content, '')
@@ -625,28 +635,18 @@ test('manual abort preserves partial output and exposes a separate terminal stat
   const acc = {
     response: '已经完成一部分',
     commentary: '',
-    bookId: 1,
     sessionId: 0,
-    chapterId: 1,
-    needsTitle: false,
     userText: 'stop this response',
     model: '',
     turnStartedAt: performance.now(),
     commentaryBlocks: [],
     commentaryDurationsMs: [],
   }
-  const ctx = {
+  const ctx = createAgentChunkContext({
     acc,
-    cfg: {},
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    flushCommits: () => {},
-    setConversations: (updater) => {
-      conversations = updater(conversations)
-    },
-    setLoading: () => {},
-    cleanup: () => {},
-  }
+    readMessages: () => conversations,
+    replaceMessages: (messages) => { conversations = messages },
+  })
 
   assert.equal(handleDone({ done: true, aborted: true }, ctx), true)
   assert.equal(conversations[0].content, '已经完成一部分')
@@ -667,10 +667,7 @@ test('completed stream without visible model content becomes an explicit failure
   const acc = {
     response: '',
     commentary: 'internal reasoning only',
-    bookId: 1,
     sessionId: 0,
-    chapterId: 1,
-    needsTitle: false,
     userText: 'analyze the characters',
     model: '',
     turnStartedAt: performance.now(),
@@ -678,22 +675,13 @@ test('completed stream without visible model content becomes an explicit failure
     commentaryBlocks: [],
     commentaryDurationsMs: [],
   }
-  const ctx = {
+  const ctx = createAgentChunkContext({
     acc,
-    cfg: {},
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    flushCommits: () => {},
-    setConversations: (updater) => {
-      conversations = updater(conversations)
-    },
-    setLoading: (next) => {
-      loading = next
-    },
-    cleanup: (nextOutcome) => {
-      outcome = nextOutcome
-    },
-  }
+    readMessages: () => conversations,
+    replaceMessages: (messages) => { conversations = messages },
+    setRunning: (next) => { loading = next },
+    onSettled: (nextOutcome) => { outcome = nextOutcome },
+  })
 
   assert.equal(handleDone({ done: true }, ctx), true)
   assert.equal(conversations[0].content, '')
@@ -710,33 +698,19 @@ test('durable task metadata does not replace Provider-authored final text', () =
   const acc = {
     response: '',
     commentary: '',
-    bookId: 1,
     sessionId: 0,
-    chapterId: 1,
-    needsTitle: false,
     userText: 'write all remaining scenes',
     model: '',
     turnStartedAt: performance.now(),
     commentaryBlocks: [],
     commentaryDurationsMs: [],
   }
-  const ctx = {
+  const ctx = createAgentChunkContext({
     acc,
-    cfg: {},
-    apiModelName: 'test-model',
-    isVisibleSession: () => true,
-    flushCommits: () => {},
-    scheduleCommit: (updater) => {
-      conversations = updater(conversations)
-    },
-    setConversations: (updater) => {
-      conversations = updater(conversations)
-    },
-    setLoading: () => {},
-    cleanup: (nextOutcome) => {
-      outcome = nextOutcome
-    },
-  }
+    readMessages: () => conversations,
+    replaceMessages: (messages) => { conversations = messages },
+    onSettled: (nextOutcome) => { outcome = nextOutcome },
+  })
 
   handleLongTaskDispatched({
     longTaskDispatched: {

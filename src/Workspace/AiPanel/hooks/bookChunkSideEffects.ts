@@ -1,11 +1,17 @@
-import type { ChunkHandler } from "./types";
+import type {
+  AgentChunkHost,
+  AiStreamChunk,
+} from '../../../agent-runtime/chunkHandlers/types'
 
 /**
  * AI 工具 editChapterContent 不再直接落库，改为推送 diff 提议给前端，
  * 由 DiffProvider 监听并 startDiff，最终用户在 overlay 接受后走 commitChapterDiff。
  */
-export const handleProposedChapterDiff: ChunkHandler = (chunk, ctx) => {
-  if (!chunk.proposedChapterDiff || !ctx.isVisibleSession()) return;
+export function handleProposedChapterDiff(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (!chunk.proposedChapterDiff || !host.isVisible()) return;
   const p = chunk.proposedChapterDiff;
   if (p.chapterId == null || typeof p.proposedText !== "string") return;
   window.dispatchEvent(
@@ -18,21 +24,27 @@ export const handleProposedChapterDiff: ChunkHandler = (chunk, ctx) => {
       },
     }),
   );
-};
+}
 
 /**
  * AI 写工具改动了设定类数据（人物 / 故事背景 / 大纲）：
  * 广播给打开中的设定面板（CharacterTab / StoryBackgroundTab 等）刷新展示。
  */
-export const handleSettingUpdated: ChunkHandler = (chunk, ctx) => {
-  if (!chunk.settingUpdated || !ctx.isVisibleSession()) return;
+export function handleSettingUpdated(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (!chunk.settingUpdated || !host.isVisible()) return;
   window.dispatchEvent(
     new CustomEvent("setting-updated", { detail: chunk.settingUpdated }),
   );
-};
+}
 
-export const handleChapterCreated: ChunkHandler = (chunk, ctx) => {
-  if (chunk.chapterCreated == null || !ctx.isVisibleSession()) return;
+export function handleChapterCreated(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (chunk.chapterCreated == null || !host.isVisible()) return;
   window.dispatchEvent(
     new CustomEvent("chapter-created", {
       detail: {
@@ -42,4 +54,4 @@ export const handleChapterCreated: ChunkHandler = (chunk, ctx) => {
       },
     }),
   );
-};
+}
