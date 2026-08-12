@@ -85,6 +85,15 @@ def _tool_handler(catalog, name: str):
     )
 
 
+async def _canonical_public_events(db, run_id: str):
+    return await db.fetch_all(
+        "SELECT kind, payload_json FROM ai_agent_run_events "
+        "WHERE run_id = ? AND event_id IS NOT NULL "
+        "AND visibility = 'public' ORDER BY id",
+        [run_id],
+    )
+
+
 def _source_state(*, target_role: str = "creativeBrief") -> ExecutionState:
     return ExecutionState(
         domain={
@@ -806,14 +815,9 @@ async def test_screenplay_tool_run_publishes_no_host_text_and_redacts_candidate_
         await composition.shutdown()
 
     assert result.candidate["payload"]["title"] == "人物驱动简报"
-    rows = await screenplay_tool_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    )
-    chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert not any("commentaryDelta" in chunk for chunk in chunks)
-    assert not any("toolCalls" in chunk for chunk in chunks)
-    assert not any("delta" in chunk for chunk in chunks)
-    assert "人物驱动简报" not in json.dumps(chunks, ensure_ascii=False)
+    events = await _canonical_public_events(screenplay_tool_db, result.run_id)
+    assert "人物驱动简报" not in json.dumps(events, ensure_ascii=False)
+    assert not any(row["kind"] == "provider.content_delta" for row in events)
     assert gateway.invocations
     assert all(
         invocation.reasoning_mode is ReasoningMode.DISABLED
@@ -866,11 +870,11 @@ async def test_screenplay_tool_length_fails_without_replaying_reasoning_mode(
     assert [item.reasoning_mode for item in gateway.invocations] == [
         ReasoningMode.DEFAULT,
     ]
-    rows = await screenplay_tool_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
+    run = await screenplay_tool_db.fetch_one(
+        "SELECT id FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
     )
-    chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert not any("candidate" in chunk for chunk in chunks)
+    events = await _canonical_public_events(screenplay_tool_db, str(run["id"]))
+    assert "candidate" not in json.dumps(events, ensure_ascii=False)
 
 
 async def test_host_prepared_scene_is_host_committed_without_tool_json(
@@ -934,19 +938,14 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
     )
     assert len(gateway.invocations) == 1
     assert gateway.invocations[0].tools == ()
-    rows = await screenplay_tool_db.fetch_all(
-        "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-    )
-    chunks = [json.loads(row["chunk_json"]) for row in rows]
-    assert not any("toolCalls" in chunk for chunk in chunks)
-    assert not any("commentaryDelta" in chunk for chunk in chunks)
-    assert "外景 石墙前" not in json.dumps(chunks, ensure_ascii=False)
+    events = await _canonical_public_events(screenplay_tool_db, result.run_id)
+    assert "外景 石墙前" not in json.dumps(events, ensure_ascii=False)
     completed = next(
-        chunk for chunk in chunks
-        if chunk.get("kind") == "run.lifecycle"
-        and chunk.get("payload", {}).get("status") == "done"
+        json.loads(str(row["payload_json"])) for row in events
+        if row["kind"] == "run.lifecycle"
+        and json.loads(str(row["payload_json"])).get("status") == "done"
     )
-    assert "finalResponse" not in completed["payload"]
+    assert "finalResponse" not in completed
     stored_run = await screenplay_tool_db.fetch_one(
         "SELECT status, final_response FROM ai_agent_runs WHERE id = ?",
         [result.run_id],

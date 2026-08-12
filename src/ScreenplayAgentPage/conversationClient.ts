@@ -2,7 +2,6 @@ import type {
   ElectronAPI,
   ScreenplayCancelOperationReceipt,
   ScreenplayAgentChunkPage,
-  ScreenplayConversationEvent,
   ScreenplayConversationTurn,
   ScreenplayConversationRuntimeInput,
   ScreenplayResumeOperationReceipt,
@@ -15,7 +14,6 @@ import {
 type NativeConversationApi = Pick<ElectronAPI,
   | 'submitScreenplayConversationTurn'
   | 'getScreenplayConversationSnapshot'
-  | 'listScreenplayConversationEvents'
   | 'watchScreenplayConversationEvents'
   | 'cancelScreenplayConversationTurn'
   | 'resumeScreenplayConversationOperation'
@@ -71,53 +69,29 @@ export class ScreenplayConversationClient {
   async refresh(
     state: ScreenplayConversationState,
   ): Promise<ScreenplayConversationState> {
-    let after = state.cursor
-    while (true) {
-      const page = dataOrThrow(
-        await this.api.listScreenplayConversationEvents({
-          projectId: state.projectId,
-          sessionId: state.sessionId,
-          after,
-          limit: 100,
-        }),
-        '读取剧本对话事件失败',
-      )
-      if (page.hasMore && page.nextCursor <= after) {
-        throw new Error('剧本对话事件游标没有前进')
-      }
-      after = page.nextCursor
-      if (!page.hasMore) break
-    }
-    return after > state.cursor
-      ? this.load(state.projectId, state.sessionId)
-      : state
+    return this.load(state.projectId, state.sessionId)
   }
 
   watch(
     state: ScreenplayConversationState,
     options: {
       chunkAfter: number
-      onInvalidate: (event: ScreenplayConversationEvent) => void
+      onInvalidate: () => void
       onChunks: (page: ScreenplayAgentChunkPage) => void
     },
   ): () => void {
-    let cursor = state.cursor
     let chunkCursor = Math.max(0, options.chunkAfter)
+    let receivedPage = false
     return this.api.watchScreenplayConversationEvents({
       projectId: state.projectId,
       sessionId: state.sessionId,
-      after: cursor,
       chunkAfter: chunkCursor,
       onEvent: (event) => {
-        if ('kind' in event) {
-          if (event.nextCursor <= chunkCursor) return
-          chunkCursor = event.nextCursor
-          options.onChunks(event)
-          return
-        }
-        if (event.cursor <= cursor) return
-        cursor = event.cursor
-        options.onInvalidate(event)
+        if (receivedPage && event.nextCursor <= chunkCursor) return
+        receivedPage = true
+        chunkCursor = event.nextCursor
+        options.onChunks(event)
+        options.onInvalidate()
       },
     })
   }

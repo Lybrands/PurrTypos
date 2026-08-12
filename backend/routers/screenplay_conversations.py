@@ -17,7 +17,7 @@ from application.screenplay_agent_planner import (
     SqliteScreenplayTaskResolver,
 )
 from application.screenplay_agent_service import ScreenplayAgentService
-from application.screenplay_agent_stream import ScreenplayAgentChunkStore
+from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
 from schemas.screenplay_agent import (
@@ -33,7 +33,7 @@ _STREAM_POLL_SECONDS = 0.04
 def _chunk_delivery_pages(page):
     """Deliver committed canonical events without host-side buffering."""
 
-    return tuple({
+    pages = tuple({
         "kind": "agent_chunks",
         "chunks": [item],
         "nextCursor": int(item["cursor"]),
@@ -41,6 +41,14 @@ def _chunk_delivery_pages(page):
             page["hasMore"] or index < len(page["chunks"]) - 1
         ),
     } for index, item in enumerate(page["chunks"]))
+    if pages or int(page["nextCursor"]) <= 0:
+        return pages
+    return ({
+        "kind": "agent_chunks",
+        "chunks": [],
+        "nextCursor": int(page["nextCursor"]),
+        "hasMore": bool(page["hasMore"]),
+    },)
 
 
 def _chunk_replay_page(page):
@@ -77,6 +85,7 @@ def _service() -> ScreenplayAgentService:
             ),
         ),
         projects=ScreenplayV2ProjectService(db),
+        output_processor=composition.output_processor,
         track_background=composition.track_background_run,
     )
 
@@ -114,41 +123,20 @@ async def stream_screenplay_conversation_events(
     request: Request,
     project_id: str,
     session_id: int = Query(alias="sessionId", ge=1),
-    after: int = Query(default=0, ge=0),
     chunk_after: int = Query(default=0, alias="chunkAfter", ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    follow: bool = True,
 ):
-    service = _service()
-    if not follow:
-        page = await service.list_events(
-            project_id=project_id,
-            session_id=session_id,
-            after=after,
-            limit=limit,
-        )
-        return {"success": True, "data": page}
+    from application.agent_composition import get_agent_composition
 
+    chunks = ScreenplayCanonicalOutputQuery(
+        get_db(),
+        output_repository=get_agent_composition().output_journal,
+    )
     async def events():
-        cursor = int(after)
         chunk_cursor = int(chunk_after)
         chunk_replay_announced = False
-        chunks = ScreenplayAgentChunkStore(get_db())
         while not await request.is_disconnected():
             emitted = False
-            page = await service.list_events(
-                project_id=project_id,
-                session_id=session_id,
-                after=cursor,
-                limit=limit,
-            )
-            for event in page["events"]:
-                cursor = int(event["cursor"])
-                yield {
-                    "id": str(cursor),
-                    "data": json.dumps(event, ensure_ascii=False),
-                }
-                emitted = True
             chunk_page = await chunks.list_chunks(
                 project_id=project_id,
                 session_id=session_id,
@@ -188,7 +176,7 @@ async def stream_screenplay_conversation_events(
                     }
                     emitted = True
                 chunk_replay_announced = True
-            if page["hasMore"] or chunk_page["hasMore"]:
+            if chunk_page["hasMore"]:
                 continue
             if not emitted:
                 await asyncio.sleep(_STREAM_POLL_SECONDS)

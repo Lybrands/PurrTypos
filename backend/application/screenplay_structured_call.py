@@ -46,7 +46,6 @@ from application.request_mapping import context_window_tokens
 from application.run_provenance import digest_model_endpoint
 from domains.screenplay_agent import ScreenplayIntentCommandMismatchError
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
-from application.screenplay_agent_stream import ScreenplayAgentChunkStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +186,7 @@ class ScreenplayStructuredCallService:
             metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
         )
         options = AgentCoreRunOptions(
+            turn_id=conversation_turn_id,
             output_limit=output_limit,
             default_context_window_tokens=window,
             model_supports_tools=False,
@@ -213,20 +213,11 @@ class ScreenplayStructuredCallService:
         cancel_watcher: asyncio.Task[None] | None = None
         try:
             handle = await core.submit(request, options=options)
-            output_drain = self._start_output_drain(
-                handle,
-                project_id=binding_aggregate_id,
-                session_id=session_id,
-                turn_id=conversation_turn_id,
-                task_id=task_id,
-            )
             if signal is not None and hasattr(signal, "wait"):
                 cancel_watcher = asyncio.create_task(
                     _cancel_on_signal(signal, handle)
                 )
             result = await handle.wait()
-            if output_drain is not None:
-                await output_drain
         finally:
             if cancel_watcher is not None:
                 cancel_watcher.cancel()
@@ -318,6 +309,7 @@ class ScreenplayStructuredCallService:
             metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
         )
         options = AgentCoreRunOptions(
+            turn_id=conversation_turn_id,
             output_limit=output_limit,
             default_context_window_tokens=window,
             model_supports_tools=False,
@@ -346,20 +338,11 @@ class ScreenplayStructuredCallService:
         cancel_watcher: asyncio.Task[None] | None = None
         try:
             handle = await core.submit(request, options=options)
-            output_drain = self._start_output_drain(
-                handle,
-                project_id=binding_aggregate_id,
-                session_id=session_id,
-                turn_id=conversation_turn_id,
-                task_id=task_id,
-            )
             if signal is not None and hasattr(signal, "wait"):
                 cancel_watcher = asyncio.create_task(
                     _cancel_on_signal(signal, handle)
                 )
             result = await handle.wait()
-            if output_drain is not None:
-                await output_drain
         finally:
             if cancel_watcher is not None:
                 cancel_watcher.cancel()
@@ -381,36 +364,6 @@ class ScreenplayStructuredCallService:
                 retryable=False,
             )
         return PublicModelResult(text=text, run_id=handle.run_id)
-
-    def _start_output_drain(
-        self,
-        handle,
-        *,
-        project_id: str,
-        session_id: int,
-        turn_id: str | None,
-        task_id: str | None,
-    ) -> asyncio.Task[None] | None:
-        if not str(turn_id or "").strip():
-            return None
-        chunks = ScreenplayAgentChunkStore(self._db)
-
-        async def _drain() -> None:
-            subscription = handle.subscribe(after_sequence=0)
-            try:
-                async for event in subscription:
-                    await chunks.append_output_event(
-                        project_id=project_id,
-                        session_id=session_id,
-                        turn_id=str(turn_id),
-                        task_id=task_id,
-                        event=event,
-                    )
-            finally:
-                await subscription.aclose()
-
-        return asyncio.create_task(_drain())
-
 
 async def _cancel_on_signal(signal, handle) -> None:
     await signal.wait()

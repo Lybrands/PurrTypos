@@ -117,24 +117,11 @@ export const backendApi: BackendApi = {
   getScreenplayConversationSnapshot: (data) => apiGet(
     `/screenplay/v2/projects/${data.projectId}/conversation/snapshot?sessionId=${data.sessionId}`,
   ),
-  listScreenplayConversationEvents: (data) => {
-    const params = new URLSearchParams({
-      sessionId: String(data.sessionId),
-      after: String(data.after ?? 0),
-      limit: String(data.limit ?? 100),
-      follow: 'false',
-    })
-    return apiGet(
-      `/screenplay/v2/projects/${data.projectId}/conversation/events?${params.toString()}`,
-    )
-  },
   watchScreenplayConversationEvents: (data) => {
     const params = new URLSearchParams({
       sessionId: String(data.sessionId),
-      after: String(Math.max(0, data.after)),
       chunkAfter: String(Math.max(0, data.chunkAfter ?? 0)),
       limit: '500',
-      follow: 'true',
     })
     const source = new EventSource(
       `${backendBaseUrl}/api/screenplay/v2/projects/${encodeURIComponent(data.projectId)}/conversation/events?${params.toString()}`,
@@ -142,14 +129,10 @@ export const backendApi: BackendApi = {
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data)
-        if (event && typeof event === 'object' && (
-          Number.isFinite(Number(event.cursor))
-          || (
-            event.kind === 'agent_chunks'
-            && Number.isFinite(Number(event.nextCursor))
-            && Array.isArray(event.chunks)
-          )
-        )) {
+        if (event && typeof event === 'object'
+          && event.kind === 'agent_chunks'
+          && Number.isFinite(Number(event.nextCursor))
+          && Array.isArray(event.chunks)) {
           data.onEvent(event)
         }
       } catch {

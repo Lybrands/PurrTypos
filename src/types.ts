@@ -508,15 +508,6 @@ export interface ScreenplayCancelOperationReceipt {
   terminalStatus: 'cancel_requested' | 'succeeded' | 'failed' | 'canceled';
 }
 
-export interface ScreenplayConversationEvent {
-  cursor: number;
-  turnId: string | null;
-  taskId: string | null;
-  type: string;
-  payload: Record<string, unknown>;
-  createdAt?: string | null;
-}
-
 export interface ScreenplayConversationSnapshot {
   projectId: EntityId;
   sessionId: number;
@@ -524,12 +515,6 @@ export interface ScreenplayConversationSnapshot {
   tasks: ScreenplayAgentTask[];
   operations: ScreenplayOperationProjection[];
   cursor: number;
-}
-
-export interface ScreenplayConversationEventPage {
-  events: ScreenplayConversationEvent[];
-  nextCursor: number;
-  hasMore: boolean;
 }
 
 export interface ScreenplayAgentChunkEvent {
@@ -551,9 +536,7 @@ export interface ScreenplayAgentChunkPage {
   hasMore: boolean;
 }
 
-export type ScreenplayConversationStreamEvent =
-  | ScreenplayConversationEvent
-  | ScreenplayAgentChunkPage;
+export type ScreenplayConversationStreamEvent = ScreenplayAgentChunkPage;
 
 export interface ScreenplayConversationRuntimeInput {
   apiKey: string;
@@ -1624,16 +1607,9 @@ export interface ElectronAPI {
     projectId: EntityId;
     sessionId: number;
   }) => Promise<ApiResult<ScreenplayConversationSnapshot>>;
-  listScreenplayConversationEvents: (data: {
-    projectId: EntityId;
-    sessionId: number;
-    after?: number;
-    limit?: number;
-  }) => Promise<ApiResult<ScreenplayConversationEventPage>>;
   watchScreenplayConversationEvents: (data: {
     projectId: EntityId;
     sessionId: number;
-    after: number;
     chunkAfter?: number;
     onEvent: (event: ScreenplayConversationStreamEvent) => void;
   }) => () => void;

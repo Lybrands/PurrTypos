@@ -426,6 +426,7 @@ class RunLifecycleOutputDraft:
     status: RunStatus
     payload: Mapping[str, Any]
     occurred_at: datetime
+    turn_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -435,6 +436,7 @@ class RunLifecycleOutputDraft:
         )
         object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
+        object.__setattr__(self, "turn_id", optional_text(self.turn_id))
         _require_aware(self.occurred_at, "occurred_at")
 
 
@@ -495,6 +497,7 @@ class RuntimeOutputEvent:
     event_type: str
     payload: Mapping[str, Any]
     occurred_at: datetime
+    turn_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -509,6 +512,7 @@ class RuntimeOutputEvent:
             required_text(self.event_type, "runtime output event type"),
         )
         object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
+        object.__setattr__(self, "turn_id", optional_text(self.turn_id))
         _require_aware(self.occurred_at, "occurred_at")
 
 

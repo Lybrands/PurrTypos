@@ -116,7 +116,7 @@ class SqliteAgentOutputRepository:
             output = await self._append_event_in_transaction(
                 AgentOutputEventDraft(
                     run_id=begun.run_id,
-                    turn_id=None,
+                    turn_id=params.turn_id,
                     output_stream_id=None,
                     invocation_id=None,
                     source_event_key=f"run:{begun.run_id}:running",
@@ -161,7 +161,7 @@ class SqliteAgentOutputRepository:
 
         event_draft = AgentOutputEventDraft(
             run_id=normalized_run_id,
-            turn_id=None,
+            turn_id=draft.turn_id,
             output_stream_id=None,
             invocation_id=None,
             source_event_key=draft.source_event_key,
@@ -323,6 +323,27 @@ class SqliteAgentOutputRepository:
             [normalized_run_id, cursor, page_size],
         )
         return tuple(_event(row) for row in rows)
+
+    async def list_session_events(
+        self,
+        *,
+        session_id: int,
+        after_cursor: int,
+        limit: int = 200,
+    ) -> tuple[tuple[int, AgentOutputEvent], ...]:
+        rows = await self._db.fetch_all(
+            "SELECT e.* FROM ai_agent_run_events AS e "
+            "JOIN ai_agent_runs AS r ON r.id = e.run_id "
+            "WHERE r.session_id = ? "
+            "AND e.event_id IS NOT NULL AND e.visibility = 'public' "
+            "AND e.id > ? ORDER BY e.id LIMIT ?",
+            [
+                int(session_id),
+                non_negative_int(after_cursor, "after cursor"),
+                positive_int(limit, "limit"),
+            ],
+        )
+        return tuple((int(row["id"]), _event(row)) for row in rows)
 
     async def _append_event_in_transaction(
         self,

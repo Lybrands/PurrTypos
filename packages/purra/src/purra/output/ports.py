@@ -67,7 +67,6 @@ class AgentOutputRepository(Protocol):
         limit: int = 200,
     ) -> tuple[AgentOutputEvent, ...]: ...
 
-
 @runtime_checkable
 class AgentOutputPublisher(Protocol):
     async def publish_committed(self, event: AgentOutputEvent) -> None: ...
@@ -78,6 +77,19 @@ class AgentOutputPublisher(Protocol):
         *,
         after_sequence: int,
     ) -> None: ...
+
+
+@runtime_checkable
+class AgentOutputJournalQuery(Protocol):
+    """Read-side cursor over committed output, independent of any domain."""
+
+    async def list_session_events(
+        self,
+        *,
+        session_id: int,
+        after_cursor: int,
+        limit: int = 200,
+    ) -> tuple[tuple[int, AgentOutputEvent], ...]: ...
 
 
 @runtime_checkable

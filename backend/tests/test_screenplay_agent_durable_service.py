@@ -1354,41 +1354,8 @@ async def test_screenplay_execution_uses_purra_task_without_job_state(
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
     ) == {"count": 1}
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await screenplay_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
-    assert not any("commentaryDelta" in chunk for chunk in chunks)
-    progress = [
-        chunk["longTaskProgress"]
-        for chunk in chunks
-        if "longTaskProgress" in chunk
-    ]
-    assert progress
-    assert progress[-1]["status"] == "completed"
-    assert progress[-1]["completedUnits"] == 13
-    assert [unit["title"] for unit in progress[-1]["units"]] == [
-        "整理第 4 集创作依据",
-        "创作第 4 集场景 ep04_s01",
-        "整理第 4 集连续性",
-        "校验第 4 集完整性",
-        "整理第 5 集创作依据",
-        "创作第 5 集场景 ep05_s01",
-        "整理第 5 集连续性",
-        "校验第 5 集完整性",
-        "整理第 6 集创作依据",
-        "创作第 6 集场景 ep06_s01",
-        "整理第 6 集连续性",
-        "校验第 6 集完整性",
-        "整理最终答复",
-    ]
-    assert any(
-        any(unit["status"] == "claimed" for unit in snapshot["units"])
-        for snapshot in progress
-    )
-    assert all(unit["status"] == "completed" for unit in progress[-1]["units"])
+    assert task["completedUnits"] == 13
+    assert all(unit["status"] == "completed" for unit in task["units"])
 
     removed = await service.truncate_from_turn(turn["id"])
     assert removed["deletedTaskIds"] == [task["id"]]
@@ -1468,36 +1435,7 @@ async def test_recoverable_exhaustion_pauses_turn_without_formal_assistant_final
     assert snapshot["tasks"][0]["status"] == "paused"
     assert snapshot["tasks"][0]["units"][0]["status"] == "completed"
     assert snapshot["tasks"][0]["units"][1]["status"] == "blocked"
-    events = await service.list_events(
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-        after=0,
-        limit=100,
-    )
-    assert any(
-        event["type"] == "screenplay.agent.task.paused"
-        for event in events["events"]
-    )
-    assert not any(
-        event["type"] == "screenplay.agent.task.failed"
-        for event in events["events"]
-    )
-    chunks = [
-        json.loads(row["chunk_json"])
-        for row in await screenplay_db.fetch_all(
-            "SELECT chunk_json FROM screenplay_agent_chunks ORDER BY id"
-        )
-    ]
-    assert not any(chunk.get("delta") for chunk in chunks)
-    assert chunks[-1] == {
-        "done": True,
-        "finalResponseExpected": False,
-        "runResult": {
-            "runId": turn["id"],
-            "status": "paused",
-            "errorCode": None,
-        },
-    }
+    assert snapshot["turns"][0]["error"]["code"] == "provider_bad_request"
     operations = SqliteScreenplayOperationRepository(screenplay_db)
     operation = await operations.load_for_turn(turn["id"])
     assert operation is not None

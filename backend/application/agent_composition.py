@@ -36,7 +36,8 @@ from purra.ports import (
     ResponseJudgePolicy,
     ToolRegistration,
 )
-from purra.output.ports import AgentOutputRepository
+from purra.output.processor import AgentOutputProcessor
+from purra.output.ports import AgentOutputJournalQuery, AgentOutputRepository
 from purra.tools import InMemoryToolCatalog
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
@@ -153,6 +154,10 @@ class AgentComposition:
             run_commit_projector=run_commit_projector,
         )
         self._output_publisher = InProcessAgentOutputPublisher()
+        self._output_processor = AgentOutputProcessor(
+            self._output_repository,
+            self._output_publisher,
+        )
         self._tool_idempotency_gateway = SqliteToolIdempotencyGateway(
             db,
             owner_id=self._repository.owner_id,
@@ -277,6 +282,14 @@ class AgentComposition:
     @property
     def output_repository(self) -> AgentOutputRepository:
         return self._output_repository
+
+    @property
+    def output_journal(self) -> AgentOutputJournalQuery:
+        return self._output_repository
+
+    @property
+    def output_processor(self) -> AgentOutputProcessor:
+        return self._output_processor
 
     @property
     def long_task_repository(self) -> SqliteLongTaskRepository:
@@ -501,6 +514,7 @@ class AgentComposition:
             runtime_limits=adapter.runtime_limits,
             recovery_policy=adapter.recovery_policy,
             tool_execution_limits=self._tool_execution_limits,
+            output_processor=self._output_processor,
             output_repository=self._output_repository,
             output_publisher=self._output_publisher,
             execution_lease_store=self._execution_lease_store,

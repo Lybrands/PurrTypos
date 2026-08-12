@@ -74,13 +74,43 @@ def test_screenplay_agent_repository_does_not_duplicate_purra_task_state():
     assert "screenplay_agent_jobs" not in source
     assert "screenplay_agent_job_steps" not in source
     assert "ai_agent_long_tasks" in source
-    assert "screenplay_agent_events" in source
-    assert "screenplay_agent_chunks" in source
+    assert "screenplay_agent_events" not in source
+    assert "screenplay_agent_chunks" not in source
     assert "screenplay_agent_operations" in source
     assert OPERATION_REPOSITORY.exists()
     assert "screenplay_agent_operations" in OPERATION_REPOSITORY.read_text(
         encoding="utf-8"
     )
+
+
+def test_retired_screenplay_output_stores_have_no_production_references():
+    production_roots = (
+        BACKEND_DIR / "main.py",
+        BACKEND_DIR / "application",
+        BACKEND_DIR / "database",
+        BACKEND_DIR / "domains",
+        BACKEND_DIR / "infrastructure",
+        BACKEND_DIR / "routers",
+    )
+    allowed = BACKEND_DIR / "database" / "crud" / "screenplay_agent_runtime_cleanup.py"
+    violations: list[str] = []
+    forbidden = (
+        "screenplay_agent_chunks",
+        "screenplay_agent_events",
+        "ScreenplayAgentChunkStore",
+        "ScreenplayAgentChunkProjector",
+        "protocol_version",
+    )
+    for root in production_roots:
+        paths = (root,) if root.is_file() else root.rglob("*.py")
+        for path in paths:
+            if path == allowed:
+                continue
+            source = path.read_text(encoding="utf-8")
+            for token in forbidden:
+                if token in source:
+                    violations.append(f"{path.relative_to(BACKEND_DIR)}: {token}")
+    assert violations == []
 
 
 def test_new_screenplay_agent_code_never_writes_legacy_turn_task_authority():
@@ -89,7 +119,6 @@ def test_new_screenplay_agent_code_never_writes_legacy_turn_task_authority():
     legacy_columns = {
         "task_id",
         "result_revision_id",
-        "error_json",
         "target_role",
     }
     violations = sorted({

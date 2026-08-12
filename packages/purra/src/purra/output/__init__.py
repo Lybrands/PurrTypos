@@ -25,6 +25,7 @@ from purra.output.contracts import (
 from purra.output.ports import (
     AgentOutputPolicy,
     AgentOutputPublisher,
+    AgentOutputJournalQuery,
     AgentOutputRepository,
     CommittedResultFactsProvider,
     ValidatedResultCommitter,

@@ -37,21 +37,6 @@ class _Service:
     def dispatch_turn(self, turn_id, runtime):
         self.dispatched.append((turn_id, runtime.options["model"]))
 
-    async def list_events(self, *, after, **_kwargs):
-        events = [] if after >= 1 else [{
-            "cursor": 1,
-            "turnId": "spaturn-route",
-            "taskId": None,
-            "type": "screenplay.agent.turn.planning",
-            "payload": {},
-        }]
-        return {
-            "events": events,
-            "nextCursor": events[-1]["cursor"] if events else after,
-            "hasMore": False,
-        }
-
-
 def _body(**extra):
     return {
         "sessionId": 7,
@@ -73,6 +58,7 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
 
     class Composition:
         execution_owner_id = "route-composition-owner"
+        output_processor = object()
 
         @staticmethod
         def track_background_run(_task):
@@ -352,14 +338,12 @@ async def test_resume_operation_replay_does_not_redispatch_terminal_operation(
     assert service.dispatched is False
 
 
-async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
+async def test_conversation_sse_streams_only_canonical_agent_output(
     monkeypatch,
 ):
-    service = _Service()
-
     class _Chunks:
-        def __init__(self, _db) -> None:
-            pass
+        def __init__(self, _db, *, output_repository) -> None:
+            assert output_repository is canonical_output
 
         async def list_chunks(self, *, after, **_kwargs):
             chunks = [] if after >= 2 else [{
@@ -379,10 +363,17 @@ async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
                 "hasMore": False,
             }
 
-    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+    canonical_output = object()
+    monkeypatch.setattr(
+        agent_composition,
+        "get_agent_composition",
+        lambda: type("Composition", (), {
+            "output_journal": canonical_output,
+        })(),
+    )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayAgentChunkStore",
+        "ScreenplayCanonicalOutputQuery",
         _Chunks,
     )
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
@@ -393,17 +384,15 @@ async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
         method="GET",
         path=(
             "/api/screenplay/v2/projects/project-1/conversation/events"
-            "?sessionId=7&after=0&chunkAfter=0&follow=true"
+            "?sessionId=7&chunkAfter=0"
         ),
     )
     try:
         await response.wait_started()
-        business = await response.next_sse_json()
         chunk_page = await response.next_sse_json()
     finally:
         await response.aclose()
 
-    assert business["type"] == "screenplay.agent.turn.planning"
     assert chunk_page == {
         "kind": "agent_chunks",
         "chunks": [{
@@ -425,11 +414,9 @@ async def test_conversation_sse_interleaves_business_and_shared_agent_chunks(
 async def test_conversation_sse_announces_empty_chunk_replay_completion(
     monkeypatch,
 ):
-    service = _Service()
-
     class _Chunks:
-        def __init__(self, _db) -> None:
-            pass
+        def __init__(self, _db, *, output_repository) -> None:
+            assert output_repository is canonical_output
 
         async def list_chunks(self, *, after, **_kwargs):
             return {
@@ -438,10 +425,17 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
                 "hasMore": False,
             }
 
-    monkeypatch.setattr(conversation_routes, "_service", lambda: service)
+    canonical_output = object()
+    monkeypatch.setattr(
+        agent_composition,
+        "get_agent_composition",
+        lambda: type("Composition", (), {
+            "output_journal": canonical_output,
+        })(),
+    )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayAgentChunkStore",
+        "ScreenplayCanonicalOutputQuery",
         _Chunks,
     )
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
@@ -452,12 +446,11 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
         method="GET",
         path=(
             "/api/screenplay/v2/projects/project-1/conversation/events"
-            "?sessionId=7&after=0&chunkAfter=0&follow=true"
+            "?sessionId=7&chunkAfter=0"
         ),
     )
     try:
         await response.wait_started()
-        await response.next_sse_json()
         chunk_page = await response.next_sse_json()
     finally:
         await response.aclose()
@@ -466,6 +459,58 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
         "kind": "agent_chunks",
         "chunks": [],
         "nextCursor": 0,
+        "hasMore": False,
+    }
+
+
+async def test_conversation_sse_advances_past_unbound_canonical_output(
+    monkeypatch,
+):
+    class _Chunks:
+        def __init__(self, _db, *, output_repository) -> None:
+            assert output_repository is canonical_output
+
+        async def list_chunks(self, *, after, **_kwargs):
+            return {
+                "chunks": [],
+                "nextCursor": 7 if after < 7 else after,
+                "hasMore": False,
+            }
+
+    canonical_output = object()
+    monkeypatch.setattr(
+        agent_composition,
+        "get_agent_composition",
+        lambda: type("Composition", (), {
+            "output_journal": canonical_output,
+        })(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayCanonicalOutputQuery",
+        _Chunks,
+    )
+    monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
+    app = FastAPI()
+    app.include_router(screenplay_router, prefix="/api")
+    response = start_asgi_request(
+        app,
+        method="GET",
+        path=(
+            "/api/screenplay/v2/projects/project-1/conversation/events"
+            "?sessionId=7&chunkAfter=0"
+        ),
+    )
+    try:
+        await response.wait_started()
+        chunk_page = await response.next_sse_json()
+    finally:
+        await response.aclose()
+
+    assert chunk_page == {
+        "kind": "agent_chunks",
+        "chunks": [],
+        "nextCursor": 7,
         "hasMore": False,
     }
 
@@ -487,6 +532,21 @@ async def test_chunk_delivery_keeps_every_canonical_event_live():
     assert [len(page["chunks"]) for page in pages] == [1, 1, 1, 1]
     assert [page["nextCursor"] for page in pages] == [1, 2, 3, 4]
     assert [page["hasMore"] for page in pages] == [True, True, True, False]
+
+
+async def test_chunk_delivery_advances_a_cursor_without_visible_chunks():
+    pages = conversation_routes._chunk_delivery_pages({
+        "chunks": [],
+        "nextCursor": 7,
+        "hasMore": False,
+    })
+
+    assert pages == ({
+        "kind": "agent_chunks",
+        "chunks": [],
+        "nextCursor": 7,
+        "hasMore": False,
+    },)
 
 
 async def test_chunk_replay_keeps_persisted_history_in_one_batch():
