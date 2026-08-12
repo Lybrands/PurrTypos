@@ -171,6 +171,93 @@ test('canonical timeline retains compaction and sequenced delegation without dup
   )
 })
 
+test('canonical timeline places the latest compaction state at the highest compaction sequence', () => {
+  const base = initialCanonicalOutputState()
+  const message: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    contextCompaction: { status: 'completed', compactedTurnCount: 8 },
+    canonicalOutput: {
+      ...base,
+      commentaryBlocks: [
+        {
+          outputStreamId: 'between-compactions',
+          firstSequence: 3,
+          lastSequence: 3,
+          startedAt: '2026-08-12T00:00:00Z',
+          text: '第一次压缩后继续检查。',
+          committed: true,
+          aborted: false,
+        },
+        {
+          outputStreamId: 'after-compactions',
+          firstSequence: 7,
+          lastSequence: 7,
+          startedAt: '2026-08-12T00:00:00Z',
+          text: '第二次压缩后继续处理。',
+          committed: true,
+          aborted: false,
+        },
+      ],
+      operationOrder: [
+        'pre-planning-compaction',
+        'middle-tool',
+        'post-planning-compaction',
+      ],
+      operations: {
+        'pre-planning-compaction': {
+          operationId: 'pre-planning-compaction',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'context_compaction',
+          firstSequence: 1,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: { phase: 'pre_planning' } },
+        },
+        'middle-tool': {
+          operationId: 'middle-tool',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'tool',
+          firstSequence: 4,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: {} },
+        },
+        'post-planning-compaction': {
+          operationId: 'post-planning-compaction',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'context_compaction',
+          firstSequence: 6,
+          status: 'succeeded',
+          startedAt: '2026-08-12T00:00:00Z',
+          display: { labelParams: { phase: 'post_planning' } },
+        },
+      },
+    },
+  }
+
+  const timeline = buildAssistantTimeline(message, { messageIndex: 0 })
+  assert.deepEqual(timeline.map((part) => part.type), [
+    'commentary',
+    'operation',
+    'contextCompaction',
+    'commentary',
+  ])
+  assert.equal(
+    timeline.filter((part) => part.type === 'contextCompaction').length,
+    1,
+  )
+  assert.deepEqual(
+    timeline
+      .filter((part) => part.type === 'operation')
+      .map((part) => part.operation.kind),
+    ['tool'],
+  )
+})
+
 test('canonical timeline preserves commentary sequence and the real provider stream', () => {
   const base = initialCanonicalOutputState()
   const message: AgentConversationMessage = {
