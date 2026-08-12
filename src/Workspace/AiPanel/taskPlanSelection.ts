@@ -65,17 +65,21 @@ export function shouldShowTaskPlan(plan: AiTaskPlan): boolean {
 }
 
 /**
- * The header reflects only the assistant message for the turn currently
- * streaming. Looking further back can leak a completed plan from a prior turn
- * while the new assistant placeholder is still waiting for its first chunks.
+ * The header reflects only the latest assistant turn. An active canonical
+ * plan owns its own visibility so a lagging conversation snapshot cannot hide
+ * the composer capsule; terminal plans remain only while output is streaming.
  */
 export function getActiveTaskPlan(
   conversations: ChatMessage[],
   loading: boolean,
 ): AiTaskPlan | undefined {
-  if (!loading) return undefined;
   const currentMessage = conversations[conversations.length - 1];
   if (currentMessage?.role !== "assistant") return undefined;
   const plan = currentMessage.taskPlan;
-  return plan && shouldShowTaskPlan(plan) ? plan : undefined;
+  if (!plan || !shouldShowTaskPlan(plan)) return undefined;
+  const planIsActive =
+    plan.status === "planned" ||
+    plan.status === "running" ||
+    plan.status === "paused";
+  return loading || planIsActive ? plan : undefined;
 }

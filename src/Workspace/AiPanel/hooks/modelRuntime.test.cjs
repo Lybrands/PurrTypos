@@ -833,7 +833,7 @@ test('task header does not reuse a completed plan from the previous turn', () =>
     ['read', 'analyze', 'review'],
   )
   assert.equal(shouldShowTaskPlan(currentPlan), true)
-  assert.equal(getActiveTaskPlan(conversations, false), undefined)
+  assert.equal(getActiveTaskPlan(conversations, false), currentPlan)
 
   const shortPlan = {
     ...currentPlan,
