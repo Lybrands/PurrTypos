@@ -557,6 +557,43 @@ test('a persisted single-operation batch keeps its recorded row timing', () => {
   assert.deepEqual(toolPart?.segment.itemDurationsMs, [8598])
 })
 
+test('a persisted multi-operation batch does not invent row timings from its total', () => {
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '模型原文',
+    toolCallSegments: [{
+      labels: ['读取章节', '读取大纲'],
+      commentaryBlockIndex: null,
+      durationMs: 8598,
+    }],
+  }, {
+    messageIndex: 0,
+    isStreaming: false,
+  })
+
+  const toolPart = timeline.find((part) => part.type === 'tools')
+  assert.equal(toolPart?.segment.itemDurationsMs, undefined)
+})
+
+test('an explicit empty row-timing array disables the legacy fallback', () => {
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '模型原文',
+    toolCallSegments: [{
+      labels: ['查看章节内容'],
+      commentaryBlockIndex: null,
+      durationMs: 8598,
+      itemDurationsMs: [],
+    }],
+  }, {
+    messageIndex: 0,
+    isStreaming: false,
+  })
+
+  const toolPart = timeline.find((part) => part.type === 'tools')
+  assert.deepEqual(toolPart?.segment.itemDurationsMs, [])
+})
+
 test('runtime metadata never becomes host-authored assistant copy', () => {
   const states: AgentConversationMessage[] = [
     { role: 'assistant', content: '' },
