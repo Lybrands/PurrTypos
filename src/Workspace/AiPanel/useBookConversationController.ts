@@ -73,7 +73,8 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
       return active
     },
     runOnce<T>(key: string, operation: () => Promise<T>): Promise<T> {
-      const existing = inFlight.get(key) as Promise<T> | undefined
+      const scopedKey = `${scopeGeneration}:${key}`
+      const existing = inFlight.get(scopedKey) as Promise<T> | undefined
       if (existing) return existing
       let pending: Promise<T>
       try {
@@ -82,9 +83,9 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
         pending = Promise.reject(error)
       }
       const tracked = pending.finally(() => {
-        if (inFlight.get(key) === tracked) inFlight.delete(key)
+        if (inFlight.get(scopedKey) === tracked) inFlight.delete(scopedKey)
       })
-      inFlight.set(key, tracked)
+      inFlight.set(scopedKey, tracked)
       return tracked
     },
   }
