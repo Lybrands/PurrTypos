@@ -106,3 +106,50 @@ test('StrictMode cleanup invalidates old work and a second setup accepts new wor
   await oldDelete
   assert.equal(oldDeleteCallbacks, 0)
 })
+
+test('deactivate isolates same-key in-flight work from the next lifecycle', async () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const oldRequest = coordinator.beginLatest()
+  const oldPending = deferred<void>()
+  let operationCalls = 0
+  let oldDeleteCallbacks = 0
+  const oldDelete = coordinator.runOnce('session:X', async () => {
+    operationCalls += 1
+    await oldPending.promise
+    if (coordinator.isCurrent(oldRequest)) oldDeleteCallbacks += 1
+  })
+
+  coordinator.deactivate()
+  coordinator.activate()
+  const currentRequest = coordinator.beginLatest()
+  const currentPending = deferred<void>()
+  let currentDeleteCallbacks = 0
+  const currentDelete = coordinator.runOnce('session:X', async () => {
+    operationCalls += 1
+    await currentPending.promise
+    if (coordinator.isCurrent(currentRequest)) currentDeleteCallbacks += 1
+  })
+
+  assert.notEqual(currentDelete, oldDelete)
+  assert.equal(operationCalls, 2)
+
+  oldPending.resolve()
+  await oldDelete
+  assert.equal(oldDeleteCallbacks, 0)
+
+  const duplicateCurrentDelete = coordinator.runOnce('session:X', async () => {
+    operationCalls += 1
+  })
+  assert.equal(duplicateCurrentDelete, currentDelete)
+  assert.equal(operationCalls, 2)
+
+  currentPending.resolve()
+  await currentDelete
+  assert.equal(currentDeleteCallbacks, 1)
+
+  await coordinator.runOnce('session:X', async () => {
+    operationCalls += 1
+  })
+  assert.equal(operationCalls, 3)
+})

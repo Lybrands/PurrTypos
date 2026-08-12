@@ -22,6 +22,7 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
     deactivate() {
       mounted = false
       generation += 1
+      inFlight.clear()
     },
     beginLatest() {
       generation += 1
