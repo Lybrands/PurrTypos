@@ -10,12 +10,24 @@ import type {
   AgentRunOutcome,
   AgentTerminalSnapshot,
 } from './types.ts'
+import { resolveTerminalRootOwnership } from '../rootOwnership.ts'
 
 export const MANUAL_ABORT_MESSAGE = '本轮对话已由你手动终止。'
 export { EMPTY_RESPONSE_MESSAGE } from '../chatHistory.ts'
 
 export const handleRequestResultTerminal: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done || !chunk.requestResult) return
+  const ownership = resolveTerminalRootOwnership(
+    chunk,
+    context.acc.conversationRunId,
+    context.acc.agentRunId,
+    context.turnId,
+  )
+  if (!ownership.accepted) return true
+  if (ownership.rootRunId) {
+    context.acc.conversationRunId = ownership.rootRunId
+    context.acc.agentRunId = ownership.rootRunId
+  }
   if (chunk.requestResult.status === 'canceled') {
     return handleDone({
       ...chunk,
@@ -35,8 +47,18 @@ export const handleRequestResultTerminal: AgentChunkHandler = (chunk, context) =
 
 export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done || !chunk.runResult) return
+  const ownership = resolveTerminalRootOwnership(
+    chunk,
+    context.acc.conversationRunId,
+    context.acc.agentRunId,
+    context.turnId,
+  )
+  if (!ownership.accepted) return true
   const { status, errorCode } = chunk.runResult
-  if (chunk.runResult.runId) context.acc.agentRunId = chunk.runResult.runId
+  if (ownership.rootRunId) {
+    context.acc.conversationRunId = ownership.rootRunId
+    context.acc.agentRunId = ownership.rootRunId
+  }
   if (
     status === 'done'
     && typeof chunk.finalResponse === 'string'
