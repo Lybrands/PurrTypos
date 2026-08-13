@@ -82,8 +82,24 @@ def test_writing_policy_applies_the_planning_eligibility_gate(
     assert actual is expected
 
 
-def test_writing_policy_does_not_infer_tools_enabled_from_catalog_contents():
-    request = _request("12345678", mode="ask", tools_enabled=True)
+@pytest.mark.parametrize(
+    ("mode", "tools_enabled", "expected"),
+    [
+        ("ask", True, True),
+        ("ask", False, False),
+        ("other", False, False),
+    ],
+)
+def test_writing_policy_does_not_infer_tools_enabled_from_catalog_contents(
+    mode: str,
+    tools_enabled: bool,
+    expected: bool,
+):
+    request = _request(
+        "续写",
+        mode=mode,
+        tools_enabled=tools_enabled,
+    )
     empty = PlanningCapabilities(available_tool_names=frozenset())
     populated = PlanningCapabilities(
         available_tool_names=frozenset({"getSomething"}),
@@ -91,8 +107,8 @@ def test_writing_policy_does_not_infer_tools_enabled_from_catalog_contents():
 
     policy = WritingPlanningPolicy()
 
-    assert policy.should_plan(request, empty) is True
-    assert policy.should_plan(request, populated) is True
+    assert policy.should_plan(request, empty) is expected
+    assert policy.should_plan(request, populated) is expected
 
 
 def _bound_chapter_capabilities(
