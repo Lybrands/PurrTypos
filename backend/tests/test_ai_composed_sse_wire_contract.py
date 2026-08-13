@@ -81,6 +81,29 @@ def _chat_request(prompt: str) -> dict[str, Any]:
     }
 
 
+async def _planned_character_delete(*_args, **_kwargs):
+    return {
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({
+                "needsTodos": True,
+                "title": "安全删除人物",
+                "goal": "经用户确认后删除人物",
+                "todos": [{
+                    "id": "delete-character",
+                    "title": "删除人物",
+                    "type": "write",
+                    "executor": "tool",
+                    "expectedTools": ["deleteCharacter"],
+                    "riskLevel": "destructive",
+                }],
+            }, ensure_ascii=False),
+        },
+        "model": "planner-model",
+        "finish_reason": "stop",
+    }
+
+
 def _lexical(text: str) -> str:
     return json.dumps({
         "root": {
@@ -1782,8 +1805,9 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         if "agentRunStarted" in event
     )
     # The second planning call repairs the initial redundant-read proposal.
-    # A successful chapter read then follows that compiled plan directly.
-    assert planner_round == 2
+    # The successful chapter read then supplies evidence for a third,
+    # unfinished-step-only revision in the same Root Run.
+    assert planner_round == 3
     assert judge_round == 2
     assert final_messages[-2]["role"] == "assistant"
     assert final_messages[-2]["content"] == invalid_response
@@ -2340,6 +2364,24 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
         assert signal is not None
 
         async def _stream():
+            if model_round == 1:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-disconnect-list",
+                                "type": "function",
+                                "function": {
+                                    "name": "listBookCharacters",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
             yield {
                 "choices": [{
                     "delta": {
@@ -2361,6 +2403,10 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
 
         return {"stream": _stream(), "model": "wire-model"}
 
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planned_character_delete,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _request_dangerous_tool,
@@ -2441,7 +2487,10 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     )
     assert [_event_name(item) for item in delivered_events] == [
         "agentRunStarted",
+        "agentRunTodosUpdated",
         "contextBudget",
+        "agentRunTodoUpdated",
+        "agentRunTodoUpdated",
         "toolApprovalRequired",
     ]
     assert not any(TERMINAL_KEYS.intersection(item) for item in delivered_events)
@@ -2474,6 +2523,8 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
         delete_calls.append(int(target_id))
         await original_delete(target_db, target_id)
 
+    model_round = 0
+
     async def _request_dangerous_tool(
         _key,
         _messages,
@@ -2481,9 +2532,29 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
         _provider,
         signal=None,
     ):
+        nonlocal model_round
+        model_round += 1
         assert signal is not None
 
         async def _stream():
+            if model_round == 1:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-send-side-list",
+                                "type": "function",
+                                "function": {
+                                    "name": "listBookCharacters",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
             yield {
                 "choices": [{
                     "delta": {
@@ -2506,6 +2577,10 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
         return {"stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(character_tools, "delete_character", _record_delete)
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planned_character_delete,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _request_dangerous_tool,
