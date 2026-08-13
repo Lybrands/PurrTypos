@@ -105,6 +105,12 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
+from infrastructure.persistence.sqlite_work_item_repository import (
+    SqliteWorkItemRepository,
+)
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
@@ -986,6 +992,120 @@ async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_privat
     )
     assert "planBindingDigest" in recipe.metadata
     assert all(step.title not in serialized_metadata for step in plan.steps)
+
+
+class _AdmissionUnitExecutor:
+    async def execute(self, context, signal=None):
+        raise AssertionError("dispatch must not execute recipe units")
+
+
+async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attach_fails(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _projects, workspace, session = await _project_and_session(temp_db)
+    project_id = workspace["project"]["id"]
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-atomic-dispatch-test",
+    )
+    turn = await repository.begin_turn(
+        command_id="atomic-dispatch",
+        project_id=project_id,
+        session_id=session["id"],
+        content="生成原作分析",
+        stage_command={
+            "kind": "stage_action",
+            "action": "create",
+            "targetRole": "sourceAnalysis",
+            "scope": {"kind": "current_stage"},
+        },
+        runtime_profile={},
+    )
+    profile = ScreenplayAgentProfileExtension(
+        temp_db,
+        owner_id="screenplay-atomic-dispatch-test",
+        resolver=_AdmissionResolver(),
+    )
+    request = await profile.prepare_request(_root_request(
+        project_id=project_id,
+        turn_id=turn["id"],
+        session_id=session["id"],
+        content="生成原作分析",
+    ))
+    plan = _admission_plan(
+        operation="create",
+        deliverable="sourceAnalysis",
+        phases=("evidence", "creation", "delivery"),
+    )
+    decision = await profile.evaluate(request, plan)
+    original_attach = profile._operations.attach_long_task
+
+    async def fail_attach(*_args, **_kwargs):
+        raise RuntimeError("injected operation attach failure")
+
+    monkeypatch.setattr(profile._operations, "attach_long_task", fail_attach)
+    dispatcher = profile.create_long_task_dispatcher(
+        work_item_repository=SqliteWorkItemRepository(temp_db),
+        long_task_repository=SqliteLongTaskRepository(temp_db),
+        executor=_AdmissionUnitExecutor(),
+    )
+    with pytest.raises(RuntimeError, match="injected operation attach failure"):
+        await dispatcher.dispatch(
+            request,
+            plan,
+            decision,
+            parent_run_id="run-atomic-dispatch",
+        )
+
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
+    ) == {"count": 0}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
+    ) == {"count": 0}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs"
+    ) == {"count": 0}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_task_units"
+    ) == {"count": 0}
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    assert operation is not None
+    assert operation.status.value == "queued"
+    assert operation.long_task_id is None
+
+    monkeypatch.setattr(profile._operations, "attach_long_task", original_attach)
+    first = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-atomic-dispatch",
+    )
+    replay = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-atomic-dispatch",
+    )
+    assert replay.task_id == first.task_id
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
+    ) == {"count": 1}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
+    ) == {"count": 1}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs"
+    ) == {"count": 1}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operation_commands "
+        "WHERE command_type = 'attachLongTask'"
+    ) == {"count": 1}
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    assert operation is not None
+    assert operation.status.value == "running"
+    assert operation.long_task_id == first.task_id
 
 
 async def test_turn_start_does_not_emit_a_host_authored_plan(
