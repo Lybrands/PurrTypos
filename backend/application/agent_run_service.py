@@ -43,6 +43,66 @@ class AgentRunService:
     def __init__(self, composition: AgentComposition) -> None:
         self._composition = composition
 
+    async def run_host_child(
+        self,
+        *,
+        body: AgentRunInput,
+        api_key: str,
+        provider_options: dict,
+        signal: CancellationSignal | None,
+        lineage: RunLineage,
+        mapped_request: AgentRunRequest,
+        base_options: AgentCoreRunOptions,
+        allowed_tool_modes: frozenset[ToolExecutionMode] | None = None,
+        required_tool_names: frozenset[str] | None = None,
+    ) -> AgentRunResult:
+        """Run one host-owned child without creating a delegation claim.
+
+        The caller supplies the immutable parent/root lineage and the product
+        request contract.  This service remains the sole owner of Core
+        submission, cancellation and terminal settlement.
+        """
+
+        if lineage.delegation_id is not None:
+            raise ValueError(
+                "host-orchestrated child lineage cannot claim a delegation"
+            )
+        child_signal = _HostChildCancellationSignal(signal)
+
+        async def _consume() -> AgentRunResult:
+            terminal: AgentRunResult | None = None
+            async for update in self.run(
+                body=body,
+                api_key=api_key,
+                provider_options=provider_options,
+                signal=child_signal,
+                provenance=base_options.provenance,
+                lineage=lineage,
+                enable_delegation=False,
+                allowed_tool_modes=allowed_tool_modes,
+                required_tool_names=required_tool_names,
+                mapped_request=mapped_request,
+                base_options=base_options,
+                host_context_only=True,
+                cancellation_reason="host_child_canceled",
+            ):
+                if isinstance(update, AgentRunResult):
+                    terminal = update
+            if terminal is None:
+                raise RuntimeError("host child completed without a terminal result")
+            return terminal
+
+        consume_task = asyncio.create_task(_consume())
+        try:
+            return await asyncio.shield(consume_task)
+        except asyncio.CancelledError:
+            child_signal.cancel()
+            try:
+                await asyncio.shield(consume_task)
+            except BaseException:
+                pass
+            raise
+
     async def run(
         self,
         *,
@@ -65,6 +125,7 @@ class AgentRunService:
         base_options: AgentCoreRunOptions | None = None,
         run_binding_lifecycle: RunBindingLifecycle | None = None,
         long_task_executor=None,
+        cancellation_reason: str | None = None,
     ) -> AsyncIterator[AgentRunUpdate]:
         composition = self._composition
         provider_capabilities = composition.provider_capabilities
@@ -234,9 +295,19 @@ class AgentRunService:
             if callable(release_core):
                 release_core(core)
             raise
+        cancel_watcher = (
+            asyncio.create_task(
+                _cancel_run_on_signal(signal, handle, cancellation_reason)
+            )
+            if cancellation_reason is not None
+            else None
+        )
         try:
             core_stream = handle.subscribe(after_sequence=0)
         except BaseException:
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
             _track_core_until_terminal(composition, core, handle)
             raise
         terminal = False
@@ -265,6 +336,9 @@ class AgentRunService:
             terminal = True
             yield result
         finally:
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
             await core_stream.aclose()
             if terminal:
                 release_core = getattr(composition, "release_core", None)
@@ -275,6 +349,43 @@ class AgentRunService:
                 # the Core owned until its handle actually settles; shutdown
                 # can still cancel this tracked waiter and close the Core.
                 _track_core_until_terminal(composition, core, handle)
+
+
+async def _cancel_run_on_signal(signal, handle, reason: str) -> None:
+    await signal.wait()
+    await handle.cancel(reason)
+
+
+class _HostChildCancellationSignal:
+    """Combine caller cancellation with the product cancellation signal."""
+
+    def __init__(self, upstream: CancellationSignal | None) -> None:
+        self._upstream = upstream
+        self._local = asyncio.Event()
+
+    def is_set(self) -> bool:
+        return self._local.is_set() or (
+            self._upstream is not None and self._upstream.is_set()
+        )
+
+    def cancel(self) -> None:
+        self._local.set()
+
+    async def wait(self) -> bool:
+        if self.is_set():
+            return True
+        if self._upstream is None:
+            return await self._local.wait()
+        local = asyncio.create_task(self._local.wait())
+        upstream = asyncio.create_task(self._upstream.wait())
+        done, pending = await asyncio.wait(
+            (local, upstream),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        return any(bool(task.result()) for task in done)
 
 
 def _track_core_until_terminal(composition, core, handle) -> None:
