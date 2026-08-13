@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from time import time
 
 import pytest
 import pytest_asyncio
@@ -182,17 +183,22 @@ async def _run_to_terminal(
     return terminal
 
 
-async def _wait_for_running_root(db: DatabaseConnection) -> str:
+async def _wait_for_live_root_lease(
+    db: DatabaseConnection,
+) -> dict[str, object]:
     for _ in range(500):
         row = await db.fetch_one(
-            "SELECT id FROM ai_agent_runs "
-            "WHERE parent_run_id IS NULL AND status = 'running' "
-            "ORDER BY create_time DESC LIMIT 1"
+            "SELECT id, execution_owner_id, lease_expires_at_ms "
+            "FROM ai_agent_runs WHERE parent_run_id IS NULL "
+            "AND status = 'running' AND execution_owner_id IS NOT NULL "
+            "AND lease_expires_at_ms > ? "
+            "ORDER BY create_time DESC LIMIT 1",
+            [int(time() * 1_000)],
         )
         if row is not None:
-            return str(row["id"])
+            return row
         await asyncio.sleep(0.01)
-    raise AssertionError("Writing Agent did not persist a running Root Run")
+    raise AssertionError("Writing Agent did not persist a live Root lease")
 
 
 @pytest.mark.real_provider
@@ -204,11 +210,7 @@ async def test_live_writing_agent_replans_after_read_and_cancels_cleanly(
     api_key = _api_key_or_skip()
     await _assert_provider_available(api_key)
 
-    prompt = (
-        "深化当前章节的弄堂氛围。必须先用 getChapterContent 读取当前章节；"
-        "读到具体声音证据后，修订尚未完成的计划，使新步骤标题明确概括该声音；"
-        "然后用 editChapterContent 提交一版保留原事件的候选正文。"
-    )
+    prompt = "深化弄堂氛围，保留原事件并给出可应用的章节候选稿。"
     terminal = await asyncio.wait_for(
         _run_to_terminal(
             composition,
@@ -253,6 +255,53 @@ async def test_live_writing_agent_replans_after_read_and_cancels_cleanly(
     assert len(plan_events) >= 2
     assert planning_call_index < plan_events[0][0]
 
+    initial_plan_title = str(plan_events[0][1].get("title") or "")
+    assert any(marker in initial_plan_title for marker in ("弄堂", "氛围"))
+    assert initial_plan_title not in {
+        "读取所需内容",
+        "生成内容",
+        "检查并回复",
+        "执行任务",
+    }
+
+    read_receipts = await db.fetch_all(
+        "SELECT tool_call_id, tool_name, content, error_code "
+        "FROM ai_agent_tool_receipts WHERE run_id = ? "
+        "AND tool_name = 'getChapterContent' ORDER BY create_time ASC",
+        [terminal.run_id],
+    )
+    assert len(read_receipts) == 1
+    read_receipt = read_receipts[0]
+    assert read_receipt["error_code"] is None
+    assert "旧铜风铃" in read_receipt["content"]
+    read_call_id = str(read_receipt["tool_call_id"])
+    read_completed_index = next(
+        index
+        for index, (event_type, payload) in enumerate(events)
+        if event_type == "tool.call_completed"
+        and payload.get("toolCallId") == read_call_id
+        and payload.get("toolName") == read_receipt["tool_name"]
+        and payload.get("outcome") in {"completed", "progressed"}
+    )
+    replanning_call_index = next(
+        index
+        for index, (event_type, payload) in enumerate(events)
+        if index > read_completed_index
+        and event_type == "model.call_recorded"
+        and payload.get("phase") == "replanning"
+    )
+    revised_plan_index = next(
+        index
+        for index, payload in plan_events
+        if index > replanning_call_index
+    )
+    assert (
+        plan_events[0][0]
+        < read_completed_index
+        < replanning_call_index
+        < revised_plan_index
+    )
+
     completed_ids = {
         step["id"]
         for step in plan_events[-1][1]["steps"]
@@ -290,8 +339,9 @@ async def test_live_writing_agent_replans_after_read_and_cancels_cleanly(
     )
 
     tool_receipts = await db.fetch_all(
-        "SELECT tool_name, effects_json FROM ai_agent_tool_receipts "
-        "WHERE run_id = ? ORDER BY id ASC",
+        "SELECT tool_call_id, tool_name, effects_json "
+        "FROM ai_agent_tool_receipts "
+        "WHERE run_id = ? ORDER BY create_time ASC, tool_call_id ASC",
         [terminal.run_id],
     )
     assert "getChapterContent" in {
@@ -314,18 +364,28 @@ async def test_live_writing_agent_replans_after_read_and_cancels_cleanly(
 
     cancel_task = asyncio.create_task(_run_to_terminal(
         composition,
-        body=_request("读取当前章节后分析氛围，并给出候选改写。"),
+        body=_request("深化当前章节的氛围，并给出一版候选改写。"),
         api_key=api_key,
         signal=asyncio.Event(),
     ))
-    canceled_root_id = await _wait_for_running_root(db)
+    live_lease = await _wait_for_live_root_lease(db)
+    canceled_root_id = str(live_lease["id"])
+    assert str(live_lease["execution_owner_id"] or "").strip()
+    assert int(live_lease["lease_expires_at_ms"]) > int(time() * 1_000)
     cancel_response = await cancel_agent_run(canceled_root_id)
     assert cancel_response["success"] is True
+    assert cancel_response["data"]["status"] == "cancel_requested"
+    assert cancel_response["data"]["newlyRequested"] is True
+    assert cancel_response["data"]["terminalized"] is False
     canceled = await asyncio.wait_for(cancel_task, timeout=60)
     assert canceled.run_id == canceled_root_id
     assert canceled.status is RunStatus.CANCELED
-    assert await db.fetch_all(
-        "SELECT id FROM ai_agent_runs "
-        "WHERE status = 'running' AND (id = ? OR root_run_id = ?)",
+    scoped_runs = await db.fetch_all(
+        "SELECT id, status, execution_owner_id, lease_expires_at_ms "
+        "FROM ai_agent_runs WHERE id = ? OR root_run_id = ?",
         [canceled_root_id, canceled_root_id],
-    ) == []
+    )
+    assert scoped_runs
+    assert all(row["status"] != "running" for row in scoped_runs)
+    assert all(row["execution_owner_id"] is None for row in scoped_runs)
+    assert all(row["lease_expires_at_ms"] is None for row in scoped_runs)
