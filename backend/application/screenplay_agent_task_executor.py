@@ -18,6 +18,7 @@ from domains.screenplay_agent.contracts import (
 )
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
+from application.screenplay_checkpoint_planning import ScreenplayCheckpointPlanner
 from application.screenplay_tool_calling import ScreenplayToolCallingService
 from domains.screenplay.source_scope import parse_source_scope
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
@@ -59,11 +60,12 @@ class ScreenplayTaskModelCalls:
         db,
         *,
         composition=None,
+        structured_call_service: ScreenplayStructuredCallService | None = None,
         tool_calling_service: ScreenplayToolCallingService | None = None,
     ) -> None:
         self._db = db
         self._context = ScreenplayAgentContextQuery(db)
-        self._models = (
+        self._models = structured_call_service or (
             ScreenplayStructuredCallService(
                 db,
                 composition=composition,
@@ -719,9 +721,23 @@ class ScreenplayTaskUnitExecutor:
         tool_calling_service: ScreenplayToolCallingService | None = None,
     ) -> None:
         self._runtime = runtime
+        structured_calls = (
+            ScreenplayStructuredCallService(db, composition=composition)
+            if composition is not None
+            else None
+        )
+        self.checkpoint_planner = (
+            ScreenplayCheckpointPlanner(
+                structured_calls,
+                runtime=runtime,
+            )
+            if structured_calls is not None
+            else None
+        )
         self._delegate = ScreenplayTaskModelCalls(
             db,
             composition=composition,
+            structured_call_service=structured_calls,
             tool_calling_service=tool_calling_service,
         )
         self._parts = ScreenplayPartArtifactQuery(db)

@@ -15,7 +15,7 @@ from purra.contracts import (
     ToolBatchOutcome,
     TraceRecord,
 )
-from purra.json_values import thaw_json_mapping
+from purra.json_values import freeze_json_mapping, thaw_json_mapping
 from purra.events import AgentEvent, CoreEventType
 from purra.ports import EventSink, RunCommit, RunRepository
 from purra.run_state import RunSnapshot, RunStateMachine, RunTransition
@@ -104,29 +104,49 @@ class AgentRunController:
         async with self._mutation_lock:
             return await self._install_plan_unlocked(plan)
 
-    async def revise_plan(self, plan: TaskPlan) -> RunSnapshot:
+    async def revise_plan(
+        self,
+        plan: TaskPlan,
+        *,
+        revision_metadata: Mapping[str, object] | None = None,
+    ) -> RunSnapshot:
         """Atomically replace tentative steps after observing runtime evidence."""
 
         async with self._mutation_lock:
-            state = self._require_started()
-            revised = RunStateMachine.revise_plan(state, plan)
-            event = AgentEvent(
-                type=CoreEventType.RUN_TODOS_UPDATED,
-                run_id=state.run_id,
-                payload=_todos_payload(revised),
+            return await self._revise_plan_unlocked(
+                plan,
+                revision_metadata=revision_metadata,
             )
-            persisted, canceled = await _await_repository_receipt(
-                self._repository.commit(
-                    state.run_id,
-                    RunCommit(replace_steps=revised.steps, events=(event,)),
-                )
+
+    async def _revise_plan_unlocked(
+        self,
+        plan: TaskPlan,
+        *,
+        revision_metadata: Mapping[str, object] | None,
+    ) -> RunSnapshot:
+        state = self._require_started()
+        revised = RunStateMachine.revise_plan(state, plan)
+        metadata = freeze_json_mapping(revision_metadata or {})
+        event = AgentEvent(
+            type=CoreEventType.RUN_TODOS_UPDATED,
+            run_id=state.run_id,
+            payload={
+                **_todos_payload(revised),
+                **({"planRevision": metadata} if metadata else {}),
+            },
+        )
+        persisted, canceled = await _await_repository_receipt(
+            self._repository.commit(
+                state.run_id,
+                RunCommit(replace_steps=revised.steps, events=(event,)),
             )
-            if self._snapshot is not state:
-                raise RuntimeError("stale run plan revision")
-            self._snapshot = revised
-            _raise_if_canceled(canceled)
-            await self._publish(persisted)
-            return revised
+        )
+        if self._snapshot is not state:
+            raise RuntimeError("stale run plan revision")
+        self._snapshot = revised
+        _raise_if_canceled(canceled)
+        await self._publish(persisted)
+        return revised
 
     async def _install_plan_unlocked(self, plan: TaskPlan) -> RunSnapshot:
         state = self._require_started()
@@ -381,6 +401,11 @@ def _todos_payload(state: RunSnapshot) -> dict[str, object]:
         "title": state.title,
         "goal": state.goal,
         "status": state.status.value,
+        **(
+            {"taskSpec": state.task_spec.to_mapping()}
+            if state.task_spec is not None
+            else {}
+        ),
         "steps": [_step_payload(step) for step in state.steps],
     }
 
