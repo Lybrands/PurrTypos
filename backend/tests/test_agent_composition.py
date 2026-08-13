@@ -146,6 +146,17 @@ def _fixture_model_options() -> dict[str, object]:
     }
 
 
+def _lexical(text: str) -> str:
+    return json.dumps({
+        "root": {
+            "children": [{
+                "type": "paragraph",
+                "children": [{"type": "text", "text": text}],
+            }],
+        },
+    }, ensure_ascii=False)
+
+
 @pytest_asyncio.fixture
 async def temp_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
@@ -1438,6 +1449,19 @@ async def test_composed_route_uses_complete_purra(
 ):
     round_number = 0
 
+    async def _create_plan(*_args, **_kwargs):
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({
+                    "needsTodos": False,
+                    "reason": "直接回答即可",
+                }, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
     async def _create_chat_stream(
         key,
         messages,
@@ -1450,7 +1474,7 @@ async def test_composed_route_uses_complete_purra(
         assert key == "key"
         assert api_provider == "openai"
         assert options["model"] == "model"
-        assert bool(options.get("tools")) is (round_number == 1)
+        assert not options.get("tools")
         assert signal is not None
 
         async def _stream():
@@ -1463,6 +1487,10 @@ async def test_composed_route_uses_complete_purra(
 
         return {"stream": _stream(), "model": "model"}
 
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _create_plan,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _create_chat_stream,
@@ -1488,12 +1516,203 @@ async def test_composed_route_uses_complete_purra(
     projected = project_wire_events_for_legacy_assertions(events)
     assert any("agentRunStarted" in event for event in projected)
     assert any("contextBudget" in event for event in projected)
-    assert round_number == 2
+    assert round_number == 1
     assert "".join(event.get("delta", "") for event in projected) == "完成"
     assert any("agentRunCompleted" in event for event in projected)
     assert events[-1]["done"] is True
     assert events[-1]["model"] == "model"
     assert events[-1]["runResult"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    chapter_text = "弄堂里没有雨声，只有晾衣竹竿在风里轻撞墙面。"
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-replan", "重规划测试书"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'writing', ?)",
+        ["writing-replan", "写作目录", "book-replan"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, level, sort) VALUES (?, ?, ?, 1, 1)",
+        ["chapter-replan", "writing-replan", "第一章：弄堂"],
+    )
+    await temp_db.execute(
+        "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
+        ["chapter-replan", _lexical(chapter_text)],
+    )
+    planner_payloads: list[dict[str, object]] = []
+
+    async def _planner(_key, messages, _options, _provider, signal=None):
+        assert signal is not None
+        payload = json.loads(messages[1]["content"])
+        planner_payloads.append(payload)
+        if len(planner_payloads) == 1:
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "根据当前章节证据提出氛围改写",
+                "todos": [
+                    {
+                        "id": "inspect-current-chapter",
+                        "title": "检查当前章节",
+                        "type": "read",
+                        "executor": "tool",
+                        "expectedTools": ["getChapterContent"],
+                        "riskLevel": "read",
+                    },
+                    {
+                        "id": "propose-atmosphere-rewrite",
+                        "title": "提出氛围改写",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
+                ],
+            }
+        else:
+            execution = payload["executionState"]
+            assert execution["completedSteps"][0]["id"] == (
+                "inspect-current-chapter"
+            )
+            assert chapter_text in json.dumps(
+                execution["recentToolObservations"],
+                ensure_ascii=False,
+            )
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "利用无雨声的新事实调整氛围策略",
+                "todos": [{
+                    "id": "shape-silent-alley-atmosphere",
+                    "title": "围绕寂静重塑弄堂氛围",
+                    "type": "review",
+                    "executor": "model",
+                    "expectedTools": [],
+                    "riskLevel": "read",
+                }],
+            }
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(content, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
+    runtime_round = 0
+
+    async def _runtime(_key, messages, options, _provider, signal=None):
+        nonlocal runtime_round
+        runtime_round += 1
+        assert signal is not None
+
+        async def _stream():
+            if runtime_round == 1:
+                assert [
+                    item["function"]["name"]
+                    for item in options.get("tools", [])
+                ] == ["getChapterContent"]
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-read-replan",
+                                "type": "function",
+                                "function": {
+                                    "name": "getChapterContent",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
+            assert not options.get("tools")
+            assert chapter_text in json.dumps(messages, ensure_ascii=False)
+            yield {
+                "choices": [{
+                    "delta": {"content": "改写应以寂静和轻微碰撞声为核心。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+    set_agent_composition(_writing_composition(temp_db))
+
+    response = await chat_stream(ChatStreamRequest(
+        messages=[{"role": "user", "content": "深化弄堂氛围"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-replan",
+        chapterId="chapter-replan",
+        currentChapterTitle="第一章：弄堂",
+        chatAgentMode="agent",
+        contextWindow="200k",
+    ))
+    events = await _collect(response)
+    projected = project_wire_events_for_legacy_assertions(events)
+    plans = [
+        event["agentRunTodosUpdated"]
+        for event in projected
+        if "agentRunTodosUpdated" in event
+    ]
+
+    assert len(planner_payloads) == 2
+    assert len(plans) >= 2
+    root_run_ids = {
+        event["agentRunStarted"]["runId"]
+        for event in projected
+        if "agentRunStarted" in event
+    }
+    assert len(root_run_ids) == 1
+    latest = plans[-1]
+    assert [
+        (step["id"], step["title"], step["status"])
+        for step in latest["steps"]
+    ] == [
+        ("inspect-current-chapter", "检查当前章节", "done"),
+        (
+            "shape-silent-alley-atmosphere",
+            "围绕寂静重塑弄堂氛围",
+            "running",
+        ),
+    ]
+    encoded = json.dumps(latest, ensure_ascii=False).lower()
+    assert all(
+        forbidden not in encoded
+        for forbidden in ("create", "publish", "recipe", "校验候选稿")
+    )
+    assert events[-1]["runResult"]["status"] == "done"
+    runs = await temp_db.fetch_all(
+        "SELECT id, status FROM ai_agent_runs ORDER BY create_time ASC"
+    )
+    assert runs == [{
+        "id": next(iter(root_run_ids)),
+        "status": "done",
+    }]
 
 
 @pytest.mark.asyncio
@@ -1503,10 +1722,32 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 ):
     round_number = 0
 
+    async def _create_plan(*_args, **_kwargs):
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({
+                    "needsTodos": True,
+                    "title": "安全删除人物",
+                    "goal": "经用户确认后删除人物",
+                    "todos": [{
+                        "id": "delete-character",
+                        "title": "删除人物",
+                        "type": "write",
+                        "executor": "tool",
+                        "expectedTools": ["deleteCharacter"],
+                        "riskLevel": "destructive",
+                    }],
+                }, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
     async def _create_chat_stream(
         _key,
         _messages,
-        _options,
+        options,
         _api_provider,
         signal=None,
     ):
@@ -1516,6 +1757,31 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 
         async def _stream():
             if round_number == 1:
+                assert [
+                    item["function"]["name"]
+                    for item in options.get("tools", [])
+                ] == ["listBookCharacters"]
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-list",
+                                "type": "function",
+                                "function": {
+                                    "name": "listBookCharacters",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+            elif round_number == 2:
+                assert [
+                    item["function"]["name"]
+                    for item in options.get("tools", [])
+                ] == ["deleteCharacter"]
                 yield {
                     "choices": [{
                         "delta": {
@@ -1542,6 +1808,10 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 
         return {"stream": _stream(), "model": "model"}
 
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _create_plan,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _create_chat_stream,
@@ -1585,7 +1855,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
                 "data": {"status": "rejected"},
             }
 
-    assert round_number == 3
+    assert round_number == 4
     assert_raw_canonical_wire(chunks)
     projected = project_wire_events_for_legacy_assertions(chunks)
     assert any("toolApprovalRequired" in chunk for chunk in projected)
