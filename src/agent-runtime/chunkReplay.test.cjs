@@ -314,6 +314,15 @@ test('replay keeps the Root Run public plan isolated from child Run events', () 
 
   replay.dispatch(seed, canonical('root-run-a', 2, {
     kind: 'run.lifecycle',
+    visibility: 'private',
+    payload: { status: 'done' },
+  }), dependencies)
+
+  plan = replay.assistant(seed.turnId)?.taskPlan
+  assert.equal(plan?.status, 'running')
+
+  replay.dispatch(seed, canonical('root-run-a', 3, {
+    kind: 'run.lifecycle',
     payload: { status: 'done' },
   }), dependencies)
 
@@ -569,6 +578,13 @@ test('paused resume switches the canonical root once and blocks late same-run te
   replay.dispatch(seed, { done: true, finalResponseExpected: false }, dependencies)
 
   replay.dispatch(seed, canonical('run-b', 1, {
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }), dependencies)
+  assert.equal(replay.assistant(seed.turnId)?.agentRunId, 'run-b')
+  assert.equal(replay.assistant(seed.turnId)?.taskPlan, undefined)
+
+  replay.dispatch(seed, canonical('run-b', 2, {
     payload: {
       eventType: 'run.todos_updated',
       data: { runId: 'run-b', title: 'B', status: 'running', steps: [] },
@@ -583,7 +599,7 @@ test('paused resume switches the canonical root once and blocks late same-run te
     finalResponseExpected: false,
     model: 'run-b-paused-model',
   }, dependencies)
-  replay.dispatch(seed, canonical('run-b', 2, {
+  replay.dispatch(seed, canonical('run-b', 3, {
     payload: {
       eventType: 'run.todo_updated',
       data: { runId: 'run-b', stepId: 'late', step: null },

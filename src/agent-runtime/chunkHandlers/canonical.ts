@@ -22,9 +22,14 @@ export function handleCanonicalOutput(
 ): boolean {
   if (!isCanonicalOutputEvent(chunk)) return false
 
+  const currentState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
+  const acceptedCanonicalEvent = chunk.sequence
+    > (currentState.lastSequenceByRun[chunk.runId] ?? 0)
   const terminalSettlement = ctx.acc.terminalSettlement
   const resumesPausedRun = Boolean(
-    terminalSettlement
+    acceptedCanonicalEvent
+    && chunk.visibility === 'public'
+    && terminalSettlement
     && terminalSettlement.phase !== 'projecting'
     && terminalSettlement.outcome === 'paused'
     && chunk.runId
@@ -35,7 +40,6 @@ export function handleCanonicalOutput(
     ctx.acc.taskPlan = undefined
   }
 
-  const currentState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
   const state = reduceCanonicalOutput(
     resumesPausedRun
       ? {
@@ -57,10 +61,12 @@ export function handleCanonicalOutput(
     .map((block) => block.text.trim())
     .filter(Boolean)
   ctx.acc.commentaryDurationsMs = undefined
-  if (chunk.kind === 'runtime.event') {
-    applyCanonicalRuntimeView(ctx, state.latestRuntimeEvent, chunk.runId)
-  } else if (chunk.kind === 'run.lifecycle') {
-    applyRunLifecycleView(ctx, chunk.runId, chunk.payload.status)
+  if (acceptedCanonicalEvent && chunk.visibility === 'public') {
+    if (chunk.kind === 'runtime.event') {
+      applyCanonicalRuntimeView(ctx, state.latestRuntimeEvent, chunk.runId)
+    } else if (chunk.kind === 'run.lifecycle') {
+      applyRunLifecycleView(ctx, chunk.runId, chunk.payload.status)
+    }
   }
   ctx.acc.delegations = state.delegationOrder.map((delegationId) =>
     delegationView(state.delegations[delegationId]),
@@ -90,7 +96,9 @@ export function handleCanonicalOutput(
           ? ctx.acc.commentaryBlocks
           : undefined,
         commentaryDurationsMs: undefined,
-        taskPlan: ctx.acc.taskPlan ?? message.taskPlan,
+        taskPlan: resumesPausedRun
+          ? undefined
+          : ctx.acc.taskPlan ?? message.taskPlan,
         longTaskId: ctx.acc.longTaskId ?? message.longTaskId,
         delegations: ctx.acc.delegations,
         subAgentActivities: ctx.acc.subAgentActivities,
