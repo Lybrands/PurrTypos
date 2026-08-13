@@ -12,6 +12,7 @@ from application.screenplay_agent_service import (
     ResolvedScreenplayTask,
     ScreenplayAgentService,
 )
+from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.screenplay_agent_planner import ModelScreenplayIntentPlanner
 from application.screenplay_candidate_assembler import (
     ScreenplayCandidateAssembler,
@@ -30,6 +31,12 @@ from domains.screenplay_agent.contracts import ScreenplayScopeKind
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
+from infrastructure.persistence.sqlite_work_item_repository import (
+    SqliteWorkItemRepository,
+)
 from infrastructure.persistence import run_store
 from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     ScreenplayOperationFinalizationCommand,
@@ -45,6 +52,7 @@ from purra.contracts import (
 from purra.api import AgentCore
 from purra.errors import ModelGatewayError
 from purra.long_tasks import LongTaskUnitResult
+from purra.long_tasks import RecipeLongTaskDispatcher
 from purra.tools import InMemoryToolCatalog
 from domains.screenplay_agent.adapter import (
     ScreenplayExecutionStateFactory,
@@ -203,6 +211,24 @@ class _UnitExecutor:
             artifact_digest=ref.content_digest,
             validation_receipt=ref.validation_receipt,
         )
+
+
+async def test_screenplay_profile_dispatcher_registers_only_the_injected_executor(
+    screenplay_db,
+):
+    executor = _UnitExecutor(screenplay_db)
+    dispatcher = ScreenplayAgentProfileExtension(
+        screenplay_db,
+        owner_id="screenplay-profile-dispatcher-test",
+    ).create_long_task_dispatcher(
+        work_item_repository=SqliteWorkItemRepository(screenplay_db),
+        long_task_repository=SqliteLongTaskRepository(screenplay_db),
+        executor=executor,
+    )
+
+    assert isinstance(dispatcher, RecipeLongTaskDispatcher)
+    assert dispatcher._executors.get("screenplay") is executor
+    assert dispatcher._executors.get("writing") is None
 
 
 class _ScriptedPlannerGateway:

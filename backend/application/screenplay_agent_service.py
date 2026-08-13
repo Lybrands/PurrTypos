@@ -11,7 +11,7 @@ import asyncio
 import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import uuid4
@@ -57,9 +57,14 @@ from domains.screenplay_agent import (
     ScreenplayOperationCreateCommand,
     ScreenplayStageCommand,
 )
+from domains.screenplay_agent.contracts import (
+    ScreenplayPlanBinding,
+    ScreenplayPlanPhase,
+)
 from application.screenplay_manifest_compiler import (
     compile_screenplay_manifest,
 )
+from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from exceptions import AppError, NotFoundError
@@ -89,17 +94,6 @@ _ACTIVE_TASKS: dict[str, asyncio.Task[None]] = {}
 class PlannedScreenplayIntent:
     intent: ScreenplayIntent
     run_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedScreenplayTask:
-    target_role: str
-    episode_numbers: tuple[int, ...] = ()
-    base_revision_id: str | None = None
-    episode_scene_ids: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
-    source_revision_refs: tuple[str, ...] = ()
-    reviewed_draft_id: str | None = None
-    document_sections: tuple[str, ...] = ()
 
 
 class ScreenplayIntentPlanner(Protocol):
@@ -249,6 +243,7 @@ class ScreenplayAgentService:
                 workspace=workspace,
                 intent=planned.intent,
             )
+            legacy_bindings = _legacy_plan_bindings(resolved.target_role)
             compiled = compile_screenplay_manifest(
                 intent=planned.intent,
                 target_role=resolved.target_role,
@@ -258,6 +253,7 @@ class ScreenplayAgentService:
                 base_revision_id=resolved.base_revision_id,
                 document_sections=resolved.document_sections,
                 original_request=str(turn["userContent"]),
+                plan_bindings=legacy_bindings,
             )
             requirements = {
                 "intent": planned.intent.to_mapping(),
@@ -297,7 +293,7 @@ class ScreenplayAgentService:
                 reason_code="screenplay_deliverable_requires_durable_execution",
                 estimated_units=len(compiled.recipe.steps),
                 estimated_model_calls=len(compiled.recipe.steps) - 1,
-                covered_step_ids=("create", "publish"),
+                covered_step_ids=tuple(step.id for step in plan.steps),
                 execution_recipe=compiled.recipe,
             )
             descriptor = DurableTaskDescriptor(
@@ -935,6 +931,19 @@ class _FixedDescriptorResolver:
         return self._descriptor
 
 
+def _legacy_plan_bindings(target_role: str) -> tuple[ScreenplayPlanBinding, ...]:
+    middle_phase = (
+        ScreenplayPlanPhase.REVIEW
+        if target_role == "review"
+        else ScreenplayPlanPhase.CREATION
+    )
+    return (
+        ScreenplayPlanBinding("evidence", ScreenplayPlanPhase.EVIDENCE),
+        ScreenplayPlanBinding("create", middle_phase),
+        ScreenplayPlanBinding("publish", ScreenplayPlanPhase.DELIVERY),
+    )
+
+
 def _durable_plan(intent: ScreenplayIntent) -> TaskPlan:
     return TaskPlan(
         title="完成剧本交付物",
@@ -944,10 +953,17 @@ def _durable_plan(intent: ScreenplayIntent) -> TaskPlan:
         ),
         steps=(
             TaskStep(
+                id="evidence",
+                title="准备创作依据",
+                type=StepType.READ,
+                executor=StepExecutor.TOOL,
+            ),
+            TaskStep(
                 id="create",
                 title="创作并校验内容",
                 type=StepType.WRITE,
                 executor=StepExecutor.TOOL,
+                depends_on=("evidence",),
             ),
             TaskStep(
                 id="publish",
