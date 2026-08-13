@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 
 from purra.contracts import (
     AgentRunRequest,
@@ -15,11 +16,12 @@ from purra.contracts import (
     ToolExecutionMode,
 )
 from purra.context_budget import resolve_context_budget_claims
+from purra.json_values import thaw_json_mapping
 from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
 from purra.context_orchestration.contracts import ContextCompressionSettings
-from purra.api import AgentCore
+from purra.api import AgentCore, AgentCoreRunOptions
 from purra.delegation import AgentCoreSubmitter, ChildRunRequestFactory
 from purra.events import AgentEvent, CoreEventType
 from purra.ports import (
@@ -265,7 +267,7 @@ class AgentComposition:
         self,
         api_key: str,
         *,
-        agent_profile: str | None = None,
+        agent_profile: str,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
         agent_role_guidance: Mapping[str, object] | None = None,
@@ -291,7 +293,7 @@ class AgentComposition:
                 on_required_tool_choice_unsupported
             ),
         )
-        profile_id = agent_profile or self._profile_registry.ids[0]
+        profile_id = str(agent_profile or "").strip()
         registration = self._profile_registry.require(profile_id)
         adapter = registration.adapter
         extension = self._profile_extensions_by_id[profile_id]
@@ -427,10 +429,58 @@ class AgentComposition:
     def agent_role_registry_for_request(
         self,
         request: AgentRunRequest,
-    ) -> AgentRoleRegistry:
+    ) -> AgentRoleRegistry | None:
         return self._profile_registry.for_request(
             request
         ).adapter.agent_role_registry
+
+    def bind_run_profile(
+        self,
+        request: AgentRunRequest,
+        options: AgentCoreRunOptions,
+    ) -> AgentCoreRunOptions:
+        """Persist the selected product profile through the existing Run binding."""
+
+        binding = options.binding
+        if binding is None:
+            return options
+        registration = self._profile_registry.for_request(request)
+        attributes = thaw_json_mapping(binding.attributes)
+        expected = {
+            "agentProfile": registration.id,
+            "domainNamespace": registration.domain_namespace,
+        }
+        for name, value in expected.items():
+            current = str(attributes.get(name) or "").strip()
+            if current and current != value:
+                raise ValueError(f"Run binding {name} conflicts with Agent profile")
+        return replace(
+            options,
+            binding=replace(binding, attributes={**attributes, **expected}),
+        )
+
+    def agent_role_registry_for_persisted_profile(
+        self,
+        *,
+        profile_id: str | None = None,
+        domain_namespace: str | None = None,
+    ) -> AgentRoleRegistry | None:
+        normalized_profile = str(profile_id or "").strip()
+        normalized_namespace = str(domain_namespace or "").strip()
+        if normalized_profile:
+            registration = self._profile_registry.require(normalized_profile)
+            if (
+                normalized_namespace
+                and registration.domain_namespace != normalized_namespace
+            ):
+                raise ValueError(
+                    "persisted Agent profile conflicts with domain namespace"
+                )
+        else:
+            registration = self._profile_registry.for_domain_namespace(
+                normalized_namespace
+            )
+        return registration.adapter.agent_role_registry
 
     def create_response_judge_policies(
         self,

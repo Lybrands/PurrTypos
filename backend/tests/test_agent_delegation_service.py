@@ -13,6 +13,7 @@ from purra.contracts import (
 )
 from application.agent_delegation_service import AgentDelegationService
 from database.connection import DatabaseConnection
+from domains.agent_roles import AgentRoleDefinition, AgentRoleRegistry
 from domains.writing.agent_roles import build_writing_agent_role_registry
 from infrastructure.persistence import run_execution_store, run_store
 from infrastructure.persistence import delegation_store
@@ -44,8 +45,37 @@ async def _parent(db: DatabaseConnection) -> str:
 def _service(db: DatabaseConnection, *, max_depth: int = 3) -> AgentDelegationService:
     return AgentDelegationService(
         SqliteDelegationRepository(db),
+        role_registry=AgentRoleRegistry(
+            AgentRoleDefinition(
+                id=role_id,
+                title=role_id,
+                delegation_description=f"Delegate to {role_id}",
+                instruction=f"Act as {role_id}",
+            )
+            for role_id in (
+                "researcher",
+                "reviewer",
+                "screenplay_writer",
+                "critic",
+                "writer",
+                "nested",
+            )
+        ),
         max_depth=max_depth,
     )
+
+
+@pytest.mark.asyncio
+async def test_delegate_rejects_profiles_without_agent_roles(db):
+    parent_run_id = await _parent(db)
+    service = AgentDelegationService(SqliteDelegationRepository(db))
+
+    with pytest.raises(ValueError, match="does not support delegation"):
+        await service.delegate(
+            parent_run_id=parent_run_id,
+            agent_role="researcher",
+            objective="must stay disabled",
+        )
 
 
 @pytest.mark.asyncio

@@ -127,12 +127,17 @@ class AgentProfileRegistry:
         return registration
 
     def for_request(self, request: AgentRunRequest) -> AgentProfileRegistration:
-        registration = self._by_namespace.get(
-            request.domain_context.namespace
-        )
+        return self.for_domain_namespace(request.domain_context.namespace)
+
+    def for_domain_namespace(
+        self,
+        domain_namespace: str,
+    ) -> AgentProfileRegistration:
+        normalized = str(domain_namespace or "").strip()
+        registration = self._by_namespace.get(normalized)
         if registration is None:
             raise ValueError(
                 "unsupported Agent domain namespace: "
-                f"{request.domain_context.namespace}"
+                f"{normalized or '<empty>'}"
             )
         return registration

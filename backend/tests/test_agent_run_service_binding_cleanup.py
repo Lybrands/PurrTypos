@@ -67,6 +67,12 @@ class _Composition:
     def create_response_judge_policies(self, _request):
         return ()
 
+    def agent_role_registry_for_request(self, _request):
+        return None
+
+    def bind_run_profile(self, _request, options):
+        return options
+
     def create_core_for_request(self, _request, _api_key, **_kwargs):
         return self.core
 

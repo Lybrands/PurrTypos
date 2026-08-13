@@ -20,21 +20,38 @@ export function handleCanonicalOutput(
   chunk: AiStreamChunk,
   ctx: AgentChunkRuntimeContext,
 ): boolean {
+  const transportStreamId = chunk.streamId
   if (!isCanonicalOutputEvent(chunk)) return false
 
   const currentState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
   const acceptedCanonicalEvent = chunk.sequence
     > (currentState.lastSequenceByRun[chunk.runId] ?? 0)
+  const currentRunId = currentState.runId ?? ctx.acc.agentRunId
+  const foreignRun = Boolean(currentRunId && chunk.runId !== currentRunId)
+  const turnBindingMatches = Boolean(
+    ctx.turnId
+    && (
+      transportStreamId === ctx.turnId
+      || (!transportStreamId && chunk.turnId === ctx.turnId)
+    )
+  )
   const terminalSettlement = ctx.acc.terminalSettlement
   const resumesPausedRun = Boolean(
     acceptedCanonicalEvent
     && chunk.visibility === 'public'
+    && foreignRun
+    && chunk.kind === 'run.lifecycle'
+    && chunk.payload.status === 'running'
+    && turnBindingMatches
     && terminalSettlement
     && terminalSettlement.phase !== 'projecting'
     && terminalSettlement.outcome === 'paused'
-    && chunk.runId
     && chunk.runId !== terminalSettlement.runId
   )
+  if (
+    (ctx.turnId && transportStreamId && transportStreamId !== ctx.turnId)
+    || (foreignRun && !resumesPausedRun)
+  ) return true
   if (resumesPausedRun) {
     ctx.acc.terminalSettlement = undefined
     ctx.acc.taskPlan = undefined

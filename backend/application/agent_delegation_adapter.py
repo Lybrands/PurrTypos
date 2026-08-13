@@ -102,16 +102,11 @@ class ApplicationDelegationAdapter:
             raise TypeError("child run requires AgentCoreRunOptions")
         role = str(request.metadata.get("agentRole") or "").strip()
         definition = self._roles.require(role)
-        create_core_for_request = getattr(
-            self._composition,
-            "create_core_for_request",
-            None,
-        )
         kwargs = {"allowed_tool_modes": definition.allowed_tool_modes}
-        core = (
-            create_core_for_request(request, self._api_key, **kwargs)
-            if callable(create_core_for_request)
-            else self._composition.create_core(self._api_key, **kwargs)
+        core = self._composition.create_core_for_request(
+            request,
+            self._api_key,
+            **kwargs,
         )
         try:
             handle = await core.submit(request, options=options)

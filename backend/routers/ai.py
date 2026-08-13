@@ -12,10 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from purra.contracts import (
-    AgentMessage,
-    AgentRunRequest,
     AgentRunResult,
-    DomainContext,
     ModelRequest,
     RunProvenance,
 )
@@ -24,7 +21,6 @@ from application.request_mapping import (
     build_chat_provider_options,
     validate_writing_request_contract,
 )
-from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
 from schemas.ai import (
     CaptureAiErrorReportRequest,
     ChatStreamRequest,
@@ -53,19 +49,6 @@ _ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
     "taskType",
     "toolsEnabled",
 })
-_WRITING_PROFILE_REQUEST = AgentRunRequest(
-    messages=(AgentMessage(role="user", content="resolve writing profile"),),
-    model=ModelRequest(provider="host", model="profile-resolution"),
-    domain_context=DomainContext(namespace=WRITING_DOMAIN_NAMESPACE),
-)
-
-
-def _writing_role_registry(composition):
-    return composition.agent_role_registry_for_request(
-        _WRITING_PROFILE_REQUEST
-    )
-
-
 class _AgentClientDisconnected(Exception):
     """A guarded ASGI send observed the client disconnect."""
 
@@ -600,12 +583,25 @@ async def create_agent_delegation(
 ):
     from application.agent_delegation_service import AgentDelegationService
     from application.agent_composition import get_agent_composition
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
 
     composition = get_agent_composition()
+    db = get_db()
     try:
+        parent = await get_run(db, run_id)
+        if parent is None:
+            raise ValueError("Agent Run does not exist")
+        role_registry = await _persisted_run_role_registry(
+            composition,
+            db,
+            parent,
+        )
+        if role_registry is None:
+            raise ValueError("Agent profile does not support delegation")
         delegation = await AgentDelegationService(
             composition.delegation_repository,
-            role_registry=_writing_role_registry(composition),
+            role_registry=role_registry,
         ).delegate(
             parent_run_id=run_id,
             agent_role=body.agentRole,
@@ -642,7 +638,8 @@ async def get_latest_session_agent_run(
 
     composition = get_agent_composition()
     normalized_request_id = str(request_id or "").strip()
-    receipt_store = SqliteWritingChatRequestStore(get_db())
+    db = get_db()
+    receipt_store = SqliteWritingChatRequestStore(db)
     receipt = (
         await receipt_store.get(normalized_request_id)
         if normalized_request_id
@@ -655,10 +652,10 @@ async def get_latest_session_agent_run(
     )
     run = (
         await get_run_for_session_request(
-            get_db(), session_id, correlated_request_id,
+            db, session_id, correlated_request_id,
         )
         if correlated_request_id
-        else await get_latest_run_for_session(get_db(), session_id)
+        else await get_latest_run_for_session(db, session_id)
     )
     if run is not None and receipt is not None and receipt.run_id is None:
         receipt = await receipt_store.bind_run(
@@ -680,8 +677,12 @@ async def get_latest_session_agent_run(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
-        role_registry=_writing_role_registry(composition),
-        product_event_query=SqliteWritingProposalReadModel(get_db()),
+        role_registry=await _persisted_run_role_registry(
+            composition,
+            db,
+            run,
+        ),
+        product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
         return {"success": True, "data": None}
@@ -712,13 +713,22 @@ async def get_agent_run_snapshot(
         SqliteWritingProposalReadModel,
     )
     from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
 
     composition = get_agent_composition()
+    db = get_db()
+    run = await get_run(db, run_id)
+    if run is None:
+        return {"success": False, "error": "Agent Run 不存在"}
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
-        role_registry=_writing_role_registry(composition),
-        product_event_query=SqliteWritingProposalReadModel(get_db()),
+        role_registry=await _persisted_run_role_registry(
+            composition,
+            db,
+            run,
+        ),
+        product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(
         run_id,
         after_event_id=after,
@@ -727,6 +737,58 @@ async def get_agent_run_snapshot(
     if snapshot is None:
         return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": snapshot}
+
+
+async def _persisted_run_role_registry(composition, db, run):
+    """Resolve optional roles from the target Run or its persisted parent."""
+
+    current = run
+    visited: set[str] = set()
+    resolved_profile = ""
+    resolved_namespace = ""
+    while current is not None:
+        current_id = str(current.get("id") or "").strip()
+        if current_id:
+            if current_id in visited:
+                raise ValueError("Agent Run parent lineage contains a cycle")
+            visited.add(current_id)
+        profile_id, domain_namespace = _persisted_profile_identity(current)
+        if profile_id:
+            if resolved_profile and resolved_profile != profile_id:
+                raise ValueError("Agent Run lineage has conflicting profiles")
+            resolved_profile = profile_id
+        if domain_namespace:
+            if resolved_namespace and resolved_namespace != domain_namespace:
+                raise ValueError("Agent Run lineage has conflicting domains")
+            resolved_namespace = domain_namespace
+        parent_run_id = str(current.get("parent_run_id") or "").strip()
+        if not parent_run_id:
+            break
+        from infrastructure.persistence.run_store import get_run
+
+        current = await get_run(db, parent_run_id)
+    if not resolved_profile and not resolved_namespace:
+        return None
+    return composition.agent_role_registry_for_persisted_profile(
+        profile_id=resolved_profile,
+        domain_namespace=resolved_namespace,
+    )
+
+
+def _persisted_profile_identity(run) -> tuple[str, str]:
+    raw = run.get("binding_attributes_json")
+    if isinstance(raw, dict):
+        attributes = raw
+    else:
+        try:
+            parsed = json.loads(str(raw or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            parsed = {}
+        attributes = parsed if isinstance(parsed, dict) else {}
+    return (
+        str(attributes.get("agentProfile") or "").strip(),
+        str(attributes.get("domainNamespace") or "").strip(),
+    )
 
 
 @router.get("/ai/agent-runtime-regressions")
