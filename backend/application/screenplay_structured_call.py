@@ -39,6 +39,10 @@ from purra.model_protocol import (
 )
 from purra.structured_output import parse_json_object
 from application.agent_run_service import AgentRunService
+from application.host_child_runs import (
+    HostChildTerminalRetryPolicy,
+    stable_host_child_key,
+)
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
@@ -217,6 +221,15 @@ class ScreenplayStructuredCallService:
             lineage=lineage,
             mapped_request=request,
             base_options=options,
+            host_child_key=stable_host_child_key(
+                binding_namespace,
+                binding_aggregate_id,
+                binding_command_id,
+                str(expected_part_key or phase),
+            ),
+            terminal_retry_policy=(
+                HostChildTerminalRetryPolicy.REUSE_DONE_RETRY_FAILED
+            ),
         )
 
         if result.status is RunStatus.CANCELED:
@@ -356,6 +369,15 @@ class ScreenplayStructuredCallService:
             lineage=lineage,
             mapped_request=request,
             base_options=options,
+            host_child_key=stable_host_child_key(
+                binding_namespace,
+                binding_aggregate_id,
+                binding_command_id,
+                str(expected_part_key or phase),
+            ),
+            terminal_retry_policy=(
+                HostChildTerminalRetryPolicy.REUSE_DONE_RETRY_FAILED
+            ),
         )
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError

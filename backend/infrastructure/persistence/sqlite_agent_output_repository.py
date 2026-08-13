@@ -226,6 +226,11 @@ class SqliteAgentOutputRepository:
         # a concurrent terminal commit therefore follows the existing
         # idempotency/conflict path and is never overwritten.
         async with self._runs.write_transaction():
+            await self._validate_host_child_response_policy(
+                run_id,
+                expected_status=expected_status,
+                has_validated_result=validated_result_draft is not None,
+            )
             existing = await self._existing_event_for_draft(event_draft)
             if existing is not None:
                 run = await self._db.fetch_one(
@@ -242,16 +247,10 @@ class SqliteAgentOutputRepository:
                     )
                     for item in related_drafts
                 ])
-                validated = ()
-                if validated_result_draft is not None:
-                    persisted = await self._existing_event_for_draft(
-                        validated_result_draft
-                    )
-                    if persisted is None:
-                        raise ContractViolationError(
-                            "completed validated Run is missing its result"
-                        )
-                    validated = (persisted,)
+                validated = await self._validated_replay_events(
+                    run_id,
+                    validated_result_draft,
+                )
                 return (*related, *validated, existing)
             atomic_drafts = (
                 *related_drafts,
@@ -301,6 +300,70 @@ class SqliteAgentOutputRepository:
                 )
             lifecycle = await self._append_event_in_transaction(event_draft)
             return (*related, *validated, lifecycle)
+
+    async def _validate_host_child_response_policy(
+        self,
+        run_id: str,
+        *,
+        expected_status: RunStatus,
+        has_validated_result: bool,
+    ) -> None:
+        if expected_status is not RunStatus.DONE:
+            return
+        run = await self._db.fetch_one(
+            "SELECT binding_attributes_json FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is None:
+            raise ContractViolationError("run lifecycle Run does not exist")
+        attributes = _json_mapping(run.get("binding_attributes_json"))
+        host_child = attributes.get("hostChild")
+        if not isinstance(host_child, Mapping):
+            return
+        if host_child.get("protocol") != "purra.host-child/v1":
+            raise ContractViolationError(
+                "host child response policy has an invalid protocol"
+            )
+        response_mode = str(host_child.get("responseMode") or "")
+        expects_validated = response_mode == "validated_result"
+        if response_mode not in {"validated_result", "direct_live"} or (
+            expects_validated != has_validated_result
+        ):
+            raise ContractViolationError(
+                "host child response policy conflicts with terminal output"
+            )
+
+    async def _validated_replay_events(
+        self,
+        run_id: str,
+        expected: AgentOutputEventDraft | None,
+    ) -> tuple[AgentOutputEvent, ...]:
+        rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_run_events WHERE run_id = ? AND kind = ? "
+            "ORDER BY sequence, id",
+            [run_id, OutputEventKind.RUN_VALIDATED_RESULT.value],
+        )
+        if expected is None:
+            if rows:
+                raise ContractViolationError(
+                    "terminal replay changed the validated result identity"
+                )
+            return ()
+        if len(rows) != 1:
+            raise ContractViolationError(
+                "terminal replay requires exactly one validated result"
+            )
+        try:
+            persisted = await self._existing_event_for_draft(expected)
+        except ContractViolationError as error:
+            raise ContractViolationError(
+                "terminal replay changed the validated result identity"
+            ) from error
+        if persisted is None:
+            raise ContractViolationError(
+                "completed validated Run is missing its validated result"
+            )
+        return (persisted,)
 
     async def commit_stream(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ from purra.contracts import (
 from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
 from purra.tools import InMemoryToolCatalog
-from purra.errors import ModelGatewayError
+from purra.errors import ContractViolationError, ModelGatewayError
 from purra.json_values import thaw_json_mapping
 from purra.recovery import (
     FailureCategory,
@@ -116,6 +117,9 @@ from infrastructure.persistence.sqlite_work_item_repository import (
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
+)
+from infrastructure.persistence.sqlite_host_child_run_registry import (
+    SqliteHostChildRunRegistry,
 )
 from infrastructure.persistence.agent_output_publisher import (
     InProcessAgentOutputPublisher,
@@ -550,6 +554,7 @@ class _CoreComposition:
             db,
             run_repository=self._runs,
         )
+        self._host_children = SqliteHostChildRunRegistry(db)
         self._publisher = InProcessAgentOutputPublisher()
         self._leases = SqliteExecutionLeaseStore(db)
         self.last_request = None
@@ -557,6 +562,10 @@ class _CoreComposition:
     @property
     def output_repository(self):
         return self._outputs
+
+    @property
+    def host_child_run_registry(self):
+        return self._host_children
 
     def create_core_for_request(self, request, api_key, **kwargs):
         self.last_request = request
@@ -591,7 +600,19 @@ class _CoreComposition:
 
     def bind_run_profile(self, request, options):
         del request
-        return options
+        if options.binding is None:
+            return options
+        return replace(
+            options,
+            binding=replace(
+                options.binding,
+                attributes={
+                    **dict(options.binding.attributes),
+                    "agentProfile": "screenplay-agent",
+                    "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+                },
+            ),
+        )
 
     def release_core(self, core) -> None:
         del core
@@ -2484,6 +2505,227 @@ async def test_structured_child_returns_persisted_result_not_validator_memory(
     assert len(gateway.invocations) == invocation_count
 
 
+async def test_structured_child_retry_after_host_crash_reuses_persisted_run(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    composition = _core_composition(temp_db, gateway)
+
+    async def invoke(active_composition=composition):
+        return await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=active_composition,
+        ).run_json(
+            runtime=_request(session["id"], "崩溃恢复").runtime,
+            session_id=session["id"],
+            prompt="崩溃恢复",
+            system_instruction="只输出 JSON",
+            user_payload={"question": "same"},
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id="project-crash",
+            binding_command_id="task-crash:unit-crash",
+            task_id="task-crash",
+            unit_id="unit-crash",
+            expected_part_key="answer",
+            lineage=_part_lineage(),
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+        )
+
+    first = await invoke()
+    event_count = await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+        [first.run_id],
+    )
+    class ReplayMustNotInvokeProvider(_ModelGateway):
+        async def stream(self, *_args, **_kwargs):
+            raise AssertionError("durable Child replay invoked its provider")
+
+    replay_gateway = ReplayMustNotInvokeProvider("secret")
+    second = await invoke(_core_composition(temp_db, replay_gateway))
+
+    assert second == first
+    assert len(gateway.invocations) == 1
+    assert replay_gateway.invocations == []
+    receipt = await temp_db.fetch_one(
+        "SELECT host_child_key FROM ai_agent_host_child_runs WHERE run_id = ?",
+        [first.run_id],
+    )
+    assert receipt is not None
+    assert receipt["host_child_key"].startswith("host-child:")
+    assert "project-crash" not in receipt["host_child_key"]
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+        [first.run_id],
+    ) == event_count
+
+
+async def test_structured_child_same_key_request_conflict_fails_closed(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    composition = _core_composition(temp_db, gateway)
+    service = screenplay_structured_call.ScreenplayStructuredCallService(
+        temp_db,
+        composition=composition,
+    )
+    common = dict(
+        runtime=_request(session["id"], "身份冲突").runtime,
+        session_id=session["id"],
+        prompt="身份冲突",
+        user_payload={"question": "same"},
+        binding_namespace="screenplay.agent.task",
+        binding_aggregate_id="project-conflict",
+        binding_command_id="task-conflict:unit-conflict",
+        task_id="task-conflict",
+        unit_id="unit-conflict",
+        expected_part_key="answer",
+        lineage=_part_lineage(),
+        phase="screenplay_test",
+        repair_instruction="修复 JSON",
+        validate=lambda value: value,
+    )
+    await service.run_json(system_instruction="只输出 JSON", **common)
+
+    with pytest.raises(ContractViolationError, match="identity"):
+        await service.run_json(system_instruction="输出另一份 JSON", **common)
+    assert len(gateway.invocations) == 1
+
+
+async def test_concurrent_structured_child_same_key_invokes_provider_once(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+
+    class BlockingSuccessGateway(_ModelGateway):
+        def __init__(self, api_key: str) -> None:
+            super().__init__(api_key)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, messages, invocation, signal=None):
+            del messages, signal
+            self.invocations.append(invocation)
+            self.started.set()
+            await self.release.wait()
+
+            async def chunks():
+                yield ModelStreamChunk(content_delta='{"answer":"one"}')
+                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
+
+            return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+    gateway = BlockingSuccessGateway("secret")
+    composition = _core_composition(temp_db, gateway)
+
+    async def invoke(signal=None):
+        return await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=composition,
+        ).run_json(
+            runtime=_request(session["id"], "并发恢复").runtime,
+            session_id=session["id"],
+            prompt="并发恢复",
+            system_instruction="只输出 JSON",
+            user_payload={"question": "same"},
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id="project-concurrent",
+            binding_command_id="task-concurrent:unit-concurrent",
+            task_id="task-concurrent",
+            unit_id="unit-concurrent",
+            expected_part_key="answer",
+            lineage=_part_lineage(),
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+            signal=signal,
+        )
+
+    first = asyncio.create_task(invoke())
+    await gateway.started.wait()
+    second = asyncio.create_task(invoke())
+    await asyncio.sleep(0.1)
+    assert len(gateway.invocations) == 1
+
+    gateway.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+    assert second_result == first_result
+    assert len(gateway.invocations) == 1
+
+
+async def test_canceling_existing_host_child_waiter_does_not_cancel_owner(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+
+    class BlockingSuccessGateway(_ModelGateway):
+        def __init__(self, api_key: str) -> None:
+            super().__init__(api_key)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, messages, invocation, signal=None):
+            del messages, signal
+            self.invocations.append(invocation)
+            self.started.set()
+            await self.release.wait()
+
+            async def chunks():
+                yield ModelStreamChunk(content_delta='{"answer":"owner"}')
+                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
+
+            return ModelStream(chunks=chunks(), model=invocation.request.model)
+
+    gateway = BlockingSuccessGateway("secret")
+    composition = _core_composition(temp_db, gateway)
+
+    async def invoke(signal=None):
+        return await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=composition,
+        ).run_json(
+            runtime=_request(session["id"], "等待取消").runtime,
+            session_id=session["id"],
+            prompt="等待取消",
+            system_instruction="只输出 JSON",
+            user_payload={"question": "same"},
+            binding_namespace="screenplay.agent.task",
+            binding_aggregate_id="project-wait-cancel",
+            binding_command_id="task-wait-cancel:unit-wait-cancel",
+            task_id="task-wait-cancel",
+            unit_id="unit-wait-cancel",
+            expected_part_key="answer",
+            lineage=_part_lineage(),
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+            signal=signal,
+        )
+
+    owner = asyncio.create_task(invoke())
+    await gateway.started.wait()
+    waiter_signal = asyncio.Event()
+    waiter = asyncio.create_task(invoke(waiter_signal))
+    await asyncio.sleep(0.1)
+    waiter_signal.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    gateway.release.set()
+    owner_result = await owner
+    assert owner_result.value == {"answer": "owner"}
+    assert len(gateway.invocations) == 1
+
+
 async def test_truncated_structured_output_is_never_repaired_or_replayed(
     temp_db: DatabaseConnection,
 ):
@@ -2596,24 +2838,28 @@ async def test_screenplay_ai_part_signal_persists_child_cancellation(
             raise AssertionError("canceled child model call resumed")
 
     gateway = BlockingGateway("secret")
+    composition = _core_composition(temp_db, gateway)
     signal = asyncio.Event()
+    common = dict(
+        runtime=_request(session["id"], "取消当前 Part").runtime,
+        session_id=session["id"],
+        prompt="取消当前 Part",
+        system_instruction="只输出 JSON",
+        user_payload={},
+        binding_namespace="screenplay.agent.test",
+        binding_aggregate_id="project-test",
+        binding_command_id="cancel-child-test",
+        lineage=_part_lineage(root_run_id),
+        phase="screenplay_test",
+        repair_instruction="修复 JSON",
+        validate=lambda value: value,
+    )
     call = asyncio.create_task(
         screenplay_structured_call.ScreenplayStructuredCallService(
             temp_db,
-            composition=_core_composition(temp_db, gateway),
+            composition=composition,
         ).run_json(
-            runtime=_request(session["id"], "取消当前 Part").runtime,
-            session_id=session["id"],
-            prompt="取消当前 Part",
-            system_instruction="只输出 JSON",
-            user_payload={},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="cancel-child-test",
-            lineage=_part_lineage(root_run_id),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
+            **common,
             signal=signal,
         )
     )
@@ -2639,6 +2885,18 @@ async def test_screenplay_ai_part_signal_persists_child_cancellation(
         "execution_owner_id": None,
         "lease_expires_at_ms": None,
     }
+    with pytest.raises(
+        ContractViolationError,
+        match="terminal status 'canceled' is not reusable",
+    ):
+        await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=composition,
+        ).run_json(**common)
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE parent_run_id = ?",
+        [root_run_id],
+    ) == {"count": 1}
 
 
 async def test_structured_model_preserves_the_frontend_thinking_option(
@@ -2736,6 +2994,68 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
     assert await temp_db.fetch_one(
         "SELECT status FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
     ) == {"status": "failed"}
+
+
+async def test_failed_host_child_retry_uses_one_new_generation(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+
+    class FailingGateway(_ModelGateway):
+        async def stream(self, *_args, **_kwargs):
+            raise RuntimeError("provider disconnected")
+
+    composition = _core_composition(temp_db, FailingGateway("secret"))
+    common = dict(
+        runtime=_request(session["id"], "失败后重试").runtime,
+        session_id=session["id"],
+        prompt="失败后重试",
+        system_instruction="只输出 JSON",
+        user_payload={"question": "same"},
+        binding_namespace="screenplay.agent.task",
+        binding_aggregate_id="project-failed-retry",
+        binding_command_id="task-failed-retry:unit-failed-retry",
+        task_id="task-failed-retry",
+        unit_id="unit-failed-retry",
+        expected_part_key="answer",
+        lineage=_part_lineage(),
+        phase="screenplay_test",
+        repair_instruction="修复 JSON",
+        validate=lambda value: value,
+    )
+    with pytest.raises(ModelGatewayError):
+        await screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=composition,
+        ).run_json(**common)
+
+    success = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"retried"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    composition._gateway = success
+    result = await screenplay_structured_call.ScreenplayStructuredCallService(
+        temp_db,
+        composition=composition,
+    ).run_json(**common)
+
+    assert result.value == {"answer": "retried"}
+    assert len(success.invocations) == 1
+    rows = await temp_db.fetch_all(
+        "SELECT status FROM ai_agent_runs WHERE parent_run_id = ? "
+        "ORDER BY CAST(json_extract(binding_attributes_json, "
+        "'$.hostChild.generation') AS INTEGER)",
+        [_part_lineage().root_run_id],
+    )
+    assert [row["status"] for row in rows] == ["failed", "done"]
+    assert await temp_db.fetch_one(
+        "SELECT generation, run_id, terminal_status "
+        "FROM ai_agent_host_child_runs",
+    ) == {
+        "generation": 2,
+        "run_id": result.run_id,
+        "terminal_status": "done",
+    }
 
 
 async def test_reasoning_only_structured_output_retries_original_not_repair(
