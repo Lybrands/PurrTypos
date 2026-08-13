@@ -172,23 +172,49 @@ class SqliteAgentOutputRepository:
             payload=draft.payload,
             occurred_at=draft.occurred_at,
         )
+        for attempt in range(3):
+            try:
+                return await self._commit_run_lifecycle_attempt(
+                    normalized_run_id,
+                    commit,
+                    event_draft,
+                    related_drafts,
+                    draft.status,
+                )
+            except RunCommitProjectionError as error:
+                if not error.retryable or attempt == 2:
+                    raise
+        raise AssertionError("unreachable Run projection retry state")
+
+    async def _commit_run_lifecycle_attempt(
+        self,
+        run_id: str,
+        commit: RunCommit,
+        event_draft: AgentOutputEventDraft,
+        related_drafts: tuple[AgentOutputEventDraft, ...],
+        expected_status: RunStatus,
+    ) -> tuple[AgentOutputEvent, ...]:
+        # Every retry re-enters the authoritative Run transaction. Its current
+        # status, lease owner, and lease expiry are revalidated before writes;
+        # a concurrent terminal commit therefore follows the existing
+        # idempotency/conflict path and is never overwritten.
         async with self._runs.write_transaction():
             existing = await self._existing_event_for_draft(event_draft)
             if existing is not None:
                 run = await self._db.fetch_one(
                     "SELECT status FROM ai_agent_runs WHERE id = ?",
-                    [normalized_run_id],
+                    [run_id],
                 )
-                if run is None or run["status"] != draft.status.value:
+                if run is None or run["status"] != expected_status.value:
                     raise ContractViolationError(
                         "canonical lifecycle event does not match Run state"
                     )
-                related = tuple(
+                related = tuple([
                     await self._require_event_by_source_key(
                         item.source_event_key
                     )
                     for item in related_drafts
-                )
+                ])
                 return (*related, existing)
             for item in related_drafts:
                 if await self._existing_event_for_draft(item) is not None:
@@ -196,13 +222,13 @@ class SqliteAgentOutputRepository:
                         "partial canonical lifecycle commit already exists"
                     )
             await self._runs.apply_commit_in_ambient_transaction(
-                normalized_run_id,
+                run_id,
                 commit,
             )
             if self._run_commit_projector is not None:
                 try:
                     projected = await self._run_commit_projector.project(
-                        normalized_run_id,
+                        run_id,
                         commit,
                     )
                 except RunCommitProjectionError:
