@@ -107,22 +107,22 @@ async def create_run(
         "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt) "
         "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            run_id,
-            session_id,
-            mode,
-            prompt,
-            *provenance_values,
-            *binding_values,
-            parent_run_id,
-            normalized_root_run_id,
-            delegation_id,
-            agent_role,
-            int(run_depth),
-            execution_owner_id,
-            lease_expires_at_ms,
-            heartbeat_at_ms,
-            1 if execution_owner_id else 0,
+            [
+                run_id,
+                session_id,
+                mode,
+                prompt,
+                *provenance_values,
+                *binding_values,
+                parent_run_id,
+                normalized_root_run_id,
+                delegation_id,
+                agent_role,
+                int(run_depth),
+                execution_owner_id,
+                lease_expires_at_ms,
+                heartbeat_at_ms,
+                1 if execution_owner_id else 0,
         ],
     )
     return run_id
@@ -259,8 +259,33 @@ async def get_latest_run_for_session(
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE session_id = ? "
-        "ORDER BY create_time DESC LIMIT 1",
+        "ORDER BY create_time DESC, rowid DESC LIMIT 1",
         [int(session_id)],
+    )
+
+
+async def get_run_for_session_request(
+    db: "DatabaseConnection",
+    session_id: int,
+    request_id: str,
+) -> dict[str, Any] | None:
+    return await db.fetch_one(
+        "SELECT id, session_id, conversation_id, status, mode, prompt, "
+        "model_provider, model_name, context_window, endpoint_digest, "
+        "request_profile_digest, requested_reasoning_mode, output_contract, "
+        "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
+        "capability_snapshot_json, "
+        "binding_namespace, binding_aggregate_id, "
+        "binding_command_id, binding_attributes_json, parent_run_id, "
+        "root_run_id, delegation_id, "
+        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
+        "final_response, create_time, update_time "
+        "FROM ai_agent_runs WHERE session_id = ? "
+        "AND binding_namespace = 'writing.chat.request' "
+        "AND binding_aggregate_id = ? AND binding_command_id = ? "
+        "ORDER BY rowid DESC LIMIT 1",
+        [int(session_id), str(session_id), str(request_id)],
     )
 
 

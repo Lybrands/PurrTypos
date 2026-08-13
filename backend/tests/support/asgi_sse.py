@@ -87,6 +87,7 @@ class LiveASGIResponse:
         self._headers: dict[str, str] = {}
         self._sse_buffer = b""
         self._fail_next_body_send = False
+        self._fail_next_response_start = False
         self._task = asyncio.create_task(
             app(self._scope, self._receive, self._send)
         )
@@ -97,6 +98,9 @@ class LiveASGIResponse:
     async def _send(self, message: dict[str, Any]) -> None:
         message_type = message["type"]
         if message_type == "http.response.start":
+            if self._fail_next_response_start:
+                self._fail_next_response_start = False
+                raise OSError("simulated disconnect before response start")
             self._status_code = int(message["status"])
             self._headers = {
                 name.decode("latin-1").lower(): value.decode("latin-1")
@@ -165,6 +169,11 @@ class LiveASGIResponse:
         """Make the next response-body send report an ASGI 2.4 disconnect."""
 
         self._fail_next_body_send = True
+
+    def fail_next_response_start(self) -> None:
+        """Make response.start be the first observation of a dead peer."""
+
+        self._fail_next_response_start = True
 
     async def finish(self, *, timeout: float = 5.0) -> ASGIResponse:
         response = await self.wait_closed(timeout=timeout)

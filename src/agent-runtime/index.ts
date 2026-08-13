@@ -58,6 +58,7 @@ export {
   replaceAgentConversationMessages,
   setAgentConversationActivity,
   setAgentConversationRunning,
+  setAgentConversationStopping,
   setAgentConversationStreamId,
   subscribeAgentConversationRuntime,
   updateAgentConversationMessages,

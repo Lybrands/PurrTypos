@@ -5,6 +5,12 @@ export type ChatRunOutcome = "completed" | "paused" | "failed" | "canceled";
 export interface QueuedChatSubmission {
   content: string;
   sessionId: number;
+  bookId: EntityId;
+  chapterId: EntityId | null;
+  sessionScope: 'chapter' | 'setting';
+  currentChapterTitle?: string;
+  locale: string;
+  needsTitle: boolean;
   selectedModel: string;
   selectedModelConfig: AiModelConfig;
   agentEnabled: boolean;

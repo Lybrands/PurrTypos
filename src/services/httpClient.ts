@@ -36,7 +36,8 @@ export async function requestJson<T>(
         await retryDelay(attempt)
         continue
       }
-      return await response.json() as ApiResult<T>
+      const payload = await response.json() as ApiResult<T>
+      return { ...payload, httpStatus: response.status }
     } catch (error) {
       if (attempt >= retries || !canRetryHttpRequest(options.method)) {
         return {

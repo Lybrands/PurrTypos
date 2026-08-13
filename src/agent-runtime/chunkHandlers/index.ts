@@ -6,6 +6,7 @@ import {
 import {
   handleDone,
   handleError,
+  handleRequestResultTerminal,
   handleRunResultTerminal,
 } from './terminal.ts'
 import type {
@@ -41,6 +42,7 @@ export function dispatchAgentChunk(
   context: AgentChunkRuntimeContext,
 ): void {
   if (handleCanonicalOutput(chunk, context)) return
+  if (handleRequestResultTerminal(chunk, context)) return
   if (handleRunResultTerminal(chunk, context)) return
   if (handleError(chunk, context)) return
   context.host.onHostChunk?.(chunk)

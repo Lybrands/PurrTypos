@@ -134,6 +134,7 @@ export function parseConversationsFromApi(
         role: 'assistant',
         content: item.response,
         conversationId: item.id,
+        clientTurnId: item.client_turn_id || undefined,
         agentRunId: item.agent_run_id || undefined,
         longTaskId: item.long_task_id || undefined,
         model: item.model || undefined,
@@ -152,12 +153,32 @@ export function parseConversationsFromApi(
       const agentProcess = parseJsonObject<{
         delegations?: AgentConversationMessage['delegations']
         subAgentActivities?: AgentConversationMessage['subAgentActivities']
+        error?: string
+        isError?: boolean
+        termination?: string
+        errorReport?: AgentConversationMessage['errorReport']
+        toolApprovals?: AgentConversationMessage['toolApprovals']
       }>(item.agent_process)
       if (Array.isArray(agentProcess?.delegations)) {
         assistantMsg.delegations = agentProcess.delegations
       }
       if (Array.isArray(agentProcess?.subAgentActivities)) {
         assistantMsg.subAgentActivities = agentProcess.subAgentActivities
+      }
+      if (typeof agentProcess?.error === 'string') {
+        assistantMsg.error = agentProcess.error
+      }
+      if (typeof agentProcess?.isError === 'boolean') {
+        assistantMsg.isError = agentProcess.isError
+      }
+      if (typeof agentProcess?.termination === 'string') {
+        assistantMsg.termination = agentProcess.termination
+      }
+      if (agentProcess?.errorReport) {
+        assistantMsg.errorReport = agentProcess.errorReport
+      }
+      if (Array.isArray(agentProcess?.toolApprovals)) {
+        assistantMsg.toolApprovals = agentProcess.toolApprovals
       }
       const rawSegments = item.tool_call_segments
       if (rawSegments) {
@@ -180,6 +201,8 @@ export function parseConversationsFromApi(
         {
           role: 'user' as const,
           content: item.prompt,
+          conversationId: item.id,
+          clientTurnId: item.client_turn_id || undefined,
           sentAt: item.create_time || undefined,
         },
         assistantMsg,

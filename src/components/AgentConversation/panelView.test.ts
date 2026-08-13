@@ -59,3 +59,17 @@ test('resume remains disabled until a model is selected', () => {
   assert.equal(withoutModel.resumeDisabled, true)
   assert.equal(withModel.resumeDisabled, false)
 })
+
+test('a pending stop disables resume before either command settles', () => {
+  const view = buildAgentConversationPanelView({
+    running: false,
+    queuedCount: 0,
+    submitMode: 'send',
+    selectedModel: { id: 'configured' },
+    inputDisabled: false,
+    resuming: false,
+    stopping: true,
+  } as Parameters<typeof buildAgentConversationPanelView>[0])
+
+  assert.equal(view.resumeDisabled, true)
+})

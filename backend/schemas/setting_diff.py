@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -7,6 +9,18 @@ class CharacterSnapshot(BaseModel):
     name: str = ""
     tags: str = ""
     profileMd: str = ""
+
+
+class SettingDiffResolution(BaseModel):
+    sessionId: int
+    agentRunId: str
+    proposalId: str
+    sessionKey: str
+    kind: Literal["character", "background", "entity"]
+    title: str
+    status: Literal["committed"]
+    acceptedSegments: int = 0
+    rejectedSegments: int = 0
 
 
 class CommitCharacterDiffRequest(BaseModel):
@@ -20,6 +34,7 @@ class CommitCharacterDiffRequest(BaseModel):
     source: str = "ai_tool"
     accepted_segments: int = 0
     rejected_segments: int = 0
+    resolution: SettingDiffResolution | None = None
 
 
 class CommitBackgroundDiffRequest(BaseModel):
@@ -31,6 +46,7 @@ class CommitBackgroundDiffRequest(BaseModel):
     source: str = "ai_tool"
     accepted_segments: int = 0
     rejected_segments: int = 0
+    resolution: SettingDiffResolution | None = None
 
 
 class CommitEntityDiffRequest(BaseModel):
@@ -44,3 +60,4 @@ class CommitEntityDiffRequest(BaseModel):
     source: str = "ai_tool"
     accepted_segments: int = 0
     rejected_segments: int = 0
+    resolution: SettingDiffResolution | None = None

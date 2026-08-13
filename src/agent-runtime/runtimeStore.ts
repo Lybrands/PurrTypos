@@ -8,14 +8,22 @@ export interface AgentConversationRuntime {
   sessionId: AgentSessionId
   messages: AgentConversationMessage[]
   running: boolean
+  stopping: boolean
   activity?: AgentConversationActivity
   streamId?: string
   updatedAt: number
+  revision: number
 }
 
 const runtimes = new Map<AgentSessionId, AgentConversationRuntime>()
 const listeners = new Set<() => void>()
 let version = 0
+let runtimeRevision = 0
+
+function nextRuntimeRevision(): number {
+  runtimeRevision += 1
+  return runtimeRevision
+}
 
 function emitChange(): void {
   version += 1
@@ -48,9 +56,26 @@ export function replaceAgentConversationMessages(
     sessionId,
     messages,
     running: current?.running ?? false,
+    stopping: current?.stopping ?? false,
     activity: current?.activity,
     streamId: current?.streamId,
     updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
+  })
+  emitChange()
+}
+
+export function setAgentConversationStopping(
+  sessionId: AgentSessionId,
+  stopping: boolean,
+): void {
+  const current = runtimes.get(sessionId)
+  if (!current || current.stopping === stopping) return
+  runtimes.set(sessionId, {
+    ...current,
+    stopping,
+    updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
   })
   emitChange()
 }
@@ -67,6 +92,7 @@ export function updateAgentConversationMessages(
     ...current,
     messages,
     updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
   })
   emitChange()
 }
@@ -85,6 +111,7 @@ export function setAgentConversationRunning(
     ...current,
     running: next,
     updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
   })
   emitChange()
 }
@@ -103,6 +130,7 @@ export function setAgentConversationActivity(
     ...current,
     activity,
     updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
   })
   emitChange()
 }
@@ -117,6 +145,7 @@ export function setAgentConversationStreamId(
     ...current,
     streamId,
     updatedAt: Date.now(),
+    revision: nextRuntimeRevision(),
   })
   emitChange()
 }

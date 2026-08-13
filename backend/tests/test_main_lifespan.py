@@ -13,7 +13,7 @@ from application.run_execution_control import RunExecutionSession
 from database import connection as database_connection
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
-from purra.contracts import RunCreateParams
+from purra.contracts import RunBinding, RunCreateParams
 from purra.long_tasks import LongTaskCreateCommand, LongTaskStatus, LongTaskUnitSpec
 from purra.work_items.contracts import WorkItemCreateCommand
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -142,6 +142,49 @@ async def test_lifespan_startup_terminalizes_run_abandoned_by_previous_process(
         assert events[-1]["payload"]["reason"] == (
             "execution_recovery_after_restart"
         )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_startup_materializes_abandoned_writing_run(
+    monkeypatch,
+    tmp_path,
+):
+    seed_db = database_connection.DatabaseConnection(tmp_path)
+    await seed_db.init()
+    await seed_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (71, 'book-71', 'chapter-71')"
+    )
+    run_id = await run_store.create_run(
+        seed_db,
+        session_id=71,
+        prompt="abandoned Writing turn",
+        mode="agent",
+        binding=RunBinding(
+            namespace="writing.chat.request",
+            aggregate_id="71",
+            command_id="startup-writing-request",
+        ),
+        execution_owner_id="previous-process",
+        heartbeat_at_ms=10_000,
+        lease_expires_at_ms=99_999_999_999_999,
+    )
+    await seed_db.close()
+
+    created = _capture_database(monkeypatch, tmp_path)
+    async with main.lifespan(_RecordingApplication()):
+        assert await created[0].fetch_one(
+            "SELECT r.status, r.conversation_id, c.prompt, c.response "
+            "FROM ai_agent_runs AS r "
+            "JOIN ai_conversations AS c ON c.id = r.conversation_id "
+            "WHERE r.id = ?",
+            [run_id],
+        ) == {
+            "status": "canceled",
+            "conversation_id": 1,
+            "prompt": "abandoned Writing turn",
+            "response": "",
+        }
 
 
 @pytest.mark.asyncio

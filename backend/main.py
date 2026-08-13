@@ -92,11 +92,21 @@ async def lifespan(application: FastAPI):
         from infrastructure.persistence.run_execution_store import (
             recover_orphaned_runs,
         )
+        from infrastructure.persistence.writing_chat_request_store import (
+            SqliteWritingChatRequestStore,
+        )
+
+        await SqliteWritingChatRequestStore(db).recover_unbound()
 
         recovered_runs = await recover_orphaned_runs(
             execution_db,
             after_restart=True,
         )
+        from infrastructure.persistence.run_conversation_store import (
+            materialize_terminal_writing_run_holes,
+        )
+
+        await materialize_terminal_writing_run_holes(db)
         if recovered_runs:
             logging.getLogger(__name__).warning(
                 "Recovered %s abandoned Agent Run(s) after restart: %s",
@@ -191,6 +201,9 @@ async def lifespan(application: FastAPI):
             monitor_orphaned_runs(
                 execution_db,
                 stop_event=orphan_monitor_stop,
+                reconcile_terminal_holes=lambda: (
+                    materialize_terminal_writing_run_holes(db)
+                ),
             )
         )
         artifact_monitor = asyncio.create_task(

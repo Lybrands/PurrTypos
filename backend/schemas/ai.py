@@ -8,6 +8,11 @@ from schemas.common import normalize_locale_tag
 
 
 class ChatStreamRequest(BaseModel):
+    # Renderer request identity; Writing binds it opaquely for recovery.
+    streamId: Optional[str] = Field(default=None, max_length=200)
+    # Enhanced Writing clients reserve a durable request receipt before POST.
+    # Omitted by legacy clients, which retain the historical stream behavior.
+    requestReceiptVersion: Optional[Literal[1]] = None
     messages: List[Dict[str, Any]]
     apiKey: str
     baseURL: Optional[str] = None
@@ -32,6 +37,10 @@ class ChatStreamRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     chatAgentMode: Optional[str] = None
     contextWindow: Optional[str] = None
+    # Enhanced renderer history fence. These immutable IDs are part of the
+    # request digest and are rechecked both when reserving and claiming.
+    expectedConversationIds: Optional[List[int]] = None
+    expectedRunIds: Optional[List[str]] = None
     @field_validator("locale")
     @classmethod
     def normalize_locale(cls, value: str) -> str:
@@ -42,6 +51,12 @@ class ChatStreamRequest(BaseModel):
     def normalize_book_id(cls, value: Optional[str]) -> Optional[str]:
         """Canonicalize the Writing security scope at the HTTP boundary."""
 
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @field_validator("streamId")
+    @classmethod
+    def normalize_stream_id(cls, value: Optional[str]) -> Optional[str]:
         normalized = str(value or "").strip()
         return normalized or None
 

@@ -23,3 +23,5 @@ class SaveConversationRequest(BaseModel):
     contextBudget: Optional[Any] = None
     agentProcess: Optional[Any] = None
     agentRunId: Optional[str] = None
+    clientTurnId: Optional[str] = None
+    expectedConversationIds: Optional[List[int]] = None

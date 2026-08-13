@@ -128,7 +128,7 @@ export function useBookConversationExtensions({
       return (
         <div className="book-assistant-attachments">
           {cards.map((card) => (
-            <SettingDiffCard key={card.sessionKey} card={card} />
+            <SettingDiffCard key={card.proposalId} card={card} />
           ))}
           {canFavorite ? (
             <div className="book-assistant-attachments__actions">

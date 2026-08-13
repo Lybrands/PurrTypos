@@ -6,6 +6,7 @@ import {
   replaceAgentConversationMessages,
   setAgentConversationActivity,
   setAgentConversationRunning,
+  setAgentConversationStopping,
   setAgentConversationStreamId,
   subscribeAgentConversationRuntime,
   updateAgentConversationMessages,
@@ -20,9 +21,11 @@ export interface ChatSessionRuntime {
   sessionId: number
   messages: AgentConversationMessage[]
   loading: boolean
+  stopping: boolean
   activity?: ChatSessionActivity
   streamId?: string
   updatedAt: number
+  revision: number
 }
 
 let queuedSubmissions: QueuedChatSubmission[] = []
@@ -56,9 +59,11 @@ export function getChatSessionRuntime(
     sessionId: runtime.sessionId as number,
     messages: runtime.messages,
     loading: runtime.running,
+    stopping: runtime.stopping,
     activity: runtime.activity as ChatSessionActivity | undefined,
     streamId: runtime.streamId,
     updatedAt: runtime.updatedAt,
+    revision: runtime.revision,
   }
 }
 
@@ -84,6 +89,13 @@ export function setChatRuntimeLoading(
   next: boolean | ((current: boolean) => boolean),
 ): void {
   setAgentConversationRunning(sessionId, next)
+}
+
+export function setChatRuntimeStopping(
+  sessionId: number,
+  stopping: boolean,
+): void {
+  setAgentConversationStopping(sessionId, stopping)
 }
 
 export function setChatRuntimeActivity(

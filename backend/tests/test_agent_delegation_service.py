@@ -155,6 +155,26 @@ async def test_claimed_delegation_atomically_attaches_child_run_and_result(db):
     assert child["run_depth"] == 1
     assert running["items"][0]["status"] == "running"
 
+    # SqliteRunRepository.create owns the atomic first attachment. The Core
+    # coordinator confirms that same identity after submit returns, so the
+    # repository operation must be an event-free idempotent replay.
+    events_before_replay = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ?",
+        [parent_run_id],
+    )
+    assert await SqliteDelegationRepository(db).attach_child_run(
+        delegation_id=delegation["delegationId"],
+        child_run_id=child_run_id,
+        worker_id="worker-child",
+    )
+    events_after_replay = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ?",
+        [parent_run_id],
+    )
+    assert events_after_replay == events_before_replay
+
     await repository.transition(
         child_run_id,
         RunStatus.DONE,
