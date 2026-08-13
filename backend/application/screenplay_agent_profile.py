@@ -50,6 +50,7 @@ class ScreenplayAgentProfileExtension:
         self._owner_id = str(owner_id or "").strip() or (
             f"screenplay-profile-{uuid4().hex}"
         )
+        self._db = db
         self._turns = SqliteScreenplayAgentRepository(
             db,
             owner_id=self._owner_id,
@@ -216,6 +217,7 @@ class ScreenplayAgentProfileExtension:
         if work_item_repository is None or long_task_repository is None:
             raise ValueError("screenplay durable repositories are required")
         return _ScreenplayRecipeLongTaskDispatcher(
+            db=self._db,
             operations=self._operations,
             work_item_repository=work_item_repository,
             long_task_repository=long_task_repository,
@@ -253,18 +255,20 @@ class _ScreenplayTaskDescriptorResolver:
 
 
 class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
-    def __init__(self, *, operations, **kwargs) -> None:
+    def __init__(self, *, db, operations, **kwargs) -> None:
         super().__init__(**kwargs)
+        self._db = db
         self._operations = operations
 
     async def dispatch(self, request, plan, decision, **kwargs):
-        receipt = await super().dispatch(request, plan, decision, **kwargs)
-        operation_id = str(decision.metadata.get("operationId") or "")
-        await self._operations.attach_long_task(
-            operation_id,
-            long_task_id=receipt.task_id,
-            command_id=f"operation:dispatch:{operation_id}:{receipt.task_id}",
-        )
+        async with self._db.transaction(cancellation_linearizable=True):
+            receipt = await super().dispatch(request, plan, decision, **kwargs)
+            operation_id = str(decision.metadata.get("operationId") or "")
+            await self._operations.attach_long_task(
+                operation_id,
+                long_task_id=receipt.task_id,
+                command_id=f"operation:dispatch:{operation_id}:{receipt.task_id}",
+            )
         return receipt
 
 

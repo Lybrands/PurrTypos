@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import asynccontextmanager
 from typing import Any
 
 from purra.json_values import thaw_json_mapping
@@ -29,6 +30,14 @@ class SqliteWorkItemRepository:
     def __init__(self, db) -> None:
         self._db = db
 
+    @asynccontextmanager
+    async def _mutation_transaction(self):
+        if self._db.current_task_owns_transaction():
+            yield
+            return
+        async with self._db.transaction(cancellation_linearizable=True):
+            yield
+
     async def create(
         self,
         work_item_id: str,
@@ -36,7 +45,7 @@ class SqliteWorkItemRepository:
     ) -> WorkItemRecord:
         normalized_id = _required_text(work_item_id, "work item id")
         try:
-            async with self._db.transaction(cancellation_linearizable=True):
+            async with self._mutation_transaction():
                 await self._db.execute(
                     "INSERT INTO ai_agent_work_items "
                     "(id, namespace, kind, owner_id, created_by_run_id, "
