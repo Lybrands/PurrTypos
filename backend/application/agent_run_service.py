@@ -151,19 +151,20 @@ class AgentRunService:
                 *tuple(response_validators),
             ),
         )
+        options = composition.bind_run_profile(request, options)
 
+        role_registry = composition.agent_role_registry_for_request(request)
         can_delegate = bool(
             enable_delegation
             and request.tools_enabled
             and request.mode == "agent"
+            and role_registry is not None
             and hasattr(composition, "delegation_repository")
         )
         planner_agent_role_guidance: dict[str, dict[str, str]] = {}
         delegation_adapter = None
         if can_delegate:
-            role_registry = composition.agent_role_registry_for_request(
-                request
-            )
+            assert role_registry is not None
             planner_agent_role_guidance = {
                 definition.id: {
                     "title": definition.title,
@@ -209,15 +210,10 @@ class AgentRunService:
                 "allowed_tool_modes": allowed_tool_modes,
                 "required_tool_names": required_tool_names,
             })
-        core_for_request = getattr(
-            composition,
-            "create_core_for_request",
-            None,
-        )
-        core = (
-            core_for_request(request, api_key, **create_core_kwargs)
-            if callable(core_for_request)
-            else composition.create_core(api_key, **create_core_kwargs)
+        core = composition.create_core_for_request(
+            request,
+            api_key,
+            **create_core_kwargs,
         )
         try:
             if run_binding_lifecycle is not None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -15,9 +14,13 @@ from application.writing_proposal_read_model import (
     unseen_product_chunks,
 )
 from application.agent_composition import set_agent_composition
+from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.agent_roles import build_writing_agent_role_registry
+from domains.screenplay_agent.agent_context import (
+    SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+)
 from infrastructure.persistence.run_store import (
     create_run,
     get_latest_run_for_session,
@@ -59,24 +62,12 @@ async def temp_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
-    checkpoint_store = SqliteCheckpointStore(db)
-    output_repository = SqliteAgentOutputRepository(db)
-    role_registry = build_writing_agent_role_registry()
-
-    def agent_role_registry_for_request(request):
-        assert request.domain_context.namespace == "purrtypos.writing"
-        return role_registry
-
-    set_agent_composition(SimpleNamespace(
-        checkpoint_store=checkpoint_store,
-        output_repository=output_repository,
-        delegation_repository=SqliteDelegationRepository(db),
-        execution_lease_store=SqliteExecutionLeaseStore(db),
-        agent_role_registry_for_request=agent_role_registry_for_request,
-    ))
+    composition = create_agent_composition(db)
+    set_agent_composition(composition)
     try:
         yield db
     finally:
+        await composition.shutdown()
         set_agent_composition(None)
         await db.close()
 
@@ -123,6 +114,15 @@ async def _seed_run(db: DatabaseConnection) -> str:
         session_id=7,
         prompt="private prompt must not be exposed by snapshots",
         mode="agent",
+        binding=RunBinding(
+            namespace="writing.chat.request",
+            aggregate_id="7",
+            command_id="fixture-writing-run",
+            attributes={
+                "agentProfile": "writing",
+                "domainNamespace": "purrtypos.writing",
+            },
+        ),
     )
     await upsert_todos(db, run_id, [{
         "id": "read",
@@ -752,6 +752,76 @@ async def test_delegation_route_rejects_roles_missing_from_business_registry(
     assert "unsupported Agent role" in response.json()["error"]
     assert snapshot is not None
     assert snapshot["delegations"]["items"] == []
+
+
+async def _seed_screenplay_run(db: DatabaseConnection) -> str:
+    await db.execute(
+        "INSERT OR IGNORE INTO ai_sessions (id, title, scope) "
+        "VALUES (8, 'Screenplay session', 'screenplay')"
+    )
+    return await create_run(
+        db,
+        session_id=8,
+        prompt="screenplay run",
+        mode="agent",
+        binding=RunBinding(
+            namespace="screenplay.agent.turn",
+            aggregate_id="project-1",
+            command_id="turn-1",
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+            },
+        ),
+    )
+
+
+async def test_screenplay_snapshot_uses_its_optional_role_registry(temp_db):
+    run_id = await _seed_screenplay_run(temp_db)
+    await SqliteDelegationRepository(temp_db).create(
+        parent_run_id=run_id,
+        agent_role="researcher",
+        objective="legacy cross-profile fixture",
+        input_payload=None,
+        required=False,
+        priority=0,
+        max_depth=3,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{run_id}",
+        json_body=None,
+    )
+
+    assert response.json()["success"] is True
+    item = response.json()["data"]["delegations"]["items"][0]
+    assert item["agentRole"] == "researcher"
+    assert item["agentTitle"] == "researcher"
+
+
+async def test_screenplay_parent_rejects_writing_delegation_roles(temp_db):
+    run_id = await _seed_screenplay_run(temp_db)
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/delegations",
+        json_body={
+            "agentRole": "researcher",
+            "objective": "must not cross profile boundaries",
+        },
+    )
+    stored = await SqliteDelegationRepository(temp_db).list_for_parent(run_id)
+
+    assert response.json()["success"] is False
+    assert "does not support delegation" in response.json()["error"]
+    assert stored == ()
 
 
 @pytest.mark.parametrize(

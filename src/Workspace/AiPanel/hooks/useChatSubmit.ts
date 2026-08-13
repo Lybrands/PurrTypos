@@ -723,6 +723,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const ctx: AgentChunkRuntimeContext = {
       acc,
       sessionId,
+      turnId: streamId,
       modelIdentity: {
         configId: cfg.id,
         name: apiModelName,

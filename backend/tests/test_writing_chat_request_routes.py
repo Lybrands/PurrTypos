@@ -69,23 +69,34 @@ def request_body(request_id: str = "chat-route-1") -> dict:
     }
 
 
-async def test_writing_routes_resolve_roles_from_explicit_profile_request():
+async def test_writing_routes_resolve_roles_from_persisted_profile_identity():
     registry = build_writing_agent_role_registry()
-    seen_namespaces: list[str] = []
+    seen_profiles: list[tuple[str, str]] = []
 
     class _Composition:
-        @property
-        def agent_role_registry(self):
-            raise AssertionError("global Writing role registry was used")
-
-        def agent_role_registry_for_request(self, request):
-            seen_namespaces.append(request.domain_context.namespace)
+        def agent_role_registry_for_persisted_profile(
+            self,
+            *,
+            profile_id,
+            domain_namespace,
+        ):
+            seen_profiles.append((profile_id, domain_namespace))
             return registry
 
-    resolved = ai_routes._writing_role_registry(_Composition())
+    resolved = await ai_routes._persisted_run_role_registry(
+        _Composition(),
+        None,
+        {
+            "id": "writing-run",
+            "binding_attributes_json": (
+                '{"agentProfile":"writing",'
+                '"domainNamespace":"purrtypos.writing"}'
+            ),
+        },
+    )
 
     assert resolved is registry
-    assert seen_namespaces == ["purrtypos.writing"]
+    assert seen_profiles == [("writing", "purrtypos.writing")]
 
 
 async def test_reserve_route_replays_response_loss_and_rejects_changed_input(

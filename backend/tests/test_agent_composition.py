@@ -29,6 +29,7 @@ from purra.contracts import (
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.api import AgentModelTaskRunner
+from purra.api import AgentCoreRunOptions
 from purra.model_invocation import ModelInvocationContext
 from purra.tools import InMemoryApprovalGateway
 from purra.tools import InMemoryToolCatalog
@@ -220,6 +221,23 @@ async def test_composition_consumes_explicit_profile_extension_capabilities(
 
 
 @pytest.mark.asyncio
+async def test_composition_create_core_requires_an_explicit_profile(
+    temp_db: DatabaseConnection,
+):
+    composition = AgentComposition(
+        temp_db,
+        profile_extension_factories=(
+            lambda **dependencies: _FakeProfileExtension(dependencies),
+        ),
+    )
+    try:
+        with pytest.raises(TypeError, match="agent_profile"):
+            composition.create_core("key")
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_static_profile_extension_defaults_have_no_side_effects(
     temp_db: DatabaseConnection,
 ):
@@ -312,6 +330,16 @@ async def test_product_composition_registers_writing_and_static_screenplay_profi
         await composition.shutdown()
 
 
+def test_product_composition_rejects_additional_profile_factories(
+    temp_db: DatabaseConnection,
+):
+    with pytest.raises(TypeError, match="profile_extension_factories"):
+        create_agent_composition(
+            temp_db,
+            profile_extension_factories=(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_product_composition_consumes_configured_writing_skills_dir(
     temp_db: DatabaseConnection,
@@ -364,6 +392,9 @@ async def test_agent_run_service_requires_request_scoped_role_registry():
         def create_response_judge_policies(self, _request):
             return ()
 
+        def bind_run_profile(self, _request, options):
+            return options
+
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "委派只读研究"}],
         apiKey="key",
@@ -384,6 +415,74 @@ async def test_agent_run_service_requires_request_scoped_role_registry():
 
     with pytest.raises(TypeError):
         await anext(updates)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_disables_delegation_when_profile_has_no_roles():
+    from infrastructure.models.provider_capabilities import (
+        ProviderCapabilityCache,
+    )
+
+    class _CoreCreated(Exception):
+        pass
+
+    captured: dict[str, object] = {}
+
+    class _NoRoleComposition:
+        provider_capabilities = ProviderCapabilityCache()
+        delegation_repository = object()
+
+        async def prepare_request(self, request):
+            return request
+
+        def create_response_judge_policies(self, _request):
+            return ()
+
+        def agent_role_registry_for_request(self, _request):
+            return None
+
+        def bind_run_profile(self, _request, options):
+            return options
+
+        def create_core_for_request(self, request, _api_key, **kwargs):
+            captured["request"] = request
+            captured["kwargs"] = kwargs
+            raise _CoreCreated
+
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "分析剧本"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        chatAgentMode="agent",
+    )
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="分析剧本"),),
+        model=ModelRequest(provider="openai", model="model"),
+        domain_context=DomainContext(namespace="purrtypos.screenplay"),
+        mode="agent",
+        tools_enabled=True,
+    )
+    updates = AgentRunService(
+        _NoRoleComposition(),  # type: ignore[arg-type]
+    ).run(
+        body=body,
+        api_key="key",
+        provider_options={"model": "model"},
+        signal=asyncio.Event(),
+        mapped_request=request,
+        base_options=AgentCoreRunOptions(),
+    )
+
+    with pytest.raises(_CoreCreated):
+        await anext(updates)
+
+    assert captured["request"] is request
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert "agent_role_guidance" not in kwargs
+    assert "delegation_repository" not in kwargs
 
 
 def test_request_mapping_supports_kimi_256k_context_window():
@@ -459,6 +558,35 @@ def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
     assert options.binding.namespace == "writing.chat.request"
     assert options.binding.aggregate_id == "7"
     assert options.binding.command_id == "chat-session-7-request-1"
+
+
+@pytest.mark.asyncio
+async def test_composition_binds_profile_identity_into_existing_run_binding(
+    temp_db: DatabaseConnection,
+):
+    composition = _writing_composition(temp_db)
+    try:
+        body = ChatStreamRequest(
+            streamId="chat-session-7-profile-binding",
+            messages=[{"role": "user", "content": "hello"}],
+            apiKey="key",
+            apiProvider="openai",
+            options=_fixture_model_options(),
+            sessionId=7,
+            chatAgentMode="agent",
+        )
+        request = to_writing_agent_request(body, {"model": "model"})
+        options = writing_run_options(request, {"max_tokens": 2_048})
+
+        bound = composition.bind_run_profile(request, options)
+
+        assert bound.binding is not None
+        assert dict(bound.binding.attributes) == {
+            "agentProfile": "writing",
+            "domainNamespace": "purrtypos.writing",
+        }
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio
@@ -685,7 +813,7 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
     p3_request = _request("读取当前章节，给出一个150字以内的摘要。")
     p5_judges = composition.create_response_judge_policies(p5_request)
     p3_judges = composition.create_response_judge_policies(p3_request)
-    core = composition.create_core("key")
+    core = composition.create_core("key", agent_profile="writing")
     p5_options = writing_run_options(
         p5_request,
         {"max_tokens": 2_048},
@@ -708,7 +836,7 @@ async def test_composition_wires_compaction_into_core_not_run_service(
 ):
     composition = _writing_composition(temp_db)
 
-    core = composition.create_core("key")
+    core = composition.create_core("key", agent_profile="writing")
 
     assert core._conversation_compactor_factory is not None
     compactor = core._conversation_compactor_factory(AgentModelTaskRunner(
@@ -743,7 +871,7 @@ async def test_composed_core_consumes_configured_approval_timeout(
         3_600,
     )
     composition = _writing_composition(temp_db)
-    core = composition.create_core("key")
+    core = composition.create_core("key", agent_profile="writing")
 
     assert core._tool_executor._limits.approval_timeout_seconds == 3_600
 
@@ -771,6 +899,7 @@ async def test_composition_filters_child_tools_from_business_role_policy(
     )
     core = composition.create_core(
         "key",
+        agent_profile="writing",
         allowed_tool_modes=role.allowed_tool_modes,
     )
     enabled = core._tool_catalog.enabled_names(request)
@@ -1216,8 +1345,9 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
             self.unsupported_callback = lambda: None
             self.provider_capabilities = ProviderCapabilityCache()
 
-        def create_core(
+        def create_core_for_request(
             self,
+            _request,
             _api_key,
             *,
             on_required_tool_choice_unsupported=None,
@@ -1227,6 +1357,12 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
 
         def create_response_judge_policies(self, _request):
             return ()
+
+        def agent_role_registry_for_request(self, _request):
+            return None
+
+        def bind_run_profile(self, _request, options):
+            return options
 
         def observe_event(self, _event):
             return None
@@ -1548,7 +1684,7 @@ async def test_composition_shutdown_cancels_all_live_approvals(
     assert late.approval_id is None
     assert late_sink.events == []
     with pytest.raises(RuntimeError, match="shut down"):
-        composition.create_core("key")
+        composition.create_core("key", agent_profile="writing")
 
 
 @pytest.mark.asyncio

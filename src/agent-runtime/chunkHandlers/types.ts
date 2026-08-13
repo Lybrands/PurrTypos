@@ -106,6 +106,7 @@ export interface AgentChunkHost {
 export interface AgentChunkRuntimeContext {
   acc: AgentAccumulator
   sessionId: AgentSessionId
+  turnId?: string
   modelIdentity: AgentModelIdentity
   host: AgentChunkHost
   persistConversation?: boolean
