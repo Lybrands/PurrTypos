@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,9 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from purra.events import CoreEventType
-from purra.output import OutputEventKind
-from application.agent_composition import (
-    AgentComposition,
-    set_agent_composition,
-)
+from purra.output import OutputEventKind, RuntimeOutputEvent
+from application.agent_composition import set_agent_composition
+from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import (
@@ -48,7 +47,7 @@ async def composed_app(
 ):
     db = DatabaseConnection(tmp_path)
     await db.init()
-    composition = AgentComposition(db)
+    composition = create_agent_composition(db)
     set_agent_composition(composition)
 
     app = FastAPI()
@@ -200,6 +199,174 @@ def _event_name(event: dict[str, Any]) -> str:
         if key in event:
             return key
     raise AssertionError(f"unclassified SSE event: {event!r}")
+
+
+@pytest.mark.asyncio
+async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
+    composed_app,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app, composition, _db = composed_app
+    release_runtime = asyncio.Event()
+
+    async def _semantic_plan(*_args, **_kwargs):
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({
+                    "needsTodos": True,
+                    "title": "续写故事",
+                    "goal": "理解原作后完成续写",
+                    "todos": [
+                        {
+                            "id": "understand-source",
+                            "title": "理解原作",
+                            "type": "analyze",
+                            "executor": "model",
+                            "expectedTools": [],
+                            "riskLevel": "read",
+                        },
+                        {
+                            "id": "draft-continuation",
+                            "title": "撰写续篇",
+                            "type": "write",
+                            "executor": "model",
+                            "expectedTools": [],
+                            "riskLevel": "write",
+                        },
+                    ],
+                }, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
+    async def _runtime(*_args, **_kwargs):
+        async def _stream():
+            await release_runtime.wait()
+            yield {
+                "choices": [{
+                    "delta": {"content": "续篇正文。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "wire-model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _semantic_plan,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+
+    live = start_asgi_request(
+        app,
+        method="POST",
+        path="/api/ai/chat/stream",
+        json_body=_chat_request("请先理解原作并完成续写"),
+    )
+    await live.wait_started()
+
+    run_id = ""
+    while True:
+        wire = await live.next_sse_json()
+        projected = project_wire_event_for_legacy_assertion(wire) or {}
+        if started := projected.get("agentRunStarted"):
+            run_id = str(started["runId"])
+        if projected.get("agentRunTodosUpdated"):
+            break
+
+    assert run_id
+    recipe_payload = {
+        "taskId": "recipe-task-wire",
+        "taskTitle": "Recipe 内部执行",
+        "status": "running",
+        "units": [
+            {
+                "id": "generate",
+                "title": "Recipe 生成正文",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "plannerStepId": "draft-continuation",
+            },
+            {
+                "id": "validate",
+                "title": "校验候选稿",
+                "kind": "validate_candidate",
+                "status": "running",
+                "plannerStepId": "draft-continuation",
+            },
+            {
+                "id": "publish",
+                "title": "发布候选稿",
+                "kind": "publish_candidate",
+                "status": "pending",
+                "plannerStepId": "draft-continuation",
+            },
+        ],
+    }
+    await composition.output_processor.accept_runtime_event(
+        RuntimeOutputEvent(
+            event_id="wire-recipe-progress",
+            run_id=run_id,
+            event_type="long_task.progress",
+            payload=recipe_payload,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    release_runtime.set()
+
+    response = await live.finish()
+    _assert_sse_wire(response)
+    canonical_events = [
+        event for event in decode_sse_json(response.content)
+        if event.get("kind") == "runtime.event"
+    ]
+    public_plan = next(
+        event["payload"]["data"]
+        for event in canonical_events
+        if event["payload"].get("eventType") == "run.todos_updated"
+    )
+    live_progress = next(
+        event["payload"]["data"]
+        for event in canonical_events
+        if event["payload"].get("eventType") == "long_task.progress"
+    )
+
+    assert public_plan["title"] == "续写故事"
+    assert [
+        (step["id"], step["title"])
+        for step in public_plan["steps"]
+    ] == [
+        ("understand-source", "理解原作"),
+        ("draft-continuation", "撰写续篇"),
+    ]
+    encoded_plan = json.dumps(public_plan, ensure_ascii=False)
+    assert "Recipe" not in encoded_plan
+    assert "校验候选稿" not in encoded_plan
+    assert "发布候选稿" not in encoded_plan
+    assert "plannerStepId" not in encoded_plan
+    assert live_progress == recipe_payload
+
+    replay_events = await composition.output_repository.list_events(
+        run_id,
+        after_sequence=0,
+        limit=200,
+    )
+    replay_payloads = [event.payload for event in replay_events]
+    assert next(
+        payload["data"]
+        for payload in replay_payloads
+        if payload.get("eventType") == "run.todos_updated"
+    ) == public_plan
+    assert next(
+        payload["data"]
+        for payload in replay_payloads
+        if payload.get("eventType") == "long_task.progress"
+    ) == recipe_payload
 
 
 @pytest.mark.asyncio
