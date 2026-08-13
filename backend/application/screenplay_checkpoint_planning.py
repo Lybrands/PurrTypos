@@ -615,6 +615,7 @@ class SqliteScreenplayCheckpointRepository:
             [root_run_id],
         )
         found: str | None = None
+        matching_event_count = 0
         for row in rows:
             try:
                 payload = json.loads(str(row.get("payload_json") or "{}"))
@@ -627,6 +628,11 @@ class SqliteScreenplayCheckpointRepository:
                 continue
             if str(metadata.get("identity") or "") != checkpoint_key:
                 continue
+            matching_event_count += 1
+            if matching_event_count != 1:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision event is duplicated"
+                )
             event_digest = str(metadata.get("digest") or "")
             steps = payload.get("steps")
             task_spec = payload.get("taskSpec")
