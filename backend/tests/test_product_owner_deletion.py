@@ -8,6 +8,7 @@ import pytest_asyncio
 from exceptions import AppError
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import delete_screenplay_project_data
+from application.product_owner_deletion import prepare_session_owner_deletion
 
 pytestmark = pytest.mark.asyncio
 
@@ -146,6 +147,14 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "VALUES ('run-project-done', 92, 'done', 'done')"
     )
     await owner_db.execute(
+        "INSERT INTO ai_agent_host_child_runs "
+        "(host_child_key, identity_digest, contract_json, generation, "
+        "attempt_key, run_id, terminal_status) VALUES "
+        "('project-done/task/unit/main', 'identity-done', "
+        "'{\"bindingAggregateId\":\"project-done\"}', 1, "
+        "'attempt-project-done', 'run-project-done', 'done')"
+    )
+    await owner_db.execute(
         "INSERT INTO screenplay_agent_turns "
         "(id, project_id, session_id, command_id, status, user_content) "
         "VALUES ('turn-before-operation', 'project-done', 92, "
@@ -187,6 +196,7 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         'ai_agent_work_items',
         'ai_writing_chat_requests',
         'ai_sessions',
+        'ai_agent_host_child_runs',
     ):
         assert await owner_db.fetch_one(
             f"SELECT 1 AS present FROM {table} LIMIT 1"
@@ -194,6 +204,42 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     assert await owner_db.fetch_one(
         "SELECT session_id FROM ai_agent_runs WHERE id = 'run-project-done'"
     ) == {"session_id": None}
+    await owner_db.execute(
+        "INSERT INTO ai_agent_host_child_runs "
+        "(host_child_key, identity_digest, contract_json, generation, "
+        "attempt_key) VALUES ('project-done/task/unit/main', 'new-identity', "
+        "'{\"bindingAggregateId\":\"project-done\"}', 1, "
+        "'new-attempt-project-done')"
+    )
+
+
+async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
+    await owner_db.execute(
+        "INSERT INTO ai_sessions (id, scope) VALUES (96, 'screenplay')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
+        "VALUES ('run-session-audit', 96, 'done', 'done')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_host_child_runs "
+        "(host_child_key, identity_digest, contract_json, generation, "
+        "attempt_key, run_id, terminal_status) VALUES "
+        "('project-audit/task/unit/main', 'identity-audit', "
+        "'{\"bindingAggregateId\":\"project-audit\"}', 1, "
+        "'attempt-project-audit', 'run-session-audit', 'done')"
+    )
+
+    await prepare_session_owner_deletion(owner_db, [96])
+
+    assert await owner_db.fetch_one(
+        "SELECT run_id, terminal_status FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = 'project-audit/task/unit/main'"
+    ) == {"run_id": "run-session-audit", "terminal_status": "done"}
+    assert await owner_db.fetch_one(
+        "SELECT session_id, status FROM ai_agent_runs "
+        "WHERE id = 'run-session-audit'"
+    ) == {"session_id": None, "status": "done"}
 
 
 @pytest.mark.parametrize("relation", ["reference", "continuation"])

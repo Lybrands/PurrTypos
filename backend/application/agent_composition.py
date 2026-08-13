@@ -55,6 +55,9 @@ from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
+from infrastructure.persistence.sqlite_host_child_run_registry import (
+    SqliteHostChildRunRegistry,
+)
 from infrastructure.persistence.agent_output_publisher import (
     InProcessAgentOutputPublisher,
 )
@@ -129,6 +132,7 @@ class AgentComposition:
             run_repository=self._repository,
             run_commit_projector=run_commit_projector,
         )
+        self._host_child_run_registry = SqliteHostChildRunRegistry(db)
         self._output_publisher = InProcessAgentOutputPublisher()
         self._output_processor = AgentOutputProcessor(
             self._output_repository,
@@ -212,6 +216,10 @@ class AgentComposition:
     @property
     def output_repository(self) -> AgentOutputRepository:
         return self._output_repository
+
+    @property
+    def host_child_run_registry(self) -> SqliteHostChildRunRegistry:
+        return self._host_child_run_registry
 
     @property
     def output_journal(self) -> AgentOutputJournalQuery:
