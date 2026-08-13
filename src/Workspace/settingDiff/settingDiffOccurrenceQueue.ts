@@ -29,6 +29,17 @@ export function createSettingDiffOccurrenceQueue() {
       }
       return false
     },
+    evictWhere(predicate: (proposal: ProposedSettingDiff) => boolean): string[] {
+      const affected: string[] = []
+      for (const [sessionKey, proposals] of bySessionKey) {
+        const retained = proposals.filter((proposal) => !predicate(proposal))
+        if (retained.length === proposals.length) continue
+        affected.push(sessionKey)
+        if (retained.length) bySessionKey.set(sessionKey, retained)
+        else bySessionKey.delete(sessionKey)
+      }
+      return affected
+    },
     clear(): void {
       bySessionKey.clear()
     },
@@ -57,6 +68,11 @@ export function createSettingDiffCommandLatch() {
     },
     release(sessionKey: string, proposalId: string): void {
       if (pending.get(sessionKey) === proposalId) pending.delete(sessionKey)
+    },
+    evictProposal(proposalId: string): void {
+      for (const [sessionKey, pendingProposalId] of pending) {
+        if (pendingProposalId === proposalId) pending.delete(sessionKey)
+      }
     },
     clear(): void {
       pending.clear()

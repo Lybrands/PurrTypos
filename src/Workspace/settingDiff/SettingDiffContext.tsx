@@ -137,6 +137,8 @@ export function SettingDiffProvider({
   const sessionsRef = React.useRef(sessions)
   const occurrenceQueueRef = React.useRef(createSettingDiffOccurrenceQueue())
   const commandLatchRef = React.useRef(createSettingDiffCommandLatch())
+  const proposalOwnerSessionRef = React.useRef(new Map<string, number>())
+  const evictedSessionIdsRef = React.useRef(new Set<number>())
   React.useEffect(() => { sessionsRef.current = sessions }, [sessions])
   React.useEffect(() => { resolvedCardsRef.current = resolvedCards }, [resolvedCards])
   const updateSessions = React.useCallback((
@@ -179,6 +181,14 @@ export function SettingDiffProvider({
     const proposalId = String(proposal.proposalId || '').trim()
     if (!proposalId) return
     if (String(proposal.bookId) !== String(bookId ?? '')) return
+    const ownerSessionId = proposal.resolutionTarget?.sessionId
+    if (
+      ownerSessionId != null
+      && evictedSessionIdsRef.current.has(Number(ownerSessionId))
+    ) return
+    if (ownerSessionId != null) {
+      proposalOwnerSessionRef.current.set(proposalId, Number(ownerSessionId))
+    }
     if (resolvedCardsRef.current[proposalId]) return
     const kind = proposal.kind
     const sessionKey = kind === 'character'
@@ -320,8 +330,15 @@ export function SettingDiffProvider({
 
   React.useEffect(() => {
     const handler = (event: Event) => {
-      const card = (event as CustomEvent<SettingDiffCardState>).detail
+      const card = (event as CustomEvent<
+        SettingDiffCardState & { ownerSessionId?: number }
+      >).detail
       if (!card?.proposalId) return
+      if (card.ownerSessionId != null) {
+        const ownerSessionId = Number(card.ownerSessionId)
+        if (evictedSessionIdsRef.current.has(ownerSessionId)) return
+        proposalOwnerSessionRef.current.set(card.proposalId, ownerSessionId)
+      }
       resolvedCardsRef.current = {
         ...resolvedCardsRef.current,
         [card.proposalId]: card,
@@ -435,6 +452,59 @@ export function SettingDiffProvider({
     const next = occurrenceQueueRef.current.shift(sessionKey)
     if (next) queueMicrotask(() => startDiff(next))
   }, [startDiff])
+
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        bookId: EntityId
+        sessionId: number
+      }>).detail
+      if (!detail || String(detail.bookId) !== String(bookId ?? '')) return
+      const sessionId = Number(detail.sessionId)
+      if (!Number.isFinite(sessionId)) return
+      evictedSessionIdsRef.current.add(sessionId)
+      const affected = new Set(
+        occurrenceQueueRef.current.evictWhere(
+          (proposal) => Number(proposal.resolutionTarget?.sessionId) === sessionId,
+        ),
+      )
+      const evictedProposalIds = new Set<string>()
+      for (const [sessionKey, session] of Object.entries(sessionsRef.current)) {
+        if (proposalOwnerSessionRef.current.get(session.proposalId) !== sessionId) {
+          continue
+        }
+        affected.add(sessionKey)
+        evictedProposalIds.add(session.proposalId)
+        commandLatchRef.current.evictProposal(session.proposalId)
+      }
+      for (const [proposalId, ownerSessionId] of proposalOwnerSessionRef.current) {
+        if (ownerSessionId !== sessionId) continue
+        evictedProposalIds.add(proposalId)
+        proposalOwnerSessionRef.current.delete(proposalId)
+        if (resolvedCardsRef.current[proposalId]) {
+          const next = { ...resolvedCardsRef.current }
+          delete next[proposalId]
+          resolvedCardsRef.current = next
+          setResolvedCards(next)
+        }
+      }
+      updateSessions((current) => {
+        const next = { ...current }
+        for (const sessionKey of affected) {
+          const session = next[sessionKey]
+          if (session && evictedProposalIds.has(session.proposalId)) {
+            delete next[sessionKey]
+          }
+        }
+        return next
+      })
+      for (const sessionKey of affected) {
+        queueMicrotask(() => activateNext(sessionKey))
+      }
+    }
+    window.addEventListener('setting-diff-owner-evicted', handler)
+    return () => window.removeEventListener('setting-diff-owner-evicted', handler)
+  }, [activateNext, bookId, updateSessions])
 
   const exitDiff = React.useCallback<SettingDiffContextValue['exitDiff']>(async (sessionKey) => {
     const cur = sessionsRef.current[sessionKey]

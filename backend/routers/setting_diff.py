@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from application.book_conversation_product_projection import (
+    BookSettingResolutionConflictError,
     persist_setting_diff_resolution,
+    setting_diff_mutation_digest,
+    validate_setting_diff_mutation,
 )
 from database.crud import character_history as char_hist_crud
 from database.crud import characters as characters_crud
@@ -19,6 +22,43 @@ from schemas.setting_diff import (
 )
 
 router = APIRouter(tags=["setting-diff"])
+
+
+async def _persist_resolution(*args, **kwargs):
+    try:
+        return await persist_setting_diff_resolution(*args, **kwargs)
+    except BookSettingResolutionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def _validate_mutation(*args, **kwargs) -> None:
+    try:
+        await validate_setting_diff_mutation(*args, **kwargs)
+    except BookSettingResolutionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def _resolution_with_mutation(
+    db,
+    resolution,
+    *,
+    request_before: dict,
+    request_proposed: dict,
+    final: dict,
+) -> dict:
+    value = resolution.model_dump()
+    try:
+        digest = await setting_diff_mutation_digest(
+            db,
+            run_id=resolution.agentRunId,
+            resolution=value,
+            request_before=request_before,
+            request_proposed=request_proposed,
+            final=final,
+        )
+    except BookSettingResolutionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {**value, "mutationDigest": digest}
 
 
 @router.post("/setting-diff/character/{characterId}/commit")
@@ -41,11 +81,25 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                 [cid],
             ) is None:
                 return {"success": False, "error": "人物不存在"}
-            resolution_write = await persist_setting_diff_resolution(
+            request_before = body.before.model_dump()
+            request_proposed = body.after.model_dump()
+            final = {
+                "name": body.name,
+                "tags": body.tags,
+                "profileMd": body.profileMd,
+            }
+            resolution_value = await _resolution_with_mutation(
+                db,
+                body.resolution,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                final=final,
+            )
+            resolution_write = await _persist_resolution(
                 db,
                 session_id=body.resolution.sessionId,
                 run_id=body.resolution.agentRunId,
-                resolution=body.resolution.model_dump(),
+                resolution=resolution_value,
                 allow_new_committed=True,
             )
             if resolution_write.replayed:
@@ -53,6 +107,23 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                     "success": True,
                     "data": {"characterId": cid, "replayed": True},
                 }
+            current = await db.fetch_one(
+                "SELECT name, tags, profile_md FROM characters WHERE id = ?",
+                [cid],
+            )
+            await _validate_mutation(
+                db,
+                run_id=body.resolution.agentRunId,
+                resolution=resolution_value,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                current={
+                    "name": str((current or {}).get("name") or ""),
+                    "tags": str((current or {}).get("tags") or ""),
+                    "profileMd": str((current or {}).get("profile_md") or ""),
+                },
+                final=final,
+            )
         row = await characters_crud.update_character(
             db,
             cid,
@@ -172,11 +243,25 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                 [eid],
             ) is None:
                 return {"success": False, "error": "实体不存在"}
-            resolution_write = await persist_setting_diff_resolution(
+            request_before = body.before.model_dump()
+            request_proposed = body.after.model_dump()
+            final = {
+                "name": body.name,
+                "tags": body.tags,
+                "profileMd": body.profileMd,
+            }
+            resolution_value = await _resolution_with_mutation(
+                db,
+                body.resolution,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                final=final,
+            )
+            resolution_write = await _persist_resolution(
                 db,
                 session_id=body.resolution.sessionId,
                 run_id=body.resolution.agentRunId,
-                resolution=body.resolution.model_dump(),
+                resolution=resolution_value,
                 allow_new_committed=True,
             )
             if resolution_write.replayed:
@@ -184,6 +269,23 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                     "success": True,
                     "data": {"entityId": eid, "replayed": True},
                 }
+            current = await db.fetch_one(
+                "SELECT name, tags, profile_md FROM setting_entities WHERE id = ?",
+                [eid],
+            )
+            await _validate_mutation(
+                db,
+                run_id=body.resolution.agentRunId,
+                resolution=resolution_value,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                current={
+                    "name": str((current or {}).get("name") or ""),
+                    "tags": str((current or {}).get("tags") or ""),
+                    "profileMd": str((current or {}).get("profile_md") or ""),
+                },
+                final=final,
+            )
         row = await entities_crud.update_setting_entity(
             db,
             eid,
@@ -293,11 +395,21 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
                 or body.resolution.sessionKey != f"background:{bookId}"
             ):
                 raise ValueError("setting proposal target does not match background")
-            resolution_write = await persist_setting_diff_resolution(
+            request_before = {"content": body.before_content}
+            request_proposed = {"content": body.after_content}
+            final = {"content": body.content}
+            resolution_value = await _resolution_with_mutation(
+                db,
+                body.resolution,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                final=final,
+            )
+            resolution_write = await _persist_resolution(
                 db,
                 session_id=body.resolution.sessionId,
                 run_id=body.resolution.agentRunId,
-                resolution=body.resolution.model_dump(),
+                resolution=resolution_value,
                 allow_new_committed=True,
             )
             if resolution_write.replayed:
@@ -305,6 +417,19 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
                     "success": True,
                     "data": {"bookId": bookId, "replayed": True},
                 }
+            current = await db.fetch_one(
+                "SELECT content FROM story_background WHERE book_id = ?",
+                [bookId],
+            )
+            await _validate_mutation(
+                db,
+                run_id=body.resolution.agentRunId,
+                resolution=resolution_value,
+                request_before=request_before,
+                request_proposed=request_proposed,
+                current={"content": str((current or {}).get("content") or "")},
+                final=final,
+            )
         await bg_crud.save_story_background(db, bookId, body.content)
         hist_id = await bg_hist_crud.insert_story_background_history(
             db,

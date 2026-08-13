@@ -210,12 +210,21 @@ class SqliteWritingChatRequestStore:
         return True
 
     async def before_submit(self, request_id: str) -> bool:
-        receipt = await self.get(request_id)
-        return bool(
-            receipt
-            and receipt.status == "starting"
-            and receipt.cancel_requested_at_ms is None
-        )
+        normalized = _required_text(request_id, "request id")
+        async with self._db.transaction(cancellation_linearizable=True):
+            row = await self._db.fetch_one(
+                "SELECT r.status, r.cancel_requested_at_ms, s.id AS owner_id "
+                "FROM ai_writing_chat_requests AS r "
+                "LEFT JOIN ai_sessions AS s ON s.id = r.session_id "
+                "WHERE r.request_id = ?",
+                [normalized],
+            )
+            return bool(
+                row
+                and row.get("owner_id") is not None
+                and row.get("status") == "starting"
+                and row.get("cancel_requested_at_ms") is None
+            )
 
     async def bind_run(
         self,

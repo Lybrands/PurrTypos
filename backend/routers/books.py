@@ -10,6 +10,7 @@ from database.crud.articles import get_article
 from database.crud.chapters import get_chapters
 from database.crud.outlines import get_or_create_writing_outline
 from dependencies import get_db
+from application.product_owner_deletion import prepare_session_owner_deletion
 from schemas.books import CreateBookRequest, RenameBookRequest
 from utils.file_storage import safe_unlink_stored_file
 from utils.id_utils import short_id8
@@ -83,7 +84,7 @@ async def create_book(body: CreateBookRequest):
 async def delete_book(bookId: str):
     db = get_db()
     attachment_paths: list[str] = []
-    async with db.transaction():
+    async with db.transaction(cancellation_linearizable=True):
         outlines = await db.fetch_all(
             "SELECT id FROM outlines WHERE book_id = ?", [bookId]
         )
@@ -112,6 +113,11 @@ async def delete_book(bookId: str):
             for row in session_rows
             if row.get("id") is not None
         })
+        await prepare_session_owner_deletion(
+            db,
+            session_ids,
+            book_ids=[bookId],
+        )
 
         attachments = await db.fetch_all(
             "SELECT stored_path FROM story_background_attachments WHERE book_id = ?",
