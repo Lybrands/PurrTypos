@@ -8,12 +8,6 @@ const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.c
 const { AgentChunkReplay } = loadTypeScriptModule(
   path.join(__dirname, 'chunkReplay.ts'),
 )
-const {
-  getActiveTaskPlan,
-  getTaskPlanCountLabel,
-} = loadTypeScriptModule(
-  path.join(__dirname, 'taskPlan.ts'),
-)
 
 const model = {
   id: 'model-1',
@@ -137,7 +131,7 @@ test('business Agents replay the canonical chunk protocol through the shared red
   assert.equal(assistant?.turnStartedAt, undefined)
 })
 
-test('canonical long-task progress restores the execution status plan without todo events', () => {
+test('canonical long-task progress restores the long task id without public plan events', () => {
   const replay = new AgentChunkReplay()
   const seed = {
     turnId: 'turn-long-task-only',
@@ -193,22 +187,77 @@ test('canonical long-task progress restores the execution status plan without to
 
   const assistant = replay.assistant(seed.turnId)
   assert.equal(assistant?.longTaskId, 'longtask-1')
-  assert.equal(assistant?.taskPlan?.status, 'running')
+  assert.equal(assistant?.taskPlan, undefined)
+})
+
+test('replay keeps the LLM public plan when Recipe progress arrives', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-public-plan-replay',
+    sessionId: 535,
+    userContent: '分析原作并续写',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+
+  replay.dispatch(seed, canonical('root-run-1', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: {
+        runId: 'root-run-1',
+        title: 'LLM 公开计划',
+        status: 'running',
+        steps: [{
+          id: 'understand-source',
+          title: '理解原作',
+          type: 'read',
+          status: 'done',
+          dependsOn: [],
+        }, {
+          id: 'write-continuation',
+          title: '撰写续篇',
+          type: 'write',
+          status: 'running',
+          dependsOn: ['understand-source'],
+        }],
+      },
+    },
+  }), dependencies)
+  replay.dispatch(seed, canonical('root-run-1', 2, {
+    payload: {
+      eventType: 'long_task.progress',
+      data: {
+        taskId: 'recipe-task-1',
+        taskTitle: 'Recipe execution units',
+        status: 'running',
+        units: [{
+          id: 'understand-source',
+          position: 0,
+          title: 'Recipe 收集素材',
+          kind: 'collect_evidence',
+          status: 'completed',
+        }, {
+          id: 'write-continuation',
+          position: 1,
+          title: 'Recipe 生成正文',
+          kind: 'generate_document_section',
+          status: 'running',
+          dependsOn: [],
+        }],
+      },
+    },
+  }), dependencies)
+
+  const plan = replay.assistant(seed.turnId)?.taskPlan
+  assert.equal(plan?.title, 'LLM 公开计划')
   assert.deepEqual(
-    assistant?.taskPlan?.steps.map((step) => [step.id, step.type, step.status]),
+    plan?.steps.map((step) => [step.id, step.title, step.dependsOn]),
     [
-      ['document:evidence', 'read', 'done'],
-      ['section:characters', 'write', 'running'],
-      ['section:story', 'write', 'running'],
-      ['compose-final-response', 'write', 'pending'],
+      ['understand-source', '理解原作', []],
+      ['write-continuation', '撰写续篇', ['understand-source']],
     ],
   )
-  assert.equal(getActiveTaskPlan([assistant], true), assistant.taskPlan)
-  assert.equal(
-    getTaskPlanCountLabel(assistant.taskPlan),
-    '并行 2 项 · 已完成 1/4',
-  )
-  assert.equal(getActiveTaskPlan([assistant], false), assistant.taskPlan)
 })
 
 test('raw Provider events are visible before transport completion', () => {
