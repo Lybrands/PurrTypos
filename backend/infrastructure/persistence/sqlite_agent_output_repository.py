@@ -35,6 +35,9 @@ from purra.ports import RunBeginResult, RunCommit
 from purra.ports.projection import RunCommitProjector
 
 
+_VALIDATED_RESULT_SCHEMA = "purra.run-validated-result/v1"
+
+
 class SqliteAgentOutputRepository:
     """Persist canonical events before any transport is allowed to publish."""
 
@@ -172,6 +175,28 @@ class SqliteAgentOutputRepository:
             payload=draft.payload,
             occurred_at=draft.occurred_at,
         )
+        validated_result_draft = (
+            AgentOutputEventDraft(
+                run_id=normalized_run_id,
+                turn_id=draft.turn_id,
+                output_stream_id=None,
+                invocation_id=None,
+                source_event_key=(
+                    f"run:{normalized_run_id}:validated-result"
+                ),
+                source=OutputSource.RUNTIME,
+                kind=OutputEventKind.RUN_VALIDATED_RESULT,
+                channel=OutputChannel.DIAGNOSTIC,
+                visibility=OutputVisibility.PRIVATE,
+                payload={
+                    "schemaVersion": _VALIDATED_RESULT_SCHEMA,
+                    "content": commit.validated_result,
+                },
+                occurred_at=draft.occurred_at,
+            )
+            if commit.validated_result is not None
+            else None
+        )
         for attempt in range(3):
             try:
                 return await self._commit_run_lifecycle_attempt(
@@ -179,6 +204,7 @@ class SqliteAgentOutputRepository:
                     commit,
                     event_draft,
                     related_drafts,
+                    validated_result_draft,
                     draft.status,
                 )
             except RunCommitProjectionError as error:
@@ -192,6 +218,7 @@ class SqliteAgentOutputRepository:
         commit: RunCommit,
         event_draft: AgentOutputEventDraft,
         related_drafts: tuple[AgentOutputEventDraft, ...],
+        validated_result_draft: AgentOutputEventDraft | None,
         expected_status: RunStatus,
     ) -> tuple[AgentOutputEvent, ...]:
         # Every retry re-enters the authoritative Run transaction. Its current
@@ -215,8 +242,26 @@ class SqliteAgentOutputRepository:
                     )
                     for item in related_drafts
                 ])
-                return (*related, existing)
-            for item in related_drafts:
+                validated = ()
+                if validated_result_draft is not None:
+                    persisted = await self._existing_event_for_draft(
+                        validated_result_draft
+                    )
+                    if persisted is None:
+                        raise ContractViolationError(
+                            "completed validated Run is missing its result"
+                        )
+                    validated = (persisted,)
+                return (*related, *validated, existing)
+            atomic_drafts = (
+                *related_drafts,
+                *(
+                    (validated_result_draft,)
+                    if validated_result_draft is not None
+                    else ()
+                ),
+            )
+            for item in atomic_drafts:
                 if await self._existing_event_for_draft(item) is not None:
                     raise ContractViolationError(
                         "partial canonical lifecycle commit already exists"
@@ -247,8 +292,15 @@ class SqliteAgentOutputRepository:
                     for item in related_drafts
                 ]
             )
+            validated = ()
+            if validated_result_draft is not None:
+                validated = (
+                    await self._append_event_in_transaction(
+                        validated_result_draft
+                    ),
+                )
             lifecycle = await self._append_event_in_transaction(event_draft)
-            return (*related, lifecycle)
+            return (*related, *validated, lifecycle)
 
     async def commit_stream(
         self,
@@ -349,6 +401,69 @@ class SqliteAgentOutputRepository:
             [normalized_run_id, cursor, page_size],
         )
         return tuple(_event(row) for row in rows)
+
+    async def load_validated_result(self, run_id: RunId) -> str:
+        """Read one private validated result from the canonical Run journal."""
+
+        normalized_run_id = required_text(run_id, "run id")
+        run = await self._db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [normalized_run_id],
+        )
+        if run is None or run.get("status") != RunStatus.DONE.value:
+            raise ContractViolationError(
+                "validated result requires a completed Run"
+            )
+        lifecycle_rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_run_events "
+            "WHERE run_id = ? AND kind = ? ORDER BY sequence, id",
+            [normalized_run_id, OutputEventKind.RUN_LIFECYCLE.value],
+        )
+        completed_rows = [
+            row
+            for row in lifecycle_rows
+            if str(_json_mapping(row.get("payload_json")).get("status") or "")
+            == RunStatus.DONE.value
+        ]
+        if len(completed_rows) != 1:
+            raise ContractViolationError(
+                "validated result requires exactly one completed lifecycle event"
+            )
+        rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_run_events "
+            "WHERE run_id = ? AND kind = ? ORDER BY sequence, id",
+            [normalized_run_id, OutputEventKind.RUN_VALIDATED_RESULT.value],
+        )
+        if len(rows) != 1:
+            raise ContractViolationError(
+                "validated result requires exactly one canonical event"
+            )
+        row = rows[0]
+        expected = {
+            "run_id": normalized_run_id,
+            "turn_id": completed_rows[0].get("turn_id"),
+            "output_stream_id": None,
+            "invocation_id": None,
+            "source_event_key": f"run:{normalized_run_id}:validated-result",
+            "source": OutputSource.RUNTIME.value,
+            "event_type": OutputEventKind.RUN_VALIDATED_RESULT.value,
+            "kind": OutputEventKind.RUN_VALIDATED_RESULT.value,
+            "channel": OutputChannel.DIAGNOSTIC.value,
+            "visibility": OutputVisibility.PRIVATE.value,
+        }
+        if {key: row.get(key) for key in expected} != expected:
+            raise ContractViolationError(
+                "validated result canonical event has invalid scope"
+            )
+        payload = _json_mapping(row.get("payload_json"))
+        if set(payload) != {"schemaVersion", "content"} or (
+            payload.get("schemaVersion") != _VALIDATED_RESULT_SCHEMA
+            or not isinstance(payload.get("content"), str)
+        ):
+            raise ContractViolationError(
+                "validated result canonical event has invalid payload"
+            )
+        return payload["content"]
 
     async def list_session_events(
         self,

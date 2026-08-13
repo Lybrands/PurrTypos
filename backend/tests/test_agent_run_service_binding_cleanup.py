@@ -4,9 +4,17 @@ import asyncio
 
 import pytest
 
-from application.agent_run_service import AgentRunService
+from application.agent_run_service import (
+    AgentRunService,
+    _HostChildCancellationSignal,
+)
 from purra.api import AgentCoreRunOptions
 from purra.contracts import AgentRunResult, RunLineage, RunStatus
+from purra.output import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
+)
 from application.request_mapping import (
     to_writing_agent_request,
     writing_run_options,
@@ -65,6 +73,7 @@ class _Composition:
         self.core = _Core(self.stream)
         self.released = []
         self.background = []
+        self.output_repository = _OutputRepository()
 
     def create_response_judge_policies(self, _request):
         return ()
@@ -134,6 +143,32 @@ class _CancelableCore(_Core):
     def __init__(self, stream: _Stream) -> None:
         super().__init__(stream)
         self.handle = _CancelableHandle(stream)
+
+
+class _OutputRepository:
+    def __init__(self, value: str = '{"answer":"persisted"}') -> None:
+        self.value = value
+        self.reads: list[str] = []
+
+    async def load_validated_result(self, run_id: str) -> str:
+        self.reads.append(run_id)
+        return self.value
+
+
+class _DoneHandle(_Handle):
+    run_id = "child-run-done"
+
+    async def wait(self):
+        return AgentRunResult(
+            run_id=self.run_id,
+            status=RunStatus.DONE,
+        )
+
+
+class _DoneCore(_Core):
+    def __init__(self, stream: _Stream) -> None:
+        super().__init__(stream)
+        self.handle = _DoneHandle(stream)
 
 
 @pytest.mark.asyncio
@@ -399,3 +434,140 @@ async def test_host_child_entry_rejects_model_delegation_lineage():
         )
 
     assert composition.released == []
+
+
+@pytest.mark.asyncio
+async def test_validated_host_child_reads_the_authoritative_persisted_result():
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "child part"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+        },
+        chatAgentMode="agent",
+    )
+    provider_options = {
+        "model": "deepseek-v4-flash",
+        "baseURL": "https://example.test/v1",
+        "max_tokens": 2_048,
+    }
+    request = to_writing_agent_request(body, provider_options)
+    composition = _Composition()
+    composition.core = _DoneCore(composition.stream)
+    options = AgentCoreRunOptions(
+        response_transaction_policy=ResponseTransactionPolicy(
+            mode=ResponseTransactionMode.VALIDATED_RESULT,
+            public_presentation=PublicPresentationMode.NONE,
+        )
+    )
+
+    result = await AgentRunService(composition).run_host_child(  # type: ignore[arg-type]
+        body=body,
+        api_key="key",
+        provider_options=provider_options,
+        signal=None,
+        lineage=RunLineage(
+            parent_run_id="root-run",
+            root_run_id="root-run",
+            delegation_id=None,
+            agent_role="screenplay-part",
+            depth=1,
+        ),
+        mapped_request=request,
+        base_options=options,
+    )
+
+    assert result.validated_result == '{"answer":"persisted"}'
+    assert composition.output_repository.reads == [result.run_id]
+
+
+@pytest.mark.asyncio
+async def test_direct_host_child_never_reads_or_exposes_a_validated_result():
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "child part"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+        },
+        chatAgentMode="agent",
+    )
+    provider_options = {
+        "model": "deepseek-v4-flash",
+        "baseURL": "https://example.test/v1",
+        "max_tokens": 2_048,
+    }
+    request = to_writing_agent_request(body, provider_options)
+    composition = _Composition()
+    composition.core = _DoneCore(composition.stream)
+
+    result = await AgentRunService(composition).run_host_child(  # type: ignore[arg-type]
+        body=body,
+        api_key="key",
+        provider_options=provider_options,
+        signal=None,
+        lineage=RunLineage(
+            parent_run_id="root-run",
+            root_run_id="root-run",
+            delegation_id=None,
+            agent_role="screenplay-part",
+            depth=1,
+        ),
+        mapped_request=request,
+        base_options=AgentCoreRunOptions(),
+    )
+
+    assert result.validated_result is None
+    assert composition.output_repository.reads == []
+
+
+@pytest.mark.asyncio
+async def test_validated_result_can_be_read_after_service_recreation():
+    composition = _Composition()
+    first = AgentRunService(composition)  # type: ignore[arg-type]
+    second = AgentRunService(composition)  # type: ignore[arg-type]
+
+    assert await first.read_validated_result("child-run") == '{"answer":"persisted"}'
+    assert await second.read_validated_result("child-run") == '{"answer":"persisted"}'
+    assert composition.output_repository.reads == ["child-run", "child-run"]
+
+
+def _pending_event_waits_since(before: set[asyncio.Task]) -> list[asyncio.Task]:
+    return [
+        task
+        for task in asyncio.all_tasks() - before
+        if not task.done()
+        and getattr(task.get_coro(), "__qualname__", "") == "Event.wait"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ("normal", "signal", "caller", "race"))
+async def test_host_child_combined_signal_never_leaks_event_waiters(settle):
+    upstream = asyncio.Event()
+    combined = _HostChildCancellationSignal(upstream)
+    before = set(asyncio.all_tasks())
+    waiter = asyncio.create_task(combined.wait())
+    await asyncio.sleep(0)
+
+    if settle == "normal":
+        waiter.cancel()
+    elif settle == "signal":
+        upstream.set()
+    elif settle == "caller":
+        combined.cancel()
+    else:
+        upstream.set()
+        combined.cancel()
+
+    await asyncio.gather(waiter, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    leaked = _pending_event_waits_since(before)
+    for task in leaked:
+        task.cancel()
+    await asyncio.gather(*leaked, return_exceptions=True)
+    assert leaked == []

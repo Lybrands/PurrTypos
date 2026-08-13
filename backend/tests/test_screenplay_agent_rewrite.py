@@ -52,6 +52,7 @@ from application.screenplay_agent_service import (
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.composition_factory import create_agent_composition
+from application.agent_run_service import AgentRunService
 from application.model_runtime import model_request_from_runtime
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
@@ -552,6 +553,10 @@ class _CoreComposition:
         self._publisher = InProcessAgentOutputPublisher()
         self._leases = SqliteExecutionLeaseStore(db)
         self.last_request = None
+
+    @property
+    def output_repository(self):
+        return self._outputs
 
     def create_core_for_request(self, request, api_key, **kwargs):
         self.last_request = request
@@ -2427,6 +2432,56 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
         "AND event_type = 'model.call_recorded' ORDER BY id",
         [result.run_id],
     ) == [{"count": 2}, {"count": 4}]
+
+
+async def test_structured_child_returns_persisted_result_not_validator_memory(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, _, session = await _project_and_session(temp_db)
+    gateway = _ScriptedModelGateway("secret", [[
+        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    composition = _core_composition(temp_db, gateway)
+    original_validate = (
+        screenplay_structured_call._StructuredResultValidator.validate
+    )
+
+    def divergent_memory(self, **kwargs):
+        verdict = original_validate(self, **kwargs)
+        self.value = {"answer": "memory-only"}
+        return verdict
+
+    monkeypatch.setattr(
+        screenplay_structured_call._StructuredResultValidator,
+        "validate",
+        divergent_memory,
+    )
+    result = await screenplay_structured_call.ScreenplayStructuredCallService(
+        temp_db,
+        composition=composition,
+    ).run_json(
+        runtime=_request(session["id"], "持久结果优先").runtime,
+        session_id=session["id"],
+        prompt="持久结果优先",
+        system_instruction="只输出 JSON",
+        user_payload={"question": "test"},
+        binding_namespace="screenplay.agent.test",
+        binding_aggregate_id="project-test",
+        binding_command_id="persisted-result-test",
+        lineage=_part_lineage(),
+        phase="screenplay_test",
+        repair_instruction="修复 JSON",
+        validate=lambda value: value,
+    )
+
+    assert result.value == {"answer": "persisted"}
+    invocation_count = len(gateway.invocations)
+    assert await AgentRunService(composition).read_validated_result(
+        result.run_id
+    ) == '{"answer":"persisted"}'
+    assert len(gateway.invocations) == invocation_count
 
 
 async def test_truncated_structured_output_is_never_repaired_or_replayed(

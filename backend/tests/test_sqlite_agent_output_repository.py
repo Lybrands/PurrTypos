@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -118,6 +119,51 @@ def _completed_commit(run_id: str) -> RunCommit:
             run_id=run_id,
             payload={"status": RunStatus.DONE.value},
         ),),
+    )
+
+
+def _validated_commit(run_id: str, content: str = '{"answer":"persisted"}') -> RunCommit:
+    return RunCommit(
+        terminal_status=RunStatus.DONE,
+        final_response="",
+        validated_result=content,
+        events=(AgentEvent(
+            type=CoreEventType.RUN_COMPLETED,
+            run_id=run_id,
+            payload={"status": RunStatus.DONE.value},
+        ),),
+    )
+
+
+async def _insert_validated_event(db, run_id: str, **overrides) -> None:
+    values = {
+        "run_id": run_id,
+        "event_type": "run.validated_result",
+        "payload_json": json.dumps({
+            "schemaVersion": "purra.run-validated-result/v1",
+            "content": '{"answer":"persisted"}',
+        }),
+        "event_id": f"manual-validated-result-{run_id}",
+        "turn_id": None,
+        "invocation_id": None,
+        "output_stream_id": None,
+        "sequence": 100,
+        "source": "runtime",
+        "kind": "run.validated_result",
+        "channel": "diagnostic",
+        "visibility": "private",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "emitted_at": datetime.now(timezone.utc).isoformat(),
+        "source_event_key": f"run:{run_id}:validated-result",
+    }
+    values.update(overrides)
+    await db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, invocation_id, "
+        "output_stream_id, sequence, source, kind, channel, visibility, "
+        "occurred_at, emitted_at, source_event_key) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        list(values.values()),
     )
 
 
@@ -450,6 +496,162 @@ async def test_run_terminal_and_canonical_event_commit_together(output_db):
     assert run == {"status": RunStatus.DONE.value}
     assert await repository.list_events(run_id, after_sequence=0) == events
     assert legacy_terminal == []
+
+
+@pytest.mark.asyncio
+async def test_validated_result_is_private_and_atomically_readable(output_db):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    content = '{"answer":"persisted"}'
+
+    events = await repository.commit_run_lifecycle(
+        run_id,
+        _validated_commit(run_id, content),
+        _completed_draft(run_id),
+    )
+
+    assert await repository.load_validated_result(run_id) == content
+    validated = [
+        event for event in events
+        if event.kind is OutputEventKind.RUN_VALIDATED_RESULT
+    ]
+    assert len(validated) == 1
+    assert validated[0].source is OutputSource.RUNTIME
+    assert validated[0].channel is OutputChannel.DIAGNOSTIC
+    assert validated[0].visibility is OutputVisibility.PRIVATE
+    assert validated[0].output_stream_id is None
+    assert validated[0].invocation_id is None
+    assert validated[0].payload == {
+        "schemaVersion": "purra.run-validated-result/v1",
+        "content": content,
+    }
+    public_events = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+    assert all(
+        event.kind is not OutputEventKind.RUN_VALIDATED_RESULT
+        for _, event in public_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_validated_result_readback_fails_closed_when_missing(output_db):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    await repository.commit_run_lifecycle(
+        run_id,
+        _completed_commit(run_id),
+        _completed_draft(run_id),
+    )
+
+    with pytest.raises(ContractViolationError, match="validated result"):
+        await repository.load_validated_result(run_id)
+
+
+@pytest.mark.asyncio
+async def test_validated_result_readback_fails_closed_when_duplicated(output_db):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    await repository.commit_run_lifecycle(
+        run_id,
+        _validated_commit(run_id),
+        _completed_draft(run_id),
+    )
+    await _insert_validated_event(
+        db,
+        run_id,
+        event_id="duplicate-validated-result",
+        source_event_key=f"run:{run_id}:validated-result:duplicate",
+    )
+
+    with pytest.raises(ContractViolationError, match="exactly one"):
+        await repository.load_validated_result(run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("column", "value"),
+    (
+        ("source_event_key", "run:wrong:validated-result"),
+        ("source", "provider"),
+        ("kind", "runtime.event"),
+        ("turn_id", "wrong-turn"),
+        ("channel", "final"),
+        ("visibility", "public"),
+    ),
+)
+async def test_validated_result_readback_rejects_wrong_scope(
+    output_db,
+    column: str,
+    value: str,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    await repository.commit_run_lifecycle(
+        run_id,
+        _completed_commit(run_id),
+        _completed_draft(run_id),
+    )
+    await _insert_validated_event(db, run_id, **{column: value})
+
+    with pytest.raises(ContractViolationError, match="validated result"):
+        await repository.load_validated_result(run_id)
+
+
+@pytest.mark.asyncio
+async def test_validated_result_readback_never_crosses_run_scope(output_db):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    other_run_id = await runs.create(
+        RunCreateParams(session_id=7, prompt="other", mode="agent")
+    )
+    await repository.commit_run_lifecycle(
+        run_id,
+        _completed_commit(run_id),
+        _completed_draft(run_id),
+    )
+    await _insert_validated_event(db, other_run_id)
+
+    with pytest.raises(ContractViolationError, match="validated result"):
+        await repository.load_validated_result(run_id)
+
+
+@pytest.mark.asyncio
+async def test_validated_result_and_terminal_state_rollback_together(
+    output_db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    original_append = repository._append_event_in_transaction
+
+    async def fail_terminal_event(draft):
+        if draft.kind is OutputEventKind.RUN_LIFECYCLE:
+            raise RuntimeError("terminal journal unavailable")
+        return await original_append(draft)
+
+    monkeypatch.setattr(
+        repository,
+        "_append_event_in_transaction",
+        fail_terminal_event,
+    )
+    with pytest.raises(RuntimeError, match="terminal journal unavailable"):
+        await repository.commit_run_lifecycle(
+            run_id,
+            _validated_commit(run_id),
+            _completed_draft(run_id),
+        )
+
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": RunStatus.RUNNING.value}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ? AND kind = ?",
+        [run_id, OutputEventKind.RUN_VALIDATED_RESULT.value],
+    ) == {"count": 0}
 
 
 @pytest.mark.asyncio
