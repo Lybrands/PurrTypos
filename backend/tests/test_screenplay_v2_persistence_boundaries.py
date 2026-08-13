@@ -31,6 +31,12 @@ OPERATION_FINALIZER = (
     / "persistence"
     / "sqlite_screenplay_operation_finalizer.py"
 )
+ROOT_COMPLETION_PROJECTOR = (
+    BACKEND_DIR
+    / "infrastructure"
+    / "screenplay"
+    / "agent_root_completion_projector.py"
+)
 AGENT_SERVICE = BACKEND_DIR / "application" / "screenplay_agent_service.py"
 AGENT_PROFILE = BACKEND_DIR / "application" / "screenplay_agent_profile.py"
 REMOVED_RUNTIME_FILES = (
@@ -135,15 +141,18 @@ def test_new_screenplay_agent_code_never_writes_legacy_turn_task_authority():
 
 
 def test_operation_finalizer_is_the_only_success_commit_boundary():
-    service = AGENT_PROFILE.read_text(encoding="utf-8")
+    profile = AGENT_PROFILE.read_text(encoding="utf-8")
+    projector = ROOT_COMPLETION_PROJECTOR.read_text(encoding="utf-8")
     finalizer = OPERATION_FINALIZER.read_text(encoding="utf-8")
 
     assert OPERATION_FINALIZER.exists()
-    assert "SqliteScreenplayOperationFinalizer" in service
-    assert "self._finalizer.finalize(" in service
-    assert "self._operations.succeed(" not in service
-    assert "self._repository.complete_operation(" not in service
-    assert "publish_candidate_revision" not in service
+    assert ROOT_COMPLETION_PROJECTOR.exists()
+    assert "SqliteScreenplayOperationFinalizer" in projector
+    assert "self._finalizer.finalize(" in projector
+    assert "SqliteScreenplayOperationFinalizer" not in profile
+    assert "self._operations.succeed(" not in profile
+    assert "self._repository.complete_operation(" not in profile
+    assert "publish_candidate_revision" not in profile
     assert "publish_screenplay_agent_task_candidate(" in finalizer
     assert "UPDATE screenplay_agent_turns SET status = 'completed'" in finalizer
     assert "UPDATE screenplay_agent_operations SET status = 'succeeded'" in finalizer

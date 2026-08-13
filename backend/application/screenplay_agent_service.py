@@ -27,7 +27,11 @@ from purra.contracts import (
     RunStatus,
 )
 from purra.api import AgentCoreRunOptions
-from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.errors import (
+    ModelGatewayError,
+    RunCommitProjectionError,
+    UnsupportedModelFeatureError,
+)
 from purra.model_protocol import FeatureRequirement, TaskCapabilityRequirements
 from purra.task_admission import (
     LongTaskExecutionUpdate,
@@ -157,6 +161,7 @@ class ScreenplayAgentService:
             model_request = request.model
             window = int(request.context_window or 200_000)
             lifecycle = _ScreenplayTurnRunLifecycle(
+                self._db,
                 self._repository,
                 self._operations,
                 turn_id,
@@ -275,6 +280,11 @@ class ScreenplayAgentService:
         turn_id: str,
         error: Exception,
     ) -> None:
+        if isinstance(error, RunCommitProjectionError):
+            # The Root terminal transaction rolled back in full. Leave the
+            # durable business state retryable instead of compensating it into
+            # a terminal product failure outside that transaction.
+            return
         code, message = _task_failure(error)
         with suppress(Exception):
             operation = await self._operations.load_for_turn(turn_id)
@@ -533,7 +543,8 @@ class _ScreenplayRunInput:
 
 
 class _ScreenplayTurnRunLifecycle:
-    def __init__(self, turns, operations, turn_id: str) -> None:
+    def __init__(self, db, turns, operations, turn_id: str) -> None:
+        self._db = db
         self._turns = turns
         self._operations = operations
         self._turn_id = str(turn_id)
@@ -550,25 +561,63 @@ class _ScreenplayTurnRunLifecycle:
         await self._turns.attach_root_run(self._turn_id, run_id)
 
     async def on_run_finished(self, result: AgentRunResult) -> None:
-        operation = await self._operations.load_for_turn(self._turn_id)
         if result.status is RunStatus.DONE:
-            if operation is None:
-                await self._turns.complete_answer(
-                    self._turn_id,
-                    result.final_response,
+            turn = await self._turns.load_turn(self._turn_id)
+            operation = await self._operations.load_for_turn(self._turn_id)
+            if turn is None or turn["status"] != "completed":
+                raise RuntimeError(
+                    "screenplay Root completed before its Turn projection"
                 )
-                return
-            if operation.status.value != "succeeded":
+            if turn["assistantContent"] != result.final_response:
+                raise RuntimeError(
+                    "screenplay Root response conflicts with its Turn projection"
+                )
+            if operation is not None and operation.status.value != "succeeded":
                 raise RuntimeError(
                     "screenplay durable Root completed before its Operation"
                 )
             return
-        if operation is None:
-            await self._turns.fail_turn(
-                self._turn_id,
-                code=str(result.error or result.status.value),
-                message=str(result.error or "剧本 Agent Root Run 未完成"),
-            )
+        async with self._db.transaction(cancellation_linearizable=True):
+            operation = await self._operations.load_for_turn(self._turn_id)
+            if result.status is RunStatus.CANCELED:
+                if operation is not None and operation.status.value == "paused":
+                    # Core represents a paused durable execution as a
+                    # non-completed Root. Preserve the resumable product state
+                    # already committed by the dispatcher.
+                    return
+                receipt = await self._operations.request_cancel(
+                    self._turn_id,
+                    idempotency_key=f"root-terminal-cancel:{self._turn_id}",
+                )
+                await self._operations.settle_cancel(
+                    self._turn_id,
+                    receipt_id=receipt.id,
+                )
+                return
+            code = str(result.error or result.status.value)
+            message = str(result.error or "剧本 Agent Root Run 未完成")
+            if operation is not None and not operation.status.terminal:
+                await self._operations.fail(
+                    operation.id,
+                    code=code,
+                    message=message,
+                    command_id=(
+                        f"operation:root-fail:{operation.id}:"
+                        f"{operation.revision}:{code}"
+                    ),
+                )
+            if operation is None:
+                await self._turns.fail_turn(
+                    self._turn_id,
+                    code=code,
+                    message=message,
+                )
+            else:
+                await self._turns.fail_task(
+                    self._turn_id,
+                    code=code,
+                    message=message,
+                )
 
     async def on_start_failed(self, code: str):
         return await self._turns.fail_turn(

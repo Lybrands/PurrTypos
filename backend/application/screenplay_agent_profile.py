@@ -8,8 +8,6 @@ from uuid import uuid4
 from application.agent_profile_registry import AgentProfileRegistration
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_manifest_compiler import compile_screenplay_manifest
-from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
-from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_task_resolver import (
     ResolvedScreenplayTask,
     SqliteScreenplayTaskResolver,
@@ -34,10 +32,6 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 )
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
-)
-from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
-    ScreenplayOperationFinalizationCommand,
-    SqliteScreenplayOperationFinalizer,
 )
 from infrastructure.screenplay import (
     build_screenplay_tool_catalog,
@@ -64,11 +58,6 @@ class ScreenplayAgentProfileExtension:
             owner_id=self._owner_id,
         )
         self._operations = SqliteScreenplayOperationRepository(db)
-        self._parts = ScreenplayPartArtifactQuery(db)
-        self._finalizer = SqliteScreenplayOperationFinalizer(
-            db,
-            candidate_assembler=ScreenplayCandidateAssembler(db),
-        )
         self._projects = ScreenplayV2ProjectService(db)
         self._resolver = resolver or SqliteScreenplayTaskResolver(db)
         context_query = ScreenplayAgentContextQuery(db)
@@ -168,6 +157,7 @@ class ScreenplayAgentProfileExtension:
             document_sections=resolved.document_sections,
             original_request=request.latest_user_text(),
             plan_bindings=intent.plan_bindings,
+            plan_steps=plan.steps,
         )
         turn = await self._turns.load_turn(str(context.turn_id))
         if turn is None:
@@ -237,8 +227,6 @@ class ScreenplayAgentProfileExtension:
             db=self._db,
             operations=self._operations,
             turns=self._turns,
-            parts=self._parts,
-            finalizer=self._finalizer,
             work_item_repository=work_item_repository,
             long_task_repository=long_task_repository,
             descriptor_resolver=_ScreenplayTaskDescriptorResolver(),
@@ -275,13 +263,11 @@ class _ScreenplayTaskDescriptorResolver:
 
 
 class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
-    def __init__(self, *, db, operations, turns, parts, finalizer, **kwargs) -> None:
+    def __init__(self, *, db, operations, turns, **kwargs) -> None:
         super().__init__(**kwargs)
         self._db = db
         self._operations = operations
         self._turns = turns
-        self._parts = parts
-        self._finalizer = finalizer
 
     async def dispatch(self, request, plan, decision, **kwargs):
         async with self._db.transaction(cancellation_linearizable=True):
@@ -328,15 +314,21 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
         if result.status is LongTaskExecutionStatus.PAUSED:
             code = result.error or "screenplay_task_paused"
             message = _task_failure_message(code)
-            await self._operations.pause(
-                operation_id,
-                code=code,
-                message=message,
-                command_id=(
-                    f"operation:pause:{operation_id}:{operation.revision}:{code}"
-                ),
-            )
-            await self._turns.pause_task(turn_id, code=code, message=message)
+            async with self._db.transaction(cancellation_linearizable=True):
+                await self._operations.pause(
+                    operation_id,
+                    code=code,
+                    message=message,
+                    command_id=(
+                        f"operation:pause:{operation_id}:"
+                        f"{operation.revision}:{code}"
+                    ),
+                )
+                await self._turns.pause_task(
+                    turn_id,
+                    code=code,
+                    message=message,
+                )
             return
         if result.status is LongTaskExecutionStatus.CANCELED:
             receipt = await self._operations.request_cancel(
@@ -350,49 +342,24 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
         if result.status is LongTaskExecutionStatus.FAILED:
             code = result.error or "screenplay_task_failed"
             message = _task_failure_message(code)
-            await self._operations.fail(
-                operation_id,
-                code=code,
-                message=message,
-                command_id=(
-                    f"operation:fail:{operation_id}:{operation.revision}:{code}"
-                ),
-            )
-            await self._turns.fail_task(turn_id, code=code, message=message)
-            return
-        recipe = metadata.get("recipe")
-        steps = recipe.get("steps") if isinstance(recipe, dict) else None
-        if not isinstance(steps, list):
-            raise RuntimeError("screenplay LongTask recipe disappeared")
-        candidate_refs = []
-        response_ref = None
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            unit_id = str(step.get("id") or "")
-            kind = str(step.get("kind") or "")
-            if kind == "validate_manifest_part":
-                ref = await self._parts.validated_unit_ref(task_id, unit_id)
-                if ref is None:
-                    raise RuntimeError(
-                        f"screenplay validation Part is missing: {unit_id}"
-                    )
-                candidate_refs.append(ref)
-            elif kind == "compose_final_response":
-                response_ref = await self._parts.validated_unit_ref(
-                    task_id,
-                    unit_id,
+            async with self._db.transaction(cancellation_linearizable=True):
+                await self._operations.fail(
+                    operation_id,
+                    code=code,
+                    message=message,
+                    command_id=(
+                        f"operation:fail:{operation_id}:"
+                        f"{operation.revision}:{code}"
+                    ),
                 )
-        if response_ref is None:
-            raise RuntimeError("screenplay final response Part is missing")
-        await self._finalizer.finalize(
-            ScreenplayOperationFinalizationCommand(
-                operation_id=operation_id,
-                expected_manifest_digest=str(metadata.get("manifestDigest") or ""),
-                candidate_part_refs=tuple(candidate_refs),
-                final_response_ref=response_ref,
-            )
-        )
+                await self._turns.fail_task(
+                    turn_id,
+                    code=code,
+                    message=message,
+                )
+            return
+        if result.status is not LongTaskExecutionStatus.COMPLETED:
+            raise RuntimeError("screenplay LongTask returned an unknown status")
 
     async def _settle_exception(self, task_id: str, error: Exception) -> None:
         task = await self._long_tasks.load(task_id)
@@ -406,15 +373,16 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
             return
         code = str(getattr(error, "code", "") or "screenplay_task_failed")
         message = str(error) or _task_failure_message(code)
-        await self._operations.fail(
-            operation_id,
-            code=code,
-            message=message,
-            command_id=(
-                f"operation:fail:{operation_id}:{operation.revision}:{code}"
-            ),
-        )
-        await self._turns.fail_task(turn_id, code=code, message=message)
+        async with self._db.transaction(cancellation_linearizable=True):
+            await self._operations.fail(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:fail:{operation_id}:{operation.revision}:{code}"
+                ),
+            )
+            await self._turns.fail_task(turn_id, code=code, message=message)
 
 
 def _task_failure_message(code: str) -> str:
