@@ -36,8 +36,9 @@ class AgentDelegationService:
         required: bool = True,
         priority: int = 0,
     ) -> dict[str, Any]:
-        if self._role_registry is not None:
-            self._role_registry.require(agent_role)
+        if self._role_registry is None:
+            raise ValueError("Agent profile does not support delegation")
+        self._role_registry.require(agent_role)
         row = await self._repository.create(
             parent_run_id=parent_run_id,
             agent_role=agent_role,

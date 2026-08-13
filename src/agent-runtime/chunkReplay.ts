@@ -80,6 +80,7 @@ export class AgentChunkReplay {
     const context: AgentChunkRuntimeContext = {
       acc,
       sessionId: seed.sessionId,
+      turnId: seed.turnId,
       modelIdentity: {
         configId: dependencies.cfg.id,
         name: seed.model || dependencies.cfg.name,

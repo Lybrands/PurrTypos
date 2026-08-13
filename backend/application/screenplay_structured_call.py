@@ -205,6 +205,7 @@ class ScreenplayStructuredCallService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
+        options = self._composition.bind_run_profile(request, options)
         core = self._composition.create_core_for_request(
             request,
             runtime.apiKey.get_secret_value(),
@@ -331,6 +332,7 @@ class ScreenplayStructuredCallService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
+        options = self._composition.bind_run_profile(request, options)
         core = self._composition.create_core_for_request(
             request,
             runtime.apiKey.get_secret_value(),

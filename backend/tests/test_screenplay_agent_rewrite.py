@@ -131,6 +131,10 @@ class _CoreComposition:
             execution_lease_duration_ms=self._runs.lease_duration_ms,
         )
 
+    def bind_run_profile(self, request, options):
+        del request
+        return options
+
     def release_core(self, core) -> None:
         del core
 

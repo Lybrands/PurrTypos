@@ -47,9 +47,6 @@ def create_agent_composition(
 ) -> AgentComposition:
     """Install product profiles without teaching generic composition domains."""
 
-    extension_factories = tuple(
-        kwargs.pop("profile_extension_factories", ())
-    )
     writing_extension_factory = partial(
         build_writing_profile_extension,
         skills_dir=kwargs.pop("skills_dir", None),
@@ -66,7 +63,6 @@ def create_agent_composition(
         run_commit_projector=run_commit_projector,
         profile_extension_factories=(
             writing_extension_factory,
-            *extension_factories,
             _build_screenplay_profile_extension,
         ),
         **kwargs,

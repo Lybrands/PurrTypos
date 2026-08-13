@@ -129,6 +129,7 @@ class ScreenplayToolCallingService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
+        options = self._composition.bind_run_profile(request, options)
         api_key = runtime.apiKey.get_secret_value()
         core = self._composition.create_core_for_request(
             request,
