@@ -758,12 +758,16 @@ class ScreenplayTaskUnitExecutor:
 
 def _unit_result(ref, output: Mapping[str, Any]) -> LongTaskUnitResult:
     revision_id = str(output.get("revisionId") or "").strip()
+    final_response = str(output.get("finalResponse") or "").strip()
     return LongTaskUnitResult(
         output_ref=ref.output_ref,
         run_id=ref.run_id,
         artifact_digest=ref.content_digest,
         validation_receipt=ref.validation_receipt,
-        metadata=({"revisionId": revision_id} if revision_id else {}),
+        metadata={
+            **({"revisionId": revision_id} if revision_id else {}),
+            **({"finalResponse": final_response} if final_response else {}),
+        },
     )
 
 

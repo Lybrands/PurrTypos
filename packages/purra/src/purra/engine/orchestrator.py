@@ -874,6 +874,7 @@ class AgentCore:
                             capabilities,
                             signal,
                             run_id=controller.run_id,
+                            turn_id=options.turn_id,
                         ),
                         signal,
                     )
@@ -1151,6 +1152,7 @@ class AgentCore:
                     controller=controller,
                     enabled_names=enabled_names,
                     registrations=registrations,
+                    turn_id=options.turn_id,
                 )
             selected_names = (
                 runtime_tool_names_for_planning_names(

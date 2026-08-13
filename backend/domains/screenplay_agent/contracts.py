@@ -204,9 +204,6 @@ class ScreenplayIntent:
     preserve: tuple[str, ...] = ()
     requested_deliverable: str | None = None
     plan_bindings: tuple[ScreenplayPlanBinding, ...] = ()
-    # TODO(screenplay-root-run Task 4/5): remove this legacy bridge after the
-    # independent planner/service no longer reads an answer from the Intent.
-    reply: str | None = None
 
     def __post_init__(self) -> None:
         action = ScreenplayIntentAction(self.action)
@@ -235,9 +232,6 @@ class ScreenplayIntent:
         if len({value.step_id for value in bindings}) != len(bindings):
             raise ValueError("screenplay plan steps must be bound exactly once")
         object.__setattr__(self, "plan_bindings", bindings)
-        object.__setattr__(self, "reply", _text(self.reply) or None)
-        if action is not ScreenplayIntentAction.ANSWER and self.reply is not None:
-            raise ValueError("actionable screenplay intent cannot contain a final reply")
 
     @classmethod
     def from_task_spec(

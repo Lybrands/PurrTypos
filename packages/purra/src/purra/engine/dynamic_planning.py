@@ -51,6 +51,7 @@ class DynamicPlanningOrchestrator:
         controller: AgentRunController,
         enabled_names: frozenset[str],
         registrations: Sequence[ToolRegistration],
+        turn_id: str | None = None,
     ) -> None:
         self._planner = planner
         self._request = request
@@ -58,6 +59,7 @@ class DynamicPlanningOrchestrator:
         self._controller = controller
         self._enabled_names = enabled_names
         self._registrations = tuple(registrations)
+        self._turn_id = str(turn_id or "").strip() or None
         self._revision = 0
 
     async def replan_after_tool(
@@ -108,6 +110,7 @@ class DynamicPlanningOrchestrator:
                     ),
                     signal,
                     run_id=self._controller.run_id,
+                    turn_id=self._turn_id,
                 ),
                 signal,
             )

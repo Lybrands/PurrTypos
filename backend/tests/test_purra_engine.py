@@ -299,8 +299,9 @@ class StaticPlanner:
         signal=None,
         *,
         run_id=None,
+        turn_id=None,
     ):
-        del run_id
+        del run_id, turn_id
         return PlanningResult(kind=PlanningKind.PLANNED, plan=self.plan)
 
 
@@ -317,6 +318,7 @@ class CapturePlanner(StaticPlanner):
         signal=None,
         *,
         run_id=None,
+        turn_id=None,
     ):
         self.capabilities = capabilities
         self.call_count += 1
@@ -325,6 +327,7 @@ class CapturePlanner(StaticPlanner):
             capabilities,
             signal,
             run_id=run_id,
+            turn_id=turn_id,
         )
 
 
@@ -343,8 +346,9 @@ class StopAfterObservationPlanner(StaticPlanner):
         signal=None,
         *,
         run_id=None,
+        turn_id=None,
     ):
-        del request, capabilities, signal, run_id
+        del request, capabilities, signal, run_id, turn_id
         self.turns.append(turn)
         return PlanningResult(
             kind=PlanningKind.DIRECT_RESPONSE,
@@ -377,8 +381,9 @@ class InvalidAfterObservationPlanner(StaticPlanner):
         signal=None,
         *,
         run_id=None,
+        turn_id=None,
     ):
-        del request, capabilities, signal, run_id
+        del request, capabilities, signal, run_id, turn_id
         self.turns.append(turn)
         raise InvalidPlannerOutputError(
             "planner output is missing needsTodos",
