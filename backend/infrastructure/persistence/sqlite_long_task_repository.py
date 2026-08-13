@@ -784,7 +784,7 @@ class SqliteLongTaskRepository:
         extra_attempts = int(additional_attempts)
         if extra_attempts < 0:
             raise ValueError("additional long task attempts cannot be negative")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             task = await self._require(task_id)
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)

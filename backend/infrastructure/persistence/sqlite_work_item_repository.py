@@ -102,7 +102,7 @@ class SqliteWorkItemRepository:
         self,
         command: WorkItemRunLinkCommand,
     ) -> WorkItemRunLink:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             existing = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_work_item_runs "
                 "WHERE work_item_id = ? AND run_id = ?",
@@ -181,20 +181,35 @@ class SqliteWorkItemRepository:
         self,
         command: WorkItemTransitionCommand,
     ) -> WorkItemRecord:
-        return await self._transition(command, WorkItemStatus.COMPLETED)
+        return await self._transition(
+            command,
+            WorkItemStatus.COMPLETED,
+            join_ambient=False,
+        )
 
     async def cancel(
         self,
         command: WorkItemTransitionCommand,
     ) -> WorkItemRecord:
-        return await self._transition(command, WorkItemStatus.CANCELED)
+        return await self._transition(
+            command,
+            WorkItemStatus.CANCELED,
+            join_ambient=True,
+        )
 
     async def _transition(
         self,
         command: WorkItemTransitionCommand,
         target: WorkItemStatus,
+        *,
+        join_ambient: bool,
     ) -> WorkItemRecord:
-        async with self._db.transaction(cancellation_linearizable=True):
+        transaction = (
+            self._mutation_transaction()
+            if join_ambient
+            else self._db.transaction(cancellation_linearizable=True)
+        )
+        async with transaction:
             row = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_work_items WHERE id = ?",
                 [command.work_item_id],
