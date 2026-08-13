@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from domains.screenplay_agent import ScreenplayIntent
@@ -21,6 +22,14 @@ class SqliteScreenplayAgentRepository:
     def __init__(self, db, *, owner_id: str) -> None:
         self._db = db
         self._owner_id = _required(owner_id, "screenplay Agent owner id")
+
+    @asynccontextmanager
+    async def _mutation_transaction(self):
+        if self._db.current_task_owns_transaction():
+            yield
+            return
+        async with self._db.transaction(cancellation_linearizable=True):
+            yield
 
     async def begin_turn(
         self,
@@ -226,6 +235,44 @@ class SqliteScreenplayAgentRepository:
                 ],
             )
 
+    async def attach_root_run(
+        self,
+        turn_id: str,
+        root_run_id: str,
+    ) -> dict[str, Any]:
+        normalized_run_id = _required(root_run_id, "screenplay Root Run id")
+        async with self._db.transaction(cancellation_linearizable=True):
+            turn = await self._require_owned_turn(turn_id)
+            existing = str(turn.get("planner_run_id") or "").strip()
+            if existing and existing != normalized_run_id:
+                raise AppError("剧本 Agent Turn 已绑定另一 Root Run", 409)
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET planner_run_id = ?, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                [normalized_run_id, turn_id],
+            )
+            return _turn_view(await self._require_turn(turn_id))
+
+    async def record_admitted_intent(
+        self,
+        turn_id: str,
+        *,
+        intent: ScreenplayIntent,
+    ) -> None:
+        async with self._mutation_transaction():
+            turn = await self._require_turn(turn_id)
+            if str(turn.get("status") or "") not in {"queued", "planning"}:
+                raise AppError("剧本 Agent Turn 已不在规划状态", 409)
+            encoded = _dump(intent.to_mapping())
+            existing = _object(turn.get("intent_json"))
+            if existing and existing != intent.to_mapping():
+                raise AppError("剧本 Agent Turn 已绑定另一任务意图", 409)
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET intent_json = ?, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                [encoded, turn_id],
+            )
+
     async def complete_answer(self, turn_id: str, reply: str) -> dict[str, Any]:
         return await self._finish_turn(
             turn_id,
@@ -241,15 +288,44 @@ class SqliteScreenplayAgentRepository:
         operation_id: str,
         task_id: str,
         target_role: str,
+        root_run_id: str | None = None,
     ) -> dict[str, Any]:
-        async with self._db.transaction(cancellation_linearizable=True):
-            turn = await self._require_owned_turn(turn_id)
+        del target_role
+        normalized_operation_id = _required(operation_id, "screenplay Operation id")
+        normalized_task_id = _required(task_id, "screenplay LongTask id")
+        normalized_root_run_id = _required(root_run_id, "screenplay Root Run id")
+        async with self._mutation_transaction():
+            turn = await self._require_turn(turn_id)
+            existing_root_run_id = str(turn.get("planner_run_id") or "").strip()
+            if existing_root_run_id and existing_root_run_id != normalized_root_run_id:
+                raise AppError("剧本 Agent Turn Root Run 不匹配", 409)
+            if not existing_root_run_id:
+                await self._db.execute(
+                    "UPDATE screenplay_agent_turns SET planner_run_id = ? "
+                    "WHERE id = ?",
+                    [normalized_root_run_id, turn_id],
+                )
+            if str(turn.get("operation_id") or "") != normalized_operation_id:
+                raise AppError("剧本 Agent Turn Operation 不匹配", 409)
+            operation = await self._db.fetch_one(
+                "SELECT long_task_id FROM screenplay_agent_operations WHERE id = ?",
+                [normalized_operation_id],
+            )
+            if (
+                operation is None
+                or str(operation.get("long_task_id") or "") != normalized_task_id
+            ):
+                raise AppError("剧本 Agent Operation LongTask 不匹配", 409)
+            if str(turn.get("status") or "") == "running":
+                return _turn_view(turn)
+            if str(turn.get("status") or "") not in {"queued", "planning"}:
+                raise AppError("剧本 Agent Turn 已不在规划状态", 409)
             await self._db.execute(
                 "UPDATE screenplay_agent_turns SET status = 'running', "
                 "operation_id = ?, execution_owner_id = NULL, "
                 "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [operation_id, turn_id],
+                [normalized_operation_id, turn_id],
             )
             return _turn_view(await self._require_turn(turn_id))
 
@@ -541,6 +617,7 @@ class SqliteScreenplayAgentRepository:
             "status": _operation_task_status(turn.get("operation_status")),
             "targetRole": str(turn.get("operation_target_role") or ""),
             "intent": _object(turn.get("intent_json")),
+            "rootRunId": str(turn.get("planner_run_id") or "") or None,
             "plannerRunId": str(turn.get("planner_run_id") or "") or None,
             "totalUnits": int((task or {}).get("total_units") or 0),
             "completedUnits": int((task or {}).get("completed_units") or 0),
@@ -638,6 +715,7 @@ class SqliteScreenplayAgentRepository:
         return turn
 
 def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    root_run_id = str(row.get("planner_run_id") or "") or None
     return {
         "id": str(row["id"]),
         "commandId": str(row.get("command_id") or ""),
@@ -649,7 +727,9 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "assistantContent": str(row.get("assistant_content") or ""),
         "runtimeProfile": _object(row.get("runtime_profile_json")),
         "intent": _object(row.get("intent_json")) or None,
-        "plannerRunId": str(row.get("planner_run_id") or "") or None,
+        "rootRunId": root_run_id,
+        # Deprecated read-only alias for clients persisted before Root Runs.
+        "plannerRunId": root_run_id,
         "operationId": str(row.get("authoritative_operation_id") or "") or None,
         "taskId": str(row.get("authoritative_task_id") or "") or None,
         "targetRole": str(row.get("operation_target_role") or "") or None,

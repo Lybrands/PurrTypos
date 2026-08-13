@@ -657,7 +657,7 @@ def test_legacy_task_budgets_and_truncation_replay_stay_removed():
 
 def test_screenplay_paused_result_cannot_fall_through_to_failure():
     source = (
-        BACKEND_DIR / "application" / "screenplay_agent_service.py"
+        BACKEND_DIR / "application" / "screenplay_agent_profile.py"
     ).read_text(encoding="utf-8")
     paused_start = source.index(
         "if result.status is LongTaskExecutionStatus.PAUSED:"

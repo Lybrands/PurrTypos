@@ -12,10 +12,6 @@ from application.screenplay_agent_task_executor import (
     ScreenplayTaskUnitExecutor,
 )
 from application.screenplay_tool_calling import ScreenplayToolCallingService
-from application.screenplay_agent_planner import (
-    ModelScreenplayIntentPlanner,
-    SqliteScreenplayTaskResolver,
-)
 from application.screenplay_agent_service import ScreenplayAgentService
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
@@ -70,11 +66,7 @@ def _service() -> ScreenplayAgentService:
     return ScreenplayAgentService(
         db,
         owner_id=composition.execution_owner_id,
-        planner=ModelScreenplayIntentPlanner(
-            db,
-            composition=composition,
-        ),
-        resolver=SqliteScreenplayTaskResolver(db),
+        composition=composition,
         unit_executor_factory=lambda runtime: ScreenplayTaskUnitExecutor(
             db,
             runtime=runtime,

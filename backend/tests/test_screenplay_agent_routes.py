@@ -87,16 +87,6 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ModelScreenplayIntentPlanner",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        conversation_routes,
-        "SqliteScreenplayTaskResolver",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        conversation_routes,
         "ScreenplayV2ProjectService",
         lambda *_args, **_kwargs: object(),
     )
@@ -114,6 +104,9 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     conversation_routes._service()
     captured_service["unit_executor_factory"](object())
 
+    assert captured_service["composition"] is composition
+    assert "planner" not in captured_service
+    assert "resolver" not in captured_service
     assert captured_executor["composition"] is composition
     assert captured_executor["tool_calling_service"] is not None
 

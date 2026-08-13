@@ -387,6 +387,7 @@ class AgentPlanner:
         signal: CancellationSignal | None = None,
         *,
         run_id: str | None = None,
+        turn_id: str | None = None,
     ) -> PlanningResult:
         return await self._create_from_messages(
             request,
@@ -396,6 +397,7 @@ class AgentPlanner:
             signal,
             turn=None,
             run_id=run_id,
+            turn_id=turn_id,
         )
 
     async def revise_plan(
@@ -406,6 +408,7 @@ class AgentPlanner:
         signal: CancellationSignal | None = None,
         *,
         run_id: str | None = None,
+        turn_id: str | None = None,
     ) -> PlanningResult:
         max_tool_steps = min(
             self._limits.max_tool_steps,
@@ -425,6 +428,7 @@ class AgentPlanner:
             signal,
             turn=turn,
             run_id=run_id,
+            turn_id=turn_id,
         )
 
     async def _create_from_messages(
@@ -437,12 +441,14 @@ class AgentPlanner:
         *,
         turn: PlanningTurn | None,
         run_id: str | None,
+        turn_id: str | None,
     ) -> PlanningResult:
         completion, model_call_parameters = await self._complete(
             messages,
             request,
             signal,
             run_id=run_id,
+            turn_id=turn_id,
         )
         active_messages = messages
         for repair_attempt in range(limits.max_repair_attempts + 1):
@@ -469,6 +475,7 @@ class AgentPlanner:
                     error,
                     signal,
                     run_id=run_id,
+                    turn_id=turn_id,
                 )
                 model_call_parameters += repair_call_parameters
         return PlanningResult(
@@ -509,6 +516,7 @@ class AgentPlanner:
         signal: CancellationSignal | None,
         *,
         run_id: str | None,
+        turn_id: str | None,
     ) -> tuple[
         ModelCompletion,
         tuple[Mapping[str, Any], ...],
@@ -531,6 +539,7 @@ class AgentPlanner:
             request,
             signal,
             run_id=run_id,
+            turn_id=turn_id,
         )
         return completion, parameters, repair_messages
 
@@ -541,6 +550,7 @@ class AgentPlanner:
         signal: CancellationSignal | None,
         *,
         run_id: str | None,
+        turn_id: str | None,
     ) -> tuple[ModelCompletion, tuple[Mapping[str, Any], ...]]:
         result = await self._model_manager.complete(
             messages,
@@ -553,6 +563,7 @@ class AgentPlanner:
             ),
             ModelInvocationContext(
                 run_id=run_id or f"planner-{uuid4().hex}",
+                turn_id=turn_id,
             ),
             signal,
         )

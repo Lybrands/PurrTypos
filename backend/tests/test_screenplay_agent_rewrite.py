@@ -42,11 +42,10 @@ from purra.recovery import (
     decide_failure,
 )
 from application.screenplay_agent_service import (
-    PlannedScreenplayIntent,
-    ResolvedScreenplayTask,
     ScreenplayAgentService,
     _task_failure,
 )
+from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.composition_factory import create_agent_composition
 from application.model_runtime import model_request_from_runtime
@@ -68,10 +67,7 @@ from application.screenplay_manifest_compiler import (
     REVIEW_DIMENSIONS,
     compile_screenplay_manifest,
 )
-from application.screenplay_agent_planner import (
-    ModelScreenplayIntentPlanner,
-    SqliteScreenplayTaskResolver,
-)
+from application.screenplay_agent_planner import SqliteScreenplayTaskResolver
 from application.screenplay_structured_call import (
     PublicModelResult,
     StructuredModelResult,
@@ -127,7 +123,6 @@ from domains.screenplay_agent.adapter import (
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 from purra.task_admission import ExecutionMode
-from purra.long_tasks import DurableTaskDescriptor
 
 
 pytestmark = pytest.mark.asyncio
@@ -214,8 +209,8 @@ async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deseriali
     })
 
     assert intent.action is ScreenplayIntentAction.ANSWER
-    assert intent.reply is None
-    assert restored.reply is None
+    assert not hasattr(intent, "reply")
+    assert not hasattr(restored, "reply")
     assert "reply" not in restored.to_mapping()
 
 
@@ -584,6 +579,43 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
     ]
 
 
+async def test_multi_episode_recipe_obeys_root_public_step_barriers():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="连续创作第 4 至 5 集",
+            requested_deliverable="screenplayDraft",
+        ),
+        target_role="screenplayDraft",
+        episode_scene_ids={
+            4: ("ep04_s01",),
+            5: ("ep05_s01",),
+        },
+        plan_bindings=(
+            ScreenplayPlanBinding("read-sources", ScreenplayPlanPhase.EVIDENCE),
+            ScreenplayPlanBinding("write-episodes", ScreenplayPlanPhase.CREATION),
+            ScreenplayPlanBinding("deliver-result", ScreenplayPlanPhase.DELIVERY),
+        ),
+    )
+
+    steps = {step.id: step for step in compiled.recipe.steps}
+    evidence_ids = {"evidence:4", "evidence:5"}
+    validation_ids = {"episode:4:validation", "episode:5:validation"}
+    assert steps["evidence:4"].depends_on == ()
+    assert steps["evidence:5"].depends_on == ()
+    assert set(steps["draft:4:ep04_s01"].depends_on) == evidence_ids
+    assert set(steps["draft:5:ep05_s01"].depends_on) == evidence_ids
+    assert set(steps["compose-final-response"].depends_on) == validation_ids
+    assert {
+        step.plan_step_id for step in compiled.recipe.steps
+        if step.id in evidence_ids
+    } == {"read-sources"}
+    assert {
+        step.plan_step_id for step in compiled.recipe.steps
+        if step.id in validation_ids
+    } == {"write-episodes"}
+
+
 async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode():
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
@@ -638,7 +670,6 @@ async def test_stage_command_accepts_only_the_same_action_role_and_scope():
         command.require_compatible(ScreenplayIntent(
             action=ScreenplayIntentAction.ANSWER,
             instruction="说明没有 JSON",
-            reply="没有 JSON",
         ))
 
 
@@ -1124,95 +1155,6 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
     assert operation.long_task_id == first.task_id
 
 
-async def test_screenplay_dispatch_links_a_new_parent_and_resumes_a_paused_task(
-    temp_db: DatabaseConnection,
-):
-    profile, request, plan, decision = await _durable_screenplay_admission(
-        temp_db,
-        owner_id="screenplay-paused-resume-test",
-        command_id="paused-resume",
-    )
-    long_tasks = SqliteLongTaskRepository(temp_db)
-    dispatcher = _admission_dispatcher(temp_db, profile)
-    first = await dispatcher.dispatch(
-        request,
-        plan,
-        decision,
-        parent_run_id="run-paused-origin",
-    )
-    await long_tasks.pause(first.task_id)
-
-    resumed = await dispatcher.dispatch(
-        request,
-        plan,
-        decision,
-        parent_run_id="run-paused-continuation",
-    )
-
-    assert resumed.task_id == first.task_id
-    assert resumed.metadata["resumed"] is True
-    assert resumed.metadata["status"] == "running"
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs "
-        "WHERE run_id = 'run-paused-continuation'"
-    ) == {"count": 1}
-
-
-class _FailedResumeDescriptorResolver:
-    async def resolve(self, request, plan, decision):
-        del plan
-        return DurableTaskDescriptor(
-            namespace=request.domain_context.namespace,
-            owner_id=str(decision.metadata["projectId"]),
-            idempotency_key=str(decision.metadata["commandId"]),
-            failed_resume_attempts=1,
-        )
-
-
-async def test_screenplay_dispatch_retries_a_failed_task_for_a_new_parent(
-    temp_db: DatabaseConnection,
-):
-    profile, request, plan, decision = await _durable_screenplay_admission(
-        temp_db,
-        owner_id="screenplay-failed-resume-test",
-        command_id="failed-resume",
-    )
-    dispatcher = _admission_dispatcher(temp_db, profile)
-    dispatcher._descriptors = _FailedResumeDescriptorResolver()
-    first = await dispatcher.dispatch(
-        request,
-        plan,
-        decision,
-        parent_run_id="run-failed-origin",
-    )
-    async with temp_db.transaction(cancellation_linearizable=True):
-        await temp_db.execute(
-            "UPDATE ai_agent_long_tasks SET status = 'failed', failed_units = 1 "
-            "WHERE id = ?",
-            [first.task_id],
-        )
-        await temp_db.execute(
-            "UPDATE ai_agent_long_task_units SET status = 'failed' "
-            "WHERE task_id = ? AND position = 0",
-            [first.task_id],
-        )
-
-    resumed = await dispatcher.dispatch(
-        request,
-        plan,
-        decision,
-        parent_run_id="run-failed-retry",
-    )
-
-    assert resumed.task_id == first.task_id
-    assert resumed.metadata["resumed"] is True
-    assert resumed.metadata["status"] == "running"
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs "
-        "WHERE run_id = 'run-failed-retry'"
-    ) == {"count": 1}
-
-
 async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_work_item(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
@@ -1257,8 +1199,6 @@ async def test_turn_start_does_not_emit_a_host_authored_plan(
     service = ScreenplayAgentService(
         temp_db,
         owner_id="no-canned-plan-test",
-        planner=object(),  # type: ignore[arg-type]
-        resolver=object(),  # type: ignore[arg-type]
         unit_executor_factory=lambda _runtime: object(),
         projects=projects,
     )
@@ -1280,8 +1220,6 @@ async def test_service_persists_the_validated_stage_command_with_the_turn(
     service = ScreenplayAgentService(
         temp_db,
         owner_id="stage-command-service-test",
-        planner=object(),  # type: ignore[arg-type]
-        resolver=object(),  # type: ignore[arg-type]
         unit_executor_factory=lambda _runtime: object(),
         projects=projects,
     )
@@ -1303,132 +1241,7 @@ async def test_service_persists_the_validated_stage_command_with_the_turn(
     assert turn["stageCommand"] == payload["stageCommand"]
 
 
-async def test_planner_structured_fields_never_become_public_text(
-    temp_db: DatabaseConnection,
-):
-    projects, workspace, session = await _project_and_session(temp_db)
-    planner_output = json.dumps({
-        "debugNote": "确认当前阶段后直接回答，不创建交付物。",
-        "action": "answer",
-        "instruction": "说明当前阶段",
-        "scope": {"kind": "current_stage"},
-        "constraints": [],
-        "preserve": [],
-        "requestedDeliverable": None,
-        "reply": "当前处于创作简报阶段。",
-    }, ensure_ascii=False)
-
-    class PlannerGateway(_ModelGateway):
-        async def stream(self, messages, invocation, signal=None):
-            del messages, signal
-            self.invocations.append(invocation)
-            response = (
-                planner_output
-                if len(self.invocations) == 1
-                else "当前处于创作简报阶段。"
-            )
-
-            async def chunks():
-                yield ModelStreamChunk(content_delta=response)
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-            return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    gateway = PlannerGateway("secret")
-    planner = ModelScreenplayIntentPlanner(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    )
-    service = ScreenplayAgentService(
-        temp_db,
-        owner_id="model-summary-ownership-test",
-        planner=planner,
-        resolver=SqliteScreenplayTaskResolver(temp_db),
-        unit_executor_factory=lambda _runtime: object(),
-        projects=projects,
-    )
-    request = _request(session["id"], "现在处于哪个阶段？")
-    turn = await service.submit_turn(
-        command_id="model-summary-ownership",
-        project_id=workspace["project"]["id"],
-        request=request,
-    )
-
-    await service.execute_turn(turn["id"], request.runtime)
-
-    visible = "".join(
-        json.loads(str(row["payload_json"]))["delta"]
-        for row in await _public_text_events(temp_db)
-    )
-    assert visible == "当前处于创作简报阶段。"
-    assert "debugNote" not in visible
-
-
-async def test_planner_without_private_note_adds_no_fallback_copy(
-    temp_db: DatabaseConnection,
-):
-    projects, workspace, session = await _project_and_session(temp_db)
-    planner_output = json.dumps({
-        "action": "answer",
-        "instruction": "说明当前阶段",
-        "scope": {"kind": "current_stage"},
-        "constraints": [],
-        "preserve": [],
-        "requestedDeliverable": None,
-        "reply": "当前处于创作简报阶段。",
-    }, ensure_ascii=False)
-
-    class PlannerGateway(_ModelGateway):
-        async def stream(self, messages, invocation, signal=None):
-            del messages, signal
-            self.invocations.append(invocation)
-            response = (
-                planner_output
-                if len(self.invocations) == 1
-                else "当前处于创作简报阶段。"
-            )
-
-            async def chunks():
-                yield ModelStreamChunk(content_delta=response)
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-            return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    gateway = PlannerGateway("secret")
-    service = ScreenplayAgentService(
-        temp_db,
-        owner_id="optional-model-summary-test",
-        planner=ModelScreenplayIntentPlanner(
-            temp_db,
-            composition=_core_composition(temp_db, gateway),
-        ),
-        resolver=SqliteScreenplayTaskResolver(temp_db),
-        unit_executor_factory=lambda _runtime: object(),
-        projects=projects,
-    )
-    request = _request(session["id"], "现在处于哪个阶段？")
-    turn = await service.submit_turn(
-        command_id="optional-model-summary",
-        project_id=workspace["project"]["id"],
-        request=request,
-    )
-
-    await service.execute_turn(turn["id"], request.runtime)
-
-    snapshot = await service.get_snapshot(
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-    )
-    visible = "".join(
-        json.loads(str(row["payload_json"]))["delta"]
-        for row in await _public_text_events(temp_db)
-    )
-    assert visible == "当前处于创作简报阶段。"
-    assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
-    assert len(gateway.invocations) == 2
-
-
-async def test_final_response_unit_metadata_does_not_duplicate_the_response():
+async def test_final_response_unit_metadata_exposes_the_generic_durable_contract():
     result = _unit_result(
         ValidatedPartArtifactRef(
             artifact_id="artifact-final-response",
@@ -1440,7 +1253,7 @@ async def test_final_response_unit_metadata_does_not_duplicate_the_response():
         {"finalResponse": "任务已经完成。"},
     )
 
-    assert result.metadata == {}
+    assert result.metadata == {"finalResponse": "任务已经完成。"}
     assert result.output_ref == (
         "screenplay-part-artifact://artifact-final-response"
     )
@@ -2156,16 +1969,6 @@ async def test_review_failure_is_projected_from_the_operation_part():
     }
 
 
-class _Planner:
-    def __init__(self, intent: ScreenplayIntent) -> None:
-        self.intent = intent
-        self.calls = []
-
-    async def plan(self, **kwargs):
-        self.calls.append(kwargs)
-        return PlannedScreenplayIntent(self.intent, "run-semantic-planner")
-
-
 class _ModelGateway:
     def __init__(self, api_key: str) -> None:
         assert api_key == "secret"
@@ -2214,139 +2017,6 @@ class _ScriptedModelGateway(_ModelGateway):
                 yield chunk
 
         return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-
-def _planner_answer_json(reply: str = "没有待修复 JSON") -> str:
-    return json.dumps({
-        "action": "answer",
-        "instruction": "说明没有待修复 JSON",
-        "scope": {"kind": "current_stage"},
-        "constraints": [],
-        "preserve": [],
-        "requestedDeliverable": None,
-        "reply": reply,
-    }, ensure_ascii=False)
-
-
-def _planner_review_json() -> str:
-    return json.dumps({
-        "action": "review",
-        "instruction": "审阅当前完整剧本",
-        "scope": {"kind": "current_stage"},
-        "constraints": [],
-        "preserve": [],
-        "requestedDeliverable": "review",
-        "reply": None,
-    }, ensure_ascii=False)
-
-
-async def test_planner_repairs_schema_valid_intent_that_violates_stage_command(
-    temp_db: DatabaseConnection,
-):
-    _, workspace, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [
-        [
-            ModelStreamChunk(content_delta=_planner_answer_json()),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-        [
-            ModelStreamChunk(content_delta=_planner_review_json()),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-    ])
-    planner = ModelScreenplayIntentPlanner(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    )
-    command = ScreenplayStageCommand.from_mapping({
-        "kind": "stage_action",
-        "action": "review",
-        "targetRole": "review",
-        "scope": {"kind": "current_stage"},
-    })
-
-    planned = await planner.plan(
-        workspace=workspace,
-        history=(),
-        user_content="开始审阅",
-        stage_command=command,
-        runtime=_request(session["id"], "开始审阅").runtime,
-        session_id=session["id"],
-        turn_id="turn-review-command",
-    )
-
-    assert planned.intent.action is ScreenplayIntentAction.REVIEW
-    assert len(gateway.invocations) == 2
-    first_payload = json.loads(str(gateway.calls[0][0][1].content))
-    assert first_payload["requiredStageCommand"] == command.to_mapping()
-
-
-async def test_planner_preserves_command_mismatch_after_failed_repair(
-    temp_db: DatabaseConnection,
-):
-    _, workspace, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [
-        [
-            ModelStreamChunk(content_delta=_planner_answer_json()),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-        [
-            ModelStreamChunk(content_delta=_planner_answer_json("仍然是回答")),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-    ])
-    planner = ModelScreenplayIntentPlanner(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    )
-    command = ScreenplayStageCommand.from_mapping({
-        "kind": "stage_action",
-        "action": "review",
-        "targetRole": "review",
-        "scope": {"kind": "current_stage"},
-    })
-
-    with pytest.raises(ScreenplayIntentCommandMismatchError):
-        await planner.plan(
-            workspace=workspace,
-            history=(),
-            user_content="开始审阅",
-            stage_command=command,
-            runtime=_request(session["id"], "开始审阅").runtime,
-            session_id=session["id"],
-            turn_id="turn-review-command-mismatch",
-        )
-
-
-async def test_planner_omits_required_command_for_free_text(
-    temp_db: DatabaseConnection,
-):
-    _, workspace, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta=_planner_answer_json("正常回答")),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ], [
-        ModelStreamChunk(content_delta="正常回答"),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    planner = ModelScreenplayIntentPlanner(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    )
-
-    planned = await planner.plan(
-        workspace=workspace,
-        history=(),
-        user_content="现在到哪一步？",
-        stage_command=None,
-        runtime=_request(session["id"], "现在到哪一步？").runtime,
-        session_id=session["id"],
-        turn_id="turn-free-text",
-    )
-
-    assert planned.intent.action is ScreenplayIntentAction.ANSWER
-    first_payload = json.loads(str(gateway.calls[0][0][1].content))
-    assert "requiredStageCommand" not in first_payload
 
 
 async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
@@ -3726,195 +3396,3 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
         2,
     ]
     assert len(result["sourceRunIds"]) == 2
-
-
-async def test_production_resolver_and_executor_publish_one_native_candidate(
-    temp_db: DatabaseConnection,
-):
-    projects, workspace, session = await _project_and_session(temp_db)
-    project_id = workspace["project"]["id"]
-    await _install_head(temp_db, project_id, "creativeBrief", {
-        "documentKind": "creative_brief",
-        "fields": {"approach": "人物驱动", "premise": "意外重逢"},
-    })
-    await _install_head(temp_db, project_id, "structure", {
-        "documentKind": "episode_outline",
-        "episodes": [
-            {"number": 1, "id": "episode-1", "title": "重逢"},
-            {"number": 2, "id": "episode-2", "title": "追问"},
-            {"number": 3, "id": "episode-3", "title": "选择"},
-        ],
-    })
-    scene_list_id = await _install_head(temp_db, project_id, "sceneList", {
-        "documentKind": "scene_list",
-        "scenes": [
-            {"id": "scene-1", "episodeNumber": 1, "heading": "咖啡馆·夜"},
-            {"id": "scene-2", "episodeNumber": 2, "heading": "车站·晨"},
-            {"id": "scene-3", "episodeNumber": 3, "heading": "码头·黄昏"},
-        ],
-    })
-    intent = ScreenplayIntent(
-        action=ScreenplayIntentAction.CREATE,
-        instruction="把接下来两集写完，每集结尾留下新的问题",
-        scope=ScreenplayIntentScope(
-            kind=ScreenplayScopeKind.NEXT_EPISODES,
-            count=2,
-        ),
-    )
-    executor = ScreenplayTaskModelCalls(
-        temp_db,
-        composition=object(),
-    )
-    executor._models = _StructuredDraftModels()
-
-    def unit_executor_factory(runtime):
-        unit = ScreenplayTaskUnitExecutor(
-            temp_db,
-            runtime=runtime,
-            composition=object(),
-        )
-        unit._delegate = executor
-        return unit
-
-    service = ScreenplayAgentService(
-        temp_db,
-        owner_id="production-screenplay-task-test",
-        planner=_Planner(intent),
-        resolver=SqliteScreenplayTaskResolver(temp_db),
-        unit_executor_factory=unit_executor_factory,
-        projects=projects,
-    )
-    request = _request(session["id"], "把接下来两集写完，每集结尾留下新的问题")
-    turn = await service.submit_turn(
-        command_id="production-next-two",
-        project_id=project_id,
-        request=request,
-    )
-
-    await service.execute_turn(turn["id"], request.runtime)
-
-    snapshot = await service.get_snapshot(
-        project_id=project_id,
-        session_id=session["id"],
-    )
-    task = snapshot["tasks"][0]
-    assert task["status"] == "completed", json.dumps(
-        task,
-        ensure_ascii=False,
-        default=str,
-    )
-    result_revision = task["resultRevision"]
-    assert result_revision["id"] == task["resultRevisionId"]
-    assert result_revision["role"] == "screenplayDraft"
-    assert result_revision["revisionNo"] == 1
-    assert result_revision["summary"]["proposalKind"] == "scene_draft"
-    assert result_revision["summary"]["title"] == "第 1–2 集剧本"
-    assert result_revision["summary"]["partCount"] == 3
-    assert result_revision["agentTaskId"] == task["id"]
-    assert result_revision["status"] == "candidate"
-    assert "parts" not in result_revision
-    assert "contentText" not in result_revision
-    assert "contentJson" not in result_revision
-    revision = await projects.get_revision(task["resultRevisionId"], view="full")
-    assert revision["createdBy"] == "agent"
-    assert revision["parts"][0]["payload"]["sceneListId"] == scene_list_id
-    assert [part["key"] for part in revision["parts"]] == ["main", "1", "2"]
-    assert await temp_db.fetch_one(
-        "SELECT agent_task_id FROM screenplay_revisions WHERE id = ?",
-        [revision["id"]],
-    ) == {"agent_task_id": task["id"]}
-    unit_rows = await temp_db.fetch_all(
-        "SELECT unit_id, output_ref, artifact_digest, validation_receipt_json "
-        "FROM ai_agent_long_task_units WHERE task_id = ? ORDER BY position",
-        [task["id"]],
-    )
-    assert all(
-        str(row["output_ref"]).startswith("screenplay-part-artifact://")
-        and str(row["artifact_digest"]).strip()
-        and json.loads(str(row["validation_receipt_json"]))["valid"] is True
-        for row in unit_rows
-    )
-    evidence = await ScreenplayPartArtifactQuery(temp_db).require(
-        str(unit_rows[0]["output_ref"])
-    )
-    assert set(evidence["evidenceDescriptor"]) >= {
-        "sourceRevisionRefs",
-        "sceneListRevisionId",
-        "episodeNumber",
-    }
-    assert "acceptedDeliverables" not in evidence["evidenceDescriptor"]
-    assert "writingContext" not in evidence["evidenceDescriptor"]
-    assert await temp_db.fetch_one(
-        "SELECT name FROM sqlite_master WHERE type = 'table' "
-        "AND name = 'screenplay_agent_task_outputs'"
-    ) is None
-    continuation = await SqliteScreenplayTaskResolver(temp_db).resolve(
-        workspace=await projects.get_workspace(project_id),
-        intent=ScreenplayIntent(
-            action=ScreenplayIntentAction.CREATE,
-            instruction="继续创作下一集",
-            scope=ScreenplayIntentScope(
-                kind=ScreenplayScopeKind.NEXT_EPISODES,
-                count=1,
-            ),
-        ),
-    )
-    assert continuation.base_revision_id == revision["id"]
-    assert continuation.episode_numbers == (3,)
-
-    continuation_service = ScreenplayAgentService(
-        temp_db,
-        owner_id="production-screenplay-continuation-test",
-        planner=_Planner(ScreenplayIntent(
-            action=ScreenplayIntentAction.CREATE,
-            instruction="继续创作下一集",
-            scope=ScreenplayIntentScope(
-                kind=ScreenplayScopeKind.NEXT_EPISODES,
-                count=1,
-            ),
-        )),
-        resolver=SqliteScreenplayTaskResolver(temp_db),
-        unit_executor_factory=unit_executor_factory,
-        projects=projects,
-    )
-    continuation_turn = await continuation_service.submit_turn(
-        command_id="production-next-one-after-candidate",
-        project_id=project_id,
-        request=_request(session["id"], "继续创作下一集"),
-    )
-    await continuation_service.execute_turn(
-        continuation_turn["id"],
-        _request(session["id"], "继续创作下一集").runtime,
-    )
-    continued_snapshot = await continuation_service.get_snapshot(
-        project_id=project_id,
-        session_id=session["id"],
-    )
-    assert [
-        item["resultRevision"]["id"]
-        for item in continued_snapshot["tasks"]
-    ] == [
-        revision["id"],
-        continued_snapshot["tasks"][1]["resultRevisionId"],
-    ]
-    assert all(
-        "parts" not in item["resultRevision"]
-        for item in continued_snapshot["tasks"]
-    )
-    continued_revision = await projects.get_revision(
-        continued_snapshot["tasks"][1]["resultRevisionId"],
-        view="full",
-    )
-    assert continued_revision["parentRevisionId"] == revision["id"]
-    assert [part["key"] for part in continued_revision["parts"]] == [
-        "main",
-        "1",
-        "2",
-        "3",
-    ]
-
-    await service.truncate_from_turn(turn["id"])
-    assert await temp_db.fetch_one(
-        "SELECT id FROM screenplay_revisions WHERE id = ?",
-        [revision["id"]],
-    ) is None
