@@ -185,15 +185,40 @@ class RunStateMachine:
                 type=StepType.REVIEW,
                 executor=StepExecutor.MODEL,
             ),)
+        future_dependencies = {
+            step.id: step.depends_on
+            for step in future
+        }
         revised_future = RunStateMachine.initialize(
             state.run_id,
-            TaskPlan(title=plan.title, goal=plan.goal, steps=future),
+            TaskPlan(
+                title=plan.title,
+                goal=plan.goal,
+                steps=tuple(
+                    replace(
+                        step,
+                        depends_on=tuple(
+                            dependency
+                            for dependency in step.depends_on
+                            if dependency not in history_ids
+                        ),
+                    )
+                    for step in future
+                ),
+            ),
+        )
+        revised_future_steps = tuple(
+            replace(
+                step,
+                depends_on=future_dependencies[step.id],
+            )
+            for step in revised_future.steps
         )
         return replace(
             state,
             title=plan.title,
             goal=plan.goal,
-            steps=history + revised_future.steps,
+            steps=history + revised_future_steps,
         )
 
     @staticmethod

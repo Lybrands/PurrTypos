@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
-from purra.contracts import ExecutionRecipe
+from purra.contracts import ExecutionRecipe, TaskPlan
 from purra.normalization import (
     non_negative_int,
     optional_text,
@@ -132,6 +132,14 @@ class LongTaskExecutionUpdate:
 
     event: AgentEvent
     persist: bool = True
+    plan_revision: TaskPlan | None = None
+
+    def __post_init__(self) -> None:
+        if self.plan_revision is not None and not isinstance(
+            self.plan_revision,
+            TaskPlan,
+        ):
+            raise TypeError("long task plan revision must be a TaskPlan")
 
 
 @dataclass(frozen=True, slots=True)

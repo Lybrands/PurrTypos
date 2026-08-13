@@ -202,6 +202,7 @@ async def test_dispatcher_executes_static_map_reduce_and_delivers_dependencies(
     ]
     assert (await work_items.load(task.work_item_id)).status is WorkItemStatus.COMPLETED
     assert updates
+    assert all(update.plan_revision is None for update in updates)
     progress = [update.event.payload for update in updates]
     assert progress[-1]["status"] == "completed"
     assert progress[-1]["revision"] == task.revision

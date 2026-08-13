@@ -58,6 +58,7 @@ BANNED_PROVIDER_TEXT_FRAGMENTS = {
     "mimo",
     "zai",
 }
+PRODUCT_MODULE_PARTS = {"application", "screenplay", "writing"}
 
 
 def _source_files() -> list[Path]:
@@ -100,6 +101,25 @@ def test_purra_imports_only_stdlib_and_itself():
                     )
 
     assert not violations, "PurrA dependency violations:\n" + "\n".join(violations)
+
+
+def test_purra_durable_core_does_not_import_product_modules():
+    path = CORE_DIR / "engine" / "durable_execution.py"
+    module_name = _module_for(path)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.append(_resolved_import(module_name, node))
+
+    leaked = sorted(
+        name
+        for name in imports
+        if PRODUCT_MODULE_PARTS.intersection(name.casefold().split("."))
+    )
+    assert not leaked, "PurrA durable Core imports product modules: " + ", ".join(leaked)
 
 
 def test_purra_does_not_name_writing_scope_fields():
