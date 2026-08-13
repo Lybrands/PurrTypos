@@ -36,13 +36,16 @@ from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
 )
+from application.composition_factory import create_agent_composition
 from application.agent_profile_registry import (
     AgentProfileExtension,
     AgentProfileRegistration,
     StaticAgentProfileExtension,
 )
+from application.agent_run_service import AgentRunService
 from application.conversation_compaction import ConversationCompactionService
 from application.memory_reranking import ModelBackedMemoryReranker
+from application.writing_agent_profile import build_writing_profile_extension
 from application.request_mapping import (
     context_window_tokens,
     to_writing_agent_request,
@@ -51,26 +54,9 @@ from application.request_mapping import (
 from application.sse_mapping import core_update_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider
 from domains.writing.context_source import RepositoryWritingContextSource
-from domains.writing.contracts import (
-    WRITING_DOMAIN_NAMESPACE,
-    WritingDomainContext,
-)
-from domains.writing.response import writing_atomic_continuity_judge_policy
-from infrastructure.persistence.writing import (
-    SqliteAssociatedContextRepository,
-    SqliteMemoryRecallRepository,
-    SqliteStoryMemoryRecallRepository,
-    SqliteWritingCatalogRepository,
-    SqliteWritingToolMemoryRepository,
-)
-from infrastructure.writing import (
-    WritingSkillCatalog,
-    WritingToolDependencies,
-    build_writing_tool_catalog,
-)
+from domains.writing.contracts import WritingDomainContext
 from routers.ai import (
     _stream_composed_agent,
     chat_stream,
@@ -143,99 +129,11 @@ def _fake_request() -> AgentRunRequest:
     )
 
 
-class _WritingTestProfileExtension:
-    """Temporary product fixture until Task 4 installs the real extension."""
-
-    def __init__(self, db: DatabaseConnection):
-        skill_catalog = WritingSkillCatalog(BACKEND_DIR / "skills")
-        self._catalog_repository = SqliteWritingCatalogRepository(db)
-        self._context_source = RepositoryWritingContextSource(
-            SqliteAssociatedContextRepository(db),
-            SqliteMemoryRecallRepository(db),
-            SqliteStoryMemoryRecallRepository(db),
-        )
-        self._adapter = WritingDomainAdapter.build(
-            tool_catalog=build_writing_tool_catalog(
-                dependencies=WritingToolDependencies(
-                    db,
-                    SqliteWritingToolMemoryRepository(db),
-                ),
-                skill_items=tuple(skill_catalog.skill_items()),
-            ),
-            context_provider=WritingContextProvider(self._context_source),
-        )
-
-    def profile_registration(self):
-        return AgentProfileRegistration(
-            id="writing",
-            domain_namespace=WRITING_DOMAIN_NAMESPACE,
-            adapter=self._adapter,
-        )
-
-    async def prepare_request(
-        self,
-        request: AgentRunRequest,
-    ) -> AgentRunRequest:
-        context = WritingDomainContext.from_core_context(
-            request.domain_context
-        )
-        book_id = str(context.book_id or "").strip()
-        if not book_id:
-            hydrated = replace(
-                context,
-                writing_chapters=(),
-                available_outlines=(),
-            )
-        else:
-            hydrated = replace(
-                context,
-                writing_chapters=(
-                    await self._catalog_repository.load_writing_chapters(
-                        book_id
-                    )
-                ),
-                available_outlines=(
-                    await self._catalog_repository.load_available_outlines(
-                        book_id
-                    )
-                ),
-            )
-        return replace(request, domain_context=hydrated.to_core_context())
-
-    def context_provider_factory(self):
-        return lambda model_tasks: WritingContextProvider(
-            self._context_source.with_memory_reranker(
-                ModelBackedMemoryReranker(model_tasks)
-            )
-        )
-
-    def response_judge_policies(self, request: AgentRunRequest):
-        policy = writing_atomic_continuity_judge_policy(request)
-        return () if policy is None else (policy,)
-
-    def task_admission(self):
-        return None
-
-    def create_long_task_dispatcher(self, **_dependencies):
-        return None
-
-    def clear_active_executions(self) -> None:
-        return None
-
-
 def _writing_composition(
     db: DatabaseConnection,
     **kwargs,
 ) -> AgentComposition:
-    return AgentComposition(
-        db,
-        profile_extension_factories=(
-            lambda **dependencies: _WritingTestProfileExtension(
-                dependencies["db"]
-            ),
-        ),
-        **kwargs,
-    )
+    return create_agent_composition(db, **kwargs)
 
 
 def _fixture_model_options() -> dict[str, object]:
@@ -344,6 +242,113 @@ async def test_static_profile_extension_defaults_have_no_side_effects(
     assert extension.context_provider_factory() is None
     assert extension.task_admission() is None
     assert extension.create_long_task_dispatcher() is None
+
+
+@pytest.mark.asyncio
+async def test_writing_profile_extension_owns_product_capabilities(
+    temp_db: DatabaseConnection,
+):
+    extension = build_writing_profile_extension(
+        db=temp_db,
+        skills_dir=BACKEND_DIR / "skills",
+    )
+    registration = extension.profile_registration()
+    composition = AgentComposition(
+        temp_db,
+        profile_extension_factories=(lambda **_dependencies: extension,),
+    )
+    try:
+        core = composition.create_core("key", agent_profile="writing")
+        model_tasks = AgentModelTaskRunner(
+            core._model_invocations,
+            ModelInvocationContext(run_id="writing-profile-test"),
+        )
+        provider = extension.context_provider_factory()(model_tasks)
+        tool_names = {
+            item.schema.name
+            for item in registration.adapter.tool_catalog.registrations()
+        }
+        declared_skill_names = {
+            path.parent.name
+            for path in (BACKEND_DIR / "skills").glob("*/SKILL.md")
+        }
+
+        assert isinstance(extension, AgentProfileExtension)
+        assert registration.id == "writing"
+        assert registration.domain_namespace == "purrtypos.writing"
+        assert tool_names == declared_skill_names
+        assert {
+            definition.id
+            for definition in registration.adapter.agent_role_registry.definitions
+        } == {"researcher", "reviewer", "analyst"}
+        assert isinstance(
+            registration.adapter.context_provider,
+            WritingContextProvider,
+        )
+        assert isinstance(
+            registration.adapter.context_provider._source,
+            RepositoryWritingContextSource,
+        )
+        assert isinstance(provider, WritingContextProvider)
+        assert isinstance(provider._source, RepositoryWritingContextSource)
+        reranker = provider._source._memory._semantic._reranker
+        assert isinstance(reranker, ModelBackedMemoryReranker)
+        assert provider._source._memory._story._reranker is reranker
+        assert extension.task_admission() is None
+        assert extension.create_long_task_dispatcher() is None
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_product_composition_registers_writing_and_static_screenplay_profiles(
+    temp_db: DatabaseConnection,
+):
+    composition = create_agent_composition(temp_db)
+    try:
+        assert composition.agent_profile_ids == ("writing", "screenplay")
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_requires_request_scoped_role_registry():
+    from infrastructure.models.provider_capabilities import (
+        ProviderCapabilityCache,
+    )
+
+    class _CompositionWithoutRoleResolver:
+        provider_capabilities = ProviderCapabilityCache()
+        delegation_repository = object()
+        agent_role_registry_for_request = None
+
+        @property
+        def agent_role_registry(self):
+            raise AssertionError("global Writing role fallback was used")
+
+        def create_response_judge_policies(self, _request):
+            return ()
+
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "委派只读研究"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chatAgentMode="agent",
+    )
+    updates = AgentRunService(
+        _CompositionWithoutRoleResolver()  # type: ignore[arg-type]
+    ).run(
+        body=body,
+        api_key="key",
+        provider_options={"model": "model"},
+        signal=asyncio.Event(),
+    )
+
+    with pytest.raises(TypeError):
+        await anext(updates)
 
 
 def test_request_mapping_supports_kimi_256k_context_window():
