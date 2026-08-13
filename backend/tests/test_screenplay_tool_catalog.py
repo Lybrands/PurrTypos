@@ -27,6 +27,7 @@ from purra.contracts import (
     ModelStream,
     ModelStreamChunk,
     ReasoningMode,
+    RunLineage,
     RunStatus,
     ToolCallDelta,
 )
@@ -65,6 +66,16 @@ def _context(
         tool_access=tool_access,
         source_book_id=source_book_id,
         source_scope=source_scope or {"mode": "whole_book"},
+    )
+
+
+def _part_lineage(root_run_id: str) -> RunLineage:
+    return RunLineage(
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        delegation_id=None,
+        agent_role="screenplay-part",
+        depth=1,
     )
 
 
@@ -809,6 +820,7 @@ async def test_screenplay_tool_run_publishes_no_host_text_and_redacts_candidate_
             user_payload={"instruction": "生成创作简报"},
             domain_context=_context(),
             conversation_turn_id="turn-screenplay-tools",
+            lineage=_part_lineage("root-screenplay-tools"),
             reasoning_mode=ReasoningMode.DISABLED,
         )
     finally:
@@ -862,6 +874,7 @@ async def test_screenplay_tool_length_fails_without_replaying_reasoning_mode(
                 user_payload={"instruction": "生成创作简报"},
                 domain_context=_context(),
                 conversation_turn_id="turn-reasoning-fallback",
+                lineage=_part_lineage("root-reasoning-fallback"),
             )
     finally:
         await composition.shutdown()
@@ -921,6 +934,7 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
                 expected_part_key="ep01_s04",
             ),
             conversation_turn_id="turn-host-prepared-scene",
+            lineage=_part_lineage("root-host-prepared-scene"),
             reasoning_mode=ReasoningMode.DISABLED,
             host_candidate_template={
                 "sceneId": "ep01_s04",
@@ -1007,6 +1021,7 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
                     expected_part_key="ep01_s04",
                 ),
                 conversation_turn_id="turn-atomic-rollback",
+                lineage=_part_lineage("root-atomic-rollback"),
                 reasoning_mode=ReasoningMode.DISABLED,
                 host_candidate_template={
                     "sceneId": "ep01_s04",

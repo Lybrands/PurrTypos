@@ -23,6 +23,7 @@ from purra.contracts import (
     MessageRole,
     ResponseValidationResult,
     RunBinding,
+    RunLineage,
     RunProvenance,
     RunStatus,
 )
@@ -37,6 +38,7 @@ from purra.model_protocol import (
     resolve_invocation_output_limit,
 )
 from purra.structured_output import parse_json_object
+from application.agent_run_service import AgentRunService
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
@@ -101,8 +103,8 @@ class _StructuredResultValidator:
 
 class ScreenplayStructuredCallService:
     def __init__(self, db, *, composition) -> None:
-        self._db = db
-        self._composition = composition
+        del db
+        self._runs = AgentRunService(composition)
 
     async def run_json(
         self,
@@ -117,6 +119,8 @@ class ScreenplayStructuredCallService:
         binding_command_id: str,
         conversation_turn_id: str | None = None,
         task_id: str | None = None,
+        unit_id: str | None = None,
+        expected_part_key: str | None = None,
         phase: str,
         repair_instruction: str,
         validate: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -124,6 +128,7 @@ class ScreenplayStructuredCallService:
         project_execution: (
             Callable[[dict[str, Any]], Sequence[str]] | None
         ) = None,
+        lineage: RunLineage,
         signal=None,
     ) -> StructuredModelResult:
         # These former projection inputs remain accepted during call-site
@@ -172,10 +177,10 @@ class ScreenplayStructuredCallService:
             domain_context=ScreenplayAgentDomainContext(
                 project_id=binding_aggregate_id,
                 task_id=str(task_id or binding_command_id),
-                unit_id=str(binding_command_id or phase),
+                unit_id=str(unit_id or binding_command_id or phase),
                 target_role=phase,
                 expected_part_type="structured_private",
-                expected_part_key=phase,
+                expected_part_key=str(expected_part_key or phase),
                 tool_access="evidence_read",
                 locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
             ).to_core_context(),
@@ -205,25 +210,15 @@ class ScreenplayStructuredCallService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
-        options = self._composition.bind_run_profile(request, options)
-        core = self._composition.create_core_for_request(
-            request,
-            runtime.apiKey.get_secret_value(),
+        result = await self._runs.run_host_child(
+            body=runtime,
+            api_key=runtime.apiKey.get_secret_value(),
+            provider_options=_provider_options(runtime),
+            signal=signal,
+            lineage=lineage,
+            mapped_request=request,
+            base_options=options,
         )
-        handle = None
-        cancel_watcher: asyncio.Task[None] | None = None
-        try:
-            handle = await core.submit(request, options=options)
-            if signal is not None and hasattr(signal, "wait"):
-                cancel_watcher = asyncio.create_task(
-                    _cancel_on_signal(signal, handle)
-                )
-            result = await handle.wait()
-        finally:
-            if cancel_watcher is not None:
-                cancel_watcher.cancel()
-                await asyncio.gather(cancel_watcher, return_exceptions=True)
-            self._composition.release_core(core)
 
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError
@@ -243,7 +238,7 @@ class ScreenplayStructuredCallService:
                 ),
                 retryable=False,
             )
-        return StructuredModelResult(validator.value, handle.run_id)
+        return StructuredModelResult(validator.value, result.run_id)
 
     async def run_public_text(
         self,
@@ -258,7 +253,10 @@ class ScreenplayStructuredCallService:
         binding_command_id: str,
         phase: str,
         task_id: str | None = None,
+        unit_id: str | None = None,
+        expected_part_key: str | None = None,
         conversation_turn_id: str | None = None,
+        lineage: RunLineage,
         signal=None,
     ) -> PublicModelResult:
         model_request = model_request_from_runtime(runtime)
@@ -296,10 +294,10 @@ class ScreenplayStructuredCallService:
             domain_context=ScreenplayAgentDomainContext(
                 project_id=binding_aggregate_id,
                 task_id=str(task_id or binding_command_id),
-                unit_id=str(binding_command_id or phase),
+                unit_id=str(unit_id or binding_command_id or phase),
                 target_role=phase,
                 expected_part_type="public_response",
-                expected_part_key=phase,
+                expected_part_key=str(expected_part_key or phase),
                 tool_access="evidence_read",
                 locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
             ).to_core_context(),
@@ -332,24 +330,15 @@ class ScreenplayStructuredCallService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
-        options = self._composition.bind_run_profile(request, options)
-        core = self._composition.create_core_for_request(
-            request,
-            runtime.apiKey.get_secret_value(),
+        result = await self._runs.run_host_child(
+            body=runtime,
+            api_key=runtime.apiKey.get_secret_value(),
+            provider_options=_provider_options(runtime),
+            signal=signal,
+            lineage=lineage,
+            mapped_request=request,
+            base_options=options,
         )
-        cancel_watcher: asyncio.Task[None] | None = None
-        try:
-            handle = await core.submit(request, options=options)
-            if signal is not None and hasattr(signal, "wait"):
-                cancel_watcher = asyncio.create_task(
-                    _cancel_on_signal(signal, handle)
-                )
-            result = await handle.wait()
-        finally:
-            if cancel_watcher is not None:
-                cancel_watcher.cancel()
-                await asyncio.gather(cancel_watcher, return_exceptions=True)
-            self._composition.release_core(core)
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError
         if result.status is not RunStatus.DONE:
@@ -365,11 +354,14 @@ class ScreenplayStructuredCallService:
                 code="empty_model_response",
                 retryable=False,
             )
-        return PublicModelResult(text=text, run_id=handle.run_id)
+        return PublicModelResult(text=text, run_id=result.run_id)
 
-async def _cancel_on_signal(signal, handle) -> None:
-    await signal.wait()
-    await handle.cancel("screenplay_agent_canceled")
+
+def _provider_options(runtime) -> dict[str, Any]:
+    return {
+        **dict(runtime.options),
+        "baseURL": str(runtime.baseURL or ""),
+    }
 
 
 def _provenance(

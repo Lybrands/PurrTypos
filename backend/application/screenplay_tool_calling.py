@@ -17,6 +17,7 @@ from purra.contracts import (
     MessageOrigin,
     MessageRole,
     RunBinding,
+    RunLineage,
     ReasoningMode,
     RunProvenance,
     RunStatus,
@@ -34,6 +35,7 @@ from application.model_runtime import (
     reasoning_mode_from_options,
     run_execution_intent,
 )
+from application.agent_run_service import AgentRunService
 from application.request_mapping import context_window_tokens
 from application.run_provenance import digest_model_endpoint
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
@@ -52,7 +54,7 @@ class ScreenplayCandidateRunResult:
 
 class ScreenplayToolCallingService:
     def __init__(self, db, *, composition) -> None:
-        self._composition = composition
+        self._runs = AgentRunService(composition)
         self._candidates = ScreenplayCandidateArtifacts(db)
 
     async def run_candidate(
@@ -70,6 +72,7 @@ class ScreenplayToolCallingService:
             Callable[[Mapping[str, Any]], Mapping[str, Any]] | None
         ) = None,
         host_candidate_template: Mapping[str, Any] | None = None,
+        lineage: RunLineage,
         signal=None,
     ) -> ScreenplayCandidateRunResult:
         model_request = model_request_from_runtime(runtime)
@@ -129,29 +132,16 @@ class ScreenplayToolCallingService:
                 public_presentation=PublicPresentationMode.NONE,
             ),
         )
-        options = self._composition.bind_run_profile(request, options)
-        api_key = runtime.apiKey.get_secret_value()
-        core = self._composition.create_core_for_request(
-            request,
-            api_key,
+        result = await self._runs.run_host_child(
+            body=runtime,
+            api_key=runtime.apiKey.get_secret_value(),
+            provider_options=_provider_options(runtime),
+            signal=signal,
+            lineage=lineage,
+            mapped_request=request,
+            base_options=options,
         )
-        handle = None
-        cancel_watcher: asyncio.Task[None] | None = None
-        try:
-            handle = await core.submit(request, options=options)
-            if signal is not None and hasattr(signal, "wait"):
-                cancel_watcher = asyncio.create_task(
-                    _cancel_on_signal(signal, handle)
-                )
-            result = await handle.wait()
-        finally:
-            if cancel_watcher is not None:
-                cancel_watcher.cancel()
-                await asyncio.gather(cancel_watcher, return_exceptions=True)
-            self._composition.release_core(core)
-        if handle is None:
-            raise RuntimeError("screenplay tool Run returned no handle")
-        run_id = handle.run_id
+        run_id = result.run_id
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError
         if result.status is not RunStatus.DONE:
@@ -186,9 +176,11 @@ class ScreenplayToolCallingService:
         candidate = public_candidate
         return ScreenplayCandidateRunResult(run_id=run_id, candidate=candidate)
 
-async def _cancel_on_signal(signal, handle) -> None:
-    await signal.wait()
-    await handle.cancel("screenplay_agent_canceled")
+def _provider_options(runtime) -> dict[str, Any]:
+    return {
+        **dict(runtime.options),
+        "baseURL": str(runtime.baseURL or ""),
+    }
 
 
 def _provenance(runtime, payload: Mapping[str, Any], window: int) -> RunProvenance:

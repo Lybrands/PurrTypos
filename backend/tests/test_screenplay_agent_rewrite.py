@@ -18,12 +18,14 @@ from purra.contracts import (
     ContextBudget,
     DomainContext,
     RunCreateParams,
+    RunLineage,
     RunStatus,
     ModelCompletion,
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
     ModelRequest,
+    PlanningCapabilities,
     ReasoningMode,
     StepExecutor,
     StepType,
@@ -55,6 +57,7 @@ from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
+    _requires_child_run,
     _unit_result,
 )
 from application.screenplay_candidate_assembler import (
@@ -117,6 +120,7 @@ from infrastructure.persistence.agent_output_publisher import (
     InProcessAgentOutputPublisher,
 )
 from infrastructure.persistence.run_execution_store import SqliteExecutionLeaseStore
+from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from domains.screenplay_agent.adapter import (
     ScreenplayExecutionStateFactory,
     ScreenplayHostContextProvider,
@@ -132,6 +136,29 @@ from purra.task_admission import (
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _part_lineage(root_run_id: str = "root-screenplay-part") -> RunLineage:
+    return RunLineage(
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        delegation_id=None,
+        agent_role="screenplay-part",
+        depth=1,
+    )
+
+
+@pytest.mark.parametrize(("kind", "expected"), (
+    ("collect_evidence", False),
+    ("validate_manifest_part", False),
+    ("generate_draft_scene", True),
+    ("generate_episode_metadata", True),
+    ("generate_document_section", True),
+    ("generate_review_dimension", True),
+    ("compose_final_response", True),
+))
+async def test_screenplay_part_child_run_classification(kind, expected):
+    assert _requires_child_run(kind) is expected
 
 
 def _semantic_steps() -> tuple[TaskStep, ...]:
@@ -458,6 +485,28 @@ async def test_screenplay_domain_context_round_trips_root_and_legacy_child_modes
     assert legacy_child.task_id == "task-1"
 
 
+async def test_screenplay_child_part_context_never_generates_a_public_plan():
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="只生成当前 Part"),),
+        model=ModelRequest(provider="openai", model="fixture-model"),
+        domain_context=ScreenplayAgentDomainContext(
+            project_id="project-1",
+            task_id="task-1",
+            unit_id="unit-1",
+            target_role="screenplayDraft",
+            expected_part_type="scene",
+            expected_part_key="scene-1",
+        ).to_core_context(),
+        mode="agent",
+        tools_enabled=True,
+    )
+
+    assert ScreenplayToolLoopPolicy().should_plan(
+        request,
+        PlanningCapabilities(),
+    ) is False
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -493,6 +542,7 @@ async def test_screenplay_root_context_rejects_non_object_stage_command():
 
 class _CoreComposition:
     def __init__(self, db, gateway) -> None:
+        self.provider_capabilities = ProviderCapabilityCache()
         self._gateway = gateway
         self._runs = SqliteRunRepository(db)
         self._outputs = SqliteAgentOutputRepository(
@@ -501,14 +551,21 @@ class _CoreComposition:
         )
         self._publisher = InProcessAgentOutputPublisher()
         self._leases = SqliteExecutionLeaseStore(db)
+        self.last_request = None
 
-    def create_core_for_request(self, request, api_key):
-        del request, api_key
+    def create_core_for_request(self, request, api_key, **kwargs):
+        self.last_request = request
+        del api_key
+        kwargs.pop("on_required_tool_choice_unsupported", None)
+        context_provider = kwargs.pop(
+            "context_provider_override",
+            ScreenplayHostContextProvider(),
+        )
         return AgentCore(
             model_gateway=self._gateway,
             run_repository=self._runs,
             planning_policy=ScreenplayToolLoopPolicy(),
-            context_provider=ScreenplayHostContextProvider(),
+            context_provider=context_provider,
             execution_state_factory=ScreenplayExecutionStateFactory(),
             tool_catalog=InMemoryToolCatalog(()),
             output_repository=self._outputs,
@@ -516,7 +573,16 @@ class _CoreComposition:
             execution_lease_store=self._leases,
             execution_owner_id=self._runs.owner_id,
             execution_lease_duration_ms=self._runs.lease_duration_ms,
+            **kwargs,
         )
+
+    def create_response_judge_policies(self, request):
+        del request
+        return ()
+
+    def agent_role_registry_for_request(self, request):
+        del request
+        return None
 
     def bind_run_profile(self, request, options):
         del request
@@ -524,6 +590,9 @@ class _CoreComposition:
 
     def release_core(self, core) -> None:
         del core
+
+    def observe_event(self, event) -> None:
+        del event
 
 
 def _core_composition(db, gateway):
@@ -853,6 +922,43 @@ async def _project_and_session(db):
     )
     session = await projects.ensure_current_session(workspace["project"]["id"])
     return projects, workspace, session
+
+
+async def test_deterministic_evidence_part_creates_no_child_run(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=object(),  # unused by deterministic evidence
+    )
+    before = await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    )
+
+    output = await executor.execute(
+        task={
+            "id": "task-deterministic-evidence",
+            "projectId": workspace["project"]["id"],
+            "sessionId": session["id"],
+            "turnId": "turn-deterministic-evidence",
+            "rootRunId": "root-deterministic-evidence",
+            "targetRole": "sourceAnalysis",
+            "sourceRevisionRefs": [],
+            "units": [],
+        },
+        unit={
+            "id": "evidence:main",
+            "kind": "collect_evidence",
+            "input": {},
+        },
+        runtime=object(),
+    )
+
+    assert output["evidenceDescriptor"]["projectId"] == workspace["project"]["id"]
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == before
 
 
 def _admission_plan(
@@ -1526,6 +1632,7 @@ async def test_final_response_composition_receives_only_public_candidate_facts(
         "projectId": "project-final-response-facts",
         "sessionId": 7,
         "turnId": "turn-final-response-facts",
+        "rootRunId": "root-final-response-facts",
         "targetRole": "screenplayDraft",
         "units": [
             {
@@ -2227,6 +2334,11 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     temp_db: DatabaseConnection,
 ):
     _, _, session = await _project_and_session(temp_db)
+    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
+        session_id=session["id"],
+        prompt="测试结构化输出 Root",
+        mode="agent",
+    ))
     malformed = '{"contentText":"角色说"少亲自来"。"}'
     runtime = _request(session["id"], "测试结构化输出").runtime
     runtime.options.update({
@@ -2244,9 +2356,10 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
             ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
         ],
     ])
+    composition = _core_composition(temp_db, gateway)
     result = await screenplay_structured_call.ScreenplayStructuredCallService(
         temp_db,
-        composition=_core_composition(temp_db, gateway),
+        composition=composition,
     ).run_json(
         runtime=runtime,
         session_id=session["id"],
@@ -2256,12 +2369,28 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="repair-test",
+        task_id="task-repair",
+        unit_id="unit-repair",
+        expected_part_key="answer",
+        lineage=_part_lineage(root_run_id),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
     )
 
     assert result.value == {"answer": "ok"}
+    child_context = ScreenplayAgentDomainContext.from_core_context(
+        composition.last_request.domain_context
+    )
+    assert (
+        child_context.task_id,
+        child_context.unit_id,
+        child_context.expected_part_key,
+    ) == ("task-repair", "unit-repair", "answer")
+    assert ScreenplayToolLoopPolicy().should_plan(
+        composition.last_request,
+        PlanningCapabilities(),
+    ) is False
     assert [invocation.reasoning_mode for invocation in gateway.invocations] == [
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
@@ -2273,13 +2402,19 @@ async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
     assert gateway.calls[1][0][-2].content == malformed
     assert "question" not in str(gateway.calls[1][0][-2].content)
     assert await temp_db.fetch_one(
-        "SELECT status, binding_namespace, final_response "
+        "SELECT status, binding_namespace, final_response, parent_run_id, "
+        "root_run_id, delegation_id, agent_role, run_depth "
         "FROM ai_agent_runs WHERE id = ?",
         [result.run_id],
     ) == {
         "status": "done",
         "binding_namespace": "screenplay.agent.test",
         "final_response": "",
+        "parent_run_id": root_run_id,
+        "root_run_id": root_run_id,
+        "delegation_id": None,
+        "agent_role": "screenplay-part",
+        "run_depth": 1,
     }
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_events "
@@ -2324,6 +2459,7 @@ async def test_truncated_structured_output_is_never_repaired_or_replayed(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="truncated-output-test",
+            lineage=_part_lineage(),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -2364,6 +2500,7 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="slow-lease-test",
+        lineage=_part_lineage(),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -2376,6 +2513,74 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
         [result.run_id],
     ) == {
         "status": "done",
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+
+
+async def test_screenplay_ai_part_signal_persists_child_cancellation(
+    temp_db: DatabaseConnection,
+):
+    _, _, session = await _project_and_session(temp_db)
+    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
+        session_id=session["id"],
+        prompt="取消 Child Root",
+        mode="agent",
+    ))
+
+    class BlockingGateway(_ModelGateway):
+        def __init__(self, api_key: str) -> None:
+            super().__init__(api_key)
+            self.started = asyncio.Event()
+            self.never = asyncio.Event()
+
+        async def stream(self, messages, invocation, signal=None):
+            del messages, invocation, signal
+            self.started.set()
+            await self.never.wait()
+            raise AssertionError("canceled child model call resumed")
+
+    gateway = BlockingGateway("secret")
+    signal = asyncio.Event()
+    call = asyncio.create_task(
+        screenplay_structured_call.ScreenplayStructuredCallService(
+            temp_db,
+            composition=_core_composition(temp_db, gateway),
+        ).run_json(
+            runtime=_request(session["id"], "取消当前 Part").runtime,
+            session_id=session["id"],
+            prompt="取消当前 Part",
+            system_instruction="只输出 JSON",
+            user_payload={},
+            binding_namespace="screenplay.agent.test",
+            binding_aggregate_id="project-test",
+            binding_command_id="cancel-child-test",
+            lineage=_part_lineage(root_run_id),
+            phase="screenplay_test",
+            repair_instruction="修复 JSON",
+            validate=lambda value: value,
+            signal=signal,
+        )
+    )
+    await gateway.started.wait()
+    signal.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    child = await temp_db.fetch_one(
+        "SELECT status, parent_run_id, root_run_id, delegation_id, agent_role, "
+        "run_depth, execution_owner_id, lease_expires_at_ms "
+        "FROM ai_agent_runs WHERE parent_run_id = ?",
+        [root_run_id],
+    )
+    assert child == {
+        "status": "canceled",
+        "parent_run_id": root_run_id,
+        "root_run_id": root_run_id,
+        "delegation_id": None,
+        "agent_role": "screenplay-part",
+        "run_depth": 1,
         "execution_owner_id": None,
         "lease_expires_at_ms": None,
     }
@@ -2410,6 +2615,7 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="thinking-option-test",
+        lineage=_part_lineage(),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -2464,6 +2670,7 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="failure-diagnostic-test",
+            lineage=_part_lineage(),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -2504,6 +2711,7 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="reasoning-json-test",
+        lineage=_part_lineage(),
         phase="screenplay_intent_planning",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -2542,6 +2750,7 @@ async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="empty-json-test",
+            lineage=_part_lineage(),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -2589,6 +2798,7 @@ async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="invalid-json-test",
+            lineage=_part_lineage(),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -2621,6 +2831,7 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="body-isolation-test",
+        lineage=_part_lineage(),
         phase="screenplay_episode_generation",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -3187,6 +3398,7 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
         "turnId": "turn-formal-evidence-checkpoint",
+        "rootRunId": "root-formal-evidence-checkpoint",
         "targetRole": "screenplayDraft",
         "units": [
             {
@@ -3292,6 +3504,7 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
         "turnId": "turn-visible-scene-parts",
+        "rootRunId": "root-visible-scene-parts",
         "targetRole": "screenplayDraft",
         "units": [{
             "id": "evidence:1",
@@ -3397,6 +3610,7 @@ async def test_review_dimension_parts_aggregate_host_side(
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
         "turnId": "turn-review-dimensions",
+        "rootRunId": "root-review-dimensions",
         "targetRole": "review",
         "units": [{
             "id": "review-input:1",
@@ -3489,6 +3703,7 @@ async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
         "turnId": "turn-failed-review-dimension",
+        "rootRunId": "root-failed-review-dimension",
         "targetRole": "review",
         "units": [{
             "id": "review-input:1",
@@ -3545,6 +3760,7 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
         "projectId": workspace["project"]["id"],
         "sessionId": session["id"],
         "turnId": "turn-scene-list-sections",
+        "rootRunId": "root-scene-list-sections",
         "targetRole": "sceneList",
         "units": [{
             "id": "document:evidence",
