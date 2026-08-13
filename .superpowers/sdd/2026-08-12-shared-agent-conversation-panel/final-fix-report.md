@@ -265,6 +265,77 @@ Base: `1676a2ab5c43581bdaa4a185aa10496a3a4edf88`.
   successful session-deletion eviction, and deleted-session tombstones; there is
   no magic item cap or process-global singleton source of truth.
 
+## Scoped final-review root-fix wave
+
+Second-wave base: `491532edee56381e39b03b0f09d1b396d3f2d208`.
+The approved seven findings were independently reproduced before their fixes;
+this wave added no route, schema, provider/PurrA contract, public runtime event,
+or Agent execution semantic.
+
+1. **Recovered Book Run settlement ownership.** RED deferred R1's terminal
+   Conversation refetch and demonstrated that queue release could start R2
+   before R1's late `commitSettled` replaced the runtime. GREEN retains a
+   `recovered-run:<runId>` control owner through projection and commits only
+   when `{sessionId, runtimeRevision, expectedRunId}` still owns the runtime.
+   The behavior regression is in `conversationSessionLifecycle.test.ts`; the
+   production owner check is consumed by `AiPanel/index.tsx`.
+2. **Immutable Setting proposal CAS.** RED for character, entity, and
+   background accepted a journal-owned occurrence after the target had changed
+   concurrently; a replay with the same proposal/resolution metadata but
+   different snapshots or final mutation was also falsely acknowledged.
+   GREEN validates immutable `before/proposed`, current target, and the exact
+   UI-reviewed paragraph/meta composition in the same
+   cancellation-linearizable transaction as target/history/resolution writes.
+   A server-computed canonical SHA-256 over target identity, journal-owned
+   `before/proposed`, and the reviewed final mutation is stored in the existing
+   resolution overlay and participates in the monotonic resolution CAS.
+   Forged snapshots, arbitrary finals, concurrent changes, and conflicting
+   replay bodies return 409 before setting/history/memory side effects; mixed
+   accept/reject, empty-paragraph composition, and identical replay for all
+   three target kinds are covered.
+3. **Shared product-owner deletion.** RED showed Book active Runs, claimed
+   Writing requests, direct-owner LongTasks, Screenplay Operations, and an
+   active child reachable only through a terminal root could survive or bypass
+   deletion. GREEN computes the full recursive Run owner set under one
+   cancellation-linearizable write transaction, rejects active Run/request/
+   LongTask/Operation ownership, and unlinks or deletes terminal reports,
+   receipts, conversations, memories, artifacts, work items, tasks, operations,
+   and owner rows. `before_submit` takes the same lock and rechecks the live
+   session, so claim/delete/submit has one winner. The Screenplay aggregate
+   deletion joins its existing outer CAS transaction instead of nesting a
+   second linearizable transaction.
+4. **Screenplay hydration action identity.** RED mounted A, switched to B with
+   deferred hydration, then exercised real Enter, Send, and history editor
+   submission. GREEN assigns `{projectId, sessionId, loadEpoch}` identity,
+   keeps per-session drafts, disables submit while initializing, and has the
+   Screenplay domain action reject send/edit both before and after async
+   truncation when its token is stale. The shared controller remains a generic
+   mapping boundary.
+5. **Legacy Book root reconciliation.** RED left an unbound legacy terminal
+   Book Run unmaterialized while a colliding product Run had to remain
+   excluded. GREEN recognizes legacy roots only from the authoritative positive
+   Book session scope (`book_id` plus `chapter|setting`) or the modern Writing
+   binding. Restart/monitor reconciliation materializes Book holes without
+   importing product-specific state into the generic Conversation contract.
+6. **Explicit-memory reactivation.** RED kept a repeated explicit remember
+   command archived and bound to its deleted source after history truncation.
+   GREEN marks automatic source deletion as
+   `source_type='conversation_truncated'` in the same transaction and permits
+   only that tombstone to reactivate/rebind the existing fingerprint. A user
+   archive remains `source_type='conversation'` and cannot be revived by a new
+   command, even if its source is later removed.
+7. **SettingDiff provider owner eviction.** RED left session A active when A
+   was deleted and never advanced queued same-entity session B. GREEN evicts
+   active, queued, resolved, and command-latch ownership by persisted session,
+   tombstones late A occurrences, and activates the next valid B occurrence.
+   The event is dispatched only from the successful durable history-deletion
+   callback; tab close and failed deletion do not evict.
+
+Focused second-wave evidence includes 114 backend transaction/recovery/CAS
+tests, 20 frontend state-machine and mounted interaction tests, the 52-test
+architecture boundary gate, and production TypeScript typecheck. All are also
+part of the mandatory full gate below.
+
 ## Verification
 
 Fresh verification from the final working tree:
@@ -274,10 +345,11 @@ Fresh verification from the final working tree:
   - model contracts: 12 passed;
   - Screenplay acceptance: 118 passed;
   - TypeScript typecheck: passed;
-  - mandatory unit/mounted behavior: 321 passed;
-  - proposal/receipt/recovery projection: 27 passed;
-  - full backend: 1479 passed, 4 skipped.
-- `npm run build:web`: PASS (1087 modules transformed; only the existing chunk
+  - mandatory unit/mounted behavior: 323 passed;
+  - proposal/receipt/recovery projection: 29 passed;
+  - Screenplay session/load-epoch lifecycle: 2 passed;
+  - full backend: 1500 passed, 4 skipped.
+- `npm run build:web`: PASS (1088 modules transformed; only the existing chunk
   size advisory).
 - `git diff --check`: PASS.
 - Focused final local-save/frontier/deletion suite: 67 passed.
@@ -319,3 +391,9 @@ used in this wave.
 
 Both commits descend from base
 `1676a2ab5c43581bdaa4a185aa10496a3a4edf88`.
+
+The scoped final-review root-fix implementation is
+`deab29a` (`fix(agent): close final owner lifecycle races`) and descends from
+second-wave base `491532edee56381e39b03b0f09d1b396d3f2d208`.
+This updated evidence report is its immediate report-only descendant; the final
+handoff includes that exact SHA.
