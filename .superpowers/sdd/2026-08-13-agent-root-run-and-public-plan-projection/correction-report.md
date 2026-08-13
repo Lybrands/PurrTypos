@@ -441,3 +441,35 @@ the repository virtualenv are pre-existing and non-failing.
 The credential-skipped real-provider Screenplay E2E cases remain RELEASE
 BLOCKERS, not passes. This wave did not run the full gate or claim live-provider
 coverage.
+
+## Minor follow-up — null-Run request results require an exact request id
+
+Implementation commit: `dc73fe9 fix(agent): require exact pre-run request ownership`.
+
+RED:
+
+```bash
+node --experimental-strip-types --test src/agent-runtime/chunkHandlers.test.ts
+```
+
+Result: exit 1, 27 passed and 2 failed. With no current request id, foreign
+pre-Run canceled and rejected results incorrectly settled as canceled/failed.
+
+The null-Run branch now accepts a request result only when both the expected and
+result request ids are non-empty and exactly equal. Missing current identity and
+non-matching identity both fail closed; existing legitimate tests explicitly
+provide the matching request id.
+
+GREEN verification:
+
+```text
+chunkHandlers.test.ts                              29 passed
+chunkReplay.test.cjs                               11 passed
+useChatSubmit.behavior.test.mjs                    18 passed
+npm run typecheck                                  exit 0
+git diff --check                                   exit 0
+```
+
+Files: `src/agent-runtime/rootOwnership.ts` and
+`src/agent-runtime/chunkHandlers.test.ts`. No compatibility fallback, backend,
+schema, repository, product branch, or UI ownership state was added.
