@@ -228,3 +228,216 @@ module warnings are pre-existing and non-failing.
 The credential-skipped real-provider Screenplay E2E cases documented by the
 earlier verification remain RELEASE BLOCKERS, not passes. This correction wave
 did not run the full gate or claim live-provider coverage.
+
+---
+
+# Residual Root terminal ownership correction
+
+## Status and scope
+
+PASS for the focused residual correction wave. Implementation commit:
+`156c2ed fix(agent): reject foreign terminal envelopes`.
+
+This wave changes only shared frontend/runtime transport behavior and focused
+tests. It does not touch `packages/purra/**`, backend production code,
+migrations, schema, repositories, or later Novel/Screenplay business plans. It
+adds no Writing/Screenplay branch and no second UI ownership state.
+
+## Important — terminal envelopes must obey the authoritative Root binding
+
+### RED
+
+The initial reducer matrix was added before the production filter:
+
+```bash
+node --experimental-strip-types --test src/agent-runtime/chunkHandlers.test.ts
+```
+
+Observed result: exit 1, 16 passed and 7 failed. A bound Root accepted foreign
+`failed`, `blocked`, `done`, and `canceled` Run results. The foreign outcomes
+settled the Root, foreign final text replaced the Root response, and cancellation
+changed the Root plan/terminal state. An unbound non-null `requestResult` also
+failed to establish Root identity, while conflicting bound canceled/rejected
+request results settled the existing Root.
+
+Production-shaped transport and host-control regressions were then exercised:
+
+```bash
+node --test src/Workspace/AiPanel/hooks/useChatSubmit.behavior.test.mjs
+```
+
+Observed result: exit 1, 16 passed and 2 failed. `backendApi` treated a foreign
+failed Run as the stream terminal, created an error report, and skipped Root
+snapshot recovery. `useChatSubmit` persisted and unsubscribed the Root as failed
+before its own terminal arrived.
+
+The same-request pre-Run rule was added as a separate RED matrix:
+
+```bash
+node --experimental-strip-types --test src/agent-runtime/chunkHandlers.test.ts
+```
+
+Observed result: exit 1, 23 passed and 2 failed. Foreign `runId=null`
+`requestResult` canceled/rejected envelopes settled the current request even
+though their `requestId` did not match the runtime turn/request id.
+
+The no-receipt compatibility ownership closure was also RED before its fix:
+
+```bash
+node --experimental-strip-types --test src/agent-runtime/chunkHandlers.test.ts
+```
+
+Observed result: exit 1, 25 passed and 1 failed. The first compatible non-null
+Root `runResult` settled successfully but did not bind `conversationRunId`, so a
+late child terminal could still change the accumulator identity.
+
+Finally, the fail-closed check was tested against a mixed envelope carrying a
+Root-looking canonical delta plus a conflicting non-null `requestResult`:
+
+```bash
+node --experimental-strip-types --test src/agent-runtime/chunkHandlers.test.ts
+node --test src/Workspace/AiPanel/hooks/useChatSubmit.behavior.test.mjs
+```
+
+Observed results: reducer exit 1 with 26 passed and 1 failed; transport/host exit
+1 with 16 passed and 2 failed. The late terminal handlers rejected settlement,
+but canonical projection/listener delivery had already exposed the mixed
+envelope. This proved the ownership check had to run before all envelope
+projection and transport bookkeeping.
+
+### GREEN
+
+One small shared contract now distinguishes two responsibilities:
+
+- `resolveRootRunBinding` accepts the first authoritative non-terminal
+  `requestReceipt.runId`, accepts exact repeats, and refuses later rebinding;
+- `resolveTerminalRootOwnership` accepts a non-null `runResult` or
+  `requestResult` only when it establishes an unbound Root or matches the
+  existing Root;
+- a `runId=null` request result is accepted only before any Run exists and only
+  when its `requestId` matches the current request; a context without a known
+  request id retains the legacy direct-handler compatibility path;
+- a legacy Run result without a Run id remains compatible only before any Root
+  is bound or observed;
+- an accepted terminal Run/result establishes `conversationRunId` so late
+  terminals cannot mutate identity after settlement.
+
+The shared reducer preflights terminal ownership before request receipt mutation,
+canonical reduction, host projection, or generic terminal handling. `backendApi`
+does the same before cursor/error/visible-output bookkeeping, error-report
+creation, `receivedTerminalChunk`, debug recording, or listener delivery.
+`useChatSubmit` checks the same contract before durable stop/terminal control,
+proposal refresh, persistence, or reducer dispatch. Thus a conflicting non-null
+request result is ignored as an entire envelope.
+
+Live and replay remain equivalent because `AgentChunkReplay` uses the same
+preflight reducer. The production-shaped paused Root replay now includes foreign
+failed/done terminals and preserves Root identity, canonical output, response,
+and paused plan. A true Root terminal still settles normally.
+
+Focused GREEN results:
+
+```text
+node --experimental-strip-types --test \
+  src/agent-runtime/chunkHandlers.test.ts \
+  src/agent-runtime/chunkReplay.test.cjs                    38 passed
+node --test \
+  src/Workspace/AiPanel/hooks/useChatSubmit.behavior.test.mjs
+                                                            18 passed
+node --test src/Workspace/AiPanel/hooks/modelRuntime.test.cjs
+                                                            14 passed
+```
+
+The `modelRuntime` suite intentionally preserved the legacy no-Run-id long-task
+terminal path. During iteration it first failed 13 passed / 1 failed, catching
+an over-strict helper revision; the final rule limits that compatibility to the
+unbound state and the suite is green.
+
+Files:
+
+- `src/agent-runtime/rootOwnership.ts`
+- `src/agent-runtime/chunkHandlers/index.ts`
+- `src/agent-runtime/chunkHandlers/terminal.ts`
+- `src/agent-runtime/chunkHandlers.test.ts`
+- `src/agent-runtime/chunkReplay.test.cjs`
+- `src/services/backendApi.ts`
+- `src/Workspace/AiPanel/hooks/useChatSubmit.ts`
+- `src/Workspace/AiPanel/hooks/useChatSubmit.behavior.test.mjs`
+
+## Consolidated verification
+
+Frontend directly affected suites:
+
+```bash
+npm run test:unit
+npm run test:proposal-projection
+```
+
+Final results: 342 passed and 29 passed respectively; zero failures.
+
+Backend compatibility suites (no backend production files changed):
+
+```bash
+PURRTYPOS_PYTHON=/Users/liuyubin/Lybrand_project/PurrTypos/.venv/bin/python \
+  node scripts/run-backend-tests.cjs \
+  backend/tests/test_agent_run_queries.py \
+  backend/tests/test_agent_delegation_service.py \
+  backend/tests/test_writing_chat_request_routes.py
+```
+
+Result: exit 0, 50 passed in 5.25s. The first invocation without
+`PURRTYPOS_PYTHON` exited before test collection because the worktree runner
+could not discover pytest; the explicit repository virtualenv invocation passed.
+
+Typecheck:
+
+```bash
+npm run typecheck
+```
+
+Result: exit 0.
+
+Architecture boundary gate:
+
+```bash
+PURRTYPOS_PYTHON=/Users/liuyubin/Lybrand_project/PurrTypos/.venv/bin/python \
+  npm run check:agent-refactor-boundaries
+```
+
+Result: exit 0, 53 passed in 1.29s. As above, an initial invocation without the
+explicit Python path stopped before collection; the corrected command passed.
+
+Formatting:
+
+```bash
+git diff --check
+```
+
+Result: exit 0.
+
+Per the correction brief, the full `check:agent-refactor` gate was not run.
+
+## Self-review
+
+- Foreign terminal envelopes are rejected before any canonical, persistence,
+  cancellation, proposal, recovery-cursor, diagnostic, or settlement effect.
+- `requestReceipt` remains a non-terminal authoritative Root binding;
+  `requestResult` remains terminal and follows the explicit null/non-null matrix.
+- The helper contains no transport, UI, Writing, or Screenplay state. Existing
+  `conversationRunId`, request id, and persisted receipt/root bindings are reused.
+- Plain generic `done`/`error` and the unbound legacy no-Run-id Ask/long-task
+  paths remain compatible; once a Root exists, unidentified terminals fail
+  closed.
+- Root todo events remain the only public plan source. No product profile or
+  router split was introduced.
+- The implementation commit contains only the eight focused files listed above.
+
+## Concerns and release blockers
+
+No scoped code blocker remains. npm mirror-key warnings, Node typeless-module
+warnings, React test warnings, and the need to point worktree backend commands at
+the repository virtualenv are pre-existing and non-failing.
+
+The credential-skipped real-provider Screenplay E2E cases remain RELEASE
+BLOCKERS, not passes. This wave did not run the full gate or claim live-provider
+coverage.
