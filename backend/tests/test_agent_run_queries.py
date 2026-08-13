@@ -61,12 +61,18 @@ async def temp_db(tmp_path: Path):
     set_db(db)
     checkpoint_store = SqliteCheckpointStore(db)
     output_repository = SqliteAgentOutputRepository(db)
+    role_registry = build_writing_agent_role_registry()
+
+    def agent_role_registry_for_request(request):
+        assert request.domain_context.namespace == "purrtypos.writing"
+        return role_registry
+
     set_agent_composition(SimpleNamespace(
         checkpoint_store=checkpoint_store,
         output_repository=output_repository,
         delegation_repository=SqliteDelegationRepository(db),
         execution_lease_store=SqliteExecutionLeaseStore(db),
-        agent_role_registry=build_writing_agent_role_registry(),
+        agent_role_registry_for_request=agent_role_registry_for_request,
     ))
     try:
         yield db

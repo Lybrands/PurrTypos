@@ -161,15 +161,8 @@ class AgentRunService:
         planner_agent_role_guidance: dict[str, dict[str, str]] = {}
         delegation_adapter = None
         if can_delegate:
-            registry_for_request = getattr(
-                composition,
-                "agent_role_registry_for_request",
-                None,
-            )
-            role_registry = (
-                registry_for_request(request)
-                if callable(registry_for_request)
-                else composition.agent_role_registry
+            role_registry = composition.agent_role_registry_for_request(
+                request
             )
             planner_agent_role_guidance = {
                 definition.id: {
