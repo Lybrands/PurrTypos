@@ -303,7 +303,7 @@ async def test_request_id_replay_cannot_change_api_key_credential(receipt_app):
     assert "different-secret" not in stored["request_digest"]
 
 
-async def test_replan_cannot_rewrite_completed_writing_step_or_create_new_root(
+async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
     receipt_app,
     monkeypatch,
 ):
@@ -369,6 +369,9 @@ async def test_replan_cannot_rewrite_completed_writing_step_or_create_new_root(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
+            # Approved contract deviation: Core rejects this completed-id
+            # rewrite by retaining immutable history, without surfacing a
+            # planner validation error to the Writing layer.
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
@@ -479,13 +482,27 @@ async def test_replan_cannot_rewrite_completed_writing_step_or_create_new_root(
     assert planner_round == 2
     assert len(plans) >= 2
     assert [
-        (step["id"], step["title"], step["status"])
+        (
+            step["id"],
+            step["title"],
+            step["type"],
+            step["executor"],
+            step["status"],
+        )
         for step in plans[-1]["steps"]
     ] == [
-        ("inspect-current-chapter", "检查当前章节", "done"),
+        (
+            "inspect-current-chapter",
+            "检查当前章节",
+            "read",
+            "tool",
+            "done",
+        ),
         (
             "shape-wind-sound-atmosphere",
             "围绕风声调整弄堂氛围",
+            "review",
+            "model",
             "running",
         ),
     ]
