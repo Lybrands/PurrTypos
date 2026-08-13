@@ -8,6 +8,10 @@ const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.c
 const { AgentChunkReplay } = loadTypeScriptModule(
   path.join(__dirname, 'chunkReplay.ts'),
 )
+const {
+  dispatchAgentChunk,
+  initialAgentAccumulator,
+} = loadTypeScriptModule(path.join(__dirname, 'chunkHandlers/index.ts'))
 
 const model = {
   id: 'model-1',
@@ -39,6 +43,42 @@ const canonical = (runId, sequence, overrides = {}) => ({
   emittedAt: `2026-08-12T08:00:${String(sequence).padStart(2, '0')}+00:00`,
   ...overrides,
 })
+
+const reduceLive = (seed, chunks) => {
+  let messages = [
+    { role: 'user', content: seed.userContent },
+    {
+      role: 'assistant',
+      content: '',
+      model: seed.model,
+      turnStartedAt: seed.turnStartedAt,
+    },
+  ]
+  const context = {
+    acc: initialAgentAccumulator({
+      sessionId: seed.sessionId,
+      userText: seed.userContent,
+      model: seed.model,
+      turnStartedAt: seed.turnStartedAt,
+    }),
+    sessionId: seed.sessionId,
+    modelIdentity: { configId: model.id, name: seed.model || model.name },
+    host: {
+      readMessages: () => messages,
+      replaceMessages: (next) => { messages = next },
+      scheduleCommit: (updater) => { messages = updater(messages) },
+      flushCommits: () => undefined,
+      setRunning: () => undefined,
+      isVisible: () => true,
+      onHostChunk: () => undefined,
+      onSettled: () => undefined,
+    },
+    persistConversation: false,
+    now: () => performance.now(),
+  }
+  chunks.forEach((chunk) => dispatchAgentChunk(chunk, context))
+  return messages.at(-1)
+}
 
 test('business Agents replay the canonical chunk protocol through the shared reducer', () => {
   const replay = new AgentChunkReplay()
@@ -258,6 +298,113 @@ test('replay keeps the LLM public plan when Recipe progress arrives', () => {
       ['write-continuation', '撰写续篇', ['understand-source']],
     ],
   )
+})
+
+test('live and replay converge when Recipe progress interleaves Root plan events', () => {
+  const seed = {
+    turnId: 'turn-plan-ordering',
+    sessionId: 537,
+    userContent: '理解原作并续写',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const chunks = [
+    canonical('root-run-ordering', 1, {
+      payload: {
+        eventType: 'run.todos_updated',
+        data: {
+          title: '续写故事',
+          status: 'running',
+          steps: [{
+            id: 'understand-source',
+            title: '理解原作',
+            type: 'analyze',
+            status: 'done',
+          }, {
+            id: 'draft-continuation',
+            title: '撰写续篇',
+            type: 'write',
+            status: 'running',
+            dependsOn: ['understand-source'],
+          }],
+        },
+      },
+    }),
+    canonical('root-run-ordering', 2, {
+      payload: {
+        eventType: 'long_task.progress',
+        data: {
+          taskId: 'recipe-task-ordering',
+          taskTitle: 'Recipe 内部执行',
+          status: 'completed',
+          units: [{
+            id: 'validate',
+            title: '校验候选稿',
+            status: 'completed',
+            plannerStepId: 'draft-continuation',
+          }, {
+            id: 'publish',
+            title: '发布候选稿',
+            status: 'completed',
+            plannerStepId: 'draft-continuation',
+          }],
+        },
+      },
+    }),
+    canonical('root-run-ordering', 3, {
+      payload: {
+        eventType: 'run.todo_updated',
+        data: {
+          stepId: 'draft-continuation',
+          status: 'running',
+          step: {
+            id: 'draft-continuation',
+            title: '撰写续篇',
+            type: 'write',
+            status: 'done',
+            dependsOn: ['understand-source'],
+          },
+        },
+      },
+    }),
+    canonical('root-run-ordering', 4, {
+      kind: 'run.lifecycle',
+      payload: { status: 'done' },
+    }),
+  ]
+
+  const liveAssistant = reduceLive(seed, chunks)
+  const replay = new AgentChunkReplay()
+  chunks.forEach((chunk) => replay.dispatch(
+    seed,
+    chunk,
+    { cfg: model, appMessage },
+  ))
+  const replayedAssistant = replay.assistant(seed.turnId)
+
+  assert.deepEqual(replayedAssistant, liveAssistant)
+  assert.equal(replayedAssistant?.longTaskId, 'recipe-task-ordering')
+  const plan = replayedAssistant?.taskPlan
+  assert.deepEqual(
+    plan?.steps.map((step) => [
+      step.id,
+      step.title,
+      step.status,
+      step.dependsOn,
+    ]),
+    [
+      ['understand-source', '理解原作', 'done', undefined],
+      ['draft-continuation', '撰写续篇', 'done', ['understand-source']],
+    ],
+  )
+  assert.equal(plan?.runId, 'root-run-ordering')
+  assert.equal(plan?.title, '续写故事')
+  assert.equal(plan?.status, 'done')
+  const encodedPlan = JSON.stringify(plan)
+  assert.equal(encodedPlan.includes('Recipe'), false)
+  assert.equal(encodedPlan.includes('校验候选稿'), false)
+  assert.equal(encodedPlan.includes('发布候选稿'), false)
+  assert.equal(encodedPlan.includes('plannerStepId'), false)
 })
 
 test('replay keeps the Root Run public plan isolated from child Run events', () => {
