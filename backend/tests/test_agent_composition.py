@@ -1530,6 +1530,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
     monkeypatch: pytest.MonkeyPatch,
 ):
     chapter_text = "弄堂里没有雨声，只有晾衣竹竿在风里轻撞墙面。"
+    style_fact = "克制、寂静，以细微物声衬托空间感"
     await temp_db.execute(
         "INSERT INTO books (id, title) VALUES (?, ?)",
         ["book-replan", "重规划测试书"],
@@ -1548,6 +1549,10 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
         ["chapter-replan", _lexical(chapter_text)],
     )
+    await temp_db.execute(
+        "INSERT INTO book_style (book_id, tone) VALUES (?, ?)",
+        ["book-replan", style_fact],
+    )
     planner_payloads: list[dict[str, object]] = []
 
     async def _planner(_key, messages, _options, _provider, signal=None):
@@ -1558,14 +1563,14 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "根据当前章节证据提出氛围改写",
+                "goal": "根据书籍风格证据提出氛围改写",
                 "todos": [
                     {
-                        "id": "inspect-current-chapter",
-                        "title": "检查当前章节",
+                        "id": "inspect-book-style",
+                        "title": "检查书籍风格",
                         "type": "read",
                         "executor": "tool",
-                        "expectedTools": ["getChapterContent"],
+                        "expectedTools": ["getBookStyle"],
                         "riskLevel": "read",
                     },
                     {
@@ -1581,19 +1586,19 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         else:
             execution = payload["executionState"]
             assert execution["completedSteps"][0]["id"] == (
-                "inspect-current-chapter"
+                "inspect-book-style"
             )
-            assert chapter_text in json.dumps(
+            assert style_fact in json.dumps(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "利用无雨声的新事实调整氛围策略",
+                "goal": "利用克制寂静的风格证据调整氛围策略",
                 "todos": [{
-                    "id": "shape-silent-alley-atmosphere",
-                    "title": "围绕寂静重塑弄堂氛围",
+                    "id": "shape-restrained-alley-atmosphere",
+                    "title": "按克制风格重塑弄堂氛围",
                     "type": "review",
                     "executor": "model",
                     "expectedTools": [],
@@ -1621,7 +1626,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 assert [
                     item["function"]["name"]
                     for item in options.get("tools", [])
-                ] == ["getChapterContent"]
+                ] == ["getBookStyle"]
                 yield {
                     "choices": [{
                         "delta": {
@@ -1630,7 +1635,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                                 "id": "call-read-replan",
                                 "type": "function",
                                 "function": {
-                                    "name": "getChapterContent",
+                                    "name": "getBookStyle",
                                     "arguments": "{}",
                                 },
                             }],
@@ -1640,7 +1645,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }
                 return
             assert not options.get("tools")
-            assert chapter_text in json.dumps(messages, ensure_ascii=False)
+            assert style_fact in json.dumps(messages, ensure_ascii=False)
             yield {
                 "choices": [{
                     "delta": {"content": "改写应以寂静和轻微碰撞声为核心。"},
@@ -1693,10 +1698,10 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         (step["id"], step["title"], step["status"])
         for step in latest["steps"]
     ] == [
-        ("inspect-current-chapter", "检查当前章节", "done"),
+        ("inspect-book-style", "检查书籍风格", "done"),
         (
-            "shape-silent-alley-atmosphere",
-            "围绕寂静重塑弄堂氛围",
+            "shape-restrained-alley-atmosphere",
+            "按克制风格重塑弄堂氛围",
             "running",
         ),
     ]
