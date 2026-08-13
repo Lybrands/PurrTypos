@@ -388,6 +388,21 @@ unlinks reports, removes favorites, archives Conversation memory, and strips
 retained task session metadata in the same transaction. The combined related
 backend suites pass 164/164.
 
+The final scoped artifact review added three last REDs. A restart deleted a
+native project's durable Screenplay Artifact family; a Task/WorkItem reference
+could transfer physical deletion across owners; and the production planner's
+NULL-session `screenplay.agent.turn.response` binding escaped legacy retirement.
+GREEN removes the runtime schema's global Screenplay Artifact purge, requires
+each physically deleted Task and WorkItem to match the exact product namespace
+and owner, and adds the response binding to the legacy project's exact aggregate
+whitelist. Restart tests preserve native Artifact/batch/claim/projection rows,
+still remove the legacy owner's rows, cancel the exact legacy response Run, and
+preserve a native response Run with the same namespace. The binding-only branch
+requires `session_id IS NULL`; session-owned roots are selected exclusively by
+the legacy project's session set, so a native session plus stale legacy binding
+cannot be reclassified. The focused owner, migration, Artifact, and boundary
+suites pass 82/82.
+
 ## Verification
 
 Fresh verification from the final working tree:
@@ -400,7 +415,7 @@ Fresh verification from the final working tree:
   - mandatory unit/mounted behavior: 323 passed;
   - proposal/receipt/recovery projection: 29 passed;
   - Screenplay session/load-epoch lifecycle: 2 passed;
-  - full backend: 1521 passed, 4 skipped.
+  - full backend: 1522 passed, 4 skipped.
 - `npm run build:web`: PASS (1088 modules transformed; only the existing chunk
   size advisory).
 - `git diff --check`: PASS.
@@ -451,6 +466,10 @@ second-wave base `491532edee56381e39b03b0f09d1b396d3f2d208`.
 The final independent-review implementation is
 `b9a9f37b00b135621fe8a4424663a463b95d7976`
 (`fix(agent): reconcile legacy owner cleanup`) and descends from follow-up base
-`91f21217e5e6a18aa0238bd225ea8028eca70eb7`. This updated evidence report is
-its immediate report-only descendant; the final handoff includes that exact
-SHA.
+`91f21217e5e6a18aa0238bd225ea8028eca70eb7`.
+
+The final artifact/owner retirement implementation is
+`3069e442a1e36d7b1deafe6a18b3f2057c7dab93`
+(`fix(screenplay): preserve native owner artifacts`) and descends from
+`4bb5b833c7c975e8ce4897f3383de2e9f11c62e3`. This report is its immediate
+report-only descendant; the final handoff includes that exact SHA.
