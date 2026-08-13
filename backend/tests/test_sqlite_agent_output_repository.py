@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest_asyncio
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from purra.contracts import ModelFinishReason, RunCreateParams, RunStatus
-from purra.errors import ContractViolationError
+from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.events import AgentEvent, CoreEventType
 from purra.output import (
     AgentOutputEventDraft,
@@ -55,12 +56,19 @@ async def output_db(tmp_path: Path):
         await db.close()
 
 
-def _repository(db, *, run_repository=None, domain_projector=None):
+def _repository(
+    db,
+    *,
+    run_repository=None,
+    domain_projector=None,
+    run_commit_projector=None,
+):
     SqliteAgentOutputRepository, _port = _repository_types()
     return SqliteAgentOutputRepository(
         db,
         run_repository=run_repository,
         domain_projector=domain_projector,
+        run_commit_projector=run_commit_projector,
     )
 
 
@@ -97,6 +105,27 @@ def _delta(
         source=OutputSource.PROVIDER,
         channel=OutputChannel.FINAL,
         delta=text,
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+
+def _completed_commit(run_id: str) -> RunCommit:
+    return RunCommit(
+        terminal_status=RunStatus.DONE,
+        final_response="",
+        events=(AgentEvent(
+            type=CoreEventType.RUN_COMPLETED,
+            run_id=run_id,
+            payload={"status": RunStatus.DONE.value},
+        ),),
+    )
+
+
+def _completed_draft(run_id: str) -> RunLifecycleOutputDraft:
+    return RunLifecycleOutputDraft(
+        source_event_key=f"run:{run_id}:done",
+        status=RunStatus.DONE,
+        payload={"status": RunStatus.DONE.value},
         occurred_at=datetime.now(timezone.utc),
     )
 
@@ -421,6 +450,219 @@ async def test_run_terminal_and_canonical_event_commit_together(output_db):
     assert run == {"status": RunStatus.DONE.value}
     assert await repository.list_events(run_id, after_sequence=0) == events
     assert legacy_terminal == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_root_projection_retries_the_complete_transaction_once(
+    output_db,
+):
+    class FailOnceProjector:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, projected_run_id, _commit):
+            self.calls += 1
+            await db.execute(
+                "INSERT INTO projection_test_effects (id) VALUES (?)",
+                [f"projection:{projected_run_id}"],
+            )
+            if self.calls == 1:
+                raise RunCommitProjectionError(
+                    "temporary projection failure",
+                    retryable=True,
+                )
+
+    db, run_id, runs = output_db
+    await db.execute("CREATE TABLE projection_test_effects (id TEXT PRIMARY KEY)")
+    projector = FailOnceProjector()
+    repository = _repository(
+        db,
+        run_repository=runs,
+        run_commit_projector=projector,
+    )
+    commit = _completed_commit(run_id)
+    draft = _completed_draft(run_id)
+
+    events = await repository.commit_run_lifecycle(run_id, commit, draft)
+
+    assert projector.calls == 2
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "done"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE source_event_key = ?",
+        [draft.source_event_key],
+    ) == {"count": 1}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM projection_test_effects WHERE id = ?",
+        [f"projection:{run_id}"],
+    ) == {"count": 1}
+    replay = await repository.commit_run_lifecycle(run_id, commit, draft)
+    assert replay == events
+    assert projector.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_permanent_retryable_projection_is_bounded_and_rolls_back(
+    output_db,
+):
+    class AlwaysTransientProjector:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, projected_run_id, _commit):
+            self.calls += 1
+            await db.execute(
+                "INSERT INTO projection_test_effects (id) VALUES (?)",
+                [f"projection:{projected_run_id}:{self.calls}"],
+            )
+            raise RunCommitProjectionError(
+                "persistent transient projection failure",
+                retryable=True,
+            )
+
+    db, run_id, runs = output_db
+    await db.execute("CREATE TABLE projection_test_effects (id TEXT PRIMARY KEY)")
+    projector = AlwaysTransientProjector()
+    repository = _repository(
+        db,
+        run_repository=runs,
+        run_commit_projector=projector,
+    )
+
+    with pytest.raises(
+        RunCommitProjectionError,
+        match="persistent transient",
+    ):
+        await repository.commit_run_lifecycle(
+            run_id,
+            _completed_commit(run_id),
+            _completed_draft(run_id),
+        )
+
+    assert projector.calls == 3
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "running"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE source_event_key = ?",
+        [f"run:{run_id}:done"],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM projection_test_effects WHERE id LIKE ?",
+        [f"projection:{run_id}:%"],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_projection_failure_runs_once_and_rolls_back(
+    output_db,
+):
+    class InvalidProjection:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, _run_id, _commit):
+            self.calls += 1
+            raise RuntimeError("invalid projection identity")
+
+    db, run_id, runs = output_db
+    projector = InvalidProjection()
+    repository = _repository(
+        db,
+        run_repository=runs,
+        run_commit_projector=projector,
+    )
+
+    with pytest.raises(
+        RunCommitProjectionError,
+        match="projector rejected",
+    ) as raised:
+        await repository.commit_run_lifecycle(
+            run_id,
+            _completed_commit(run_id),
+            _completed_draft(run_id),
+        )
+
+    assert projector.calls == 1
+    assert raised.value.retryable is False
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "running"}
+
+
+@pytest.mark.asyncio
+async def test_projection_retry_never_overwrites_a_concurrent_terminal_commit(
+    output_db,
+):
+    db, run_id, runs = output_db
+    competitor = _repository(db, run_repository=runs)
+    competing_task = None
+
+    class YieldToConcurrentTerminal:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, _run_id, _commit):
+            nonlocal competing_task
+            self.calls += 1
+            competing_task = asyncio.create_task(
+                competitor.commit_run_lifecycle(
+                    run_id,
+                    RunCommit(
+                        terminal_status=RunStatus.CANCELED,
+                        events=(AgentEvent(
+                            type=CoreEventType.RUN_CANCELED,
+                            run_id=run_id,
+                            payload={"status": RunStatus.CANCELED.value},
+                        ),),
+                    ),
+                    RunLifecycleOutputDraft(
+                        source_event_key=f"run:{run_id}:canceled",
+                        status=RunStatus.CANCELED,
+                        payload={"status": RunStatus.CANCELED.value},
+                        occurred_at=datetime.now(timezone.utc),
+                    ),
+                )
+            )
+            await asyncio.sleep(0)
+            raise RunCommitProjectionError(
+                "yield terminal ownership",
+                retryable=True,
+            )
+
+    projector = YieldToConcurrentTerminal()
+    repository = _repository(
+        db,
+        run_repository=runs,
+        run_commit_projector=projector,
+    )
+
+    with pytest.raises(ContractViolationError, match="terminal run"):
+        await repository.commit_run_lifecycle(
+            run_id,
+            _completed_commit(run_id),
+            _completed_draft(run_id),
+        )
+    assert competing_task is not None
+    await competing_task
+
+    assert projector.calls == 1
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "canceled"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS canceled, "
+        "SUM(CASE WHEN source_event_key = ? THEN 1 ELSE 0 END) AS done "
+        "FROM ai_agent_run_events WHERE run_id = ? AND kind = 'run.lifecycle'",
+        [f"run:{run_id}:done", run_id],
+    ) == {"canceled": 1, "done": 0}
 
 
 @pytest.mark.asyncio

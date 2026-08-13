@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import suppress
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     SqliteScreenplayOperationFinalizer,
 )
 from infrastructure.screenplay.agent_root_completion_projector import (
+    ScreenplayAgentRootCompletionError,
     ScreenplayAgentRootCompletionProjector,
 )
 from purra.contracts import (
@@ -51,7 +53,7 @@ from purra.contracts import (
 )
 from purra.ports import RunCommit
 from purra.api import AgentCore
-from purra.errors import ModelGatewayError
+from purra.errors import ModelGatewayError, RunCommitProjectionError
 from purra.long_tasks import LongTaskUnitResult, RecipeLongTaskDispatcher
 from purra.tools import InMemoryToolCatalog
 from domains.screenplay_agent.adapter import (
@@ -506,23 +508,53 @@ async def test_operation_finalization_rolls_back_every_write_on_failure(
     ) == {"count": 0}
 
 
-@pytest.mark.asyncio
-async def test_answer_projection_joins_root_transaction_and_replays(
-    screenplay_db,
-):
+async def _answer_projection_fixture(screenplay_db, suffix: str):
     projects = ScreenplayV2ProjectService(screenplay_db)
     workspace = await projects.create_project(
-        command_id="create-answer-projector-project",
+        command_id=f"create-answer-projector-{suffix}",
         request=CreateScreenplayV2ProjectRequest.model_validate({
-            "title": "Atomic answer root",
+            "title": f"Atomic answer root {suffix}",
             "format": "series",
             "source": {"type": "original"},
             "brief": {"approach": "人物驱动", "premise": "意外重逢"},
         }),
     )
     session = await projects.ensure_current_session(workspace["project"]["id"])
-    root_run_id = "run-atomic-answer-projection"
-    turn_id = "turn-atomic-answer-projection"
+    root_run_id = f"run-atomic-answer-{suffix}"
+    turn_id = f"turn-atomic-answer-{suffix}"
+    command_id = f"command-atomic-answer-{suffix}"
+    run_session_id = (
+        None if suffix == "null_session_id"
+        else 999_999 if suffix == "wrong_session_id"
+        else session["id"]
+    )
+    binding_project_id = (
+        None if suffix == "null_project_id"
+        else "wrong-project" if suffix == "wrong_project_id"
+        else workspace["project"]["id"]
+    )
+    binding_command_id = (
+        None if suffix == "null_command_id"
+        else "wrong-command" if suffix == "wrong_command_id"
+        else command_id
+    )
+    binding_attributes = (
+        {"domainNamespace": "purrtypos.screenplay"}
+        if suffix == "missing_profile"
+        else {
+            "agentProfile": "screenplay",
+            "domainNamespace": (
+                "wrong.domain"
+                if suffix == "wrong_domain"
+                else "purrtypos.screenplay"
+            ),
+        }
+    )
+    canonical_turn_id = (
+        None if suffix == "null_turn_id"
+        else "wrong-turn" if suffix == "wrong_turn_id"
+        else turn_id
+    )
     await screenplay_db.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, binding_namespace, "
@@ -530,17 +562,31 @@ async def test_answer_projection_joins_root_transaction_and_replays(
         "VALUES (?, ?, 'running', 'agent', ?, ?, ?, ?, ?)",
         [
             root_run_id,
-            session["id"],
+            run_session_id,
             "解释当前项目",
             "screenplay.conversation_turn",
-            workspace["project"]["id"],
-            "command-atomic-answer-projection",
-            json.dumps({
-                "agentProfile": "screenplay",
-                "domainNamespace": "purrtypos.screenplay",
-            }),
+            binding_project_id,
+            binding_command_id,
+            json.dumps(binding_attributes),
         ],
     )
+    if suffix != "missing_turn_event":
+        await screenplay_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+            "source, kind, channel, visibility, occurred_at, emitted_at, "
+            "source_event_key) VALUES (?, 'run.started', ?, ?, ?, 1, "
+            "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?, ?, ?)",
+            [
+                root_run_id,
+                '{"status":"running"}',
+                f"event-atomic-answer-{suffix}",
+                canonical_turn_id,
+                "2026-08-14T00:00:00+00:00",
+                "2026-08-14T00:00:00+00:00",
+                f"run:{root_run_id}:running",
+            ],
+        )
     await screenplay_db.execute(
         "INSERT INTO screenplay_agent_turns "
         "(id, project_id, session_id, command_id, status, user_content, "
@@ -549,11 +595,27 @@ async def test_answer_projection_joins_root_transaction_and_replays(
             turn_id,
             workspace["project"]["id"],
             session["id"],
-            "command-atomic-answer-projection",
+            command_id,
             "解释当前项目",
             root_run_id,
         ],
     )
+    return {
+        "rootRunId": root_run_id,
+        "turnId": turn_id,
+        "sessionId": session["id"],
+        "projectId": workspace["project"]["id"],
+        "commandId": command_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_projection_joins_root_transaction_and_replays(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "success")
+    root_run_id = identity["rootRunId"]
+    turn_id = identity["turnId"]
     projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
     commit = RunCommit(
         terminal_status=RunStatus.DONE,
@@ -581,6 +643,71 @@ async def test_answer_projection_joins_root_transaction_and_replays(
         "status": "completed",
         "assistant_content": "当前项目正在进行素材梳理。",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch",
+    (
+        "null_turn_id",
+        "wrong_turn_id",
+        "missing_turn_event",
+        "null_session_id",
+        "wrong_session_id",
+        "null_project_id",
+        "wrong_project_id",
+        "null_command_id",
+        "wrong_command_id",
+        "missing_profile",
+        "wrong_domain",
+    ),
+)
+async def test_answer_projection_fails_closed_on_root_identity_mismatch(
+    screenplay_db,
+    mismatch,
+):
+    identity = await _answer_projection_fixture(screenplay_db, mismatch)
+    root_run_id = identity["rootRunId"]
+
+    with pytest.raises(ScreenplayAgentRootCompletionError) as raised:
+        async with screenplay_db.transaction(cancellation_linearizable=True):
+            await ScreenplayAgentRootCompletionProjector(screenplay_db).project(
+                root_run_id,
+                RunCommit(
+                    terminal_status=RunStatus.DONE,
+                    final_response="不应提交",
+                ),
+            )
+
+    assert raised.value.retryable is False
+    assert await screenplay_db.fetch_one(
+        "SELECT status, assistant_content FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [identity["turnId"]],
+    ) == {"status": "planning", "assistant_content": ""}
+
+
+@pytest.mark.asyncio
+async def test_answer_projection_classifies_only_sqlite_transients_as_retryable(
+    screenplay_db,
+    monkeypatch,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "transient")
+
+    async def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(screenplay_db, "fetch_all", locked)
+    with pytest.raises(ScreenplayAgentRootCompletionError) as raised:
+        await ScreenplayAgentRootCompletionProjector(screenplay_db).project(
+            identity["rootRunId"],
+            RunCommit(
+                terminal_status=RunStatus.DONE,
+                final_response="稍后重试",
+            ),
+        )
+
+    assert raised.value.retryable is True
 
 
 @pytest.mark.asyncio
@@ -1365,13 +1492,13 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
 
 
 @pytest.mark.asyncio
-async def test_formal_business_projection_rolls_back_when_later_root_projector_fails(
+async def test_formal_root_retries_the_complete_business_projection_transaction(
     screenplay_db,
     monkeypatch,
 ):
     class RejectAfterScreenplayProjection:
         def __init__(self):
-            self.commit = None
+            self.calls = 0
 
         async def project(self, run_id, commit):
             binding = await screenplay_db.fetch_one(
@@ -1381,13 +1508,14 @@ async def test_formal_business_projection_rolls_back_when_later_root_projector_f
             if (
                 commit.terminal_status is not None
                 and binding == {"binding_namespace": "screenplay.conversation_turn"}
+                and commit.terminal_status.value == "done"
             ):
-                if (
-                    commit.terminal_status.value == "done"
-                    and self.commit is None
-                ):
-                    self.commit = commit
-                raise RuntimeError("injected later Root projection failure")
+                self.calls += 1
+                if self.calls == 1:
+                    raise RunCommitProjectionError(
+                        "injected later Root projection failure",
+                        retryable=True,
+                    )
 
     projects = ScreenplayV2ProjectService(screenplay_db)
     workspace = await projects.create_project(
@@ -1475,54 +1603,34 @@ async def test_formal_business_projection_rolls_back_when_later_root_projector_f
 
     try:
         await service.execute_turn(turn["id"], request.runtime)
+        snapshot = await service.get_snapshot(
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+        )
+        projected_turn = snapshot["turns"][0]
+        root = await screenplay_db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [projected_turn["rootRunId"]],
+        )
+        terminal_events = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+            "WHERE run_id = ? AND kind = 'run.lifecycle' "
+            "AND json_extract(payload_json, '$.status') = 'done'",
+            [projected_turn["rootRunId"]],
+        )
+        revision_count = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM screenplay_revisions "
+            "WHERE agent_task_id = ?",
+            [snapshot["tasks"][0]["id"]],
+        )
     finally:
         await composition.shutdown()
-
-    snapshot = await service.get_snapshot(
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-    )
-    projected_turn = snapshot["turns"][0]
-    root = await screenplay_db.fetch_one(
-        "SELECT status FROM ai_agent_runs WHERE id = ?",
-        [projected_turn["rootRunId"]],
-    )
-    terminal_events = await screenplay_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
-        "WHERE run_id = ? AND kind = 'run.lifecycle' "
-        "AND json_extract(payload_json, '$.status') = 'done'",
-        [projected_turn["rootRunId"]],
-    )
-    assert root == {"status": "running"}
-    assert terminal_events == {"count": 0}
-    assert projected_turn["status"] == "running"
-    assert snapshot["operations"][0]["status"] == "running"
-    assert await screenplay_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_revisions "
-        "WHERE agent_task_id = ?",
-        [snapshot["tasks"][0]["id"]],
-    ) == {"count": 0}
-
-    assert rejecting_projector.commit is not None
-    assert rejecting_projector.commit.terminal_status.value == "done"
-    retry_projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
-    for _attempt in range(2):
-        async with screenplay_db.transaction(cancellation_linearizable=True):
-            await retry_projector.project(
-                projected_turn["rootRunId"],
-                rejecting_projector.commit,
-            )
-    retried = await service.get_snapshot(
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-    )
-    assert retried["turns"][0]["status"] == "completed"
-    assert retried["operations"][0]["status"] == "succeeded"
-    assert await screenplay_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM screenplay_revisions "
-        "WHERE agent_task_id = ?",
-        [snapshot["tasks"][0]["id"]],
-    ) == {"count": 1}
+    assert rejecting_projector.calls == 2
+    assert root == {"status": "done"}
+    assert terminal_events == {"count": 1}
+    assert projected_turn["status"] == "completed"
+    assert snapshot["operations"][0]["status"] == "succeeded"
+    assert revision_count == {"count": 1}
 
 
 @pytest.mark.asyncio
