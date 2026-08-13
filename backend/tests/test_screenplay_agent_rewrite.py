@@ -26,6 +26,7 @@ from purra.contracts import (
     ReasoningMode,
     StepExecutor,
     StepType,
+    TaskPlan,
     TaskSpec,
     TaskStep,
 )
@@ -42,9 +43,11 @@ from purra.recovery import (
 )
 from application.screenplay_agent_service import (
     PlannedScreenplayIntent,
+    ResolvedScreenplayTask,
     ScreenplayAgentService,
     _task_failure,
 )
+from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.composition_factory import create_agent_composition
 from application.model_runtime import model_request_from_runtime
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
@@ -117,6 +120,7 @@ from domains.screenplay_agent.adapter import (
 )
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
+from purra.task_admission import ExecutionMode
 
 
 pytestmark = pytest.mark.asyncio
@@ -525,6 +529,11 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         source_revision_refs=("sprev-scenes", "sprev-brief"),
         episode_scene_ids={4: ("ep04_s01", "ep04_s02")},
         original_request="请创作第 4 集，并保留上一集的结尾伏笔。",
+        plan_bindings=(
+            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
+            ScreenplayPlanBinding("draft", ScreenplayPlanPhase.CREATION),
+            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
+        ),
     )
     compiled = compile_screenplay_manifest(**arguments)
     repeated = compile_screenplay_manifest(**arguments)
@@ -579,6 +588,11 @@ async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode(
         source_revision_refs=("sprev-draft",),
         episode_scene_ids={1: ("ep01_s01", "ep01_s02")},
         reviewed_draft_id="sprev-draft",
+        plan_bindings=(
+            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
+            ScreenplayPlanBinding("review", ScreenplayPlanPhase.REVIEW),
+            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
+        ),
     )
 
     dimension_parts = [
@@ -733,6 +747,245 @@ async def _project_and_session(db):
     )
     session = await projects.ensure_current_session(workspace["project"]["id"])
     return projects, workspace, session
+
+
+def _admission_plan(
+    *,
+    operation: str,
+    deliverable: str | None,
+    phases: tuple[str, ...],
+) -> TaskPlan:
+    steps = tuple(
+        TaskStep(
+            id=f"semantic-{index}",
+            title=f"语义步骤 {index}",
+            type=(StepType.READ if phase == "evidence" else StepType.WRITE),
+            executor=StepExecutor.MODEL,
+            depends_on=((f"semantic-{index - 1}",) if index > 1 else ()),
+        )
+        for index, phase in enumerate(phases, start=1)
+    )
+    return TaskPlan(
+        title="完成本轮剧本任务",
+        task_spec=TaskSpec(
+            goal="根据本轮要求完成剧本任务",
+            operation=operation,
+            instruction="根据本轮要求完成剧本任务",
+            deliverable=deliverable,
+            target={"screenplay": {
+                "version": 1,
+                "scope": {"kind": "current_stage"},
+                "stepBindings": [
+                    {"stepId": step.id, "phase": phase}
+                    for step, phase in zip(steps, phases, strict=True)
+                ],
+            }},
+        ),
+        steps=steps,
+    )
+
+
+def _root_request(
+    *,
+    project_id: str,
+    turn_id: str,
+    session_id: int,
+    content: str,
+) -> AgentRunRequest:
+    return AgentRunRequest(
+        messages=(AgentMessage(role="user", content=content),),
+        model=ModelRequest(provider="fixture", model="model"),
+        domain_context=ScreenplayAgentDomainContext(
+            project_id=project_id,
+            turn_id=turn_id,
+        ).to_core_context(),
+        session_id=session_id,
+        mode="agent",
+    )
+
+
+class _AdmissionResolver:
+    async def resolve(self, *, workspace, intent):
+        del workspace
+        if intent.action is ScreenplayIntentAction.REVIEW:
+            return ResolvedScreenplayTask(
+                target_role="review",
+                episode_numbers=(1,),
+                episode_scene_ids={1: ("scene-1",)},
+                reviewed_draft_id="sprev-draft",
+            )
+        return ResolvedScreenplayTask(
+            target_role=str(intent.requested_deliverable),
+            document_sections=("summary",),
+        )
+
+
+async def test_screenplay_profile_admits_answer_inline_without_operation(
+    temp_db: DatabaseConnection,
+):
+    _projects, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-admission-test",
+    )
+    turn = await repository.begin_turn(
+        command_id="answer-inline",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="当前项目进行到哪一步？",
+        stage_command=None,
+        runtime_profile={},
+    )
+    profile = ScreenplayAgentProfileExtension(
+        temp_db,
+        owner_id="screenplay-admission-test",
+        resolver=_AdmissionResolver(),
+    )
+    request = await profile.prepare_request(_root_request(
+        project_id=workspace["project"]["id"],
+        turn_id=turn["id"],
+        session_id=session["id"],
+        content="当前项目进行到哪一步？",
+    ))
+
+    decision = await profile.task_admission().evaluate(
+        request,
+        _admission_plan(
+            operation="answer",
+            deliverable=None,
+            phases=("evidence", "delivery"),
+        ),
+    )
+
+    assert decision.mode is ExecutionMode.INLINE
+    assert decision.execution_recipe is None
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operations"
+    ) == {"count": 0}
+
+
+async def test_product_composition_installs_the_screenplay_profile_extension(
+    temp_db: DatabaseConnection,
+):
+    composition = create_agent_composition(temp_db)
+    try:
+        assert isinstance(
+            composition.profile_extension("screenplay"),
+            ScreenplayAgentProfileExtension,
+        )
+    finally:
+        await composition.shutdown()
+
+
+async def test_screenplay_profile_rejects_a_root_request_outside_its_persisted_turn(
+    temp_db: DatabaseConnection,
+):
+    _projects, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-trusted-turn-test",
+    )
+    turn = await repository.begin_turn(
+        command_id="trusted-turn",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="持久化的用户请求",
+        stage_command=None,
+        runtime_profile={},
+    )
+    profile = ScreenplayAgentProfileExtension(
+        temp_db,
+        owner_id="screenplay-trusted-turn-test",
+    )
+
+    with pytest.raises(ValueError, match="scope does not match"):
+        await profile.prepare_request(_root_request(
+            project_id=workspace["project"]["id"],
+            turn_id=turn["id"],
+            session_id=session["id"],
+            content="伪造的另一条用户请求",
+        ))
+
+
+@pytest.mark.parametrize(
+    ("operation", "deliverable", "phases"),
+    (
+        ("create", "sourceAnalysis", ("evidence", "creation", "delivery")),
+        ("revise", "sourceAnalysis", ("evidence", "creation", "delivery")),
+        ("review", "review", ("evidence", "review", "delivery")),
+    ),
+)
+async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_private_recipe(
+    temp_db: DatabaseConnection,
+    operation: str,
+    deliverable: str,
+    phases: tuple[str, ...],
+):
+    _projects, workspace, session = await _project_and_session(temp_db)
+    project_id = workspace["project"]["id"]
+    stage_command = {
+        "kind": "stage_action",
+        "action": operation,
+        "targetRole": deliverable,
+        "scope": {"kind": "current_stage"},
+    }
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-admission-test",
+    )
+    turn = await repository.begin_turn(
+        command_id=f"formal-{operation}",
+        project_id=project_id,
+        session_id=session["id"],
+        content="完成正式任务",
+        stage_command=stage_command,
+        runtime_profile={},
+    )
+    profile = ScreenplayAgentProfileExtension(
+        temp_db,
+        owner_id="screenplay-admission-test",
+        resolver=_AdmissionResolver(),
+    )
+    request = await profile.prepare_request(_root_request(
+        project_id=project_id,
+        turn_id=turn["id"],
+        session_id=session["id"],
+        content="完成正式任务",
+    ))
+    hydrated = ScreenplayAgentDomainContext.from_core_context(
+        request.domain_context
+    )
+    plan = _admission_plan(
+        operation=operation,
+        deliverable=deliverable,
+        phases=phases,
+    )
+
+    first = await profile.task_admission().evaluate(request, plan)
+    replay = await profile.task_admission().evaluate(request, plan)
+
+    assert hydrated.stage_command == ScreenplayStageCommand.from_mapping(
+        stage_command
+    )
+    assert first.mode is ExecutionMode.DURABLE
+    assert replay.mode is ExecutionMode.DURABLE
+    assert first.covered_step_ids == tuple(step.id for step in plan.steps)
+    assert first.metadata["operationId"] == replay.metadata["operationId"]
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operations"
+    ) == {"count": 1}
+    recipe = first.execution_recipe
+    assert recipe is not None
+    assert {step.plan_step_id for step in recipe.steps} == set(
+        first.covered_step_ids
+    )
+    assert all(step.plan_step_id for step in recipe.steps)
+    serialized_metadata = json.dumps(
+        thaw_json_mapping(recipe.metadata),
+        ensure_ascii=False,
+    )
+    assert "planBindingDigest" in recipe.metadata
+    assert all(step.title not in serialized_metadata for step in plan.steps)
 
 
 async def test_turn_start_does_not_emit_a_host_authored_plan(
