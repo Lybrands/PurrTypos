@@ -7,7 +7,11 @@ import json
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from domains.screenplay_agent.contracts import ScreenplayIntent
+from domains.screenplay_agent.contracts import (
+    ScreenplayIntent,
+    ScreenplayPlanBinding,
+    ScreenplayPlanPhase,
+)
 from domains.screenplay_agent.manifest import (
     ScreenplayArtifactManifest,
     ScreenplayPartKind,
@@ -56,6 +60,7 @@ def compile_screenplay_manifest(
     base_revision_id: str | None = None,
     document_sections: Sequence[str] = (),
     original_request: str | None = None,
+    plan_bindings: Sequence[ScreenplayPlanBinding] = (),
 ) -> CompiledScreenplayManifest:
     scenes = {
         int(number): tuple(str(value).strip() for value in values)
@@ -87,6 +92,12 @@ def compile_screenplay_manifest(
         common=common,
         original_request=original_request,
     )
+    bindings = tuple(plan_bindings) or intent.plan_bindings
+    part_step_ids, binding_digest = _bind_parts_to_plan(
+        parts,
+        bindings,
+        target_role=target_role,
+    )
     canonical = {
         "artifactKind": target_role,
         "sourceRevisionRefs": sorted(set(source_revision_refs)),
@@ -115,7 +126,10 @@ def compile_screenplay_manifest(
         manifest=manifest,
         recipe=ExecutionRecipe(
             kind=f"screenplay.{target_role}",
-            steps=tuple(_recipe_step(part) for part in parts),
+            steps=tuple(
+                _recipe_step(part, plan_step_id=part_step_ids[part.id])
+                for part in parts
+            ),
             max_parallelism=parallelism,
             metadata={
                 "targetRole": target_role,
@@ -123,6 +137,7 @@ def compile_screenplay_manifest(
                 "manifestId": manifest.id,
                 "manifestDigest": manifest.digest,
                 "assemblyStrategy": strategy,
+                "planBindingDigest": binding_digest,
             },
         ),
     )
@@ -320,7 +335,7 @@ def _part_mapping(part):
     }
 
 
-def _recipe_step(part):
+def _recipe_step(part, *, plan_step_id):
     execution_kind = {
         ScreenplayPartKind.EVIDENCE: "collect_evidence",
         ScreenplayPartKind.DRAFT_SCENE: "generate_draft_scene",
@@ -337,11 +352,7 @@ def _recipe_step(part):
         executor="screenplay",
         depends_on=part.dependencies,
         input_ref=part.input_ref,
-        plan_step_id=(
-            "publish"
-            if part.kind is ScreenplayPartKind.FINAL_RESPONSE
-            else "create"
-        ),
+        plan_step_id=plan_step_id,
         max_attempts=(4 if part.kind in {
             ScreenplayPartKind.DRAFT_SCENE,
             ScreenplayPartKind.REVIEW_DIMENSION,
@@ -365,6 +376,58 @@ def _recipe_step(part):
             "retryPolicy": "bounded_attempts",
         },
     )
+
+
+def _bind_parts_to_plan(parts, bindings, *, target_role):
+    if not bindings or any(
+        not isinstance(binding, ScreenplayPlanBinding)
+        for binding in bindings
+    ):
+        raise ValueError("screenplay Manifest requires plan bindings")
+    by_phase = {
+        phase: tuple(
+            binding.step_id for binding in bindings if binding.phase is phase
+        )
+        for phase in ScreenplayPlanPhase
+    }
+    parts_by_phase = {
+        phase: tuple(
+            part for part in parts
+            if _part_phase(part, target_role=target_role) is phase
+        )
+        for phase in ScreenplayPlanPhase
+    }
+    mapped: dict[str, str] = {}
+    for phase in ScreenplayPlanPhase:
+        step_ids = by_phase[phase]
+        phase_parts = parts_by_phase[phase]
+        if bool(step_ids) != bool(phase_parts) or len(step_ids) > len(phase_parts):
+            raise ValueError(
+                f"screenplay plan phase {phase.value} cannot cover Manifest Parts"
+            )
+        for index, part in enumerate(phase_parts):
+            mapped[part.id] = step_ids[index * len(step_ids) // len(phase_parts)]
+    digest_source = [binding.to_mapping() for binding in bindings]
+    digest = "sha256:" + hashlib.sha256(json.dumps(
+        digest_source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return mapped, digest
+
+
+def _part_phase(part, *, target_role):
+    if part.kind is ScreenplayPartKind.EVIDENCE:
+        return ScreenplayPlanPhase.EVIDENCE
+    if part.kind is ScreenplayPartKind.REVIEW_DIMENSION:
+        return ScreenplayPlanPhase.REVIEW
+    if part.kind is ScreenplayPartKind.FINAL_RESPONSE:
+        return ScreenplayPlanPhase.DELIVERY
+    if part.kind is ScreenplayPartKind.VALIDATION and target_role == "review":
+        return ScreenplayPlanPhase.REVIEW
+    return ScreenplayPlanPhase.CREATION
 
 
 __all__ = [

@@ -5,24 +5,11 @@ from __future__ import annotations
 from functools import partial
 
 from application.agent_composition import AgentComposition
-from application.agent_profile_registry import (
-    AgentProfileRegistration,
-    StaticAgentProfileExtension,
+from application.screenplay_agent_profile import (
+    build_screenplay_profile_extension,
 )
-from application.screenplay_agent_context import ScreenplayAgentContextQuery
-from application.screenplay_v2_service import ScreenplayV2ProjectService
 from application.writing_agent_profile import build_writing_profile_extension
-from domains.screenplay_agent.adapter import (
-    ScreenplayDomainAdapter,
-    ScreenplayHostContextProvider,
-)
-from domains.screenplay_agent.agent_context import (
-    SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-)
-from infrastructure.screenplay import (
-    ScreenplayCandidateCompletionProjector,
-    build_screenplay_tool_catalog,
-)
+from infrastructure.screenplay import ScreenplayCandidateCompletionProjector
 
 
 class _ChainedRunCommitProjector:
@@ -34,26 +21,6 @@ class _ChainedRunCommitProjector:
             projected = await projector.project(run_id, event)
             if projected is not None:
                 raise TypeError("run commit projector must return None")
-
-
-def _build_screenplay_profile_extension(*, db, **_dependencies):
-    context_query = ScreenplayAgentContextQuery(db)
-    projects = ScreenplayV2ProjectService(db)
-
-    async def load_planning_context(project_id: str):
-        workspace = await projects.get_workspace(project_id)
-        return await context_query.planning_context(workspace)
-
-    return StaticAgentProfileExtension(AgentProfileRegistration(
-        id="screenplay",
-        domain_namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-        adapter=ScreenplayDomainAdapter(
-            tool_catalog=build_screenplay_tool_catalog(db=db),
-            context_provider=ScreenplayHostContextProvider(
-                planning_context_loader=load_planning_context,
-            ),
-        ),
-    ))
 
 
 def create_agent_composition(
@@ -78,7 +45,7 @@ def create_agent_composition(
         run_commit_projector=run_commit_projector,
         profile_extension_factories=(
             writing_extension_factory,
-            _build_screenplay_profile_extension,
+            build_screenplay_profile_extension,
         ),
         **kwargs,
     )
