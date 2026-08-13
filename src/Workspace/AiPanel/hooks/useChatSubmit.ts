@@ -737,7 +737,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     })
     unsubscribe = services.ai.onAiChunk(
       (chunk) => {
-        const runId = chunk.runId || chunk.runResult?.runId
+        const runId = chunk.requestReceipt?.runId
+          || chunk.runId
+          || chunk.runResult?.runId
         durableControl?.observeRunId(runId)
         const authoritativeStatus = chunk.runResult?.status
         const requestStatus = chunk.requestResult?.status

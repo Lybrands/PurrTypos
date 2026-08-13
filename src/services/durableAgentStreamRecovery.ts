@@ -31,6 +31,7 @@ export async function recoverDurableAgentStream(dependencies: {
   const seenEvents = new Set<number>()
   const seenProposals = new Set<string>()
   let longTaskDispatched = false
+  let requestReceiptEmitted = false
 
   while (!dependencies.isAborted()) {
     let snapshot: AiAgentRunSnapshot | undefined
@@ -50,6 +51,10 @@ export async function recoverDurableAgentStream(dependencies: {
             finalResponseExpected: false,
           })
           return 'terminal'
+        }
+        if (request?.runId && !requestReceiptEmitted) {
+          await dependencies.emit({ requestReceipt: request })
+          requestReceiptEmitted = true
         }
         if (latest.success && latest.data?.snapshot) {
           const candidate = latest.data.snapshot

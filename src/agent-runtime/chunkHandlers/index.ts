@@ -41,6 +41,8 @@ export function dispatchAgentChunk(
   chunk: AiStreamChunk,
   context: AgentChunkRuntimeContext,
 ): void {
+  const receiptRunId = String(chunk.requestReceipt?.runId || '').trim()
+  if (receiptRunId) context.acc.conversationRunId = receiptRunId
   if (handleCanonicalOutput(chunk, context)) return
   if (handleRequestResultTerminal(chunk, context)) return
   if (handleRunResultTerminal(chunk, context)) return

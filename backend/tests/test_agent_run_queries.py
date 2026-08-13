@@ -730,6 +730,121 @@ async def test_delegation_route_is_visible_in_parent_snapshot(temp_db):
     assert snapshot["delegations"]["items"][0]["agentTitle"] == "研究 Agent"
 
 
+async def test_legacy_writing_run_without_profile_attributes_keeps_roles(
+    temp_db,
+):
+    await temp_db.execute(
+        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
+        "VALUES (17, 'Legacy Writing session', 'chapter', 'book-legacy')"
+    )
+    run_id = await create_run(
+        temp_db,
+        session_id=17,
+        prompt="legacy writing run",
+        mode="agent",
+        binding=RunBinding(
+            namespace="writing.chat.request",
+            aggregate_id="17",
+            command_id="legacy-writing-request",
+        ),
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    delegated = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/delegations",
+        json_body={
+            "agentRole": "researcher",
+            "objective": "Keep legacy Writing roles available",
+        },
+    )
+    snapshot = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{run_id}",
+        json_body=None,
+    )
+
+    assert delegated.json()["success"] is True
+    assert delegated.json()["data"]["agentTitle"] == "研究 Agent"
+    assert snapshot.json()["success"] is True
+    assert snapshot.json()["data"]["delegations"]["items"][0][
+        "agentTitle"
+    ] == "研究 Agent"
+
+
+async def test_legacy_writing_run_uses_persisted_session_scope_without_binding(
+    temp_db,
+):
+    await temp_db.execute(
+        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
+        "VALUES (19, 'Legacy setting session', 'setting', 'book-setting')"
+    )
+    run_id = await create_run(
+        temp_db,
+        session_id=19,
+        prompt="legacy unbound writing run",
+        mode="agent",
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/delegations",
+        json_body={
+            "agentRole": "researcher",
+            "objective": "Resolve the persisted Writing session owner",
+        },
+    )
+
+    assert response.json()["success"] is True
+    assert response.json()["data"]["agentTitle"] == "研究 Agent"
+
+
+async def test_persisted_profile_conflict_between_attributes_and_binding_fails_closed(
+    temp_db,
+):
+    await temp_db.execute(
+        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
+        "VALUES (18, 'Conflicted Writing session', 'chapter', 'book-conflict')"
+    )
+    run_id = await create_run(
+        temp_db,
+        session_id=18,
+        prompt="conflicted profile",
+        mode="agent",
+        binding=RunBinding(
+            namespace="writing.chat.request",
+            aggregate_id="18",
+            command_id="conflicted-writing-request",
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+            },
+        ),
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/delegations",
+        json_body={
+            "agentRole": "researcher",
+            "objective": "must not trust conflicting profile attributes",
+        },
+    )
+
+    assert response.json()["success"] is False
+    assert "conflict" in response.json()["error"].lower()
+    assert await SqliteDelegationRepository(temp_db).list_for_parent(run_id) == ()
+
+
 async def test_delegation_route_rejects_roles_missing_from_business_registry(
     temp_db,
 ):
@@ -754,7 +869,11 @@ async def test_delegation_route_rejects_roles_missing_from_business_registry(
     assert snapshot["delegations"]["items"] == []
 
 
-async def _seed_screenplay_run(db: DatabaseConnection) -> str:
+async def _seed_screenplay_run(
+    db: DatabaseConnection,
+    *,
+    persist_profile_attributes: bool = True,
+) -> str:
     await db.execute(
         "INSERT OR IGNORE INTO ai_sessions (id, title, scope) "
         "VALUES (8, 'Screenplay session', 'screenplay')"
@@ -768,10 +887,13 @@ async def _seed_screenplay_run(db: DatabaseConnection) -> str:
             namespace="screenplay.agent.turn",
             aggregate_id="project-1",
             command_id="turn-1",
-            attributes={
-                "agentProfile": "screenplay",
-                "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-            },
+            attributes=(
+                {
+                    "agentProfile": "screenplay",
+                    "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+                }
+                if persist_profile_attributes else {}
+            ),
         ),
     )
 
@@ -822,6 +944,31 @@ async def test_screenplay_parent_rejects_writing_delegation_roles(temp_db):
     assert response.json()["success"] is False
     assert "does not support delegation" in response.json()["error"]
     assert stored == ()
+
+
+async def test_legacy_screenplay_parent_without_profile_attributes_stays_no_role(
+    temp_db,
+):
+    run_id = await _seed_screenplay_run(
+        temp_db,
+        persist_profile_attributes=False,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{run_id}/delegations",
+        json_body={
+            "agentRole": "researcher",
+            "objective": "must not infer Writing roles",
+        },
+    )
+
+    assert response.json()["success"] is False
+    assert "does not support delegation" in response.json()["error"]
+    assert await SqliteDelegationRepository(temp_db).list_for_parent(run_id) == ()
 
 
 @pytest.mark.parametrize(

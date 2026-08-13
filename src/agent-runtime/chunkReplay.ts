@@ -11,6 +11,8 @@ import {
 
 export interface AgentChunkTurnSeed {
   turnId: string
+  /** Root identity from a persisted Run snapshot, never from an event envelope. */
+  rootRunId?: string
   sessionId: number
   userContent: string
   model?: string
@@ -46,6 +48,8 @@ export class AgentChunkReplay {
         model: seed.model,
         turnStartedAt: seed.turnStartedAt,
       })
+    const rootRunId = String(seed.rootRunId || '').trim()
+    if (rootRunId) acc.conversationRunId = rootRunId
     this.accumulators.set(seed.turnId, acc)
 
     let messages: AgentConversationMessage[] = [
