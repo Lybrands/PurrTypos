@@ -25,6 +25,7 @@ from purra.contracts import (
     TaskStep,
     TaskStepUpdate,
     TaskPlan,
+    TaskSpec,
     ToolExecutionMode,
     ToolPolicy,
     ToolRiskLevel,
@@ -38,6 +39,40 @@ from purra.model_protocol import (
 )
 from purra.events import AgentCommand, AgentEvent, CoreCommandType, CoreEventType
 from purra.task_admission import ExecutionMode, TaskAdmissionDecision
+
+
+def test_task_spec_preserves_versioned_screenplay_extension_as_frozen_json():
+    target = {
+        "screenplay": {
+            "version": 1,
+            "scope": {"kind": "current_stage"},
+            "stepBindings": [
+                {"stepId": "understand-source", "phase": "evidence"},
+            ],
+        },
+    }
+    task_spec = TaskSpec(
+        goal="分析原作范围",
+        target=target,
+        operation="create",
+        instruction="梳理人物与冲突",
+        deliverable="sourceAnalysis",
+    )
+    target["screenplay"]["stepBindings"][0]["phase"] = "creation"
+
+    assert task_spec.target["screenplay"]["version"] == 1
+    assert task_spec.target["screenplay"]["stepBindings"][0]["phase"] == "evidence"
+    assert task_spec.to_mapping()["target"] == {
+        "screenplay": {
+            "version": 1,
+            "scope": {"kind": "current_stage"},
+            "stepBindings": [
+                {"stepId": "understand-source", "phase": "evidence"},
+            ],
+        },
+    }
+    with pytest.raises(TypeError):
+        task_spec.target["screenplay"]["version"] = 2  # type: ignore[index]
 
 
 def test_run_request_snapshots_opaque_context_and_finds_latest_user_text():
