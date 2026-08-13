@@ -358,7 +358,18 @@ async def test_post_claim_binds_one_run_and_bound_cancel_is_applied_once(
 
     assert calls == 1
     assert receipt["status"] == "run_bound"
-    assert first_frames[0]["runId"] == receipt["run_id"]
+    assert first_frames[0] == {
+        "requestReceipt": {
+            "requestId": request_id,
+            "sessionId": 7,
+            "status": "run_bound",
+            "runId": receipt["run_id"],
+            "cancelRequested": False,
+            "rejectionCode": None,
+            "revision": 3,
+        },
+    }
+    assert first_frames[1]["runId"] == receipt["run_id"]
     assert replay_frames == [{
         "requestReceipt": {
             "requestId": request_id,

@@ -42,6 +42,9 @@ class WritingChatRequestLifecycle:
     async def on_run_started(self, run_id: str) -> None:
         await self._store.bind_run(self._request_id, run_id)
 
+    async def current_receipt(self) -> WritingChatRequestReceipt | None:
+        return await self._store.get(self._request_id)
+
     async def on_run_finished(self, result: AgentRunResult) -> None:
         del result
 

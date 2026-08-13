@@ -668,6 +668,7 @@ export const backendApi: BackendApi = {
     latestAiStreamId = streamId
     startAiDebugRun(streamId, data)
     let observedAgentRunId: string | undefined
+    let authoritativeAgentRunId: string | undefined
     let observedErrorCode: string | undefined
     let observedTaskType: string | undefined
     let receivedVisibleOutput = false
@@ -739,14 +740,38 @@ export const backendApi: BackendApi = {
       if (abortController.signal.aborted && transport.done) {
         transport.aborted = true
       }
-      if (isCanonicalOutputEvent(chunk)) {
-        observedAgentRunId = chunk.runId || observedAgentRunId
-        lastCanonicalSequence = Math.max(lastCanonicalSequence, chunk.sequence)
+      const receiptRunId = String(
+        chunk.requestReceipt?.runId || transport.requestResult?.runId || '',
+      ).trim()
+      if (receiptRunId) {
+        authoritativeAgentRunId = receiptRunId
+        observedAgentRunId = receiptRunId
       }
-      observedAgentRunId = transport.runResult?.runId || observedAgentRunId
+      let canonicalBelongsToObservedRoot = false
+      if (isCanonicalOutputEvent(chunk)) {
+        canonicalBelongsToObservedRoot = Boolean(
+          (!authoritativeAgentRunId && !observedAgentRunId)
+          || chunk.runId === authoritativeAgentRunId
+          || chunk.runId === observedAgentRunId
+        )
+        if (canonicalBelongsToObservedRoot) {
+          observedAgentRunId = chunk.runId || observedAgentRunId
+          lastCanonicalSequence = Math.max(lastCanonicalSequence, chunk.sequence)
+        }
+      }
+      if (
+        transport.runResult?.runId
+        && (
+          !authoritativeAgentRunId
+          || transport.runResult.runId === authoritativeAgentRunId
+        )
+      ) {
+        observedAgentRunId = transport.runResult.runId
+      }
       observedErrorCode =
         transport.runResult?.errorCode ||
         (isCanonicalOutputEvent(chunk)
+          && canonicalBelongsToObservedRoot
           && chunk.kind === 'run.lifecycle'
           && typeof chunk.payload.errorCode === 'string'
           ? chunk.payload.errorCode
@@ -759,6 +784,7 @@ export const backendApi: BackendApi = {
       }
       if (
         (isCanonicalOutputEvent(chunk)
+          && canonicalBelongsToObservedRoot
           && chunk.visibility === 'public'
           && chunk.source === 'provider'
           && chunk.kind === 'provider.content_delta'

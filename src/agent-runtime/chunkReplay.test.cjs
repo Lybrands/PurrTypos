@@ -44,6 +44,18 @@ const canonical = (runId, sequence, overrides = {}) => ({
   ...overrides,
 })
 
+const requestReceipt = (runId) => ({
+  requestReceipt: {
+    requestId: `request-for-${runId}`,
+    sessionId: 7,
+    status: 'run_bound',
+    runId,
+    cancelRequested: false,
+    rejectionCode: null,
+    revision: 3,
+  },
+})
+
 const reduceLive = (seed, chunks) => {
   let messages = [
     { role: 'user', content: seed.userContent },
@@ -62,6 +74,7 @@ const reduceLive = (seed, chunks) => {
       turnStartedAt: seed.turnStartedAt,
     }),
     sessionId: seed.sessionId,
+    turnId: seed.turnId,
     modelIdentity: { configId: model.id, name: seed.model || model.name },
     host: {
       readMessages: () => messages,
@@ -708,6 +721,7 @@ test('paused durable task emits no formal answer and resume commits once', () =>
   assert.equal(paused?.taskPlan?.status, 'paused')
   assert.equal(paused?.model, 'paused-model')
 
+  replay.dispatch(seed, requestReceipt('run-resumed'), dependencies)
   replay.dispatch(seed, canonical('run-resumed', 1, {
     turnId: seed.turnId,
     kind: 'run.lifecycle',
@@ -758,26 +772,42 @@ test('paused resume switches the canonical root once and blocks late same-run te
   const dependencies = { cfg: model, appMessage }
   const seed = {
     turnId: 'turn-paused-twice',
+    rootRunId: 'run-a',
     sessionId: 8,
     userContent: '暂停后继续，再次暂停',
     turnStartedAt: performance.now(),
   }
 
-  replay.dispatch(seed, canonical('run-a', 1, {
+  const rootPlanChunk = canonical('run-a', 1, {
     turnId: seed.turnId,
     payload: {
       eventType: 'run.todos_updated',
       data: { runId: 'run-a', title: 'A', status: 'paused', steps: [] },
     },
-  }), dependencies)
+  })
+  const rootResponseChunk = canonical('run-a', 2, {
+    turnId: seed.turnId,
+    outputStreamId: 'run-a-final',
+    invocationId: 'run-a-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '保留 Root A 的响应。' },
+  })
+  replay.dispatch(seed, rootPlanChunk, dependencies)
+  replay.dispatch(seed, rootResponseChunk, dependencies)
   replay.dispatch(seed, { done: true, finalResponseExpected: false }, dependencies)
 
-  replay.dispatch(seed, canonical('foreign-child', 1, {
+  const foreignLifecycleChunk = canonical('foreign-child', 1, {
+    // backendApi attaches the live request stream id to every envelope. It is
+    // transport correlation only and cannot authorize a child as the Root.
+    streamId: seed.turnId,
     turnId: 'different-turn',
     kind: 'run.lifecycle',
     payload: { status: 'running' },
-  }), dependencies)
-  replay.dispatch(seed, canonical('foreign-child', 2, {
+  })
+  const foreignPlanChunk = canonical('foreign-child', 2, {
+    streamId: seed.turnId,
     turnId: 'different-turn',
     payload: {
       eventType: 'run.todos_updated',
@@ -788,14 +818,32 @@ test('paused resume switches the canonical root once and blocks late same-run te
         steps: [],
       },
     },
-  }), dependencies)
+  })
+  replay.dispatch(seed, foreignLifecycleChunk, dependencies)
+  replay.dispatch(seed, foreignPlanChunk, dependencies)
   let assistant = replay.assistant(seed.turnId)
   assert.equal(assistant?.agentRunId, 'run-a')
   assert.equal(assistant?.canonicalOutput?.runId, 'run-a')
+  assert.equal(assistant?.canonicalOutput?.finalText, '保留 Root A 的响应。')
+  assert.equal(assistant?.content, '保留 Root A 的响应。')
   assert.equal(assistant?.taskPlan?.runId, 'run-a')
   assert.equal(assistant?.taskPlan?.status, 'paused')
+  const live = reduceLive(seed, [
+    requestReceipt('run-a'),
+    rootPlanChunk,
+    rootResponseChunk,
+    { done: true, finalResponseExpected: false },
+    foreignLifecycleChunk,
+    foreignPlanChunk,
+  ])
+  assert.equal(live?.agentRunId, assistant?.agentRunId)
+  assert.equal(live?.canonicalOutput?.runId, assistant?.canonicalOutput?.runId)
+  assert.equal(live?.content, assistant?.content)
+  assert.equal(live?.taskPlan?.runId, assistant?.taskPlan?.runId)
+  assert.equal(live?.taskPlan?.status, assistant?.taskPlan?.status)
 
-  replay.dispatch(seed, canonical('run-b', 1, {
+  const resumedSeed = { ...seed, rootRunId: 'run-b' }
+  replay.dispatch(resumedSeed, canonical('run-b', 1, {
     turnId: seed.turnId,
     kind: 'run.lifecycle',
     payload: { status: 'running' },
@@ -803,7 +851,7 @@ test('paused resume switches the canonical root once and blocks late same-run te
   assert.equal(replay.assistant(seed.turnId)?.agentRunId, 'run-b')
   assert.equal(replay.assistant(seed.turnId)?.taskPlan, undefined)
 
-  replay.dispatch(seed, canonical('run-b', 2, {
+  replay.dispatch(resumedSeed, canonical('run-b', 2, {
     payload: {
       eventType: 'run.todos_updated',
       data: { runId: 'run-b', title: 'B', status: 'running', steps: [] },
@@ -813,18 +861,18 @@ test('paused resume switches the canonical root once and blocks late same-run te
   assert.equal(replay.assistant(seed.turnId)?.canonicalOutput?.runId, 'run-b')
   assert.equal(replay.assistant(seed.turnId)?.taskPlan?.runId, 'run-b')
 
-  replay.dispatch(seed, {
+  replay.dispatch(resumedSeed, {
     done: true,
     finalResponseExpected: false,
     model: 'run-b-paused-model',
   }, dependencies)
-  replay.dispatch(seed, canonical('run-b', 3, {
+  replay.dispatch(resumedSeed, canonical('run-b', 3, {
     payload: {
       eventType: 'run.todo_updated',
       data: { runId: 'run-b', stepId: 'late', step: null },
     },
   }), dependencies)
-  replay.dispatch(seed, {
+  replay.dispatch(resumedSeed, {
     done: true,
     finalResponseExpected: false,
     model: 'late-run-b-model',

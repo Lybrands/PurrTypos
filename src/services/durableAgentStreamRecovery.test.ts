@@ -106,6 +106,15 @@ test('exact request receipt overrides a stale latest-Run baseline exclusion', as
     (emitted.at(-1)?.runResult as { runId?: string } | undefined)?.runId,
     'run-recover',
   )
+  assert.deepEqual(emitted[0].requestReceipt, {
+    requestId: 'request-replayed',
+    sessionId: 7,
+    status: 'run_bound',
+    runId: 'run-recover',
+    cancelRequested: false,
+    rejectionCode: null,
+    revision: 3,
+  })
 })
 
 test('recovery retries read failures and deduplicates cursor and proposal occurrence', async () => {
@@ -289,8 +298,12 @@ test('accepted request waits for later Run binding and never synthesizes a termi
   })
 
   assert.equal(waits, 1)
-  assert.equal(emitted.length, 1)
-  assert.equal((emitted[0].runResult as { status: string }).status, 'done')
+  assert.equal(emitted.length, 2)
+  assert.equal(
+    (emitted[0].requestReceipt as { runId: string }).runId,
+    'run-recover',
+  )
+  assert.equal((emitted[1].runResult as { status: string }).status, 'done')
 })
 
 test('authoritative pre-Run rejection settles as request result, never Run result', async () => {

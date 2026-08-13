@@ -28,12 +28,9 @@ export function handleCanonicalOutput(
     > (currentState.lastSequenceByRun[chunk.runId] ?? 0)
   const currentRunId = currentState.runId ?? ctx.acc.agentRunId
   const foreignRun = Boolean(currentRunId && chunk.runId !== currentRunId)
-  const turnBindingMatches = Boolean(
-    ctx.turnId
-    && (
-      transportStreamId === ctx.turnId
-      || (!transportStreamId && chunk.turnId === ctx.turnId)
-    )
+  const authoritativeRootRunId = ctx.acc.conversationRunId
+  const violatesRootBinding = Boolean(
+    authoritativeRootRunId && chunk.runId !== authoritativeRootRunId
   )
   const terminalSettlement = ctx.acc.terminalSettlement
   const resumesPausedRun = Boolean(
@@ -42,7 +39,7 @@ export function handleCanonicalOutput(
     && foreignRun
     && chunk.kind === 'run.lifecycle'
     && chunk.payload.status === 'running'
-    && turnBindingMatches
+    && chunk.runId === authoritativeRootRunId
     && terminalSettlement
     && terminalSettlement.phase !== 'projecting'
     && terminalSettlement.outcome === 'paused'
@@ -50,6 +47,7 @@ export function handleCanonicalOutput(
   )
   if (
     (ctx.turnId && transportStreamId && transportStreamId !== ctx.turnId)
+    || violatesRootBinding
     || (foreignRun && !resumesPausedRun)
   ) return true
   if (resumesPausedRun) {
