@@ -953,6 +953,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         error_code TEXT DEFAULT NULL,
         reservation_owner TEXT DEFAULT NULL,
         reservation_expires_at_ms INTEGER DEFAULT NULL,
+        reservation_epoch INTEGER NOT NULL DEFAULT 1,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (operation_id, checkpoint_key),
@@ -961,6 +962,7 @@ async def init_schema(db: DatabaseConnection) -> None:
     for column in (
         "reservation_owner TEXT DEFAULT NULL",
         "reservation_expires_at_ms INTEGER DEFAULT NULL",
+        "reservation_epoch INTEGER NOT NULL DEFAULT 1",
     ):
         await _try_exec(
             db,

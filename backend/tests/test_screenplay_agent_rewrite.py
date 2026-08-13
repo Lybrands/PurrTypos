@@ -40,6 +40,7 @@ from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
 from purra.tools import InMemoryToolCatalog
 from purra.errors import ContractViolationError, ModelGatewayError
+from purra.cancellation import OperationCanceled
 from purra.json_values import thaw_json_mapping
 from purra.recovery import (
     FailureCategory,
@@ -56,6 +57,7 @@ from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import (
     ScreenplayAgentProfileExtension,
     _ScreenplayCheckpointObserver,
+    _checkpoint_input,
     _ready_checkpoint_keys,
 )
 from application.composition_factory import create_agent_composition
@@ -89,7 +91,11 @@ from application.screenplay_checkpoint_planning import (
     ScreenplayCheckpointPlanner,
     ScreenplayCheckpointStateError,
     SqliteScreenplayCheckpointRepository,
+    _canonical_root_plan,
+    _planning_payload,
     _plan_mapping,
+    parse_persisted_plan,
+    plan_digest,
 )
 from application.screenplay_agent_planner import SqliteScreenplayTaskResolver
 from application.screenplay_structured_call import (
@@ -190,6 +196,39 @@ def _checkpoint_unit(
     )
 
 
+def _root_revision_payload(
+    plan: TaskPlan,
+    *,
+    identity: str,
+    digest: str | None = None,
+) -> dict[str, object]:
+    return {
+        "title": plan.title,
+        "goal": plan.goal,
+        "status": "running",
+        "taskSpec": plan.task_spec.to_mapping() if plan.task_spec else None,
+        "steps": [{
+            "id": step.id,
+            "title": step.title,
+            "type": step.type.value,
+            "executor": step.executor.value,
+            "status": step.status.value,
+            "risk_level": step.risk_level.value if step.risk_level else None,
+            "suggested_tools": list(step.suggested_tools),
+            "agent_role": step.agent_role,
+            "assignment": thaw_json_mapping(step.assignment),
+            "depends_on": list(step.depends_on),
+            "description": step.description,
+            "result_summary": step.result_summary,
+            "error": step.error,
+        } for step in plan.steps],
+        "planRevision": {
+            "identity": identity,
+            "digest": digest or plan_digest(plan),
+        },
+    }
+
+
 async def test_checkpoint_boundaries_are_business_milestones_not_every_part():
     ordinary_part = SimpleNamespace(
         position=1,
@@ -224,6 +263,58 @@ async def test_checkpoint_boundaries_are_business_milestones_not_every_part():
     assert _ready_checkpoint_keys((review_one, review_two_done)) == (
         "review:aggregate",
     )
+
+
+async def test_checkpoint_planner_receipts_expose_only_public_artifact_facts():
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    unit = SimpleNamespace(
+        id="PRIVATE-UNIT-SENTINEL",
+        status=SimpleNamespace(value="completed"),
+        artifact_digest="sha256:" + "a" * 64,
+        error_code=None,
+        failure=None,
+        metadata={
+            "unitKind": "generate_document_section",
+            "input": {
+                "sectionKey": "characters",
+                "instruction": "PROMPT-SENTINEL-DO-NOT-LEAK",
+            },
+        },
+    )
+    checkpoint = _checkpoint_input(
+        SimpleNamespace(
+            id="PRIVATE-TASK-SENTINEL",
+            created_by_run_id="root-public-plan",
+        ),
+        (unit,),
+        {
+            "turnId": "turn-public",
+            "projectId": "project-public",
+            "sessionId": 1,
+            "targetRole": "creative_brief",
+            "screenplayScope": {},
+        },
+        "document:sections",
+        plan,
+        plan,
+    )
+
+    payload = _planning_payload(checkpoint)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    assert payload["artifactReceipts"] == [{
+        "partKind": "documentSection",
+        "digest": "sha256:" + "a" * 64,
+        "sectionKey": "characters",
+        "status": "completed",
+    }]
+    assert "unitKind" not in encoded
+    assert "PRIVATE-UNIT-SENTINEL" not in encoded
+    assert "PRIVATE-TASK-SENTINEL" not in encoded
+    assert "PROMPT-SENTINEL-DO-NOT-LEAK" not in encoded
 
 
 @pytest.mark.parametrize(("kind", "expected"), (
@@ -386,7 +477,7 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
     )
-    await repository.reserve(
+    reservation = await repository.reserve(
         operation_id="operation-stale",
         task_id="task-stale",
         checkpoint_key="episode:4",
@@ -398,12 +489,17 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         checkpoint_key="episode:4",
         plan=plan,
         outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
     )
 
     row = await repository.pause_ready_conflict(
         operation_id="operation-stale",
         checkpoint_key="episode:4",
         code="screenplay_checkpoint_ready_root_plan_conflict",
+        expected_plan_digest=str((await repository.load(
+            "operation-stale", "episode:4"
+        ))["plan_digest"]),
     )
 
     assert row["status"] == "paused"
@@ -444,6 +540,228 @@ async def test_checkpoint_reservation_is_single_winner_and_expiry_recoverable(
     assert recovered["reservation_owner"] == "owner-after-restart"
 
 
+async def test_checkpoint_non_owner_waits_at_barrier_until_owner_is_ready(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=1_000,
+        poll_interval_seconds=0.005,
+    )
+    first = await repository.acquire_planning(
+        operation_id="operation-barrier",
+        task_id="task-barrier",
+        checkpoint_key="episode:4",
+        root_run_id="root-barrier",
+        input_digest="sha256:" + "a" * 64,
+        reservation_token="owner-a",
+    )
+    waiter = asyncio.create_task(repository.acquire_planning(
+        operation_id="operation-barrier",
+        task_id="task-barrier",
+        checkpoint_key="episode:4",
+        root_run_id="root-barrier",
+        input_digest="sha256:" + "a" * 64,
+        reservation_token="owner-b",
+    ))
+    await asyncio.sleep(0.02)
+    assert waiter.done() is False
+
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    await repository.ready(
+        operation_id="operation-barrier",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner="owner-a",
+        reservation_epoch=int(first["reservation_epoch"]),
+    )
+
+    observed = await asyncio.wait_for(waiter, timeout=0.2)
+    assert observed["status"] == "ready"
+    assert observed["_acquired"] is False
+
+
+async def test_checkpoint_expiry_takeover_fences_stale_planner_write(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=20,
+        poll_interval_seconds=0.002,
+    )
+    stale = await repository.acquire_planning(
+        operation_id="operation-fence",
+        task_id="task-fence",
+        checkpoint_key="episode:4",
+        root_run_id="root-fence",
+        input_digest="sha256:" + "b" * 64,
+        reservation_token="owner-stale",
+    )
+    recovered = await repository.acquire_planning(
+        operation_id="operation-fence",
+        task_id="task-fence",
+        checkpoint_key="episode:4",
+        root_run_id="root-fence",
+        input_digest="sha256:" + "b" * 64,
+        reservation_token="owner-recovered",
+    )
+    assert recovered["_acquired"] is True
+    assert int(recovered["reservation_epoch"]) > int(stale["reservation_epoch"])
+
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    with pytest.raises(RuntimeError, match="reservation_lost"):
+        await repository.ready(
+            operation_id="operation-fence",
+            checkpoint_key="episode:4",
+            plan=plan,
+            outcome=ScreenplayCheckpointOutcome.REVISED,
+            reservation_owner="owner-stale",
+            reservation_epoch=int(stale["reservation_epoch"]),
+        )
+    await repository.ready(
+        operation_id="operation-fence",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner="owner-recovered",
+        reservation_epoch=int(recovered["reservation_epoch"]),
+    )
+
+
+async def test_checkpoint_planner_heartbeat_prevents_duplicate_model_call(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=30,
+        poll_interval_seconds=0.002,
+    )
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=SimpleNamespace(),
+        task_id="task-heartbeat",
+        root_run_id="root-heartbeat",
+        signal=None,
+    )
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    model_calls = 0
+
+    async def worker(owner: str):
+        nonlocal model_calls
+        receipt = await repository.acquire_planning(
+            operation_id="operation-heartbeat",
+            task_id="task-heartbeat",
+            checkpoint_key="episode:4",
+            root_run_id="root-heartbeat",
+            input_digest="sha256:" + "e" * 64,
+            reservation_token=owner,
+        )
+        if not receipt.get("_acquired"):
+            return receipt
+        model_calls += 1
+        await observer._with_heartbeat(receipt, "reserved", asyncio.sleep(0.1))
+        return await repository.ready(
+            operation_id="operation-heartbeat",
+            checkpoint_key="episode:4",
+            plan=plan,
+            outcome=ScreenplayCheckpointOutcome.REVISED,
+            reservation_owner=owner,
+            reservation_epoch=int(receipt["reservation_epoch"]),
+        )
+
+    first, second = await asyncio.gather(worker("owner-a"), worker("owner-b"))
+
+    assert model_calls == 1
+    assert {first["status"], second["status"]} == {"ready"}
+
+
+async def test_checkpoint_heartbeat_caller_cancel_cleans_worker_and_keeper(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=30,
+        poll_interval_seconds=0.002,
+    )
+    receipt = await repository.acquire_planning(
+        operation_id="operation-heartbeat-cancel",
+        task_id="task-heartbeat-cancel",
+        checkpoint_key="episode:4",
+        root_run_id="root-heartbeat-cancel",
+        input_digest="sha256:" + "f" * 64,
+        reservation_token="owner-a",
+    )
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=SimpleNamespace(),
+        task_id="task-heartbeat-cancel",
+        root_run_id="root-heartbeat-cancel",
+        signal=None,
+    )
+    before = set(asyncio.all_tasks())
+    running = asyncio.create_task(observer._with_heartbeat(
+        receipt,
+        "reserved",
+        asyncio.Event().wait(),
+    ))
+    await asyncio.sleep(0.02)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await asyncio.sleep(0)
+    assert set(asyncio.all_tasks()) - before == set()
+
+
+async def test_checkpoint_waiter_cancellation_leaves_no_poll_task(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=1_000,
+        poll_interval_seconds=0.005,
+    )
+    await repository.acquire_planning(
+        operation_id="operation-cancel-wait",
+        task_id="task-cancel-wait",
+        checkpoint_key="episode:4",
+        root_run_id="root-cancel-wait",
+        input_digest="sha256:" + "c" * 64,
+        reservation_token="owner-a",
+    )
+    before = set(asyncio.all_tasks())
+    signal = asyncio.Event()
+    waiter = asyncio.create_task(repository.acquire_planning(
+        operation_id="operation-cancel-wait",
+        task_id="task-cancel-wait",
+        checkpoint_key="episode:4",
+        root_run_id="root-cancel-wait",
+        input_digest="sha256:" + "c" * 64,
+        reservation_token="owner-b",
+        signal=signal,
+    ))
+    await asyncio.sleep(0.02)
+    signal.set()
+    with pytest.raises(OperationCanceled):
+        await waiter
+    await asyncio.sleep(0)
+    assert set(asyncio.all_tasks()) - before == set()
+
+
 @pytest.mark.parametrize("event_already_persisted", (False, True))
 async def test_ready_checkpoint_reconciles_root_event_without_replanning(
     temp_db: DatabaseConnection,
@@ -455,7 +773,7 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
     )
-    await repository.reserve(
+    reservation = await repository.reserve(
         operation_id="operation-ready",
         task_id="task-ready",
         checkpoint_key="episode:4",
@@ -467,6 +785,8 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
         checkpoint_key="episode:4",
         plan=plan,
         outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
     )
     downstream_calls = 0
 
@@ -479,9 +799,11 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
             "VALUES (?, 'run.todos_updated', ?)",
             [
                 "root-ready",
-                json.dumps({
-                    "planRevision": dict(update.plan_revision_metadata),
-                }),
+                json.dumps(_root_revision_payload(
+                    _canonical_root_plan(update.plan_revision),
+                    identity=str(update.plan_revision_metadata["identity"]),
+                    digest=str(update.plan_revision_metadata["digest"]),
+                )),
             ],
         )
 
@@ -492,10 +814,13 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
             "VALUES (?, 'run.todos_updated', ?)",
             [
                 "root-ready",
-                json.dumps({"planRevision": {
-                    "identity": "episode:4",
-                    "digest": receipt["plan_digest"],
-                }}),
+                json.dumps(_root_revision_payload(
+                    _canonical_root_plan(
+                        parse_persisted_plan(str(receipt["plan_json"]))
+                    ),
+                    identity="episode:4",
+                    digest=str(receipt["plan_digest"]),
+                )),
             ],
         )
     observer = _ScreenplayCheckpointObserver(
@@ -519,6 +844,138 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
     assert (await repository.load("operation-ready", "episode:4"))["status"] == (
         "applied"
     )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("metadata_only", "wrong_step", "wrong_event_digest", "duplicate_conflict"),
+)
+async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
+    temp_db: DatabaseConnection,
+    mutation: str,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    digest = plan_digest(plan)
+    if mutation == "metadata_only":
+        payload = {"planRevision": {
+            "identity": "episode:4",
+            "digest": digest,
+        }}
+    else:
+        payload = _root_revision_payload(
+            plan,
+            identity="episode:4",
+            digest=("sha256:" + "f" * 64 if mutation == "wrong_event_digest" else digest),
+        )
+        if mutation == "wrong_step":
+            payload["steps"][1]["title"] = "并非receipt中的计划"
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json) "
+        "VALUES (?, 'run.todos_updated', ?)",
+        ["root-strict-reconcile", json.dumps(payload)],
+    )
+    if mutation == "duplicate_conflict":
+        conflicting = _root_revision_payload(
+            replace(plan, title="冲突计划"),
+            identity="episode:4",
+        )
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) "
+            "VALUES (?, 'run.todos_updated', ?)",
+            ["root-strict-reconcile", json.dumps(conflicting)],
+        )
+
+    with pytest.raises(
+        ScreenplayCheckpointStateError,
+        match="Root revision",
+    ):
+        await repository.root_revision_digest(
+            "root-strict-reconcile",
+            "episode:4",
+            expected_digest=digest,
+        )
+
+
+async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(
+        temp_db,
+        lease_ms=20,
+        poll_interval_seconds=0.002,
+    )
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    planning = await repository.reserve(
+        operation_id="operation-single-apply",
+        task_id="task-single-apply",
+        checkpoint_key="episode:4",
+        root_run_id="root-single-apply",
+        input_digest="sha256:" + "d" * 64,
+        reservation_token="planner",
+    )
+    receipt = await repository.ready(
+        operation_id="operation-single-apply",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner="planner",
+        reservation_epoch=int(planning["reservation_epoch"]),
+    )
+    downstream_calls = 0
+
+    async def persist_revision(update):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        await asyncio.sleep(0.08)
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) "
+            "VALUES (?, 'run.todos_updated', ?)",
+            [
+                "root-single-apply",
+                json.dumps(_root_revision_payload(
+                    _canonical_root_plan(update.plan_revision),
+                    identity=str(update.plan_revision_metadata["identity"]),
+                    digest=str(update.plan_revision_metadata["digest"]),
+                )),
+            ],
+        )
+
+    def observer():
+        return _ScreenplayCheckpointObserver(
+            dispatcher=SimpleNamespace(_checkpoints=repository),
+            planner=SimpleNamespace(),
+            downstream=persist_revision,
+            task_id="task-single-apply",
+            root_run_id="root-single-apply",
+            signal=None,
+        )
+
+    progress = SimpleNamespace(event=AgentEvent(
+        type=CoreEventType.LONG_TASK_PROGRESS,
+        payload={"taskId": "task-single-apply"},
+    ))
+    await asyncio.gather(
+        observer()._emit_ready(receipt, progress),
+        observer()._emit_ready(receipt, progress),
+    )
+
+    assert downstream_calls == 1
+    assert (await repository.load(
+        "operation-single-apply",
+        "episode:4",
+    ))["status"] == "applied"
 
 
 @pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))

@@ -13,9 +13,19 @@ Status: PASS
 ## Durability and privacy
 
 - Receipt identity is `(operation_id, checkpoint_key)` with transactional CAS reservation, bounded lease expiry, canonical ready plan/digest, and applied reconciliation against the Root event log.
+- Reserved and applying are durable barriers: non-owners wait, owners renew leases,
+  and every ready/pause/apply write is fenced by reservation owner plus epoch.
+- Applying is single-winner. Recovery first reconciles the authoritative Root
+  event, then takes over an expired lease, so one checkpoint emits at most one
+  canonical plan revision.
 - Crash before the Root event replays the persisted ready plan without a model call; crash after the Root event marks the receipt applied without replaying the plan.
 - Original/current plans come from the Root's authoritative first/latest todo event plus current todo snapshot, including status, result summary, error, executor, type, role, and dependencies.
+- Reconciliation reconstructs the complete TaskPlan from `run.todos_updated` and
+  requires the computed digest, event metadata digest, and receipt digest to be
+  identical; metadata-only or conflicting events pause fail-closed.
 - Planner input contains public plan fields, completed summaries, digest-only Artifact receipts, typed failures, constraint summaries, and remaining scope. Body content and task/run/unit/Operation/base Revision identifiers are excluded.
+- Artifact receipts use public part/artifact kinds, episode/section scope, digest,
+  and status only; private Recipe `unitKind` and prompt content are excluded.
 
 ## Core seam
 
@@ -31,3 +41,5 @@ Status: PASS
 - Real formal flow: three ordered episode checkpoints, one Root, one Operation, one final Revision.
 - Real provider fake pause flow: one Root plus one private screenplay-part Child; re-resolution pauses LongTask/Operation/Turn and cancels the Root.
 - Full `check:agent-refactor`: 1754 backend and 344 frontend passed. Five live Provider E2E cases remain skipped for missing credentials and are release blockers, not passes.
+- Review fix verification: 220 checkpoint/durable/Core tests and 100 route,
+  cleanup, schema, SQLite transaction/cancellation tests passed.

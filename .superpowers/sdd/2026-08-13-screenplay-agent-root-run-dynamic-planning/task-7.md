@@ -58,8 +58,14 @@ todo 事件，也不为修订另建公开 Run。
 - GREEN：episode、document batch、review aggregate 是仅有的检查点；普通 Part 不触发。
 - GREEN：持久 receipt 以 operation/checkpoint 唯一，CAS 单赢家、过期可接管；ready
   output 与 Root `planRevision` event 双向 reconcile，崩溃恢复不重复调用模型。
+- GREEN：reserved/applying 都是阻塞检查点；owner heartbeat 续租，所有终态写以
+  owner+epoch fencing，过期接管先核对 Root event，确保同检查点只发一条 revision。
+- GREEN：Root reconcile 从完整 `run.todos_updated` 重建 TaskPlan，并要求 computed /
+  metadata / receipt 三份 digest 一致；缺字段、metadata-only、冲突重复全部暂停。
 - GREEN：planner 只接收公开 Root 计划、摘要、无正文 Artifact digest、typed failure 和
   remaining scope；内部 task/run/unit/Operation/base Revision ID 不进入模型输入。
+- GREEN：Artifact receipt 只含公开 part/artifact kind、episode/section、digest/status，
+  private Recipe `unitKind` 与 prompt sentinel 不进入 planner。
 - GREEN：Root 首个/最新计划从持久 todo event 与 todo snapshot 权威读取；缺失、不一致、
   stale ready 全部 fail closed 并暂停。
 - GREEN：合法 future-only revision 经 Core 发布；scope change/invalid/provider failure
