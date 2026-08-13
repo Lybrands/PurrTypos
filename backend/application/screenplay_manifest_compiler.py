@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from domains.screenplay_agent.contracts import (
@@ -97,6 +97,11 @@ def compile_screenplay_manifest(
         parts,
         bindings,
         target_role=target_role,
+    )
+    parts = _apply_public_step_barriers(
+        parts,
+        part_step_ids,
+        bindings,
     )
     canonical = {
         "artifactKind": target_role,
@@ -416,6 +421,56 @@ def _bind_parts_to_plan(parts, bindings, *, target_role):
         allow_nan=False,
     ).encode("utf-8")).hexdigest()
     return mapped, digest
+
+
+def _apply_public_step_barriers(parts, part_step_ids, bindings):
+    """Make private recipe progress obey the model-authored Root step order."""
+
+    ordered_step_ids = tuple(dict.fromkeys(
+        binding.step_id for binding in bindings
+    ))
+    parts_by_id = {part.id: part for part in parts}
+    groups = {
+        step_id: tuple(
+            part for part in parts
+            if part_step_ids[part.id] == step_id
+        )
+        for step_id in ordered_step_ids
+    }
+    rewritten: dict[str, ScreenplayPartSpec] = {}
+    previous_terminals: tuple[str, ...] = ()
+    for step_id in ordered_step_ids:
+        group = groups[step_id]
+        group_ids = {part.id for part in group}
+        depended_on_within_group = {
+            dependency
+            for part in group
+            for dependency in part.dependencies
+            if dependency in group_ids
+        }
+        for part in group:
+            internal = tuple(
+                dependency
+                for dependency in part.dependencies
+                if dependency in group_ids
+            )
+            dependencies = (
+                tuple(dict.fromkeys((*internal, *previous_terminals)))
+                if not internal
+                else internal
+            )
+            rewritten[part.id] = replace(part, dependencies=dependencies)
+        previous_terminals = tuple(
+            part.id for part in group
+            if part.id not in depended_on_within_group
+        )
+    if set(rewritten) != set(parts_by_id):
+        raise ValueError("screenplay public plan barriers left Parts unbound")
+    return tuple(
+        rewritten[part.id]
+        for step_id in ordered_step_ids
+        for part in groups[step_id]
+    )
 
 
 def _part_phase(part, *, target_role):

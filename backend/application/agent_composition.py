@@ -385,12 +385,9 @@ class AgentComposition:
             agent_role_guidance=agent_role_guidance,
             max_parallel_agents=max_parallel_agents,
             task_admission_evaluator=extension.task_admission(),
-            long_task_dispatcher=(
-                extension.create_long_task_dispatcher(
-                    work_item_repository=self._work_item_repository,
-                    long_task_repository=self._long_task_repository,
-                    executor=long_task_executor,
-                )
+            long_task_dispatcher=self.create_long_task_dispatcher(
+                profile_id,
+                executor=long_task_executor,
             ),
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
@@ -596,6 +593,14 @@ class AgentComposition:
         if extension is None:
             raise ValueError(f"Agent profile has no extension: {normalized}")
         return extension
+
+    def create_long_task_dispatcher(self, profile_id: str, *, executor=None):
+        extension = self.profile_extension(profile_id)
+        return extension.create_long_task_dispatcher(
+            work_item_repository=self._work_item_repository,
+            long_task_repository=self._long_task_repository,
+            executor=executor,
+        )
 
     async def shutdown(self) -> None:
         """Fail closed and release all lifespan-owned live approval state."""

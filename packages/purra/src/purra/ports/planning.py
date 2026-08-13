@@ -55,6 +55,7 @@ class TaskPlanner(Protocol):
         signal: CancellationSignal | None = None,
         *,
         run_id: str | None = None,
+        turn_id: str | None = None,
     ) -> PlanningResult: ...
 
 
@@ -70,6 +71,7 @@ class DynamicTaskPlanner(Protocol):
         signal: CancellationSignal | None = None,
         *,
         run_id: str | None = None,
+        turn_id: str | None = None,
     ) -> PlanningResult: ...
 
 
