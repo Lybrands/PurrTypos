@@ -224,7 +224,8 @@ async def test_delete_archives_conversation_sourced_memory_before_removing_rows(
     await delete_session(42)
 
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items WHERE source_type = 'conversation' "
+        "SELECT status FROM memory_items "
+        "WHERE source_type = 'conversation_truncated' "
         "AND source_id = ?",
         [str(conversation_id)],
     ) == {"status": "archived"}

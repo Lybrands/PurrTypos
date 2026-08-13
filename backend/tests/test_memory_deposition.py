@@ -240,6 +240,70 @@ async def test_save_conversation_remember_instruction_creates_active_memory(temp
     assert rows[0]["source_type"] == "conversation"
 
 
+async def test_explicit_memory_reactivates_after_source_truncation_but_not_manual_archive(
+    temp_db,
+):
+    from routers.conversations import delete_after_turn, save_conversation
+    from schemas.conversations import SaveConversationRequest
+    from services import long_term_memory_service
+
+    await temp_db.execute("INSERT INTO books (id, title) VALUES ('b1', 'Book')")
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, title) VALUES (1, 'b1', 'Session')"
+    )
+    first = await save_conversation(SaveConversationRequest(
+        sessionId=1,
+        bookId="b1",
+        prompt="请记住：月门只能在雨夜开启",
+        response="记住了",
+    ))
+    memory = await temp_db.fetch_one(
+        "SELECT id, source_id FROM memory_items WHERE book_id = 'b1'"
+    )
+
+    await delete_after_turn("1", keepTurnCount=0)
+    assert await temp_db.fetch_one(
+        "SELECT status, source_type FROM memory_items WHERE id = ?",
+        [memory["id"]],
+    ) == {
+        "status": "archived",
+        "source_type": "conversation_truncated",
+    }
+
+    second = await save_conversation(SaveConversationRequest(
+        sessionId=1,
+        bookId="b1",
+        prompt="请记住：月门只能在雨夜开启",
+        response="再次记住",
+    ))
+    reactivated = await temp_db.fetch_one(
+        "SELECT id, status, pinned, source_id FROM memory_items WHERE id = ?",
+        [memory["id"]],
+    )
+    assert reactivated == {
+        "id": memory["id"],
+        "status": "active",
+        "pinned": 1,
+        "source_id": str(second["data"]["id"]),
+    }
+
+    await long_term_memory_service.archive_memory_item(memory["id"])
+    third = await save_conversation(SaveConversationRequest(
+        sessionId=1,
+        bookId="b1",
+        prompt="请记住：月门只能在雨夜开启",
+        response="第三次",
+    ))
+    assert third["success"] is True
+    assert await temp_db.fetch_one(
+        "SELECT status, source_id FROM memory_items WHERE id = ?",
+        [memory["id"]],
+    ) == {
+        "status": "archived",
+        "source_id": str(second["data"]["id"]),
+    }
+
+
 async def test_inline_article_save_creates_pending_candidate_but_plain_autosave_does_not(temp_db):
     from routers.articles import save_article
     from schemas.articles import SaveArticleRequest

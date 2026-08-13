@@ -9,6 +9,55 @@ export interface ConversationEditToken<TSessionId> {
   messageKey: string
 }
 
+export interface RecoveredRunProjectionOwner<TSessionId> {
+  sessionId: TSessionId
+  runId: string
+  runtimeRevision: number
+  streamId: string
+}
+
+interface RecoveredRunRuntime<TSessionId> {
+  sessionId: TSessionId
+  revision: number
+  loading: boolean
+  streamId?: string
+}
+
+export function recoveredRunProjectionControl(runId: string): {
+  loading: true
+  streamId: string
+} {
+  return {
+    loading: true,
+    streamId: `recovered-run:${runId}`,
+  }
+}
+
+export function captureRecoveredRunProjectionOwner<TSessionId>(
+  runtime: RecoveredRunRuntime<TSessionId>,
+  runId: string,
+): RecoveredRunProjectionOwner<TSessionId> {
+  return {
+    sessionId: runtime.sessionId,
+    runId,
+    runtimeRevision: runtime.revision,
+    streamId: recoveredRunProjectionControl(runId).streamId,
+  }
+}
+
+export function canCommitRecoveredRunProjection<TSessionId>(
+  owner: RecoveredRunProjectionOwner<TSessionId>,
+  runtime: RecoveredRunRuntime<TSessionId> | undefined,
+): boolean {
+  return Boolean(
+    runtime
+    && runtime.sessionId === owner.sessionId
+    && runtime.revision === owner.runtimeRevision
+    && runtime.loading
+    && runtime.streamId === owner.streamId,
+  )
+}
+
 export async function readStableConversationProjection<T>(dependencies: {
   isCurrent(): boolean
   getRevision(): number | undefined

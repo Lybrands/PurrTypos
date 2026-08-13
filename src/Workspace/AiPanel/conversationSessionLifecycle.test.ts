@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  captureRecoveredRunProjectionOwner,
+  canCommitRecoveredRunProjection,
   createConversationSessionLifecycle,
+  recoveredRunProjectionControl,
   readStableConversationProjection,
   retryCurrentConversationRead,
 } from './conversationSessionLifecycle.ts'
@@ -109,4 +112,69 @@ test('authoritative read retries transient failure without completing current lo
   assert.equal(reads, 2)
   assert.equal(waits, 1)
   assert.equal(lifecycle.canAct(token), false)
+})
+
+test('recovered R1 keeps queue closed and cannot settle over a newer R2 runtime', async () => {
+  const terminalRefetch = deferred<string[]>()
+  let runtime: {
+    sessionId: number
+    revision: number
+    loading: boolean
+    streamId: string | undefined
+    messages: string[]
+  } = {
+    sessionId: 7,
+    revision: 12,
+    ...recoveredRunProjectionControl('run-r1'),
+    messages: ['R1 replay'],
+  }
+  const owner = captureRecoveredRunProjectionOwner(runtime, 'run-r1')
+
+  const settleR1 = (async () => {
+    const messages = await terminalRefetch.promise
+    if (!canCommitRecoveredRunProjection(owner, runtime)) return false
+    runtime = {
+      ...runtime,
+      revision: runtime.revision + 1,
+      loading: false,
+      streamId: undefined,
+      messages,
+    }
+    return true
+  })()
+
+  // Queue drain/submit must observe R1 as busy until the authoritative
+  // Conversation refetch commits.
+  const startR2 = () => {
+    if (runtime.loading) return false
+    runtime = {
+      ...runtime,
+      revision: runtime.revision + 1,
+      loading: true,
+      streamId: 'request-r2',
+      messages: ['R2 user'],
+    }
+    return true
+  }
+  assert.equal(startR2(), false)
+
+  // Even a concurrent owner transition outside this queue path must make the
+  // late R1 projection a no-op instead of clearing R2's stream/messages.
+  runtime = {
+    ...runtime,
+    revision: runtime.revision + 1,
+    loading: true,
+    streamId: 'request-r2',
+    messages: ['R2 user'],
+  }
+  terminalRefetch.resolve(['R1 materialized'])
+
+  assert.equal(await settleR1, false)
+  assert.deepEqual(runtime, {
+    sessionId: 7,
+    revision: 13,
+    loading: true,
+    streamId: 'request-r2',
+    messages: ['R2 user'],
+  })
 })

@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
+from application.product_owner_deletion import prepare_session_owner_deletion
+
+
+@asynccontextmanager
+async def _owner_write_transaction(db):
+    if db.current_task_owns_transaction():
+        yield db
+        return
+    async with db.transaction(cancellation_linearizable=True):
+        yield db
+
 
 async def delete_screenplay_project_data(db, project_id: str) -> bool:
     """Delete every project-owned row without deciding API authorization."""
 
-    async with db.transaction():
+    async with _owner_write_transaction(db):
         project = await db.fetch_one(
             "SELECT id FROM screenplay_projects WHERE id = ?",
             [project_id],
@@ -18,6 +31,11 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             [project_id],
         )
         session_ids = [int(row["id"]) for row in sessions]
+        await prepare_session_owner_deletion(
+            db,
+            session_ids,
+            screenplay_project_ids=[project_id],
+        )
         if session_ids:
             placeholders = ",".join("?" for _ in session_ids)
             await db.execute(
@@ -48,6 +66,38 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             await db.execute(
                 f"DELETE FROM ai_sessions WHERE id IN ({placeholders})",
                 session_ids,
+            )
+
+        operation_rows = await db.fetch_all(
+            "SELECT id, turn_id FROM screenplay_agent_operations "
+            "WHERE project_id = ?",
+            [project_id],
+        )
+        operation_ids = [str(row["id"]) for row in operation_rows]
+        turn_ids = [str(row["turn_id"]) for row in operation_rows]
+        if operation_ids:
+            operation_marks = ",".join("?" for _ in operation_ids)
+            await db.execute(
+                f"DELETE FROM screenplay_agent_operation_usage "
+                f"WHERE operation_id IN ({operation_marks})",
+                operation_ids,
+            )
+            await db.execute(
+                f"DELETE FROM screenplay_agent_operation_commands "
+                f"WHERE operation_id IN ({operation_marks})",
+                operation_ids,
+            )
+            await db.execute(
+                f"DELETE FROM screenplay_agent_operations "
+                f"WHERE id IN ({operation_marks})",
+                operation_ids,
+            )
+        if turn_ids:
+            turn_marks = ",".join("?" for _ in turn_ids)
+            await db.execute(
+                f"DELETE FROM screenplay_agent_cancel_commands "
+                f"WHERE turn_id IN ({turn_marks})",
+                turn_ids,
             )
 
         for table in (

@@ -471,6 +471,52 @@ async def test_recovered_screenplay_run_cannot_materialize_into_colliding_book_s
 
 
 @pytest.mark.asyncio
+async def test_legacy_unbound_book_root_materializes_but_screenplay_scope_does_not(db):
+    await db.execute(
+        "INSERT INTO screenplay_projects (id, title, source_kind) "
+        "VALUES ('screenplay-legacy', '剧本', 'original')"
+    )
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id, scope) "
+        "VALUES (96, 'book-legacy', 'chapter-legacy', 'chapter')"
+    )
+    await db.execute(
+        "INSERT INTO ai_sessions "
+        "(id, book_id, scope, screenplay_project_id) "
+        "VALUES (97, 'book-legacy', 'screenplay', 'screenplay-legacy')"
+    )
+    book_run = await run_store.create_run(
+        db,
+        session_id=96,
+        prompt="legacy Book prompt",
+        mode="agent",
+    )
+    screenplay_run = await run_store.create_run(
+        db,
+        session_id=97,
+        prompt="legacy Screenplay prompt",
+        mode="agent",
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET status = 'canceled' WHERE id IN (?, ?)",
+        [book_run, screenplay_run],
+    )
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_terminal_writing_run_holes,
+    )
+
+    materialized = await materialize_terminal_writing_run_holes(db)
+
+    assert materialized == (book_run,)
+    assert await db.fetch_one(
+        "SELECT prompt FROM ai_conversations WHERE session_id = 96"
+    ) == {"prompt": "legacy Book prompt"}
+    assert await db.fetch_one(
+        "SELECT prompt FROM ai_conversations WHERE session_id = 97"
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_terminal_writing_hole_is_reconciled_without_current_recovery_ids(db):
     await db.execute(
         "INSERT INTO ai_sessions (id, book_id, chapter_id) "

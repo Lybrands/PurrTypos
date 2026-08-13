@@ -773,6 +773,7 @@ async def delete_after_turn(
             )
             await db.execute(
                 "UPDATE memory_items SET status = 'archived', "
+                "source_type = 'conversation_truncated', "
                 "update_time = CURRENT_TIMESTAMP "
                 "WHERE source_type = 'conversation' "
                 f"AND source_id IN ({placeholders}) AND status <> 'archived'",

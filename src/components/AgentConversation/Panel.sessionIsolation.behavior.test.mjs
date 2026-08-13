@@ -118,50 +118,71 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
   const { default: AgentConversationPanel } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/Panel.tsx',
   )
+  const { createScreenplayConversationController } = await vite.ssrLoadModule(
+    '/src/ScreenplayAgentPage/useScreenplayConversationController.ts',
+  )
+  const { createScreenplayConversationSessionLifecycle } = await vite.ssrLoadModule(
+    '/src/ScreenplayAgentPage/screenplayConversationSessionLifecycle.ts',
+  )
   const { createRoot } = await import('react-dom/client')
+  const lifecycle = createScreenplayConversationSessionLifecycle()
   let sends = 0
   const edits = []
-  const baseController = {
-    capabilities: {
-      inputDisabled: false,
-      sessionNavigationDisabled: false,
-      submitMode: 'send',
-    },
-    composer: {
-      value: 'B draft',
-      setValue: () => undefined,
-      placeholder: '输入任务',
-      ariaLabel: '输入任务',
-      submitDisabled: false,
-      selectedModel: model,
-      modelConfigs: [],
-      selectModel: () => undefined,
+  const sessions = [
+    { id: 1, title: 'A', create_time: '2026-08-13 01:00:00' },
+    { id: 2, title: 'B', create_time: '2026-08-13 01:01:00' },
+  ]
+  const controller = (token, initializing, messages) => (
+    createScreenplayConversationController({
+      project: { id: 'project-1', title: '剧本', status: 'active' },
+      sessions,
+      activeSessionId: token.sessionId,
+      conversationIdentity: token.identity,
+      messages,
+      activities: {},
+      queuedSubmissions: [],
+      prompt: 'B draft',
+      setPrompt: () => undefined,
+      initializing,
+      running: false,
+      stopping: false,
+      paused: false,
+      resuming: false,
+      modelConfigs: [model],
+      selectedModelId: model.id,
+      setSelectedModelId: () => undefined,
       openModelSettings: () => undefined,
-    },
-    actions: {
+      actions: {
       selectSession: () => undefined,
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
-      send: () => { sends += 1 },
+      send: () => lifecycle.runIfCurrent(token, () => { sends += 1 }),
       abort: () => undefined,
-      editMessage: (index, content) => { edits.push({ index, content }) },
+      resume: () => undefined,
+      editMessage: (index, content) => lifecycle.runIfCurrent(
+        token,
+        () => { edits.push({ index, content }) },
+      ),
       resolveToolApproval: async () => ({ success: true }),
-    },
-  }
-  const conversation = (identity, sessionId, initializing, messages) => ({
-    identity,
-    sessions: [{ id: 1, title: 'A' }, { id: 2, title: 'B' }],
-    activeSessionId: sessionId,
-    messages,
-    activities: {},
-    queuedSubmissions: [],
-    initializing,
-    running: false,
-    stopping: false,
-    paused: false,
-    resuming: false,
+      onSubmitErrorReport: async () => ({ success: true }),
+      },
+    })
+  )
+  let resolveBHydration
+  const bHydration = new Promise((resolve) => {
+    resolveBHydration = resolve
   })
+  const a = lifecycle.beginLoad('project-1', 1)
+  lifecycle.finishLoad(a)
+  const aMessages = [
+    { role: 'user', content: 'A question', clientTurnId: 'turn-a' },
+    { role: 'assistant', content: 'A answer', clientTurnId: 'turn-a' },
+  ]
+  const bMessages = [
+    { role: 'user', content: 'B question', clientTurnId: 'turn-b' },
+    { role: 'assistant', content: 'B answer', clientTurnId: 'turn-b' },
+  ]
   const root = createRoot(window.document.getElementById('root'))
   const act = React.act
   const keydown = (target, fields) => {
@@ -175,13 +196,7 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         indexOpen: false,
-        controller: {
-          ...baseController,
-          conversation: conversation('session:1:ready', 1, false, [
-            { role: 'user', content: 'A question', clientTurnId: 'turn-a' },
-            { role: 'assistant', content: 'A answer', clientTurnId: 'turn-a' },
-          ]),
-        },
+        controller: controller(a, false, aMessages),
       }))
       await new Promise((resolve) => window.setTimeout(resolve, 10))
     })
@@ -195,52 +210,55 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
     )
     assert.ok(retiredAEditor)
 
+    const b = lifecycle.beginLoad('project-1', 2)
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         indexOpen: false,
-        controller: {
-          ...baseController,
-          conversation: conversation('session:2:loading', 2, true, []),
-          composer: { ...baseController.composer, submitDisabled: true },
-        },
+        controller: controller(b, true, []),
       }))
     })
     assert.equal(
       window.document.querySelector('textarea[aria-label="编辑历史提问"]'),
       null,
     )
-    const composer = window.document.querySelector('textarea[aria-label="输入任务"]')
-    keydown(composer, { key: 'Enter', shiftKey: false, isComposing: false })
-    window.document.querySelector('button[aria-label="发送"]')
-      .dispatchEvent(new window.Event('click', { bubbles: true }))
+    const composer = window.document.querySelector(
+      'textarea[aria-label="输入希望剧本 Agent 完成的任务"]',
+    )
+    await act(async () => {
+      keydown(composer, { key: 'Enter', shiftKey: false, isComposing: false })
+      window.document.querySelector('button[aria-label="发送"]')
+        .dispatchEvent(new window.Event('click', { bubbles: true }))
+    })
     assert.equal(sends, 0)
     retiredAEditor.dispatchEvent(new window.Event('keydown', { bubbles: true }))
     assert.deepEqual(edits, [])
 
     await act(async () => {
+      resolveBHydration()
+      await bHydration
+      lifecycle.finishLoad(b)
       root.render(React.createElement(AgentConversationPanel, {
         indexOpen: false,
-        controller: {
-          ...baseController,
-          conversation: conversation('session:2:ready', 2, false, [
-            { role: 'user', content: 'B question', clientTurnId: 'turn-b' },
-            { role: 'assistant', content: 'B answer', clientTurnId: 'turn-b' },
-          ]),
-        },
+        controller: controller(b, false, bMessages),
       }))
       await new Promise((resolve) => window.setTimeout(resolve, 10))
     })
-    keydown(
-      window.document.querySelector('textarea[aria-label="输入任务"]'),
-      { key: 'Enter', shiftKey: false, isComposing: false },
-    )
+    await act(async () => keydown(
+        window.document.querySelector(
+          'textarea[aria-label="输入希望剧本 Agent 完成的任务"]',
+        ),
+        { key: 'Enter', shiftKey: false, isComposing: false },
+      ))
     assert.equal(sends, 1)
     const bEditButton = window.document.querySelector('button[aria-label="编辑提问"]')
     await act(async () => bEditButton.dispatchEvent(
       new window.Event('click', { bubbles: true }),
     ))
     const bEditor = window.document.querySelector('textarea[aria-label="编辑历史提问"]')
-    keydown(bEditor, { key: 'Enter', shiftKey: false, isComposing: false })
+    await act(async () => keydown(
+      bEditor,
+      { key: 'Enter', shiftKey: false, isComposing: false },
+    ))
     assert.deepEqual(edits, [{ index: 0, content: 'B question' }])
   } finally {
     await act(async () => root.unmount())

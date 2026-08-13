@@ -121,6 +121,18 @@ test('screenplay adapter derives archived conversation capabilities', () => {
   })
 })
 
+test('screenplay adapter blocks composer submission throughout authoritative hydration', () => {
+  const controller = createScreenplayConversationController({
+    ...bindings,
+    prompt: 'A 草稿',
+    initializing: true,
+  })
+
+  assert.equal(controller.capabilities.inputDisabled, false)
+  assert.equal(controller.composer.submitDisabled, true)
+  assert.equal(controller.actions, bindings.actions)
+})
+
 test('durable screenplay turn ids distinguish fast turns with the same timestamp', () => {
   const pageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8')
   assert.match(pageSource, /clientTurnId:\s*entry\.turnId/)

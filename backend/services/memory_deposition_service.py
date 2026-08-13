@@ -217,6 +217,36 @@ async def deposit_explicit_memory_from_conversation(
     content = extract_explicit_memory(prompt)
     if not book_id or not content:
         return None
+    db = get_db()
+    fingerprint = long_term_memory_service.build_fingerprint(
+        book_id,
+        "canon",
+        "book",
+        None,
+        content,
+    )
+    existing = await db.fetch_one(
+        "SELECT id, status, source_type, source_id FROM memory_items "
+        "WHERE book_id = ? AND fingerprint = ?",
+        [book_id, fingerprint],
+    )
+    if (
+        existing
+        and existing.get("status") == "archived"
+        and existing.get("source_type") == "conversation_truncated"
+        and existing.get("source_id")
+    ):
+        # Automatic source truncation is marked separately from a user archive.
+        # A new explicit remember command may reactivate only that tombstoned
+        # source; a manually archived `conversation` memory stays archived.
+        await db.execute(
+            "UPDATE memory_items SET status = 'active', pinned = 1, "
+            "source_type = 'conversation', "
+            "source_id = ?, update_time = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND status = 'archived'",
+            [str(conversation_id) if conversation_id is not None else None,
+             existing["id"]],
+        )
     return await long_term_memory_service.create_memory_item(
         book_id=book_id,
         kind="canon",
@@ -228,6 +258,7 @@ async def deposit_explicit_memory_from_conversation(
         pinned=1,
         source_type="conversation",
         source_id=conversation_id,
+        fingerprint=fingerprint,
     )
 
 

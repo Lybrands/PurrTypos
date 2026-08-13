@@ -37,10 +37,14 @@ import {
   type HydratedBookConversationReadModel,
 } from './bookConversationHydration'
 import {
+  captureRecoveredRunProjectionOwner,
+  canCommitRecoveredRunProjection,
   createConversationSessionLifecycle,
   readStableConversationProjection,
+  recoveredRunProjectionControl,
   retryCurrentConversationRead,
 } from './conversationSessionLifecycle'
+import type { RecoveredRunProjectionOwner } from './conversationSessionLifecycle'
 import { persistBookProposalResolution } from './proposalResolutionPersistence'
 import FavoritesModal from './components/FavoritesModal'
 import MemoryModal from './components/MemoryModal'
@@ -454,7 +458,10 @@ export default function AiPanel({
           }))
         } else {
           window.dispatchEvent(new CustomEvent('setting-diff-resolution-hydrated', {
-            detail: occurrence.card,
+            detail: {
+              ...occurrence.card,
+              ownerSessionId: occurrence.owner.sessionId,
+            },
           }))
         }
       }
@@ -474,8 +481,18 @@ export default function AiPanel({
       }
       return undefined
     }
-    const commitSettled = (loaded: HydratedBookConversationReadModel) => {
+    const commitSettled = (
+      loaded: HydratedBookConversationReadModel,
+      recoveredOwner?: RecoveredRunProjectionOwner<number>,
+    ) => {
       if (!lifecycle.isCurrent(token)) return
+      if (
+        recoveredOwner
+        && !canCommitRecoveredRunProjection(
+          recoveredOwner,
+          getChatSessionRuntime(sessionId),
+        )
+      ) return
       projectOccurrences(loaded)
       replaceChatRuntimeMessages(sessionId, loaded.messages)
       setChatRuntimeLoading(sessionId, false)
@@ -610,6 +627,7 @@ export default function AiPanel({
 
         let snapshot = latestSnapshot
         let promptForRun = latest.prompt
+        let recoveredTerminalOwner: RecoveredRunProjectionOwner<number> | undefined
         while (lifecycle.isCurrent(token)) {
           const running = await hydrateLatest({
             sessionId,
@@ -624,17 +642,19 @@ export default function AiPanel({
           )
           projectOccurrences(combined)
           replaceChatRuntimeMessages(sessionId, combined.messages)
-          setChatRuntimeLoading(sessionId, snapshot.run.status === 'running')
+          // Recovery owns this session until the authoritative terminal
+          // Conversation projection commits. Releasing loading/stream here
+          // lets a queued R2 start while the late R1 refetch can still replace
+          // its state.
+          const recoveryControl = recoveredRunProjectionControl(
+            snapshot.run.runId,
+          )
+          setChatRuntimeLoading(sessionId, recoveryControl.loading)
           setChatRuntimeStopping(
             sessionId,
             snapshot.run.execution.cancellationRequested,
           )
-          setChatRuntimeStreamId(
-            sessionId,
-            snapshot.run.status === 'running'
-              ? `recovered-run:${snapshot.run.runId}`
-              : undefined,
-          )
+          setChatRuntimeStreamId(sessionId, recoveryControl.streamId)
           setChatRuntimeActivity(sessionId, {
             state: snapshot.run.status === 'running'
               ? 'running'
@@ -646,10 +666,19 @@ export default function AiPanel({
             queuedCount: 0,
           })
           setConversations(combined.messages)
-          setLoading(snapshot.run.status === 'running')
+          setLoading(true)
           finishInitialLoad()
 
-          if (snapshot.run.status !== 'running') break
+          if (snapshot.run.status !== 'running') {
+            const runtime = getChatSessionRuntime(sessionId)
+            if (runtime) {
+              recoveredTerminalOwner = captureRecoveredRunProjectionOwner(
+                runtime,
+                snapshot.run.runId,
+              )
+            }
+            break
+          }
           await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
           if (!lifecycle.isCurrent(token)) return
           const polled = await services.ai.getAgentRunSnapshot({
@@ -671,7 +700,7 @@ export default function AiPanel({
               (row) => String(row.agent_run_id || '') === snapshot.run.runId,
             )) {
               const terminal = await hydrateRows(refreshedRows)
-              if (terminal) commitSettled(terminal)
+              if (terminal) commitSettled(terminal, recoveredTerminalOwner)
               return
             }
           }
@@ -683,11 +712,10 @@ export default function AiPanel({
           snapshot,
         })
         if (!terminal) return
-        commitSettled(mergeHydratedBookRun(
-          history,
-          terminal,
-          snapshot.run.runId,
-        ))
+        commitSettled(
+          mergeHydratedBookRun(history, terminal, snapshot.run.runId),
+          recoveredTerminalOwner,
+        )
         finishInitialLoad()
         return
       }
@@ -726,8 +754,11 @@ export default function AiPanel({
 
   const deleteHistorySession = React.useCallback((session: AiSession) => {
     attachmentManager.evictSession(session.id)
+    window.dispatchEvent(new CustomEvent('setting-diff-owner-evicted', {
+      detail: { bookId, sessionId: session.id },
+    }))
     handleDeleteFromHistory(session)
-  }, [attachmentManager, handleDeleteFromHistory])
+  }, [attachmentManager, bookId, handleDeleteFromHistory])
 
   const bookConversationController = useBookConversationController({
     conversationIdentity,
