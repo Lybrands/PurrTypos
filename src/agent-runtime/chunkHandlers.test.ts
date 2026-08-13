@@ -169,6 +169,76 @@ test('a Run with long-task progress preserves genuine provider final text', () =
   assert.deepEqual(outcomes, ['completed'])
 })
 
+test('long-task completion does not settle the public plan before Root Run events', () => {
+  const harness = createTestChunkContext([
+    { role: 'user', content: '续写正文' },
+    { role: 'assistant', content: '' },
+  ])
+  const dispatch = (sequence: number, eventType: string, data: Record<string, unknown>) => {
+    dispatchAgentChunk({
+      eventId: `public-plan-${sequence}`,
+      runId: 'root-run-2',
+      sequence,
+      source: 'runtime',
+      kind: 'runtime.event',
+      channel: 'lifecycle',
+      visibility: 'public',
+      payload: { eventType, data },
+      occurredAt: `2026-08-13T00:00:0${sequence}+00:00`,
+      emittedAt: `2026-08-13T00:00:0${sequence}+00:00`,
+    }, harness.context)
+  }
+
+  dispatch(1, 'run.todos_updated', {
+    runId: 'root-run-2',
+    title: 'Root Run 公开计划',
+    status: 'running',
+    steps: [{
+      id: 'draft',
+      title: '起草正文',
+      type: 'write',
+      status: 'running',
+    }],
+  })
+  dispatch(2, 'long_task.progress', {
+    taskId: 'recipe-task-2',
+    status: 'completed',
+    units: [{
+      id: 'recipe:write',
+      position: 0,
+      title: 'Recipe 完成正文',
+      kind: 'generate_document_section',
+      status: 'completed',
+    }],
+  })
+
+  let message = harness.readMessages().at(-1)
+  assert.equal(message?.longTaskId, 'recipe-task-2')
+  assert.equal(message?.taskPlan?.status, 'running')
+  assert.deepEqual(
+    message?.taskPlan?.steps.map((step) => [step.id, step.title, step.status]),
+    [['draft', '起草正文', 'running']],
+  )
+
+  dispatch(3, 'run.todo_updated', {
+    runId: 'root-run-2',
+    stepId: 'draft',
+    status: 'running',
+    step: {
+      id: 'draft',
+      title: '起草正文',
+      type: 'write',
+      status: 'done',
+    },
+  })
+  message = harness.readMessages().at(-1)
+  assert.equal(message?.taskPlan?.steps[0]?.status, 'done')
+  assert.equal(message?.taskPlan?.status, 'running')
+
+  dispatch(4, 'run.completed', { runId: 'root-run-2' })
+  assert.equal(harness.readMessages().at(-1)?.taskPlan?.status, 'done')
+})
+
 test('runtime invokes injected host chunk handling without knowing book events', () => {
   const received: unknown[] = []
   const harness = createTestChunkContext([], {
