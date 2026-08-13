@@ -13,6 +13,8 @@ import application.screenplay_structured_call as screenplay_structured_call
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
+    AgentRunRequest,
+    ContextBudget,
     DomainContext,
     RunCreateParams,
     RunStatus,
@@ -20,6 +22,7 @@ from purra.contracts import (
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
+    ModelRequest,
     ReasoningMode,
     StepExecutor,
     StepType,
@@ -30,6 +33,7 @@ from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
 from purra.tools import InMemoryToolCatalog
 from purra.errors import ModelGatewayError
+from purra.json_values import thaw_json_mapping
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
@@ -41,6 +45,7 @@ from application.screenplay_agent_service import (
     ScreenplayAgentService,
     _task_failure,
 )
+from application.composition_factory import create_agent_composition
 from application.model_runtime import model_request_from_runtime
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
@@ -1087,6 +1092,12 @@ async def test_planning_context_contains_state_not_artifact_bodies(
     temp_db: DatabaseConnection,
 ):
     _, workspace, _ = await _project_and_session(temp_db)
+    workspace["project"]["source"] = {
+        "type": "book",
+        "bookId": "book-planning-scope",
+        "bookTitle": "只用于规划范围的原作",
+        "scope": {"mode": "firstChapters", "count": 10},
+    }
     workspace["candidates"] = [{
         "id": "sprev-large-candidate",
         "role": "screenplayDraft",
@@ -1101,7 +1112,130 @@ async def test_planning_context_contains_state_not_artifact_bodies(
     assert "contentText" not in serialized
     assert '"content"' not in serialized
     assert context["project"]["title"] == "Rewritten Agent"
+    assert context["project"]["source"]["scope"] == {
+        "mode": "firstChapters",
+        "count": 10,
+    }
+    assert "creativeBrief" in context["availableDeliverables"]
+    assert "revisionId" not in serialized
+    assert "parentRevisionId" not in serialized
     assert "episodeState" in context
+
+
+async def test_composed_screenplay_root_planning_context_uses_db_facts_without_body_leakage(
+    temp_db: DatabaseConnection,
+):
+    source_marker = "SCREENPLAY_PLANNER_MUST_NOT_SEE_SOURCE_TEXT_8C4D"
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-planning-leakage", "规划上下文来源书"],
+    )
+    await temp_db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) VALUES (?, ?, ?, ?)",
+        [
+            "writing-planning-leakage",
+            "写作目录",
+            "writing",
+            "book-planning-leakage",
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO outline_chapters (id, outline_id, title, sort) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            "chapter-planning-leakage",
+            "writing-planning-leakage",
+            "第一章",
+            1,
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
+        [
+            "chapter-planning-leakage",
+            json.dumps({
+                "root": {
+                    "children": [{
+                        "type": "paragraph",
+                        "children": [{"type": "text", "text": source_marker}],
+                    }],
+                },
+            }, ensure_ascii=False),
+        ],
+    )
+    projects = ScreenplayV2ProjectService(temp_db)
+    workspace = await projects.create_project(
+        command_id="create-screenplay-planning-leakage-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "规划上下文泄漏测试",
+            "format": "series",
+            "source": {
+                "type": "book",
+                "bookId": "book-planning-leakage",
+                "scope": {"mode": "firstChapters", "count": 1},
+            },
+            "brief": {"approach": "忠实改编", "premise": "只读取范围摘要"},
+        }),
+    )
+    project_id = workspace["project"]["id"]
+    body_marker = "SCREENPLAY_PLANNER_MUST_NOT_SEE_THIS_BODY_7F2A"
+    head_id = await _install_head(
+        temp_db,
+        project_id,
+        "sourceAnalysis",
+        {"documentKind": "source_analysis", "body": body_marker},
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_revision_parts SET content_text = ? "
+        "WHERE revision_id = ? AND part_type = 'document' AND part_key = 'main'",
+        [body_marker, head_id],
+    )
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "creativeBrief",
+        "scope": {"kind": "current_stage"},
+    })
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="开始生成创作简报"),),
+        model=ModelRequest(provider="fixture", model="model"),
+        domain_context=ScreenplayAgentDomainContext(
+            project_id=project_id,
+            turn_id="turn-planning-facts",
+            stage_command=command,
+        ).to_core_context(),
+        mode="agent",
+    )
+    composition = create_agent_composition(temp_db)
+    try:
+        provider = composition._profile_registry.require(
+            "screenplay"
+        ).adapter.context_provider
+        bundle = await provider.build_planning_context(
+            request,
+            ContextBudget(
+                window_tokens=128_000,
+                output_reserve_tokens=16_000,
+                safety_reserve_tokens=4_000,
+                runtime_reserve_tokens=4_000,
+            ),
+        )
+    finally:
+        await composition.shutdown()
+
+    facts = bundle.diagnostics["hostPlanningFacts"]
+    serialized = json.dumps(thaw_json_mapping(facts), ensure_ascii=False)
+    assert facts["project"]["id"] == project_id
+    assert facts["stageCommand"] == command.to_mapping()
+    assert "sourceAnalysis" in facts["availableDeliverables"]
+    assert facts["acceptedDeliverables"][0]["role"] == "sourceAnalysis"
+    assert "summary" in facts["acceptedDeliverables"][0]
+    assert body_marker not in serialized
+    assert source_marker not in serialized
+    assert "revisionId" not in serialized
+    assert "parentRevisionId" not in serialized
+    assert "contentText" not in serialized
+    assert '"content"' not in serialized
 
 
 async def test_create_draft_continues_from_head_instead_of_older_candidate():
