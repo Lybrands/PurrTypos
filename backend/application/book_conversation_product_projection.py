@@ -24,6 +24,7 @@ class BookSettingResolutionConflictError(ValueError):
 class BookSettingResolutionWrite:
     conversation_id: int
     replayed: bool
+    needs_digest_backfill: bool = False
 
 
 async def persist_setting_diff_resolution(
@@ -109,14 +110,28 @@ async def persist_setting_diff_resolution(
     existing_resolution = _existing_resolution(current_process, proposal_id)
     normalized = _normalized_resolution(resolution)
     if existing_resolution is not None:
-        if _normalized_resolution(existing_resolution) != normalized:
+        existing_normalized = _normalized_resolution(existing_resolution)
+        if existing_normalized == normalized:
+            return BookSettingResolutionWrite(
+                conversation_id=int(conversation_id),
+                replayed=True,
+            )
+        legacy = {**existing_normalized, "mutationDigest": ""}
+        incoming_without_digest = {**normalized, "mutationDigest": ""}
+        if (
+            not existing_normalized["mutationDigest"]
+            and normalized["mutationDigest"]
+            and legacy == incoming_without_digest
+        ):
+            return BookSettingResolutionWrite(
+                conversation_id=int(conversation_id),
+                replayed=False,
+                needs_digest_backfill=True,
+            )
+        else:
             raise BookSettingResolutionConflictError(
                 "setting proposal has already been resolved differently"
             )
-        return BookSettingResolutionWrite(
-            conversation_id=int(conversation_id),
-            replayed=True,
-        )
     if status == "committed" and not allow_new_committed:
         raise BookSettingResolutionConflictError(
             "committed setting proposal must be recorded by the setting transaction"
@@ -139,6 +154,94 @@ async def persist_setting_diff_resolution(
         conversation_id=int(conversation_id),
         replayed=False,
     )
+
+
+async def backfill_setting_diff_mutation_digest(
+    db,
+    *,
+    conversation_id: int,
+    session_id: int,
+    proposal_id: str,
+    expected_resolution: dict[str, Any],
+) -> None:
+    row = await db.fetch_one(
+        "SELECT agent_process FROM ai_conversations "
+        "WHERE id = ? AND session_id = ?",
+        [int(conversation_id), int(session_id)],
+    )
+    if row is None:
+        raise BookSettingResolutionConflictError(
+            "setting proposal conversation ownership mismatch"
+        )
+    process = _json_object(row.get("agent_process"))
+    stored = _existing_resolution(process, proposal_id)
+    if stored is None:
+        raise BookSettingResolutionConflictError(
+            "setting proposal resolution disappeared during replay"
+        )
+    stored_normalized = _normalized_resolution(stored)
+    expected_normalized = _normalized_resolution(expected_resolution)
+    if (
+        stored_normalized["mutationDigest"]
+        or {**stored_normalized, "mutationDigest": ""}
+        != {**expected_normalized, "mutationDigest": ""}
+    ):
+        raise BookSettingResolutionConflictError(
+            "setting proposal has already been resolved differently"
+        )
+    stored["mutationDigest"] = expected_normalized["mutationDigest"]
+    await db.execute(
+        "UPDATE ai_conversations SET agent_process = ? "
+        "WHERE id = ? AND session_id = ?",
+        [
+            json.dumps(process, ensure_ascii=False),
+            int(conversation_id),
+            int(session_id),
+        ],
+    )
+
+
+def legacy_setting_diff_reviewed_final(
+    *,
+    kind: str,
+    request_before: dict[str, Any],
+    request_proposed: dict[str, Any],
+    resolution: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reconstruct a pre-digest reviewed final only when it is unique.
+
+    Legacy resolution receipts retained accepted/rejected counts but not the
+    selected segment bitmap. All-accepted and none-accepted selections have a
+    unique final; a mixed selection cannot be proven and fails closed.
+    """
+
+    if kind == "background":
+        fields = ("content",)
+        text_field = "content"
+    else:
+        fields = ("name", "tags", "profileMd")
+        text_field = "profileMd"
+    changed_meta = sum(
+        1
+        for field in fields
+        if field != text_field
+        and str(request_before.get(field) or "")
+        != str(request_proposed.get(field) or "")
+    )
+    changed_text = _reviewable_text_operation_count(
+        str(request_before.get(text_field) or ""),
+        str(request_proposed.get(text_field) or ""),
+    )
+    total = changed_meta + changed_text
+    accepted = int(resolution.get("acceptedSegments") or 0)
+    rejected = int(resolution.get("rejectedSegments") or 0)
+    if accepted < 0 or rejected < 0 or accepted + rejected > total:
+        return None
+    if accepted == 0:
+        return {field: str(request_before.get(field) or "") for field in fields}
+    if accepted == total:
+        return {field: str(request_proposed.get(field) or "") for field in fields}
+    return None
 
 
 async def validate_setting_diff_mutation(
@@ -321,6 +424,31 @@ def _paragraph_diff(before: list[str], proposed: list[str]):
     return raw
 
 
+def _reviewable_text_operation_count(before: str, proposed: str) -> int:
+    deletes = 0
+    inserts = 0
+    count = 0
+
+    def flush() -> None:
+        nonlocal deletes, inserts, count
+        count += max(deletes, inserts)
+        deletes = 0
+        inserts = 0
+
+    for tag, _value in _paragraph_diff(
+        before.split("\n") if before else [],
+        proposed.split("\n") if proposed else [],
+    ):
+        if tag == "delete":
+            deletes += 1
+        elif tag == "insert":
+            inserts += 1
+        else:
+            flush()
+    flush()
+    return count
+
+
 def _existing_resolution(
     process: dict[str, Any],
     proposal_id: str,
@@ -446,8 +574,10 @@ def _json_object(value: object) -> dict[str, Any]:
 
 
 __all__ = [
+    "backfill_setting_diff_mutation_digest",
     "BookSettingResolutionConflictError",
     "BookSettingResolutionWrite",
+    "legacy_setting_diff_reviewed_final",
     "merge_product_agent_process",
     "persist_setting_diff_resolution",
     "setting_diff_mutation_digest",

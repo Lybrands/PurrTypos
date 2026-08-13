@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -358,6 +359,162 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         assert "screenplay_agent_jobs" not in native_tables
         assert "screenplay_agent_job_steps" not in native_tables
         assert "screenplay_conversation_turns" not in native_tables
+    finally:
+        await reopened.close()
+
+
+async def test_startup_retires_active_legacy_project_without_using_delete_guard(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_projects (id, title) "
+        "VALUES ('legacy-active-project', '旧剧本')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_projects "
+        "(id, title, source_snapshot_json) "
+        "VALUES ('native-kept-project', '新剧本', '{}')"
+    )
+    await first.execute(
+        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
+        "VALUES (9701, 'screenplay', 'legacy-active-project')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content) "
+        "VALUES ('legacy-active-turn', 'legacy-active-project', 9701, "
+        "'legacy-active-command', 'planning', '继续')"
+    )
+    await first.execute(
+        "INSERT INTO screenplay_agent_operations "
+        "(id, turn_id, project_id, session_id, status, target_role, "
+        "manifest_digest) VALUES ('legacy-active-operation', "
+        "'legacy-active-turn', 'legacy-active-project', 9701, 'queued', "
+        "'screenplayDraft', 'digest')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, status) VALUES "
+        "('legacy-active-work', 'purrtypos.screenplay', 'draft', "
+        "'legacy-active-project', 'open')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, status) VALUES "
+        "('native-kept-work', 'purrtypos.screenplay', 'draft', "
+        "'native-kept-project', 'open')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id) VALUES "
+        "('legacy-active-run', 9701, 'running', '旧运行', "
+        "'screenplay.agent.turn', 'legacy-active-project', 'legacy-command')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, parent_run_id, root_run_id, status, prompt) VALUES "
+        "('legacy-active-child', 'legacy-active-run', 'legacy-active-run', "
+        "'running', '旧子运行')"
+    )
+    conversation_id = await first.execute_and_get_id(
+        "INSERT INTO ai_conversations (session_id, prompt, response) "
+        "VALUES (9701, '旧会话', '旧回复')"
+    )
+    await first.execute(
+        "INSERT INTO ai_favorites (session_id, session_title, prompt, content) "
+        "VALUES (9701, '旧会话', '旧会话', '旧回复')"
+    )
+    await first.execute(
+        "INSERT INTO ai_error_reports "
+        "(id, stream_id, agent_run_id, session_id, conversation_id, error_message) "
+        "VALUES ('legacy-active-report', 'legacy-active-stream', "
+        "'legacy-active-run', 9701, ?, '旧错误')",
+        [conversation_id],
+    )
+    await first.execute(
+        "INSERT INTO memory_items "
+        "(book_id, kind, content, status, source_type, source_id) VALUES "
+        "('legacy-book', 'canon', '旧记忆', 'active', 'conversation', ?)",
+        [str(conversation_id)],
+    )
+    await first.execute(
+        "INSERT INTO ai_writing_chat_requests "
+        "(request_id, session_id, request_digest, status) VALUES "
+        "('legacy-active-request', 9701, 'sha256:legacy', 'accepted')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id) VALUES ('native-kept-run', 'running', '写作', "
+        "'writing.chat.request', 'legacy-active-project', 'writing-command')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units, metadata_json) VALUES "
+        "('native-kept-task', 'native-kept-work', 'purrtypos.screenplay', "
+        "'draft', 'native-kept-project', 'native-kept-run', 'completed', 1, "
+        "'{\"sessionId\":9701,\"kept\":true}')"
+    )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        assert await reopened.fetch_one(
+            "SELECT id FROM screenplay_projects "
+            "WHERE id = 'legacy-active-project'"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT id FROM screenplay_agent_turns "
+            "WHERE id = 'legacy-active-turn'"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT id FROM ai_agent_work_items "
+            "WHERE id = 'legacy-active-work'"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT id FROM screenplay_projects "
+            "WHERE id = 'native-kept-project'"
+        ) == {"id": "native-kept-project"}
+        assert await reopened.fetch_one(
+            "SELECT id FROM ai_agent_work_items "
+            "WHERE id = 'native-kept-work'"
+        ) == {"id": "native-kept-work"}
+        assert await reopened.fetch_one(
+            "SELECT status, session_id FROM ai_agent_runs "
+            "WHERE id = 'legacy-active-run'"
+        ) == {"status": "canceled", "session_id": None}
+        assert await reopened.fetch_one(
+            "SELECT status FROM ai_agent_runs "
+            "WHERE id = 'legacy-active-child'"
+        ) == {"status": "canceled"}
+        assert await reopened.fetch_one(
+            "SELECT request_id FROM ai_writing_chat_requests "
+            "WHERE request_id = 'legacy-active-request'"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = 'native-kept-run'"
+        ) == {"status": "running"}
+        assert await reopened.fetch_one(
+            "SELECT session_id, conversation_id FROM ai_error_reports "
+            "WHERE id = 'legacy-active-report'"
+        ) == {"session_id": None, "conversation_id": None}
+        assert await reopened.fetch_one(
+            "SELECT id FROM ai_favorites WHERE session_id = 9701"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT status, source_type FROM memory_items WHERE source_id = ?",
+            [str(conversation_id)],
+        ) == {"status": "archived", "source_type": "conversation_truncated"}
+        retained_task = await reopened.fetch_one(
+            "SELECT metadata_json FROM ai_agent_long_tasks "
+            "WHERE id = 'native-kept-task'"
+        )
+        assert json.loads(retained_task["metadata_json"]) == {"kept": True}
     finally:
         await reopened.close()
 

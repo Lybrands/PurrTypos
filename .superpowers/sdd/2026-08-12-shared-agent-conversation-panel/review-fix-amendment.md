@@ -129,3 +129,47 @@ git diff --check
 
 The four credential-gated live-provider E2Es remain release blockers unless
 their credentials are supplied; they are never reported as passing coverage.
+
+## Final independent-review follow-up
+
+Base: `91f21217e5e6a18aa0238bd225ea8028eca70eb7`.
+This follow-up remains inside existing persistence tables and product routes;
+it does not change PurrA/provider contracts or Agent execution semantics.
+
+1. **Legacy Screenplay startup retirement is migration-owned.** Reopening a
+   legacy project with queued/running runtime first retires its owned Turn,
+   Operation, Run, request, and task state in one initialization transaction,
+   then removes the discarded aggregate. It never invokes or weakens the
+   interactive deletion guard and cannot touch native or cross-owner rows.
+2. **Legacy SettingDiff replay is provable, never wildcarded.** A committed
+   resolution created before `mutationDigest` is accepted only when the Run
+   journal, request snapshots, reviewed final target, current durable target,
+   and target identity prove the same mutation. The transaction atomically
+   backfills the canonical digest. Forged inputs remain `409` for all targets.
+3. **Deletion active frontier includes pre-Operation work.** The shared owner
+   predicate rejects owner-scoped open WorkItems and queued/planning/running/
+   paused Screenplay Turns, including Turns with no Operation. Claim and
+   `before_submit` recheck the same owner under the write lock.
+4. **Terminal cleanup snapshots children before parents.** The deletion
+   transaction snapshots all owned task/turn/operation IDs, clears
+   `ai_agent_long_task_usage`, and deletes every matching cancel command,
+   including pre-Operation commands with NULL `operation_id`, before parents.
+5. **Structured SettingDiff replay precedes target existence.** Character and
+   entity routes prove journal identity/digest and an existing exact receipt
+   before reading the mutable target. New mutations require a live target and
+   current-row CAS (`409` when absent); an exact successful replay remains
+   idempotent after target deletion. Background retains the same contract.
+
+### Read-only closure additions
+
+- Run-linked WorkItems are related for active-owner guarding only. Physical
+  aggregate cleanup requires exact product namespace and `owner_id`; immutable
+  REFERENCE/CONTINUATION links never transfer ownership.
+- A pre-digest SettingDiff receipt may be upgraded only when its journal
+  snapshots and accepted/rejected counts uniquely reconstruct the reviewed
+  final and the persisted mutation history/current target prove that result.
+  Mixed or otherwise ambiguous legacy selections fail closed.
+- Initialization-only retirement performs the session-dependent cleanup that
+  the public owner deletion path would perform after its guard: reports are
+  unlinked, favorites removed, Conversation memory archived, and retained task
+  metadata stripped, all inside the migration transaction.
