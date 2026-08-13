@@ -373,13 +373,29 @@ test('live and replay converge when Recipe progress interleaves Root plan events
     }),
   ]
 
-  const liveAssistant = reduceLive(seed, chunks)
+  const liveAfterProgress = reduceLive(seed, chunks.slice(0, 2))
   const replay = new AgentChunkReplay()
-  chunks.forEach((chunk) => replay.dispatch(
+  chunks.slice(0, 2).forEach((chunk) => replay.dispatch(
     seed,
     chunk,
     { cfg: model, appMessage },
   ))
+  const replayAfterProgress = replay.assistant(seed.turnId)
+
+  assert.deepEqual(replayAfterProgress, liveAfterProgress)
+  assert.equal(replayAfterProgress?.longTaskId, 'recipe-task-ordering')
+  assert.equal(replayAfterProgress?.taskPlan?.status, 'running')
+  assert.deepEqual(
+    replayAfterProgress?.taskPlan?.steps.map((step) => step.status),
+    ['done', 'running'],
+  )
+
+  chunks.slice(2).forEach((chunk) => replay.dispatch(
+    seed,
+    chunk,
+    { cfg: model, appMessage },
+  ))
+  const liveAssistant = reduceLive(seed, chunks)
   const replayedAssistant = replay.assistant(seed.turnId)
 
   assert.deepEqual(replayedAssistant, liveAssistant)
