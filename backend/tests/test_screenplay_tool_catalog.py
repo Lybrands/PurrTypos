@@ -12,6 +12,9 @@ from application.composition_factory import create_agent_composition
 from application.screenplay_tool_calling import (
     ScreenplayToolCallingService,
 )
+from application.screenplay_agent_task_executor import (
+    normalize_screenplay_candidate,
+)
 from database.connection import DatabaseConnection
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from infrastructure.screenplay import (
@@ -31,7 +34,7 @@ from purra.contracts import (
     RunStatus,
     ToolCallDelta,
 )
-from purra.errors import ModelGatewayError
+from purra.errors import ContractViolationError, ModelGatewayError
 from purra.artifacts.errors import ArtifactValidationError
 from purra.events import CoreEventType
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
@@ -87,6 +90,33 @@ def _request(context: ScreenplayAgentDomainContext) -> AgentRunRequest:
         mode="agent",
         tools_enabled=True,
     )
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {"protocol": "unknown", "kind": "generic"},
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "unknown",
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": "scene-1",
+            "unexpected": True,
+        },
+    ],
+)
+def test_candidate_validation_contract_is_strict_and_versioned(contract):
+    with pytest.raises(ValueError):
+        normalize_screenplay_candidate(
+            contract,
+            {
+                "payload": {"sceneId": "scene-1", "sceneText": "正文"},
+                "contentText": "正文",
+            },
+        )
 
 
 def _tool_handler(catalog, name: str):
@@ -351,6 +381,53 @@ async def test_invalid_candidate_part_cannot_be_finalized(
         "SELECT COUNT(*) AS count FROM ai_agent_artifact_batches "
         "WHERE artifact_id = ?",
         [artifact["id"]],
+    ) == {"count": 0}
+
+
+async def test_candidate_normalizer_must_be_deterministic_before_artifact_write(
+    screenplay_tool_db,
+):
+    calls = 0
+
+    def unstable(contract, candidate):
+        nonlocal calls
+        del contract
+        calls += 1
+        value = dict(candidate)
+        value["payload"] = {**dict(value["payload"]), "call": calls}
+        return value
+
+    artifacts = ScreenplayCandidateArtifacts(
+        screenplay_tool_db,
+        candidate_normalizer=unstable,
+    )
+    state = ExecutionState(
+        domain={
+            "projectId": "screenplay-project",
+            "taskId": "screenplay-task",
+            "unitId": "section:premise",
+            "targetRole": "creativeBrief",
+            "expectedPartType": "document_section",
+            "expectedPartKey": "premise",
+            "candidateValidation": {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "generic",
+            },
+        },
+        run_id="run-unstable-normalizer",
+    )
+
+    with pytest.raises(ValueError, match="not deterministic"):
+        await artifacts.write(state, {"candidate": {
+            "sectionKey": "premise",
+            "title": "故事前提",
+            "contentText": "正文",
+            "contentJson": {"premise": "人物重新相遇。"},
+        }})
+
+    assert await screenplay_tool_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifacts WHERE run_id = ?",
+        [state.run_id],
     ) == {"count": 0}
 
 
@@ -786,6 +863,186 @@ class _HostPreparedSceneModelGateway:
         )
 
 
+class _TaskValidationRetryGateway:
+    def __init__(self) -> None:
+        self.invocations = []
+
+    def describe_invocation(self, messages, invocation):
+        return {
+            "messageCount": len(messages),
+            "toolNames": [tool.name for tool in invocation.tools],
+        }
+
+    async def stream(self, messages, invocation, signal=None):
+        del messages, signal
+        self.invocations.append(invocation)
+        call_number = len(self.invocations)
+
+        async def chunks():
+            if call_number in {1, 3}:
+                scene_id = "wrong-scene" if call_number == 1 else "scene-1"
+                arguments = json.dumps({
+                    "candidate": {
+                        "episodeNumber": 1,
+                        "reviewDimension": "continuity",
+                        "title": "第 1 集 continuity 审阅",
+                        "contentText": "发现一个连续性问题。",
+                        "contentJson": {
+                            "verdict": "revise",
+                            "issues": [{
+                                "id": "issue-1",
+                                "severity": "major",
+                                "description": "证物出现顺序不一致。",
+                                "sceneIds": [scene_id],
+                            }],
+                        },
+                    },
+                }, ensure_ascii=False)
+                yield ModelStreamChunk(
+                    tool_call_deltas=(ToolCallDelta(
+                        index=0,
+                        id=f"call-write-review-{call_number}",
+                        type="function",
+                        name="writeScreenplayCandidatePart",
+                        arguments_fragment=arguments,
+                    ),),
+                    finish_reason=ModelFinishReason.TOOL_CALLS,
+                )
+                return
+            yield ModelStreamChunk(
+                content_delta="候选审阅已写入。",
+                finish_reason=ModelFinishReason.STOP,
+            )
+
+        return ModelStream(chunks=chunks(), model="fixture-model")
+
+    async def complete(self, messages, invocation, signal=None):
+        del messages, invocation, signal
+        return ModelCompletion(
+            message={"role": "assistant", "content": "unused"},
+            model="fixture-model",
+        )
+
+
+async def test_task_candidate_validation_fails_child_then_retries_new_generation(
+    screenplay_tool_db,
+    monkeypatch,
+):
+    gateway = _TaskValidationRetryGateway()
+    monkeypatch.setattr(
+        agent_composition_module,
+        "ProviderModelGateway",
+        lambda *_args, **_kwargs: gateway,
+    )
+    composition = create_agent_composition(screenplay_tool_db)
+    runtime = ScreenplayAgentRuntimeRequest.model_validate({
+        "apiKey": "secret",
+        "apiProvider": "openai",
+        "baseURL": "https://provider.example/v1",
+        "options": {
+            "model": "fixture-model",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
+        },
+        "contextWindow": "128k",
+    })
+    kwargs = {
+        "runtime": runtime,
+        "session_id": 1,
+        "prompt": "审阅第一集连续性",
+        "system_instruction": "只写入连续性审阅候选。",
+        "user_payload": {"reviewedContentDigest": "digest-1"},
+        "domain_context": _context(
+            target_role="review",
+            expected_part_type="review_dimension",
+            expected_part_key="1:continuity",
+        ),
+        "conversation_turn_id": "turn-task-validation-retry",
+        "lineage": _part_lineage("root-task-validation-retry"),
+        "reasoning_mode": ReasoningMode.DISABLED,
+        "candidate_validation_contract": {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "review_dimension",
+            "episodeNumber": 1,
+            "dimension": "continuity",
+            "allowedSceneIds": ["scene-1"],
+            "reviewedDraftId": "draft-1",
+            "reviewedContentDigest": "digest-1",
+        },
+    }
+    service = ScreenplayToolCallingService(
+        screenplay_tool_db,
+        composition=composition,
+    )
+    try:
+        with pytest.raises(ModelGatewayError) as first_error:
+            await service.run_candidate(**kwargs)
+        assert first_error.value.code == "candidate_commit_failed"
+        first_run = await screenplay_tool_db.fetch_one(
+            "SELECT id, status FROM ai_agent_runs "
+            "WHERE parent_run_id = 'root-task-validation-retry' "
+            "ORDER BY create_time, id LIMIT 1",
+        )
+        assert first_run["status"] == "failed"
+        assert await screenplay_tool_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_artifacts "
+            "WHERE run_id = ?",
+            [first_run["id"]],
+        ) == {"count": 0}
+
+        corrected = await service.run_candidate(**kwargs)
+        conflicting = {
+            **kwargs,
+            "candidate_validation_contract": {
+                **kwargs["candidate_validation_contract"],
+                "reviewedContentDigest": "digest-conflict",
+            },
+        }
+        with pytest.raises(ContractViolationError):
+            await service.run_candidate(**conflicting)
+    finally:
+        await composition.shutdown()
+
+    assert len(gateway.invocations) == 4
+    assert corrected.candidate["payload"]["contentJson"] == {
+        "verdict": "revise",
+        "issues": [{
+            "id": "episode-1:continuity:issue-1",
+            "severity": "major",
+            "description": "证物出现顺序不一致。",
+            "sceneIds": ["scene-1"],
+            "dimension": "continuity",
+        }],
+        "schemaVersion": 1,
+        "documentKind": "review",
+        "reviewedDraftId": "draft-1",
+        "issueCount": 1,
+        "criticalIssueCount": 0,
+        "reviewedEpisode": 1,
+        "reviewDimension": "continuity",
+        "reviewedContentDigest": "digest-1",
+        "inputContractVersion": 2,
+    }
+    finalized = await screenplay_tool_db.fetch_all(
+        "SELECT run_id, metadata_json FROM ai_agent_artifacts "
+        "WHERE status = 'finalized'",
+    )
+    assert len(finalized) == 1
+    assert finalized[0]["run_id"] == corrected.run_id
+    artifact_metadata = json.loads(finalized[0]["metadata_json"])
+    assert artifact_metadata["turnId"] == "turn-task-validation-retry"
+    assert len(artifact_metadata["candidateValidationDigest"]) == 64
+    assert "reviewedContentDigest" not in artifact_metadata
+    assert await screenplay_tool_db.fetch_one(
+        "SELECT generation, run_id, terminal_status "
+        "FROM ai_agent_host_child_runs",
+    ) == {
+        "generation": 2,
+        "run_id": corrected.run_id,
+        "terminal_status": "done",
+    }
+
+
 async def test_screenplay_tool_run_publishes_no_host_text_and_redacts_candidate_body(
     screenplay_tool_db,
     monkeypatch,
@@ -936,6 +1193,11 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
             conversation_turn_id="turn-host-prepared-scene",
             lineage=_part_lineage("root-host-prepared-scene"),
             reasoning_mode=ReasoningMode.DISABLED,
+            candidate_validation_contract={
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene",
+                "expectedSceneId": "ep01_s04",
+            },
             host_candidate_template={
                 "sceneId": "ep01_s04",
                 "processSummary": "落实追逐目标并完成穿墙钩子。",

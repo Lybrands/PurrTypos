@@ -14,18 +14,32 @@ SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE = "candidateCompletionProjection"
 SCREENPLAY_CANDIDATE_PROJECTION_PROTOCOL = (
     "purrtypos.screenplay.candidate-completion.v1"
 )
+SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL = (
+    "purrtypos.screenplay.candidate-validation/v1"
+)
 
 
 def candidate_completion_projection(
     *,
     scope: Mapping[str, Any],
+    turn_id: str,
+    validation_contract: Mapping[str, Any],
     host_candidate_template: Mapping[str, Any] | None = None,
     text_field: str = "sceneText",
 ) -> dict[str, Any]:
     projection: dict[str, Any] = {
         "protocol": SCREENPLAY_CANDIDATE_PROJECTION_PROTOCOL,
         "scope": dict(scope),
+        "turnId": str(turn_id or "").strip(),
+        "validationContract": dict(validation_contract),
     }
+    if not projection["turnId"]:
+        raise ValueError("candidate projection turn id is required")
+    if (
+        projection["validationContract"].get("protocol")
+        != SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL
+    ):
+        raise ValueError("candidate validation contract protocol is invalid")
     if host_candidate_template is not None:
         normalized_field = str(text_field or "").strip()
         if not normalized_field:
@@ -40,5 +54,6 @@ def candidate_completion_projection(
 __all__ = [
     "SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE",
     "SCREENPLAY_CANDIDATE_PROJECTION_PROTOCOL",
+    "SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL",
     "candidate_completion_projection",
 ]

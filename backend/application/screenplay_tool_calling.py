@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +44,7 @@ from application.request_mapping import context_window_tokens
 from application.run_provenance import digest_model_endpoint
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from domains.screenplay_agent.candidate_projection import (
+    SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
     candidate_completion_projection,
 )
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
@@ -72,9 +73,7 @@ class ScreenplayToolCallingService:
         domain_context: ScreenplayAgentDomainContext,
         conversation_turn_id: str,
         reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT,
-        validate_candidate: (
-            Callable[[Mapping[str, Any]], Mapping[str, Any]] | None
-        ) = None,
+        candidate_validation_contract: Mapping[str, Any] | None = None,
         host_candidate_template: Mapping[str, Any] | None = None,
         lineage: RunLineage,
         signal=None,
@@ -86,6 +85,26 @@ class ScreenplayToolCallingService:
         output_limit = resolve_invocation_output_limit(
             model_request.capability_snapshot,
             explicit_user_override=model_request.options.get("max_tokens"),
+        )
+        validation_contract = dict(
+            candidate_validation_contract
+            or {
+                "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                "kind": "generic",
+            }
+        )
+        bound_context = ScreenplayAgentDomainContext(
+            project_id=domain_context.project_id,
+            task_id=domain_context.task_id,
+            unit_id=domain_context.unit_id,
+            target_role=domain_context.target_role,
+            expected_part_type=domain_context.expected_part_type,
+            expected_part_key=domain_context.expected_part_key,
+            candidate_validation_contract=validation_contract,
+            tool_access=domain_context.tool_access,
+            source_book_id=domain_context.source_book_id,
+            source_scope=domain_context.source_scope,
+            locale=domain_context.locale,
         )
         request = AgentRunRequest(
             messages=(
@@ -104,7 +123,7 @@ class ScreenplayToolCallingService:
                 ),
             ),
             model=model_request,
-            domain_context=domain_context.to_core_context(),
+            domain_context=bound_context.to_core_context(),
             session_id=session_id,
             mode="agent",
             context_window=window,
@@ -127,7 +146,9 @@ class ScreenplayToolCallingService:
                 aggregate_id=domain_context.project_id,
                 command_id=f"{domain_context.task_id}:{domain_context.unit_id}",
                 attributes=candidate_completion_projection(
-                    scope=domain_context.to_core_context().payload,
+                    scope=bound_context.to_core_context().payload,
+                    turn_id=conversation_turn_id,
+                    validation_contract=validation_contract,
                     host_candidate_template=host_candidate_template,
                 ),
             ),
@@ -173,20 +194,10 @@ class ScreenplayToolCallingService:
                 code="candidate_commit_missing",
                 retryable=True,
             )
-        public_candidate = {
+        candidate = {
             key: value for key, value in candidate.items()
             if not str(key).startswith("_")
         }
-        if validate_candidate is not None:
-            try:
-                public_candidate = dict(validate_candidate(public_candidate))
-            except (TypeError, ValueError) as error:
-                raise ModelGatewayError(
-                    str(error) or "candidate validation failed",
-                    code="candidate_validation_failed",
-                    retryable=True,
-                ) from error
-        candidate = public_candidate
         return ScreenplayCandidateRunResult(run_id=run_id, candidate=candidate)
 
 def _provider_options(runtime) -> dict[str, Any]:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from purra.artifacts import (
@@ -136,6 +137,10 @@ class ScreenplayCandidateArtifacts:
         db,
         *,
         join_ambient_transaction: bool = False,
+        candidate_normalizer: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+            | None
+        ) = None,
     ) -> None:
         self._db = db
         self._repository = SqliteArtifactRepository(
@@ -146,6 +151,7 @@ class ScreenplayCandidateArtifacts:
             self._repository,
             validator=_CandidateValidator(),
         )
+        self._candidate_normalizer = candidate_normalizer
 
     async def write(
         self,
@@ -186,6 +192,11 @@ class ScreenplayCandidateArtifacts:
         arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
         project_id = str(scope.get("projectId") or "").strip()
+        item = self._normalize_item(
+            scope,
+            _candidate_item(scope, arguments),
+            artifact_id="",
+        )
         artifact = await self._repository.find_for_run(
             namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
             kind=SCREENPLAY_CANDIDATE_KIND,
@@ -193,6 +204,12 @@ class ScreenplayCandidateArtifacts:
             run_id=run_id,
         )
         if artifact is None:
+            validation_contract = scope.get("candidateValidation")
+            turn_id = (
+                await self._candidate_turn_id(run_id)
+                if isinstance(validation_contract, Mapping)
+                else ""
+            )
             artifact = await self._lifecycle.begin(ArtifactCreateCommand(
                 namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
                 kind=SCREENPLAY_CANDIDATE_KIND,
@@ -210,18 +227,22 @@ class ScreenplayCandidateArtifacts:
                     "semanticKey": str(
                         scope.get("semanticKey") or scope.get("unitId") or ""
                     ),
+                    "turnId": turn_id,
+                    "candidateValidationDigest": (
+                        _digest(validation_contract)
+                        if isinstance(validation_contract, Mapping)
+                        else ""
+                    ),
                 },
             ))
         if artifact.status is ArtifactStatus.FINALIZED:
             return _receipt(artifact, already_written=True)
         batches = tuple(await self._repository.list_batches(artifact.id))
         if batches:
-            item = thaw_json_mapping(batches[0].items[0])
-            expected = _candidate_item(scope, arguments)
-            if _canonical(item) != _canonical(expected):
+            stored = thaw_json_mapping(batches[0].items[0])
+            if _canonical(stored) != _canonical(item):
                 raise RuntimeError("screenplay_candidate_part_conflict")
             return _receipt(artifact, already_written=True)
-        item = _candidate_item(scope, arguments)
         receipt = await self._lifecycle.append(ArtifactAppendCommand(
             artifact_id=artifact.id,
             expected_revision=artifact.revision,
@@ -243,6 +264,106 @@ class ScreenplayCandidateArtifacts:
             "partKey": str(scope.get("expectedPartKey") or ""),
             "alreadyWritten": False,
         }
+
+    async def validate_run(
+        self,
+        *,
+        run_id: str,
+        scope: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        candidate = await self.load_run(run_id)
+        artifact = candidate["_artifact"]
+        batches = candidate["_batches"]
+        metadata = thaw_json_mapping(artifact.metadata)
+        expected_metadata = {
+            "taskId": str(scope.get("taskId") or ""),
+            "unitId": str(scope.get("unitId") or ""),
+            "targetRole": str(scope.get("targetRole") or ""),
+            "partType": str(scope.get("expectedPartType") or ""),
+            "partKey": str(scope.get("expectedPartKey") or ""),
+        }
+        validation_contract = scope.get("candidateValidation")
+        if isinstance(validation_contract, Mapping):
+            expected_metadata.update({
+                "turnId": await self._candidate_turn_id(run_id),
+                "candidateValidationDigest": _digest(validation_contract),
+            })
+        if (
+            artifact.run_id != run_id
+            or {
+                key: str(metadata.get(key) or "")
+                for key in expected_metadata
+            }
+            != expected_metadata
+            or len(batches) != 1
+            or len(batches[0].items) != 1
+        ):
+            raise ValueError("candidate Artifact scope conflicts with its Run")
+        stored = thaw_json_mapping(batches[0].items[0])
+        normalized = self._normalize_item(
+            scope,
+            stored,
+            artifact_id=artifact.id,
+        )
+        if _canonical(stored) != _canonical(normalized):
+            raise ValueError("candidate Artifact is not task-normalized")
+        return candidate
+
+    async def _candidate_turn_id(self, run_id: str) -> str:
+        rows = await self._db.fetch_all(
+            "SELECT turn_id, source, kind, channel, visibility, "
+            "output_stream_id, invocation_id FROM ai_agent_run_events "
+            "WHERE source_event_key = ?",
+            [f"run:{run_id}:running"],
+        )
+        if (
+            len(rows) != 1
+            or rows[0].get("source") != "runtime"
+            or rows[0].get("kind") != "run.lifecycle"
+            or rows[0].get("channel") != "lifecycle"
+            or rows[0].get("visibility") != "public"
+            or rows[0].get("output_stream_id") is not None
+            or rows[0].get("invocation_id") is not None
+            or not str(rows[0].get("turn_id") or "").strip()
+        ):
+            raise ValueError("candidate Artifact turn identity is invalid")
+        return str(rows[0]["turn_id"])
+
+    def _normalize_item(
+        self,
+        scope: Mapping[str, Any],
+        item: Mapping[str, Any],
+        *,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        contract = scope.get("candidateValidation")
+        if contract is None:
+            return dict(item)
+        if not isinstance(contract, Mapping) or self._candidate_normalizer is None:
+            raise RuntimeError("candidate validation contract is unavailable")
+        _require_validation_scope(scope, contract)
+        public = _public_candidate(scope, item, artifact_id=artifact_id)
+        try:
+            first = dict(self._candidate_normalizer(
+                _json_clone(contract),
+                _json_clone(public),
+            ))
+            second = dict(self._candidate_normalizer(
+                _json_clone(contract),
+                _json_clone(public),
+            ))
+        except (TypeError, ValueError) as error:
+            raise ScreenplayToolInputError(
+                "The screenplay candidate does not match its task contract.",
+                guidance=(
+                    "Correct the candidate using the registered task identity "
+                    "and content constraints, then retry once."
+                ),
+                details={"validationCode": "candidate_task_invalid"},
+            ) from error
+        if _canonical(first) != _canonical(second):
+            raise ValueError("candidate normalizer is not deterministic")
+        return _normalized_candidate_item(scope, first)
 
     async def inspect(self, state: ExecutionState) -> dict[str, Any]:
         run_id = str(state.run_id or "").strip()
@@ -376,6 +497,52 @@ def _candidate_item(scope, arguments: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _public_candidate(
+    scope: Mapping[str, Any],
+    item: Mapping[str, Any],
+    *,
+    artifact_id: str,
+) -> dict[str, Any]:
+    payload = thaw_json_mapping(item.get("payload"))
+    content_text = str(item.get("contentText") or "")
+    if not content_text and str(scope.get("targetRole") or "") == (
+        "screenplayDraft"
+    ):
+        if str(item.get("partType") or "") == "scene":
+            content_text = str(payload.get("sceneText") or "").strip()
+        else:
+            content_text = "\n\n".join(
+                str(scene.get("sceneText") or "").strip()
+                for scene in payload.get("scenes") or ()
+                if isinstance(scene, Mapping)
+            )
+    return {
+        "artifactId": artifact_id,
+        "partType": str(item.get("partType") or ""),
+        "partKey": str(item.get("partKey") or ""),
+        "payload": payload,
+        "contentText": content_text,
+    }
+
+
+def _normalized_candidate_item(
+    scope: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = candidate.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("normalized candidate payload is missing")
+    content_text = str(candidate.get("contentText") or "")
+    if str(scope.get("targetRole") or "") == "screenplayDraft":
+        content_text = ""
+    return {
+        "partType": str(scope.get("expectedPartType") or ""),
+        "partKey": str(scope.get("expectedPartKey") or ""),
+        "payload": dict(payload),
+        "contentText": content_text,
+    }
+
+
 def _receipt(artifact: ArtifactRecord, *, already_written: bool) -> dict[str, Any]:
     metadata = thaw_json_mapping(artifact.metadata)
     return {
@@ -395,6 +562,56 @@ def _canonical(value: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _json_clone(value: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads(_canonical(value))
+
+
+def _require_validation_scope(
+    scope: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> None:
+    kind = str(contract.get("kind") or "")
+    expected_type = str(scope.get("expectedPartType") or "")
+    expected_key = str(scope.get("expectedPartKey") or "")
+    compatible = {
+        "generic": True,
+        "scene": (
+            expected_type == "scene"
+            and expected_key == str(contract.get("expectedSceneId") or "")
+        ),
+        "episode_metadata": (
+            expected_type == "episode_metadata"
+            and expected_key == str(contract.get("episodeNumber") or "")
+        ),
+        "review_dimension": (
+            expected_type == "review_dimension"
+            and expected_key
+            == (
+                f"{contract.get('episodeNumber')}:"
+                f"{contract.get('dimension')}"
+            )
+        ),
+        "document_section": (
+            expected_type == "document_section"
+            and expected_key == str(contract.get("sectionKey") or "")
+        ),
+        "scene_list_fragment": (
+            expected_type == "document_section"
+            and expected_key == f"episode-{contract.get('episodeNumber')}"
+        ),
+    }.get(kind, False)
+    if not compatible:
+        raise ScreenplayToolInputError(
+            "The candidate validation contract conflicts with its task scope.",
+            guidance="Use the host-bound candidate contract for this exact task unit.",
+            details={"validationCode": "candidate_scope_invalid"},
+        )
 
 
 __all__ = [

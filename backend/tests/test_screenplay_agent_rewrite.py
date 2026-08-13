@@ -61,6 +61,7 @@ from application.screenplay_agent_task_executor import (
     ScreenplayTaskUnitExecutor,
     _requires_child_run,
     _unit_result,
+    normalize_screenplay_candidate,
 )
 from application.screenplay_candidate_assembler import (
     aggregate_review_validations,
@@ -3681,9 +3682,12 @@ class _CheckpointingToolCalls:
             }
         else:
             raise AssertionError(f"unexpected part type: {part_type}")
-        validator = kwargs.get("validate_candidate")
-        if validator is not None:
-            candidate = dict(validator(candidate))
+        validation_contract = kwargs.get("candidate_validation_contract")
+        if validation_contract is not None:
+            candidate = normalize_screenplay_candidate(
+                validation_contract,
+                candidate,
+            )
         return ScreenplayCandidateRunResult(
             run_id=f"run-{part_type}-{part_key}-{len(self.calls)}",
             candidate=candidate,
