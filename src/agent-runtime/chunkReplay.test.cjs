@@ -260,6 +260,67 @@ test('replay keeps the LLM public plan when Recipe progress arrives', () => {
   )
 })
 
+test('replay keeps the Root Run public plan isolated from child Run events', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-root-plan-ownership',
+    sessionId: 536,
+    userContent: '续写正文',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+
+  replay.dispatch(seed, canonical('root-run-a', 1, {
+    payload: {
+      eventType: 'run.todos_updated',
+      data: {
+        title: 'Root Run 公开计划',
+        status: 'running',
+        steps: [{
+          id: 'draft',
+          title: '起草正文',
+          type: 'write',
+          status: 'running',
+        }],
+      },
+    },
+  }), dependencies)
+  replay.dispatch(seed, canonical('child-run-a', 1, {
+    payload: {
+      eventType: 'run.todo_updated',
+      data: {
+        stepId: 'draft',
+        status: 'done',
+        step: {
+          id: 'draft',
+          title: '子 Run 改写步骤',
+          type: 'write',
+          status: 'done',
+        },
+      },
+    },
+  }), dependencies)
+  replay.dispatch(seed, canonical('child-run-a', 2, {
+    kind: 'run.lifecycle',
+    payload: { status: 'done' },
+  }), dependencies)
+
+  let plan = replay.assistant(seed.turnId)?.taskPlan
+  assert.equal(plan?.runId, 'root-run-a')
+  assert.equal(plan?.status, 'running')
+  assert.equal(plan?.steps[0]?.title, '起草正文')
+  assert.equal(plan?.steps[0]?.status, 'running')
+
+  replay.dispatch(seed, canonical('root-run-a', 2, {
+    kind: 'run.lifecycle',
+    payload: { status: 'done' },
+  }), dependencies)
+
+  plan = replay.assistant(seed.turnId)?.taskPlan
+  assert.equal(plan?.status, 'done')
+})
+
 test('raw Provider events are visible before transport completion', () => {
   const replay = new AgentChunkReplay()
   const seed = {
@@ -515,6 +576,7 @@ test('paused resume switches the canonical root once and blocks late same-run te
   }), dependencies)
   assert.equal(replay.assistant(seed.turnId)?.agentRunId, 'run-b')
   assert.equal(replay.assistant(seed.turnId)?.canonicalOutput?.runId, 'run-b')
+  assert.equal(replay.assistant(seed.turnId)?.taskPlan?.runId, 'run-b')
 
   replay.dispatch(seed, {
     done: true,
