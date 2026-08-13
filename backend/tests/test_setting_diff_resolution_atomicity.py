@@ -133,6 +133,90 @@ async def _proposal_for(
     return run_id, proposal_occurrence_id(run_id, tool_call_id, 0)
 
 
+async def _request_for_kind(db: DatabaseConnection, kind: str):
+    if kind == "background":
+        run_id, proposal_id = await _proposal(db)
+        request = CommitBackgroundDiffRequest.model_validate({
+            "content": "新世界",
+            "before_content": "旧世界",
+            "after_content": "新世界",
+            "source": "ai_tool",
+            "accepted_segments": 1,
+            "resolution": {
+                "sessionId": 7,
+                "agentRunId": run_id,
+                "proposalId": proposal_id,
+                "sessionKey": "background:book-1",
+                "kind": kind,
+                "title": "故事背景",
+                "status": "committed",
+                "acceptedSegments": 1,
+                "rejectedSegments": 0,
+            },
+        })
+        return commit_background_diff, "book-1", request, run_id, proposal_id
+    target_id = 11 if kind == "character" else 12
+    noun = "人物" if kind == "character" else "地点"
+    before = {
+        "name": f"旧{noun}",
+        "tags": "旧标签",
+        "profileMd": f"旧{noun}简介",
+    }
+    proposed = {
+        "name": f"新{noun}",
+        "tags": "新标签",
+        "profileMd": f"新{noun}简介",
+    }
+    run_id, proposal_id = await _proposal_for(
+        db,
+        kind=kind,
+        payload={f"{kind}Id": target_id, "before": before, "proposed": proposed},
+        tool_name="updateCharacter" if kind == "character" else "updateSettingEntity",
+        tool_call_id=f"call-{kind}-upgrade-fixture",
+    )
+    request_type = (
+        CommitCharacterDiffRequest if kind == "character" else CommitEntityDiffRequest
+    )
+    request = request_type.model_validate({
+        **proposed,
+        "before": before,
+        "after": proposed,
+        "source": "ai_tool",
+        "accepted_segments": 3,
+        "resolution": {
+            "sessionId": 7,
+            "agentRunId": run_id,
+            "proposalId": proposal_id,
+            "sessionKey": f"{kind}:{target_id}",
+            "kind": kind,
+            "title": noun,
+            "status": "committed",
+            "acceptedSegments": 3,
+            "rejectedSegments": 0,
+        },
+    })
+    commit = commit_character_diff if kind == "character" else commit_entity_diff
+    return commit, str(target_id), request, run_id, proposal_id
+
+
+async def _remove_mutation_digest(
+    db: DatabaseConnection,
+    run_id: str,
+    proposal_id: str,
+) -> None:
+    row = await db.fetch_one(
+        "SELECT c.id, c.agent_process FROM ai_conversations AS c "
+        "JOIN ai_agent_runs AS r ON r.conversation_id = c.id WHERE r.id = ?",
+        [run_id],
+    )
+    process = json.loads(str(row["agent_process"]))
+    process["settingDiff"]["resolutions"][proposal_id].pop("mutationDigest", None)
+    await db.execute(
+        "UPDATE ai_conversations SET agent_process = ? WHERE id = ?",
+        [json.dumps(process, ensure_ascii=False), int(row["id"])],
+    )
+
+
 async def test_setting_commit_and_resolution_share_one_transaction(resolution_db):
     run_id, proposal_id = await _proposal(resolution_db)
     result = await commit_background_diff(
@@ -420,6 +504,150 @@ async def test_structured_resolution_identical_replay_is_idempotent(
         "success": True,
         "data": {f"{kind}Id": target_id, "replayed": True},
     }
+
+
+@pytest.mark.parametrize("kind", ["background", "character", "entity"])
+async def test_upgrade_backfills_digest_only_for_a_proven_legacy_replay(
+    resolution_db,
+    kind: str,
+):
+    commit, target, request, run_id, proposal_id = await _request_for_kind(
+        resolution_db,
+        kind,
+    )
+    await commit(target, request)
+    await _remove_mutation_digest(resolution_db, run_id, proposal_id)
+
+    replay = await commit(target, request)
+
+    assert replay["success"] is True
+    assert replay["data"]["replayed"] is True
+    row = await resolution_db.fetch_one(
+        "SELECT c.agent_process FROM ai_conversations AS c "
+        "JOIN ai_agent_runs AS r ON r.conversation_id = c.id WHERE r.id = ?",
+        [run_id],
+    )
+    stored = json.loads(str(row["agent_process"]))
+    assert stored["settingDiff"]["resolutions"][proposal_id][
+        "mutationDigest"
+    ].startswith("sha256:")
+
+
+@pytest.mark.parametrize("kind", ["background", "character", "entity"])
+async def test_upgrade_never_backfills_legacy_digest_for_a_forged_final(
+    resolution_db,
+    kind: str,
+):
+    commit, target, request, run_id, proposal_id = await _request_for_kind(
+        resolution_db,
+        kind,
+    )
+    await commit(target, request)
+    await _remove_mutation_digest(resolution_db, run_id, proposal_id)
+    if kind == "background":
+        forged = request.model_copy(update={"content": "旧世界"})
+    else:
+        forged = request.model_copy(update={"name": request.before.name})
+
+    with pytest.raises(HTTPException) as conflict:
+        await commit(target, forged)
+
+    assert conflict.value.status_code == 409
+    row = await resolution_db.fetch_one(
+        "SELECT c.agent_process FROM ai_conversations AS c "
+        "JOIN ai_agent_runs AS r ON r.conversation_id = c.id WHERE r.id = ?",
+        [run_id],
+    )
+    stored = json.loads(str(row["agent_process"]))
+    assert "mutationDigest" not in (
+        stored["settingDiff"]["resolutions"][proposal_id]
+    )
+
+
+@pytest.mark.parametrize("kind", ["background", "character", "entity"])
+async def test_legacy_backfill_rejects_a_different_legal_final_even_if_current_matches(
+    resolution_db,
+    kind: str,
+):
+    commit, target, request, run_id, proposal_id = await _request_for_kind(
+        resolution_db,
+        kind,
+    )
+    await commit(target, request)
+    await _remove_mutation_digest(resolution_db, run_id, proposal_id)
+    if kind == "background":
+        await resolution_db.execute(
+            "UPDATE story_background SET content = ? WHERE book_id = ?",
+            [request.before_content, target],
+        )
+        forged = request.model_copy(update={"content": request.before_content})
+    else:
+        table = "characters" if kind == "character" else "setting_entities"
+        await resolution_db.execute(
+            f"UPDATE {table} SET name = ?, tags = ?, profile_md = ? WHERE id = ?",
+            [
+                request.before.name,
+                request.before.tags,
+                request.before.profileMd,
+                int(target),
+            ],
+        )
+        forged = request.model_copy(update={
+            "name": request.before.name,
+            "tags": request.before.tags,
+            "profileMd": request.before.profileMd,
+        })
+
+    with pytest.raises(HTTPException) as conflict:
+        await commit(target, forged)
+
+    assert conflict.value.status_code == 409
+    row = await resolution_db.fetch_one(
+        "SELECT c.agent_process FROM ai_conversations AS c "
+        "JOIN ai_agent_runs AS r ON r.conversation_id = c.id WHERE r.id = ?",
+        [run_id],
+    )
+    stored = json.loads(str(row["agent_process"]))
+    assert "mutationDigest" not in stored["settingDiff"]["resolutions"][proposal_id]
+
+
+@pytest.mark.parametrize("kind", ["character", "entity"])
+async def test_exact_resolution_replay_survives_target_deletion(
+    resolution_db,
+    kind: str,
+):
+    commit, target, request, _run_id, _proposal_id = await _request_for_kind(
+        resolution_db,
+        kind,
+    )
+    await commit(target, request)
+    table = "characters" if kind == "character" else "setting_entities"
+    await resolution_db.execute(f"DELETE FROM {table} WHERE id = ?", [int(target)])
+
+    replay = await commit(target, request)
+
+    assert replay == {
+        "success": True,
+        "data": {f"{kind}Id": int(target), "replayed": True},
+    }
+
+
+@pytest.mark.parametrize("kind", ["character", "entity"])
+async def test_new_resolution_for_missing_target_is_a_conflict(
+    resolution_db,
+    kind: str,
+):
+    commit, target, request, _run_id, _proposal_id = await _request_for_kind(
+        resolution_db,
+        kind,
+    )
+    table = "characters" if kind == "character" else "setting_entities"
+    await resolution_db.execute(f"DELETE FROM {table} WHERE id = ?", [int(target)])
+
+    with pytest.raises(HTTPException) as conflict:
+        await commit(target, request)
+
+    assert conflict.value.status_code == 409
 
 
 async def test_generic_conversation_save_cannot_create_committed_resolution(

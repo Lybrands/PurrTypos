@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException
 
 from application.book_conversation_product_projection import (
     BookSettingResolutionConflictError,
+    backfill_setting_diff_mutation_digest,
+    legacy_setting_diff_reviewed_final,
     persist_setting_diff_resolution,
     setting_diff_mutation_digest,
     validate_setting_diff_mutation,
@@ -61,6 +63,50 @@ async def _resolution_with_mutation(
     return {**value, "mutationDigest": digest}
 
 
+async def _backfill_legacy_replay(
+    db,
+    *,
+    write,
+    resolution,
+    resolution_value: dict,
+    proven: bool,
+) -> None:
+    if not proven:
+        raise HTTPException(
+            status_code=409,
+            detail="legacy setting proposal replay cannot be proven",
+        )
+    try:
+        await backfill_setting_diff_mutation_digest(
+            db,
+            conversation_id=write.conversation_id,
+            session_id=resolution.sessionId,
+            proposal_id=resolution.proposalId,
+            expected_resolution=resolution_value,
+        )
+    except BookSettingResolutionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def _legacy_replay_is_proven(
+    *,
+    kind: str,
+    request_before: dict,
+    request_proposed: dict,
+    resolution: dict,
+    current: dict | None,
+    final: dict,
+    history: dict | None,
+) -> bool:
+    expected = legacy_setting_diff_reviewed_final(
+        kind=kind,
+        request_before=request_before,
+        request_proposed=request_proposed,
+        resolution=resolution,
+    )
+    return bool(history and expected is not None and current == expected and final == expected)
+
+
 @router.post("/setting-diff/character/{characterId}/commit")
 async def commit_character_diff(characterId: str, body: CommitCharacterDiffRequest):
     db = get_db()
@@ -76,11 +122,6 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                 or body.resolution.sessionKey != f"character:{cid}"
             ):
                 raise ValueError("setting proposal target does not match character")
-            if await db.fetch_one(
-                "SELECT id FROM characters WHERE id = ?",
-                [cid],
-            ) is None:
-                return {"success": False, "error": "人物不存在"}
             request_before = body.before.model_dump()
             request_proposed = body.after.model_dump()
             final = {
@@ -111,6 +152,51 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                 "SELECT name, tags, profile_md FROM characters WHERE id = ?",
                 [cid],
             )
+            if resolution_write.needs_digest_backfill:
+                history = await db.fetch_one(
+                    "SELECT id FROM character_history WHERE character_id = ? "
+                    "AND before_name = ? AND before_tags = ? "
+                    "AND before_profile_md = ? AND after_name = ? "
+                    "AND after_tags = ? AND after_profile_md = ? "
+                    "AND accepted_segments = ? AND rejected_segments = ? LIMIT 1",
+                    [
+                        cid,
+                        body.before.name,
+                        body.before.tags,
+                        body.before.profileMd,
+                        body.after.name,
+                        body.after.tags,
+                        body.after.profileMd,
+                        body.resolution.acceptedSegments,
+                        body.resolution.rejectedSegments,
+                    ],
+                )
+                current_value = ({
+                    "name": str(current.get("name") or ""),
+                    "tags": str(current.get("tags") or ""),
+                    "profileMd": str(current.get("profile_md") or ""),
+                } if current else None)
+                await _backfill_legacy_replay(
+                    db,
+                    write=resolution_write,
+                    resolution=body.resolution,
+                    resolution_value=resolution_value,
+                    proven=_legacy_replay_is_proven(
+                        kind="character",
+                        request_before=request_before,
+                        request_proposed=request_proposed,
+                        resolution=resolution_value,
+                        current=current_value,
+                        final=final,
+                        history=history,
+                    ),
+                )
+                return {
+                    "success": True,
+                    "data": {"characterId": cid, "replayed": True},
+                }
+            if current is None:
+                raise HTTPException(status_code=409, detail="character target is missing")
             await _validate_mutation(
                 db,
                 run_id=body.resolution.agentRunId,
@@ -238,11 +324,6 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                 or body.resolution.sessionKey != f"entity:{eid}"
             ):
                 raise ValueError("setting proposal target does not match entity")
-            if await db.fetch_one(
-                "SELECT id FROM setting_entities WHERE id = ?",
-                [eid],
-            ) is None:
-                return {"success": False, "error": "实体不存在"}
             request_before = body.before.model_dump()
             request_proposed = body.after.model_dump()
             final = {
@@ -273,6 +354,51 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                 "SELECT name, tags, profile_md FROM setting_entities WHERE id = ?",
                 [eid],
             )
+            if resolution_write.needs_digest_backfill:
+                history = await db.fetch_one(
+                    "SELECT id FROM setting_entity_history WHERE entity_id = ? "
+                    "AND before_name = ? AND before_tags = ? "
+                    "AND before_profile_md = ? AND after_name = ? "
+                    "AND after_tags = ? AND after_profile_md = ? "
+                    "AND accepted_segments = ? AND rejected_segments = ? LIMIT 1",
+                    [
+                        eid,
+                        body.before.name,
+                        body.before.tags,
+                        body.before.profileMd,
+                        body.after.name,
+                        body.after.tags,
+                        body.after.profileMd,
+                        body.resolution.acceptedSegments,
+                        body.resolution.rejectedSegments,
+                    ],
+                )
+                current_value = ({
+                    "name": str(current.get("name") or ""),
+                    "tags": str(current.get("tags") or ""),
+                    "profileMd": str(current.get("profile_md") or ""),
+                } if current else None)
+                await _backfill_legacy_replay(
+                    db,
+                    write=resolution_write,
+                    resolution=body.resolution,
+                    resolution_value=resolution_value,
+                    proven=_legacy_replay_is_proven(
+                        kind="entity",
+                        request_before=request_before,
+                        request_proposed=request_proposed,
+                        resolution=resolution_value,
+                        current=current_value,
+                        final=final,
+                        history=history,
+                    ),
+                )
+                return {
+                    "success": True,
+                    "data": {"entityId": eid, "replayed": True},
+                }
+            if current is None:
+                raise HTTPException(status_code=409, detail="entity target is missing")
             await _validate_mutation(
                 db,
                 run_id=body.resolution.agentRunId,
@@ -421,6 +547,42 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
                 "SELECT content FROM story_background WHERE book_id = ?",
                 [bookId],
             )
+            if resolution_write.needs_digest_backfill:
+                history = await db.fetch_one(
+                    "SELECT id FROM story_background_history WHERE book_id = ? "
+                    "AND before_content = ? AND after_content = ? "
+                    "AND accepted_segments = ? AND rejected_segments = ? LIMIT 1",
+                    [
+                        bookId,
+                        body.before_content,
+                        body.after_content,
+                        body.resolution.acceptedSegments,
+                        body.resolution.rejectedSegments,
+                    ],
+                )
+                current_value = (
+                    {"content": str(current.get("content") or "")}
+                    if current else None
+                )
+                await _backfill_legacy_replay(
+                    db,
+                    write=resolution_write,
+                    resolution=body.resolution,
+                    resolution_value=resolution_value,
+                    proven=_legacy_replay_is_proven(
+                        kind="background",
+                        request_before=request_before,
+                        request_proposed=request_proposed,
+                        resolution=resolution_value,
+                        current=current_value,
+                        final=final,
+                        history=history,
+                    ),
+                )
+                return {
+                    "success": True,
+                    "data": {"bookId": bookId, "replayed": True},
+                }
             await _validate_mutation(
                 db,
                 run_id=body.resolution.agentRunId,

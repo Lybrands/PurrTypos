@@ -54,6 +54,59 @@ async def test_screenplay_project_delete_rejects_active_operation(owner_db):
     )
 
 
+@pytest.mark.parametrize(
+    ("active_owner", "status"),
+    [
+        ("turn", "queued"),
+        ("turn", "planning"),
+        ("turn", "running"),
+        ("turn", "paused"),
+        ("work_item", "open"),
+    ],
+)
+async def test_screenplay_project_delete_rejects_active_pre_operation_owner(
+    owner_db,
+    active_owner: str,
+    status: str,
+):
+    project_id = f"project-active-{active_owner}-{status}"
+    await owner_db.execute(
+        "INSERT INTO screenplay_projects "
+        "(id, title, source_kind, source_snapshot_json) VALUES (?, 'Active', "
+        "'original', '{}')",
+        [project_id],
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
+        "VALUES (93, 'screenplay', ?)",
+        [project_id],
+    )
+    if active_owner == "turn":
+        await owner_db.execute(
+            "INSERT INTO screenplay_agent_turns "
+            "(id, project_id, session_id, command_id, status, user_content) "
+            "VALUES ('turn-without-operation', ?, 93, 'command', ?, '继续')",
+            [project_id, status],
+        )
+    else:
+        await owner_db.execute(
+            "INSERT INTO ai_agent_work_items "
+            "(id, namespace, kind, owner_id, status) VALUES "
+            "('open-work-without-operation', 'purrtypos.screenplay', "
+            "'screenplayDraft', ?, 'open')",
+            [project_id],
+        )
+
+    with pytest.raises(AppError) as conflict:
+        await delete_screenplay_project_data(owner_db, project_id)
+
+    assert conflict.value.status_code == 409
+    assert await owner_db.fetch_one(
+        "SELECT id FROM screenplay_projects WHERE id = ?",
+        [project_id],
+    ) == {"id": project_id}
+
+
 async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     owner_db,
 ):
@@ -92,11 +145,46 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
         "VALUES ('run-project-done', 92, 'done', 'done')"
     )
+    await owner_db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content) "
+        "VALUES ('turn-before-operation', 'project-done', 92, "
+        "'command-before-operation', 'failed', '失败')"
+    )
+    await owner_db.execute(
+        "INSERT INTO screenplay_agent_cancel_commands "
+        "(command_id, turn_id, operation_id, request_digest, receipt_id) "
+        "VALUES ('cancel-before-operation', 'turn-before-operation', NULL, "
+        "'digest', 'receipt-before-operation')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, status) VALUES "
+        "('work-project-done', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'project-done', 'completed')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES ('task-project-done', "
+        "'work-project-done', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'project-done', 'run-project-done', 'completed', 1)"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_long_task_usage "
+        "(task_id, run_id, invocation_count, input_tokens, output_tokens) "
+        "VALUES ('task-project-done', 'run-project-done', 1, 2, 3)"
+    )
 
     assert await delete_screenplay_project_data(owner_db, 'project-done') is True
     for table in (
         'screenplay_agent_operations',
         'screenplay_agent_operation_commands',
+        'screenplay_agent_cancel_commands',
+        'screenplay_agent_turns',
+        'ai_agent_long_task_usage',
+        'ai_agent_long_tasks',
+        'ai_agent_work_items',
         'ai_writing_chat_requests',
         'ai_sessions',
     ):
@@ -106,3 +194,49 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     assert await owner_db.fetch_one(
         "SELECT session_id FROM ai_agent_runs WHERE id = 'run-project-done'"
     ) == {"session_id": None}
+
+
+@pytest.mark.parametrize("relation", ["reference", "continuation"])
+async def test_project_delete_preserves_cross_owner_work_linked_to_its_run(
+    owner_db,
+    relation: str,
+):
+    for project_id in ("project-delete", "project-keep"):
+        await owner_db.execute(
+            "INSERT INTO screenplay_projects "
+            "(id, title, source_kind, source_snapshot_json) "
+            "VALUES (?, ?, 'original', '{}')",
+            [project_id, project_id],
+        )
+    await owner_db.execute(
+        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
+        "VALUES (94, 'screenplay', 'project-delete')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id) VALUES ('run-delete', 94, 'done', 'done', "
+        "'screenplay.agent.turn', 'project-delete', 'command-delete')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, status) VALUES "
+        "('work-keep', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'project-keep', 'completed')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_work_item_runs "
+        "(work_item_id, run_id, relation, work_item_revision) "
+        "VALUES ('work-keep', 'run-delete', ?, 1)",
+        [relation],
+    )
+
+    assert await delete_screenplay_project_data(owner_db, "project-delete") is True
+
+    assert await owner_db.fetch_one(
+        "SELECT owner_id FROM ai_agent_work_items WHERE id = 'work-keep'"
+    ) == {"owner_id": "project-keep"}
+    assert await owner_db.fetch_one(
+        "SELECT relation FROM ai_agent_work_item_runs "
+        "WHERE work_item_id = 'work-keep' AND run_id = 'run-delete'"
+    ) == {"relation": relation}

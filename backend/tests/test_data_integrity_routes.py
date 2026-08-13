@@ -523,6 +523,11 @@ async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
         "'run-book-terminal', 'completed', 1)"
     )
     await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_usage "
+        "(task_id, run_id, invocation_count, input_tokens, output_tokens) "
+        "VALUES ('task-book-terminal', 'run-book-terminal', 1, 2, 3)"
+    )
+    await temp_db.execute(
         "INSERT INTO ai_agent_artifacts "
         "(id, namespace, kind, owner_id, run_id) VALUES "
         "('artifact-book-terminal', 'purrtypos.writing', 'draft', "
@@ -547,6 +552,10 @@ async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
     ) == {"session_id": None, "conversation_id": None}
     assert await temp_db.fetch_one(
         "SELECT id FROM ai_agent_long_tasks WHERE id = 'task-book-terminal'"
+    ) is None
+    assert await temp_db.fetch_one(
+        "SELECT task_id FROM ai_agent_long_task_usage "
+        "WHERE task_id = 'task-book-terminal'"
     ) is None
     assert await temp_db.fetch_one(
         "SELECT id FROM ai_agent_work_items WHERE id = 'work-book-terminal'"
