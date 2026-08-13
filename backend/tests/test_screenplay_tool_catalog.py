@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 import application.agent_composition as agent_composition_module
+import domains.screenplay_agent.candidate_projection as candidate_projection_module
 from application.agent_composition import AgentComposition
 from application.composition_factory import create_agent_composition
 from application.screenplay_tool_calling import (
@@ -117,6 +118,163 @@ def test_candidate_validation_contract_is_strict_and_versioned(contract):
                 "contentText": "正文",
             },
         )
+
+
+@pytest.mark.parametrize(
+    ("contract", "expected"),
+    [
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "generic",
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "generic",
+            },
+        ),
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene",
+                "expectedSceneId": " scene-1 ",
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene",
+                "expectedSceneId": "scene-1",
+            },
+        ),
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "episode_metadata",
+                "episodeNumber": 1,
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "episode_metadata",
+                "episodeNumber": 1,
+            },
+        ),
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "review_dimension",
+                "episodeNumber": 1,
+                "dimension": "continuity",
+                "allowedSceneIds": [" scene-1 ", "scene-2"],
+                "reviewedDraftId": " draft-1 ",
+                "reviewedContentDigest": "A" * 64,
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "review_dimension",
+                "episodeNumber": 1,
+                "dimension": "continuity",
+                "allowedSceneIds": ["scene-1", "scene-2"],
+                "reviewedDraftId": "draft-1",
+                "reviewedContentDigest": "a" * 64,
+            },
+        ),
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "document_section",
+                "sectionKey": " premise ",
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "document_section",
+                "sectionKey": "premise",
+            },
+        ),
+        (
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene_list_fragment",
+                "episodeNumber": 1,
+            },
+            {
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene_list_fragment",
+                "episodeNumber": 1,
+            },
+        ),
+    ],
+)
+def test_candidate_validation_contract_has_one_canonical_parser(contract, expected):
+    parser = getattr(
+        candidate_projection_module,
+        "parse_candidate_validation_contract",
+        None,
+    )
+    assert parser is not None
+    assert parser(contract) == expected
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "episode_metadata",
+            "episodeNumber": True,
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "episode_metadata",
+            "episodeNumber": 0,
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": "x" * 257,
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": "   ",
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "review_dimension",
+            "episodeNumber": 1,
+            "dimension": "continuity",
+            "allowedSceneIds": ["scene-1", "scene-1"],
+            "reviewedDraftId": "draft-1",
+            "reviewedContentDigest": "a" * 64,
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "review_dimension",
+            "episodeNumber": 1,
+            "dimension": "continuity",
+            "allowedSceneIds": ["scene-1"],
+            "reviewedDraftId": "draft-1",
+            "reviewedContentDigest": "not-a-digest",
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": {"nested": "scene-1"},
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "generic",
+            "content": "must not enter the contract",
+        },
+    ],
+)
+def test_candidate_validation_contract_rejects_untrusted_json_types(contract):
+    parser = getattr(
+        candidate_projection_module,
+        "parse_candidate_validation_contract",
+        None,
+    )
+    assert parser is not None
+    with pytest.raises(ValueError):
+        parser(contract)
 
 
 def _tool_handler(catalog, name: str):
@@ -924,6 +1082,81 @@ class _TaskValidationRetryGateway:
         )
 
 
+@pytest.mark.parametrize(
+    "invalid_contract",
+    [
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": "scene-1",
+            "body": "must not enter identity",
+        },
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "review_dimension",
+            "episodeNumber": 1,
+            "dimension": "continuity",
+            "allowedSceneIds": [f"scene-{index}" for index in range(513)],
+            "reviewedDraftId": "draft-1",
+            "reviewedContentDigest": "a" * 64,
+        },
+    ],
+)
+async def test_invalid_candidate_contract_is_rejected_before_child_reservation(
+    screenplay_tool_db,
+    monkeypatch,
+    invalid_contract,
+):
+    gateway = _TaskValidationRetryGateway()
+    monkeypatch.setattr(
+        agent_composition_module,
+        "ProviderModelGateway",
+        lambda *_args, **_kwargs: gateway,
+    )
+    composition = create_agent_composition(screenplay_tool_db)
+    runtime = ScreenplayAgentRuntimeRequest.model_validate({
+        "apiKey": "secret",
+        "apiProvider": "openai",
+        "baseURL": "https://provider.example/v1",
+        "options": {
+            "model": "fixture-model",
+            "model_profile": "deepseek:deepseek-v4-flash",
+            "max_tokens": 32_768,
+        },
+        "contextWindow": "128k",
+    })
+    try:
+        with pytest.raises(ValueError):
+            await ScreenplayToolCallingService(
+                screenplay_tool_db,
+                composition=composition,
+            ).run_candidate(
+                runtime=runtime,
+                session_id=1,
+                prompt="生成候选",
+                system_instruction="只写入候选。",
+                user_payload={},
+                domain_context=_context(
+                    target_role="screenplayDraft",
+                    expected_part_type="scene",
+                    expected_part_key="scene-1",
+                ),
+                conversation_turn_id="turn-invalid-contract",
+                lineage=_part_lineage("root-invalid-contract"),
+                candidate_validation_contract=invalid_contract,
+            )
+    finally:
+        await composition.shutdown()
+
+    assert gateway.invocations == []
+    assert await screenplay_tool_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == {"count": 0}
+    assert await screenplay_tool_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_host_child_runs"
+    ) == {"count": 0}
+
+
 async def test_task_candidate_validation_fails_child_then_retries_new_generation(
     screenplay_tool_db,
     monkeypatch,
@@ -967,7 +1200,7 @@ async def test_task_candidate_validation_fails_child_then_retries_new_generation
             "dimension": "continuity",
             "allowedSceneIds": ["scene-1"],
             "reviewedDraftId": "draft-1",
-            "reviewedContentDigest": "digest-1",
+            "reviewedContentDigest": "A" * 64,
         },
     }
     service = ScreenplayToolCallingService(
@@ -991,11 +1224,20 @@ async def test_task_candidate_validation_fails_child_then_retries_new_generation
         ) == {"count": 0}
 
         corrected = await service.run_candidate(**kwargs)
+        equivalent = {
+            **kwargs,
+            "candidate_validation_contract": {
+                **kwargs["candidate_validation_contract"],
+                "reviewedContentDigest": "a" * 64,
+            },
+        }
+        replayed = await service.run_candidate(**equivalent)
+        assert replayed.run_id == corrected.run_id
         conflicting = {
             **kwargs,
             "candidate_validation_contract": {
                 **kwargs["candidate_validation_contract"],
-                "reviewedContentDigest": "digest-conflict",
+                "reviewedContentDigest": "b" * 64,
             },
         }
         with pytest.raises(ContractViolationError):
@@ -1020,7 +1262,7 @@ async def test_task_candidate_validation_fails_child_then_retries_new_generation
         "criticalIssueCount": 0,
         "reviewedEpisode": 1,
         "reviewDimension": "continuity",
-        "reviewedContentDigest": "digest-1",
+        "reviewedContentDigest": "a" * 64,
         "inputContractVersion": 2,
     }
     finalized = await screenplay_tool_db.fetch_all(

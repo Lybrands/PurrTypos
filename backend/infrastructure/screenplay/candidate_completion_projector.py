@@ -12,7 +12,7 @@ from purra.ports import RunCommit
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE,
     SCREENPLAY_CANDIDATE_PROJECTION_PROTOCOL,
-    SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+    parse_candidate_validation_contract,
 )
 from infrastructure.screenplay.tools.candidate_artifact import (
     ScreenplayCandidateArtifacts,
@@ -70,10 +70,17 @@ class ScreenplayCandidateCompletionProjector:
             if (
                 not isinstance(scope, Mapping)
                 or not isinstance(validation_contract, Mapping)
-                or validation_contract.get("protocol")
-                != SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL
-                or scope.get("candidateValidation") != validation_contract
                 or not turn_id
+            ):
+                raise ValueError("candidate projection contract is invalid")
+            normalized_validation = parse_candidate_validation_contract(
+                validation_contract
+            )
+            scope_validation = scope.get("candidateValidation")
+            if (
+                not isinstance(scope_validation, Mapping)
+                or parse_candidate_validation_contract(scope_validation)
+                != normalized_validation
             ):
                 raise ValueError("candidate projection contract is invalid")
             await self._validate_started_event(run_id, turn_id)

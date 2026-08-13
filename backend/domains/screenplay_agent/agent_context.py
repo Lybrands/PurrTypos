@@ -8,6 +8,10 @@ from typing import Any, Mapping
 from purra.contracts import DomainContext
 from purra.json_values import thaw_json_mapping
 
+from domains.screenplay_agent.candidate_projection import (
+    parse_candidate_validation_contract,
+)
+
 from domains.screenplay_agent.contracts import ScreenplayStageCommand
 
 
@@ -80,7 +84,9 @@ class ScreenplayAgentDomainContext:
             self,
             "candidate_validation_contract",
             (
-                dict(self.candidate_validation_contract)
+                parse_candidate_validation_contract(
+                    self.candidate_validation_contract
+                )
                 if self.candidate_validation_contract is not None
                 else None
             ),
