@@ -23,6 +23,7 @@ from domains.writing.associated_context import (
     OutlineContextFact,
 )
 from domains.writing.context import (
+    WRITING_AGENT_POLICY_CONTEXT,
     WRITING_BINDING_CONTEXT,
     WRITING_EVIDENCE_POLICY_CONTEXT,
     WRITING_RETRIEVAL_CONTEXT,
@@ -472,7 +473,9 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
     provider = WritingContextProvider(source)
 
     planning = await provider.build_planning_context(request, budget)
-    assert planning.blocks == ()
+    assert [block.name for block in planning.blocks] == [
+        WRITING_AGENT_POLICY_CONTEXT,
+    ]
     assert planning.diagnostics["planningContextMode"] == "lightweight_manifest"
     assert source.queries == []
 

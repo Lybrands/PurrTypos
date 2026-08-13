@@ -18,7 +18,11 @@ from purra.contracts import (
 )
 from purra.json_values import thaw_json_mapping
 from purra.ports import CancellationSignal
-from domains.writing.associated_context import AssociatedContextResult
+from domains.writing.associated_context import (
+    AssociatedContextResult,
+    ChapterContextFact,
+    OutlineContextFact,
+)
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.memory_context import (
     MemoryContextBlock,
@@ -27,6 +31,7 @@ from domains.writing.memory_context import (
 )
 from domains.writing.unified_memory_context import MemoryContextPack
 from domains.writing.prompts import (
+    build_writing_agent_policy,
     build_writing_evidence_policy,
     build_writing_session_binding,
     frame_untrusted_writing_context,
@@ -37,6 +42,7 @@ from domains.writing.response import writing_response_contract_for_request
 WRITING_RETRIEVAL_CONTEXT = "writing_retrieval"
 WRITING_BINDING_CONTEXT = "writing_session_binding"
 WRITING_EVIDENCE_POLICY_CONTEXT = "writing_evidence_policy"
+WRITING_AGENT_POLICY_CONTEXT = "writing_agent_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,43 +116,57 @@ class WritingContextProvider:
     ) -> ContextBundle:
         """Build only the host facts needed before the LLM Planner runs.
 
-        Explicitly selected evidence keeps the legacy exact-manifest path so
-        existing no-reread guarantees remain truthful. Ordinary semantic
-        memory search is deferred until a normalized TaskSpec exists.
+        Evidence bodies and semantic memory search are deferred until a
+        normalized TaskSpec exists. Explicit selections are represented by a
+        fail-closed manifest rather than being loaded and then discarded.
         """
 
         del signal
         context = WritingDomainContext.from_core_context(request.domain_context)
-        if _has_explicit_evidence(context):
-            bundle = await self._build_context(request, budget)
-            return ContextBundle(
-                blocks=(),
-                diagnostics={
-                    **dict(bundle.diagnostics),
-                    "planningContextMode": "explicit_evidence_manifest",
-                },
-            )
         empty_memory = unavailable_memory_context(MemoryContextRequest(
             book_id=context.book_id,
             user_prompt="",
             token_budget=0,
+            selected_spark_idea_ids=context.selected_memory_ids,
+            selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         ))
-        return ContextBundle(diagnostics={
-            "memoryTokens": 0,
-            "associatedTokens": 0,
-            "retrievalTokens": 0,
-            "retrievalAllocation": budget.allocation_for(
-                WRITING_RETRIEVAL_CONTEXT
+        associated = _planning_associated_manifest(context)
+        policy = build_writing_agent_policy()
+        host_facts = build_host_planning_facts(
+            current_chapter_bound=bool(
+                str(context.chapter_id or "").strip()
             ),
-            "planningContextMode": "lightweight_manifest",
-            "hostPlanningFacts": build_host_planning_facts(
-                current_chapter_bound=bool(
-                    str(context.chapter_id or "").strip()
+            memory=empty_memory,
+            associated=associated,
+            include_evidence_read_rules=False,
+        )
+        existing_rules = host_facts.get("planningRules")
+        host_facts["planningRules"] = [
+            policy,
+            *(existing_rules if isinstance(existing_rules, list) else []),
+        ]
+        return ContextBundle(
+            blocks=(ContextBlock(
+                name=WRITING_AGENT_POLICY_CONTEXT,
+                content=policy,
+                token_count=estimate_json_tokens(policy),
+                untrusted=False,
+            ),),
+            diagnostics={
+                "memoryTokens": 0,
+                "associatedTokens": 0,
+                "retrievalTokens": 0,
+                "retrievalAllocation": budget.allocation_for(
+                    WRITING_RETRIEVAL_CONTEXT
                 ),
-                memory=empty_memory,
-                associated=AssociatedContextResult(),
-            ),
-        })
+                "planningContextMode": (
+                    "explicit_evidence_manifest"
+                    if _has_explicit_evidence(context)
+                    else "lightweight_manifest"
+                ),
+                "hostPlanningFacts": host_facts,
+            },
+        )
 
     async def build_task_context(
         self,
@@ -359,6 +379,12 @@ def build_task_recall_query(task: TaskContextRequest) -> str:
     rows = [f"任务目标: {brief.goal}"]
     if brief.operation:
         rows.append(f"操作: {brief.operation}")
+    if task.required_context_blocks:
+        rows.append(
+            "所需上下文块: " + ", ".join(task.required_context_blocks)
+        )
+    if task.evidence_kinds:
+        rows.append("所需证据类型: " + ", ".join(task.evidence_kinds))
     if brief.target:
         rows.append(
             "目标: "
@@ -377,9 +403,28 @@ def build_task_recall_query(task: TaskContextRequest) -> str:
         rows.append("必须保留: " + "；".join(brief.preserve))
     if brief.deliverable:
         rows.append(f"交付物: {brief.deliverable}")
-    if task.evidence_kinds:
-        rows.append("所需证据类型: " + ", ".join(task.evidence_kinds))
     return "\n".join(rows)[:6_000]
+
+
+def _planning_associated_manifest(
+    context: WritingDomainContext,
+) -> AssociatedContextResult:
+    return AssociatedContextResult(
+        chapter_facts=tuple(
+            ChapterContextFact(chapter_id, "not_injected")
+            for chapter_id in _unique_identifiers(context.associated_chapter_ids)
+        ),
+        outline_facts=tuple(
+            OutlineContextFact(outline_id, "not_injected")
+            for outline_id in _unique_identifiers(context.associated_outline_ids)
+        ),
+    )
+
+
+def _unique_identifiers(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        str(value).strip() for value in values if str(value).strip()
+    ))
 
 
 def _has_explicit_evidence(context: WritingDomainContext) -> bool:
@@ -470,6 +515,7 @@ def build_host_planning_facts(
     current_chapter_bound: bool,
     memory: MemoryContextBlock | MemoryContextPack | None,
     associated: AssociatedContextResult,
+    include_evidence_read_rules: bool = True,
 ) -> dict[str, object]:
     """Return the ID-free planning manifest consumed by PurrA."""
 
@@ -527,7 +573,7 @@ def build_host_planning_facts(
             "For the bound current chapter, getChapterContent may omit chapterId; "
             "do not add listWritingChapters solely to locate that chapter."
         )
-    if selected_memory_value is not None:
+    if selected_memory_value is not None and include_evidence_read_rules:
         rules.append(
             "User-selected memory material with status complete is already "
             "fully injected; do not plan searchMemories or searchSparkIdeas "
@@ -543,7 +589,7 @@ def build_host_planning_facts(
                 "may require another search"
                 + (f" via {search_tools}." if search_tools else ".")
             )
-    if "associatedChapters" in facts:
+    if "associatedChapters" in facts and include_evidence_read_rules:
         rules.append(
             "A complete associated chapter is already fully injected; do not "
             "plan getChapterContent solely to reread it."
@@ -568,7 +614,7 @@ def build_host_planning_facts(
                 "locatorAvailableToExecution is false, listWritingChapters may "
                 "be used only to discover its locator before getChapterContent."
             )
-    if "associatedOutlines" in facts:
+    if "associatedOutlines" in facts and include_evidence_read_rules:
         rules.append(
             "A complete associated outline is already fully injected; do not "
             "plan any tool step to reread it."
@@ -597,13 +643,19 @@ def build_host_planning_facts(
             "getGlobalOutline is book-wide and never substitutes for an "
             "associated outline."
         )
-    if selected_evidence_complete:
+    if selected_evidence_complete and include_evidence_read_rules:
         rules.append(
             "The complete user-selected evidence set is already injected. "
             "When the request is explicitly limited to analyzing or citing "
             "that selected evidence, do not broaden scope with dashboards, "
             "character or setting lists, searches, or unrelated discovery "
             "tools unless the user explicitly asks to broaden the evidence set."
+        )
+    if selected_evidence_statuses and not include_evidence_read_rules:
+        rules.append(
+            "Host-bound explicit evidence bodies are loaded after TaskSpec "
+            "planning; do not plan tool steps solely to read those exact "
+            "selections."
         )
     if rules:
         facts["planningRules"] = rules
