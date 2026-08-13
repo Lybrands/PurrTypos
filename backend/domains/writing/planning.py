@@ -87,11 +87,9 @@ class WritingPlanningPolicy:
             return False
         mode = (request.mode or "").strip().lower()
         del capabilities
-        if mode == "ask" and not request.tools_enabled:
-            return False
-        if mode != "agent" and not request.tools_enabled:
-            return False
-        return len(text) >= 8
+        if mode == "agent":
+            return True
+        return bool(request.tools_enabled)
 
 
 def _bound_current_chapter_satisfies_catalog_dependency(
