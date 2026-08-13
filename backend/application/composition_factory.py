@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from application.agent_composition import AgentComposition
 from application.agent_profile_registry import (
     AgentProfileRegistration,
@@ -48,6 +50,10 @@ def create_agent_composition(
     extension_factories = tuple(
         kwargs.pop("profile_extension_factories", ())
     )
+    writing_extension_factory = partial(
+        build_writing_profile_extension,
+        skills_dir=kwargs.pop("skills_dir", None),
+    )
     supplied_projector = kwargs.pop("run_commit_projector", None)
     screenplay_projector = ScreenplayCandidateCompletionProjector(db)
     run_commit_projector = (
@@ -59,7 +65,7 @@ def create_agent_composition(
         db,
         run_commit_projector=run_commit_projector,
         profile_extension_factories=(
-            build_writing_profile_extension,
+            writing_extension_factory,
             *extension_factories,
             _build_screenplay_profile_extension,
         ),

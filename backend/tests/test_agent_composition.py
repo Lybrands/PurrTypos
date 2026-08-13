@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -307,6 +308,40 @@ async def test_product_composition_registers_writing_and_static_screenplay_profi
     composition = create_agent_composition(temp_db)
     try:
         assert composition.agent_profile_ids == ("writing", "screenplay")
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_product_composition_consumes_configured_writing_skills_dir(
+    temp_db: DatabaseConnection,
+    tmp_path: Path,
+):
+    configured_skills = tmp_path / "configured-skills"
+    shutil.copytree(BACKEND_DIR / "skills", configured_skills)
+    marker = "Configured Writing catalog marker."
+    skill_file = configured_skills / "getChapterContent" / "SKILL.md"
+    source = skill_file.read_text(encoding="utf-8")
+    description_line = next(
+        line for line in source.splitlines()
+        if line.startswith("description:")
+    )
+    skill_file.write_text(
+        source.replace(description_line, f"description: {marker}", 1),
+        encoding="utf-8",
+    )
+
+    composition = create_agent_composition(
+        temp_db,
+        skills_dir=configured_skills,
+    )
+    try:
+        core = composition.create_core("key", agent_profile="writing")
+        registration = next(
+            item for item in core._tool_catalog.registrations()
+            if item.schema.name == "getChapterContent"
+        )
+        assert registration.schema.description == marker
     finally:
         await composition.shutdown()
 
