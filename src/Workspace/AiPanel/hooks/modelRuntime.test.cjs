@@ -15,6 +15,7 @@ const {
 const {
   EMPTY_RESPONSE_MESSAGE,
   handleDone,
+  handleRunResultTerminal,
   MANUAL_ABORT_MESSAGE,
 } = loadTypeScriptModule(
   path.join(__dirname, '../../../agent-runtime/chunkHandlers/terminal.ts'),
@@ -321,7 +322,7 @@ test('completed stream without visible model content becomes an explicit failure
   assert.equal(outcome, 'failed')
 })
 
-test('durable task metadata does not replace Provider-authored final text', () => {
+test('durable task dispatch receipt does not become Provider-authored final text', () => {
   let conversations = [{ role: 'assistant', content: '' }]
   let outcome
   const acc = {
@@ -350,17 +351,22 @@ test('durable task metadata does not replace Provider-authored final text', () =
       completedUnits: 0,
     },
   }, ctx)
-  acc.response = '已恢复原有长篇正文任务，将从上次检查点继续。'
   assert.equal(conversations[0].content, '')
-  assert.equal(handleDone({ done: true }, ctx), true)
+  const terminal = {
+    done: true,
+    finalResponse: '已恢复原有长篇正文任务，将从上次检查点继续。',
+    runResult: { status: 'done' },
+  }
+  assert.equal(handleRunResultTerminal(terminal, ctx), undefined)
+  assert.equal(handleDone(terminal, ctx), true)
   assert.equal(acc.longTaskId, 'task-1')
   assert.equal(conversations[0].longTaskId, 'task-1')
   assert.equal(
     conversations[0].content,
-    '已恢复原有长篇正文任务，将从上次检查点继续。',
+    '',
   )
   assert.equal(conversations[0].isError, undefined)
-  assert.equal(outcome, 'completed')
+  assert.equal(outcome, 'paused')
 })
 
 test('queued chat activity stays pending until the final queued turn completes', () => {
@@ -522,4 +528,25 @@ test('clearing chat runtime notifies once after runtime and queue are consistent
   unsubscribe()
 
   assert.deepEqual(snapshots, [{ runtime: undefined, queue: [] }])
+})
+
+test('session runtime revision advances even when wall clock does not', () => {
+  const sessionId = 91004
+  const originalNow = Date.now
+  Date.now = () => 123456
+  try {
+    replaceChatRuntimeMessages(sessionId, [
+      { role: 'user', content: 'request' },
+      { role: 'assistant', content: '' },
+    ])
+    const before = getChatSessionRuntime(sessionId)
+    setChatRuntimeLoading(sessionId, true)
+    const after = getChatSessionRuntime(sessionId)
+
+    assert.equal(before.updatedAt, after.updatedAt)
+    assert.ok(after.revision > before.revision)
+  } finally {
+    Date.now = originalNow
+    clearChatRuntime(sessionId)
+  }
 })

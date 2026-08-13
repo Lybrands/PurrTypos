@@ -1,4 +1,5 @@
 import type {
+  EntityId,
   ProposedSettingDiff,
   SettingDiffCardState,
 } from '../../../types'
@@ -7,11 +8,20 @@ import type {
   AiStreamChunk,
 } from '../../../agent-runtime/chunkHandlers/types'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
+import { settingDiffCard } from '../settingDiffProjection'
 
 export type BookSettingDiffAttachmentHandler = (
   message: AgentConversationMessage,
   card: SettingDiffCardState,
+  owner: BookSettingDiffAttachmentOwner,
 ) => void
+
+export interface BookSettingDiffAttachmentOwner {
+  sessionId: number
+  bookId: EntityId
+  chapterId: EntityId | null
+  prompt: string
+}
 
 /**
  * AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议：
@@ -21,21 +31,28 @@ export function handleProposedSettingDiff(
   chunk: AiStreamChunk,
   host: AgentChunkHost,
   onAssistantAttachment?: BookSettingDiffAttachmentHandler,
+  owner?: BookSettingDiffAttachmentOwner,
 ): void {
   if (!chunk.proposedSettingDiff || !host.isVisible()) return;
-  const p = chunk.proposedSettingDiff as ProposedSettingDiff;
+  const raw = chunk.proposedSettingDiff as ProposedSettingDiff;
+  const p: ProposedSettingDiff = owner && chunk.runId
+    ? {
+        ...raw,
+        resolutionTarget: {
+          sessionId: owner.sessionId,
+          agentRunId: chunk.runId,
+          prompt: owner.prompt,
+        },
+      }
+    : raw
   if (!p.kind) return;
+
+  const card = settingDiffCard(p)
+  if (!card) return
 
   window.dispatchEvent(
     new CustomEvent("ai-propose-setting-diff", { detail: p }),
   );
-
-  const sessionKey =
-    p.kind === "character"
-      ? `character:${p.characterId}`
-      : p.kind === "entity"
-        ? `entity:${p.entityId}`
-        : `background:${p.bookId}`;
 
   const proposedName =
     p.kind === "character" || p.kind === "entity"
@@ -44,28 +61,10 @@ export function handleProposedSettingDiff(
         (p.before as { name?: string }).name ||
         ""
       : "";
-  const title =
-    p.kind === "character"
-      ? proposedName
-        ? `人物「${proposedName}」`
-        : "人物设定"
-      : p.kind === "entity"
-        ? proposedName
-          ? `设定「${proposedName}」`
-          : "世界设定"
-        : "故事背景";
-
-  const card: SettingDiffCardState = {
-    sessionKey,
-    kind: p.kind,
-    title,
-    status: "pending",
-  };
-
   const assistant = [...host.readMessages()].reverse().find(
     (message) => message.role === 'assistant',
   )
-  if (assistant) onAssistantAttachment?.(assistant, card)
+  if (assistant && owner) onAssistantAttachment?.(assistant, card, owner)
 
   host.scheduleCommit((prev) => {
     const next = [...prev];

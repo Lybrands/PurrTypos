@@ -314,6 +314,38 @@ async def init_schema(db: DatabaseConnection) -> None:
             "failed to retire legacy conversation process columns"
         )
     await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN agent_process TEXT DEFAULT NULL")
+    await _try_exec(db, "ALTER TABLE ai_conversations ADD COLUMN client_turn_id TEXT DEFAULT NULL")
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_conversations_session_client_turn
+        ON ai_conversations(session_id, client_turn_id)
+        WHERE client_turn_id IS NOT NULL
+    """)
+
+    # Local Ask turns need an ownership record that survives Conversation
+    # truncation. Agent requests use their separate stream/request receipt.
+    await db.execute("""CREATE TABLE IF NOT EXISTS
+        ai_local_conversation_turn_receipts (
+            session_id INTEGER NOT NULL,
+            client_turn_id TEXT NOT NULL,
+            payload_digest TEXT DEFAULT NULL,
+            status TEXT NOT NULL CHECK(status IN ('persisted', 'retired')),
+            conversation_id INTEGER DEFAULT NULL,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (session_id, client_turn_id),
+            CHECK(
+                (status = 'persisted' AND payload_digest IS NOT NULL
+                    AND conversation_id IS NOT NULL)
+                OR (status = 'retired' AND conversation_id IS NULL)
+            )
+        )
+    """)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_local_turn_receipts_conversation
+        ON ai_local_conversation_turn_receipts(conversation_id)
+        WHERE conversation_id IS NOT NULL
+    """)
 
     # ── ai_conversation_summaries ────────────────────────────────
     # Raw turns remain authoritative in ai_conversations. This table stores
@@ -475,6 +507,29 @@ async def init_schema(db: DatabaseConnection) -> None:
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_runs_session_time
         ON ai_agent_runs(session_id, update_time DESC)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_writing_chat_requests (
+        request_id TEXT PRIMARY KEY NOT NULL,
+        session_id INTEGER NOT NULL,
+        request_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+            status IN ('accepted', 'starting', 'run_bound', 'rejected', 'canceled')
+        ),
+        run_id TEXT DEFAULT NULL UNIQUE,
+        cancel_requested_at_ms INTEGER DEFAULT NULL,
+        cancel_applied_run_id TEXT DEFAULT NULL,
+        rejection_code TEXT DEFAULT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_writing_chat_requests_session_time
+        ON ai_writing_chat_requests(session_id, create_time DESC)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_writing_chat_requests_run
+        ON ai_writing_chat_requests(run_id)
     """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

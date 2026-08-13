@@ -25,10 +25,12 @@ class AgentRunQueryService:
         output_repository: AgentOutputRepository,
         *,
         role_registry: AgentRoleRegistry | None = None,
+        product_event_query=None,
     ) -> None:
         self._store = store
         self._output = output_repository
         self._role_registry = role_registry
+        self._product_events = product_event_query
 
     async def get_snapshot(
         self,
@@ -84,6 +86,11 @@ class AgentRunQueryService:
             checkpoint.delegations,
             self._role_registry,
         )
+        product_events = (
+            await self._product_events.list_for_run(normalized_run_id)
+            if self._product_events is not None
+            else []
+        )
         return {
             "version": RUN_SNAPSHOT_VERSION,
             "run": _run_view(
@@ -92,6 +99,7 @@ class AgentRunQueryService:
             ),
             "todos": [thaw_json_mapping(step) for step in checkpoint.steps],
             "events": envelopes,
+            "productEvents": product_events,
             "delegations": {
                 "items": [
                     _delegation_view(item, self._role_registry)

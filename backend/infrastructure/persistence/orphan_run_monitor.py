@@ -20,6 +20,9 @@ async def monitor_orphaned_runs(
     reconcile_linked_state: (
         Callable[[], Awaitable[Sequence[str]]] | None
     ) = None,
+    reconcile_terminal_holes: (
+        Callable[[], Awaitable[Sequence[str]]] | None
+    ) = None,
 ) -> None:
     """Terminalize expired Runs and reconcile their durable owner state."""
 
@@ -47,6 +50,20 @@ async def monitor_orphaned_runs(
                 len(recovered),
                 ", ".join(recovered),
             )
+        if reconcile_terminal_holes is not None:
+            try:
+                projected = tuple(await reconcile_terminal_holes())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Failed to materialize terminal Writing Runs")
+            else:
+                if projected:
+                    logger.warning(
+                        "Materialized %s terminal Writing Run(s): %s",
+                        len(projected),
+                        ", ".join(projected),
+                    )
         if reconcile_linked_state is None:
             continue
         try:

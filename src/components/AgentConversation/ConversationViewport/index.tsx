@@ -33,9 +33,17 @@ import AgentConversationTurnIndex, {
   buildAgentConversationTurnIndex,
   type AgentConversationTurnIndexItem,
 } from '../TurnIndex'
+import { bindScrollFollowIntent } from '../scrollFollowEvents'
+import {
+  cancelViewportFrame,
+  createViewportEditTarget,
+  resolveViewportEditTarget,
+  type ViewportEditTarget,
+} from '../viewportSession'
 import './index.scss'
 
 export interface AgentConversationProps {
+  sessionIdentity: string
   messages: AgentConversationMessage[]
   loading: boolean
   initializing?: boolean
@@ -92,6 +100,10 @@ const VIRTUOSO_COMPONENTS = {
   Scroller: VirtuosoScroller,
 }
 
+const useClientLayoutEffect = typeof window === 'undefined'
+  ? React.useEffect
+  : React.useLayoutEffect
+
 function findTurnAtDataIndex(
   turns: AgentConversationTurnIndexItem[],
   dataIndex: number,
@@ -121,6 +133,7 @@ function hasVisibleAssistantContent(message: AgentConversationMessage): boolean 
 }
 
 export default function ConversationViewport({
+  sessionIdentity,
   messages,
   loading,
   initializing = false,
@@ -143,7 +156,7 @@ export default function ConversationViewport({
   const [userDetached, setUserDetached] = React.useState(false)
   const [isAtBottom, setIsAtBottom] = React.useState(true)
   const [activeTurnIndex, setActiveTurnIndex] = React.useState(0)
-  const [editingMessageIndex, setEditingMessageIndex] = React.useState<number | null>(null)
+  const [editingTarget, setEditingTarget] = React.useState<ViewportEditTarget | null>(null)
   const turnIndexItems = React.useMemo(
     () => buildAgentConversationTurnIndex(messages),
     [messages],
@@ -183,67 +196,34 @@ export default function ConversationViewport({
     scrollerCleanupRef.current = null
     if (!ref || ref instanceof Window) return
 
-    const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) detachFromOutput()
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) detachFromOutput()
-    }
-    let touchY: number | null = null
-    let scrollbarPointerActive = false
-    let scrollbarScrollTop = ref.scrollTop
-    const handleTouchStart = (event: TouchEvent) => {
-      touchY = event.touches[0]?.clientY ?? null
-    }
-    const handleTouchMove = (event: TouchEvent) => {
-      const nextY = event.touches[0]?.clientY
-      if (touchY != null && nextY != null && nextY > touchY) detachFromOutput(false)
-      touchY = nextY ?? touchY
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      const bounds = ref.getBoundingClientRect()
-      scrollbarPointerActive = event.clientX >= bounds.right - 16
-      scrollbarScrollTop = ref.scrollTop
-    }
-    const handlePointerEnd = () => {
-      scrollbarPointerActive = false
-    }
-    const handleScroll = () => {
-      if (scrollbarPointerActive && ref.scrollTop < scrollbarScrollTop) {
-        detachFromOutput(false)
-      }
-      scrollbarScrollTop = ref.scrollTop
-    }
-    ref.addEventListener('wheel', handleWheel, { passive: true })
-    ref.addEventListener('keydown', handleKeyDown)
-    ref.addEventListener('touchstart', handleTouchStart, { passive: true })
-    ref.addEventListener('touchmove', handleTouchMove, { passive: true })
-    ref.addEventListener('pointerdown', handlePointerDown)
-    ref.addEventListener('pointerup', handlePointerEnd)
-    ref.addEventListener('pointercancel', handlePointerEnd)
-    ref.addEventListener('scroll', handleScroll, { passive: true })
-    scrollerCleanupRef.current = () => {
-      ref.removeEventListener('wheel', handleWheel)
-      ref.removeEventListener('keydown', handleKeyDown)
-      ref.removeEventListener('touchstart', handleTouchStart)
-      ref.removeEventListener('touchmove', handleTouchMove)
-      ref.removeEventListener('pointerdown', handlePointerDown)
-      ref.removeEventListener('pointerup', handlePointerEnd)
-      ref.removeEventListener('pointercancel', handlePointerEnd)
-      ref.removeEventListener('scroll', handleScroll)
-    }
+    scrollerCleanupRef.current = bindScrollFollowIntent(ref, detachFromOutput)
   }, [detachFromOutput])
 
   React.useEffect(() => () => {
     scrollerCleanupRef.current?.()
-    if (liveTurnPinFrameRef.current != null) {
-      cancelAnimationFrame(liveTurnPinFrameRef.current)
-    }
+    liveTurnPinFrameRef.current = cancelViewportFrame(
+      liveTurnPinFrameRef.current,
+      cancelAnimationFrame,
+    )
   }, [])
 
   React.useEffect(() => {
-    if (loading) setEditingMessageIndex(null)
+    if (loading) setEditingTarget(null)
   }, [loading])
+
+  useClientLayoutEffect(() => {
+    setEditingTarget(null)
+    liveTurnCursorRef.current = undefined
+    liveTurnPinPendingRef.current = false
+    liveTurnPinFrameRef.current = cancelViewportFrame(
+      liveTurnPinFrameRef.current,
+      cancelAnimationFrame,
+    )
+    setActiveTurnIndex(0)
+    isAtBottomRef.current = true
+    setIsAtBottom(true)
+    applyScrollFollowState(createScrollFollowState())
+  }, [applyScrollFollowState, sessionIdentity])
 
   React.useEffect(() => {
     if (!initializing) return
@@ -307,7 +287,7 @@ export default function ConversationViewport({
       })
     })
     return () => cancelAnimationFrame(frame)
-  }, [initializing, messageAttachmentsVersion, messages, userDetached])
+  }, [initializing, messageAttachmentsVersion, messages, sessionIdentity, userDetached])
 
   const handleVisibleRangeChange = React.useCallback((
     { startIndex }: { startIndex: number; endIndex: number },
@@ -327,18 +307,21 @@ export default function ConversationViewport({
     })
   }, [detachFromOutput, turnIndexItems])
 
-  const cancelMessageEdit = React.useCallback(() => setEditingMessageIndex(null), [])
+  const cancelMessageEdit = React.useCallback(() => setEditingTarget(null), [])
   const submitMessageEdit = React.useCallback((content: string) => {
-    if (editingMessageIndex == null || !onEditMessage) return
-    const index = editingMessageIndex
-    setEditingMessageIndex(null)
+    if (!onEditMessage) return
+    const index = resolveViewportEditTarget(editingTarget, sessionIdentity, messages)
+    if (index == null) return
+    setEditingTarget(null)
     void onEditMessage(index, content)
-  }, [editingMessageIndex, onEditMessage])
+  }, [editingTarget, messages, onEditMessage, sessionIdentity])
 
   const renderMessage = React.useCallback((index: number, message: AgentConversationMessage) => {
     const isLast = index === messages.length - 1
     if (message.role === 'user') {
-      const editing = editingMessageIndex === index
+      const messageKey = agentConversationMessageKey(index, message)
+      const editing = editingTarget?.sessionIdentity === sessionIdentity
+        && editingTarget.messageKey === messageKey
       return (
         <article
           className={`agent-conversation__message is-user${editing ? ' is-editing' : ''}`}
@@ -355,7 +338,9 @@ export default function ConversationViewport({
               content={message.content}
               sentAt={message.sentAt}
               onEdit={onEditMessage && !loading
-                ? () => setEditingMessageIndex(index)
+                ? () => setEditingTarget(
+                    createViewportEditTarget(sessionIdentity, index, message),
+                  )
                 : undefined}
             />
           )}
@@ -420,7 +405,7 @@ export default function ConversationViewport({
     afterAssistantMessage,
     cancelMessageEdit,
     detachFromOutput,
-    editingMessageIndex,
+    editingTarget,
     loading,
     messages.length,
     onEditMessage,
@@ -428,6 +413,7 @@ export default function ConversationViewport({
     onStructuredAnswer,
     onSubmitErrorReport,
     submitMessageEdit,
+    sessionIdentity,
   ])
 
   return (

@@ -239,36 +239,58 @@ async def attach_child_run(
     normalized_delegation = _required_text(delegation_id, "delegation id")
     normalized_child = _required_text(child_run_id, "child run id")
     normalized_worker = _required_text(worker_id, "worker id")
-    delegation = await get_delegation(db, normalized_delegation)
-    child = await run_store.get_run(db, normalized_child)
-    if delegation is None or child is None:
-        return False
-    if (
-        child.get("parent_run_id") != delegation.get("parent_run_id")
-        or child.get("root_run_id") != delegation.get("root_run_id")
-        or child.get("delegation_id") != normalized_delegation
-        or child.get("agent_role") != delegation.get("agent_role")
-    ):
-        return False
-    await db.execute(
-        "UPDATE ai_agent_delegations SET child_run_id = ?, status = 'running', "
-        "claim_expires_at_ms = NULL, "
-        "update_time = CURRENT_TIMESTAMP WHERE id = ? AND status = 'claimed' "
-        "AND worker_id = ? AND child_run_id IS NULL",
-        [normalized_child, normalized_delegation, normalized_worker],
-    )
-    changed = await db.fetch_one("SELECT changes() AS count")
-    attached = int((changed or {}).get("count") or 0) == 1
-    if attached:
+    async with db.transaction():
+        delegation = await get_delegation(db, normalized_delegation)
+        child = await run_store.get_run(db, normalized_child)
+        if delegation is None or child is None:
+            return False
+        if (
+            child.get("parent_run_id") != delegation.get("parent_run_id")
+            or child.get("root_run_id") != delegation.get("root_run_id")
+            or child.get("delegation_id") != normalized_delegation
+            or child.get("agent_role") != delegation.get("agent_role")
+        ):
+            return False
+
+        # Run creation owns the first atomic lineage attachment. The
+        # coordinator confirms the same identity after submit returns; that
+        # confirmation is an idempotent replay, not a second state transition.
+        if (
+            delegation.get("status") == "running"
+            and delegation.get("child_run_id") == normalized_child
+            and delegation.get("worker_id") == normalized_worker
+        ):
+            return True
+        if (
+            delegation.get("status") != "claimed"
+            or delegation.get("child_run_id") is not None
+            or delegation.get("worker_id") != normalized_worker
+        ):
+            return False
+
+        await db.execute(
+            "UPDATE ai_agent_delegations SET child_run_id = ?, "
+            "status = 'running', claim_expires_at_ms = NULL, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND status = 'claimed' AND worker_id = ? "
+            "AND child_run_id IS NULL",
+            [normalized_child, normalized_delegation, normalized_worker],
+        )
         updated = await get_delegation(db, normalized_delegation)
-        assert updated is not None
+        if (
+            updated is None
+            or updated.get("status") != "running"
+            or updated.get("child_run_id") != normalized_child
+            or updated.get("worker_id") != normalized_worker
+        ):
+            return False
         await run_store.append_event(
             db,
             str(updated["parent_run_id"]),
             CoreEventType.DELEGATION_CLAIMED,
             _delegation_event_payload(updated, status="running"),
         )
-    return attached
+        return True
 
 
 async def record_result(

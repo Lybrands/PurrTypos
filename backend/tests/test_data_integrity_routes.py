@@ -119,6 +119,15 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         [10, "chapter1", "p", "r"],
     )
     await temp_db.execute(
+        "UPDATE ai_conversations SET client_turn_id = 'book-delete-turn' "
+        "WHERE session_id = 10"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_local_conversation_turn_receipts "
+        "(session_id, client_turn_id, payload_digest, status, conversation_id) "
+        "VALUES (10, 'book-delete-turn', 'sha256:fixture', 'persisted', 1)"
+    )
+    await temp_db.execute(
         "INSERT INTO ai_conversation_summaries "
         "(session_id, version, covered_through_conversation_id, "
         "covered_turn_count, source_digest, summary_json) "
@@ -273,6 +282,7 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_sessions",
         "ai_conversations",
         "ai_conversation_summaries",
+        "ai_local_conversation_turn_receipts",
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",

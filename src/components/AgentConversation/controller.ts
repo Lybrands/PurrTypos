@@ -17,6 +17,7 @@ export interface AgentConversationSession {
 export interface AgentConversationController {
   capabilities: AgentConversationCapabilities
   conversation: {
+    identity: string
     sessions: AgentConversationSession[]
     activeSessionId: AgentSessionId | null
     messages: AgentConversationMessage[]
@@ -32,6 +33,8 @@ export interface AgentConversationController {
       sessions: AgentConversationSession[]
       loading: boolean
       error?: string
+      deletingSessionIds?: AgentSessionId[]
+      deleteDisabledSessionIds?: AgentSessionId[]
     }
   }
   composer: {

@@ -1,5 +1,7 @@
 import type {
   AiErrorReport,
+  AiWritingChatRequestReceipt,
+  ApiResult,
   ElectronAPI,
 } from '../types'
 import {
@@ -19,6 +21,12 @@ import {
 } from '../components/AiDevInspector/store'
 import { isCanonicalOutputEvent } from '../agent-runtime/canonicalOutput'
 import { presentAgentRunError } from '../agent-runtime/agentErrorPresentation'
+import { recoverDurableAgentStream } from './durableAgentStreamRecovery'
+import {
+  reserveWritingChatRequest,
+  replayWritingChatPostUntilObserved,
+  type WritingChatRequestReservation,
+} from './writingChatRequestReceipt'
 
 export type PlatformApiKey =
   | 'openXmindFile'
@@ -44,7 +52,84 @@ type AiStreamRequest = Parameters<ElectronAPI['aiChatStream']>[0]
 
 let aiChunkListeners: Array<(chunk: AiChunk) => void> = []
 const aiAbortControllers = new Map<string, AbortController>()
+const writingRequestReservations = new Map<
+  string,
+  Promise<WritingChatRequestReservation>
+>()
 let latestAiStreamId: string | null = null
+
+async function responseMessage(response: Response): Promise<string> {
+  try {
+    const payload = await response.json() as {
+      detail?: unknown
+      error?: unknown
+    }
+    const value = payload.detail ?? payload.error
+    if (typeof value === 'string' && value.trim()) return value
+  } catch {
+    // Fall back to the HTTP status below.
+  }
+  return `AI 请求失败 (${response.status})`
+}
+
+async function sendWritingRequestReservation(
+  requestId: string,
+  body: AiStreamRequest,
+): Promise<WritingChatRequestReservation> {
+  const response = await fetch(
+    `${backendBaseUrl}/api/ai/chat/requests/${encodeURIComponent(requestId)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const error = await responseMessage(response)
+    if (response.status >= 400 && response.status < 500) {
+      return { kind: 'rejected', error, status: response.status }
+    }
+    throw new Error(error)
+  }
+  const payload = await response.json() as {
+    success?: boolean
+    data?: AiWritingChatRequestReceipt
+    error?: string
+  }
+  if (!payload.success || !payload.data) {
+    throw new Error(payload.error || 'Writing Agent 请求回执缺失')
+  }
+  return { kind: 'accepted', receipt: payload.data }
+}
+
+async function sendWritingRequestCancel(
+  requestId: string,
+): Promise<ApiResult<AiWritingChatRequestReceipt | null>> {
+  while (true) {
+    try {
+      const response = await fetch(
+        `${backendBaseUrl}/api/ai/chat/requests/${encodeURIComponent(requestId)}/cancel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+      )
+      if (!response.ok) {
+        const error = await responseMessage(response)
+        if (response.status >= 400 && response.status < 500) {
+          return { success: false, data: null, error }
+        }
+        throw new Error(error)
+      }
+      return await response.json() as ApiResult<AiWritingChatRequestReceipt>
+    } catch {
+      // The cancel endpoint is idempotent. A dropped response is ambiguous, so
+      // replay the same request identity until an explicit result is observed.
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 500))
+    }
+  }
+}
 
 const apiPostIdempotent = <T>(path: string, body: unknown, commandId: string) =>
   requestJson<T>(`/api${path}`, {
@@ -368,6 +453,7 @@ export const backendApi: BackendApi = {
       source: data.source || 'ai_tool',
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
+      resolution: data.resolution,
     }),
   commitBackgroundSettingDiff: (data) =>
     apiPost(`/setting-diff/background/${data.bookId}/commit`, {
@@ -377,6 +463,7 @@ export const backendApi: BackendApi = {
       source: data.source || 'ai_tool',
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
+      resolution: data.resolution,
     }),
   listCharacterSettingHistory: (data) =>
     apiGet(`/setting-diff/character/${data.characterId}/history?limit=${data.limit ?? 50}`),
@@ -400,6 +487,7 @@ export const backendApi: BackendApi = {
       source: data.source || 'ai_tool',
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
+      resolution: data.resolution,
     }),
   listEntitySettingHistory: (data) =>
     apiGet(`/setting-diff/entity/${data.entityId}/history?limit=${data.limit ?? 50}`),
@@ -438,8 +526,29 @@ export const backendApi: BackendApi = {
     return response
   },
   getConversations: (data) => apiGet(`/conversations/${data.sessionId}`),
-  deleteConversationsAfterTurn: (data) =>
-    apiDelete(`/conversations/${data.sessionId}/after-turn?keepTurnCount=${data.keepTurnCount}`),
+  deleteConversationsAfterTurn: (data) => {
+    const query = new URLSearchParams({
+      keepTurnCount: String(data.keepTurnCount),
+    })
+    if (data.retireConversationIds !== undefined) {
+      query.set('retireConversationIds', data.retireConversationIds.join(','))
+    }
+    if (data.expectedConversationIds !== undefined) {
+      query.set('expectedConversationIds', data.expectedConversationIds.join(','))
+    }
+    if (data.retireRunIds !== undefined) {
+      query.set('retireRunIds', data.retireRunIds.join(','))
+    }
+    if (data.expectedRunIds !== undefined) {
+      query.set('expectedRunIds', data.expectedRunIds.join(','))
+    }
+    if (data.retireClientTurnIds !== undefined) {
+      query.set('retireClientTurnIds', data.retireClientTurnIds.join(','))
+    }
+    return apiDelete(
+      `/conversations/${data.sessionId}/after-turn?${query.toString()}`,
+    )
+  },
 
   saveAiFavorite: (data) => apiPost('/ai-favorites', data),
   getAiFavorites: () => apiGet('/ai-favorites'),
@@ -523,6 +632,16 @@ export const backendApi: BackendApi = {
     }),
   cancelAgentRun: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/cancel`, {}),
+  cancelWritingChatRequest: async (data) => {
+    const reservation = writingRequestReservations.get(data.requestId)
+    if (reservation) {
+      const result = await reservation
+      if (result.kind !== 'accepted') {
+        return { success: true, data: null }
+      }
+    }
+    return sendWritingRequestCancel(data.requestId)
+  },
   createAgentDelegation: (data) =>
     apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/delegations`, {
       agentRole: data.agentRole,
@@ -540,6 +659,10 @@ export const backendApi: BackendApi = {
     const streamId = data.streamId || `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const requestData = { ...data }
     delete requestData.streamId
+    if (data.chatAgentMode === 'agent') {
+      requestData.streamId = streamId
+      requestData.requestReceiptVersion = 1
+    }
     const abortController = new AbortController()
     aiAbortControllers.set(streamId, abortController)
     latestAiStreamId = streamId
@@ -548,6 +671,27 @@ export const backendApi: BackendApi = {
     let observedErrorCode: string | undefined
     let observedTaskType: string | undefined
     let receivedVisibleOutput = false
+    let receivedTerminalChunk = false
+    let lastCanonicalSequence = 0
+    let requestStarted = false
+    const durableReservation = (
+      data.chatAgentMode === 'agent' && data.sessionId != null
+        ? reserveWritingChatRequest({
+            requestId: streamId,
+            send: (requestId) => sendWritingRequestReservation(
+              requestId,
+              requestData,
+            ),
+            wait: () => new Promise<void>((resolve) => {
+              globalThis.setTimeout(resolve, 500)
+            }),
+            isAborted: () => abortController.signal.aborted,
+          })
+        : undefined
+    )
+    if (durableReservation) {
+      writingRequestReservations.set(streamId, durableReservation)
+    }
 
     const attachErrorReport = async (
       chunk: AiChunk,
@@ -579,19 +723,145 @@ export const backendApi: BackendApi = {
       }
     }
 
-    fetch(`${backendBaseUrl}/api/ai/chat/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestData),
-      signal: abortController.signal,
+    const deliverChunk = async (chunk: AiChunk): Promise<void> => {
+      const transport = chunk as AiChunk & {
+        done?: boolean
+        aborted?: boolean
+        error?: string
+        longTaskDispatched?: { taskId?: string; kind?: string }
+        runResult?: {
+          runId: string
+          status: string
+          errorCode?: string | null
+        }
+        requestResult?: AiWritingChatRequestReceipt
+      }
+      if (abortController.signal.aborted && transport.done) {
+        transport.aborted = true
+      }
+      if (isCanonicalOutputEvent(chunk)) {
+        observedAgentRunId = chunk.runId || observedAgentRunId
+        lastCanonicalSequence = Math.max(lastCanonicalSequence, chunk.sequence)
+      }
+      observedAgentRunId = transport.runResult?.runId || observedAgentRunId
+      observedErrorCode =
+        transport.runResult?.errorCode ||
+        (isCanonicalOutputEvent(chunk)
+          && chunk.kind === 'run.lifecycle'
+          && typeof chunk.payload.errorCode === 'string'
+          ? chunk.payload.errorCode
+          : undefined) ||
+        observedErrorCode
+      if (chunk.longTaskDispatched?.taskId) {
+        observedTaskType = chunk.longTaskDispatched.kind === 'screenplay_draft_generation'
+          ? '持久化长任务 · 剧本正文分批创作'
+          : `持久化长任务 · ${chunk.longTaskDispatched.kind || '通用任务'}`
+      }
+      if (
+        (isCanonicalOutputEvent(chunk)
+          && chunk.visibility === 'public'
+          && chunk.source === 'provider'
+          && chunk.kind === 'provider.content_delta'
+          && typeof chunk.payload.delta === 'string'
+          && chunk.payload.delta.trim())
+        || transport.longTaskDispatched?.taskId
+      ) {
+        receivedVisibleOutput = true
+      }
+      if (transport.done || transport.error) receivedTerminalChunk = true
+      if (
+        transport.done
+        && transport.runResult
+        && ['failed', 'blocked'].includes(transport.runResult.status)
+      ) {
+        await attachErrorReport(
+          transport,
+          presentAgentRunError(
+            transport.runResult.status,
+            transport.runResult.errorCode,
+          ),
+          transport.runResult.errorCode || undefined,
+        )
+      } else if (transport.error && !transport.requestResult) {
+        await attachErrorReport(transport)
+      } else if (
+        transport.done
+        && !transport.aborted
+        && !receivedVisibleOutput
+        && transport.finalResponseExpected !== false
+        && !transport.requestResult
+      ) {
+        await attachErrorReport(
+          chunk,
+          '模型未返回可见内容。',
+          'empty_model_response',
+        )
+      }
+      recordAiDebugChunk(streamId, chunk)
+      aiChunkListeners.forEach((listener) => listener({ ...chunk, streamId }))
+    }
+
+    const recoverDurableStream = () => recoverDurableAgentStream({
+      runId: observedAgentRunId,
+      sessionId: Number(data.sessionId),
+      after: lastCanonicalSequence,
+      getLatestRun: (sessionId) => apiGet(
+        `/ai/session-runs/latest?sessionId=${encodeURIComponent(sessionId)}`
+        + `&requestId=${encodeURIComponent(streamId)}`,
+      ),
+      getRunSnapshot: ({ runId, after, limit }) => apiGet(
+        `/ai/agent-runs/${encodeURIComponent(runId)}?after=${after}&limit=${limit}`,
+      ),
+      wait: () => new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 500)
+      }),
+      isAborted: () => abortController.signal.aborted,
+      emit: deliverChunk,
+    })
+
+    Promise.resolve(durableReservation).then(async (reservation) => {
+      if (reservation?.kind === 'rejected') {
+        await deliverChunk({
+          done: true,
+          error: reservation.error,
+          finalResponseExpected: false,
+          requestResult: {
+            requestId: streamId,
+            sessionId: Number(data.sessionId),
+            status: 'rejected',
+            runId: null,
+            cancelRequested: false,
+            rejectionCode: `http_${reservation.status}`,
+            revision: 0,
+          },
+        })
+        return undefined
+      }
+      requestStarted = Boolean(reservation)
+      const send = () => fetch(`${backendBaseUrl}/api/ai/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestData),
+        signal: abortController.signal,
+      })
+      return reservation
+        ? replayWritingChatPostUntilObserved({
+            send,
+            accept: (response) => response.ok || response.status < 500,
+            wait: () => new Promise<void>((resolve) => {
+              globalThis.setTimeout(resolve, 500)
+            }),
+            isAborted: () => abortController.signal.aborted,
+          })
+        : send()
     }).then(async (response) => {
+      if (!response) return
       if (!response.ok || !response.body) {
         throw new Error(`AI 请求失败 (${response.status})`)
       }
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
-      let receivedTerminalChunk = false
       const processLines = async (lines: string[]) => {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
@@ -599,77 +869,7 @@ export const backendApi: BackendApi = {
           if (payload === '[DONE]') continue
           try {
             const chunk = JSON.parse(payload) as AiChunk
-            const transport = chunk as AiChunk & {
-              done?: boolean
-              aborted?: boolean
-              error?: string
-              longTaskDispatched?: { taskId?: string }
-              runResult?: {
-                runId: string
-                status: string
-                errorCode?: string | null
-              }
-            }
-            if (abortController.signal.aborted && transport.done) {
-              transport.aborted = true
-            }
-            observedAgentRunId =
-              (isCanonicalOutputEvent(chunk) ? chunk.runId : undefined) ||
-              observedAgentRunId
-            observedErrorCode =
-              transport.runResult?.errorCode ||
-              (isCanonicalOutputEvent(chunk)
-                && chunk.kind === 'run.lifecycle'
-                && typeof chunk.payload.errorCode === 'string'
-                ? chunk.payload.errorCode
-                : undefined) ||
-              observedErrorCode
-            if (chunk.longTaskDispatched?.taskId) {
-              observedTaskType = chunk.longTaskDispatched.kind === 'screenplay_draft_generation'
-                ? '持久化长任务 · 剧本正文分批创作'
-                : `持久化长任务 · ${chunk.longTaskDispatched.kind || '通用任务'}`
-            }
-            if (
-              (isCanonicalOutputEvent(chunk)
-                && chunk.visibility === 'public'
-                && chunk.source === 'provider'
-                && chunk.kind === 'provider.content_delta'
-                && typeof chunk.payload.delta === 'string'
-                && chunk.payload.delta.trim())
-              ||
-              transport.longTaskDispatched?.taskId
-            ) {
-              receivedVisibleOutput = true
-            }
-            if (transport.done || transport.error) receivedTerminalChunk = true
-            if (
-              transport.done
-              && transport.runResult
-              && ['failed', 'blocked'].includes(transport.runResult.status)
-            ) {
-              await attachErrorReport(
-                transport,
-                presentAgentRunError(
-                  transport.runResult.status,
-                  transport.runResult.errorCode,
-                ),
-                transport.runResult.errorCode || undefined,
-              )
-            } else if (transport.error) {
-              await attachErrorReport(transport)
-            } else if (
-              transport.done &&
-              !transport.aborted &&
-              !receivedVisibleOutput
-            ) {
-              await attachErrorReport(
-                chunk,
-                '模型未返回可见内容。',
-                'empty_model_response',
-              )
-            }
-            recordAiDebugChunk(streamId, chunk)
-            aiChunkListeners.forEach((listener) => listener({ ...chunk, streamId }))
+            await deliverChunk(chunk)
           } catch {
             // Ignore malformed/incomplete SSE events; the next event can still be valid.
           }
@@ -685,19 +885,32 @@ export const backendApi: BackendApi = {
       }
       if (buffer.trim()) await processLines(buffer.split('\n'))
       if (!receivedTerminalChunk) {
-        const terminalChunk = abortController.signal.aborted
-          ? { done: true, aborted: true, streamId }
-          : { done: true, streamId }
-        recordAiDebugChunk(streamId, terminalChunk)
-        aiChunkListeners.forEach((listener) => listener(terminalChunk))
+        if (
+          data.chatAgentMode === 'agent'
+          && data.sessionId != null
+          && !abortController.signal.aborted
+        ) {
+          await recoverDurableStream()
+        } else {
+          await deliverChunk(abortController.signal.aborted
+            ? { done: true, aborted: true, streamId }
+            : { done: true, streamId })
+        }
       }
     }).catch(async (error) => {
+      if (
+        data.chatAgentMode === 'agent'
+        && data.sessionId != null
+        && requestStarted
+        && !abortController.signal.aborted
+      ) {
+        await recoverDurableStream()
+        return
+      }
       const chunk = abortController.signal.aborted
         ? { done: true, aborted: true, streamId }
         : { error: error instanceof Error ? error.message : String(error), streamId }
-      await attachErrorReport(chunk)
-      recordAiDebugChunk(streamId, chunk)
-      aiChunkListeners.forEach((listener) => listener(chunk))
+      await deliverChunk(chunk)
     }).finally(() => {
       if (aiAbortControllers.get(streamId) === abortController) {
         aiAbortControllers.delete(streamId)
@@ -705,6 +918,7 @@ export const backendApi: BackendApi = {
       if (latestAiStreamId === streamId) {
         latestAiStreamId = Array.from(aiAbortControllers.keys()).at(-1) || null
       }
+      writingRequestReservations.delete(streamId)
     })
     return streamId
   },

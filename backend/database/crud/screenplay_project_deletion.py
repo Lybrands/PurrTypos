@@ -31,6 +31,11 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
                 session_ids,
             )
             await db.execute(
+                f"DELETE FROM ai_local_conversation_turn_receipts "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            )
+            await db.execute(
                 f"DELETE FROM ai_conversations "
                 f"WHERE session_id IN ({placeholders})",
                 session_ids,

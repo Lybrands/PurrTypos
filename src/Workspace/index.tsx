@@ -362,7 +362,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
   return (
     <WorkspaceContext.Provider value={workspaceContextValue}>
     <DiffProvider>
-    <SettingDiffProvider>
+    <SettingDiffProvider key={String(bookId ?? 'no-book')} bookId={bookId}>
       <AppHeader
         title={
           bookId ? (

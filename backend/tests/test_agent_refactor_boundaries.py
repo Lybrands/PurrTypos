@@ -12,6 +12,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
@@ -156,7 +158,15 @@ def _screenplay_count(path: Path) -> int:
 def _source_between(source: str, start: str, end: str) -> str:
     assert source.count(start) == 1, f"Expected one source anchor: {start}"
     assert source.count(end) == 1, f"Expected one source anchor: {end}"
+    assert source.index(start) < source.index(end), (
+        "start anchor must precede end anchor"
+    )
     return source.split(start, 1)[1].split(end, 1)[0]
+
+
+def test_source_between_rejects_reversed_anchors():
+    with pytest.raises(AssertionError, match="start anchor must precede end anchor"):
+        _source_between("end marker then start marker", "start marker", "end marker")
 
 
 def _class_fields(path: Path, class_name: str) -> set[str]:

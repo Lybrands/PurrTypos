@@ -811,6 +811,8 @@ export interface SettingEntityHistory {
 
 /** AI 工具提交的设定 diff 提议（人物 / 故事背景 / 世界设定实体） */
 export interface ProposedSettingDiff {
+  /** Durable occurrence identity; entity sessionKey remains only an editor route. */
+  proposalId?: string;
   kind: "character" | "background" | "entity";
   bookId: EntityId;
   characterId?: number;
@@ -821,6 +823,12 @@ export interface ProposedSettingDiff {
   before: CharacterSettingSnapshot | { content: string };
   proposed: CharacterSettingSnapshot | { content: string };
   source?: string;
+  /** Product owner needed to durably resolve this journal occurrence. */
+  resolutionTarget?: {
+    sessionId: number;
+    agentRunId: string;
+    prompt: string;
+  };
 }
 
 /** 服务端暂停高风险 Agent 工具调用时发送的用户确认请求。 */
@@ -845,12 +853,19 @@ export interface ToolApprovalRequest {
 
 /** 设定 diff 卡片终态（提交 / 放弃后持久化到消息） */
 export interface SettingDiffCardState {
+  proposalId: string;
   sessionKey: string;
   kind: "character" | "background" | "entity";
   title: string;
   status: "pending" | "committed" | "rejected";
   acceptedSegments?: number;
   rejectedSegments?: number;
+}
+
+export interface SettingDiffResolutionCommand extends SettingDiffCardState {
+  sessionId: number;
+  agentRunId: string;
+  status: "committed";
 }
 
 export interface StoryBackgroundAttachment {
@@ -966,6 +981,7 @@ export interface Conversation {
   agent_process?: string | null;
   agent_run_id?: string | null;
   long_task_id?: string | null;
+  client_turn_id?: string | null;
   create_time?: string;
 }
 
@@ -1056,6 +1072,21 @@ export interface AiAgentRunEventEnvelope {
   createdAt?: string | null;
 }
 
+export interface AiAgentRunProductEvent {
+  version: 1;
+  type: "writing.proposed_setting_diff";
+  runId: string;
+  proposalId: string;
+  toolCallId?: string;
+  effectIndex: number;
+  payload: ProposedSettingDiff & { proposalId: string };
+  chunk: {
+    runId: string;
+    proposedSettingDiff: ProposedSettingDiff & { proposalId: string };
+  };
+  createdAt?: string | null;
+}
+
 export interface AiAgentRunSnapshot {
   version: 1;
   run: {
@@ -1091,12 +1122,24 @@ export interface AiAgentRunSnapshot {
   };
   todos: AiTaskPlanChunk['steps'];
   events: AiAgentRunEventEnvelope[];
+  /** Product-owned projection; deliberately separate from canonical Core events. */
+  productEvents?: AiAgentRunProductEvent[];
   delegations: {
     items: AiAgentDelegation[];
     aggregate: AiAgentDelegationAggregate;
   };
   nextCursor: number;
   hasMore: boolean;
+}
+
+export interface AiWritingChatRequestReceipt {
+  requestId: string
+  sessionId: number
+  status: 'accepted' | 'starting' | 'run_bound' | 'rejected' | 'canceled'
+  runId: string | null
+  cancelRequested: boolean
+  rejectionCode: string | null
+  revision: number
 }
 
 export type AiLongTaskStatus =
@@ -1284,6 +1327,7 @@ export interface ApiResult<T = unknown> {
   success: boolean;
   data: T;
   error?: string;
+  httpStatus?: number;
 }
 
 export type AiErrorReportStatus = "captured" | "submitted" | "resolved";
@@ -1948,6 +1992,7 @@ export interface ElectronAPI {
     source?: string;
     acceptedSegments?: number;
     rejectedSegments?: number;
+    resolution?: SettingDiffResolutionCommand;
   }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
   commitBackgroundSettingDiff: (data: {
     bookId: EntityId;
@@ -1957,6 +2002,7 @@ export interface ElectronAPI {
     source?: string;
     acceptedSegments?: number;
     rejectedSegments?: number;
+    resolution?: SettingDiffResolutionCommand;
   }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
   listCharacterSettingHistory: (data: {
     characterId: number;
@@ -1988,6 +2034,7 @@ export interface ElectronAPI {
     source?: string;
     acceptedSegments?: number;
     rejectedSegments?: number;
+    resolution?: SettingDiffResolutionCommand;
   }) => Promise<ApiResult<{ id: number; entityId: number } | null>>;
   listEntitySettingHistory: (data: {
     entityId: number;
@@ -2024,11 +2071,10 @@ export interface ElectronAPI {
     taskPlan?: AiTaskPlanChunk;
     contextCompaction?: AiContextCompactionState;
     contextBudget?: AiContextBudgetState;
-    agentProcess?: {
-      delegations?: AiAgentDelegation[];
-      subAgentActivities?: unknown[];
-    };
+    agentProcess?: Record<string, unknown>;
     agentRunId?: string;
+    clientTurnId?: string;
+    expectedConversationIds?: number[];
   }) => Promise<ApiResult<{ id: number | null }>>;
   getConversations: (data: {
     sessionId: number;
@@ -2036,6 +2082,11 @@ export interface ElectronAPI {
   deleteConversationsAfterTurn: (data: {
     sessionId: number;
     keepTurnCount: number;
+    expectedConversationIds?: number[];
+    retireConversationIds?: number[];
+    retireRunIds?: string[];
+    expectedRunIds?: string[];
+    retireClientTurnIds?: string[];
   }) => Promise<ApiResult<void>>;
   updateSessionTitle: (data: {
     sessionId: number;
@@ -2167,8 +2218,9 @@ export interface ElectronAPI {
   getLatestSessionAgentRun: (data: {
     sessionId: number;
   }) => Promise<ApiResult<{
+    request?: AiWritingChatRequestReceipt;
     prompt: string;
-    snapshot: AiAgentRunSnapshot;
+    snapshot: AiAgentRunSnapshot | null;
   } | null>>;
   captureAiErrorReport: (data: {
     streamId: string;
@@ -2202,6 +2254,9 @@ export interface ElectronAPI {
     childrenCanceled: number;
     terminalized: boolean;
   }>>;
+  cancelWritingChatRequest: (data: {
+    requestId: string;
+  }) => Promise<ApiResult<AiWritingChatRequestReceipt | null>>;
   createAgentDelegation: (data: {
     runId: string;
     agentRole: string;
@@ -2213,6 +2268,8 @@ export interface ElectronAPI {
   aiChatStream: (data: {
     /** Renderer-generated identifier used to isolate concurrent streams. */
     streamId?: string;
+    /** Durable Writing request-receipt protocol version. */
+    requestReceiptVersion?: 1;
     apiKey: string;
     baseURL?: string;
     locale?: string;
@@ -2242,6 +2299,9 @@ export interface ElectronAPI {
     selectedForeshadowingIds?: (number | string)[];
     chatAgentMode?: ChatAgentMode;
     contextWindow?: AiContextWindow;
+    /** Immutable durable history frontier for request reservation/claim. */
+    expectedConversationIds?: number[];
+    expectedRunIds?: string[];
   }) => string;
   abortAiStream: (streamId?: string) => void;
   onAiChunk: (
@@ -2267,11 +2327,17 @@ export interface ElectronAPI {
         status: "done" | "failed" | "blocked" | "canceled" | string;
         errorCode?: string | null;
       };
+      /** Product request receipt; distinct from an Agent Run terminal. */
+      requestReceipt?: AiWritingChatRequestReceipt;
+      /** Authoritative pre-Run request settlement. */
+      requestResult?: AiWritingChatRequestReceipt;
       delta?: string;
       done?: boolean;
       aborted?: boolean;
       /** False when execution settled without a product-level final answer. */
       finalResponseExpected?: boolean;
+      /** Authoritative completed Run text supplied during snapshot recovery. */
+      finalResponse?: string;
       error?: string;
       /** 本地自动创建的脱敏错误报告。 */
       errorReport?: AiErrorReport;

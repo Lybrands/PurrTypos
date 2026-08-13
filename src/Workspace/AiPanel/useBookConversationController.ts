@@ -27,6 +27,11 @@ export interface HistoryRequestCoordinator {
   isCurrentScope(scopeRequest: number): boolean
   isMounted(): boolean
   runOnce<T>(key: string, operation: () => Promise<T>): Promise<T>
+  beginSessionDelete(id: number, allowed: boolean): object | null
+  completeSessionDelete(token: object): boolean
+  failSessionDelete(token: object): boolean
+  isSessionDeleting(id: number): boolean
+  canOpenSession(id: number): boolean
 }
 
 export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
@@ -34,6 +39,7 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
   let scopeGeneration = 0
   let active = false
   const inFlight = new Map<string, Promise<unknown>>()
+  const deleting = new Map<number, object>()
   return {
     activate() {
       active = true
@@ -45,6 +51,7 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
       scopeGeneration += 1
       loadGeneration += 1
       inFlight.clear()
+      deleting.clear()
     },
     beginLatest() {
       loadGeneration += 1
@@ -53,6 +60,7 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
     invalidateLatest() {
       scopeGeneration += 1
       loadGeneration += 1
+      deleting.clear()
     },
     isCurrent(request) {
       return active && request === loadGeneration
@@ -88,14 +96,48 @@ export function createHistoryRequestCoordinator(): HistoryRequestCoordinator {
       inFlight.set(scopedKey, tracked)
       return tracked
     },
+    beginSessionDelete(id, allowed) {
+      if (!active || !allowed || deleting.has(id)) return null
+      loadGeneration += 1
+      const token = { id, scopeGeneration, loadGeneration }
+      deleting.set(id, token)
+      return token
+    },
+    completeSessionDelete(token) {
+      const id = Number((token as { id?: unknown }).id)
+      if (deleting.get(id) !== token) return false
+      deleting.delete(id)
+      if (!active || (token as { scopeGeneration?: unknown }).scopeGeneration !== scopeGeneration) {
+        return false
+      }
+      loadGeneration += 1
+      return true
+    },
+    failSessionDelete(token) {
+      const id = Number((token as { id?: unknown }).id)
+      if (deleting.get(id) !== token) return false
+      deleting.delete(id)
+      return active
+        && (token as { scopeGeneration?: unknown }).scopeGeneration === scopeGeneration
+        && (token as { loadGeneration?: unknown }).loadGeneration === loadGeneration
+    },
+    isSessionDeleting(id) {
+      return deleting.has(id)
+    },
+    canOpenSession(id) {
+      return !deleting.has(id)
+    },
   }
 }
 
 export interface BookConversationBindings {
+  conversationIdentity?: string
   sessions: AiSession[]
   historySessions: AiSession[]
   historyLoading: boolean
   historyError?: string
+  deletingSessionIds?: number[]
+  deleteDisabledSessionIds?: number[]
   activeSessionId: number | null
   messages: AgentConversationMessage[]
   prependedHistory: AgentConversationMessage[]
@@ -106,6 +148,7 @@ export interface BookConversationBindings {
   initializing: boolean
   running: boolean
   stopping?: boolean
+  canSelectSession?(id: string | number): boolean
   attachmentsVersion?: string | number
   scopeAvailable?: boolean
   modelConfigs: AiModelConfig[]
@@ -183,6 +226,8 @@ export function createBookConversationController(
       sessionLoading: bindings.initializing,
     }),
     conversation: {
+      identity: bindings.conversationIdentity
+        ?? `book-session:${String(bindings.activeSessionId ?? 'none')}`,
       sessions: bindings.sessions.map((session) => (
         toAgentConversationSession(session, session.create_time)
       )),
@@ -205,6 +250,8 @@ export function createBookConversationController(
         )),
         loading: bindings.historyLoading,
         error: bindings.historyError,
+        deletingSessionIds: bindings.deletingSessionIds,
+        deleteDisabledSessionIds: bindings.deleteDisabledSessionIds,
       },
     },
     composer: {
@@ -217,6 +264,7 @@ export function createBookConversationController(
         || !selectedModel
         || bindings.activeSessionId == null
         || bindings.scopeAvailable === false
+        || bindings.initializing
       ),
       selectedModel,
       modelConfigs: bindings.modelConfigs,
@@ -225,7 +273,19 @@ export function createBookConversationController(
       openModelSettings: bindings.openModelSettings,
       taskPlan: bindings.taskPlan,
     },
-    actions: bindings.actions,
+    actions: {
+      ...bindings.actions,
+      selectSession: (id) => {
+        if (bindings.canSelectSession?.(id) === false) return
+        return bindings.actions.selectSession(id)
+      },
+      send: (content) => {
+        if (!bindings.initializing) return bindings.actions.send(content)
+      },
+      editMessage: (index, content) => {
+        if (!bindings.initializing) return bindings.actions.editMessage(index, content)
+      },
+    },
   }
 }
 
@@ -243,6 +303,9 @@ export function useBookConversationController({
   const [historyLoading, setHistoryLoading] = React.useState(false)
   const [historyError, setHistoryError] = React.useState<string>()
   const [historyRequests] = React.useState(createHistoryRequestCoordinator)
+  const [deletingSessions, setDeletingSessions] = React.useState(
+    () => new Map<number, object>(),
+  )
 
   React.useEffect(() => {
     historyRequests.activate()
@@ -254,6 +317,7 @@ export function useBookConversationController({
     setHistorySessions([])
     setHistoryLoading(false)
     setHistoryError(undefined)
+    setDeletingSessions(new Map())
   }, [bookId, chapterId, historyRequests, scope])
 
   const loadSessionHistory = React.useCallback(async () => {
@@ -293,43 +357,93 @@ export function useBookConversationController({
   }, [bookId, chapterId, historyRequests, historyService, scope])
 
   const openHistorySession = React.useCallback((id: string | number) => {
+    if (!historyRequests.canOpenSession(Number(id))) return
     const session = historySessions.find((item) => item.id === id)
     if (session) onOpenFromHistory(session)
-  }, [historySessions, onOpenFromHistory])
+  }, [historyRequests, historySessions, onOpenFromHistory])
 
   const deleteHistorySession = React.useCallback(async (id: string | number) => {
     const session = historySessions.find((item) => item.id === id)
     if (!session) return
-    await historyRequests.runOnce(`session:${session.id}`, async () => {
-      const scopeRequest = historyRequests.beginMutation()
-      if (historyRequests.isCurrentScope(scopeRequest)) setHistoryLoading(false)
-      try {
-        const result = await historyService.deleteSession({ sessionId: session.id })
-        if (!result.success) {
-          if (historyRequests.isCurrentScope(scopeRequest)) {
-            setHistoryError(result.error || '删除历史对话失败')
-          }
-          return
-        }
-        if (!historyRequests.completeMutation(scopeRequest)) return
-        setHistoryLoading(false)
-        setHistorySessions((current) => (
-          current.filter((item) => item.id !== session.id)
-        ))
-        onDeleteFromHistory(session)
-      } catch {
-        if (historyRequests.isCurrentScope(scopeRequest)) {
-          setHistoryError('删除历史对话失败，请稍后重试')
-        }
+    const activity = bindings.activities[session.id]
+    const protectedActivity = Boolean(
+      activity
+      && (
+        activity.queuedCount > 0
+        || activity.state === 'running'
+        || activity.state === 'queued'
+        || activity.state === 'paused'
+      ),
+    ) || (bindings.activeSessionId === session.id && bindings.running)
+    const token = historyRequests.beginSessionDelete(session.id, !protectedActivity)
+    if (!token) {
+      if (protectedActivity) {
+        setHistoryError('运行中、排队中或已暂停的对话不能删除。')
       }
+      return
+    }
+    setDeletingSessions((current) => new Map(current).set(session.id, token))
+    setHistoryLoading(false)
+    setHistoryError(undefined)
+    try {
+      const result = await historyService.deleteSession({ sessionId: session.id })
+      if (!result.success) {
+        if (historyRequests.failSessionDelete(token)) {
+          setHistoryError(result.error || '删除历史对话失败')
+        }
+        return
+      }
+      if (!historyRequests.completeSessionDelete(token)) return
+      setHistoryLoading(false)
+      setHistorySessions((current) => (
+        current.filter((item) => item.id !== session.id)
+      ))
+      onDeleteFromHistory(session)
+    } catch {
+      if (historyRequests.failSessionDelete(token)) {
+        setHistoryError('删除历史对话失败，请稍后重试')
+      }
+    } finally {
+      setDeletingSessions((current) => {
+        if (current.get(session.id) !== token) return current
+        const next = new Map(current)
+        next.delete(session.id)
+        return next
+      })
+    }
+  }, [
+    bindings.activeSessionId,
+    bindings.activities,
+    bindings.running,
+    historyRequests,
+    historyService,
+    historySessions,
+    onDeleteFromHistory,
+  ])
+
+  const deleteDisabledSessionIds = historySessions
+    .filter((session) => {
+      const activity = bindings.activities[session.id]
+      return Boolean(
+        (activity && (
+          activity.queuedCount > 0
+          || activity.state === 'running'
+          || activity.state === 'queued'
+          || activity.state === 'paused'
+        ))
+        || (bindings.activeSessionId === session.id && bindings.running)
+      )
     })
-  }, [historyRequests, historyService, historySessions, onDeleteFromHistory])
+    .map((session) => session.id)
 
   return createBookConversationController({
     ...bindings,
     historySessions,
     historyLoading,
     historyError,
+    deletingSessionIds: [...deletingSessions.keys()],
+    deleteDisabledSessionIds,
+    canSelectSession: (id) => historyRequests.canOpenSession(Number(id)),
     actions: {
       ...actions,
       loadSessionHistory,

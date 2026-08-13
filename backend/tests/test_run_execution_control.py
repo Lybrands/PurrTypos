@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from purra.contracts import RunCreateParams
+from purra.contracts import RunBinding, RunCreateParams
 from application.run_execution_control import RunExecutionSession
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_execution_store, run_store
@@ -33,6 +33,14 @@ async def _unowned_run(db: DatabaseConnection) -> str:
         session_id=None,
         prompt="execute",
         mode="agent",
+    )
+
+
+def _writing_binding(session_id: int, command_id: str) -> RunBinding:
+    return RunBinding(
+        namespace="writing.chat.request",
+        aggregate_id=str(session_id),
+        command_id=command_id,
     )
 
 
@@ -256,6 +264,67 @@ async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(db):
 
 
 @pytest.mark.asyncio
+async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(db):
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (91, 'book-91', 'chapter-91')"
+    )
+    run_id = await run_store.create_run(
+        db,
+        session_id=91,
+        prompt="interrupted before restart",
+        mode="agent",
+        binding=_writing_binding(91, "restart-request"),
+        execution_owner_id="previous-process",
+        heartbeat_at_ms=10_000,
+        lease_expires_at_ms=99_999,
+    )
+    recovered = await run_execution_store.recover_orphaned_runs(
+        db,
+        timestamp_ms=10_001,
+        after_restart=True,
+    )
+
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_terminal_writing_run_holes,
+    )
+
+    materialized = await materialize_terminal_writing_run_holes(db)
+
+    assert materialized == (run_id,)
+    assert await db.fetch_one(
+        "SELECT r.status, r.conversation_id, c.response "
+        "FROM ai_agent_runs AS r "
+        "JOIN ai_conversations AS c ON c.id = r.conversation_id "
+        "WHERE r.id = ?",
+        [run_id],
+    ) == {
+        "status": "canceled",
+        "conversation_id": 1,
+        "response": "",
+    }
+    projected = await db.fetch_one(
+        "SELECT conversation_id FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    )
+    from dependencies import set_db
+    from routers.conversations import save_conversation
+    from schemas.conversations import SaveConversationRequest
+
+    set_db(db)
+    next_turn = await save_conversation(SaveConversationRequest(
+        sessionId=91,
+        bookId="book-91",
+        chapterId="chapter-91",
+        prompt="next Ask",
+        response="next answer",
+        clientTurnId="turn-after-restart",
+        expectedConversationIds=[int(projected["conversation_id"])],
+    ))
+    assert next_turn["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_orphan_monitor_reaps_expired_run_without_restart(db):
     run_id = await run_store.create_run(
         db,
@@ -320,3 +389,167 @@ async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(db):
             await monitor
 
     assert calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_monitor_materializes_each_recovered_book_run(db):
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (92, 'book-92', 'chapter-92')"
+    )
+    run_id = await run_store.create_run(
+        db,
+        session_id=92,
+        prompt="expired while app is open",
+        mode="agent",
+        binding=_writing_binding(92, "live-request"),
+        execution_owner_id="lost-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_terminal_writing_run_holes,
+    )
+
+    monitor = asyncio.create_task(monitor_orphaned_runs(
+        db,
+        poll_interval_seconds=0.01,
+        reconcile_terminal_holes=lambda: (
+            materialize_terminal_writing_run_holes(db)
+        ),
+    ))
+    try:
+        for _ in range(100):
+            projected = await db.fetch_one(
+                "SELECT conversation_id FROM ai_agent_runs WHERE id = ?",
+                [run_id],
+            )
+            if projected and projected.get("conversation_id") is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("orphan monitor did not materialize the run")
+    finally:
+        monitor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitor
+
+
+@pytest.mark.asyncio
+async def test_recovered_screenplay_run_cannot_materialize_into_colliding_book_session(
+    db,
+):
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (93, 'book-93', 'chapter-93')"
+    )
+    run_id = await run_store.create_run(
+        db,
+        session_id=93,
+        prompt="screenplay prompt must never become Book history",
+        mode="agent",
+        binding=RunBinding(
+            namespace="screenplay.agent.turn",
+            aggregate_id="93",
+            command_id="screenplay-request",
+        ),
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET status = 'canceled' WHERE id = ?",
+        [run_id],
+    )
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_recovered_run_conversations,
+    )
+
+    materialized = await materialize_recovered_run_conversations(db, (run_id,))
+
+    assert materialized == ()
+    assert await db.fetch_one(
+        "SELECT id FROM ai_conversations WHERE session_id = 93"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_writing_hole_is_reconciled_without_current_recovery_ids(db):
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (94, 'book-94', 'chapter-94')"
+    )
+    run_id = await run_store.create_run(
+        db,
+        session_id=94,
+        prompt="terminal before process restart",
+        mode="agent",
+        binding=_writing_binding(94, "preexisting-terminal-request"),
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET status = 'failed', "
+        "final_response = 'provider_error' WHERE id = ?",
+        [run_id],
+    )
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_terminal_writing_run_holes,
+    )
+
+    materialized = await materialize_terminal_writing_run_holes(db)
+
+    assert materialized == (run_id,)
+    assert await db.fetch_one(
+        "SELECT response FROM ai_conversations WHERE session_id = 94"
+    ) == {"response": ""}
+
+
+@pytest.mark.asyncio
+async def test_orphan_monitor_retries_terminal_writing_holes_after_projection_failure(
+    db,
+):
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (95, 'book-95', 'chapter-95')"
+    )
+    run_id = await run_store.create_run(
+        db,
+        session_id=95,
+        prompt="projection retry",
+        mode="agent",
+        binding=_writing_binding(95, "retry-request"),
+        execution_owner_id="lost-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    from infrastructure.persistence.run_conversation_store import (
+        materialize_terminal_writing_run_holes,
+    )
+
+    attempts = 0
+
+    async def flaky_reconcile():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient projection failure")
+        return await materialize_terminal_writing_run_holes(db)
+
+    monitor = asyncio.create_task(monitor_orphaned_runs(
+        db,
+        poll_interval_seconds=0.01,
+        reconcile_terminal_holes=flaky_reconcile,
+    ))
+    try:
+        for _ in range(100):
+            projected = await db.fetch_one(
+                "SELECT conversation_id FROM ai_agent_runs WHERE id = ?",
+                [run_id],
+            )
+            if projected and projected.get("conversation_id") is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("terminal Writing hole was not retried")
+    finally:
+        monitor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitor
+
+    assert attempts >= 2

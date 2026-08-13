@@ -164,6 +164,7 @@ export default function AgentConversationPanel({
     selectedModel: controller.composer.selectedModel,
     inputDisabled: controller.capabilities.inputDisabled,
     resuming: controller.conversation.resuming,
+    stopping: controller.conversation.stopping,
   })
 
   const setIndexOpen = React.useCallback((open: boolean) => {
@@ -226,6 +227,7 @@ export default function AgentConversationPanel({
       )}
       <main className="agent-conversation-panel__main">
         <ConversationViewport
+          sessionIdentity={controller.conversation.identity}
           messages={controller.conversation.messages}
           loading={controller.conversation.running}
           initializing={controller.conversation.initializing}

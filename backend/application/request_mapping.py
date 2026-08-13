@@ -10,6 +10,7 @@ from purra.contracts import (
     AgentRunRequest,
     ContextBudgetClaim,
     ModelRequest,
+    RunBinding,
     RunProvenance,
     RunLineage,
 )
@@ -158,8 +159,20 @@ def to_writing_agent_request(
         mode=body.chatAgentMode,
         context_window=selected_context_window,
         tools_enabled=bool(body.enableAgentTools and body.bookId),
-        metadata={"locale": body.locale},
+        metadata={
+            "locale": body.locale,
+            **({"streamId": body.streamId} if body.streamId else {}),
+        },
     )
+
+
+def validate_writing_request_contract(
+    body: ChatStreamRequest,
+    provider_options: Mapping[str, Any],
+) -> None:
+    """Application facade for product preflight without leaking assembly to HTTP."""
+
+    to_writing_agent_request(body, provider_options)
 
 
 def to_agent_request(
@@ -205,12 +218,26 @@ def writing_run_options(
     )
     return AgentCoreRunOptions(
         context_claims=writing_context_claims(request),
+        turn_id=(
+            str(request.metadata["streamId"])
+            if request.metadata.get("streamId")
+            else None
+        ),
         output_limit=output_limit,
         default_context_window_tokens=request.context_window or 200_000,
         force_planned_tool_choice=force_planned_tool_choice,
         reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,
         lineage=lineage,
+        binding=(
+            RunBinding(
+                namespace="writing.chat.request",
+                aggregate_id=str(request.session_id),
+                command_id=str(request.metadata["streamId"]),
+            )
+            if request.session_id is not None and request.metadata.get("streamId")
+            else None
+        ),
         response_constraints=response_constraints,
         response_validators=response_validators,
         response_judge_policies=judge_policies,

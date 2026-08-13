@@ -16,8 +16,11 @@ interface SettingDiffCardProps {
 
 export default function SettingDiffCard({ card }: SettingDiffCardProps) {
   const diff = useSettingDiff()
-  const session = diff.getSession(card.sessionKey)
-  const resolved = diff.getResolvedCard(card.sessionKey)
+  const candidate = diff.getSession(card.sessionKey)
+  const session = candidate?.proposalId === card.proposalId
+    ? candidate
+    : undefined
+  const resolved = diff.getResolvedCard(card.proposalId)
   const display = resolved || (card.status !== 'pending' ? card : null)
 
   const stats = session
@@ -83,14 +86,15 @@ export default function SettingDiffCard({ card }: SettingDiffCardProps) {
             diff.acceptAllPending(card.sessionKey)
             void diff.commit(card.sessionKey)
           }}
-          disabled={session.computing}
+          disabled={session.computing || session.committing}
         >
           全部接受
         </PurrButton>
         <PurrButton
           size="small"
           icon={<CloseIcon />}
-          onClick={() => diff.exitDiff(card.sessionKey)}
+          onClick={() => void diff.exitDiff(card.sessionKey).catch(() => undefined)}
+          disabled={session.committing}
         >
           拒绝
         </PurrButton>
