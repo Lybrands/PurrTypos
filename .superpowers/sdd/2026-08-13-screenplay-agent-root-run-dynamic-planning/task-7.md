@@ -60,8 +60,12 @@ todo 事件，也不为修订另建公开 Run。
   output 与 Root `planRevision` event 双向 reconcile，崩溃恢复不重复调用模型。
 - GREEN：reserved/applying 都是阻塞检查点；owner heartbeat 续租，所有终态写以
   owner+epoch fencing，过期接管先核对 Root event，确保同检查点只发一条 revision。
+- GREEN：applying heartbeat 覆盖 emit/ACK、权威 event readback 与 applied CAS 全链路，
+  caller cancel/exception 均 finally 清理；短 lease 下第二 observer 不会中途接管。
 - GREEN：Root reconcile 从完整 `run.todos_updated` 重建 TaskPlan，并要求 computed /
   metadata / receipt 三份 digest 一致；缺字段、metadata-only、冲突重复全部暂停。
+- GREEN：同一 checkpoint identity 的 Root revision event 必须严格恰好一条；即使
+  digest 与完整计划完全相同的第二条 event 也视为冲突并暂停。
 - GREEN：planner 只接收公开 Root 计划、摘要、无正文 Artifact digest、typed failure 和
   remaining scope；内部 task/run/unit/Operation/base Revision ID 不进入模型输入。
 - GREEN：Artifact receipt 只含公开 part/artifact kind、episode/section、digest/status，

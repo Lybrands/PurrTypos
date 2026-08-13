@@ -597,29 +597,31 @@ class _ScreenplayCheckpointObserver:
                 return
             owner = str(applying["reservation_owner"])
             epoch = int(applying["reservation_epoch"])
-            # The prior apply owner may have committed the Root event and crashed
-            # before acknowledging the receipt. Reconcile before any re-emission.
-            root_digest = await self._dispatcher._checkpoints.root_revision_digest(
-                self._root_run_id,
-                checkpoint_key,
-                expected_digest=digest,
-            )
-            if root_digest is None:
-                event = AgentEvent(
-                    type=CoreEventType.LONG_TASK_PROGRESS,
-                    run_id=self._root_run_id,
-                    payload={
-                        **thaw_json_mapping(progress_update.event.payload),
-                        "checkpoint": {
-                            "identity": checkpoint_key,
-                            "digest": digest,
-                        },
-                    },
+
+            async def apply_revision() -> None:
+                # The prior apply owner may have committed the Root event and
+                # crashed before acknowledging the receipt. Reconcile before
+                # any re-emission.
+                root_digest = (
+                    await self._dispatcher._checkpoints.root_revision_digest(
+                        self._root_run_id,
+                        checkpoint_key,
+                        expected_digest=digest,
+                    )
                 )
-                await self._with_heartbeat(
-                    applying,
-                    "applying",
-                    self._downstream(type(progress_update)(
+                if root_digest is None:
+                    event = AgentEvent(
+                        type=CoreEventType.LONG_TASK_PROGRESS,
+                        run_id=self._root_run_id,
+                        payload={
+                            **thaw_json_mapping(progress_update.event.payload),
+                            "checkpoint": {
+                                "identity": checkpoint_key,
+                                "digest": digest,
+                            },
+                        },
+                    )
+                    await self._downstream(type(progress_update)(
                         event=event,
                         plan_revision=parse_persisted_plan(
                             str(receipt["plan_json"])
@@ -628,23 +630,30 @@ class _ScreenplayCheckpointObserver:
                             "identity": checkpoint_key,
                             "digest": digest,
                         },
-                    )),
+                    ))
+                    root_digest = (
+                        await self._dispatcher._checkpoints.root_revision_digest(
+                            self._root_run_id,
+                            checkpoint_key,
+                            expected_digest=digest,
+                        )
+                    )
+                if root_digest != digest:
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint Root revision ACK is missing"
+                    )
+                await self._dispatcher._checkpoints.applied(
+                    operation_id=operation_id,
+                    checkpoint_key=checkpoint_key,
+                    digest=digest,
+                    reservation_owner=owner,
+                    reservation_epoch=epoch,
                 )
-                root_digest = await self._dispatcher._checkpoints.root_revision_digest(
-                    self._root_run_id,
-                    checkpoint_key,
-                    expected_digest=digest,
-                )
-            if root_digest != digest:
-                raise ScreenplayCheckpointStateError(
-                    "checkpoint Root revision ACK is missing"
-                )
-            await self._dispatcher._checkpoints.applied(
-                operation_id=operation_id,
-                checkpoint_key=checkpoint_key,
-                digest=digest,
-                reservation_owner=owner,
-                reservation_epoch=epoch,
+
+            await self._with_heartbeat(
+                applying,
+                "applying",
+                apply_revision(),
             )
         except ScreenplayCheckpointStateError:
             await self._dispatcher._checkpoints.pause_ready_conflict(
@@ -684,15 +693,15 @@ class _ScreenplayCheckpointObserver:
                 {worker, keeper},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if keeper in done:
-                return keeper.result()
-            return worker.result()
+            if worker in done:
+                return worker.result()
+            return keeper.result()
         finally:
             for child in (worker, keeper):
                 if not child.done():
                     child.cancel()
             for child in (worker, keeper):
-                with suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError, Exception):
                     await child
 
 def _ready_checkpoint_keys(units) -> tuple[str, ...]:

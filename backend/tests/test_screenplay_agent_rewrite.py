@@ -848,7 +848,13 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("metadata_only", "wrong_step", "wrong_event_digest", "duplicate_conflict"),
+    (
+        "metadata_only",
+        "wrong_step",
+        "wrong_event_digest",
+        "duplicate_exact",
+        "duplicate_conflict",
+    ),
 )
 async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
     temp_db: DatabaseConnection,
@@ -880,10 +886,14 @@ async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
         "VALUES (?, 'run.todos_updated', ?)",
         ["root-strict-reconcile", json.dumps(payload)],
     )
-    if mutation == "duplicate_conflict":
-        conflicting = _root_revision_payload(
-            replace(plan, title="冲突计划"),
-            identity="episode:4",
+    if mutation in {"duplicate_exact", "duplicate_conflict"}:
+        conflicting = (
+            payload
+            if mutation == "duplicate_exact"
+            else _root_revision_payload(
+                replace(plan, title="冲突计划"),
+                identity="episode:4",
+            )
         )
         await temp_db.execute(
             "INSERT INTO ai_agent_run_events "
@@ -901,6 +911,72 @@ async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
             "episode:4",
             expected_digest=digest,
         )
+
+
+async def test_duplicate_root_revision_event_pauses_ready_receipt(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-duplicate-event",
+        task_id="task-duplicate-event",
+        checkpoint_key="episode:4",
+        root_run_id="root-duplicate-event",
+        input_digest="sha256:" + "9" * 64,
+        reservation_token="planner",
+    )
+    receipt = await repository.ready(
+        operation_id="operation-duplicate-event",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner="planner",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    payload = _root_revision_payload(
+        _canonical_root_plan(parse_persisted_plan(str(receipt["plan_json"]))),
+        identity="episode:4",
+        digest=str(receipt["plan_digest"]),
+    )
+    for _ in range(2):
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) "
+            "VALUES (?, 'run.todos_updated', ?)",
+            ["root-duplicate-event", json.dumps(payload)],
+        )
+    downstream_calls = 0
+
+    async def downstream(_update):
+        nonlocal downstream_calls
+        downstream_calls += 1
+
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=downstream,
+        task_id="task-duplicate-event",
+        root_run_id="root-duplicate-event",
+        signal=None,
+    )
+    await observer._emit_ready(
+        receipt,
+        SimpleNamespace(event=AgentEvent(
+            type=CoreEventType.LONG_TASK_PROGRESS,
+            payload={"taskId": "task-duplicate-event"},
+        )),
+    )
+
+    assert downstream_calls == 0
+    assert (await repository.load(
+        "operation-duplicate-event",
+        "episode:4",
+    ))["status"] == "paused"
 
 
 async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event(
@@ -933,11 +1009,21 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
         reservation_epoch=int(planning["reservation_epoch"]),
     )
     downstream_calls = 0
+    authoritative_readback_started = asyncio.Event()
+    original_root_revision_digest = repository.root_revision_digest
+
+    async def delayed_root_revision_digest(*args, **kwargs):
+        result = await original_root_revision_digest(*args, **kwargs)
+        if result is not None and not authoritative_readback_started.is_set():
+            authoritative_readback_started.set()
+            await asyncio.sleep(0.08)
+        return result
+
+    repository.root_revision_digest = delayed_root_revision_digest
 
     async def persist_revision(update):
         nonlocal downstream_calls
         downstream_calls += 1
-        await asyncio.sleep(0.08)
         await temp_db.execute(
             "INSERT INTO ai_agent_run_events "
             "(run_id, event_type, payload_json) "
@@ -966,16 +1052,22 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
         type=CoreEventType.LONG_TASK_PROGRESS,
         payload={"taskId": "task-single-apply"},
     ))
-    await asyncio.gather(
-        observer()._emit_ready(receipt, progress),
-        observer()._emit_ready(receipt, progress),
-    )
+    first = asyncio.create_task(observer()._emit_ready(receipt, progress))
+    await asyncio.wait_for(authoritative_readback_started.wait(), timeout=0.2)
+    second = asyncio.create_task(observer()._emit_ready(receipt, progress))
+    await asyncio.gather(first, second)
 
     assert downstream_calls == 1
     assert (await repository.load(
         "operation-single-apply",
         "episode:4",
     ))["status"] == "applied"
+    event_rows = await temp_db.fetch_all(
+        "SELECT id FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_type = 'run.todos_updated'",
+        ["root-single-apply"],
+    )
+    assert len(event_rows) == 1
 
 
 @pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))
