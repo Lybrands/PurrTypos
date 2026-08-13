@@ -4,4 +4,4 @@ Branch: codex/agent-root-run-public-plan
 Base: e4a6537
 Pre-flight: common prerequisite and Writing dynamic planning implementation complete. Writing full gate: 1590 passed, 5 credential-blocked provider E2E; writing-method exact revision binding remains an explicit unrelated release gap.
 
-Task 5: PASS. Screenplay Conversation Turns now submit one shared Root Run; answer and formal durable lifecycles, Root-ordered phase barriers, atomic completion projection, terminal mapping, and cancellation are covered. Full Agent refactor gate: 1650 passed, 5 credential-blocked provider E2E.
+Task 5: PASS. Screenplay Conversation Turns now submit one shared Root Run; answer and formal durable lifecycles, Root-ordered phase barriers, bounded full-transaction completion retry, strict persisted identity, terminal mapping, and cancellation are covered. Full Agent refactor gate: 1666 passed, 5 credential-blocked provider E2E.

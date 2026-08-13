@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 
 from purra.contracts import RunStatus
@@ -42,32 +43,55 @@ class ScreenplayAgentRootCompletionProjector:
     async def project(self, run_id: str, commit: RunCommit) -> None:
         if commit.terminal_status is not RunStatus.DONE:
             return None
-        row = await self._db.fetch_one(
-            "SELECT binding_namespace, binding_attributes_json "
-            "FROM ai_agent_runs WHERE id = ?",
-            [run_id],
-        )
-        if row is None or str(row.get("binding_namespace") or "") != (
-            _ROOT_BINDING_NAMESPACE
-        ):
-            return None
-        attributes = _json_mapping(row.get("binding_attributes_json"))
-        if (
-            str(attributes.get("agentProfile") or "") != _PROFILE_ID
-            or str(attributes.get("domainNamespace") or "")
-            != SCREENPLAY_AGENT_DOMAIN_NAMESPACE
-        ):
-            raise ScreenplayAgentRootCompletionError(
-                "screenplay Root binding profile is invalid"
-            )
-
         try:
-            turn = await self._db.fetch_one(
+            row = await self._db.fetch_one(
+                "SELECT session_id, binding_namespace, binding_aggregate_id, "
+                "binding_command_id, binding_attributes_json "
+                "FROM ai_agent_runs WHERE id = ?",
+                [run_id],
+            )
+            if row is None or str(row.get("binding_namespace") or "") != (
+                _ROOT_BINDING_NAMESPACE
+            ):
+                return None
+            attributes = _json_mapping(row.get("binding_attributes_json"))
+            if (
+                str(attributes.get("agentProfile") or "") != _PROFILE_ID
+                or str(attributes.get("domainNamespace") or "")
+                != SCREENPLAY_AGENT_DOMAIN_NAMESPACE
+            ):
+                raise ScreenplayAgentRootCompletionError(
+                    "screenplay Root binding profile is invalid"
+                )
+            identity_rows = await self._db.fetch_all(
+                "SELECT turn_id FROM ai_agent_run_events "
+                "WHERE run_id = ? AND source_event_key = ? "
+                "AND kind = 'run.lifecycle' AND event_id IS NOT NULL",
+                [run_id, f"run:{run_id}:running"],
+            )
+            if len(identity_rows) != 1:
+                raise ValueError(
+                    "screenplay Root canonical Turn identity is missing"
+                )
+            canonical_turn_id = str(
+                identity_rows[0].get("turn_id") or ""
+            ).strip()
+            if not canonical_turn_id:
+                raise ValueError(
+                    "screenplay Root canonical Turn identity is empty"
+                )
+            turns = await self._db.fetch_all(
                 "SELECT * FROM screenplay_agent_turns WHERE planner_run_id = ?",
                 [run_id],
             )
-            if turn is None:
+            if len(turns) != 1:
                 raise LookupError("screenplay Root Turn does not exist")
+            turn = turns[0]
+            _require_root_identity(
+                run=row,
+                turn=turn,
+                canonical_turn_id=canonical_turn_id,
+            )
             operation_id = str(turn.get("operation_id") or "").strip()
             final_response = str(commit.final_response or "")
             if operation_id:
@@ -82,7 +106,8 @@ class ScreenplayAgentRootCompletionProjector:
             raise
         except Exception as error:
             raise ScreenplayAgentRootCompletionError(
-                "screenplay Root product state could not be committed"
+                "screenplay Root product state could not be committed",
+                retryable=_is_transient_projection_error(error),
             ) from error
 
     async def _complete_answer(
@@ -198,6 +223,44 @@ def _json_mapping(value: object) -> dict[str, object]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _require_root_identity(
+    *,
+    run: Mapping[str, object],
+    turn: Mapping[str, object],
+    canonical_turn_id: str,
+) -> None:
+    expected = {
+        "conversation Turn": (
+            canonical_turn_id,
+            str(turn.get("id") or "").strip(),
+        ),
+        "session": (
+            str(run.get("session_id") or "").strip(),
+            str(turn.get("session_id") or "").strip(),
+        ),
+        "project": (
+            str(run.get("binding_aggregate_id") or "").strip(),
+            str(turn.get("project_id") or "").strip(),
+        ),
+        "command": (
+            str(run.get("binding_command_id") or "").strip(),
+            str(turn.get("command_id") or "").strip(),
+        ),
+    }
+    for label, (actual, persisted) in expected.items():
+        if not actual or not persisted or actual != persisted:
+            raise ValueError(f"screenplay Root {label} identity conflicts")
+
+
+def _is_transient_projection_error(error: Exception) -> bool:
+    if isinstance(error, RunCommitProjectionError):
+        return bool(error.retryable)
+    return isinstance(error, sqlite3.OperationalError) and any(
+        marker in str(error).lower()
+        for marker in ("database is locked", "database is busy", "interrupted")
+    )
 
 
 __all__ = [

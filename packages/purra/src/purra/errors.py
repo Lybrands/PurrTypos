@@ -42,6 +42,17 @@ class RunCommitProjectionError(CodedAgentCoreError):
 
     default_code = "completion_projection_failed"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: Mapping[str, Any] | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message, code=code, details=details)
+        self.retryable = bool(retryable)
+
 
 class ResponseJudgeContractError(ContractViolationError):
     """A semantic judge response violates its declared verdict contract."""

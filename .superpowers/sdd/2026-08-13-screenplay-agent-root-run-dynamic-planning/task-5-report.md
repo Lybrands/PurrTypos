@@ -13,6 +13,8 @@ Status: PASS
 - Planner model invocations now inherit the Root Turn id through the generic PlanningPort, including repair and dynamic replan calls, so canonical output sequence and correlation remain unique within the Turn.
 - Multi-episode recipes now use barriers derived from model-authored public step bindings projected through the validated Root `TaskPlan.steps` order. A shuffled binding array cannot reorder public execution, and private Parts cannot advance a later public Root step until every terminal Part of the preceding public step has completed.
 - Manual cancellation now persists Root cancellation and lets the supervised Root signal drive durable cleanup instead of canceling the outer service coroutine; Root, LongTask, Operation, and Turn settle consistently.
+- Retryable host projection failures now retry the complete Root commit transaction at most three times. The retry contract defaults to non-retryable, revalidates current Root ownership/status on every attempt, and never overwrites a concurrent terminal commit.
+- Screenplay Root completion now fails closed unless the canonical `run:{rootRunId}:running` event has one non-empty Turn identity matching the persisted Turn, Run session, binding project, binding command, profile, and domain.
 
 ## TDD evidence
 
@@ -25,10 +27,12 @@ Status: PASS
 - GREEN: answer, formal success, multi-episode barriers, pause, runtime failure, and manual cancellation all pass through the real shared composition and `AgentRunService` path.
 - GREEN: the manifest compiler orders bindings by validated Root steps; pre-dispatch terminal settlement is idempotent; paused/failed/exception settlement joins one ambient SQLite transaction and retries cleanly.
 - GREEN: answer and formal product completion both join the Root terminal transaction. A later projector failure rolls back Root state, canonical event, Revision, Operation, and Turn; retry is idempotent and publishes exactly one Revision.
+- GREEN: a fail-once typed projection failure succeeds on the second complete transaction; a permanent typed transient stops after three fully rolled-back attempts; raw and validation failures run once. A concurrent terminal winner is preserved.
+- GREEN: missing, null, and mismatched canonical Turn, session, project, command, profile, and domain identities remain non-retryable; only explicitly classified transient SQLite failures opt into retry.
 - GREEN: the required route/durable-service target passed (35 tests).
 - GREEN: the related screenplay, persistence, composition, LongTask, WorkItem, planner, and Core-engine suites passed.
-- GREEN: the focused screenplay, route, repository, transaction, cancellation, LongTask, and WorkItem suites passed (246 tests); Agent boundary guards passed (54 tests).
-- GREEN: `npm run check:agent-refactor` passed, including typecheck, frontend unit/projection/session tests, and 1,650 backend tests. Five real-provider E2E cases remain skipped because their credentials are unavailable and retain their existing `RELEASE BLOCKER` markers.
+- GREEN: the focused screenplay, output, controller, engine, route, repository, transaction, cancellation, LongTask, and WorkItem suites passed (284 tests); Agent boundary guards passed (54 tests).
+- GREEN: `npm run check:agent-refactor` passed, including typecheck, frontend unit/projection/session tests, and 1,666 backend tests. Five real-provider E2E cases remain skipped because their credentials are unavailable and retain their existing `RELEASE BLOCKER` markers.
 - `git diff --check` and the production legacy-symbol search passed.
 
 ## Lifecycle boundary
