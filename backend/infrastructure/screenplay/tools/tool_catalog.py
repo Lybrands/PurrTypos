@@ -17,9 +17,12 @@ from infrastructure.screenplay.tools.candidate_artifact import (
 from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 
 
-def build_screenplay_tool_catalog(*, db):
+def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
     query = ScreenplayToolQuery(db)
-    candidates = ScreenplayCandidateArtifacts(db)
+    candidates = ScreenplayCandidateArtifacts(
+        db,
+        candidate_normalizer=candidate_normalizer,
+    )
 
     def bind_read(tool_name, method):
         async def handler(state, arguments, signal):

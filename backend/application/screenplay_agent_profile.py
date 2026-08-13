@@ -48,7 +48,14 @@ from purra.json_values import thaw_json_mapping
 
 
 class ScreenplayAgentProfileExtension:
-    def __init__(self, db, *, owner_id: str | None = None, resolver=None) -> None:
+    def __init__(
+        self,
+        db,
+        *,
+        owner_id: str | None = None,
+        resolver=None,
+        candidate_normalizer=None,
+    ) -> None:
         self._owner_id = str(owner_id or "").strip() or (
             f"screenplay-profile-{uuid4().hex}"
         )
@@ -67,7 +74,10 @@ class ScreenplayAgentProfileExtension:
             return await context_query.planning_context(workspace)
 
         self._adapter = ScreenplayDomainAdapter(
-            tool_catalog=build_screenplay_tool_catalog(db=db),
+            tool_catalog=build_screenplay_tool_catalog(
+                db=db,
+                candidate_normalizer=candidate_normalizer,
+            ),
             context_provider=ScreenplayHostContextProvider(
                 planning_context_loader=load_planning_context,
             ),
@@ -400,9 +410,13 @@ def _task_failure_message(code: str) -> str:
 def build_screenplay_profile_extension(
     *,
     db,
+    candidate_normalizer=None,
     **_dependencies,
 ) -> ScreenplayAgentProfileExtension:
-    return ScreenplayAgentProfileExtension(db)
+    return ScreenplayAgentProfileExtension(
+        db,
+        candidate_normalizer=candidate_normalizer,
+    )
 
 
 __all__ = [
