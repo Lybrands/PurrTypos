@@ -535,6 +535,37 @@ test('a pre-Run rejected request settles as a structured failure', () => {
 })
 
 for (const status of ['canceled', 'rejected'] as const) {
+  test(`an unknown current request rejects a pre-Run ${status} result`, () => {
+    const outcomes: string[] = []
+    const harness = createTestChunkContext([
+      { role: 'user', content: '问题' },
+      { role: 'assistant', content: '' },
+    ], {
+      onSettled: (outcome) => outcomes.push(outcome),
+    })
+
+    dispatchAgentChunk({
+      done: true,
+      aborted: status === 'canceled',
+      finalResponseExpected: false,
+      requestResult: {
+        requestId: 'unbound-request',
+        sessionId: 7,
+        status,
+        runId: null,
+        cancelRequested: status === 'canceled',
+        rejectionCode: status === 'rejected' ? 'unbound_rejection' : null,
+        revision: 2,
+      },
+    }, harness.context)
+
+    const message = harness.readMessages().at(-1)
+    assert.deepEqual(outcomes, [])
+    assert.equal(harness.context.acc.terminalSettlement, undefined)
+    assert.equal(message?.error, undefined)
+    assert.equal(message?.termination, undefined)
+  })
+
   test(`a foreign pre-Run ${status} request result cannot settle this request`, () => {
     const outcomes: string[] = []
     const harness = createTestChunkContext([
