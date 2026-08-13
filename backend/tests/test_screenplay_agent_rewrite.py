@@ -84,6 +84,7 @@ from domains.screenplay_agent.agent_context import (
     ScreenplayAgentDomainContext,
 )
 from domains.screenplay_agent.contracts import (
+    ScreenplayPlanBinding,
     ScreenplayPlanPhase,
     ScreenplayScopeKind,
 )
@@ -206,7 +207,12 @@ async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deseriali
     ("mutate", "message"),
     [
         (lambda raw: raw.update({"version": 2}), "version"),
+        (lambda raw: raw.update({"version": 1.0}), "version"),
+        (lambda raw: raw.update({"version": True}), "version"),
+        (lambda raw: raw.update({"version": "1"}), "version"),
         (lambda raw: raw.update({"unknown": True}), "fields"),
+        (lambda raw: raw["scope"].update({"kind": 1}), "scope kind"),
+        (lambda raw: raw["scope"].update({"kind": True}), "scope kind"),
         (lambda raw: raw["scope"].update({"count": 2}), "scope"),
         (lambda raw: raw["scope"].update({"unknown": True}), "scope fields"),
         (
@@ -245,6 +251,22 @@ async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deseriali
             "phase",
         ),
         (
+            lambda raw: raw["stepBindings"][0].update({"stepId": 1}),
+            "step id",
+        ),
+        (
+            lambda raw: raw["stepBindings"][0].update({"stepId": True}),
+            "step id",
+        ),
+        (
+            lambda raw: raw["stepBindings"][0].update({"phase": 1}),
+            "phase",
+        ),
+        (
+            lambda raw: raw["stepBindings"][0].update({"phase": True}),
+            "phase",
+        ),
+        (
             lambda raw: raw["stepBindings"][0].update({"unknown": True}),
             "binding fields",
         ),
@@ -270,6 +292,30 @@ async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_con
             _screenplay_task_spec(screenplay=raw),
             _semantic_steps(),
         )
+
+
+@pytest.mark.parametrize("step_id", [1, b"understand-source", True])
+async def test_screenplay_plan_binding_rejects_non_string_step_ids(step_id):
+    with pytest.raises(ValueError, match="step id"):
+        ScreenplayPlanBinding.from_mapping({
+            "stepId": step_id,
+            "phase": "evidence",
+        })
+
+
+@pytest.mark.parametrize("phase", [1, b"evidence", True])
+async def test_screenplay_plan_binding_rejects_non_string_phases(phase):
+    with pytest.raises(ValueError, match="phase"):
+        ScreenplayPlanBinding.from_mapping({
+            "stepId": "understand-source",
+            "phase": phase,
+        })
+
+
+@pytest.mark.parametrize("kind", [1, b"current_stage", True])
+async def test_screenplay_task_scope_rejects_non_string_kinds(kind):
+    with pytest.raises(ValueError, match="scope kind"):
+        ScreenplayIntentScope.from_task_spec_mapping({"kind": kind})
 
 
 @pytest.mark.parametrize(
