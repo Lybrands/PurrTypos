@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from functools import partial
 from pathlib import Path
 
@@ -11,8 +12,12 @@ import dependencies
 from purra.cancellation import await_with_cancellation
 from purra.contracts import (
     ExecutionState,
+    ToolBatchOutcome,
+    ToolBatchRequest,
+    ToolCall,
     ToolPlanningDisposition,
 )
+from purra.tools.executor import CoreToolExecutor
 from database.connection import DatabaseConnection
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.tools.contracts import ToolResult, _err
@@ -63,6 +68,73 @@ def _registration(db, name: str):
     )
     return next(
         item for item in catalog.registrations() if item.schema.name == name
+    )
+
+
+class _RecordingSink:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+def _lexical(text: str) -> str:
+    return json.dumps({
+        "root": {
+            "children": [{
+                "type": "paragraph",
+                "children": [{"type": "text", "text": text}],
+            }],
+        },
+    }, ensure_ascii=False)
+
+
+async def _seed_writing_chapter(
+    db: DatabaseConnection,
+    *,
+    book_id: str,
+    outline_id: str,
+    chapter_id: str,
+    title: str,
+    content: str,
+    sort: int,
+) -> None:
+    if await db.fetch_one("SELECT id FROM books WHERE id = ?", [book_id]) is None:
+        await db.execute(
+            "INSERT INTO books (id, title) VALUES (?, ?)",
+            [book_id, f"{book_id} title"],
+        )
+        await db.execute(
+            "INSERT INTO outlines (id, title, type, book_id) "
+            "VALUES (?, ?, 'writing', ?)",
+            [outline_id, f"{book_id} writing", book_id],
+        )
+    await db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, level, sort) VALUES (?, ?, ?, 1, ?)",
+        [chapter_id, outline_id, title, sort],
+    )
+    await db.execute(
+        "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
+        [chapter_id, _lexical(content)],
+    )
+
+
+def _edit_request(
+    *,
+    arguments: dict,
+    domain: dict,
+) -> ToolBatchRequest:
+    return ToolBatchRequest(
+        run_id="writing-candidate-run",
+        calls=(ToolCall(
+            id="edit-call",
+            name="editChapterContent",
+            arguments_json=json.dumps(arguments, ensure_ascii=False),
+        ),),
+        allowed_tool_names=frozenset({"editChapterContent"}),
+        state=ExecutionState(domain=domain),
     )
 
 
@@ -338,5 +410,175 @@ async def test_atomic_handler_rolls_back_when_operation_returns_error(
             "SELECT id FROM books WHERE id = ?",
             ["rolled-back"],
         ) is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_chapter_content_emits_only_a_candidate_before_user_apply(
+    tmp_path,
+):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        await _seed_writing_chapter(
+            db,
+            book_id="book-a",
+            outline_id="writing-a",
+            chapter_id="chapter-current",
+            title="第一章",
+            content="正式正文保持不变",
+            sort=1,
+        )
+        await _seed_writing_chapter(
+            db,
+            book_id="book-a",
+            outline_id="writing-a",
+            chapter_id="chapter-authorized",
+            title="第二章",
+            content="第二章正式正文",
+            sort=2,
+        )
+        stored_before = await db.fetch_one(
+            "SELECT content FROM articles WHERE chapter_id = ?",
+            ["chapter-authorized"],
+        )
+        domain = {
+            "bookId": "book-a",
+            "chapterId": "chapter-current",
+            "writingChapters": [
+                {"id": "chapter-current", "title": "第一章"},
+                {"id": "chapter-authorized", "title": "第二章"},
+            ],
+        }
+        result = await CoreToolExecutor(
+            build_writing_tool_catalog(
+                dependencies=_tool_dependencies(db),
+                skill_items=SKILL_ITEMS,
+            )
+        ).execute_batch(
+            _edit_request(
+                arguments={
+                    "chapterId": "chapter-authorized",
+                    "content": "仅供用户审阅的第二章候选正文",
+                },
+                domain=domain,
+            ),
+            _RecordingSink(),
+        )
+        stored_after = await db.fetch_one(
+            "SELECT content FROM articles WHERE chapter_id = ?",
+            ["chapter-authorized"],
+        )
+
+        assert result.outcome is ToolBatchOutcome.COMPLETED
+        assert json.loads(result.results[0].content) == {
+            "success": True,
+            "message": "已向用户提交差异预览，需用户在编辑器接受/拒绝后才会写入正文",
+            "chapterId": "chapter-authorized",
+            "pendingUserApproval": True,
+        }
+        assert [
+            {"type": effect.type, "payload": dict(effect.payload)}
+            for effect in result.results[0].effects
+        ] == [{
+            "type": "writing.proposed_chapter_diff",
+            "payload": {
+                "chapterId": "chapter-authorized",
+                "beforeText": "第二章正式正文",
+                "proposedText": "仅供用户审阅的第二章候选正文",
+                "source": "ai_tool_edit",
+            },
+        }]
+        assert stored_before == stored_after == {
+            "content": _lexical("第二章正式正文"),
+        }
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_chapter_content_fails_closed_outside_host_scope(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        await _seed_writing_chapter(
+            db,
+            book_id="book-a",
+            outline_id="writing-a",
+            chapter_id="chapter-a",
+            title="第一章",
+            content="甲书正式正文",
+            sort=1,
+        )
+        await _seed_writing_chapter(
+            db,
+            book_id="book-b",
+            outline_id="writing-b",
+            chapter_id="chapter-b",
+            title="第一章",
+            content="乙书正式正文",
+            sort=1,
+        )
+        executor = CoreToolExecutor(build_writing_tool_catalog(
+            dependencies=_tool_dependencies(db),
+            skill_items=SKILL_ITEMS,
+        ))
+        domain = {
+            "bookId": "book-a",
+            "chapterId": "chapter-a",
+            "writingChapters": [
+                {"id": "chapter-a", "title": "第一章"},
+                # Deliberately forged into the runtime catalog. The database
+                # ownership check must still reject the cross-book chapter.
+                {"id": "chapter-b", "title": "伪造的第二章"},
+            ],
+        }
+        stored_before = await db.fetch_all(
+            "SELECT chapter_id, content FROM articles ORDER BY chapter_id"
+        )
+
+        book_conflict = await executor.execute_batch(
+            _edit_request(
+                arguments={
+                    "bookId": "book-b",
+                    "chapterId": "chapter-a",
+                    "content": "模型伪造书籍绑定",
+                },
+                domain=domain,
+            ),
+            _RecordingSink(),
+        )
+        unknown_chapter = await executor.execute_batch(
+            _edit_request(
+                arguments={
+                    "chapterId": "chapter-not-in-catalog",
+                    "content": "模型伪造目录外章节",
+                },
+                domain=domain,
+            ),
+            _RecordingSink(),
+        )
+        cross_book_chapter = await executor.execute_batch(
+            _edit_request(
+                arguments={
+                    "chapterId": "chapter-b",
+                    "content": "模型尝试跨书改写",
+                },
+                domain=domain,
+            ),
+            _RecordingSink(),
+        )
+        stored_after = await db.fetch_all(
+            "SELECT chapter_id, content FROM articles ORDER BY chapter_id"
+        )
+
+        assert book_conflict.outcome is ToolBatchOutcome.REJECTED
+        assert book_conflict.error == "tool_scope_violation"
+        for result in (unknown_chapter, cross_book_chapter):
+            assert result.outcome is ToolBatchOutcome.FAILED
+            assert result.error == "tool_execution_failed"
+            assert result.results[0].effects == ()
+        assert stored_after == stored_before
     finally:
         await db.close()
