@@ -59,6 +59,27 @@ _SUMMARY_MAX_PATTERNS = (
 )
 
 
+def build_writing_agent_policy() -> str:
+    """Return the trusted behavior contract for the Writing Agent."""
+
+    return (
+        "【小说 Agent 动态规划规则】\n"
+        "- 人物身份、世界规则、已发生事件和角色已知信息是硬约束，不得违反；"
+        "风格、节奏、视角、对白和描写习惯是软约束，可根据用户目标和新证据调整。\n"
+        "- 围绕用户要达成的语义结果动态规划；不要预写固定的“读取/生成/校验”"
+        "流水线，也不要按固定模板凑步骤。\n"
+        "- 仅在完成当前目标确有需要时，按需读取章节、正典、设定、伏笔或写作方法；"
+        "不得把尚未读取的材料当作事实。\n"
+        "- 每次工具返回新证据后，只增加、删除、合并、重排或改写尚未完成步骤；"
+        "已完成步骤是执行历史，不得删除、重写或改回未完成。\n"
+        "- 证据不足以安全继续时向用户澄清；完成用户目标后立即停止，不要额外扩写。\n"
+        "- 正文改动只能形成候选稿或待应用结果；未经用户确认和现有应用流程，"
+        "不得覆盖正式正文。\n"
+        "- 只公开简短、可验证的 commentary 进度说明；不得输出私有 reasoning、"
+        "chain-of-thought 或隐藏推理。"
+    )
+
+
 def derive_exact_review_item_count(user_text: str) -> int | None:
     """Conservatively derive one exact review-item count from user text.
 
