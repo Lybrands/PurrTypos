@@ -521,6 +521,180 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
     }]
 
 
+async def test_agent_edit_persists_candidate_receipt_without_applying_article(
+    receipt_app,
+    monkeypatch,
+):
+    _app, db = receipt_app
+    original_article = _lexical("正式正文：木门在风里轻响。")
+    proposed_text = "候选正文：风钻过弄堂，旧木门发出一声轻响。"
+    await db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-1", "候选稿边界测试书"],
+    )
+    await db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'writing', ?)",
+        ["writing-candidate", "写作目录", "book-1"],
+    )
+    await db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, level, sort) VALUES (?, ?, ?, 1, 1)",
+        ["chapter-1", "writing-candidate", "第一章：弄堂"],
+    )
+    await db.execute(
+        "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
+        ["chapter-1", original_article],
+    )
+
+    async def _planner(_key, _messages, _options, _provider, signal=None):
+        assert signal is not None
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({
+                    "needsTodos": True,
+                    "title": "深化弄堂氛围",
+                    "goal": "提出一版可由用户审阅的章节候选稿",
+                    "todos": [{
+                        "id": "propose-chapter-edit",
+                        "title": "提出章节候选改写",
+                        "type": "write",
+                        "executor": "tool",
+                        "expectedTools": ["editChapterContent"],
+                        "riskLevel": "write",
+                    }],
+                }, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
+    runtime_round = 0
+    runtime_tools: list[list[str]] = []
+
+    async def _runtime(_key, _messages, options, _provider, signal=None):
+        nonlocal runtime_round
+        runtime_round += 1
+        assert signal is not None
+        available = [
+            item["function"]["name"]
+            for item in options.get("tools", [])
+        ]
+        runtime_tools.append(available)
+
+        async def _stream():
+            if runtime_round == 1:
+                assert available == ["getChapterContent"], available
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-read-candidate",
+                                "type": "function",
+                                "function": {
+                                    "name": "getChapterContent",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+            elif runtime_round == 2:
+                assert available == ["editChapterContent"], available
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-edit-candidate",
+                                "type": "function",
+                                "function": {
+                                    "name": "editChapterContent",
+                                    "arguments": json.dumps({
+                                        "chapterId": "chapter-1",
+                                        "content": proposed_text,
+                                    }, ensure_ascii=False),
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+            else:
+                assert available == []
+                yield {
+                    "choices": [{
+                        "delta": {"content": "候选稿已提交，等待用户确认。"},
+                        "finish_reason": "stop",
+                    }],
+                }
+
+        return {"stream": _stream(), "model": "route-model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+    body = request_body("chat-candidate-first")
+    body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
+    body["currentChapterTitle"] = "第一章：弄堂"
+    body.pop("streamId")
+    body.pop("requestReceiptVersion")
+    chunks = [
+        chunk
+        async for chunk in ai_routes._stream_composed_agent(
+            body=ChatStreamRequest.model_validate(body),
+            api_key="test-key",
+            provider_options={
+                "model": "deepseek-v4-flash",
+                "baseURL": "https://provider.test/v1/",
+                "max_tokens": 2_048,
+            },
+            signal=asyncio.Event(),
+        )
+    ]
+    run = await db.fetch_one(
+        "SELECT id, status FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
+    )
+    receipt = await db.fetch_one(
+        "SELECT tool_name, content, effects_json FROM ai_agent_tool_receipts "
+        "WHERE run_id = ? AND tool_call_id = ?",
+        [run["id"], "call-edit-candidate"],
+    )
+    stored_article = await db.fetch_one(
+        "SELECT content FROM articles WHERE chapter_id = ?",
+        ["chapter-1"],
+    )
+
+    assert runtime_round == 3, runtime_tools
+    assert chunks[-1]["runResult"]["status"] == "done"
+    assert run["status"] == "done"
+    assert receipt["tool_name"] == "editChapterContent"
+    assert json.loads(receipt["content"]) == {
+        "success": True,
+        "message": "已向用户提交差异预览，需用户在编辑器接受/拒绝后才会写入正文",
+        "chapterId": "chapter-1",
+        "pendingUserApproval": True,
+    }
+    assert json.loads(receipt["effects_json"]) == [{
+        "type": "writing.proposed_chapter_diff",
+        "payload": {
+            "chapterId": "chapter-1",
+            "beforeText": "正式正文：木门在风里轻响。",
+            "proposedText": proposed_text,
+            "source": "ai_tool_edit",
+        },
+    }]
+    assert stored_article == {"content": original_article}
+
+
 async def test_post_claim_binds_one_run_and_bound_cancel_is_applied_once(
     receipt_app,
     monkeypatch,
