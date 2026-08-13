@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import replace
 
 import pytest
@@ -19,7 +20,9 @@ from purra.contracts import (
     StepStatus,
     StepType,
     TaskPlan,
+    TaskSpec,
     TaskStep,
+    ToolRiskLevel,
 )
 from purra.engine.durable_execution import (
     _validate_durable_plan_revision,
@@ -117,7 +120,7 @@ def _plan(*, revised: bool = False) -> TaskPlan:
         else None
     )
     return TaskPlan(
-        title="Revised durable plan" if revised else "Durable plan",
+        title="Durable plan",
         steps=(
             TaskStep(
                 id="gather",
@@ -589,3 +592,293 @@ async def test_non_persisted_durable_revision_fails_before_checkpoint_emission()
     assert yielded[-1].payload["error"] == (
         "durable_plan_revision_contract_violation"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda step: replace(step, type=StepType.REVIEW),
+        lambda step: replace(
+            step,
+            executor=StepExecutor.AGENT,
+            agent_role="fixture-agent",
+            assignment={"scope": "forged"},
+        ),
+        lambda step: replace(step, status=StepStatus.DONE),
+        lambda step: replace(step, risk_level=ToolRiskLevel.WRITE),
+        lambda step: replace(step, suggested_tools=("forged_tool",)),
+        lambda step: replace(step, result_summary="forged result"),
+        lambda step: replace(step, error="forged_error"),
+    ),
+    ids=(
+        "type",
+        "executor-role-assignment",
+        "status",
+        "risk-level",
+        "suggested-tools",
+        "result-summary",
+        "error",
+    ),
+)
+async def test_durable_revision_rejects_non_whitelisted_future_step_changes(
+    mutate,
+):
+    controller, _repository, _sink = await _started()
+    assert controller.snapshot is not None
+    current = controller.snapshot.steps
+    revised = TaskPlan(
+        title=controller.snapshot.title,
+        goal=controller.snapshot.goal,
+        steps=(current[0], mutate(current[1])),
+    )
+
+    with pytest.raises(
+        ContractViolationError,
+        match="only change title, description, and dependencies",
+    ):
+        _validate_durable_plan_revision(
+            controller,
+            revised,
+            ("gather", "deliver"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_durable_revision_allows_future_copy_and_dependency_reordering():
+    repository = _Repository()
+    sink = _Sink()
+    controller = AgentRunController(repository=repository, event_sink=sink)
+    plan = TaskPlan(
+        title="Reorder future",
+        steps=(
+            TaskStep(
+                id="source-a",
+                title="Source A",
+                type=StepType.ANALYZE,
+                executor=StepExecutor.MODEL,
+            ),
+            TaskStep(
+                id="source-b",
+                title="Source B",
+                type=StepType.ANALYZE,
+                executor=StepExecutor.MODEL,
+            ),
+            TaskStep(
+                id="deliver",
+                title="Deliver",
+                type=StepType.WRITE,
+                executor=StepExecutor.MODEL,
+                depends_on=("source-a", "source-b"),
+            ),
+        ),
+    )
+    await controller.start(
+        RunCreateParams(session_id="session-1", prompt="work", mode="agent"),
+        plan,
+    )
+    assert controller.snapshot is not None
+    current = controller.snapshot.steps
+    revision = replace(
+        plan,
+        steps=(
+            current[1],
+            current[0],
+            replace(
+                current[2],
+                title="Deliver revised",
+                description="Use checkpoint evidence",
+                depends_on=("source-b", "source-a"),
+            ),
+        ),
+    )
+
+    _validate_durable_plan_revision(
+        controller,
+        revision,
+        ("source-a", "source-b", "deliver"),
+    )
+    revised_snapshot = await controller.revise_plan(revision)
+    assert [step.id for step in revised_snapshot.steps] == [
+        "source-b",
+        "source-a",
+        "deliver",
+    ]
+    assert {
+        step.id: step.status
+        for step in revised_snapshot.steps
+    } == {
+        "source-a": StepStatus.RUNNING,
+        "source-b": StepStatus.PENDING,
+        "deliver": StepStatus.PENDING,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"title": "Forged plan title"},
+        {"goal": "Forged plan goal"},
+        {"task_spec": TaskSpec(goal="Forged task contract")},
+    ),
+    ids=("title", "goal", "task-spec"),
+)
+async def test_durable_revision_freezes_top_level_plan_contract(changes):
+    controller, _repository, _sink = await _started()
+    assert controller.snapshot is not None
+    revision = replace(_plan(), **changes)
+
+    with pytest.raises(
+        ContractViolationError,
+        match="cannot change plan title, goal, or task spec",
+    ):
+        _validate_durable_plan_revision(
+            controller,
+            revision,
+            ("gather", "deliver"),
+            original_plan=_plan(),
+        )
+
+
+class _CloseAwareDispatcher:
+    def __init__(self, *, cleanup_error: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.second_observe_started = asyncio.Event()
+        self.cleaned = asyncio.Event()
+        self.task: asyncio.Task | None = None
+        self.cleanup_error = cleanup_error
+
+    async def dispatch(self, *args, **kwargs):
+        del args, kwargs
+        return LongTaskDispatchReceipt(task_id="task-1", message="Dispatched")
+
+    async def execute(self, task_id, *, observer, **kwargs):
+        del task_id, kwargs
+        self.task = asyncio.current_task()
+        self.started.set()
+        try:
+            await observer(LongTaskExecutionUpdate(
+                event=_progress_event(status="running"),
+            ))
+            self.second_observe_started.set()
+            await observer(LongTaskExecutionUpdate(
+                event=_progress_event(status="running"),
+            ))
+            await asyncio.Event().wait()
+        finally:
+            self.cleaned.set()
+            if self.cleanup_error:
+                raise RuntimeError("dispatcher_cleanup_failed")
+
+
+async def _close_leaked_dispatcher(dispatcher: _CloseAwareDispatcher) -> None:
+    task = dispatcher.task
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError, RuntimeError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_consumer_aclose_cancels_dispatcher_waiting_on_observer_ack():
+    controller, _repository, sink = await _started()
+    dispatcher = _CloseAwareDispatcher(cleanup_error=True)
+    stream = complete_admitted_task(
+        controller=controller,
+        request=_request(),
+        plan=_plan(),
+        admission=_admission(),
+        dispatcher=dispatcher,
+        sink=sink,
+        signal=None,
+    )
+    try:
+        assert (await anext(stream)).type == CoreEventType.LONG_TASK_DISPATCHED
+        assert (await anext(stream)).type == CoreEventType.LONG_TASK_PROGRESS
+        await asyncio.wait_for(dispatcher.second_observe_started.wait(), 1)
+
+        await asyncio.wait_for(stream.aclose(), 1)
+        await asyncio.wait_for(dispatcher.cleaned.wait(), 1)
+
+        assert dispatcher.task is not None and dispatcher.task.done()
+        assert controller.status is RunStatus.RUNNING
+    finally:
+        await _close_leaked_dispatcher(dispatcher)
+
+
+@pytest.mark.asyncio
+async def test_contract_violation_cleanup_error_does_not_replace_root_failure():
+    controller, repository, sink = await _started()
+    dispatcher = _CloseAwareDispatcher(cleanup_error=True)
+
+    async def invalid_execute(task_id, *, observer, **kwargs):
+        del task_id, kwargs
+        dispatcher.task = asyncio.current_task()
+        try:
+            await observer(LongTaskExecutionUpdate(
+                event=AgentEvent(
+                    type=CoreEventType.RUN_TODOS_UPDATED,
+                    payload={"steps": []},
+                ),
+            ))
+        finally:
+            dispatcher.cleaned.set()
+            raise RuntimeError("dispatcher_cleanup_failed")
+
+    dispatcher.execute = invalid_execute  # type: ignore[method-assign]
+
+    yielded = [
+        event
+        async for event in complete_admitted_task(
+            controller=controller,
+            request=_request(),
+            plan=_plan(),
+            admission=_admission(),
+            dispatcher=dispatcher,
+            sink=sink,
+            signal=None,
+        )
+    ]
+
+    assert dispatcher.cleaned.is_set()
+    assert repository.status is RunStatus.FAILED
+    assert repository.error == "durable_plan_revision_contract_violation"
+    assert yielded[-1].type == CoreEventType.RUN_FAILED
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_survives_dispatcher_cleanup_error():
+    controller, _repository, sink = await _started()
+    dispatcher = _CloseAwareDispatcher(cleanup_error=True)
+
+    async def waiting_execute(task_id, *, observer, **kwargs):
+        del task_id, observer, kwargs
+        dispatcher.task = asyncio.current_task()
+        dispatcher.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            dispatcher.cleaned.set()
+            raise RuntimeError("dispatcher_cleanup_failed")
+
+    dispatcher.execute = waiting_execute  # type: ignore[method-assign]
+    stream = complete_admitted_task(
+        controller=controller,
+        request=_request(),
+        plan=_plan(),
+        admission=_admission(),
+        dispatcher=dispatcher,
+        sink=sink,
+        signal=None,
+    )
+    assert (await anext(stream)).type == CoreEventType.LONG_TASK_DISPATCHED
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(dispatcher.started.wait(), 1)
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert dispatcher.cleaned.is_set()
+    assert controller.status is RunStatus.RUNNING

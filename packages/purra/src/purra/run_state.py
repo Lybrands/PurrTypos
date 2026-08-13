@@ -189,6 +189,16 @@ class RunStateMachine:
             step.id: step.depends_on
             for step in future
         }
+        current_future = {
+            step.id: step
+            for step in state.steps
+            if step.id not in history_ids
+            and step.status is StepStatus.RUNNING
+        }
+        preserve_running_step = any(
+            step.id in current_future
+            for step in future
+        )
         revised_future = RunStateMachine.initialize(
             state.run_id,
             TaskPlan(
@@ -211,6 +221,23 @@ class RunStateMachine:
             replace(
                 step,
                 depends_on=future_dependencies[step.id],
+                status=(
+                    current_future[step.id].status
+                    if step.id in current_future
+                    else StepStatus.PENDING
+                    if preserve_running_step
+                    else step.status
+                ),
+                result_summary=(
+                    current_future[step.id].result_summary
+                    if step.id in current_future
+                    else step.result_summary
+                ),
+                error=(
+                    current_future[step.id].error
+                    if step.id in current_future
+                    else step.error
+                ),
             )
             for step in revised_future.steps
         )

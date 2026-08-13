@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import replace
 from typing import Protocol
 
 from purra.cancellation import await_with_cancellation
@@ -88,11 +89,16 @@ async def complete_admitted_task(
         updates: asyncio.Queue[
             tuple[LongTaskExecutionUpdate, asyncio.Event]
         ] = asyncio.Queue()
+        acknowledgements: set[asyncio.Event] = set()
 
         async def observe(update: LongTaskExecutionUpdate) -> None:
             acknowledged = asyncio.Event()
-            await updates.put((update, acknowledged))
-            await acknowledged.wait()
+            acknowledgements.add(acknowledged)
+            try:
+                await updates.put((update, acknowledged))
+                await acknowledged.wait()
+            finally:
+                acknowledgements.discard(acknowledged)
 
         execution = asyncio.create_task(dispatcher.execute(
             receipt.task_id,
@@ -100,6 +106,11 @@ async def complete_admitted_task(
             observer=observe,
             signal=signal,
         ))
+        pending_update: asyncio.Task[
+            tuple[LongTaskExecutionUpdate, asyncio.Event]
+        ] | None = None
+        execution_drained = False
+        contract_violation = False
         try:
             while not execution.done() or not updates.empty():
                 pending_update = asyncio.create_task(updates.get())
@@ -109,77 +120,74 @@ async def complete_admitted_task(
                 )
                 if pending_update in done:
                     update, acknowledged = pending_update.result()
-                    try:
-                        if update.event.type == CoreEventType.RUN_TODOS_UPDATED:
-                            raise ContractViolationError(
-                                "durable updates cannot publish run.todos_updated"
-                            )
-                        if update.plan_revision is not None and not update.persist:
-                            raise ContractViolationError(
-                                "durable plan revisions require persisted "
-                                "checkpoint evidence"
-                            )
-                        event = bind_event_to_run(
-                            update.event,
-                            controller.run_id,
+                    pending_update = None
+                    if update.event.type == CoreEventType.RUN_TODOS_UPDATED:
+                        raise ContractViolationError(
+                            "durable updates cannot publish run.todos_updated"
                         )
-                        if update.persist:
-                            event = _bind_durable_progress_to_plan(
-                                event,
-                                durable_step_aliases,
+                    if update.plan_revision is not None and not update.persist:
+                        raise ContractViolationError(
+                            "durable plan revisions require persisted "
+                            "checkpoint evidence"
+                        )
+                    event = bind_event_to_run(
+                        update.event,
+                        controller.run_id,
+                    )
+                    if update.persist:
+                        event = _bind_durable_progress_to_plan(
+                            event,
+                            durable_step_aliases,
+                        )
+                        durable_statuses = _durable_plan_step_statuses(event)
+                        if durable_statuses:
+                            await controller.sync_durable_execution(
+                                durable_statuses
                             )
-                            durable_statuses = _durable_plan_step_statuses(event)
-                            if durable_statuses:
-                                await controller.sync_durable_execution(
-                                    durable_statuses
-                                )
-                            if update.plan_revision is not None:
-                                _validate_durable_plan_revision(
-                                    controller,
-                                    update.plan_revision,
-                                    admission.covered_step_ids,
-                                )
-                                await controller.revise_plan(
-                                    update.plan_revision
-                                )
-                            await controller.record_event(
-                                event.type,
-                                thaw_json_mapping(event.payload),
+                        if update.plan_revision is not None:
+                            _validate_durable_plan_revision(
+                                controller,
+                                update.plan_revision,
+                                admission.covered_step_ids,
+                                original_plan=plan,
                             )
-                            persisted = sink.drain()
-                        else:
-                            persisted = (event,)
-                    except BaseException:
-                        raise
+                            await controller.revise_plan(
+                                update.plan_revision
+                            )
+                        await controller.record_event(
+                            event.type,
+                            thaw_json_mapping(event.payload),
+                        )
+                        persisted = sink.drain()
                     else:
-                        acknowledged.set()
-                        for emitted in persisted:
-                            yield emitted
+                        persisted = (event,)
+                    acknowledged.set()
+                    for emitted in persisted:
+                        yield emitted
                 else:
                     pending_update.cancel()
                     with suppress(asyncio.CancelledError):
                         await pending_update
+                    pending_update = None
             result = await execution
+            execution_drained = True
         except ContractViolationError:
-            execution.cancel()
-            with suppress(asyncio.CancelledError):
-                await execution
+            contract_violation = True
+        finally:
+            if not execution_drained:
+                await _cleanup_durable_execution(
+                    execution,
+                    pending_update,
+                    acknowledgements,
+                )
+
+        if contract_violation:
             await controller.fail(
                 "durable_plan_revision_contract_violation"
             )
             for event in sink.drain():
                 yield event
             return
-        except asyncio.CancelledError:
-            execution.cancel()
-            with suppress(asyncio.CancelledError):
-                await execution
-            raise
-        except Exception:
-            execution.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await execution
-            raise
 
         if result.status is LongTaskExecutionStatus.COMPLETED:
             # Durable execution has now genuinely completed. This transition
@@ -209,6 +217,23 @@ async def complete_admitted_task(
     )
     for event in sink.drain():
         yield event
+
+
+async def _cleanup_durable_execution(
+    execution: asyncio.Task[object],
+    pending_update: asyncio.Task[object] | None,
+    acknowledgements: set[asyncio.Event],
+) -> None:
+    if pending_update is not None and not pending_update.done():
+        pending_update.cancel()
+    execution.cancel()
+    for acknowledged in tuple(acknowledgements):
+        acknowledged.set()
+    if pending_update is not None:
+        with suppress(asyncio.CancelledError, Exception):
+            await pending_update
+    with suppress(asyncio.CancelledError, Exception):
+        await execution
 
 
 def validate_task_admission_coverage(
@@ -247,6 +272,8 @@ def _validate_durable_plan_revision(
     controller: AgentRunController,
     revision: TaskPlan,
     covered_step_ids: Sequence[str],
+    *,
+    original_plan: TaskPlan | None = None,
 ) -> None:
     revised_by_id = {step.id: step for step in revision.steps}
     if set(revised_by_id) != set(covered_step_ids):
@@ -258,13 +285,41 @@ def _validate_durable_plan_revision(
         raise ContractViolationError(
             "durable plan revision requires an active root run"
         )
+    baseline = original_plan or TaskPlan(
+        title=snapshot.title,
+        goal=snapshot.goal,
+        steps=snapshot.steps,
+    )
+    if (
+        revision.title,
+        revision.goal,
+        revision.task_spec,
+    ) != (
+        baseline.title,
+        baseline.goal,
+        baseline.task_spec,
+    ):
+        raise ContractViolationError(
+            "durable plan revision cannot change plan title, goal, or task spec"
+        )
     for current in snapshot.steps:
-        if current.status is not StepStatus.DONE:
-            continue
         revised = revised_by_id[current.id]
-        if revised != current:
+        if current.status is StepStatus.DONE and revised != current:
             raise ContractViolationError(
                 "durable plan revision cannot change completed steps"
+            )
+        if current.status is StepStatus.DONE:
+            continue
+        immutable_revision = replace(
+            revised,
+            title=current.title,
+            description=current.description,
+            depends_on=current.depends_on,
+        )
+        if immutable_revision != current:
+            raise ContractViolationError(
+                "durable plan revision may only change title, description, "
+                "and dependencies for incomplete steps"
             )
 
 
