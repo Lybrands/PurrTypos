@@ -13,6 +13,7 @@ import application.screenplay_structured_call as screenplay_structured_call
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
+    DomainContext,
     RunCreateParams,
     RunStatus,
     ModelCompletion,
@@ -20,6 +21,10 @@ from purra.contracts import (
     ModelStream,
     ModelStreamChunk,
     ReasoningMode,
+    StepExecutor,
+    StepType,
+    TaskSpec,
+    TaskStep,
 )
 from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
@@ -74,7 +79,14 @@ from domains.screenplay_agent import (
     ScreenplayIntentScope,
     ScreenplayStageCommand,
 )
-from domains.screenplay_agent.contracts import ScreenplayScopeKind
+from domains.screenplay_agent.agent_context import (
+    SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+    ScreenplayAgentDomainContext,
+)
+from domains.screenplay_agent.contracts import (
+    ScreenplayPlanPhase,
+    ScreenplayScopeKind,
+)
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from exceptions import AppError
 from infrastructure.persistence.sqlite_screenplay_agent_repository import (
@@ -102,6 +114,305 @@ from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _semantic_steps() -> tuple[TaskStep, ...]:
+    return (
+        TaskStep(
+            id="understand-source",
+            title="理解原作范围",
+            type=StepType.READ,
+            executor=StepExecutor.MODEL,
+        ),
+        TaskStep(
+            id="draft-analysis",
+            title="形成素材分析",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=("understand-source",),
+        ),
+        TaskStep(
+            id="deliver-candidate",
+            title="交付候选文档",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=("draft-analysis",),
+        ),
+    )
+
+
+def _screenplay_task_spec(
+    *,
+    operation: str = "create",
+    deliverable: str | None = "sourceAnalysis",
+    screenplay: dict | None = None,
+) -> TaskSpec:
+    extension = screenplay or {
+        "version": 1,
+        "scope": {"kind": "current_stage"},
+        "stepBindings": [
+            {"stepId": "understand-source", "phase": "evidence"},
+            {"stepId": "draft-analysis", "phase": "creation"},
+            {"stepId": "deliver-candidate", "phase": "delivery"},
+        ],
+    }
+    return TaskSpec(
+        goal="分析原作范围",
+        target={"screenplay": extension},
+        operation=operation,
+        instruction="梳理人物、事件与可改编冲突。",
+        constraints=("只使用指定原作范围",),
+        preserve=("保留人物关系",),
+        deliverable=deliverable,
+    )
+
+
+async def test_screenplay_intent_compiles_versioned_task_spec_and_exact_plan_bindings():
+    intent = ScreenplayIntent.from_task_spec(
+        _screenplay_task_spec(),
+        _semantic_steps(),
+    )
+
+    assert intent.action is ScreenplayIntentAction.CREATE
+    assert intent.instruction == "梳理人物、事件与可改编冲突。"
+    assert intent.requested_deliverable == "sourceAnalysis"
+    assert intent.scope.kind is ScreenplayScopeKind.CURRENT_STAGE
+    assert [(binding.step_id, binding.phase) for binding in intent.plan_bindings] == [
+        ("understand-source", ScreenplayPlanPhase.EVIDENCE),
+        ("draft-analysis", ScreenplayPlanPhase.CREATION),
+        ("deliver-candidate", ScreenplayPlanPhase.DELIVERY),
+    ]
+    assert "reply" not in intent.to_mapping()
+    assert ScreenplayIntent.from_mapping(intent.to_mapping()) == intent
+
+
+async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deserialized():
+    task_spec = _screenplay_task_spec(operation="answer", deliverable=None)
+
+    intent = ScreenplayIntent.from_task_spec(task_spec, _semantic_steps())
+    restored = ScreenplayIntent.from_mapping({
+        "action": "answer",
+        "instruction": "说明当前阶段",
+        "reply": "旧持久化回复不能完成新 Turn",
+    })
+
+    assert intent.action is ScreenplayIntentAction.ANSWER
+    assert intent.reply is None
+    assert restored.reply is None
+    assert "reply" not in restored.to_mapping()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda raw: raw.update({"version": 2}), "version"),
+        (lambda raw: raw.update({"unknown": True}), "fields"),
+        (lambda raw: raw["scope"].update({"count": 2}), "scope"),
+        (lambda raw: raw["scope"].update({"unknown": True}), "scope fields"),
+        (
+            lambda raw: raw.update({
+                "scope": {"kind": "next_episodes", "count": "2"}
+            }),
+            "count",
+        ),
+        (
+            lambda raw: raw.update({
+                "scope": {"kind": "next_episodes", "count": True}
+            }),
+            "count",
+        ),
+        (
+            lambda raw: raw.update({
+                "scope": {"kind": "episodes", "episodeNumbers": [1, "3"]}
+            }),
+            "episode numbers",
+        ),
+        (
+            lambda raw: raw["stepBindings"].append(
+                {"stepId": "understand-source", "phase": "review"}
+            ),
+            "exactly once",
+        ),
+        (lambda raw: raw["stepBindings"].pop(), "plan steps"),
+        (
+            lambda raw: raw["stepBindings"].append(
+                {"stepId": "publish-internal-revision", "phase": "delivery"}
+            ),
+            "plan steps",
+        ),
+        (
+            lambda raw: raw["stepBindings"][0].update({"phase": "internal"}),
+            "phase",
+        ),
+        (
+            lambda raw: raw["stepBindings"][0].update({"unknown": True}),
+            "binding fields",
+        ),
+    ],
+)
+async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_contracts(
+    mutate,
+    message,
+):
+    raw = {
+        "version": 1,
+        "scope": {"kind": "current_stage"},
+        "stepBindings": [
+            {"stepId": "understand-source", "phase": "evidence"},
+            {"stepId": "draft-analysis", "phase": "creation"},
+            {"stepId": "deliver-candidate", "phase": "delivery"},
+        ],
+    }
+    mutate(raw)
+
+    with pytest.raises(ValueError, match=message):
+        ScreenplayIntent.from_task_spec(
+            _screenplay_task_spec(screenplay=raw),
+            _semantic_steps(),
+        )
+
+
+@pytest.mark.parametrize(
+    "task_spec",
+    [
+        _screenplay_task_spec(operation="create", deliverable=None),
+        _screenplay_task_spec(operation="answer", deliverable="sourceAnalysis"),
+        TaskSpec(
+            goal="分析原作",
+            target={},
+            operation="create",
+            instruction="分析",
+            deliverable="sourceAnalysis",
+        ),
+    ],
+)
+async def test_screenplay_task_spec_rejects_missing_formal_or_extension_semantics(
+    task_spec,
+):
+    with pytest.raises(ValueError):
+        ScreenplayIntent.from_task_spec(task_spec, _semantic_steps())
+
+
+async def test_task_spec_intent_still_obeys_typed_stage_command():
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "sourceAnalysis",
+        "scope": {"kind": "current_stage"},
+    })
+    intent = ScreenplayIntent.from_task_spec(
+        _screenplay_task_spec(),
+        _semantic_steps(),
+    )
+
+    command.require_compatible(intent)
+
+    with pytest.raises(ScreenplayIntentCommandMismatchError):
+        ScreenplayStageCommand.from_mapping({
+            "kind": "stage_action",
+            "action": "create",
+            "targetRole": "creativeBrief",
+            "scope": {"kind": "current_stage"},
+        }).require_compatible(intent)
+
+
+@pytest.mark.parametrize("scope", [
+    {"kind": "current_stage"},
+    {"kind": "next_episodes", "count": 2},
+    {"kind": "episodes", "episodeNumbers": [1, 3]},
+    {"kind": "all_remaining"},
+])
+async def test_task_spec_scope_is_compatible_with_the_same_stage_command(scope):
+    screenplay = {
+        "version": 1,
+        "scope": scope,
+        "stepBindings": [
+            {"stepId": "understand-source", "phase": "evidence"},
+            {"stepId": "draft-analysis", "phase": "creation"},
+            {"stepId": "deliver-candidate", "phase": "delivery"},
+        ],
+    }
+    intent = ScreenplayIntent.from_task_spec(
+        _screenplay_task_spec(screenplay=screenplay),
+        _semantic_steps(),
+    )
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "sourceAnalysis",
+        "scope": scope,
+    })
+
+    command.require_compatible(intent)
+
+
+async def test_screenplay_domain_context_round_trips_root_and_legacy_child_modes():
+    stage_command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "sourceAnalysis",
+        "scope": {"kind": "current_stage"},
+    })
+    root = ScreenplayAgentDomainContext(
+        project_id="project-1",
+        turn_id="turn-1",
+        stage_command=stage_command,
+    )
+    restored_root = ScreenplayAgentDomainContext.from_core_context(
+        root.to_core_context()
+    )
+    legacy_child = ScreenplayAgentDomainContext.from_core_context(DomainContext(
+        namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+        payload={
+            "projectId": "project-1",
+            "taskId": "task-1",
+            "unitId": "unit-1",
+            "targetRole": "sourceAnalysis",
+            "expectedPartType": "document",
+            "expectedPartKey": "main",
+        },
+    ))
+
+    assert restored_root.is_root is True
+    assert restored_root.is_child is False
+    assert restored_root.turn_id == "turn-1"
+    assert restored_root.stage_command == stage_command
+    assert legacy_child.is_root is False
+    assert legacy_child.is_child is True
+    assert legacy_child.task_id == "task-1"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"projectId": "project-1", "turnId": "turn-1", "taskId": "task-1"},
+        {"projectId": "project-1", "turnId": "turn-1", "unitId": "unit-1"},
+        {
+            "projectId": "project-1",
+            "taskId": "task-1",
+            "unitId": "unit-1",
+            "expectedPartKey": "main",
+        },
+    ],
+)
+async def test_screenplay_domain_context_rejects_mixed_or_partial_mode_fields(payload):
+    with pytest.raises(ValueError, match="root or child"):
+        ScreenplayAgentDomainContext.from_core_context(DomainContext(
+            namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+            payload=payload,
+        ))
+
+
+async def test_screenplay_root_context_rejects_non_object_stage_command():
+    with pytest.raises(ValueError, match="stage command"):
+        ScreenplayAgentDomainContext.from_core_context(DomainContext(
+            namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+            payload={
+                "projectId": "project-1",
+                "turnId": "turn-1",
+                "stageCommand": "create",
+            },
+        ))
 
 
 class _CoreComposition:

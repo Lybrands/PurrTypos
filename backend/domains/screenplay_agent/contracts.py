@@ -1,10 +1,14 @@
-"""Closed semantic contracts produced by the screenplay intent Planner."""
+"""Closed screenplay semantics compiled from one Root Run TaskSpec."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
+
+from purra.contracts import TaskSpec, TaskStep
+from purra.json_values import thaw_json_mapping
 
 
 class ScreenplayIntentAction(StrEnum):
@@ -23,6 +27,13 @@ class ScreenplayScopeKind(StrEnum):
     NEXT_EPISODES = "next_episodes"
     EPISODES = "episodes"
     ALL_REMAINING = "all_remaining"
+
+
+class ScreenplayPlanPhase(StrEnum):
+    EVIDENCE = "evidence"
+    CREATION = "creation"
+    REVIEW = "review"
+    DELIVERY = "delivery"
 
 
 SCREENPLAY_DELIVERABLE_ROLES = frozenset({
@@ -46,6 +57,46 @@ def _text_tuple(value: object) -> tuple[str, ...]:
         text for item in value if (text := _text(item))
     ))
     return result
+
+
+def _require_exact_fields(
+    value: Mapping[str, Any],
+    expected: frozenset[str],
+    label: str,
+) -> None:
+    if frozenset(value) != expected:
+        raise ValueError(f"screenplay {label} fields are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenplayPlanBinding:
+    step_id: str
+    phase: ScreenplayPlanPhase
+
+    def __post_init__(self) -> None:
+        step_id = _text(self.step_id)
+        if not step_id:
+            raise ValueError("screenplay plan binding step id is required")
+        object.__setattr__(self, "step_id", step_id)
+        object.__setattr__(self, "phase", ScreenplayPlanPhase(self.phase))
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "ScreenplayPlanBinding":
+        if not isinstance(value, Mapping):
+            raise ValueError("screenplay plan binding must be an object")
+        _require_exact_fields(
+            value,
+            frozenset({"stepId", "phase"}),
+            "plan binding",
+        )
+        try:
+            phase = ScreenplayPlanPhase(_text(value.get("phase")))
+        except ValueError as error:
+            raise ValueError("screenplay plan binding phase is invalid") from error
+        return cls(step_id=_text(value.get("stepId")), phase=phase)
+
+    def to_mapping(self) -> dict[str, str]:
+        return {"stepId": self.step_id, "phase": self.phase.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +132,41 @@ class ScreenplayIntentScope:
             episode_numbers=tuple(raw.get("episodeNumbers") or ()),
         )
 
+    @classmethod
+    def from_task_spec_mapping(cls, value: object) -> "ScreenplayIntentScope":
+        if not isinstance(value, Mapping):
+            raise ValueError("screenplay scope must be an object")
+        kind = ScreenplayScopeKind(_text(value.get("kind")))
+        expected_fields = {
+            ScreenplayScopeKind.CURRENT_STAGE: frozenset({"kind"}),
+            ScreenplayScopeKind.NEXT_EPISODES: frozenset({"kind", "count"}),
+            ScreenplayScopeKind.EPISODES: frozenset({"kind", "episodeNumbers"}),
+            ScreenplayScopeKind.ALL_REMAINING: frozenset({"kind"}),
+        }[kind]
+        _require_exact_fields(value, expected_fields, "scope")
+        if kind is ScreenplayScopeKind.NEXT_EPISODES:
+            count = value.get("count")
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise ValueError("screenplay scope count must be an integer")
+        if kind is ScreenplayScopeKind.EPISODES:
+            numbers = value.get("episodeNumbers")
+            if (
+                isinstance(numbers, (str, bytes, bytearray))
+                or not isinstance(numbers, Sequence)
+                or any(
+                    isinstance(number, bool) or not isinstance(number, int)
+                    for number in numbers
+                )
+            ):
+                raise ValueError(
+                    "screenplay scope episode numbers must be integer list"
+                )
+        return cls(
+            kind=kind,
+            count=value.get("count") if "count" in value else None,
+            episode_numbers=tuple(value.get("episodeNumbers") or ()),
+        )
+
     def to_mapping(self) -> dict[str, Any]:
         return {
             "kind": self.kind.value,
@@ -101,6 +187,9 @@ class ScreenplayIntent:
     constraints: tuple[str, ...] = ()
     preserve: tuple[str, ...] = ()
     requested_deliverable: str | None = None
+    plan_bindings: tuple[ScreenplayPlanBinding, ...] = ()
+    # TODO(screenplay-root-run Task 4/5): remove this legacy bridge after the
+    # independent planner/service no longer reads an answer from the Intent.
     reply: str | None = None
 
     def __post_init__(self) -> None:
@@ -124,11 +213,82 @@ class ScreenplayIntent:
             and self.requested_deliverable not in SCREENPLAY_DELIVERABLE_ROLES
         ):
             raise ValueError("requested deliverable is invalid")
+        bindings = tuple(self.plan_bindings)
+        if any(not isinstance(value, ScreenplayPlanBinding) for value in bindings):
+            raise TypeError("screenplay plan bindings are invalid")
+        if len({value.step_id for value in bindings}) != len(bindings):
+            raise ValueError("screenplay plan steps must be bound exactly once")
+        object.__setattr__(self, "plan_bindings", bindings)
         object.__setattr__(self, "reply", _text(self.reply) or None)
-        if action is ScreenplayIntentAction.ANSWER and self.reply is None:
-            raise ValueError("answer intent requires a reply")
         if action is not ScreenplayIntentAction.ANSWER and self.reply is not None:
             raise ValueError("actionable screenplay intent cannot contain a final reply")
+
+    @classmethod
+    def from_task_spec(
+        cls,
+        task_spec: TaskSpec,
+        plan_steps: Sequence[TaskStep],
+    ) -> "ScreenplayIntent":
+        if not isinstance(task_spec, TaskSpec):
+            raise TypeError("screenplay intent requires a TaskSpec")
+        steps = tuple(plan_steps)
+        if not steps or any(not isinstance(step, TaskStep) for step in steps):
+            raise TypeError("screenplay intent requires TaskPlan steps")
+        step_ids = tuple(step.id for step in steps)
+        if len(step_ids) != len(set(step_ids)):
+            raise ValueError("screenplay plan step ids must be unique")
+        target = thaw_json_mapping(task_spec.target)
+        if frozenset(target) != frozenset({"screenplay"}):
+            raise ValueError("TaskSpec target must contain only screenplay")
+        raw = target.get("screenplay")
+        if not isinstance(raw, Mapping):
+            raise ValueError("TaskSpec target screenplay must be an object")
+        _require_exact_fields(
+            raw,
+            frozenset({"version", "scope", "stepBindings"}),
+            "TaskSpec target",
+        )
+        version = raw.get("version")
+        if isinstance(version, bool) or version != 1:
+            raise ValueError("screenplay TaskSpec version must be 1")
+        scope = ScreenplayIntentScope.from_task_spec_mapping(raw.get("scope"))
+        raw_bindings = raw.get("stepBindings")
+        if isinstance(raw_bindings, (str, bytes, bytearray)) or not isinstance(
+            raw_bindings,
+            Sequence,
+        ):
+            raise ValueError("screenplay stepBindings must be a list")
+        bindings = tuple(
+            ScreenplayPlanBinding.from_mapping(value)
+            for value in raw_bindings
+        )
+        binding_ids = tuple(binding.step_id for binding in bindings)
+        if len(binding_ids) != len(set(binding_ids)):
+            raise ValueError("screenplay plan steps must be bound exactly once")
+        if set(binding_ids) != set(step_ids):
+            raise ValueError("screenplay bindings must match all plan steps")
+
+        action = ScreenplayIntentAction(_text(task_spec.operation))
+        deliverable = _text(task_spec.deliverable) or None
+        if action is ScreenplayIntentAction.ANSWER:
+            if deliverable is not None:
+                raise ValueError("answer TaskSpec cannot declare a deliverable")
+        else:
+            if deliverable not in SCREENPLAY_DELIVERABLE_ROLES:
+                raise ValueError("formal TaskSpec requires a valid deliverable")
+            if action is ScreenplayIntentAction.REVIEW and deliverable != "review":
+                raise ValueError("review TaskSpec requires review deliverable")
+            if action is not ScreenplayIntentAction.REVIEW and deliverable == "review":
+                raise ValueError("review deliverable requires review operation")
+        return cls(
+            action=action,
+            instruction=task_spec.instruction or task_spec.goal,
+            scope=scope,
+            constraints=task_spec.constraints,
+            preserve=task_spec.preserve,
+            requested_deliverable=deliverable,
+            plan_bindings=bindings,
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ScreenplayIntent":
@@ -139,7 +299,10 @@ class ScreenplayIntent:
             constraints=tuple(value.get("constraints") or ()),
             preserve=tuple(value.get("preserve") or ()),
             requested_deliverable=_text(value.get("requestedDeliverable")) or None,
-            reply=_text(value.get("reply")) or None,
+            plan_bindings=tuple(
+                ScreenplayPlanBinding.from_mapping(item)
+                for item in value.get("stepBindings") or ()
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -154,7 +317,15 @@ class ScreenplayIntent:
                 if self.requested_deliverable
                 else {}
             ),
-            **({"reply": self.reply} if self.reply else {}),
+            **(
+                {
+                    "stepBindings": [
+                        binding.to_mapping() for binding in self.plan_bindings
+                    ]
+                }
+                if self.plan_bindings
+                else {}
+            ),
         }
 
 
@@ -377,6 +548,8 @@ __all__ = [
     "ScreenplayIntentAction",
     "ScreenplayIntentCommandMismatchError",
     "ScreenplayIntentScope",
+    "ScreenplayPlanBinding",
+    "ScreenplayPlanPhase",
     "ScreenplayStageCommand",
     "ScreenplayScopeKind",
     "SCREENPLAY_DELIVERABLE_ROLES",
