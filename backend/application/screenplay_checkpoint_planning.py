@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -19,7 +20,9 @@ from purra.contracts import (
     TaskStep,
     ToolRiskLevel,
 )
+from purra.cancellation import await_with_cancellation
 from purra.json_values import thaw_json_mapping
+from purra.run_state import RunStateMachine
 from infrastructure.persistence.run_store import get_run_todos
 
 
@@ -139,8 +142,23 @@ class ScreenplayCheckpointPlanner:
 class SqliteScreenplayCheckpointRepository:
     """Durable ready-output receipt reconciled against Root plan events."""
 
-    def __init__(self, db) -> None:
+    def __init__(
+        self,
+        db,
+        *,
+        lease_ms: int = 30_000,
+        poll_interval_seconds: float = 0.05,
+    ) -> None:
         self._db = db
+        self._lease_ms = max(10, int(lease_ms))
+        self._poll_interval_seconds = max(
+            0.001,
+            float(poll_interval_seconds),
+        )
+
+    @property
+    def heartbeat_interval_seconds(self) -> float:
+        return max(0.002, self._lease_ms / 3_000)
 
     async def load_root_plan(
         self,
@@ -255,7 +273,7 @@ class SqliteScreenplayCheckpointRepository:
             "checkpoint-reservation"
         )
         now = int(time.time() * 1000)
-        expires_at = now + 30_000
+        expires_at = now + self._lease_ms
         async with self._db.transaction(cancellation_linearizable=True):
             existing = await self.load(operation_id, checkpoint_key)
             if existing is not None:
@@ -265,7 +283,11 @@ class SqliteScreenplayCheckpointRepository:
                     or str(existing["input_digest"]) != input_digest
                 ):
                     raise RuntimeError("screenplay_checkpoint_identity_conflict")
-                acquired = False
+                acquired = (
+                    str(existing["status"]) == "reserved"
+                    and str(existing.get("reservation_owner") or "") == token
+                    and int(existing.get("reservation_expires_at_ms") or 0) > now
+                )
                 if (
                     str(existing["status"]) == "reserved"
                     and int(existing.get("reservation_expires_at_ms") or 0) <= now
@@ -273,6 +295,7 @@ class SqliteScreenplayCheckpointRepository:
                     await self._db.execute(
                         "UPDATE screenplay_checkpoint_plans SET "
                         "reservation_owner = ?, reservation_expires_at_ms = ?, "
+                        "reservation_epoch = reservation_epoch + 1, "
                         "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
                         "AND checkpoint_key = ? AND status = 'reserved' "
                         "AND COALESCE(reservation_expires_at_ms, 0) <= ?",
@@ -291,8 +314,8 @@ class SqliteScreenplayCheckpointRepository:
             await self._db.execute(
                 "INSERT INTO screenplay_checkpoint_plans "
                 "(operation_id, task_id, checkpoint_key, root_run_id, status, "
-                "input_digest, reservation_owner, reservation_expires_at_ms) "
-                "VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)",
+                "input_digest, reservation_owner, reservation_expires_at_ms, "
+                "reservation_epoch) VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?, 1)",
                 [
                     operation_id,
                     task_id,
@@ -308,31 +331,165 @@ class SqliteScreenplayCheckpointRepository:
                 "_acquired": True,
             }
 
+    async def acquire_planning(
+        self,
+        *,
+        operation_id: str,
+        task_id: str,
+        checkpoint_key: str,
+        root_run_id: str,
+        input_digest: str,
+        reservation_token: str,
+        signal=None,
+    ):
+        while True:
+            receipt = await self.reserve(
+                operation_id=operation_id,
+                task_id=task_id,
+                checkpoint_key=checkpoint_key,
+                root_run_id=root_run_id,
+                input_digest=input_digest,
+                reservation_token=reservation_token,
+            )
+            if str(receipt["status"]) != "reserved" or receipt.get("_acquired"):
+                return receipt
+            await await_with_cancellation(
+                asyncio.sleep(self._poll_interval_seconds),
+                signal,
+            )
+
+    async def renew(
+        self,
+        *,
+        operation_id: str,
+        checkpoint_key: str,
+        reservation_owner: str,
+        reservation_epoch: int,
+        status: str,
+    ) -> None:
+        if status not in {"reserved", "applying"}:
+            raise ValueError("checkpoint reservation status is invalid")
+        expires_at = int(time.time() * 1000) + self._lease_ms
+        async with self._db.transaction(cancellation_linearizable=True):
+            await self._db.execute(
+                "UPDATE screenplay_checkpoint_plans SET "
+                "reservation_expires_at_ms = ?, update_time = CURRENT_TIMESTAMP "
+                "WHERE operation_id = ? AND checkpoint_key = ? AND status = ? "
+                "AND reservation_owner = ? AND reservation_epoch = ?",
+                [
+                    expires_at,
+                    operation_id,
+                    checkpoint_key,
+                    status,
+                    reservation_owner,
+                    int(reservation_epoch),
+                ],
+            )
+            if not await self._last_write_changed():
+                raise RuntimeError("screenplay_checkpoint_reservation_lost")
+
+    async def acquire_applying(
+        self,
+        *,
+        operation_id: str,
+        checkpoint_key: str,
+        digest: str,
+        reservation_token: str,
+        signal=None,
+    ):
+        while True:
+            now = int(time.time() * 1000)
+            expires_at = now + self._lease_ms
+            async with self._db.transaction(cancellation_linearizable=True):
+                row = await self.load(operation_id, checkpoint_key)
+                if row is None or str(row.get("plan_digest") or "") != digest:
+                    raise RuntimeError("screenplay_checkpoint_apply_conflict")
+                status = str(row["status"])
+                if status in {"applied", "paused"}:
+                    return {**row, "_acquired": False}
+                if (
+                    status == "applying"
+                    and str(row.get("reservation_owner") or "") == reservation_token
+                    and int(row.get("reservation_expires_at_ms") or 0) > now
+                ):
+                    return {**row, "_acquired": True}
+                can_acquire = status == "ready" or (
+                    status == "applying"
+                    and int(row.get("reservation_expires_at_ms") or 0) <= now
+                )
+                if can_acquire:
+                    await self._db.execute(
+                        "UPDATE screenplay_checkpoint_plans SET status = 'applying', "
+                        "reservation_owner = ?, reservation_expires_at_ms = ?, "
+                        "reservation_epoch = reservation_epoch + 1, "
+                        "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                        "AND checkpoint_key = ? AND plan_digest = ? AND "
+                        "((status = 'ready') OR (status = 'applying' AND "
+                        "COALESCE(reservation_expires_at_ms, 0) <= ?))",
+                        [
+                            reservation_token,
+                            expires_at,
+                            operation_id,
+                            checkpoint_key,
+                            digest,
+                            now,
+                        ],
+                    )
+                    if await self._last_write_changed():
+                        acquired = await self.load(operation_id, checkpoint_key)
+                        return {**acquired, "_acquired": True}
+            await await_with_cancellation(
+                asyncio.sleep(self._poll_interval_seconds),
+                signal,
+            )
+
+    async def _last_write_changed(self) -> bool:
+        row = await self._db.fetch_one("SELECT changes() AS count")
+        return bool(row and int(row.get("count") or 0) == 1)
+
     async def pause_ready_conflict(
         self,
         *,
         operation_id: str,
         checkpoint_key: str,
         code: str,
+        expected_plan_digest: str,
+        reservation_owner: str | None = None,
+        reservation_epoch: int | None = None,
     ):
         async with self._db.transaction(cancellation_linearizable=True):
             row = await self.load(operation_id, checkpoint_key)
             if row is None:
                 raise RuntimeError("screenplay checkpoint reservation disappeared")
+            if str(row.get("plan_digest") or "") != expected_plan_digest:
+                raise RuntimeError("screenplay_checkpoint_ready_conflict")
             if str(row["status"]) == "paused":
                 return row
-            if str(row["status"]) != "ready":
+            status = str(row["status"])
+            if status not in {"ready", "applying"}:
                 raise RuntimeError("screenplay checkpoint is not ready")
+            if status == "applying" and (
+                str(row.get("reservation_owner") or "") != str(
+                    reservation_owner or ""
+                )
+                or int(row.get("reservation_epoch") or 0) != int(
+                    reservation_epoch or 0
+                )
+            ):
+                raise RuntimeError("screenplay_checkpoint_reservation_lost")
             await self._db.execute(
                 "UPDATE screenplay_checkpoint_plans SET status = 'paused', "
-                "outcome = ?, error_code = ?, update_time = CURRENT_TIMESTAMP "
+                "outcome = ?, error_code = ?, reservation_owner = NULL, "
+                "reservation_expires_at_ms = NULL, "
+                "update_time = CURRENT_TIMESTAMP "
                 "WHERE operation_id = ? AND checkpoint_key = ? "
-                "AND status = 'ready'",
+                "AND status = ?",
                 [
                     ScreenplayCheckpointOutcome.PAUSED.value,
                     code[:240],
                     operation_id,
                     checkpoint_key,
+                    status,
                 ],
             )
             return await self.load(operation_id, checkpoint_key)
@@ -344,7 +501,10 @@ class SqliteScreenplayCheckpointRepository:
         checkpoint_key: str,
         plan: TaskPlan,
         outcome: ScreenplayCheckpointOutcome,
+        reservation_owner: str,
+        reservation_epoch: int,
     ):
+        canonical_plan = _canonical_root_plan(plan)
         encoded = json.dumps(
             _plan_mapping(plan),
             ensure_ascii=False,
@@ -352,28 +512,30 @@ class SqliteScreenplayCheckpointRepository:
             separators=(",", ":"),
             allow_nan=False,
         )
-        digest = plan_digest(plan)
+        digest = plan_digest(canonical_plan)
         async with self._db.transaction(cancellation_linearizable=True):
             row = await self.load(operation_id, checkpoint_key)
             if row is None:
                 raise RuntimeError("screenplay checkpoint reservation disappeared")
-            if str(row["status"]) in {"ready", "applied"}:
-                if (
-                    str(row.get("plan_digest") or "") != digest
-                    or str(row.get("plan_json") or "") != encoded
-                ):
-                    raise RuntimeError("screenplay_checkpoint_ready_conflict")
-                return row
-            if str(row["status"]) != "reserved":
-                raise RuntimeError("screenplay checkpoint is not reservable")
             await self._db.execute(
                 "UPDATE screenplay_checkpoint_plans SET status = 'ready', "
                 "plan_json = ?, plan_digest = ?, outcome = ?, error_code = NULL, "
                 "reservation_owner = NULL, reservation_expires_at_ms = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
-                "AND checkpoint_key = ? AND status = 'reserved'",
-                [encoded, digest, outcome.value, operation_id, checkpoint_key],
+                "AND checkpoint_key = ? AND status = 'reserved' "
+                "AND reservation_owner = ? AND reservation_epoch = ?",
+                [
+                    encoded,
+                    digest,
+                    outcome.value,
+                    operation_id,
+                    checkpoint_key,
+                    reservation_owner,
+                    int(reservation_epoch),
+                ],
             )
+            if not await self._last_write_changed():
+                raise RuntimeError("screenplay_checkpoint_reservation_lost")
             return await self.load(operation_id, checkpoint_key)
 
     async def pause(
@@ -383,23 +545,31 @@ class SqliteScreenplayCheckpointRepository:
         checkpoint_key: str,
         outcome: ScreenplayCheckpointOutcome,
         code: str,
+        reservation_owner: str,
+        reservation_epoch: int,
     ):
         async with self._db.transaction(cancellation_linearizable=True):
             row = await self.load(operation_id, checkpoint_key)
             if row is None:
                 raise RuntimeError("screenplay checkpoint reservation disappeared")
-            if str(row["status"]) == "paused":
-                return row
-            if str(row["status"]) != "reserved":
-                raise RuntimeError("screenplay checkpoint cannot be paused")
             await self._db.execute(
                 "UPDATE screenplay_checkpoint_plans SET status = 'paused', "
                 "outcome = ?, error_code = ?, update_time = CURRENT_TIMESTAMP "
                 ", reservation_owner = NULL, reservation_expires_at_ms = NULL "
                 "WHERE operation_id = ? AND checkpoint_key = ? "
-                "AND status = 'reserved'",
-                [outcome.value, code[:240], operation_id, checkpoint_key],
+                "AND status = 'reserved' AND reservation_owner = ? "
+                "AND reservation_epoch = ?",
+                [
+                    outcome.value,
+                    code[:240],
+                    operation_id,
+                    checkpoint_key,
+                    reservation_owner,
+                    int(reservation_epoch),
+                ],
             )
+            if not await self._last_write_changed():
+                raise RuntimeError("screenplay_checkpoint_reservation_lost")
             return await self.load(operation_id, checkpoint_key)
 
     async def applied(
@@ -408,27 +578,36 @@ class SqliteScreenplayCheckpointRepository:
         operation_id: str,
         checkpoint_key: str,
         digest: str,
+        reservation_owner: str,
+        reservation_epoch: int,
     ):
         async with self._db.transaction(cancellation_linearizable=True):
             row = await self.load(operation_id, checkpoint_key)
             if row is None or str(row.get("plan_digest") or "") != digest:
                 raise RuntimeError("screenplay_checkpoint_applied_conflict")
-            if str(row["status"]) == "applied":
-                return row
-            if str(row["status"]) != "ready":
-                raise RuntimeError("screenplay checkpoint is not ready")
             await self._db.execute(
                 "UPDATE screenplay_checkpoint_plans SET status = 'applied', "
+                "reservation_owner = NULL, reservation_expires_at_ms = NULL, "
                 "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
-                "AND checkpoint_key = ? AND status = 'ready'",
-                [operation_id, checkpoint_key],
+                "AND checkpoint_key = ? AND status = 'applying' "
+                "AND reservation_owner = ? AND reservation_epoch = ?",
+                [
+                    operation_id,
+                    checkpoint_key,
+                    reservation_owner,
+                    int(reservation_epoch),
+                ],
             )
+            if not await self._last_write_changed():
+                raise RuntimeError("screenplay_checkpoint_reservation_lost")
             return await self.load(operation_id, checkpoint_key)
 
     async def root_revision_digest(
         self,
         root_run_id: str,
         checkpoint_key: str,
+        *,
+        expected_digest: str | None = None,
     ) -> str | None:
         rows = await self._db.fetch_all(
             "SELECT payload_json FROM ai_agent_run_events WHERE run_id = ? "
@@ -441,17 +620,56 @@ class SqliteScreenplayCheckpointRepository:
                 payload = json.loads(str(row.get("payload_json") or "{}"))
             except (TypeError, ValueError):
                 continue
+            if not isinstance(payload, Mapping):
+                continue
             metadata = payload.get("planRevision")
             if not isinstance(metadata, Mapping):
                 continue
             if str(metadata.get("identity") or "") != checkpoint_key:
                 continue
-            digest = str(metadata.get("digest") or "")
-            if not digest:
-                raise RuntimeError("screenplay checkpoint Root event has no digest")
-            if found is not None and found != digest:
-                raise RuntimeError("screenplay_checkpoint_root_digest_conflict")
-            found = digest
+            event_digest = str(metadata.get("digest") or "")
+            steps = payload.get("steps")
+            task_spec = payload.get("taskSpec")
+            if (
+                not event_digest
+                or not str(payload.get("title") or "").strip()
+                or payload.get("status") != "running"
+                or not isinstance(task_spec, Mapping)
+                or not isinstance(steps, Sequence)
+                or isinstance(steps, (str, bytes))
+                or not steps
+                or not all(isinstance(step, Mapping) for step in steps)
+            ):
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision event is incomplete"
+                )
+            try:
+                event_plan = parse_persisted_plan({
+                    "title": payload["title"],
+                    "goal": payload.get("goal"),
+                    "taskSpec": task_spec,
+                    "steps": [
+                        _event_step_to_persisted_step(step)
+                        for step in steps
+                    ],
+                })
+                computed_digest = plan_digest(event_plan)
+            except (TypeError, ValueError) as error:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision event is invalid"
+                ) from error
+            if event_digest != computed_digest or (
+                expected_digest is not None
+                and computed_digest != expected_digest
+            ):
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision digest is inconsistent"
+                )
+            if found is not None and found != computed_digest:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision events conflict"
+                )
+            found = computed_digest
         return found
 
 
@@ -539,7 +757,14 @@ def _planning_payload(value: ScreenplayCheckpointInput) -> dict[str, Any]:
         "artifactReceipts": [
             _selected_fact(
                 item,
-                ("kind", "digest", "episodeNumber", "sectionKey"),
+                (
+                    "partKind",
+                    "artifactKind",
+                    "digest",
+                    "episodeNumber",
+                    "sectionKey",
+                    "status",
+                ),
             )
             for item in value.artifact_receipts
         ],
@@ -764,6 +989,16 @@ def plan_digest(plan: TaskPlan) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_root_plan(plan: TaskPlan) -> TaskPlan:
+    snapshot = RunStateMachine.initialize("checkpoint-plan", plan)
+    return TaskPlan(
+        title=snapshot.title,
+        goal=snapshot.goal,
+        task_spec=snapshot.task_spec,
+        steps=snapshot.steps,
+    )
 
 
 __all__ = [
