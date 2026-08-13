@@ -74,11 +74,19 @@ class ScreenplayPlanBinding:
     phase: ScreenplayPlanPhase
 
     def __post_init__(self) -> None:
-        step_id = _text(self.step_id)
+        if not isinstance(self.step_id, str):
+            raise ValueError("screenplay plan binding step id must be a string")
+        step_id = self.step_id.strip()
         if not step_id:
             raise ValueError("screenplay plan binding step id is required")
         object.__setattr__(self, "step_id", step_id)
-        object.__setattr__(self, "phase", ScreenplayPlanPhase(self.phase))
+        if not isinstance(self.phase, str):
+            raise ValueError("screenplay plan binding phase must be a string")
+        try:
+            phase = ScreenplayPlanPhase(self.phase.strip())
+        except ValueError as error:
+            raise ValueError("screenplay plan binding phase is invalid") from error
+        object.__setattr__(self, "phase", phase)
 
     @classmethod
     def from_mapping(cls, value: object) -> "ScreenplayPlanBinding":
@@ -89,11 +97,13 @@ class ScreenplayPlanBinding:
             frozenset({"stepId", "phase"}),
             "plan binding",
         )
-        try:
-            phase = ScreenplayPlanPhase(_text(value.get("phase")))
-        except ValueError as error:
-            raise ValueError("screenplay plan binding phase is invalid") from error
-        return cls(step_id=_text(value.get("stepId")), phase=phase)
+        step_id = value.get("stepId")
+        phase = value.get("phase")
+        if not isinstance(step_id, str):
+            raise ValueError("screenplay plan binding step id must be a string")
+        if not isinstance(phase, str):
+            raise ValueError("screenplay plan binding phase must be a string")
+        return cls(step_id=step_id, phase=phase)
 
     def to_mapping(self) -> dict[str, str]:
         return {"stepId": self.step_id, "phase": self.phase.value}
@@ -136,7 +146,13 @@ class ScreenplayIntentScope:
     def from_task_spec_mapping(cls, value: object) -> "ScreenplayIntentScope":
         if not isinstance(value, Mapping):
             raise ValueError("screenplay scope must be an object")
-        kind = ScreenplayScopeKind(_text(value.get("kind")))
+        raw_kind = value.get("kind")
+        if not isinstance(raw_kind, str):
+            raise ValueError("screenplay scope kind must be a string")
+        try:
+            kind = ScreenplayScopeKind(raw_kind.strip())
+        except ValueError as error:
+            raise ValueError("screenplay scope kind is invalid") from error
         expected_fields = {
             ScreenplayScopeKind.CURRENT_STAGE: frozenset({"kind"}),
             ScreenplayScopeKind.NEXT_EPISODES: frozenset({"kind", "count"}),
@@ -249,7 +265,7 @@ class ScreenplayIntent:
             "TaskSpec target",
         )
         version = raw.get("version")
-        if isinstance(version, bool) or version != 1:
+        if type(version) is not int or version != 1:
             raise ValueError("screenplay TaskSpec version must be 1")
         scope = ScreenplayIntentScope.from_task_spec_mapping(raw.get("scope"))
         raw_bindings = raw.get("stepBindings")
