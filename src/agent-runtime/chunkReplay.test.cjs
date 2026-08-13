@@ -819,8 +819,21 @@ test('paused resume switches the canonical root once and blocks late same-run te
       },
     },
   })
+  const foreignTerminalChunks = [{
+    done: true,
+    runResult: {
+      runId: 'foreign-child',
+      status: 'failed',
+      errorCode: 'foreign_failure',
+    },
+  }, {
+    done: true,
+    finalResponse: 'Foreign child response',
+    runResult: { runId: 'foreign-child', status: 'done' },
+  }]
   replay.dispatch(seed, foreignLifecycleChunk, dependencies)
   replay.dispatch(seed, foreignPlanChunk, dependencies)
+  foreignTerminalChunks.forEach((chunk) => replay.dispatch(seed, chunk, dependencies))
   let assistant = replay.assistant(seed.turnId)
   assert.equal(assistant?.agentRunId, 'run-a')
   assert.equal(assistant?.canonicalOutput?.runId, 'run-a')
@@ -828,6 +841,8 @@ test('paused resume switches the canonical root once and blocks late same-run te
   assert.equal(assistant?.content, '保留 Root A 的响应。')
   assert.equal(assistant?.taskPlan?.runId, 'run-a')
   assert.equal(assistant?.taskPlan?.status, 'paused')
+  assert.equal(assistant?.error, undefined)
+  assert.equal(assistant?.termination, undefined)
   const live = reduceLive(seed, [
     requestReceipt('run-a'),
     rootPlanChunk,
@@ -835,6 +850,7 @@ test('paused resume switches the canonical root once and blocks late same-run te
     { done: true, finalResponseExpected: false },
     foreignLifecycleChunk,
     foreignPlanChunk,
+    ...foreignTerminalChunks,
   ])
   assert.equal(live?.agentRunId, assistant?.agentRunId)
   assert.equal(live?.canonicalOutput?.runId, assistant?.canonicalOutput?.runId)

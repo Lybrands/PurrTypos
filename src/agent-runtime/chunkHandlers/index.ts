@@ -13,6 +13,10 @@ import type {
   AgentChunkRuntimeContext,
   AiStreamChunk,
 } from './types.ts'
+import {
+  resolveRootRunBinding,
+  resolveTerminalRootOwnership,
+} from '../rootOwnership.ts'
 
 export type {
   AgentAccumulator,
@@ -41,8 +45,23 @@ export function dispatchAgentChunk(
   chunk: AiStreamChunk,
   context: AgentChunkRuntimeContext,
 ): void {
-  const receiptRunId = String(chunk.requestReceipt?.runId || '').trim()
-  if (receiptRunId) context.acc.conversationRunId = receiptRunId
+  const receiptBinding = resolveRootRunBinding(
+    context.acc.conversationRunId,
+    chunk.requestReceipt?.runId,
+  )
+  const rootRunId = receiptBinding.accepted
+    ? receiptBinding.rootRunId
+    : context.acc.conversationRunId
+  const terminalOwnership = resolveTerminalRootOwnership(
+    chunk,
+    rootRunId,
+    context.acc.agentRunId,
+    context.turnId,
+  )
+  if (terminalOwnership.terminal && !terminalOwnership.accepted) return
+  if (receiptBinding.accepted) {
+    context.acc.conversationRunId = receiptBinding.rootRunId
+  }
   if (handleCanonicalOutput(chunk, context)) return
   if (handleRequestResultTerminal(chunk, context)) return
   if (handleRunResultTerminal(chunk, context)) return

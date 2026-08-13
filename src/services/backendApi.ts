@@ -21,6 +21,10 @@ import {
 } from '../components/AiDevInspector/store'
 import { isCanonicalOutputEvent } from '../agent-runtime/canonicalOutput'
 import { presentAgentRunError } from '../agent-runtime/agentErrorPresentation'
+import {
+  resolveRootRunBinding,
+  resolveTerminalRootOwnership,
+} from '../agent-runtime/rootOwnership'
 import { recoverDurableAgentStream } from './durableAgentStreamRecovery'
 import {
   reserveWritingChatRequest,
@@ -740,12 +744,30 @@ export const backendApi: BackendApi = {
       if (abortController.signal.aborted && transport.done) {
         transport.aborted = true
       }
-      const receiptRunId = String(
-        chunk.requestReceipt?.runId || transport.requestResult?.runId || '',
-      ).trim()
-      if (receiptRunId) {
-        authoritativeAgentRunId = receiptRunId
-        observedAgentRunId = receiptRunId
+      const receiptBinding = resolveRootRunBinding(
+        authoritativeAgentRunId,
+        chunk.requestReceipt?.runId,
+      )
+      const rootRunId = receiptBinding.accepted
+        ? receiptBinding.rootRunId
+        : authoritativeAgentRunId
+      const terminalOwnership = resolveTerminalRootOwnership(
+        chunk,
+        rootRunId,
+        observedAgentRunId,
+        streamId,
+      )
+      if (terminalOwnership.terminal && !terminalOwnership.accepted) return
+      if (receiptBinding.accepted) {
+        authoritativeAgentRunId = receiptBinding.rootRunId
+        observedAgentRunId = receiptBinding.rootRunId
+      }
+      if (
+        terminalOwnership.accepted
+        && terminalOwnership.rootRunId
+      ) {
+        authoritativeAgentRunId = terminalOwnership.rootRunId
+        observedAgentRunId = terminalOwnership.rootRunId
       }
       let canonicalBelongsToObservedRoot = false
       if (isCanonicalOutputEvent(chunk)) {
@@ -760,16 +782,17 @@ export const backendApi: BackendApi = {
         }
       }
       if (
-        transport.runResult?.runId
-        && (
-          !authoritativeAgentRunId
-          || transport.runResult.runId === authoritativeAgentRunId
-        )
+        terminalOwnership.accepted
+        && terminalOwnership.source === 'runResult'
+        && transport.runResult?.runId
       ) {
         observedAgentRunId = transport.runResult.runId
       }
       observedErrorCode =
-        transport.runResult?.errorCode ||
+        (terminalOwnership.accepted
+          && terminalOwnership.source === 'runResult'
+          ? transport.runResult?.errorCode
+          : undefined) ||
         (isCanonicalOutputEvent(chunk)
           && canonicalBelongsToObservedRoot
           && chunk.kind === 'run.lifecycle'
@@ -794,9 +817,17 @@ export const backendApi: BackendApi = {
       ) {
         receivedVisibleOutput = true
       }
-      if (transport.done || transport.error) receivedTerminalChunk = true
+      const acceptedTerminal = terminalOwnership.terminal
+        && terminalOwnership.accepted
+      const plainTransportTerminal = !terminalOwnership.terminal
+        && Boolean(transport.done || transport.error)
+      if (acceptedTerminal || plainTransportTerminal) {
+        receivedTerminalChunk = true
+      }
       if (
-        transport.done
+        acceptedTerminal
+        && terminalOwnership.source === 'runResult'
+        && transport.done
         && transport.runResult
         && ['failed', 'blocked'].includes(transport.runResult.status)
       ) {
@@ -808,10 +839,11 @@ export const backendApi: BackendApi = {
           ),
           transport.runResult.errorCode || undefined,
         )
-      } else if (transport.error && !transport.requestResult) {
+      } else if (plainTransportTerminal && transport.error) {
         await attachErrorReport(transport)
       } else if (
-        transport.done
+        (acceptedTerminal || plainTransportTerminal)
+        && transport.done
         && !transport.aborted
         && !receivedVisibleOutput
         && transport.finalResponseExpected !== false
