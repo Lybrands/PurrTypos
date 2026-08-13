@@ -11,12 +11,20 @@ import anyio
 from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
-from purra.contracts import AgentRunResult, RunProvenance
+from purra.contracts import (
+    AgentMessage,
+    AgentRunRequest,
+    AgentRunResult,
+    DomainContext,
+    ModelRequest,
+    RunProvenance,
+)
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
     validate_writing_request_contract,
 )
+from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
 from schemas.ai import (
     CaptureAiErrorReportRequest,
     ChatStreamRequest,
@@ -45,6 +53,17 @@ _ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
     "taskType",
     "toolsEnabled",
 })
+_WRITING_PROFILE_REQUEST = AgentRunRequest(
+    messages=(AgentMessage(role="user", content="resolve writing profile"),),
+    model=ModelRequest(provider="host", model="profile-resolution"),
+    domain_context=DomainContext(namespace=WRITING_DOMAIN_NAMESPACE),
+)
+
+
+def _writing_role_registry(composition):
+    return composition.agent_role_registry_for_request(
+        _WRITING_PROFILE_REQUEST
+    )
 
 
 class _AgentClientDisconnected(Exception):
@@ -586,7 +605,7 @@ async def create_agent_delegation(
     try:
         delegation = await AgentDelegationService(
             composition.delegation_repository,
-            role_registry=composition.agent_role_registry,
+            role_registry=_writing_role_registry(composition),
         ).delegate(
             parent_run_id=run_id,
             agent_role=body.agentRole,
@@ -661,7 +680,7 @@ async def get_latest_session_agent_run(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
-        role_registry=getattr(composition, "agent_role_registry", None),
+        role_registry=_writing_role_registry(composition),
         product_event_query=SqliteWritingProposalReadModel(get_db()),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
@@ -698,7 +717,7 @@ async def get_agent_run_snapshot(
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
-        role_registry=getattr(composition, "agent_role_registry", None),
+        role_registry=_writing_role_registry(composition),
         product_event_query=SqliteWritingProposalReadModel(get_db()),
     ).get_snapshot(
         run_id,

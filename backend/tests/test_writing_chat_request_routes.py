@@ -7,9 +7,11 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
-from application.agent_composition import AgentComposition, set_agent_composition
+from application.agent_composition import set_agent_composition
+from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
+from domains.writing.agent_roles import build_writing_agent_role_registry
 from infrastructure.persistence.run_store import create_run
 from purra.contracts import RunBinding
 import routers.ai as ai_routes
@@ -33,7 +35,7 @@ async def receipt_app(tmp_path: Path):
         "VALUES (7, 'book-1', 'chapter-1')"
     )
     set_db(db)
-    composition = AgentComposition(db)
+    composition = create_agent_composition(db)
     set_agent_composition(composition)
     app = FastAPI()
     app.include_router(ai_router, prefix="/api")
@@ -65,6 +67,25 @@ def request_body(request_id: str = "chat-route-1") -> dict:
         "chatAgentMode": "agent",
         "contextWindow": "200k",
     }
+
+
+async def test_writing_routes_resolve_roles_from_explicit_profile_request():
+    registry = build_writing_agent_role_registry()
+    seen_namespaces: list[str] = []
+
+    class _Composition:
+        @property
+        def agent_role_registry(self):
+            raise AssertionError("global Writing role registry was used")
+
+        def agent_role_registry_for_request(self, request):
+            seen_namespaces.append(request.domain_context.namespace)
+            return registry
+
+    resolved = ai_routes._writing_role_registry(_Composition())
+
+    assert resolved is registry
+    assert seen_namespaces == ["purrtypos.writing"]
 
 
 async def test_reserve_route_replays_response_loss_and_rejects_changed_input(
