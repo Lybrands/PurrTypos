@@ -376,7 +376,7 @@ class SqliteScreenplayAgentRepository:
         code: str,
         message: str,
     ) -> dict[str, Any]:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             turn = await self._require_turn(turn_id)
             if str(turn["status"]) == "paused":
                 return _turn_view(turn)
@@ -400,7 +400,7 @@ class SqliteScreenplayAgentRepository:
         code: str,
         message: str,
     ) -> dict[str, Any]:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             turn = await self._require_turn(turn_id)
             if str(turn["status"]) in {
                 "completed", "paused", "failed", "canceled",

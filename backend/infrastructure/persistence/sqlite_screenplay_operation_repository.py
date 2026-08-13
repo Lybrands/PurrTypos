@@ -210,7 +210,7 @@ class SqliteScreenplayOperationRepository:
             "capabilitySnapshotDigest": digest,
         }
         request_digest = _digest(request)
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             replay = await self._db.fetch_one(
                 "SELECT * FROM screenplay_agent_operation_commands "
                 "WHERE command_id = ?",
@@ -375,7 +375,7 @@ class SqliteScreenplayOperationRepository:
         command_id = _required(idempotency_key, "cancel idempotency key")
         request = {"turnId": normalized_turn_id}
         request_digest = _digest(request)
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             replay = await self._db.fetch_one(
                 "SELECT * FROM screenplay_agent_cancel_commands "
                 "WHERE command_id = ?",
@@ -469,7 +469,7 @@ class SqliteScreenplayOperationRepository:
     ) -> CancelOperationReceipt:
         normalized_turn_id = _required(turn_id, "screenplay Turn id")
         normalized_receipt = _required(receipt_id, "cancel receipt id")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             turn = await self._db.fetch_one(
                 "SELECT * FROM screenplay_agent_turns WHERE id = ?",
                 [normalized_turn_id],

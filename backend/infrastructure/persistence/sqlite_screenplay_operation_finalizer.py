@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -89,13 +90,21 @@ class SqliteScreenplayOperationFinalizer:
         self._revisions = SqliteScreenplayV2Repository(db)
         self._candidate_assembler = candidate_assembler
 
+    @asynccontextmanager
+    async def _mutation_transaction(self):
+        if self._db.current_task_owns_transaction():
+            yield
+            return
+        async with self._db.transaction(cancellation_linearizable=True):
+            yield
+
     async def finalize(
         self,
         command: ScreenplayOperationFinalizationCommand,
     ) -> ScreenplayOperationFinalizationReceipt:
         request_digest = _command_digest(command)
         command_id = f"operation:finalize:{command.operation_id}"
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             operation = await self._operations.load(command.operation_id)
             if operation is None:
                 raise LookupError("screenplay Operation does not exist")

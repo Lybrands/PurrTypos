@@ -17,7 +17,7 @@ from domains.screenplay_agent.manifest import (
     ScreenplayPartKind,
     ScreenplayPartSpec,
 )
-from purra.contracts import ExecutionRecipe, ExecutionRecipeStep
+from purra.contracts import ExecutionRecipe, ExecutionRecipeStep, TaskStep
 from purra.json_values import thaw_json_mapping
 
 
@@ -61,6 +61,7 @@ def compile_screenplay_manifest(
     document_sections: Sequence[str] = (),
     original_request: str | None = None,
     plan_bindings: Sequence[ScreenplayPlanBinding] = (),
+    plan_steps: Sequence[TaskStep],
 ) -> CompiledScreenplayManifest:
     scenes = {
         int(number): tuple(str(value).strip() for value in values)
@@ -92,7 +93,10 @@ def compile_screenplay_manifest(
         common=common,
         original_request=original_request,
     )
-    bindings = tuple(plan_bindings) or intent.plan_bindings
+    bindings = _order_bindings_by_root_plan(
+        tuple(plan_bindings) or intent.plan_bindings,
+        plan_steps,
+    )
     part_step_ids, binding_digest = _bind_parts_to_plan(
         parts,
         bindings,
@@ -421,6 +425,17 @@ def _bind_parts_to_plan(parts, bindings, *, target_role):
         allow_nan=False,
     ).encode("utf-8")).hexdigest()
     return mapped, digest
+
+
+def _order_bindings_by_root_plan(bindings, plan_steps):
+    steps = tuple(plan_steps)
+    if not steps or any(not isinstance(step, TaskStep) for step in steps):
+        raise ValueError("screenplay Manifest requires validated Root plan steps")
+    by_id = {binding.step_id: binding for binding in bindings}
+    step_ids = tuple(step.id for step in steps)
+    if len(by_id) != len(bindings) or set(by_id) != set(step_ids):
+        raise ValueError("screenplay bindings must match validated Root plan steps")
+    return tuple(by_id[step_id] for step_id in step_ids)
 
 
 def _apply_public_step_barriers(parts, part_step_ids, bindings):
