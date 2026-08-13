@@ -658,17 +658,17 @@ def _planning_source(value: object) -> dict[str, Any]:
     return result
 
 
-def _planning_summary(value: object) -> str:
-    if isinstance(value, Mapping):
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    else:
-        parsed = _object(value)
-        raw = (
-            json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-            if parsed
-            else str(value or "")
-        )
-    return _clip(raw, 1_200)
+def _planning_summary(value: object) -> dict[str, str | int]:
+    source = dict(value) if isinstance(value, Mapping) else _object(value)
+    result: dict[str, str | int] = {}
+    title = source.get("title")
+    if isinstance(title, str) and title.strip():
+        result["title"] = title.strip()[:240]
+    for key in ("textLength", "fieldCount", "partCount"):
+        count = source.get(key)
+        if type(count) is int and count >= 0:
+            result[key] = count
+    return result
 
 
 def _planning_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
