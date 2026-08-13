@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -11,10 +13,15 @@ from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
 from purra.contracts import (
+    AgentMessage,
+    AgentRunRequest,
     AgentRunResult,
     ApprovalRequest,
     ApprovalStatus,
+    DomainContext,
+    ModelRequest,
     ResponseConstraints,
+    RuntimeLimits,
     RunStatus,
     ToolCall,
     ToolExecutionMode,
@@ -23,11 +30,19 @@ from purra.events import AgentEvent, CoreEventType
 from purra.api import AgentModelTaskRunner
 from purra.model_invocation import ModelInvocationContext
 from purra.tools import InMemoryApprovalGateway
+from purra.tools import InMemoryToolCatalog
+from purra.recovery import RecoveryPolicy
 from application.agent_composition import (
     AgentComposition,
     set_agent_composition,
 )
+from application.agent_profile_registry import (
+    AgentProfileExtension,
+    AgentProfileRegistration,
+    StaticAgentProfileExtension,
+)
 from application.conversation_compaction import ConversationCompactionService
+from application.memory_reranking import ModelBackedMemoryReranker
 from application.request_mapping import (
     context_window_tokens,
     to_writing_agent_request,
@@ -36,7 +51,26 @@ from application.request_mapping import (
 from application.sse_mapping import core_update_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from domains.writing.contracts import WritingDomainContext
+from domains.writing.adapter import WritingDomainAdapter
+from domains.writing.context import WritingContextProvider
+from domains.writing.context_source import RepositoryWritingContextSource
+from domains.writing.contracts import (
+    WRITING_DOMAIN_NAMESPACE,
+    WritingDomainContext,
+)
+from domains.writing.response import writing_atomic_continuity_judge_policy
+from infrastructure.persistence.writing import (
+    SqliteAssociatedContextRepository,
+    SqliteMemoryRecallRepository,
+    SqliteStoryMemoryRecallRepository,
+    SqliteWritingCatalogRepository,
+    SqliteWritingToolMemoryRepository,
+)
+from infrastructure.writing import (
+    WritingSkillCatalog,
+    WritingToolDependencies,
+    build_writing_tool_catalog,
+)
 from routers.ai import (
     _stream_composed_agent,
     chat_stream,
@@ -50,6 +84,158 @@ from tests.support.canonical_wire import (
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+class _FakeProfileExtension:
+    def __init__(self, factory_dependencies: dict[str, object]):
+        self.factory_dependencies = factory_dependencies
+        self.context_provider = object()
+        self.context_factory = lambda _model_tasks: self.context_provider
+        self.judge_policy = object()
+        self.admission = object()
+        self.dispatcher = object()
+        self.dispatcher_dependencies: dict[str, object] | None = None
+        self.adapter = SimpleNamespace(
+            planning_policy=None,
+            execution_state_factory=None,
+            tool_catalog=InMemoryToolCatalog(()),
+            agent_role_registry=None,
+            context_provider=None,
+            runtime_limits=RuntimeLimits(),
+            recovery_policy=RecoveryPolicy(),
+        )
+
+    def profile_registration(self):
+        return AgentProfileRegistration(
+            id="fake",
+            domain_namespace="test.fake",
+            adapter=self.adapter,
+        )
+
+    async def prepare_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunRequest:
+        return replace(request, metadata={"prepared": True})
+
+    def context_provider_factory(self):
+        return self.context_factory
+
+    def response_judge_policies(self, _request: AgentRunRequest):
+        return (self.judge_policy,)
+
+    def task_admission(self):
+        return self.admission
+
+    def create_long_task_dispatcher(self, **dependencies):
+        self.dispatcher_dependencies = dependencies
+        return self.dispatcher
+
+    def clear_active_executions(self) -> None:
+        return None
+
+
+def _fake_request() -> AgentRunRequest:
+    return AgentRunRequest(
+        messages=(AgentMessage(role="user", content="test"),),
+        model=ModelRequest(provider="openai", model="test-model"),
+        domain_context=DomainContext(namespace="test.fake"),
+    )
+
+
+class _WritingTestProfileExtension:
+    """Temporary product fixture until Task 4 installs the real extension."""
+
+    def __init__(self, db: DatabaseConnection):
+        skill_catalog = WritingSkillCatalog(BACKEND_DIR / "skills")
+        self._catalog_repository = SqliteWritingCatalogRepository(db)
+        self._context_source = RepositoryWritingContextSource(
+            SqliteAssociatedContextRepository(db),
+            SqliteMemoryRecallRepository(db),
+            SqliteStoryMemoryRecallRepository(db),
+        )
+        self._adapter = WritingDomainAdapter.build(
+            tool_catalog=build_writing_tool_catalog(
+                dependencies=WritingToolDependencies(
+                    db,
+                    SqliteWritingToolMemoryRepository(db),
+                ),
+                skill_items=tuple(skill_catalog.skill_items()),
+            ),
+            context_provider=WritingContextProvider(self._context_source),
+        )
+
+    def profile_registration(self):
+        return AgentProfileRegistration(
+            id="writing",
+            domain_namespace=WRITING_DOMAIN_NAMESPACE,
+            adapter=self._adapter,
+        )
+
+    async def prepare_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunRequest:
+        context = WritingDomainContext.from_core_context(
+            request.domain_context
+        )
+        book_id = str(context.book_id or "").strip()
+        if not book_id:
+            hydrated = replace(
+                context,
+                writing_chapters=(),
+                available_outlines=(),
+            )
+        else:
+            hydrated = replace(
+                context,
+                writing_chapters=(
+                    await self._catalog_repository.load_writing_chapters(
+                        book_id
+                    )
+                ),
+                available_outlines=(
+                    await self._catalog_repository.load_available_outlines(
+                        book_id
+                    )
+                ),
+            )
+        return replace(request, domain_context=hydrated.to_core_context())
+
+    def context_provider_factory(self):
+        return lambda model_tasks: WritingContextProvider(
+            self._context_source.with_memory_reranker(
+                ModelBackedMemoryReranker(model_tasks)
+            )
+        )
+
+    def response_judge_policies(self, request: AgentRunRequest):
+        policy = writing_atomic_continuity_judge_policy(request)
+        return () if policy is None else (policy,)
+
+    def task_admission(self):
+        return None
+
+    def create_long_task_dispatcher(self, **_dependencies):
+        return None
+
+    def clear_active_executions(self) -> None:
+        return None
+
+
+def _writing_composition(
+    db: DatabaseConnection,
+    **kwargs,
+) -> AgentComposition:
+    return AgentComposition(
+        db,
+        profile_extension_factories=(
+            lambda **dependencies: _WritingTestProfileExtension(
+                dependencies["db"]
+            ),
+        ),
+        **kwargs,
+    )
 
 
 def _fixture_model_options() -> dict[str, object]:
@@ -86,6 +272,78 @@ async def _collect(response) -> list[dict]:
         if any(event.get("done") for event in events):
             break
     return events
+
+
+@pytest.mark.asyncio
+async def test_composition_consumes_explicit_profile_extension_capabilities(
+    temp_db: DatabaseConnection,
+):
+    created: list[_FakeProfileExtension] = []
+
+    def factory(**dependencies):
+        extension = _FakeProfileExtension(dependencies)
+        created.append(extension)
+        return extension
+
+    composition = AgentComposition(
+        temp_db,
+        profile_extension_factories=(factory,),
+    )
+    request = _fake_request()
+
+    prepared = await composition.prepare_request(request)
+    policies = composition.create_response_judge_policies(request)
+    core = composition.create_core(
+        "key",
+        agent_profile="fake",
+        long_task_executor=object(),
+    )
+
+    extension = created[0]
+    assert composition.agent_profile_ids == ("fake",)
+    assert prepared.metadata == {"prepared": True}
+    assert policies == (extension.judge_policy,)
+    assert core._context_provider_factory is extension.context_factory
+    assert core._task_admission_evaluator is extension.admission
+    assert core._long_task_dispatcher is extension.dispatcher
+    assert set(extension.factory_dependencies) == {
+        "db",
+        "artifact_continuity",
+        "work_item_repository",
+        "long_task_repository",
+        "execution_lease_store",
+    }
+    assert set(extension.dispatcher_dependencies or {}) == {
+        "work_item_repository",
+        "long_task_repository",
+        "executor",
+    }
+
+
+@pytest.mark.asyncio
+async def test_static_profile_extension_defaults_have_no_side_effects(
+    temp_db: DatabaseConnection,
+):
+    extension = StaticAgentProfileExtension(
+        AgentProfileRegistration(
+            id="fake",
+            domain_namespace="test.fake",
+            adapter=_FakeProfileExtension({}).adapter,
+        )
+    )
+    request = _fake_request()
+
+    composition = AgentComposition(
+        temp_db,
+        profile_extension_factories=(lambda **_kwargs: extension,),
+    )
+
+    assert isinstance(extension, AgentProfileExtension)
+    assert await composition.prepare_request(request) is request
+    assert composition.create_response_judge_policies(request) == ()
+    assert extension.context_provider_factory() is None
+    assert extension.task_admission() is None
+    assert extension.create_long_task_dispatcher() is None
 
 
 def test_request_mapping_supports_kimi_256k_context_window():
@@ -247,7 +505,7 @@ async def test_composition_hydrates_authoritative_book_catalogs(
     assert before.writing_chapters == ()
     assert before.available_outlines == ()
 
-    composition = AgentComposition(temp_db)
+    composition = _writing_composition(temp_db)
     try:
         prepared = await composition.prepare_request(request)
     finally:
@@ -380,7 +638,7 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
         )
         return to_writing_agent_request(body, {"model": "model"})
 
-    composition = AgentComposition(temp_db)
+    composition = _writing_composition(temp_db)
     p5_request = _request(
         "对照当前章节与关联大纲，找出两处不一致，并给出最小修改建议。"
     )
@@ -408,7 +666,7 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
 async def test_composition_wires_compaction_into_core_not_run_service(
     temp_db: DatabaseConnection,
 ):
-    composition = AgentComposition(temp_db)
+    composition = _writing_composition(temp_db)
 
     core = composition.create_core("key")
 
@@ -444,7 +702,7 @@ async def test_composed_core_consumes_configured_approval_timeout(
         "AGENT_APPROVAL_TIMEOUT_SECONDS",
         3_600,
     )
-    composition = AgentComposition(temp_db)
+    composition = _writing_composition(temp_db)
     core = composition.create_core("key")
 
     assert core._tool_executor._limits.approval_timeout_seconds == 3_600
@@ -454,8 +712,7 @@ async def test_composed_core_consumes_configured_approval_timeout(
 async def test_composition_filters_child_tools_from_business_role_policy(
     temp_db: DatabaseConnection,
 ):
-    composition = AgentComposition(temp_db)
-    role = composition.agent_role_registry.require("researcher")
+    composition = _writing_composition(temp_db)
     request = to_writing_agent_request(
         ChatStreamRequest(
             messages=[{"role": "user", "content": "读取当前章节"}],
@@ -468,6 +725,9 @@ async def test_composition_filters_child_tools_from_business_role_policy(
             chatAgentMode="agent",
         ),
         {"model": "model"},
+    )
+    role = composition.agent_role_registry_for_request(request).require(
+        "researcher"
     )
     core = composition.create_core(
         "key",
@@ -844,7 +1104,7 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
         "infrastructure.models.provider_router.create_chat_stream",
         _unexpected_model_call,
     )
-    set_agent_composition(AgentComposition(temp_db))
+    set_agent_composition(_writing_composition(temp_db))
 
     response = await chat_stream(
         ChatStreamRequest(
@@ -1031,7 +1291,7 @@ async def test_composed_route_uses_complete_purra(
         "infrastructure.models.provider_router.create_chat_stream",
         _create_chat_stream,
     )
-    set_agent_composition(AgentComposition(temp_db))
+    set_agent_composition(_writing_composition(temp_db))
 
     response = await chat_stream(
         ChatStreamRequest(
@@ -1110,7 +1370,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
         "infrastructure.models.provider_router.create_chat_stream",
         _create_chat_stream,
     )
-    set_agent_composition(AgentComposition(temp_db))
+    set_agent_composition(_writing_composition(temp_db))
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "删除"}],
         apiKey="key",
@@ -1196,9 +1456,8 @@ async def test_composition_shutdown_cancels_all_live_approvals(
             self.events.append(event)
 
     gateway = InMemoryApprovalGateway()
-    composition = AgentComposition(
+    composition = _writing_composition(
         temp_db,
-        writing=object(),  # type: ignore[arg-type]
         approval_gateway=gateway,
     )
     sink = _RecordingSink()
@@ -1256,10 +1515,7 @@ async def test_composition_shutdown_cancels_all_live_approvals(
 async def test_composition_shutdown_cancels_owned_root_execution_tasks(
     temp_db: DatabaseConnection,
 ):
-    composition = AgentComposition(
-        temp_db,
-        writing=object(),  # type: ignore[arg-type]
-    )
+    composition = _writing_composition(temp_db)
     canceled = asyncio.Event()
 
     async def _worker() -> None:

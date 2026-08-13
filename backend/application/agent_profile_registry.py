@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol, runtime_checkable
 
+from purra.api import AgentModelTaskRunner
 from purra.contracts import AgentRunRequest
+from purra.long_tasks import LongTaskRepository
+from purra.ports import ContextProvider, ResponseJudgePolicy
+from purra.task_admission import LongTaskDispatcher, TaskAdmissionEvaluator
+from purra.work_items.ports import WorkItemRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +27,79 @@ class AgentProfileRegistration:
             raise ValueError("Agent profile id and domain namespace are required")
         object.__setattr__(self, "id", profile_id)
         object.__setattr__(self, "domain_namespace", namespace)
+
+
+ContextProviderFactory = Callable[[AgentModelTaskRunner], ContextProvider]
+
+
+@runtime_checkable
+class AgentProfileExtension(Protocol):
+    def profile_registration(self) -> AgentProfileRegistration: ...
+
+    async def prepare_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunRequest | None: ...
+
+    def context_provider_factory(self) -> ContextProviderFactory | None: ...
+
+    def response_judge_policies(
+        self,
+        request: AgentRunRequest,
+    ) -> tuple[ResponseJudgePolicy, ...]: ...
+
+    def task_admission(self) -> TaskAdmissionEvaluator | None: ...
+
+    def create_long_task_dispatcher(
+        self,
+        *,
+        work_item_repository: WorkItemRepository | None = None,
+        long_task_repository: LongTaskRepository | None = None,
+        executor: Any = None,
+    ) -> LongTaskDispatcher | None: ...
+
+    def clear_active_executions(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StaticAgentProfileExtension:
+    registration: AgentProfileRegistration
+
+    def profile_registration(self) -> AgentProfileRegistration:
+        return self.registration
+
+    async def prepare_request(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunRequest | None:
+        del request
+        return None
+
+    def context_provider_factory(self) -> ContextProviderFactory | None:
+        return None
+
+    def response_judge_policies(
+        self,
+        request: AgentRunRequest,
+    ) -> tuple[ResponseJudgePolicy, ...]:
+        del request
+        return ()
+
+    def task_admission(self) -> TaskAdmissionEvaluator | None:
+        return None
+
+    def create_long_task_dispatcher(
+        self,
+        *,
+        work_item_repository: WorkItemRepository | None = None,
+        long_task_repository: LongTaskRepository | None = None,
+        executor: Any = None,
+    ) -> LongTaskDispatcher | None:
+        del work_item_repository, long_task_repository, executor
+        return None
+
+    def clear_active_executions(self) -> None:
+        return None
 
 
 class AgentProfileRegistry:
