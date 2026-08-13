@@ -8,6 +8,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 
 from domains.screenplay_agent.operation import (
@@ -23,6 +24,14 @@ from purra.json_values import thaw_json_mapping
 class SqliteScreenplayOperationRepository:
     def __init__(self, db) -> None:
         self._db = db
+
+    @asynccontextmanager
+    async def _mutation_transaction(self):
+        if self._db.current_task_owns_transaction():
+            yield
+            return
+        async with self._db.transaction(cancellation_linearizable=True):
+            yield
 
     async def create(
         self,
@@ -574,7 +583,7 @@ class SqliteScreenplayOperationRepository:
         normalized_command = _required(command_id, "screenplay Operation command id")
         request = {"target": target.value, **dict(values)}
         digest = _digest(request)
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             receipt = await self._db.fetch_one(
                 "SELECT * FROM screenplay_agent_operation_commands "
                 "WHERE command_id = ?",

@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
@@ -32,6 +33,14 @@ class SqliteLongTaskRepository:
     def __init__(self, db) -> None:
         self._db = db
 
+    @asynccontextmanager
+    async def _mutation_transaction(self):
+        if self._db.current_task_owns_transaction():
+            yield
+            return
+        async with self._db.transaction(cancellation_linearizable=True):
+            yield
+
     async def create(
         self,
         task_id: str,
@@ -39,7 +48,7 @@ class SqliteLongTaskRepository:
     ) -> LongTaskRecord:
         normalized_id = _required(task_id, "long task id")
         try:
-            async with self._db.transaction(cancellation_linearizable=True):
+            async with self._mutation_transaction():
                 work_item = await self._db.fetch_one(
                     "SELECT namespace, kind, owner_id, status "
                     "FROM ai_agent_work_items WHERE id = ?",
