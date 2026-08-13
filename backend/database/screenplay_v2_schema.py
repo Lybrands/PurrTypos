@@ -312,7 +312,7 @@ async def init_screenplay_v2_runtime_schema(db) -> None:
     """Link generic runtime staging records after their base tables exist."""
 
     from database.crud.screenplay_project_deletion import (
-        delete_screenplay_project_data,
+        retire_legacy_screenplay_project_data,
     )
 
     legacy_projects = await db.fetch_all(
@@ -320,7 +320,7 @@ async def init_screenplay_v2_runtime_schema(db) -> None:
         "WHERE source_snapshot_json IS NULL"
     )
     for project in legacy_projects:
-        await delete_screenplay_project_data(db, str(project["id"]))
+        await retire_legacy_screenplay_project_data(db, str(project["id"]))
 
     await db.execute(
         "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN ("

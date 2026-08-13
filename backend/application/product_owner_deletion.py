@@ -48,6 +48,12 @@ async def prepare_session_owner_deletion(
     conversation_ids = tuple(sorted(int(row["id"]) for row in conversations))
     conversation_marks = _marks(conversation_ids)
     owned_run_ids = await _owned_run_ids(db, sessions, conversation_ids)
+    work_item_ids, task_ids, open_work_item = await _owned_work_and_task_ids(
+        db,
+        owned_run_ids,
+        projects,
+        books,
+    )
     run_marks = _marks(owned_run_ids)
     run_owner_sql = f"id IN ({run_marks})" if owned_run_ids else ""
     run_owner_params = list(owned_run_ids)
@@ -78,6 +84,12 @@ async def prepare_session_owner_deletion(
         + ") AND status IN ('queued', 'running', 'paused') LIMIT 1",
         operation_params,
     ) if operation_clauses else None
+    active_turn = await db.fetch_one(
+        "SELECT id FROM screenplay_agent_turns WHERE ("
+        + " OR ".join(operation_clauses)
+        + ") AND status IN ('queued', 'planning', 'running', 'paused') LIMIT 1",
+        operation_params,
+    ) if operation_clauses else None
     active_long_task = await _active_long_task(
         db,
         sessions,
@@ -85,7 +97,14 @@ async def prepare_session_owner_deletion(
         projects,
         books,
     )
-    if active_run or active_request or active_operation or active_long_task:
+    if (
+        active_run
+        or active_request
+        or active_operation
+        or active_turn
+        or active_long_task
+        or open_work_item
+    ):
         raise ProductOwnerActiveError()
 
     if sessions:
@@ -124,6 +143,12 @@ async def prepare_session_owner_deletion(
             sessions,
             owned_run_ids,
         )
+
+    # A single Conversation session deletion keeps terminal product task audit
+    # rows owned by the surviving Book/project and only unlinks session
+    # metadata above. Aggregate deletion owns and removes the product tasks.
+    if projects or books:
+        await _delete_owned_work(db, work_item_ids, task_ids)
 
     if sessions:
         for table in (
@@ -173,50 +198,103 @@ async def prepare_session_owner_deletion(
                 f"WHERE id IN ({artifact_marks})",
                 list(artifact_ids),
             )
-        work_items = await db.fetch_all(
-            "SELECT id FROM ai_agent_work_items "
-            f"WHERE namespace IN ({namespace_marks}) "
-            f"AND owner_id IN ({book_marks})",
-            [*namespaces, *books],
-        )
-        work_item_ids = tuple(str(row["id"]) for row in work_items)
-        if work_item_ids:
-            work_marks = _marks(work_item_ids)
-            await db.execute(
-                f"DELETE FROM ai_agent_long_task_units WHERE task_id IN ("
-                "SELECT id FROM ai_agent_long_tasks "
-                f"WHERE work_item_id IN ({work_marks}))",
-                list(work_item_ids),
-            )
-            await db.execute(
-                f"DELETE FROM ai_agent_long_tasks "
-                f"WHERE work_item_id IN ({work_marks})",
-                list(work_item_ids),
-            )
-            await db.execute(
-                f"DELETE FROM ai_agent_work_item_runs "
-                f"WHERE work_item_id IN ({work_marks})",
-                list(work_item_ids),
-            )
-            await db.execute(
-                f"DELETE FROM ai_agent_work_items WHERE id IN ({work_marks})",
-                list(work_item_ids),
-            )
-        # Some legacy LongTasks predate a Work Item row.
-        await db.execute(
-            f"DELETE FROM ai_agent_long_task_units WHERE task_id IN ("
-            "SELECT id FROM ai_agent_long_tasks "
-            f"WHERE namespace IN ({namespace_marks}) "
-            f"AND owner_id IN ({book_marks}))",
-            [*namespaces, *books],
-        )
-        await db.execute(
-            f"DELETE FROM ai_agent_long_tasks "
-            f"WHERE namespace IN ({namespace_marks}) "
-            f"AND owner_id IN ({book_marks})",
-            [*namespaces, *books],
-        )
     return SessionOwnerRows(sessions, conversation_ids)
+
+
+async def _owned_work_and_task_ids(db, owned_run_ids, projects, books):
+    related_clauses: list[str] = []
+    related_params: list[object] = []
+    if owned_run_ids:
+        marks = _marks(owned_run_ids)
+        related_clauses.extend([
+            f"created_by_run_id IN ({marks})",
+            "EXISTS (SELECT 1 FROM ai_agent_work_item_runs AS wir "
+            "WHERE wir.work_item_id = ai_agent_work_items.id "
+            f"AND wir.run_id IN ({marks}))",
+        ])
+        related_params.extend(owned_run_ids)
+        related_params.extend(owned_run_ids)
+    owned_clauses: list[str] = []
+    owned_params: list[object] = []
+    if projects:
+        marks = _marks(projects)
+        owned_clauses.append(
+            f"(namespace = 'purrtypos.screenplay' AND owner_id IN ({marks}))"
+        )
+        owned_params.extend(projects)
+    if books:
+        marks = _marks(books)
+        owned_clauses.append(
+            f"(namespace IN ('purrtypos.writing', 'writing.book') "
+            f"AND owner_id IN ({marks}))"
+        )
+        owned_params.extend(books)
+    related_rows = await db.fetch_all(
+        "SELECT id, status FROM ai_agent_work_items WHERE "
+        + " OR ".join([*related_clauses, *owned_clauses]),
+        [*related_params, *owned_params],
+    ) if related_clauses or owned_clauses else []
+    open_work = next(
+        (row for row in related_rows if str(row.get("status") or "") == "open"),
+        None,
+    )
+    # Run links express continuity, including cross-owner references. They are
+    # relevant to the active guard but never transfer physical ownership.
+    owned_work_rows = await db.fetch_all(
+        "SELECT id FROM ai_agent_work_items WHERE " + " OR ".join(owned_clauses),
+        owned_params,
+    ) if owned_clauses else []
+    work_ids = tuple(sorted(str(row["id"]) for row in owned_work_rows))
+
+    task_clauses: list[str] = []
+    task_params: list[object] = []
+    if work_ids:
+        marks = _marks(work_ids)
+        task_clauses.append(f"work_item_id IN ({marks})")
+        task_params.extend(work_ids)
+    if projects:
+        marks = _marks(projects)
+        task_clauses.append(
+            f"(namespace = 'purrtypos.screenplay' AND owner_id IN ({marks}))"
+        )
+        task_params.extend(projects)
+    if books:
+        marks = _marks(books)
+        task_clauses.append(
+            f"(namespace IN ('purrtypos.writing', 'writing.book') "
+            f"AND owner_id IN ({marks}))"
+        )
+        task_params.extend(books)
+    tasks = await db.fetch_all(
+        "SELECT id FROM ai_agent_long_tasks WHERE " + " OR ".join(task_clauses),
+        task_params,
+    ) if task_clauses else []
+    task_ids = tuple(sorted(str(row["id"]) for row in tasks))
+    return work_ids, task_ids, open_work
+
+
+async def _delete_owned_work(db, work_item_ids, task_ids) -> None:
+    if task_ids:
+        marks = _marks(task_ids)
+        for table in ("ai_agent_long_task_usage", "ai_agent_long_task_units"):
+            await db.execute(
+                f"DELETE FROM {table} WHERE task_id IN ({marks})",
+                list(task_ids),
+            )
+        await db.execute(
+            f"DELETE FROM ai_agent_long_tasks WHERE id IN ({marks})",
+            list(task_ids),
+        )
+    if work_item_ids:
+        marks = _marks(work_item_ids)
+        await db.execute(
+            f"DELETE FROM ai_agent_work_item_runs WHERE work_item_id IN ({marks})",
+            list(work_item_ids),
+        )
+        await db.execute(
+            f"DELETE FROM ai_agent_work_items WHERE id IN ({marks})",
+            list(work_item_ids),
+        )
 
 
 async def _active_long_task(db, sessions, owned_run_ids, projects, books):

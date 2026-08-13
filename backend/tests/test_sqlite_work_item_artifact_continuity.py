@@ -25,6 +25,7 @@ from purra.work_items import (
     WorkItemCreateCommand,
     WorkItemRunLinkCommand,
     WorkItemRunRelation,
+    WorkItemTransitionCommand,
 )
 from purra.work_items.ports import WorkItemRepository
 from database.connection import DatabaseConnection
@@ -41,6 +42,7 @@ from infrastructure.persistence.sqlite_work_item_repository import (
 from infrastructure.persistence.sqlite_work_item_artifact_lifecycle import (
     SqliteWorkItemArtifactLifecycle,
 )
+from application.product_owner_deletion import ProductOwnerActiveError
 from tests.support.agent_adapter_contracts import (
     assert_artifact_claim_repository_contract,
     assert_work_item_repository_contract,
@@ -417,6 +419,14 @@ async def test_screenplay_project_delete_cleans_continuity_state(
         lease_duration_ms=1_000,
     ))
 
+    with pytest.raises(ProductOwnerActiveError):
+        await screenplay_crud.delete_project(continuity_db, "project-1")
+    await SqliteWorkItemRepository(continuity_db).complete(
+        WorkItemTransitionCommand(
+            work_item_id=item.id,
+            expected_revision=item.revision,
+        )
+    )
     assert await screenplay_crud.delete_project(continuity_db, "project-1")
     for table in (
         "ai_agent_artifact_claims",
