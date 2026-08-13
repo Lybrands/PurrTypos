@@ -1863,6 +1863,7 @@ export default function ScreenplayAgentPage({
                 const chunk = event.chunk as AiStreamChunk
                 agentChunkReplayRef.current.dispatch({
                   turnId: event.turnId,
+                  rootRunId: turn?.plannerRunId || undefined,
                   sessionId: agentSessionId,
                   userContent: event.userContent || turn?.userContent || '',
                   model: modelName || undefined,

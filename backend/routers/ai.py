@@ -753,6 +753,16 @@ async def _persisted_run_role_registry(composition, db, run):
                 raise ValueError("Agent Run parent lineage contains a cycle")
             visited.add(current_id)
         profile_id, domain_namespace = _persisted_profile_identity(current)
+        inferred_namespace = await _persisted_domain_namespace(db, current)
+        if (
+            domain_namespace
+            and inferred_namespace
+            and domain_namespace != inferred_namespace
+        ):
+            raise ValueError(
+                "persisted Agent domain namespace conflicts with Run binding"
+            )
+        domain_namespace = domain_namespace or inferred_namespace
         if profile_id:
             if resolved_profile and resolved_profile != profile_id:
                 raise ValueError("Agent Run lineage has conflicting profiles")
@@ -789,6 +799,52 @@ def _persisted_profile_identity(run) -> tuple[str, str]:
         str(attributes.get("agentProfile") or "").strip(),
         str(attributes.get("domainNamespace") or "").strip(),
     )
+
+
+async def _persisted_domain_namespace(db, run) -> str:
+    """Infer legacy profile identity only from durable product discriminators."""
+
+    from domains.screenplay_agent.agent_context import (
+        SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
+    )
+    from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
+
+    candidates: set[str] = set()
+    binding_namespace = str(run.get("binding_namespace") or "").strip()
+    if binding_namespace == "writing.chat.request":
+        candidates.add(WRITING_DOMAIN_NAMESPACE)
+    elif binding_namespace.startswith("screenplay.agent."):
+        candidates.add(SCREENPLAY_AGENT_DOMAIN_NAMESPACE)
+
+    session_id = run.get("session_id")
+    if db is not None and session_id is not None:
+        session = await db.fetch_one(
+            "SELECT scope, chapter_id, book_id, screenplay_project_id "
+            "FROM ai_sessions WHERE id = ?",
+            [int(session_id)],
+        )
+        if session is not None:
+            scope = str(session.get("scope") or "").strip()
+            screenplay_owned = bool(
+                scope == "screenplay"
+                or str(session.get("screenplay_project_id") or "").strip()
+            )
+            writing_owned = bool(
+                not screenplay_owned
+                and (
+                    scope in {"chapter", "setting"}
+                    or str(session.get("chapter_id") or "").strip()
+                    or str(session.get("book_id") or "").strip()
+                )
+            )
+            if screenplay_owned:
+                candidates.add(SCREENPLAY_AGENT_DOMAIN_NAMESPACE)
+            elif writing_owned:
+                candidates.add(WRITING_DOMAIN_NAMESPACE)
+
+    if len(candidates) > 1:
+        raise ValueError("persisted Agent profile discriminators conflict")
+    return next(iter(candidates), "")
 
 
 @router.get("/ai/agent-runtime-regressions")
@@ -1143,6 +1199,7 @@ async def chat_stream(
         transport_closed.set()
 
     async def _event_generator():
+        binding_receipt_emitted = False
         composed_stream = _stream_composed_agent(
             body=body,
             api_key=key,
@@ -1152,6 +1209,16 @@ async def chat_stream(
         )
         try:
             async for composed_chunk in composed_stream:
+                if (
+                    run_binding_lifecycle is not None
+                    and not binding_receipt_emitted
+                ):
+                    receipt = await run_binding_lifecycle.current_receipt()
+                    if receipt is not None and receipt.run_id is not None:
+                        yield json.dumps({
+                            "requestReceipt": receipt.to_public_dict(),
+                        })
+                        binding_receipt_emitted = True
                 yield json.dumps(composed_chunk)
         except UnsupportedCallerToolContractError as error:
             logger.info("[ai/chat/stream] rejected request contract: %s", error)

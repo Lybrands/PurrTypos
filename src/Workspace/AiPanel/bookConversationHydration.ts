@@ -199,6 +199,7 @@ async function hydrateTurn(
   const model = loaded.run.provenance.modelName || row.model || ''
   const seed = {
     turnId: `book-conversation:${row.id}:run:${runId}`,
+    rootRunId: loaded.run.runId,
     sessionId: row.session_id,
     userContent: row.prompt,
     model,
