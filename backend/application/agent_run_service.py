@@ -16,11 +16,16 @@ from purra.contracts import (
     MessageRole,
     RunLineage,
     RunProvenance,
+    RunStatus,
     ToolExecutionMode,
 )
 from purra.events import AgentEvent
 from purra.json_values import thaw_json_mapping
-from purra.output import AgentOutputEvent, OutputEventKind
+from purra.output import (
+    AgentOutputEvent,
+    OutputEventKind,
+    ResponseTransactionMode,
+)
 from purra.api import AgentCoreRunOptions
 from purra.ports import CancellationSignal, ResponseValidator
 from application.agent_composition import AgentComposition
@@ -42,6 +47,13 @@ class AgentRunService:
 
     def __init__(self, composition: AgentComposition) -> None:
         self._composition = composition
+
+    async def read_validated_result(self, run_id: str) -> str:
+        """Read the private canonical result without replaying execution."""
+
+        return await self._composition.output_repository.load_validated_result(
+            run_id
+        )
 
     async def run_host_child(
         self,
@@ -331,6 +343,17 @@ class AgentRunService:
                         ))
                 yield update
             result = await handle.wait()
+            if (
+                result.status is RunStatus.DONE
+                and options.resolved_response_transaction_policy.mode
+                is ResponseTransactionMode.VALIDATED_RESULT
+            ):
+                result = replace(
+                    result,
+                    validated_result=await self.read_validated_result(
+                        result.run_id
+                    ),
+                )
             if run_binding_lifecycle is not None and lineage is None:
                 await run_binding_lifecycle.on_run_finished(result)
             terminal = True
@@ -378,14 +401,18 @@ class _HostChildCancellationSignal:
             return await self._local.wait()
         local = asyncio.create_task(self._local.wait())
         upstream = asyncio.create_task(self._upstream.wait())
-        done, pending = await asyncio.wait(
-            (local, upstream),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        return any(bool(task.result()) for task in done)
+        waiters = (local, upstream)
+        try:
+            done, _pending = await asyncio.wait(
+                waiters,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return any(bool(task.result()) for task in done)
+        finally:
+            for task in waiters:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
 
 
 def _track_core_until_terminal(composition, core, handle) -> None:

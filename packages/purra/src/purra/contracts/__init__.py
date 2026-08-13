@@ -1794,6 +1794,7 @@ class AgentRunResult:
     final_response: str = ""
     error: str | None = None
     model: str | None = None
+    validated_result: str | None = None
 
     def __post_init__(self) -> None:
         run_id = required_text(self.run_id, "agent run result run id")
@@ -1805,6 +1806,15 @@ class AgentRunResult:
         object.__setattr__(self, "final_response", str(self.final_response or ""))
         object.__setattr__(self, "error", _optional_text(self.error))
         object.__setattr__(self, "model", _optional_text(self.model))
+        object.__setattr__(
+            self,
+            "validated_result",
+            (
+                None
+                if self.validated_result is None
+                else str(self.validated_result)
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
