@@ -248,10 +248,6 @@ async def _owned_work_and_task_ids(db, owned_run_ids, projects, books):
 
     task_clauses: list[str] = []
     task_params: list[object] = []
-    if work_ids:
-        marks = _marks(work_ids)
-        task_clauses.append(f"work_item_id IN ({marks})")
-        task_params.extend(work_ids)
     if projects:
         marks = _marks(projects)
         task_clauses.append(

@@ -240,3 +240,38 @@ async def test_project_delete_preserves_cross_owner_work_linked_to_its_run(
         "SELECT relation FROM ai_agent_work_item_runs "
         "WHERE work_item_id = 'work-keep' AND run_id = 'run-delete'"
     ) == {"relation": relation}
+
+
+async def test_project_delete_preserves_cross_owner_task_on_owned_work(
+    owner_db,
+):
+    for project_id in ("project-delete-task", "project-keep-task"):
+        await owner_db.execute(
+            "INSERT INTO screenplay_projects "
+            "(id, title, source_kind, source_snapshot_json) "
+            "VALUES (?, ?, 'original', '{}')",
+            [project_id, project_id],
+        )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, status) VALUES "
+        "('work-delete-task', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'project-delete-task', 'completed')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES ('task-keep-cross-owner', "
+        "'work-delete-task', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'project-keep-task', 'run-cross-owner', 'completed', 1)"
+    )
+
+    assert await delete_screenplay_project_data(
+        owner_db,
+        "project-delete-task",
+    ) is True
+
+    assert await owner_db.fetch_one(
+        "SELECT owner_id FROM ai_agent_long_tasks "
+        "WHERE id = 'task-keep-cross-owner'"
+    ) == {"owner_id": "project-keep-task"}

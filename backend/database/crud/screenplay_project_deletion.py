@@ -224,8 +224,9 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
     ) if session_ids else []
     conversation_ids = [int(row["id"]) for row in conversation_rows]
     direct_clauses = [
-        "(binding_namespace IN ('screenplay.agent.turn', "
-        "'screenplay.agent.task', 'screenplay.operation') "
+        "(session_id IS NULL AND binding_namespace IN ('screenplay.agent.turn', "
+        "'screenplay.agent.turn.response', 'screenplay.agent.task', "
+        "'screenplay.operation') "
         "AND binding_aggregate_id = ?)"
     ]
     direct_params: list[object] = [project_id]
@@ -254,7 +255,7 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
     operation_ids = [str(row["id"]) for row in operation_rows]
     turn_ids = [str(row["id"]) for row in turn_rows]
     task_rows = await db.fetch_all(
-        "SELECT id, work_item_id FROM ai_agent_long_tasks "
+        "SELECT id FROM ai_agent_long_tasks "
         "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
         [project_id],
     )
@@ -264,10 +265,7 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
         [project_id],
     )
-    work_ids = sorted({
-        *(str(row["work_item_id"]) for row in task_rows),
-        *(str(row["id"]) for row in work_rows),
-    })
+    work_ids = [str(row["id"]) for row in work_rows]
 
     if turn_ids:
         marks = ",".join("?" for _ in turn_ids)
