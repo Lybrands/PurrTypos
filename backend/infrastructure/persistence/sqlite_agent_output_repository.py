@@ -513,7 +513,10 @@ class SqliteAgentOutputRepository:
             for row in rows
         )
         run = await self._db.fetch_one(
-            "SELECT * FROM ai_agent_runs WHERE id = ?",
+            "SELECT r.*, s.chapter_id AS authoritative_chapter_id "
+            "FROM ai_agent_runs AS r "
+            "LEFT JOIN ai_sessions AS s ON s.id = r.session_id "
+            "WHERE r.id = ?",
             [spec.run_id],
         )
         if run is None:
@@ -528,15 +531,29 @@ class SqliteAgentOutputRepository:
         if run.get("session_id") is None or not content:
             return
         if run.get("conversation_id") is not None:
-            raise ContractViolationError(
-                "final output stream already has a conversation projection"
+            # A running proposal resolution can create a server-owned shell.
+            # Canonical output completes that same row without touching the
+            # product overlay stored in agent_process.
+            await self._db.execute(
+                "UPDATE ai_conversations SET chapter_id = ?, prompt = ?, "
+                "response = ?, model = ? WHERE id = ? AND session_id = ?",
+                [
+                    run.get("authoritative_chapter_id"),
+                    str(run.get("prompt") or ""),
+                    content,
+                    run.get("model_name"),
+                    int(run["conversation_id"]),
+                    int(run["session_id"]),
+                ],
             )
+            return
         conversation_id = await self._db.execute_and_get_id(
             "INSERT INTO ai_conversations "
             "(session_id, chapter_id, prompt, response, model) "
-            "VALUES (?, NULL, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?)",
             [
                 int(run["session_id"]),
+                run.get("authoritative_chapter_id"),
                 str(run.get("prompt") or ""),
                 content,
                 run.get("model_name"),

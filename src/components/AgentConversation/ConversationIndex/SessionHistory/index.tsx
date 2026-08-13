@@ -61,6 +61,8 @@ export default function SessionHistory({
   const [search, setSearch] = React.useState('')
   const history = controller.conversation.history
   const sessions = history?.sessions ?? []
+  const deletingSessionIds = new Set(history?.deletingSessionIds ?? [])
+  const deleteDisabledSessionIds = new Set(history?.deleteDisabledSessionIds ?? [])
 
   const handleOpenChange = React.useCallback((open: boolean) => {
     if (disabled) return
@@ -72,9 +74,10 @@ export default function SessionHistory({
   }, [controller.actions, disabled])
 
   const handleOpen = React.useCallback((id: AgentSessionId) => {
+    if (deletingSessionIds.has(id)) return
     void controller.actions.openHistorySession?.(id)
     setPopoverOpen(false)
-  }, [controller.actions])
+  }, [controller.actions, deletingSessionIds])
 
   const handleDelete = React.useCallback((
     id: AgentSessionId,
@@ -125,17 +128,23 @@ export default function SessionHistory({
               <div className="history-group-label">{group}</div>
               <PurrList
                 dataSource={items}
-                renderItem={(session) => (
+                renderItem={(session) => {
+                  const deleting = deletingSessionIds.has(session.id)
+                  const deleteDisabled = deleting
+                    || deleteDisabledSessionIds.has(session.id)
+                  return (
                   <PurrList.Item
-                    className={`history-item${controller.conversation.activeSessionId === session.id ? ' active' : ''}`}
+                    className={`history-item${controller.conversation.activeSessionId === session.id ? ' active' : ''}${deleting ? ' is-deleting' : ''}`}
                     actions={controller.actions.deleteSession ? [
-                      <PurrTooltip title="删除" key="delete">
+                      <PurrTooltip title={deleteDisabled ? '当前对话有未完成任务，暂不能删除' : '删除'} key="delete">
                         <PurrButton
                           type="text"
                           size="small"
                           icon={<DeleteIcon />}
                           className="history-delete-btn"
                           onClick={(event) => handleDelete(session.id, event)}
+                          disabled={deleteDisabled}
+                          loading={deleting}
                           aria-label={`删除对话：${session.title}`}
                         />
                       </PurrTooltip>,
@@ -146,11 +155,13 @@ export default function SessionHistory({
                       className="history-item-open"
                       aria-current={controller.conversation.activeSessionId === session.id ? 'page' : undefined}
                       onClick={() => handleOpen(session.id)}
+                      disabled={deleting}
                     >
                       <span className="history-item-title">{session.title}</span>
                     </button>
                   </PurrList.Item>
-                )}
+                  )
+                }}
               />
             </div>
           ))}

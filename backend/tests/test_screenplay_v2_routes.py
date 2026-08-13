@@ -453,6 +453,21 @@ async def test_native_project_delete_is_cas_guarded_and_replay_safe(
         idempotency_key="create-delete-project",
     )
     project_id = created["data"]["project"]["id"]
+    session = await ensure_current_screenplay_v2_session(project_id)
+    session_id = int(session["data"]["id"])
+    conversation_id = await temp_db.execute_and_get_id(
+        "INSERT INTO ai_conversations "
+        "(session_id, prompt, response, client_turn_id) "
+        "VALUES (?, '本地问题', '本地回答', 'screenplay-local-turn')",
+        [session_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_local_conversation_turn_receipts "
+        "(session_id, client_turn_id, payload_digest, status, conversation_id) "
+        "VALUES (?, 'screenplay-local-turn', 'sha256:screenplay', "
+        "'persisted', ?)",
+        [session_id, conversation_id],
+    )
     request = DeleteScreenplayV2ProjectRequest(expectedProjectRevision=1)
 
     deleted = await delete_screenplay_v2_project(
@@ -464,6 +479,11 @@ async def test_native_project_delete_is_cas_guarded_and_replay_safe(
     assert await temp_db.fetch_one(
         "SELECT id FROM screenplay_projects WHERE id = ?",
         [project_id],
+    ) is None
+    assert await temp_db.fetch_one(
+        "SELECT session_id FROM ai_local_conversation_turn_receipts "
+        "WHERE session_id = ?",
+        [session_id],
     ) is None
     assert await temp_db.fetch_one(
         "SELECT command_type, project_id FROM screenplay_command_receipts "

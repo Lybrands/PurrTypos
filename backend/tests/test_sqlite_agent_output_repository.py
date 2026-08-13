@@ -41,6 +41,10 @@ def _repository_types():
 async def output_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
     await db.init()
+    await db.execute(
+        "INSERT INTO ai_sessions (id, book_id, chapter_id) "
+        "VALUES (7, 'book-1', 'chapter-7')"
+    )
     runs = SqliteRunRepository(db)
     run_id = await runs.create(
         RunCreateParams(session_id=7, prompt="审阅当前正文", mode="agent")
@@ -288,16 +292,56 @@ async def test_commit_final_stream_projects_one_conversation_answer_atomically(
         [run_id],
     )
     conversation = await db.fetch_one(
-        "SELECT prompt, response FROM ai_conversations WHERE id = ?",
+        "SELECT chapter_id, prompt, response FROM ai_conversations WHERE id = ?",
         [run["conversation_id"]],
     )
 
     assert committed.payload["finishReason"] == "stop"
     assert run["final_response"] == "已完成审阅。"
     assert conversation == {
+        "chapter_id": "chapter-7",
         "prompt": "审阅当前正文",
         "response": "已完成审阅。",
     }
+
+
+@pytest.mark.asyncio
+async def test_commit_final_stream_completes_existing_resolution_shell(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    proposal_id = "setting-proposal:v1:mid-run"
+    shell_id = await db.execute_and_get_id(
+        "INSERT INTO ai_conversations "
+        "(session_id, chapter_id, prompt, response, model, agent_process) "
+        "VALUES (7, 'wrong-chapter', 'stale', '', NULL, ?)",
+        [
+            '{"settingDiff":{"resolutions":{"'
+            + proposal_id
+            + '":{"status":"rejected"}}}}'
+        ],
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET conversation_id = ? WHERE id = ?",
+        [shell_id, run_id],
+    )
+    repository = _repository(db)
+    await repository.open_stream(_stream(run_id))
+    await repository.append_event(
+        _delta(run_id, source_event_key="provider:shell:1", text="服务端终稿")
+    )
+
+    await repository.commit_stream("output-1", ModelFinishReason.STOP)
+
+    projected = await db.fetch_one(
+        "SELECT chapter_id, prompt, response, agent_process "
+        "FROM ai_conversations WHERE id = ?",
+        [shell_id],
+    )
+    assert projected["chapter_id"] == "chapter-7"
+    assert projected["prompt"] == "审阅当前正文"
+    assert projected["response"] == "服务端终稿"
+    assert proposal_id in projected["agent_process"]
 
 
 @pytest.mark.asyncio

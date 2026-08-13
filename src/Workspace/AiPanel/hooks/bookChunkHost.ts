@@ -22,7 +22,7 @@ import {
 } from './bookChunkSideEffects'
 import { handleProposedSettingDiff } from './bookSettingDiff'
 import type { BookSettingDiffAttachmentHandler } from './bookSettingDiff'
-import { associateBookAssistantAttachmentIdentities } from '../bookAssistantAttachments'
+import type { BookSettingDiffAttachmentOwner } from './bookSettingDiff'
 
 export interface BookChunkHostDependencies {
   sessionId: number
@@ -31,6 +31,7 @@ export interface BookChunkHostDependencies {
   needsTitle: boolean
   modelConfig: AiModelConfig
   apiModelName: string
+  expectedConversationIds: number[]
   readMessages(): AgentConversationMessage[]
   replaceMessages(messages: AgentConversationMessage[]): void
   scheduleCommit(
@@ -49,6 +50,20 @@ export interface BookChunkHostDependencies {
   isSessionRunning(): boolean
   submitQueued(submission: QueuedChatSubmission): void
   onAssistantAttachment?: BookSettingDiffAttachmentHandler
+  attachmentOwner?: BookSettingDiffAttachmentOwner
+  associateAssistantIdentities?(
+    source: AgentConversationMessage,
+    target: AgentConversationMessage,
+  ): void
+  productAgentProcess?(
+    message: AgentConversationMessage,
+  ): Record<string, unknown> | undefined
+  afterSettled?(outcome: AgentRunOutcome, snapshot: AgentTerminalSnapshot): void
+  onPersistenceBlocked?(): void
+  onPersistenceConflict?(): void
+  onPersistenceStarted?(): void
+  onPersistenceAborted?(): void
+  shouldRetryPersistence?(): boolean
   persistConversation?: boolean
 }
 
@@ -66,27 +81,91 @@ export function createBookChunkHost(
       chunk,
       host,
       dependencies.onAssistantAttachment,
+      dependencies.attachmentOwner,
     ),
     onSettled: (outcome, snapshot) => {
       dependencies.unsubscribe()
       dependencies.clearStream()
-      settleQueue(outcome, dependencies)
-      if (dependencies.persistConversation !== false) {
-        persistTerminalSnapshot(snapshot, dependencies)
-        maybeGenerateSessionTitle(outcome, snapshot, dependencies)
+      const finishSettlement = () => {
+        dependencies.setRunning(false)
+        settleQueue(outcome, dependencies)
+        dependencies.afterSettled?.(outcome, snapshot)
       }
+      if (dependencies.persistConversation === false) {
+        finishSettlement()
+        return
+      }
+      // The reducer has delivered the authoritative terminal, but editing or
+      // draining a queued turn before this write settles can race a history
+      // truncation against a late Conversation insert. Keep the product
+      // session busy until the durable projection either commits or fails.
+      dependencies.setRunning(true)
+      dependencies.onPersistenceStarted?.()
+      void persistTerminalSnapshotUntilConfirmed(snapshot, dependencies).then((result) => {
+        if (result === 'retry-aborted') {
+          dependencies.onPersistenceAborted?.()
+          return
+        }
+        if (result === 'rejected') {
+          dependencies.onPersistenceConflict?.()
+          dependencies.replaceQueue(
+            dependencies.getQueue().filter(
+              (submission) => submission.sessionId !== dependencies.sessionId,
+            ),
+          )
+          dependencies.setRunning(false)
+          dependencies.setActivity(getSettledSessionActivity('failed', 0))
+          dependencies.afterSettled?.('failed', snapshot)
+          return
+        }
+        maybeGenerateSessionTitle(outcome, snapshot, dependencies)
+        finishSettlement()
+      })
     },
   }
   return host
+}
+
+async function persistTerminalSnapshotUntilConfirmed(
+  snapshot: AgentTerminalSnapshot,
+  dependencies: BookChunkHostDependencies,
+): Promise<'persisted' | 'rejected' | 'retry-aborted'> {
+  let attempt = 0
+  while (dependencies.shouldRetryPersistence?.() !== false) {
+    const result = await persistTerminalSnapshot(
+      snapshot,
+      dependencies,
+      attempt === 0,
+    )
+    if (result === 'persisted' || result === 'rejected') return result
+    if (attempt === 0) dependencies.onPersistenceBlocked?.()
+    attempt += 1
+    if (dependencies.shouldRetryPersistence?.() === false) return 'retry-aborted'
+    const retryDelayMs = attempt === 1
+      ? 0
+      : Math.min(250 * (2 ** (attempt - 2)), 5_000)
+    if (retryDelayMs === 0) {
+      await Promise.resolve()
+    } else {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, retryDelayMs))
+    }
+  }
+  return 'retry-aborted'
 }
 
 function dispatchBookChunk(
   chunk: AiStreamChunk,
   host: AgentChunkHost,
   onAssistantAttachment?: BookSettingDiffAttachmentHandler,
+  attachmentOwner?: BookSettingDiffAttachmentOwner,
 ): void {
   handleProposedChapterDiff(chunk, host)
-  handleProposedSettingDiff(chunk, host, onAssistantAttachment)
+  handleProposedSettingDiff(
+    chunk,
+    host,
+    onAssistantAttachment,
+    attachmentOwner,
+  )
   handleChapterCreated(chunk, host)
   handleSettingUpdated(chunk, host)
 }
@@ -119,10 +198,11 @@ function settleQueue(
   })
 }
 
-function persistTerminalSnapshot(
+async function persistTerminalSnapshot(
   snapshot: AgentTerminalSnapshot,
   dependencies: BookChunkHostDependencies,
-): void {
+  notifyFailure = true,
+): Promise<'persisted' | 'rejected' | 'retry'> {
   const assistant = dependencies.readMessages().at(-1)
   const assistantIdentity = assistant
     ? {
@@ -130,7 +210,8 @@ function persistTerminalSnapshot(
         agentRunId: assistant.agentRunId || snapshot.agentRunId,
       }
     : undefined
-  void services.conversations.saveConversation({
+  try {
+    const result = await services.conversations.saveConversation({
     sessionId: dependencies.sessionId,
     bookId: dependencies.bookId ?? undefined,
     chapterId: dependencies.chapterId ?? null,
@@ -150,74 +231,109 @@ function persistTerminalSnapshot(
     taskPlan: snapshot.taskPlan,
     contextCompaction: snapshot.contextCompaction,
     contextBudget: snapshot.contextBudget,
-    agentProcess: assistant?.delegations?.length
-      || assistant?.subAgentActivities?.length
-      ? {
-          delegations: assistant.delegations,
-          subAgentActivities: assistant.subAgentActivities,
-        }
-      : undefined,
+    agentProcess: buildProductConversationProjection(
+      assistant,
+      assistantIdentity
+        ? dependencies.productAgentProcess?.(assistantIdentity)
+        : undefined,
+    ),
     agentRunId: snapshot.agentRunId,
-  }).then((result) => {
+    clientTurnId: assistantIdentity?.clientTurnId,
+    expectedConversationIds: dependencies.expectedConversationIds,
+    })
     if (result?.success) {
       const conversationId = result.data?.id
       if (typeof conversationId === 'number') {
         if (assistantIdentity) {
-          associateBookAssistantAttachmentIdentities(assistantIdentity, {
+          const persistedAssistant = {
             ...assistantIdentity,
             conversationId,
-          })
-        }
-        if (dependencies.isVisible()) {
-          attachConversationId(snapshot, conversationId, dependencies)
+          }
+          dependencies.associateAssistantIdentities?.(
+            assistantIdentity,
+            persistedAssistant,
+          )
+          dependencies.replaceMessages(
+            attachConversationIdentity(
+              dependencies.readMessages(),
+              persistedAssistant,
+              snapshot,
+            ),
+          )
         }
       }
-      return
+      return 'persisted'
     }
-    warnPersistenceFailure(result, dependencies.appMessage)
-  }).catch((error: unknown) => {
-    warnPersistenceFailure(
-      { error: error instanceof Error ? error.message : String(error) },
-      dependencies.appMessage,
-    )
-  })
+    if (notifyFailure) warnPersistenceFailure(result, dependencies.appMessage)
+    return typeof result?.httpStatus === 'number'
+      && result.httpStatus >= 400
+      && result.httpStatus < 500
+      ? 'rejected'
+      : 'retry'
+  } catch (error: unknown) {
+    if (notifyFailure) {
+      warnPersistenceFailure(
+        { error: error instanceof Error ? error.message : String(error) },
+        dependencies.appMessage,
+      )
+    }
+    return 'retry'
+  }
 }
 
-function attachConversationId(
-  snapshot: AgentTerminalSnapshot,
-  conversationId: number,
-  dependencies: BookChunkHostDependencies,
-): void {
-  dependencies.scheduleCommit((messages) => {
-    const index = findConversationMessageIndex(
-      messages,
-      snapshot.userText,
-      snapshot.response,
-    )
-    if (index < 0) return messages
-    const next = [...messages]
-    next[index] = { ...next[index], conversationId }
-    return next
-  })
+function buildProductConversationProjection(
+  assistant: AgentConversationMessage | undefined,
+  attachmentProjection?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (!assistant) return undefined
+  const projection = {
+    delegations: assistant.delegations,
+    subAgentActivities: assistant.subAgentActivities,
+    error: assistant.error,
+    isError: assistant.isError,
+    termination: assistant.termination,
+    errorReport: assistant.errorReport,
+    toolApprovals: assistant.toolApprovals,
+  }
+  const combined = { ...projection, ...attachmentProjection }
+  return Object.values(combined).some((value) => value !== undefined)
+    ? combined
+    : undefined
 }
 
-function findConversationMessageIndex(
+function attachConversationIdentity(
   messages: AgentConversationMessage[],
-  userText: string,
-  assistantContent: string,
-): number {
+  persisted: AgentConversationMessage,
+  snapshot: AgentTerminalSnapshot,
+): AgentConversationMessage[] {
   for (let index = messages.length - 1; index >= 1; index -= 1) {
     const assistant = messages[index]
     const user = messages[index - 1]
     if (
       assistant.role === 'assistant'
       && !assistant.conversationId
-      && assistant.content === assistantContent
-      && user?.role === 'user'
-      && user.content === userText
-    ) return index
+      && (
+        (persisted.clientTurnId
+          && assistant.clientTurnId === persisted.clientTurnId)
+        || (persisted.agentRunId
+          && assistant.agentRunId === persisted.agentRunId)
+        || (
+          assistant.content === snapshot.response
+          && user?.role === 'user'
+          && user.content === snapshot.userText
+        )
+      )
+    ) {
+      const next = [...messages]
+      next[index] = {
+        ...assistant,
+        conversationId: persisted.conversationId,
+        agentRunId: assistant.agentRunId || persisted.agentRunId,
+      }
+      return next
+    }
   }
-  return -1
+  return messages
 }
 
 function warnPersistenceFailure(

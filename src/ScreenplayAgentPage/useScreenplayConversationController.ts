@@ -75,6 +75,7 @@ export function createScreenplayConversationController(
       sessionLoading: bindings.initializing,
     }),
     conversation: {
+      identity: `screenplay-session:${String(bindings.activeSessionId ?? 'none')}`,
       sessions: bindings.sessions.map((session) => (
         toAgentConversationSession(session, session.create_time)
       )),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 
@@ -225,12 +226,34 @@ class AgentRunService:
             if callable(core_for_request)
             else composition.create_core(api_key, **create_core_kwargs)
         )
-        handle = await core.submit(request, options=options)
-        core_stream = handle.subscribe(after_sequence=0)
-        if run_binding_lifecycle is not None:
-            await run_binding_lifecycle.on_run_started(handle.run_id)
+        try:
+            if run_binding_lifecycle is not None:
+                await run_binding_lifecycle.before_submit()
+        except BaseException:
+            release_core = getattr(composition, "release_core", None)
+            if callable(release_core):
+                release_core(core)
+            raise
+        try:
+            handle = await core.submit(request, options=options)
+        except BaseException:
+            # submit() may already have spawned a shielded supervisor task.
+            # Closing the Core is the only safe ownership conclusion; merely
+            # discarding it can orphan execution during request cancellation.
+            await core.close()
+            release_core = getattr(composition, "release_core", None)
+            if callable(release_core):
+                release_core(core)
+            raise
+        try:
+            core_stream = handle.subscribe(after_sequence=0)
+        except BaseException:
+            _track_core_until_terminal(composition, core, handle)
+            raise
         terminal = False
         try:
+            if run_binding_lifecycle is not None:
+                await run_binding_lifecycle.on_run_started(handle.run_id)
             async for update in core_stream:
                 if (
                     isinstance(update, AgentOutputEvent)
@@ -258,6 +281,36 @@ class AgentRunService:
                 release_core = getattr(composition, "release_core", None)
                 if callable(release_core):
                     release_core(core)
+            else:
+                # The durable Run may continue after a bind/SSE failure. Keep
+                # the Core owned until its handle actually settles; shutdown
+                # can still cancel this tracked waiter and close the Core.
+                _track_core_until_terminal(composition, core, handle)
+
+
+def _track_core_until_terminal(composition, core, handle) -> None:
+    async def _wait_and_release() -> None:
+        try:
+            await handle.wait()
+        except asyncio.CancelledError:
+            # Composition shutdown gathers background waiters before closing
+            # active Cores. Keep ownership registered so that second phase can
+            # close the underlying durable Run task.
+            raise
+        except BaseException:
+            release_core = getattr(composition, "release_core", None)
+            if callable(release_core):
+                release_core(core)
+            raise
+        else:
+            release_core = getattr(composition, "release_core", None)
+            if callable(release_core):
+                release_core(core)
+
+    task = asyncio.create_task(_wait_and_release())
+    track_background = getattr(composition, "track_background_run", None)
+    if callable(track_background):
+        track_background(task)
 
 
 class _HostBoundContextProvider:

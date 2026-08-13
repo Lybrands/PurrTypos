@@ -110,6 +110,7 @@ import {
   type ScreenplayConversationState,
   type ScreenplayTurnArtifact,
 } from './conversationState'
+import { createScreenplayOperationCommandLatch } from './screenplayOperationCommandLatch'
 import RevisionLibraryModal from './RevisionLibraryModal'
 import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
 import {
@@ -644,6 +645,7 @@ export default function ScreenplayAgentPage({
   const [agentSubmitting, setAgentSubmitting] = React.useState(false)
   const [agentResumeSubmitting, setAgentResumeSubmitting] = React.useState(false)
   const [agentCancelSubmitting, setAgentCancelSubmitting] = React.useState(false)
+  const [agentCancelHeld, setAgentCancelHeld] = React.useState(false)
   const [agentConversationState, setAgentConversationState] = React.useState<
     ScreenplayConversationState | null
   >(null)
@@ -671,6 +673,9 @@ export default function ScreenplayAgentPage({
   const activeAgentSessionRef = React.useRef<number | null>(null)
   const agentConversationStateRef = React.useRef<ScreenplayConversationState | null>(null)
   const agentChunkReplayRef = React.useRef(new AgentChunkReplay())
+  const operationCommandLatchRef = React.useRef(
+    createScreenplayOperationCommandLatch(),
+  )
   const agentChunkCursorRef = React.useRef(0)
   const agentChunkRenderPendingRef = React.useRef(false)
   const agentChunkReplayCaughtUpRef = React.useRef(true)
@@ -777,12 +782,25 @@ export default function ScreenplayAgentPage({
     && !latestConversationOperation.cancelReceiptId
       ? latestConversationOperation
       : null
+
+  React.useEffect(() => {
+    for (const operation of agentConversationState?.operations ?? []) {
+      operationCommandLatchRef.current.observeOperation(operation)
+    }
+    setAgentCancelHeld(operationCommandLatchRef.current.hasPendingCancel())
+  }, [agentConversationState?.operations])
+
   const agentRunning = activeConversationTurn != null
     || activeConversationOperation != null
 
   React.useEffect(() => {
     activeAgentSessionRef.current = agentSessionId
   }, [agentSessionId])
+
+  React.useEffect(() => {
+    operationCommandLatchRef.current.clear()
+    setAgentCancelHeld(false)
+  }, [agentSessionId, openedProject?.id])
 
   React.useEffect(() => {
     agentConversationStateRef.current = agentConversationState
@@ -2027,20 +2045,37 @@ export default function ScreenplayAgentPage({
   }, [message])
 
   const stopAgent = React.useCallback(async (): Promise<boolean> => {
+    const targetOperation = cancellableConversationOperation
+      || cancelPendingConversationOperation
     const targetTurnId = cancellableConversationOperation?.turnId
       || cancelPendingConversationOperation?.turnId
       || activeConversationTurn?.id
     if (!targetTurnId || !openedProject || agentSessionId == null) return true
     if (agentCancelSubmitting || agentResumeSubmitting) return false
+    const commandToken = operationCommandLatchRef.current.tryAcquire(
+      targetOperation?.id ?? `turn:${targetTurnId}`,
+      targetOperation?.revision ?? 0,
+      'cancel',
+    )
+    if (!commandToken) return false
     setAgentCancelSubmitting(true)
+    let cancelAccepted = false
     try {
       if (!cancelPendingConversationOperation) {
         await conversationClient.cancel(
           createScreenplayCommandId('cancel-turn'),
           targetTurnId,
         )
+        cancelAccepted = true
+        if (targetOperation) {
+          operationCommandLatchRef.current.holdUntilAuthoritative(commandToken)
+          setAgentCancelHeld(true)
+        }
       }
       const next = await conversationClient.load(openedProject.id, agentSessionId)
+      for (const operation of next.operations) {
+        operationCommandLatchRef.current.observeOperation(operation)
+      }
       if (activeAgentSessionRef.current !== agentSessionId) return true
       agentConversationStateRef.current = next
       setAgentConversationState(next)
@@ -2048,9 +2083,10 @@ export default function ScreenplayAgentPage({
       return true
     } catch (error) {
       message.error(error instanceof Error ? error.message : '终止剧本对话失败')
-      return false
+      return cancelAccepted
     } finally {
       setAgentCancelSubmitting(false)
+      operationCommandLatchRef.current.release(commandToken)
     }
   }, [
     activeConversationTurn,
@@ -2071,6 +2107,9 @@ export default function ScreenplayAgentPage({
       || !openedProject
       || agentSessionId == null
       || agentResumeSubmitting
+      || agentCancelSubmitting
+      || agentCancelHeld
+      || cancelPendingConversationOperation
     ) return
     const model = modelConfigs.find((item) => item.id === selectedModelId)
     if (!model?.apiKey?.trim()) {
@@ -2078,6 +2117,12 @@ export default function ScreenplayAgentPage({
       onOpenSettings()
       return
     }
+    const commandToken = operationCommandLatchRef.current.tryAcquire(
+      pausedConversationOperation.id,
+      pausedConversationOperation.revision,
+      'resume',
+    )
+    if (!commandToken) return
     setAgentResumeSubmitting(true)
     try {
       await conversationClient.resume(
@@ -2094,10 +2139,14 @@ export default function ScreenplayAgentPage({
       message.error(error instanceof Error ? error.message : '继续执行剧本任务失败')
     } finally {
       setAgentResumeSubmitting(false)
+      operationCommandLatchRef.current.release(commandToken)
     }
   }, [
+    agentCancelSubmitting,
+    agentCancelHeld,
     agentResumeSubmitting,
     agentSessionId,
+    cancelPendingConversationOperation,
     conversationClient,
     message,
     modelConfigs,
@@ -2817,7 +2866,11 @@ export default function ScreenplayAgentPage({
     setPrompt: setAgentPrompt,
     initializing: projectLoading || agentSessionLoading || agentChunkHydrating,
     running: agentRunning || agentSubmitting,
-    stopping: Boolean(cancelPendingConversationOperation || agentCancelSubmitting),
+    stopping: Boolean(
+      cancelPendingConversationOperation
+      || agentCancelSubmitting
+      || agentCancelHeld
+    ),
     paused: Boolean(pausedConversationOperation),
     resuming: agentResumeSubmitting,
     attachmentsVersion: agentArtifactVersion,
@@ -2833,6 +2886,7 @@ export default function ScreenplayAgentPage({
     activeQueuedSubmissions,
     agentArtifactVersion,
     agentCancelSubmitting,
+    agentCancelHeld,
     agentChunkHydrating,
     agentMessages,
     agentPrompt,

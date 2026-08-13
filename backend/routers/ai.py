@@ -8,13 +8,14 @@ import logging
 from typing import Any, AsyncIterator
 
 import anyio
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from purra.contracts import AgentRunResult, RunProvenance
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
+    validate_writing_request_contract,
 )
 from schemas.ai import (
     CaptureAiErrorReportRequest,
@@ -48,6 +49,100 @@ _ERROR_REPORT_DIAGNOSTIC_KEYS = frozenset({
 
 class _AgentClientDisconnected(Exception):
     """A guarded ASGI send observed the client disconnect."""
+
+
+def _writing_chat_request_digest(body: ChatStreamRequest) -> str:
+    from infrastructure.persistence.writing_chat_request_store import (
+        writing_chat_request_digest,
+    )
+
+    payload = body.model_dump(mode="json")
+    payload["baseURL"] = normalize_base_url(body.baseURL)
+    return writing_chat_request_digest(payload)
+
+
+def _validate_durable_writing_request(body: ChatStreamRequest) -> None:
+    if body.chatAgentMode != "agent" or body.sessionId is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Durable Writing receipt requires an Agent session request",
+        )
+    if not str(body.apiKey or "").strip():
+        raise HTTPException(status_code=400, detail="API Key 为空")
+    opts = body.options or {}
+    model = str(opts.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="无效的模型参数")
+    temperature = opts.get("temperature")
+    rest = {k: v for k, v in opts.items() if k not in ("model", "temperature")}
+    request_params = build_chat_provider_options(
+        model,
+        rest,
+        normalize_base_url(body.baseURL),
+        temperature,
+    )
+    try:
+        validate_writing_request_contract(body, request_params)
+    except (UnsupportedCallerToolContractError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.put("/ai/chat/requests/{request_id}")
+async def reserve_writing_chat_request(
+    request_id: str,
+    body: ChatStreamRequest,
+):
+    from dependencies import get_db
+    from infrastructure.persistence.writing_chat_request_store import (
+        SqliteWritingChatRequestStore,
+        WritingChatRequestConflictError,
+    )
+
+    normalized = str(request_id or "").strip()
+    if not normalized or normalized != str(body.streamId or "").strip():
+        raise HTTPException(status_code=400, detail="requestId must match streamId")
+    _validate_durable_writing_request(body)
+    try:
+        receipt = await SqliteWritingChatRequestStore(get_db()).reserve(
+            request_id=normalized,
+            session_id=int(body.sessionId),
+            request_digest=_writing_chat_request_digest(body),
+            book_id=body.bookId,
+            chapter_id=body.chapterId,
+            expected_conversation_ids=body.expectedConversationIds,
+            expected_run_ids=body.expectedRunIds,
+        )
+    except WritingChatRequestConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"success": True, "data": receipt.to_public_dict()}
+
+
+@router.post("/ai/chat/requests/{request_id}/cancel")
+async def cancel_writing_chat_request(request_id: str):
+    from dependencies import get_db
+    from infrastructure.persistence.run_execution_store import now_ms
+    from infrastructure.persistence.writing_chat_request_store import (
+        SqliteWritingChatRequestStore,
+    )
+
+    store = SqliteWritingChatRequestStore(get_db())
+    receipt, application_needed = await store.request_cancel_and_claim(
+        request_id,
+        timestamp_ms=now_ms(),
+    )
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Writing chat request not found")
+    if (
+        receipt.run_id
+        and application_needed
+    ):
+        # The receipt supplies durable pre-Run identity; once associated, the
+        # existing Run cancellation plane remains the execution authority.
+        await cancel_agent_run(receipt.run_id)
+        receipt = await store.mark_cancel_applied(request_id, receipt.run_id)
+    return {"success": True, "data": receipt.to_public_dict()}
 
 
 class _AgentEventSourceResponse(EventSourceResponse):
@@ -508,6 +603,7 @@ async def create_agent_delegation(
 @router.get("/ai/session-runs/latest")
 async def get_latest_session_agent_run(
     session_id: int = Query(alias="sessionId", ge=1),
+    request_id: str | None = Query(default=None, alias="requestId", max_length=200),
 ):
     """Return the latest session-owned Run for page recovery."""
 
@@ -516,22 +612,67 @@ async def get_latest_session_agent_run(
     from dependencies import get_db
     from infrastructure.persistence.run_store import (
         get_latest_run_for_session,
+        get_run_for_session_request,
+    )
+    from application.writing_proposal_read_model import (
+        SqliteWritingProposalReadModel,
+    )
+    from infrastructure.persistence.writing_chat_request_store import (
+        SqliteWritingChatRequestStore,
     )
 
     composition = get_agent_composition()
-    run = await get_latest_run_for_session(get_db(), session_id)
+    normalized_request_id = str(request_id or "").strip()
+    receipt_store = SqliteWritingChatRequestStore(get_db())
+    receipt = (
+        await receipt_store.get(normalized_request_id)
+        if normalized_request_id
+        else await receipt_store.latest_active_for_session(session_id)
+    )
+    if receipt is not None and receipt.session_id != session_id:
+        receipt = None
+    correlated_request_id = normalized_request_id or (
+        receipt.request_id if receipt is not None else ""
+    )
+    run = (
+        await get_run_for_session_request(
+            get_db(), session_id, correlated_request_id,
+        )
+        if correlated_request_id
+        else await get_latest_run_for_session(get_db(), session_id)
+    )
+    if run is not None and receipt is not None and receipt.run_id is None:
+        receipt = await receipt_store.bind_run(
+            receipt.request_id,
+            str(run["id"]),
+        )
     if run is None:
-        return {"success": True, "data": None}
+        return {
+            "success": True,
+            "data": (
+                {
+                    "request": receipt.to_public_dict(),
+                    "prompt": "",
+                    "snapshot": None,
+                }
+                if receipt is not None else None
+            ),
+        }
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
         role_registry=getattr(composition, "agent_role_registry", None),
+        product_event_query=SqliteWritingProposalReadModel(get_db()),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
         return {"success": True, "data": None}
     return {
         "success": True,
         "data": {
+            **(
+                {"request": receipt.to_public_dict()}
+                if receipt is not None else {}
+            ),
             "prompt": str(run.get("prompt") or ""),
             "snapshot": snapshot,
         },
@@ -548,12 +689,17 @@ async def get_agent_run_snapshot(
 
     from application.agent_run_queries import AgentRunQueryService
     from application.agent_composition import get_agent_composition
+    from application.writing_proposal_read_model import (
+        SqliteWritingProposalReadModel,
+    )
+    from dependencies import get_db
 
     composition = get_agent_composition()
     snapshot = await AgentRunQueryService(
         composition.checkpoint_store,
         composition.output_repository,
         role_registry=getattr(composition, "agent_role_registry", None),
+        product_event_query=SqliteWritingProposalReadModel(get_db()),
     ).get_snapshot(
         run_id,
         after_event_id=after,
@@ -735,6 +881,7 @@ async def _stream_composed_agent(
     provider_options: dict[str, Any],
     signal: asyncio.Event,
     provenance: RunProvenance | None = None,
+    run_binding_lifecycle=None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run independently and map live updates while an SSE peer is attached."""
 
@@ -749,6 +896,7 @@ async def _stream_composed_agent(
         provider_options=provider_options,
         signal=signal,
         provenance=provenance,
+        run_binding_lifecycle=run_binding_lifecycle,
     )
     model = str(provider_options.get("model") or "")
     queue: asyncio.Queue[dict[str, Any] | Exception | object] = asyncio.Queue()
@@ -776,6 +924,10 @@ async def _stream_composed_agent(
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if run_binding_lifecycle is not None:
+                await run_binding_lifecycle.on_start_failed(
+                    "request_start_failed",
+                )
             if subscriber_attached:
                 await queue.put(error)
             else:
@@ -807,6 +959,13 @@ async def _stream_composed_agent(
 async def chat_stream(
     body: ChatStreamRequest,
 ):
+    if body.requestReceiptVersion == 1:
+        # Enhanced requests fail closed before any legacy SSE error branch or
+        # Agent composition work. Their immutable receipt cannot be bypassed
+        # by clearing mode/session/stream/key/model on the POST replay.
+        _validate_durable_writing_request(body)
+        if not str(body.streamId or "").strip():
+            raise HTTPException(status_code=400, detail="Durable requestId is required")
     key = (body.apiKey or "").strip()
     if not key:
         async def _err_key():
@@ -829,6 +988,69 @@ async def chat_stream(
         base_url,
         temperature,
     )
+    run_binding_lifecycle = None
+    if body.chatAgentMode == "agent" and body.sessionId is not None and body.streamId:
+        from application.writing_chat_request_lifecycle import (
+            WritingChatRequestLifecycle,
+        )
+        from dependencies import get_db
+        from infrastructure.persistence.writing_chat_request_store import (
+            SqliteWritingChatRequestStore,
+            WritingChatRequestConflictError,
+        )
+
+        store = SqliteWritingChatRequestStore(get_db())
+        receipt = await store.get(body.streamId)
+        if receipt is not None:
+            try:
+                receipt, claimed = await store.claim(
+                    request_id=body.streamId,
+                    session_id=int(body.sessionId),
+                    request_digest=_writing_chat_request_digest(body),
+                    book_id=body.bookId,
+                    chapter_id=body.chapterId,
+                    expected_conversation_ids=body.expectedConversationIds,
+                    expected_run_ids=body.expectedRunIds,
+                )
+            except WritingChatRequestConflictError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            if not claimed:
+                async def _receipt_only():
+                    terminal = receipt.status in {"canceled", "rejected"}
+                    yield json.dumps({
+                        "requestReceipt": receipt.to_public_dict(),
+                        **(
+                            {
+                                "done": True,
+                                "requestResult": receipt.to_public_dict(),
+                                "finalResponseExpected": False,
+                                **(
+                                    {"aborted": True}
+                                    if receipt.status == "canceled"
+                                    else {
+                                        "error": (
+                                            receipt.rejection_code
+                                            or "Writing Agent 请求未启动"
+                                        )
+                                    }
+                                ),
+                            }
+                            if terminal else {}
+                        ),
+                    })
+                return EventSourceResponse(
+                    _receipt_only(),
+                    media_type="text/event-stream",
+                )
+            run_binding_lifecycle = WritingChatRequestLifecycle(
+                store,
+                body.streamId,
+            )
+        elif body.requestReceiptVersion == 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Writing chat request was not durably reserved",
+            )
 
     # EventSourceResponse is the sole ASGI ``receive`` owner. Transport close
     # only detaches delivery; explicit control-plane cancellation owns the Run.
@@ -845,6 +1067,7 @@ async def chat_stream(
             api_key=key,
             provider_options=request_params,
             signal=run_signal,
+            run_binding_lifecycle=run_binding_lifecycle,
         )
         try:
             async for composed_chunk in composed_stream:
@@ -858,6 +1081,35 @@ async def chat_stream(
                 ),
             })
         except Exception:
+            if run_binding_lifecycle is not None:
+                receipt = await run_binding_lifecycle.on_start_failed(
+                    "request_start_failed",
+                )
+                if receipt.run_id is None:
+                    yield json.dumps({
+                        "done": True,
+                        "requestResult": receipt.to_public_dict(),
+                        "finalResponseExpected": False,
+                        **(
+                            {"aborted": True}
+                            if receipt.status == "canceled"
+                            else {
+                                "error": (
+                                    receipt.rejection_code
+                                    or "Writing Agent 请求未启动"
+                                )
+                            }
+                        ),
+                    })
+                    return
+                # A bound Run is authoritative and may continue detached. EOF
+                # makes the renderer recover its journal; never synthesize a
+                # transport error as a business terminal.
+                logger.exception(
+                    "[ai/chat/stream] detached from bound Agent Run %s",
+                    receipt.run_id,
+                )
+                return
             logger.exception("[ai/chat/stream] composed Agent failed")
             yield json.dumps({
                 "error": "Agent 运行过程中发生异常，已安全停止；请稍后重试。",
@@ -867,11 +1119,44 @@ async def chat_stream(
                 try:
                     await composed_stream.aclose()
                 finally:
-                    transport_closed.set()
+                    if run_binding_lifecycle is None:
+                        transport_closed.set()
                     stream_cleanup_complete.set()
+
+    eager_payloads: asyncio.Queue[str | object] | None = None
+    eager_end = object()
+    if run_binding_lifecycle is not None:
+        # Claim ownership before ASGI writes response.start. If that send is
+        # the first place a dead peer is observed, the product request still
+        # has a live execution owner which will bind a Run or terminalize the
+        # receipt; it cannot remain orphaned in `starting` until restart.
+        eager_payloads = asyncio.Queue()
+
+        async def _pump_owned_request() -> None:
+            try:
+                async for payload in _event_generator():
+                    if not transport_closed.is_set():
+                        await eager_payloads.put(payload)
+            finally:
+                await eager_payloads.put(eager_end)
+
+        asyncio.create_task(_pump_owned_request())
+        await asyncio.sleep(0)
 
     async def _transport_event_generator():
         """Drain cancellation events without writing after disconnect."""
+
+        if eager_payloads is not None:
+            try:
+                while True:
+                    payload = await eager_payloads.get()
+                    if payload is eager_end:
+                        return
+                    if not transport_closed.is_set():
+                        yield payload
+            finally:
+                transport_closed.set()
+            return
 
         source = _event_generator()
         try:

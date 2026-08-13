@@ -45,7 +45,7 @@ export function reduceBookAssistantAttachment(
   if (!key) return store
   const current = store[key] ?? []
   const existingIndex = current.findIndex(
-    (entry) => entry.sessionKey === card.sessionKey,
+    (entry) => entry.proposalId === card.proposalId,
   )
   const cards = [...current]
   if (existingIndex >= 0) cards[existingIndex] = card
@@ -62,7 +62,7 @@ export function resolveBookAssistantAttachments(
     Object.entries(store).map(([key, cards]) => [
       key,
       cards.map((card) => {
-        if (card.sessionKey !== detail.sessionKey) return card
+        if (card.proposalId !== detail.proposalId) return card
         changed = true
         return { ...card, ...detail }
       }),
@@ -71,72 +71,151 @@ export function resolveBookAssistantAttachments(
   return changed ? next : store
 }
 
-let attachmentStore: BookAssistantAttachmentStore = {}
-let attachmentVersion = 0
-const attachmentListeners = new Set<() => void>()
-
-function replaceBookAssistantAttachments(
-  next: BookAssistantAttachmentStore,
-): boolean {
-  if (next === attachmentStore) return false
-  attachmentStore = next
-  attachmentVersion += 1
-  attachmentListeners.forEach((listener) => listener())
-  return true
+export interface BookAssistantAttachmentManager {
+  readonly ownerKey: string
+  getSnapshot(): BookAssistantAttachmentStore
+  getVersion(): number
+  subscribe(listener: () => void): () => void
+  add(
+    message: AgentConversationMessage,
+    card: SettingDiffCardState,
+    owner?: BookAssistantAttachmentOwner,
+  ): boolean
+  associate(
+    source: AgentConversationMessage,
+    target: AgentConversationMessage,
+  ): boolean
+  resolve(detail: SettingDiffCardState): boolean
+  evictSession(sessionId: number): boolean
+  ownerForProposal(proposalId: string): BookAssistantAttachmentOwner | undefined
+  productProjection(
+    message: AgentConversationMessage,
+  ): Record<string, unknown> | undefined
 }
 
-export function getBookAssistantAttachments(): BookAssistantAttachmentStore {
-  return attachmentStore
+export interface BookAssistantAttachmentOwner {
+  sessionId: number
+  bookId?: string
+  chapterId?: string | null
+  prompt: string
+  message: AgentConversationMessage
 }
 
-export function getBookAssistantAttachmentsVersion(): number {
-  return attachmentVersion
-}
+/** One short-lived store per Book; closed/deleted session owners are evicted. */
+export function createBookAssistantAttachmentManager(
+  ownerKey: string,
+): BookAssistantAttachmentManager {
+  let attachmentStore: BookAssistantAttachmentStore = {}
+  let attachmentVersion = 0
+  const attachmentListeners = new Set<() => void>()
+  const owners = new Map<string, BookAssistantAttachmentOwner>()
+  const evictedSessions = new Set<number>()
 
-export function subscribeBookAssistantAttachments(listener: () => void): () => void {
-  attachmentListeners.add(listener)
-  return () => attachmentListeners.delete(listener)
-}
-
-export function addBookAssistantAttachment(
-  message: AgentConversationMessage,
-  card: SettingDiffCardState,
-): boolean {
-  const keys = bookAttachmentKeys(message)
-  if (keys.length === 0) return false
-  const next = keys.reduce(
-    (store, key) => reduceBookAssistantAttachment(store, key, card),
-    attachmentStore,
-  )
-  return replaceBookAssistantAttachments(next)
-}
-
-export function associateBookAssistantAttachmentIdentities(
-  source: AgentConversationMessage,
-  target: AgentConversationMessage,
-): boolean {
-  const keys = [...new Set([
-    ...bookAttachmentKeys(source),
-    ...bookAttachmentKeys(target),
-  ])]
-  const cardsBySession = new Map<string, SettingDiffCardState>()
-  for (const key of keys) {
-    for (const card of attachmentStore[key] ?? []) {
-      cardsBySession.set(card.sessionKey, card)
-    }
+  const replace = (next: BookAssistantAttachmentStore): boolean => {
+    if (next === attachmentStore) return false
+    attachmentStore = next
+    attachmentVersion += 1
+    attachmentListeners.forEach((listener) => listener())
+    return true
   }
-  if (cardsBySession.size === 0) return false
-  const cards = [...cardsBySession.values()]
-  return replaceBookAssistantAttachments(Object.fromEntries([
-    ...Object.entries(attachmentStore),
-    ...keys.map((key) => [key, cards] as const),
-  ]))
-}
 
-export function resolveStoredBookAssistantAttachments(
-  detail: SettingDiffCardState,
-): boolean {
-  return replaceBookAssistantAttachments(
-    resolveBookAssistantAttachments(attachmentStore, detail),
-  )
+  return {
+    ownerKey,
+    getSnapshot: () => attachmentStore,
+    getVersion: () => attachmentVersion,
+    subscribe(listener) {
+      attachmentListeners.add(listener)
+      return () => attachmentListeners.delete(listener)
+    },
+    add(message, card, owner) {
+      if (owner && evictedSessions.has(owner.sessionId)) return false
+      const keys = bookAttachmentKeys(message)
+      if (keys.length === 0) return false
+      if (owner) owners.set(card.proposalId, { ...owner, message })
+      return replace(keys.reduce(
+        (store, key) => reduceBookAssistantAttachment(store, key, card),
+        attachmentStore,
+      ))
+    },
+    associate(source, target) {
+      const keys = [...new Set([
+        ...bookAttachmentKeys(source),
+        ...bookAttachmentKeys(target),
+      ])]
+      const cardsByProposal = new Map<string, SettingDiffCardState>()
+      for (const key of keys) {
+        for (const card of attachmentStore[key] ?? []) {
+          cardsByProposal.set(card.proposalId, card)
+        }
+      }
+      if (cardsByProposal.size === 0) return false
+      for (const proposalId of cardsByProposal.keys()) {
+        const owner = owners.get(proposalId)
+        if (owner) owners.set(proposalId, { ...owner, message: target })
+      }
+      const cards = [...cardsByProposal.values()]
+      return replace(Object.fromEntries([
+        ...Object.entries(attachmentStore),
+        ...keys.map((key) => [key, cards] as const),
+      ]))
+    },
+    resolve(detail) {
+      return replace(resolveBookAssistantAttachments(attachmentStore, detail))
+    },
+    evictSession(sessionId) {
+      evictedSessions.add(sessionId)
+      const proposalIds = new Set(
+        [...owners.entries()]
+          .filter(([, owner]) => owner.sessionId === sessionId)
+          .map(([proposalId]) => proposalId),
+      )
+      if (proposalIds.size === 0) return false
+      proposalIds.forEach((proposalId) => owners.delete(proposalId))
+      return replace(Object.fromEntries(
+        Object.entries(attachmentStore).flatMap(([key, cards]) => {
+          const retained = cards.filter(
+            (card) => !proposalIds.has(card.proposalId),
+          )
+          return retained.length ? [[key, retained]] : []
+        }),
+      ))
+    },
+    ownerForProposal: (proposalId) => owners.get(proposalId),
+    productProjection(message) {
+      const cards = getBookAssistantAttachmentsForMessage(
+        attachmentStore,
+        message,
+      )
+      if (cards.length === 0) return undefined
+      const proposalIds = new Set(cards.map((card) => card.proposalId))
+      const aliases: Record<string, Record<string, unknown[]>> = {}
+      for (const [key, storedCards] of Object.entries(attachmentStore)) {
+        for (const card of storedCards) {
+          if (!proposalIds.has(card.proposalId)) continue
+          const alias = aliases[card.proposalId] ?? {
+            clientTurnIds: [],
+            runIds: [],
+            conversationIds: [],
+          }
+          if (key.startsWith('client:')) alias.clientTurnIds.push(key.slice(7))
+          else if (key.startsWith('run:')) alias.runIds.push(key.slice(4))
+          else if (key.startsWith('conversation:')) {
+            const value = Number(key.slice(13))
+            if (Number.isFinite(value)) alias.conversationIds.push(value)
+          }
+          aliases[card.proposalId] = alias
+        }
+      }
+      const resolutions = Object.fromEntries(cards
+        .filter((card) => card.status !== 'pending')
+        .map((card) => [card.proposalId, card]))
+      return {
+        settingDiff: {
+          version: 1,
+          aliases,
+          ...(Object.keys(resolutions).length ? { resolutions } : {}),
+        },
+      }
+    },
+  }
 }

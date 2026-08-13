@@ -15,6 +15,10 @@ import {
   type DiffOp,
   type DiffOpStatus,
 } from '../diff/paragraphDiff'
+import {
+  createSettingDiffCommandLatch,
+  createSettingDiffOccurrenceQueue,
+} from './settingDiffOccurrenceQueue'
 
 const DIFF_ASYNC_THRESHOLD = 8000
 
@@ -29,6 +33,7 @@ export interface MetaDiffOp {
 }
 
 export interface SettingDiffSession {
+  proposalId: string
   sessionKey: string
   kind: SettingKind
   bookId: EntityId
@@ -42,8 +47,10 @@ export interface SettingDiffSession {
   profileOps: DiffOp[]
   metaOps: MetaDiffOp[]
   computing?: boolean
+  committing?: boolean
   source: string
   startedAt: number
+  resolutionTarget?: ProposedSettingDiff['resolutionTarget']
 }
 
 export function settingSessionKey(kind: SettingKind, id: number | EntityId): string {
@@ -95,12 +102,12 @@ interface SettingDiffContextValue {
   resolvedCards: Record<string, SettingDiffCardState>
   hasSession: (sessionKey: string) => boolean
   getSession: (sessionKey: string) => SettingDiffSession | undefined
-  getResolvedCard: (sessionKey: string) => SettingDiffCardState | undefined
+  getResolvedCard: (proposalId: string) => SettingDiffCardState | undefined
   setOpStatus: (sessionKey: string, opIndex: number, status: DiffOpStatus, rejectReason?: string) => void
   setMetaOpStatus: (sessionKey: string, metaIndex: number, status: DiffOpStatus) => void
   acceptAllPending: (sessionKey: string) => void
   rejectAllPending: (sessionKey: string) => void
-  exitDiff: (sessionKey: string) => void
+  exitDiff: (sessionKey: string) => Promise<void>
   commit: (sessionKey: string) => Promise<void>
   openPanelForSession: (
     sessionKey: string,
@@ -116,16 +123,33 @@ export function useSettingDiff(): SettingDiffContextValue {
   return ctx
 }
 
-export function SettingDiffProvider({ children }: { children: React.ReactNode }) {
+export function SettingDiffProvider({
+  children,
+  bookId,
+}: {
+  children: React.ReactNode
+  bookId?: EntityId | null
+}) {
   const appMessage = usePurrToast()
   const [sessions, setSessions] = React.useState<Record<string, SettingDiffSession>>({})
   const [resolvedCards, setResolvedCards] = React.useState<Record<string, SettingDiffCardState>>({})
+  const resolvedCardsRef = React.useRef(resolvedCards)
   const sessionsRef = React.useRef(sessions)
+  const occurrenceQueueRef = React.useRef(createSettingDiffOccurrenceQueue())
+  const commandLatchRef = React.useRef(createSettingDiffCommandLatch())
   React.useEffect(() => { sessionsRef.current = sessions }, [sessions])
+  React.useEffect(() => { resolvedCardsRef.current = resolvedCards }, [resolvedCards])
+  const updateSessions = React.useCallback((
+    updater: (current: Record<string, SettingDiffSession>) => Record<string, SettingDiffSession>,
+  ) => {
+    const next = updater(sessionsRef.current)
+    sessionsRef.current = next
+    setSessions(next)
+  }, [])
 
   const hasSession = React.useCallback((sessionKey: string) => Boolean(sessions[sessionKey]), [sessions])
   const getSession = React.useCallback((sessionKey: string) => sessions[sessionKey], [sessions])
-  const getResolvedCard = React.useCallback((sessionKey: string) => resolvedCards[sessionKey], [resolvedCards])
+  const getResolvedCard = React.useCallback((proposalId: string) => resolvedCards[proposalId], [resolvedCards])
 
   const openPanelForSession = React.useCallback((
     sessionKey: string,
@@ -151,7 +175,11 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     }))
   }, [])
 
-  const startDiff = React.useCallback((proposal: ProposedSettingDiff) => {
+  const startDiff = React.useCallback((proposal: ProposedSettingDiff & { restoreOnly?: boolean }) => {
+    const proposalId = String(proposal.proposalId || '').trim()
+    if (!proposalId) return
+    if (String(proposal.bookId) !== String(bookId ?? '')) return
+    if (resolvedCardsRef.current[proposalId]) return
     const kind = proposal.kind
     const sessionKey = kind === 'character'
       ? settingSessionKey('character', proposal.characterId!)
@@ -159,8 +187,12 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         ? settingSessionKey('entity', proposal.entityId!)
         : settingSessionKey('background', proposal.bookId)
 
+    if (sessionsRef.current[sessionKey]?.proposalId === proposalId) return
     if (sessionsRef.current[sessionKey]) {
-      appMessage.warning('该设定已有未完成的差异，请先在设定面板接受/拒绝后再继续')
+      occurrenceQueueRef.current.enqueue(sessionKey, proposal)
+      if (!proposal.restoreOnly) {
+        appMessage.info('该设定的新一轮修改已排队，将在当前审阅结束后继续')
+      }
       return
     }
 
@@ -177,6 +209,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         || proposed.name || before.name
 
       const baseSession = {
+        proposalId,
         sessionKey,
         kind,
         bookId: proposal.bookId,
@@ -189,29 +222,30 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         metaOps,
         source,
         startedAt,
+        resolutionTarget: proposal.resolutionTarget,
       }
 
       if (totalLen < DIFF_ASYNC_THRESHOLD) {
-        setSessions((prev) => ({
+        updateSessions((prev) => ({
           ...prev,
           [sessionKey]: {
             ...baseSession,
             profileOps: diffParagraphs(before.profileMd || '', proposed.profileMd || ''),
           },
         }))
-        openPanelForSession(sessionKey, baseSession)
+        if (!proposal.restoreOnly) openPanelForSession(sessionKey, baseSession)
       } else {
-        setSessions((prev) => ({
+        updateSessions((prev) => ({
           ...prev,
           [sessionKey]: { ...baseSession, profileOps: [], computing: true },
         }))
         diffParagraphsAsync(before.profileMd || '', proposed.profileMd || '').then((ops) => {
-          setSessions((prev) => {
+          updateSessions((prev) => {
             const cur = prev[sessionKey]
-            if (!cur || cur.startedAt !== startedAt) return prev
+            if (!cur || cur.proposalId !== proposalId) return prev
             return { ...prev, [sessionKey]: { ...cur, profileOps: ops, computing: false } }
           })
-          openPanelForSession(sessionKey)
+          if (!proposal.restoreOnly) openPanelForSession(sessionKey)
         })
       }
       return
@@ -222,9 +256,10 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     const totalLen = beforeContent.length + proposedContent.length
 
     const finishBg = (profileOps: DiffOp[]) => {
-      setSessions((prev) => ({
+      updateSessions((prev) => ({
         ...prev,
         [sessionKey]: {
+          proposalId,
           sessionKey,
           kind: 'background',
           bookId: proposal.bookId,
@@ -234,17 +269,21 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
           metaOps: [],
           source,
           startedAt,
+          resolutionTarget: proposal.resolutionTarget,
         },
       }))
-      openPanelForSession(sessionKey, { kind: 'background' })
+      if (!proposal.restoreOnly) {
+        openPanelForSession(sessionKey, { kind: 'background' })
+      }
     }
 
     if (totalLen < DIFF_ASYNC_THRESHOLD) {
       finishBg(diffParagraphs(beforeContent, proposedContent))
     } else {
-      setSessions((prev) => ({
+      updateSessions((prev) => ({
         ...prev,
         [sessionKey]: {
+          proposalId,
           sessionKey,
           kind: 'background',
           bookId: proposal.bookId,
@@ -255,18 +294,19 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
           computing: true,
           source,
           startedAt,
+          resolutionTarget: proposal.resolutionTarget,
         },
       }))
       diffParagraphsAsync(beforeContent, proposedContent).then((ops) => {
-        setSessions((prev) => {
+        updateSessions((prev) => {
           const cur = prev[sessionKey]
-          if (!cur || cur.startedAt !== startedAt) return prev
+          if (!cur || cur.proposalId !== proposalId) return prev
           return { ...prev, [sessionKey]: { ...cur, profileOps: ops, computing: false } }
         })
-        openPanelForSession(sessionKey)
+        if (!proposal.restoreOnly) openPanelForSession(sessionKey)
       })
     }
-  }, [appMessage, openPanelForSession])
+  }, [appMessage, bookId, openPanelForSession, updateSessions])
 
   React.useEffect(() => {
     const handler = (e: Event) => {
@@ -278,11 +318,34 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     return () => window.removeEventListener('ai-propose-setting-diff', handler as EventListener)
   }, [startDiff])
 
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const card = (event as CustomEvent<SettingDiffCardState>).detail
+      if (!card?.proposalId) return
+      resolvedCardsRef.current = {
+        ...resolvedCardsRef.current,
+        [card.proposalId]: card,
+      }
+      setResolvedCards(resolvedCardsRef.current)
+      const session = sessionsRef.current[card.sessionKey]
+      if (session?.proposalId === card.proposalId) {
+        updateSessions((current) => {
+          if (current[card.sessionKey]?.proposalId !== card.proposalId) return current
+          const next = { ...current }
+          delete next[card.sessionKey]
+          return next
+        })
+      }
+    }
+    window.addEventListener('setting-diff-resolution-hydrated', handler)
+    return () => window.removeEventListener('setting-diff-resolution-hydrated', handler)
+  }, [updateSessions])
+
   const setOpStatus = React.useCallback<SettingDiffContextValue['setOpStatus']>(
     (sessionKey, opIndex, status, rejectReason) => {
-      setSessions((prev) => {
+      updateSessions((prev) => {
         const cur = prev[sessionKey]
-        if (!cur) return prev
+        if (!cur || cur.committing) return prev
         const profileOps = cur.profileOps.map((op) => {
           if (op.index !== opIndex || op.kind === 'equal') return op
           const next = { ...op, status }
@@ -296,27 +359,30 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         return { ...prev, [sessionKey]: { ...cur, profileOps } }
       })
     },
-    [],
+    [updateSessions],
   )
 
   const setMetaOpStatus = React.useCallback<SettingDiffContextValue['setMetaOpStatus']>(
     (sessionKey, metaIndex, status) => {
-      setSessions((prev) => {
+      updateSessions((prev) => {
         const cur = prev[sessionKey]
-        if (!cur) return prev
+        if (!cur || cur.committing) return prev
         const metaOps = cur.metaOps.map((op) =>
           op.index === metaIndex ? { ...op, status } : op,
         )
         return { ...prev, [sessionKey]: { ...cur, metaOps } }
       })
     },
-    [],
+    [updateSessions],
   )
 
   const setAllPending = React.useCallback((sessionKey: string, status: DiffOpStatus) => {
-    setSessions((prev) => {
+    updateSessions((prev) => {
       const cur = prev[sessionKey]
-      if (!cur) return prev
+      if (
+        !cur
+        || !commandLatchRef.current.canMutate(sessionKey, cur.proposalId)
+      ) return prev
       const profileOps = cur.profileOps.map((op) =>
         op.kind !== 'equal' && op.status === 'pending' ? { ...op, status } : op,
       )
@@ -325,7 +391,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       )
       return { ...prev, [sessionKey]: { ...cur, profileOps, metaOps } }
     })
-  }, [])
+  }, [updateSessions])
 
   const acceptAllPending = React.useCallback((sessionKey: string) => {
     setAllPending(sessionKey, 'accepted')
@@ -335,7 +401,7 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     setAllPending(sessionKey, 'rejected')
   }, [setAllPending])
 
-  const markResolved = React.useCallback((
+  const resolutionCard = React.useCallback((
     session: SettingDiffSession,
     status: SettingDiffCardState['status'],
     stats: { accepted: number; rejected: number },
@@ -345,32 +411,98 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
       : session.kind === 'entity'
         ? `设定「${session.entityName || (session.before as CharacterSettingSnapshot).name}」`
         : '故事背景'
-    const card: SettingDiffCardState = {
+    return {
+      proposalId: session.proposalId,
       sessionKey: session.sessionKey,
       kind: session.kind,
       title,
       status,
       acceptedSegments: stats.accepted,
       rejectedSegments: stats.rejected,
+    } satisfies SettingDiffCardState
+  }, [])
+
+  const markResolved = React.useCallback((card: SettingDiffCardState) => {
+    resolvedCardsRef.current = {
+      ...resolvedCardsRef.current,
+      [card.proposalId]: card,
     }
-    setResolvedCards((prev) => ({ ...prev, [session.sessionKey]: card }))
+    setResolvedCards(resolvedCardsRef.current)
     window.dispatchEvent(new CustomEvent('setting-diff-resolved', { detail: card }))
   }, [])
 
-  const exitDiff = React.useCallback<SettingDiffContextValue['exitDiff']>((sessionKey) => {
-    setSessions((prev) => {
-      const cur = prev[sessionKey]
-      if (!cur) return prev
-      markResolved(cur, 'rejected', { accepted: 0, rejected: 0 })
-      const next = { ...prev }
-      delete next[sessionKey]
-      return next
+  const activateNext = React.useCallback((sessionKey: string) => {
+    const next = occurrenceQueueRef.current.shift(sessionKey)
+    if (next) queueMicrotask(() => startDiff(next))
+  }, [startDiff])
+
+  const exitDiff = React.useCallback<SettingDiffContextValue['exitDiff']>(async (sessionKey) => {
+    const cur = sessionsRef.current[sessionKey]
+    if (!cur || !commandLatchRef.current.tryBegin(sessionKey, cur.proposalId)) return
+    updateSessions((prev) => {
+      const current = prev[sessionKey]
+      return current?.proposalId === cur.proposalId
+        ? { ...prev, [sessionKey]: { ...current, committing: true } }
+        : prev
     })
-  }, [markResolved])
+    const card = resolutionCard(cur, 'rejected', { accepted: 0, rejected: 0 })
+    try {
+      const target = cur.resolutionTarget
+      if (!target) throw new Error('设定提议缺少持久化归属')
+      const saved = await services.conversations.saveConversation({
+        sessionId: target.sessionId,
+        prompt: target.prompt,
+        response: '',
+        agentRunId: target.agentRunId,
+        agentProcess: {
+          settingDiff: {
+            version: 1,
+            resolutions: { [card.proposalId]: card },
+          },
+        },
+      })
+      if (!saved.success) throw new Error(saved.error || '设定审阅状态保存失败')
+      if (!commandLatchRef.current.canComplete(
+        sessionKey,
+        cur.proposalId,
+        sessionsRef.current[sessionKey]?.proposalId,
+      )) return
+      markResolved(card)
+      updateSessions((prev) => {
+        if (prev[sessionKey]?.proposalId !== cur.proposalId) return prev
+        const next = { ...prev }
+        delete next[sessionKey]
+        return next
+      })
+      commandLatchRef.current.release(sessionKey, cur.proposalId)
+      activateNext(sessionKey)
+    } catch (error) {
+      updateSessions((prev) => {
+        const current = prev[sessionKey]
+        return current?.proposalId === cur.proposalId
+          ? { ...prev, [sessionKey]: { ...current, committing: false } }
+          : prev
+      })
+      commandLatchRef.current.release(sessionKey, cur.proposalId)
+      appMessage.error(error instanceof Error ? error.message : '设定审阅状态保存失败')
+      throw error
+    }
+  }, [activateNext, appMessage, markResolved, resolutionCard, updateSessions])
 
   const commit = React.useCallback<SettingDiffContextValue['commit']>(async (sessionKey) => {
     const cur = sessionsRef.current[sessionKey]
     if (!cur) throw new Error('当前设定没有活跃的 diff 会话')
+    if (!commandLatchRef.current.tryBegin(sessionKey, cur.proposalId)) return
+    updateSessions((prev) => {
+      const current = prev[sessionKey]
+      if (!current || current.proposalId !== cur.proposalId || current.committing) {
+        return prev
+      }
+      return {
+        ...prev,
+        [sessionKey]: { ...current, committing: true },
+      }
+    })
 
     const profileStats = countByStatus(cur.profileOps)
     const metaStats = countByStatus(cur.metaOps.map((op) => ({
@@ -382,8 +514,18 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
     })))
     const accepted = profileStats.accepted + metaStats.accepted
     const rejected = profileStats.rejected + metaStats.rejected
+    const card = resolutionCard(cur, 'committed', { accepted, rejected })
 
-    if (cur.kind === 'character') {
+    try {
+      const target = cur.resolutionTarget
+      if (!target) throw new Error('设定提议缺少持久化归属')
+      const resolution = {
+        ...card,
+        status: 'committed' as const,
+        sessionId: target.sessionId,
+        agentRunId: target.agentRunId,
+      }
+      if (cur.kind === 'character') {
       const finalSnap = composeCharacterFields(cur)
       const before = cur.before as CharacterSettingSnapshot
       const proposed = cur.proposed as CharacterSettingSnapshot
@@ -397,12 +539,13 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         source: cur.source,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
+        resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
       window.dispatchEvent(new CustomEvent('setting-updated', {
         detail: { kind: 'character', action: 'update', id: cur.characterId, name: finalSnap.name },
       }))
-    } else if (cur.kind === 'entity') {
+      } else if (cur.kind === 'entity') {
       const finalSnap = composeCharacterFields(cur)
       const before = cur.before as CharacterSettingSnapshot
       const proposed = cur.proposed as CharacterSettingSnapshot
@@ -416,12 +559,13 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         source: cur.source,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
+        resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
       window.dispatchEvent(new CustomEvent('setting-updated', {
         detail: { kind: 'entity', action: 'update', id: cur.entityId, name: finalSnap.name },
       }))
-    } else {
+      } else {
       const beforeContent = (cur.before as { content: string }).content || ''
       const proposedContent = (cur.proposed as { content: string }).content || ''
       const finalContent = composeResult(cur.profileOps)
@@ -433,27 +577,49 @@ export function SettingDiffProvider({ children }: { children: React.ReactNode })
         source: cur.source,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
+        resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
       window.dispatchEvent(new CustomEvent('setting-updated', {
         detail: { kind: 'background', action: 'update' },
       }))
-    }
+      }
 
-    appMessage.success(
+      if (!commandLatchRef.current.canComplete(
+        sessionKey,
+        cur.proposalId,
+        sessionsRef.current[sessionKey]?.proposalId,
+      )) {
+        commandLatchRef.current.release(sessionKey, cur.proposalId)
+        return
+      }
+
+      appMessage.success(
       `已应用：接受 ${accepted} 段，拒绝 ${rejected} 段` +
       (profileStats.pending + metaStats.pending > 0
         ? `，未处理 ${profileStats.pending + metaStats.pending} 段（保留原文）`
         : ''),
     )
 
-    markResolved(cur, 'committed', { accepted, rejected })
-    setSessions((prev) => {
-      const next = { ...prev }
-      delete next[sessionKey]
-      return next
-    })
-  }, [appMessage, markResolved])
+      markResolved(card)
+      updateSessions((prev) => {
+        if (prev[sessionKey]?.proposalId !== cur.proposalId) return prev
+        const next = { ...prev }
+        delete next[sessionKey]
+        return next
+      })
+      commandLatchRef.current.release(sessionKey, cur.proposalId)
+      activateNext(sessionKey)
+    } catch (error) {
+      updateSessions((prev) => {
+        const current = prev[sessionKey]
+        if (!current || current.proposalId !== cur.proposalId) return prev
+        return { ...prev, [sessionKey]: { ...current, committing: false } }
+      })
+      commandLatchRef.current.release(sessionKey, cur.proposalId)
+      throw error
+    }
+  }, [activateNext, appMessage, markResolved, resolutionCard, updateSessions])
 
   const value = React.useMemo<SettingDiffContextValue>(() => ({
     sessions,

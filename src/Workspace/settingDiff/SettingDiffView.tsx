@@ -21,7 +21,7 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
   const diff = useSettingDiff()
   const session = diff.getSession(sessionKey)
   const confirm = usePurrConfirm()
-  const [committing, setCommitting] = React.useState(false)
+  const committing = Boolean(session?.committing)
 
   if (!session) return null
 
@@ -52,20 +52,17 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
         cancelText: '继续编辑',
         confirmVariant: 'danger',
       }).then((result) => {
-        if (result === 'confirm') diff.exitDiff(sessionKey)
+        if (result === 'confirm') void diff.exitDiff(sessionKey).catch(() => undefined)
       })
     } else {
-      diff.exitDiff(sessionKey)
+      void diff.exitDiff(sessionKey).catch(() => undefined)
     }
   }
   const handleCommit = async () => {
-    setCommitting(true)
     try {
       await diff.commit(sessionKey)
     } catch (e) {
       console.error('[SettingDiffView] commit failed', e)
-    } finally {
-      setCommitting(false)
     }
   }
 
@@ -81,10 +78,10 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
           {rejectedTotal > 0 ? <PurrTag>拒绝 {rejectedTotal}</PurrTag> : null}
         </div>
         <PurrSpace size="small" wrap>
-          <PurrButton size="small" icon={<CheckIcon />} onClick={handleAcceptAll} disabled={pendingTotal === 0}>
+          <PurrButton size="small" icon={<CheckIcon />} onClick={handleAcceptAll} disabled={committing || pendingTotal === 0}>
             全部接受
           </PurrButton>
-          <PurrButton size="small" icon={<CloseIcon />} onClick={handleRejectAll} disabled={pendingTotal === 0}>
+          <PurrButton size="small" icon={<CloseIcon />} onClick={handleRejectAll} disabled={committing || pendingTotal === 0}>
             全部拒绝
           </PurrButton>
           <PurrButton
@@ -92,7 +89,7 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
             type="primary"
             icon={<SaveIcon />}
             loading={committing}
-            disabled={session.computing}
+            disabled={session.computing || committing}
             onClick={handleCommit}
           >
             {session.computing
@@ -101,7 +98,7 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
                 ? '应用并保存'
                 : `应用（剩 ${pendingTotal} 段保留原文）`}
           </PurrButton>
-          <PurrButton size="small" icon={<CloseIcon />} danger onClick={handleExit}>
+          <PurrButton size="small" icon={<CloseIcon />} danger onClick={handleExit} disabled={committing}>
             退出
           </PurrButton>
         </PurrSpace>
@@ -118,6 +115,7 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
               <MetaDiffRow
                 key={`meta-${op.field}-${op.index}`}
                 op={op}
+                disabled={committing}
                 onAccept={() => diff.setMetaOpStatus(sessionKey, op.index, 'accepted')}
                 onReject={() => diff.setMetaOpStatus(sessionKey, op.index, 'rejected')}
                 onPending={() => diff.setMetaOpStatus(sessionKey, op.index, 'pending')}
@@ -131,6 +129,7 @@ export default function SettingDiffView({ sessionKey, title, compact = false }: 
                   <DiffParagraphRow
                     key={op.index}
                     op={op}
+                    disabled={committing}
                     onAccept={() => diff.setOpStatus(sessionKey, op.index, 'accepted')}
                     onReject={(reason) => diff.setOpStatus(sessionKey, op.index, 'rejected', reason)}
                     onPending={() => diff.setOpStatus(sessionKey, op.index, 'pending')}
@@ -150,11 +149,13 @@ function MetaDiffRow({
   onAccept,
   onReject,
   onPending,
+  disabled,
 }: {
   op: MetaDiffOp
   onAccept: () => void
   onReject: () => void
   onPending: () => void
+  disabled?: boolean
 }) {
   const label = op.field === 'name' ? '姓名' : '标签'
   const cls = ['diff-row', 'diff-row-replace', `diff-status-${op.status}`].join(' ')
@@ -170,14 +171,14 @@ function MetaDiffRow({
         {op.status === 'pending' ? (
           <>
             <PurrTooltip title="接受">
-              <PurrButton type="text" size="small" icon={<CheckIcon />} onClick={onAccept} />
+              <PurrButton type="text" size="small" icon={<CheckIcon />} onClick={onAccept} disabled={disabled} />
             </PurrTooltip>
             <PurrTooltip title="拒绝">
-              <PurrButton type="text" size="small" icon={<CloseIcon />} onClick={onReject} />
+              <PurrButton type="text" size="small" icon={<CloseIcon />} onClick={onReject} disabled={disabled} />
             </PurrTooltip>
           </>
         ) : (
-          <PurrButton type="text" size="small" onClick={onPending}>
+          <PurrButton type="text" size="small" onClick={onPending} disabled={disabled}>
             {op.status === 'accepted' ? '已接受' : '已拒绝'}
           </PurrButton>
         )}
@@ -191,11 +192,13 @@ function DiffParagraphRow({
   onAccept,
   onReject,
   onPending,
+  disabled,
 }: {
   op: DiffOp
   onAccept: () => void
   onReject: (reason?: string) => void
   onPending: () => void
+  disabled?: boolean
 }) {
   const [reasonModalOpen, setReasonModalOpen] = React.useState(false)
   const [reasonDraft, setReasonDraft] = React.useState('')
@@ -241,7 +244,7 @@ function DiffParagraphRow({
         {op.status === 'pending' ? (
           <>
             <PurrTooltip title="接受此段">
-              <PurrButton type="text" size="small" icon={<CheckIcon />} onClick={onAccept} />
+              <PurrButton type="text" size="small" icon={<CheckIcon />} onClick={onAccept} disabled={disabled} />
             </PurrTooltip>
             <PurrDropdown.Button
               menu={{ items: rejectMenuItems }}
@@ -250,12 +253,13 @@ function DiffParagraphRow({
               trigger={['click']}
               icon={<ChevronDownIcon />}
               onClick={() => onReject(undefined)}
+              disabled={disabled}
             >
               <CloseIcon />
             </PurrDropdown.Button>
           </>
         ) : (
-          <PurrButton type="text" size="small" onClick={onPending}>
+          <PurrButton type="text" size="small" onClick={onPending} disabled={disabled}>
             {op.status === 'accepted' ? '已接受' : '已拒绝'}
           </PurrButton>
         )}

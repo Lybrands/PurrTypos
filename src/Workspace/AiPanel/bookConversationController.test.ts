@@ -1,16 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  addBookAssistantAttachment,
-  associateBookAssistantAttachmentIdentities,
   bookAttachmentKey,
-  getBookAssistantAttachments,
+  createBookAssistantAttachmentManager,
   getBookAssistantAttachmentsForMessage,
-  getBookAssistantAttachmentsVersion,
   reduceBookAssistantAttachment,
-  resolveStoredBookAssistantAttachments,
   resolveBookAssistantAttachments,
-  subscribeBookAssistantAttachments,
 } from './bookAssistantAttachments.ts'
 import type {
   AgentConversationActivity,
@@ -25,6 +20,11 @@ import {
   toBookQueuedSubmissions,
   type BookConversationBindings,
 } from './useBookConversationController.ts'
+import { reconcileDeletedOpenSessions } from './sessionDeletion.ts'
+import {
+  createViewportEditTarget,
+  resolveViewportEditTarget,
+} from '../../components/AgentConversation/viewportSession.ts'
 
 const noOp = () => undefined
 const resolveToolApproval = async () => ({ success: true })
@@ -95,6 +95,7 @@ const bindings: BookConversationBindings = {
 test('setting diff is stored outside the generic message', () => {
   const message = { role: 'assistant' as const, content: '', clientTurnId: 'turn-1' }
   const next = reduceBookAssistantAttachment({}, bookAttachmentKey(message), {
+    proposalId: 'proposal-1',
     sessionKey: 'character:1',
     kind: 'character',
     title: '人物设定',
@@ -129,6 +130,7 @@ test('attachment keys prefer live turn, then persisted conversation and replay r
 test('attachment without a stable turn identity is ignored instead of leaking across turns', () => {
   const current = {
     'client:turn-1': [{
+      proposalId: 'proposal-1',
       sessionKey: 'character:1',
       kind: 'character' as const,
       title: '人物设定',
@@ -138,6 +140,7 @@ test('attachment without a stable turn identity is ignored instead of leaking ac
 
   assert.equal(bookAttachmentKey({ role: 'assistant', content: '' }), undefined)
   assert.equal(reduceBookAssistantAttachment(current, undefined, {
+    proposalId: 'proposal-2',
     sessionKey: 'background:1',
     kind: 'background',
     title: '故事背景',
@@ -147,6 +150,7 @@ test('attachment without a stable turn identity is ignored instead of leaking ac
 
 test('resolved setting diff updates the same attachment store', () => {
   const current = reduceBookAssistantAttachment({}, 'client:turn-1', {
+    proposalId: 'run-1:call-1:0',
     sessionKey: 'character:1',
     kind: 'character',
     title: '人物设定',
@@ -154,6 +158,7 @@ test('resolved setting diff updates the same attachment store', () => {
   })
 
   const next = resolveBookAssistantAttachments(current, {
+    proposalId: 'run-1:call-1:0',
     sessionKey: 'character:1',
     kind: 'character',
     title: '人物设定',
@@ -163,18 +168,48 @@ test('resolved setting diff updates the same attachment store', () => {
   assert.equal(next['client:turn-1'][0].status, 'committed')
 })
 
-test('book attachment store survives consumer unsubscribe and remount', () => {
+test('same entity proposal occurrences retain independent resolutions', () => {
+  const first = reduceBookAssistantAttachment({}, 'run:run-1', {
+    proposalId: 'run-1:call-1:0',
+    sessionKey: 'character:1',
+    kind: 'character',
+    title: '人物设定',
+    status: 'pending',
+  })
+  const second = reduceBookAssistantAttachment(first, 'run:run-2', {
+    proposalId: 'run-2:call-2:0',
+    sessionKey: 'character:1',
+    kind: 'character',
+    title: '人物设定',
+    status: 'pending',
+  })
+
+  const resolved = resolveBookAssistantAttachments(second, {
+    proposalId: 'run-1:call-1:0',
+    sessionKey: 'character:1',
+    kind: 'character',
+    title: '人物设定',
+    status: 'rejected',
+  })
+
+  assert.equal(resolved['run:run-1'][0].status, 'rejected')
+  assert.equal(resolved['run:run-2'][0].status, 'pending')
+})
+
+test('owner attachment manager survives consumer unsubscribe while owned', () => {
+  const manager = createBookAssistantAttachmentManager('book-1:session-7')
   const message = {
     role: 'assistant' as const,
     content: '',
     clientTurnId: 'turn-lifecycle',
   }
   let firstConsumerNotifications = 0
-  const unsubscribe = subscribeBookAssistantAttachments(() => {
+  const unsubscribe = manager.subscribe(() => {
     firstConsumerNotifications += 1
   })
 
-  assert.equal(addBookAssistantAttachment(message, {
+  assert.equal(manager.add(message, {
+    proposalId: 'proposal-lifecycle',
     sessionKey: 'character:lifecycle',
     kind: 'character',
     title: '人物设定',
@@ -183,46 +218,85 @@ test('book attachment store survives consumer unsubscribe and remount', () => {
   assert.equal(firstConsumerNotifications, 1)
   unsubscribe()
 
-  const versionAfterUnmount = getBookAssistantAttachmentsVersion()
+  const versionAfterUnmount = manager.getVersion()
   assert.equal(
-    getBookAssistantAttachments()['client:turn-lifecycle'][0].status,
+    manager.getSnapshot()['client:turn-lifecycle'][0].status,
     'pending',
   )
-  assert.equal(resolveStoredBookAssistantAttachments({
+  assert.equal(manager.resolve({
+    proposalId: 'proposal-lifecycle',
     sessionKey: 'character:lifecycle',
     kind: 'character',
     title: '人物设定',
     status: 'committed',
   }), true)
-  assert.equal(getBookAssistantAttachmentsVersion(), versionAfterUnmount + 1)
+  assert.equal(manager.getVersion(), versionAfterUnmount + 1)
   assert.equal(
-    getBookAssistantAttachments()['client:turn-lifecycle'][0].status,
+    manager.getSnapshot()['client:turn-lifecycle'][0].status,
     'committed',
   )
 })
 
-test('book attachment store does not notify or mutate without a stable turn key', () => {
-  const version = getBookAssistantAttachmentsVersion()
-  const snapshot = getBookAssistantAttachments()
+test('deleting a session evicts only that persisted attachment owner', () => {
+  const manager = createBookAssistantAttachmentManager('book-1')
+  const add = (sessionId: number, suffix: string) => manager.add({
+    role: 'assistant',
+    content: '',
+    agentRunId: `run-${suffix}`,
+  }, {
+    proposalId: `proposal-${suffix}`,
+    sessionKey: `background:${suffix}`,
+    kind: 'background',
+    title: '故事背景',
+    status: 'pending',
+  }, {
+    sessionId,
+    bookId: 'book-1',
+    chapterId: null,
+    prompt: `prompt-${suffix}`,
+    message: { role: 'assistant', content: '' },
+  })
+  add(7, 'a')
+  add(8, 'b')
 
-  assert.equal(addBookAssistantAttachment({ role: 'assistant', content: '' }, {
+  assert.equal(manager.evictSession(7), true)
+  assert.equal(manager.ownerForProposal('proposal-a'), undefined)
+  assert.equal(manager.getSnapshot()['run:run-a'], undefined)
+  assert.equal(manager.ownerForProposal('proposal-b')?.sessionId, 8)
+  assert.equal(manager.getSnapshot()['run:run-b'][0].proposalId, 'proposal-b')
+  assert.equal(manager.evictSession(7), false)
+
+  assert.equal(add(7, 'late-a'), false)
+  assert.equal(manager.ownerForProposal('proposal-late-a'), undefined)
+  assert.equal(manager.getSnapshot()['run:run-late-a'], undefined)
+})
+
+test('book attachment store does not notify or mutate without a stable turn key', () => {
+  const manager = createBookAssistantAttachmentManager('book-1:session-7')
+  const version = manager.getVersion()
+  const snapshot = manager.getSnapshot()
+
+  assert.equal(manager.add({ role: 'assistant', content: '' }, {
+    proposalId: 'proposal-unstable',
     sessionKey: 'background:unstable',
     kind: 'background',
     title: '故事背景',
     status: 'pending',
   }), false)
-  assert.equal(getBookAssistantAttachmentsVersion(), version)
-  assert.equal(getBookAssistantAttachments(), snapshot)
+  assert.equal(manager.getVersion(), version)
+  assert.equal(manager.getSnapshot(), snapshot)
 })
 
 test('attachment survives live identity persistence and API message rebuild', () => {
+  const manager = createBookAssistantAttachmentManager('book-1:session-7')
   const liveMessage: AgentConversationMessage = {
     role: 'assistant',
     content: '已更新人物',
     clientTurnId: 'turn-persist-alias',
     agentRunId: 'run-persist-alias',
   }
-  addBookAssistantAttachment(liveMessage, {
+  manager.add(liveMessage, {
+    proposalId: 'proposal-persist-alias',
     sessionKey: 'character:persist-alias',
     kind: 'character',
     title: '人物设定',
@@ -230,10 +304,10 @@ test('attachment survives live identity persistence and API message rebuild', ()
   })
 
   assert.equal(
-    getBookAssistantAttachments()['run:run-persist-alias'][0].sessionKey,
+    manager.getSnapshot()['run:run-persist-alias'][0].sessionKey,
     'character:persist-alias',
   )
-  associateBookAssistantAttachmentIdentities(liveMessage, {
+  manager.associate(liveMessage, {
     ...liveMessage,
     conversationId: 501,
   })
@@ -250,19 +324,46 @@ test('attachment survives live identity persistence and API message rebuild', ()
   assert.equal(rebuilt.conversationId, 501)
   assert.equal(
     getBookAssistantAttachmentsForMessage(
-      getBookAssistantAttachments(),
+      manager.getSnapshot(),
       rebuilt,
     )[0].sessionKey,
     'character:persist-alias',
   )
 })
 
+test('persisted user identity comes from the real conversation row', () => {
+  const first = parseConversationsFromApi([{
+    id: 501,
+    session_id: 7,
+    chapter_id: 'chapter-1',
+    prompt: '第一条用户消息',
+    response: '第一条回复',
+  } as Conversation])
+  const replacement = parseConversationsFromApi([{
+    id: 502,
+    session_id: 7,
+    chapter_id: 'chapter-1',
+    prompt: '替换消息',
+    response: '替换回复',
+  } as Conversation])
+
+  assert.equal(first[0].conversationId, 501)
+  assert.equal(first[1].conversationId, 501)
+  const target = createViewportEditTarget('session:7:1', 0, first[0])
+  assert.equal(
+    resolveViewportEditTarget(target, 'session:7:1', replacement),
+    undefined,
+  )
+})
+
 test('API message falls through an empty conversation key to its run alias', () => {
-  addBookAssistantAttachment({
+  const manager = createBookAssistantAttachmentManager('book-1:session-7')
+  manager.add({
     role: 'assistant',
     content: '',
     agentRunId: 'run-fallback-alias',
   }, {
+    proposalId: 'proposal-fallback-alias',
     sessionKey: 'background:fallback-alias',
     kind: 'background',
     title: '故事背景',
@@ -278,11 +379,31 @@ test('API message falls through an empty conversation key to its run alias', () 
   assert.equal(bookAttachmentKey(rebuilt), 'conversation:999')
   assert.equal(
     getBookAssistantAttachmentsForMessage(
-      getBookAssistantAttachments(),
+      manager.getSnapshot(),
       rebuilt,
     )[0].sessionKey,
     'background:fallback-alias',
   )
+})
+
+test('local non-journal terminal metadata reloads as structured state, never Assistant prose', () => {
+  const rebuilt = parseConversationsFromApi([{
+    id: 777,
+    session_id: 7,
+    chapter_id: 'chapter-1',
+    prompt: '本地失败',
+    response: '',
+    agent_process: JSON.stringify({
+      error: '本地传输失败',
+      isError: true,
+      termination: '本轮已停止',
+    }),
+  } as Conversation]).at(-1)!
+
+  assert.equal(rebuilt.content, '')
+  assert.equal(rebuilt.error, '本地传输失败')
+  assert.equal(rebuilt.isError, true)
+  assert.equal(rebuilt.termination, '本轮已停止')
 })
 
 test('book adapter exposes only display queue entries', () => {
@@ -338,6 +459,28 @@ test('book adapter derives queue capabilities and chapter send availability', ()
     submitMode: 'queue',
   })
   assert.equal(unavailable.composer.submitDisabled, true)
+})
+
+test('book hydration keeps typing editable while blocking send and edit actions', async () => {
+  let sends = 0
+  let edits = 0
+  const controller = createBookConversationController({
+    ...bindings,
+    initializing: true,
+    prompt: 'A 会话尚未恢复完成',
+    actions: {
+      ...bindings.actions,
+      send: () => { sends += 1 },
+      editMessage: () => { edits += 1 },
+    },
+  })
+
+  assert.equal(controller.capabilities.inputDisabled, false)
+  assert.equal(controller.composer.submitDisabled, true)
+  await controller.actions.send()
+  await controller.actions.editMessage(0, '不能截断尚未恢复的会话')
+  assert.equal(sends, 0)
+  assert.equal(edits, 0)
 })
 
 test('paused book activity is terminal and the panel contract accepts a new request', () => {
@@ -479,6 +622,65 @@ test('book history coordinator isolates same-key deletes across scope changes', 
   assert.deepEqual(visible, [])
 })
 
+test('pending history delete blocks open and a newer load orders a late failure out', () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const token = coordinator.beginSessionDelete(8, true)
+
+  assert.ok(token)
+  assert.equal(coordinator.canOpenSession(8), false)
+  coordinator.beginLatest()
+  assert.equal(coordinator.failSessionDelete(token!), false)
+  assert.equal(coordinator.canOpenSession(8), true)
+})
+
+test('pending history delete also blocks an already-open tab selection action', () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+  const selected: Array<string | number> = []
+  const controller = createBookConversationController({
+    ...bindings,
+    canSelectSession: (id: string | number) => coordinator.canOpenSession(Number(id)),
+    actions: {
+      ...bindings.actions,
+      selectSession: (id) => { selected.push(id) },
+    },
+  })
+  const token = coordinator.beginSessionDelete(8, true)
+  assert.ok(token)
+
+  controller.actions.selectSession(8)
+  assert.deepEqual(selected, [])
+
+  coordinator.failSessionDelete(token!)
+  controller.actions.selectSession(8)
+  assert.deepEqual(selected, [8])
+})
+
+test('active running or queued history sessions are rejected before the delete service', () => {
+  const coordinator = createHistoryRequestCoordinator()
+  coordinator.activate()
+
+  assert.equal(coordinator.beginSessionDelete(7, false), null)
+  assert.equal(coordinator.isSessionDeleting(7), false)
+})
+
+test('delete completion reconciles against the current active session, not request start', () => {
+  const open = [
+    { id: 7, title: 'A' },
+    { id: 8, title: 'B' },
+  ] as AiSession[]
+
+  assert.deepEqual(reconcileDeletedOpenSessions(open, 7, 8), {
+    sessions: [open[1]],
+    activeSessionId: 8,
+  })
+  assert.deepEqual(reconcileDeletedOpenSessions(open, 8, 8), {
+    sessions: [open[0]],
+    activeSessionId: 7,
+  })
+})
+
 test('history delete invalidates an earlier load and removes the active session once', async () => {
   const coordinator = createHistoryRequestCoordinator()
   coordinator.activate()
@@ -576,4 +778,21 @@ test('scope invalidation blocks an old deferred history load', async () => {
   await load
 
   assert.deepEqual(visible.map((session) => session.id), [9])
+})
+
+test('history deletion lifecycle blocks opening and rejects active work', () => {
+  const coordinator = createHistoryRequestCoordinator() as ReturnType<
+    typeof createHistoryRequestCoordinator
+  > & {
+    beginSessionDelete(id: number, allowed: boolean): object | null
+    isSessionDeleting(id: number): boolean
+    canOpenSession(id: number): boolean
+  }
+  coordinator.activate()
+
+  assert.equal(coordinator.beginSessionDelete(7, false), null)
+  const token = coordinator.beginSessionDelete(8, true)
+  assert.ok(token)
+  assert.equal(coordinator.isSessionDeleting(8), true)
+  assert.equal(coordinator.canOpenSession(8), false)
 })

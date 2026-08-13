@@ -3,6 +3,7 @@ import React from "react";
 import { usePurrToast } from '@/purr-components';
 import type { AiSession, EntityId } from "../../../types";
 import type { AgentConversationMessage } from "../../../agent-runtime/contracts";
+import { reconcileDeletedOpenSessions } from '../sessionDeletion'
 
 // "setting" 为历史存储值，对应 UI 上的「全局对话」（不绑章节、整本书共享）
 export type ChatSessionScope = "chapter" | "setting";
@@ -34,6 +35,10 @@ export function useAiSessions({
   const [activeSessionId, setActiveSessionIdState] = React.useState<
     number | null
   >(null);
+  const activeSessionIdRef = React.useRef<number | null>(null)
+  activeSessionIdRef.current = activeSessionId
+  const sessionsRef = React.useRef<AiSession[]>([])
+  sessionsRef.current = sessions
   const [prependedHistory, setPrependedHistory] = React.useState<AgentConversationMessage[]>(
     [],
   );
@@ -45,6 +50,7 @@ export function useAiSessions({
   >((next) => {
     setActiveSessionIdState((current) => {
       const resolved = typeof next === "function" ? next(current) : next;
+      activeSessionIdRef.current = resolved
       if (resolved != null && loadKeyRef.current) {
         activeSessionByLoadKey.set(loadKeyRef.current, resolved);
       }
@@ -154,15 +160,18 @@ export function useAiSessions({
 
   const handleDeleteFromHistory = React.useCallback(
     (session: AiSession) => {
-      setSessions((prev) => {
-        const next = prev.filter((s) => s.id !== session.id);
-        if (activeSessionId === session.id) {
-          setActiveSessionId(next[next.length - 1]?.id ?? null);
-        }
-        return next;
-      });
+      const reconciled = reconcileDeletedOpenSessions(
+        sessionsRef.current,
+        session.id,
+        activeSessionIdRef.current,
+      )
+      sessionsRef.current = reconciled.sessions
+      setSessions(reconciled.sessions)
+      if (reconciled.activeSessionId !== activeSessionIdRef.current) {
+        setActiveSessionId(reconciled.activeSessionId)
+      }
     },
-    [activeSessionId],
+    [setActiveSessionId],
   );
 
   const currentSessionTitle =

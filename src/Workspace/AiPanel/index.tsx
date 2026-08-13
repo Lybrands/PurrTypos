@@ -2,7 +2,12 @@ import { services } from '@/services'
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import { usePurrToast, type PurrDropdownItem } from '@/purr-components'
-import type { AiModelConfig, Conversation, SettingDiffCardState } from '../../types'
+import type {
+  AiModelConfig,
+  AiSession,
+  Conversation,
+  SettingDiffCardState,
+} from '../../types'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
 import { AgentConversationPanel } from '../../components/AgentConversation'
@@ -16,18 +21,33 @@ import {
   useChatSubmit,
   type ChatSessionScope,
 } from './hooks'
-import { getChatSessionRuntime } from './hooks/chatRuntimeStore'
-import { parseConversationsFromApi } from './utils'
+import {
+  getChatSessionRuntime,
+  replaceChatRuntimeMessages,
+  setChatRuntimeActivity,
+  setChatRuntimeLoading,
+  setChatRuntimeStopping,
+  setChatRuntimeStreamId,
+} from './hooks/chatRuntimeStore'
+import {
+  BookConversationHydrationError,
+  hydrateBookConversationReadModel,
+  hydrateLatestBookRun,
+  mergeHydratedBookRun,
+  type HydratedBookConversationReadModel,
+} from './bookConversationHydration'
+import {
+  createConversationSessionLifecycle,
+  readStableConversationProjection,
+  retryCurrentConversationRead,
+} from './conversationSessionLifecycle'
+import { persistBookProposalResolution } from './proposalResolutionPersistence'
 import FavoritesModal from './components/FavoritesModal'
 import MemoryModal from './components/MemoryModal'
 import AiPanelHeader from './components/AiPanelHeader'
 import type { AiContextBarBindings } from './components/AiContextBar'
 import {
-  addBookAssistantAttachment,
-  getBookAssistantAttachments,
-  getBookAssistantAttachmentsVersion,
-  resolveStoredBookAssistantAttachments,
-  subscribeBookAssistantAttachments,
+  createBookAssistantAttachmentManager,
 } from './bookAssistantAttachments'
 import { useBookConversationController } from './useBookConversationController'
 import { useBookConversationExtensions } from './BookConversationExtensions'
@@ -77,41 +97,27 @@ export default function AiPanel({
     bookTitle,
     writingChapters,
   } = useWorkspace()
-  const [prompt, setPrompt] = React.useState('')
+  const [prompt, setPromptState] = React.useState('')
   const [conversations, setConversations] = React.useState<AgentConversationMessage[]>([])
   const [loading, setLoading] = React.useState(false)
   const [conversationInitializing, setConversationInitializing] = React.useState(false)
+  const [conversationReloadRevision, requestConversationReload] = React.useReducer(
+    (value: number) => value + 1,
+    0,
+  )
   const [chatScope, setChatScope] = React.useState<ChatSessionScope>('chapter')
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
-  const attachmentsVersion = React.useSyncExternalStore(
-    subscribeBookAssistantAttachments,
-    getBookAssistantAttachmentsVersion,
-    getBookAssistantAttachmentsVersion,
-  )
-  const attachments = getBookAssistantAttachments()
   const pendingSettingSessionRef = React.useRef(false)
+  const pendingSettingPromptRef = React.useRef<string>()
+  const conversationLifecycleRef = React.useRef(
+    createConversationSessionLifecycle<number>(),
+  )
+  const [conversationIdentity, setConversationIdentity] = React.useState('book-session:none:0')
   const effectiveChapterId = chatScope === 'setting' ? null : chapterId
   const scopeAvailable = bookId != null
     && (chatScope === 'setting' || chapterId != null)
-
-  const addAssistantAttachment = React.useCallback((
-    message: AgentConversationMessage,
-    card: SettingDiffCardState,
-  ) => {
-    addBookAssistantAttachment(message, card)
-  }, [])
-
-  React.useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<SettingDiffCardState>).detail
-      if (!detail?.sessionKey) return
-      resolveStoredBookAssistantAttachments(detail)
-    }
-    window.addEventListener('setting-diff-resolved', handler as EventListener)
-    return () => window.removeEventListener('setting-diff-resolved', handler as EventListener)
-  }, [])
 
   const {
     selectedModel,
@@ -147,13 +153,95 @@ export default function AiPanel({
     setConversations,
     setLoading,
   })
+  const activeSessionRef = React.useRef(activeSessionId)
+  activeSessionRef.current = activeSessionId
+  const attachmentManager = React.useMemo(
+    () => createBookAssistantAttachmentManager(
+      `book:${String(bookId ?? 'none')}`,
+    ),
+    [bookId],
+  )
+  const attachments = React.useSyncExternalStore(
+    attachmentManager.subscribe,
+    attachmentManager.getSnapshot,
+    attachmentManager.getSnapshot,
+  )
+  const addAssistantAttachment = React.useCallback((
+    message: AgentConversationMessage,
+    card: SettingDiffCardState,
+    owner: {
+      sessionId: number
+      bookId: string
+      chapterId: string | null
+      prompt: string
+    },
+  ) => {
+    attachmentManager.add(message, card, {
+      ...owner,
+      message,
+    })
+  }, [attachmentManager])
+
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<SettingDiffCardState>).detail
+      if (!detail?.proposalId) return
+      attachmentManager.resolve(detail)
+      const owner = attachmentManager.ownerForProposal(detail.proposalId)
+      if (!owner) return
+      const assistant = owner.message
+      const runId = assistant?.agentRunId
+      if (!runId) return
+      void persistBookProposalResolution({
+        wait: () => new Promise<void>((resolve) => window.setTimeout(resolve, 300)),
+        save: () => services.conversations.saveConversation({
+          sessionId: owner.sessionId,
+          bookId: owner.bookId,
+          chapterId: owner.chapterId,
+          prompt: owner.prompt,
+          response: '',
+          agentRunId: runId,
+          agentProcess: attachmentManager.productProjection(assistant),
+        }),
+      }).then((saved) => {
+        if (!saved) appMessage.error('设定审阅状态保存失败，请稍后重试')
+      })
+    }
+    window.addEventListener('setting-diff-resolved', handler as EventListener)
+    return () => window.removeEventListener('setting-diff-resolved', handler as EventListener)
+  }, [
+    appMessage,
+    attachmentManager,
+  ])
+  const setPrompt = React.useCallback<React.Dispatch<React.SetStateAction<string>>>(
+    (next) => {
+      setPromptState((current) => {
+        const value = typeof next === 'function' ? next(current) : next
+        const sessionId = activeSessionRef.current
+        if (sessionId != null) {
+          conversationLifecycleRef.current.setDraft(sessionId, value)
+        }
+        return value
+      })
+    },
+    [],
+  )
+  const activeLoadToken = conversationLifecycleRef.current.currentToken()
+  const activeLoadMatches = activeSessionId == null
+    || activeLoadToken?.sessionId === activeSessionId
+  const activePrompt = activeSessionId != null && !activeLoadMatches
+    ? conversationLifecycleRef.current.getDraft(activeSessionId)
+    : prompt
 
   React.useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ prefill?: string }>).detail
       setChatScope('setting')
       pendingSettingSessionRef.current = true
-      if (detail?.prefill) setPrompt(detail.prefill)
+      if (detail?.prefill) {
+        pendingSettingPromptRef.current = detail.prefill
+        setPromptState(detail.prefill)
+      }
     }
     window.addEventListener('open-setting-chat', handler as EventListener)
     return () => window.removeEventListener('open-setting-chat', handler as EventListener)
@@ -226,9 +314,10 @@ export default function AiPanel({
     handleAbort,
     queuedMessages,
     sessionActivities,
+    stopping,
   } = useChatSubmit({
     selectedModelConfig,
-    prompt,
+    prompt: activePrompt,
     setPrompt,
     loading,
     setLoading,
@@ -237,13 +326,10 @@ export default function AiPanel({
     bookId: bookId ?? undefined,
     chapterId: effectiveChapterId,
     activeSessionId,
-    setActiveSessionId,
     sessions,
     setSessions,
     associatedChapterIds,
     associatedOutlineIds,
-    writingChapters,
-    availableOutlines,
     currentChapterTitle: chatScope === 'setting'
       ? undefined
       : activeChapterTitle || undefined,
@@ -253,6 +339,14 @@ export default function AiPanel({
     selectedForeshadowingIds,
     sessionScope: chatScope,
     onAssistantAttachment: addAssistantAttachment,
+    associateAssistantIdentities: attachmentManager.associate,
+    productAgentProcess: attachmentManager.productProjection,
+    onPersistenceConflict: (sessionId) => {
+      if (sessionId === activeSessionRef.current) {
+        setConversationInitializing(true)
+      }
+      requestConversationReload()
+    },
   })
 
   const clearSelectedContext = React.useCallback(() => {
@@ -261,6 +355,12 @@ export default function AiPanel({
   }, [setSelectedForeshadowingIds, setSelectedMemoryIds])
 
   const handleSubmit = React.useCallback((content?: string) => {
+    const token = conversationLifecycleRef.current.currentToken()
+    if (
+      !token
+      || token.sessionId !== activeSessionRef.current
+      || !conversationLifecycleRef.current.canAct(token)
+    ) return
     if (content !== undefined) {
       const trimmed = content.trim()
       if (!trimmed) return
@@ -272,6 +372,12 @@ export default function AiPanel({
   }, [clearSelectedContext, doSubmit])
 
   const handleEditMessage = React.useCallback((index: number, content: string) => {
+    const token = conversationLifecycleRef.current.currentToken()
+    if (
+      !token
+      || token.sessionId !== activeSessionRef.current
+      || !conversationLifecycleRef.current.canAct(token)
+    ) return
     const editIndex = index - prependedHistory.length
     const trimmed = content.trim()
     if (editIndex < 0 || !trimmed) return
@@ -289,31 +395,314 @@ export default function AiPanel({
   )
 
   React.useEffect(() => {
-    let active = true
+    const lifecycle = conversationLifecycleRef.current
     if (activeSessionId == null) {
+      lifecycle.invalidate()
       setConversationInitializing(false)
       setConversations([])
-      return () => { active = false }
+      setLoading(false)
+      setConversationIdentity(
+        `book-session:none:${String(bookId ?? 'none')}:${String(effectiveChapterId ?? 'none')}:${chatScope}`,
+      )
+      return
     }
     const sessionId = activeSessionId
+    const token = lifecycle.beginLoad(sessionId)
+    setConversationIdentity(token.identity)
+    const pendingSettingPrompt = chatScope === 'setting'
+      ? pendingSettingPromptRef.current
+      : undefined
+    if (pendingSettingPrompt != null) {
+      pendingSettingPromptRef.current = undefined
+      lifecycle.setDraft(sessionId, pendingSettingPrompt)
+    }
+    setPromptState(lifecycle.getDraft(sessionId))
     const currentRuntime = getChatSessionRuntime(sessionId)
-    setConversations(currentRuntime?.messages ?? [])
-    setLoading(currentRuntime?.loading ?? false)
+    const currentRuntimeAttached = Boolean(
+      currentRuntime
+      && (currentRuntime.loading || currentRuntime.stopping || currentRuntime.streamId),
+    )
+    setConversations(currentRuntimeAttached ? currentRuntime!.messages : [])
+    setLoading(currentRuntimeAttached ? currentRuntime!.loading : false)
     setConversationInitializing(true)
-    void services.conversations
-      .getConversations({ sessionId })
-      .then((result) => {
-        if (!active || !result.success) return
-        const loaded = parseConversationsFromApi(result.data as Conversation[])
-        const runtime = getChatSessionRuntime(sessionId)
-        setConversations(runtime?.messages ?? loaded)
-        setLoading(runtime?.loading ?? false)
+    let initialLoadFinished = false
+
+    const finishInitialLoad = () => {
+      if (initialLoadFinished) return
+      initialLoadFinished = true
+      if (lifecycle.finishLoad(token)) setConversationInitializing(false)
+    }
+    const projectOccurrences = (loaded: HydratedBookConversationReadModel) => {
+      for (const occurrence of loaded.settingDiffOccurrences) {
+        attachmentManager.add(occurrence.message, occurrence.card, {
+          ...occurrence.owner,
+          message: occurrence.message,
+        })
+        if (occurrence.card.status === 'pending') {
+          window.dispatchEvent(new CustomEvent('ai-propose-setting-diff', {
+            detail: {
+              ...occurrence.proposal,
+              restoreOnly: true,
+              resolutionTarget: occurrence.message.agentRunId
+                ? {
+                    sessionId: occurrence.owner.sessionId,
+                    agentRunId: occurrence.message.agentRunId,
+                    prompt: occurrence.owner.prompt,
+                  }
+                : undefined,
+            },
+          }))
+        } else {
+          window.dispatchEvent(new CustomEvent('setting-diff-resolution-hydrated', {
+            detail: occurrence.card,
+          }))
+        }
+      }
+    }
+    const hydrateRows = async (rows: Conversation[]) => {
+      while (lifecycle.isCurrent(token)) {
+        try {
+          return await hydrateBookConversationReadModel(rows, {
+            getRunSnapshot: (input) => services.ai.getAgentRunSnapshot(input),
+            concurrency: 4,
+            isCurrent: () => lifecycle.isCurrent(token),
+          })
+        } catch (error) {
+          if (!(error instanceof BookConversationHydrationError)) throw error
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
+        }
+      }
+      return undefined
+    }
+    const commitSettled = (loaded: HydratedBookConversationReadModel) => {
+      if (!lifecycle.isCurrent(token)) return
+      projectOccurrences(loaded)
+      replaceChatRuntimeMessages(sessionId, loaded.messages)
+      setChatRuntimeLoading(sessionId, false)
+      setChatRuntimeStopping(sessionId, false)
+      setChatRuntimeStreamId(sessionId, undefined)
+      setConversations(loaded.messages)
+      setLoading(false)
+    }
+    const waitForAuthority = () => new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 500)
+    })
+    const hydrateLatest = (input: Parameters<typeof hydrateLatestBookRun>[0]) => (
+      retryCurrentConversationRead({
+        isCurrent: () => lifecycle.isCurrent(token),
+        read: () => hydrateLatestBookRun(input, {
+          getRunSnapshot: (request) => services.ai.getAgentRunSnapshot(request),
+        }),
+        isRetryable: (error) => error instanceof BookConversationHydrationError,
+        wait: waitForAuthority,
       })
-      .finally(() => {
-        if (active) setConversationInitializing(false)
-      })
-    return () => { active = false }
-  }, [activeSessionId, setConversations, setLoading])
+    )
+
+    void (async () => {
+      while (lifecycle.isCurrent(token)) {
+        const stable = await readStableConversationProjection({
+          isCurrent: () => lifecycle.isCurrent(token),
+          getRevision: () => getChatSessionRuntime(sessionId)?.revision,
+          read: () => Promise.all([
+            services.conversations.getConversations({ sessionId }),
+            services.ai.getLatestSessionAgentRun({ sessionId }),
+          ]),
+          isSuccessful: ([conversations, latest]) => (
+            conversations.success && latest.success
+          ),
+          wait: waitForAuthority,
+        })
+        if (!stable || !lifecycle.isCurrent(token)) return
+        const [conversationResult, latestResult] = stable.value
+
+        let rows = conversationResult.data as Conversation[]
+        const latest = latestResult.data
+        const latestSnapshot = latest?.snapshot ?? null
+        const latestRunId = latestSnapshot?.run.runId
+        const rowHasLatest = Boolean(
+          latestRunId && rows.some(
+            (row) => String(row.agent_run_id || '') === latestRunId,
+          ),
+        )
+        const history = await hydrateRows(rows)
+        if (!history || !lifecycle.isCurrent(token)) return
+        const attachedRuntime = getChatSessionRuntime(sessionId)
+        const transportOwnsRun = Boolean(
+          attachedRuntime
+          && (attachedRuntime.loading || attachedRuntime.stopping)
+          && attachedRuntime.streamId
+          && !attachedRuntime.streamId.startsWith('recovered-run:'),
+        )
+        if (transportOwnsRun) {
+          projectOccurrences(history)
+          setConversations(attachedRuntime!.messages)
+          setLoading(attachedRuntime!.loading)
+          finishInitialLoad()
+          return
+        }
+
+        if (latest?.request && !latestSnapshot) {
+          // Only a fresh renderer without an attached transport may abandon an
+          // accepted request whose secret-bearing POST body was lost. A live
+          // A→B→A transport owns the same request and must never be canceled by
+          // hydration.
+          const canceled = await services.ai.cancelWritingChatRequest({
+            requestId: latest.request.requestId,
+          })
+          if (!canceled.success) await waitForAuthority()
+          continue
+        }
+
+        // Hydration itself may span a queued settlement. Never let an older
+        // stable read commit after the session runtime revision has advanced.
+        if (getChatSessionRuntime(sessionId)?.revision !== stable.revision) {
+          continue
+        }
+
+        if (!latest || !latestSnapshot) {
+          commitSettled(history)
+          finishInitialLoad()
+          return
+        }
+
+        if (latestSnapshot.run.status !== 'running') {
+          if (rowHasLatest) {
+            commitSettled(history)
+            finishInitialLoad()
+            return
+          }
+          const replayed = await hydrateLatest({
+            sessionId,
+            prompt: latest.prompt,
+            snapshot: latestSnapshot,
+          })
+          if (!replayed || !lifecycle.isCurrent(token)) return
+          const fallback: HydratedBookConversationReadModel = {
+            messages: [...history.messages, ...replayed.messages],
+            settingDiffOccurrences: [
+              ...history.settingDiffOccurrences,
+              ...replayed.settingDiffOccurrences,
+            ],
+          }
+          for (
+            let attempt = 0;
+            attempt < 3 && lifecycle.isCurrent(token);
+            attempt += 1
+          ) {
+            const refreshed = await services.conversations.getConversations({ sessionId })
+            if (refreshed.success) {
+              rows = refreshed.data as Conversation[]
+              if (rows.some(
+                (row) => String(row.agent_run_id || '') === latestRunId,
+              )) {
+                const materialized = await hydrateRows(rows)
+                if (materialized) commitSettled(materialized)
+                finishInitialLoad()
+                return
+              }
+            }
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 100))
+          }
+          commitSettled(fallback)
+          finishInitialLoad()
+          return
+        }
+
+        let snapshot = latestSnapshot
+        let promptForRun = latest.prompt
+        while (lifecycle.isCurrent(token)) {
+          const running = await hydrateLatest({
+            sessionId,
+            prompt: promptForRun,
+            snapshot,
+          })
+          if (!running || !lifecycle.isCurrent(token)) return
+          const combined = mergeHydratedBookRun(
+            history,
+            running,
+            snapshot.run.runId,
+          )
+          projectOccurrences(combined)
+          replaceChatRuntimeMessages(sessionId, combined.messages)
+          setChatRuntimeLoading(sessionId, snapshot.run.status === 'running')
+          setChatRuntimeStopping(
+            sessionId,
+            snapshot.run.execution.cancellationRequested,
+          )
+          setChatRuntimeStreamId(
+            sessionId,
+            snapshot.run.status === 'running'
+              ? `recovered-run:${snapshot.run.runId}`
+              : undefined,
+          )
+          setChatRuntimeActivity(sessionId, {
+            state: snapshot.run.status === 'running'
+              ? 'running'
+              : snapshot.run.status === 'done'
+                ? 'completed'
+                : snapshot.run.status === 'canceled'
+                  ? 'canceled'
+                  : 'failed',
+            queuedCount: 0,
+          })
+          setConversations(combined.messages)
+          setLoading(snapshot.run.status === 'running')
+          finishInitialLoad()
+
+          if (snapshot.run.status !== 'running') break
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
+          if (!lifecycle.isCurrent(token)) return
+          const polled = await services.ai.getAgentRunSnapshot({
+            runId: snapshot.run.runId,
+            limit: 500,
+          })
+          if (!polled.success || !polled.data) continue
+          snapshot = polled.data
+        }
+
+        // Canonical terminal materialization is server-owned. Refetch it; if
+        // projection commit is a fraction behind, retain the replayed terminal
+        // view and retry briefly instead of reviving stale pre-Run history.
+        for (let attempt = 0; attempt < 3 && lifecycle.isCurrent(token); attempt += 1) {
+          const refreshed = await services.conversations.getConversations({ sessionId })
+          if (refreshed.success) {
+            const refreshedRows = refreshed.data as Conversation[]
+            if (refreshedRows.some(
+              (row) => String(row.agent_run_id || '') === snapshot.run.runId,
+            )) {
+              const terminal = await hydrateRows(refreshedRows)
+              if (terminal) commitSettled(terminal)
+              return
+            }
+          }
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 100))
+        }
+        const terminal = await hydrateLatest({
+          sessionId,
+          prompt: promptForRun,
+          snapshot,
+        })
+        if (!terminal) return
+        commitSettled(mergeHydratedBookRun(
+          history,
+          terminal,
+          snapshot.run.runId,
+        ))
+        finishInitialLoad()
+        return
+      }
+    })()
+    return () => lifecycle.invalidate()
+  }, [
+    activeSessionId,
+    attachmentManager,
+    bookId,
+    chatScope,
+    conversationReloadRevision,
+    effectiveChapterId,
+    setConversations,
+    setLoading,
+  ])
 
   const handleAddFavorite = React.useCallback(async (
     sourcePrompt: string,
@@ -335,7 +724,13 @@ export default function AiPanel({
     if (session) handleCloseTab(session)
   }, [handleCloseTab, sessions])
 
+  const deleteHistorySession = React.useCallback((session: AiSession) => {
+    attachmentManager.evictSession(session.id)
+    handleDeleteFromHistory(session)
+  }, [attachmentManager, handleDeleteFromHistory])
+
   const bookConversationController = useBookConversationController({
+    conversationIdentity,
     bookId,
     chapterId: effectiveChapterId,
     scope: chatScope,
@@ -346,11 +741,15 @@ export default function AiPanel({
     prependedHistory,
     activities: sessionActivities,
     queuedMessages,
-    prompt,
+    prompt: activePrompt,
     setPrompt,
-    initializing: Boolean(scopeAvailable && (!sessionsLoaded || conversationInitializing)),
+    initializing: Boolean(
+      scopeAvailable
+      && (!sessionsLoaded || conversationInitializing || !activeLoadMatches),
+    ),
     running: loading,
-    attachmentsVersion,
+    stopping,
+    attachmentsVersion: attachmentManager.getVersion(),
     scopeAvailable,
     modelConfigs,
     selectedModelId: selectedModel,
@@ -370,7 +769,7 @@ export default function AiPanel({
       onSubmitErrorReport: handleSubmitErrorReport,
     },
     onOpenFromHistory: handleOpenFromHistory,
-    onDeleteFromHistory: handleDeleteFromHistory,
+    onDeleteFromHistory: deleteHistorySession,
   })
   const combinedMessages = bookConversationController.conversation.messages
   const bookConversationExtensions = useBookConversationExtensions({
@@ -385,7 +784,7 @@ export default function AiPanel({
     chatAgentMode,
     setChatAgentMode,
     contextBar,
-    prompt,
+    prompt: activePrompt,
     onInsertPrompt: setPrompt,
     promptTemplateContext,
     messages: combinedMessages,

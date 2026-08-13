@@ -10,6 +10,7 @@ export interface AgentConversationPanelViewInput {
   selectedModel: Pick<AiModelConfig, 'id'> | null
   inputDisabled: boolean
   resuming: boolean
+  stopping?: boolean
 }
 
 export interface AgentConversationPanelView {
@@ -27,6 +28,7 @@ export function buildAgentConversationPanelView({
   selectedModel,
   inputDisabled,
   resuming,
+  stopping = false,
 }: AgentConversationPanelViewInput): AgentConversationPanelView {
   const showTaskProgress = Boolean(
     taskPlan
@@ -37,6 +39,6 @@ export function buildAgentConversationPanelView({
     queueLabel: queuedCount > 0 ? `排队 ${queuedCount}` : '',
     showTaskProgress,
     taskCountLabel: taskPlan ? getTaskPlanCountLabel(taskPlan) : '',
-    resumeDisabled: inputDisabled || resuming || !selectedModel,
+    resumeDisabled: inputDisabled || resuming || stopping || !selectedModel,
   }
 }

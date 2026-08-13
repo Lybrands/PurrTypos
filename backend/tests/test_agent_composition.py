@@ -133,6 +133,36 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     assert options.context_claims[0].name == "writing_retrieval"
 
 
+def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
+    body = ChatStreamRequest(
+        streamId="chat-session-7-request-1",
+        messages=[{"role": "user", "content": "hello"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-pro",
+            "model_profile": "deepseek:deepseek-v4-pro",
+        },
+        sessionId=7,
+        chatAgentMode="agent",
+    )
+
+    request = to_writing_agent_request(
+        body,
+        {
+            "model": "deepseek-v4-pro",
+            "baseURL": "https://api.deepseek.com",
+        },
+    )
+    options = writing_run_options(request, {"max_tokens": 2048})
+
+    assert options.turn_id == "chat-session-7-request-1"
+    assert options.binding is not None
+    assert options.binding.namespace == "writing.chat.request"
+    assert options.binding.aggregate_id == "7"
+    assert options.binding.command_id == "chat-session-7-request-1"
+
+
 @pytest.mark.asyncio
 async def test_composition_hydrates_authoritative_book_catalogs(
     temp_db: DatabaseConnection,

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from application.book_conversation_product_projection import (
+    persist_setting_diff_resolution,
+)
 from database.crud import character_history as char_hist_crud
 from database.crud import characters as characters_crud
 from database.crud import setting_entities as entities_crud
@@ -26,31 +29,55 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
     except (TypeError, ValueError):
         return {"success": False, "error": "无效的人物 ID"}
 
-    row = await characters_crud.update_character(
-        db,
-        cid,
-        {
-            "name": body.name,
-            "tags": body.tags,
-            "profile_md": body.profileMd,
-        },
-    )
-    if not row:
-        return {"success": False, "error": "人物不存在"}
+    async with db.transaction(cancellation_linearizable=True):
+        if body.resolution is not None:
+            if (
+                body.resolution.kind != "character"
+                or body.resolution.sessionKey != f"character:{cid}"
+            ):
+                raise ValueError("setting proposal target does not match character")
+            if await db.fetch_one(
+                "SELECT id FROM characters WHERE id = ?",
+                [cid],
+            ) is None:
+                return {"success": False, "error": "人物不存在"}
+            resolution_write = await persist_setting_diff_resolution(
+                db,
+                session_id=body.resolution.sessionId,
+                run_id=body.resolution.agentRunId,
+                resolution=body.resolution.model_dump(),
+                allow_new_committed=True,
+            )
+            if resolution_write.replayed:
+                return {
+                    "success": True,
+                    "data": {"characterId": cid, "replayed": True},
+                }
+        row = await characters_crud.update_character(
+            db,
+            cid,
+            {
+                "name": body.name,
+                "tags": body.tags,
+                "profile_md": body.profileMd,
+            },
+        )
+        if not row:
+            return {"success": False, "error": "人物不存在"}
 
-    hist_id = await char_hist_crud.insert_character_history(
-        db,
-        character_id=cid,
-        before_name=body.before.name,
-        before_tags=body.before.tags,
-        before_profile_md=body.before.profileMd,
-        after_name=body.after.name,
-        after_tags=body.after.tags,
-        after_profile_md=body.after.profileMd,
-        source=body.source,
-        accepted_segments=body.accepted_segments,
-        rejected_segments=body.rejected_segments,
-    )
+        hist_id = await char_hist_crud.insert_character_history(
+            db,
+            character_id=cid,
+            before_name=body.before.name,
+            before_tags=body.before.tags,
+            before_profile_md=body.before.profileMd,
+            after_name=body.after.name,
+            after_tags=body.after.tags,
+            after_profile_md=body.after.profileMd,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+            rejected_segments=body.rejected_segments,
+        )
     try:
         from services import memory_deposition_service
         await memory_deposition_service.deposit_manual_character_memory(row)
@@ -133,31 +160,55 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
     except (TypeError, ValueError):
         return {"success": False, "error": "无效的实体 ID"}
 
-    row = await entities_crud.update_setting_entity(
-        db,
-        eid,
-        {
-            "name": body.name,
-            "tags": body.tags,
-            "profile_md": body.profileMd,
-        },
-    )
-    if not row:
-        return {"success": False, "error": "实体不存在"}
+    async with db.transaction(cancellation_linearizable=True):
+        if body.resolution is not None:
+            if (
+                body.resolution.kind != "entity"
+                or body.resolution.sessionKey != f"entity:{eid}"
+            ):
+                raise ValueError("setting proposal target does not match entity")
+            if await db.fetch_one(
+                "SELECT id FROM setting_entities WHERE id = ?",
+                [eid],
+            ) is None:
+                return {"success": False, "error": "实体不存在"}
+            resolution_write = await persist_setting_diff_resolution(
+                db,
+                session_id=body.resolution.sessionId,
+                run_id=body.resolution.agentRunId,
+                resolution=body.resolution.model_dump(),
+                allow_new_committed=True,
+            )
+            if resolution_write.replayed:
+                return {
+                    "success": True,
+                    "data": {"entityId": eid, "replayed": True},
+                }
+        row = await entities_crud.update_setting_entity(
+            db,
+            eid,
+            {
+                "name": body.name,
+                "tags": body.tags,
+                "profile_md": body.profileMd,
+            },
+        )
+        if not row:
+            return {"success": False, "error": "实体不存在"}
 
-    hist_id = await ent_hist_crud.insert_entity_history(
-        db,
-        entity_id=eid,
-        before_name=body.before.name,
-        before_tags=body.before.tags,
-        before_profile_md=body.before.profileMd,
-        after_name=body.after.name,
-        after_tags=body.after.tags,
-        after_profile_md=body.after.profileMd,
-        source=body.source,
-        accepted_segments=body.accepted_segments,
-        rejected_segments=body.rejected_segments,
-    )
+        hist_id = await ent_hist_crud.insert_entity_history(
+            db,
+            entity_id=eid,
+            before_name=body.before.name,
+            before_tags=body.before.tags,
+            before_profile_md=body.before.profileMd,
+            after_name=body.after.name,
+            after_tags=body.after.tags,
+            after_profile_md=body.after.profileMd,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+            rejected_segments=body.rejected_segments,
+        )
     try:
         from services import memory_deposition_service
         await memory_deposition_service.deposit_manual_entity_memory(row)
@@ -235,16 +286,35 @@ async def rollback_entity_history(historyId: int):
 @router.post("/setting-diff/background/{bookId}/commit")
 async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest):
     db = get_db()
-    await bg_crud.save_story_background(db, bookId, body.content)
-    hist_id = await bg_hist_crud.insert_story_background_history(
-        db,
-        book_id=bookId,
-        before_content=body.before_content,
-        after_content=body.after_content,
-        source=body.source,
-        accepted_segments=body.accepted_segments,
-        rejected_segments=body.rejected_segments,
-    )
+    async with db.transaction(cancellation_linearizable=True):
+        if body.resolution is not None:
+            if (
+                body.resolution.kind != "background"
+                or body.resolution.sessionKey != f"background:{bookId}"
+            ):
+                raise ValueError("setting proposal target does not match background")
+            resolution_write = await persist_setting_diff_resolution(
+                db,
+                session_id=body.resolution.sessionId,
+                run_id=body.resolution.agentRunId,
+                resolution=body.resolution.model_dump(),
+                allow_new_committed=True,
+            )
+            if resolution_write.replayed:
+                return {
+                    "success": True,
+                    "data": {"bookId": bookId, "replayed": True},
+                }
+        await bg_crud.save_story_background(db, bookId, body.content)
+        hist_id = await bg_hist_crud.insert_story_background_history(
+            db,
+            book_id=bookId,
+            before_content=body.before_content,
+            after_content=body.after_content,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+            rejected_segments=body.rejected_segments,
+        )
     try:
         from services import memory_deposition_service
         await memory_deposition_service.deposit_manual_background_memory(

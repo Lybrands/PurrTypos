@@ -14,9 +14,46 @@ import type {
 export const MANUAL_ABORT_MESSAGE = '本轮对话已由你手动终止。'
 export { EMPTY_RESPONSE_MESSAGE } from '../chatHistory.ts'
 
+export const handleRequestResultTerminal: AgentChunkHandler = (chunk, context) => {
+  if (!chunk.done || !chunk.requestResult) return
+  if (chunk.requestResult.status === 'canceled') {
+    return handleDone({
+      ...chunk,
+      aborted: true,
+      finalResponseExpected: false,
+    }, context)
+  }
+  if (chunk.requestResult.status === 'rejected') {
+    return handleError({
+      ...chunk,
+      error: chunk.error
+        || chunk.requestResult.rejectionCode
+        || 'Writing Agent 请求未启动',
+    }, context)
+  }
+}
+
 export const handleRunResultTerminal: AgentChunkHandler = (chunk, context) => {
   if (!chunk.done || !chunk.runResult) return
   const { status, errorCode } = chunk.runResult
+  if (chunk.runResult.runId) context.acc.agentRunId = chunk.runResult.runId
+  if (
+    status === 'done'
+    && typeof chunk.finalResponse === 'string'
+    && chunk.finalResponseExpected !== false
+    && !context.acc.longTaskId
+  ) {
+    context.acc.response = chunk.finalResponse
+    if (context.acc.canonicalOutput) {
+      context.acc.canonicalOutput = {
+        ...context.acc.canonicalOutput,
+        finalText: chunk.finalResponse,
+        finalStreamStatus: 'committed',
+        runStatus: 'done',
+        runTerminal: true,
+      }
+    }
+  }
   if (status === 'failed' || status === 'blocked') {
     return handleError({
       ...chunk,
@@ -92,7 +129,10 @@ export const handleDone: AgentChunkHandler = (chunk, context) => {
     if (chunk.aborted) acc.taskPlan = markTaskPlanAborted(acc.taskPlan)
 
     const response = acc.response || ''
-    const finalResponseExpected = chunk.finalResponseExpected !== false
+    const finalResponseExpected = (
+      chunk.finalResponseExpected !== false
+      && !(acc.longTaskId && !response.trim())
+    )
     const emptyResponse = finalResponseExpected
       && !chunk.aborted
       && !response.trim()
@@ -119,6 +159,7 @@ export const handleDone: AgentChunkHandler = (chunk, context) => {
         taskPlan: acc.taskPlan
           ?? (chunk.aborted ? markTaskPlanAborted(message.taskPlan) : message.taskPlan),
         longTaskId: acc.longTaskId ?? message.longTaskId,
+        canonicalOutput: acc.canonicalOutput ?? message.canonicalOutput,
         termination: chunk.aborted ? MANUAL_ABORT_MESSAGE : undefined,
         toolCalling: false,
         errorReport: emptyResponse
@@ -131,10 +172,10 @@ export const handleDone: AgentChunkHandler = (chunk, context) => {
     }
 
     acc.response = response
-    const outcome: AgentRunOutcome = !finalResponseExpected
-      ? 'paused'
-      : chunk.aborted
-        ? 'canceled'
+    const outcome: AgentRunOutcome = chunk.aborted
+      ? 'canceled'
+      : !finalResponseExpected
+        ? 'paused'
         : emptyResponse
           ? 'failed'
           : 'completed'

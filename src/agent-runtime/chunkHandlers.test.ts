@@ -70,6 +70,105 @@ test('terminal projection calls the host once and keeps provider text unchanged'
   assert.equal(harness.readMessages().at(-1)?.content, '模型原文')
 })
 
+test('snapshot-recovered terminal replaces partial canonical copy with final response', () => {
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    {
+      role: 'assistant',
+      content: '半段',
+      canonicalOutput: {
+        lastSequence: 1,
+        lastSequenceByRun: { 'run-1': 1 },
+        finalText: '半段',
+        commentaryText: '',
+        commentaryBlocks: [],
+        operations: {},
+        operationOrder: [],
+        delegations: {},
+        delegationOrder: [],
+        approvals: {},
+        approvalOrder: [],
+        runId: 'run-1',
+        runStatus: null,
+        runTerminal: false,
+        finalStreamStatus: 'open',
+        finalStreamId: 'final-1',
+        finalStreamErrorCode: null,
+        latestRuntimeEvent: null,
+      },
+    },
+  ])
+  harness.context.acc.response = '半段'
+  harness.context.acc.canonicalOutput = harness.readMessages().at(-1)?.canonicalOutput
+
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: '服务端完整终稿',
+    runResult: { runId: 'run-1', status: 'done' },
+  }, harness.context)
+
+  const message = harness.readMessages().at(-1)
+  assert.equal(message?.content, '服务端完整终稿')
+  assert.equal(message?.canonicalOutput?.finalText, '服务端完整终稿')
+  assert.equal(message?.canonicalOutput?.finalStreamStatus, 'committed')
+})
+
+test('durable long-task dispatch settles without receipt prose or empty-response error', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '继续长篇任务' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+
+  dispatchAgentChunk({
+    eventId: 'dispatch-1',
+    runId: 'run-long-task',
+    sequence: 1,
+    source: 'runtime',
+    kind: 'runtime.event',
+    channel: 'lifecycle',
+    visibility: 'public',
+    payload: {
+      eventType: 'long_task.dispatched',
+      data: { taskId: 'long-task-1' },
+    },
+    occurredAt: '2026-08-13T00:00:00+00:00',
+    emittedAt: '2026-08-13T00:00:00+00:00',
+  }, harness.context)
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: '已恢复原有长篇正文任务。',
+    finalResponseExpected: false,
+    runResult: { runId: 'run-long-task', status: 'done' },
+  }, harness.context)
+
+  const message = harness.readMessages().at(-1)
+  assert.equal(message?.content, '')
+  assert.equal(message?.longTaskId, 'long-task-1')
+  assert.equal(message?.error, undefined)
+  assert.equal(message?.isError, undefined)
+  assert.deepEqual(outcomes, ['paused'])
+})
+
+test('a Run with long-task progress preserves genuine provider final text', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '创作正文' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+  harness.context.acc.longTaskId = 'long-task-with-text'
+  harness.context.acc.response = '第一场正文。'
+
+  dispatchAgentChunk({ done: true }, harness.context)
+
+  assert.equal(harness.readMessages().at(-1)?.content, '第一场正文。')
+  assert.deepEqual(outcomes, ['completed'])
+})
+
 test('runtime invokes injected host chunk handling without knowing book events', () => {
   const received: unknown[] = []
   const harness = createTestChunkContext([], {
@@ -114,6 +213,62 @@ test('an early transport error stays out of content and remains visible in metad
   assert.equal(message?.content, '')
   assert.equal(message?.isError, true)
   assert.equal(message?.error, '上游连接失败')
+})
+
+test('a pre-Run canceled request settles as canceled rather than paused', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+
+  dispatchAgentChunk({
+    done: true,
+    aborted: true,
+    finalResponseExpected: false,
+    requestResult: {
+      requestId: 'request-canceled',
+      sessionId: 7,
+      status: 'canceled',
+      runId: null,
+      cancelRequested: true,
+      rejectionCode: null,
+      revision: 2,
+    },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['canceled'])
+  assert.match(harness.readMessages().at(-1)?.termination || '', /终止/)
+})
+
+test('a pre-Run rejected request settles as a structured failure', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+
+  dispatchAgentChunk({
+    done: true,
+    finalResponseExpected: false,
+    requestResult: {
+      requestId: 'request-rejected',
+      sessionId: 7,
+      status: 'rejected',
+      runId: null,
+      cancelRequested: false,
+      rejectionCode: 'invalid_model',
+      revision: 2,
+    },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['failed'])
+  assert.equal(harness.readMessages().at(-1)?.content, '')
+  assert.equal(harness.readMessages().at(-1)?.error, 'invalid_model')
 })
 
 for (const failingHostMethod of [
