@@ -336,6 +336,58 @@ tests, 20 frontend state-machine and mounted interaction tests, the 52-test
 architecture boundary gate, and production TypeScript typecheck. All are also
 part of the mandatory full gate below.
 
+## Final independent-review follow-up
+
+Follow-up base: `91f21217e5e6a18aa0238bd225ea8028eca70eb7`.
+This review round added no schema, route, PurrA/provider contract, or Agent
+execution semantic.
+
+1. **Migration-owned legacy Screenplay retirement.** RED reopened a legacy
+   NULL-snapshot project with a queued Operation and reached the interactive
+   active-owner guard. GREEN uses a dedicated initialization-only retirement
+   transaction: it snapshots and terminalizes exact legacy Screenplay runtime
+   ownership, deletes its children before the discarded aggregate, and never
+   calls or weakens the public deletion guard. A real SQLite re-init regression
+   also proves that native project work and a colliding Writing binding survive.
+2. **Provable legacy SettingDiff digest backfill.** RED made all three exact
+   pre-digest resolution replays return 409. GREEN re-reads the authoritative
+   proposal journal and requires exact target identity, immutable
+   `before/proposed`, reviewed final mutation, current target, and mutation
+   history before atomically backfilling the server-computed canonical digest
+   in the existing Conversation overlay. The empty digest is never a wildcard;
+   forged finals remain 409 for character, entity, and background.
+3. **Complete active deletion frontier.** RED deleted owner-scoped open
+   WorkItems and queued/planning/running/paused Screenplay Turns before an
+   Operation existed. GREEN evaluates those durable owners in the same
+   cancellation-linearizable transaction as Run/request/LongTask/Operation
+   ownership and deletion. The public delete guard remains fail-closed; the
+   continuity regression first observes 409, then completes the WorkItem and
+   verifies terminal cleanup.
+4. **Child-before-parent terminal cleanup.** RED left LongTask usage and
+   pre-Operation Turn cancel commands behind after Book/Screenplay owner
+   deletion. GREEN snapshots all task, turn, and operation IDs before parent
+   removal, clears `ai_agent_long_task_usage`, and deletes every owner Turn
+   cancel command including `operation_id IS NULL` before deleting parents.
+5. **Structured proposal replay precedes mutable target existence.** RED made
+   exact Character/Entity replays fail after a successfully mutated target was
+   later deleted, while new missing targets did not consistently fail closed.
+   GREEN proves journal identity, digest, and exact durable resolution receipt
+   first; an exact replay is idempotent after target deletion, while a new
+   mutation still requires target existence and current-row CAS or returns 409.
+
+Focused follow-up evidence is 73/73 core owner/migration/proposal tests plus
+77/77 route, runtime, Conversation, and architecture tests. Each listed RED was
+observed before its corresponding production change.
+
+The first read-only follow-up review added three same-root RED cases, all now
+closed: cross-owner REFERENCE/CONTINUATION WorkItems are guard-related but never
+physically owned; a legacy resolution backfill reconstructs the unique reviewed
+final from journal snapshots and its persisted accepted/rejected counts (mixed
+or otherwise ambiguous selections fail closed); and migration retirement now
+unlinks reports, removes favorites, archives Conversation memory, and strips
+retained task session metadata in the same transaction. The combined related
+backend suites pass 164/164.
+
 ## Verification
 
 Fresh verification from the final working tree:
@@ -343,12 +395,12 @@ Fresh verification from the final working tree:
 - `PURRTYPOS_PYTHON=/Users/liuyubin/Lybrand_project/PurrTypos/.venv/bin/python npm run check:agent-refactor`: PASS.
   - architecture boundaries: 52 passed;
   - model contracts: 12 passed;
-  - Screenplay acceptance: 118 passed;
+  - Screenplay acceptance: 119 passed;
   - TypeScript typecheck: passed;
   - mandatory unit/mounted behavior: 323 passed;
   - proposal/receipt/recovery projection: 29 passed;
   - Screenplay session/load-epoch lifecycle: 2 passed;
-  - full backend: 1500 passed, 4 skipped.
+  - full backend: 1521 passed, 4 skipped.
 - `npm run build:web`: PASS (1088 modules transformed; only the existing chunk
   size advisory).
 - `git diff --check`: PASS.
@@ -395,5 +447,10 @@ Both commits descend from base
 The scoped final-review root-fix implementation is
 `deab29a` (`fix(agent): close final owner lifecycle races`) and descends from
 second-wave base `491532edee56381e39b03b0f09d1b396d3f2d208`.
-This updated evidence report is its immediate report-only descendant; the final
-handoff includes that exact SHA.
+
+The final independent-review implementation is
+`b9a9f37b00b135621fe8a4424663a463b95d7976`
+(`fix(agent): reconcile legacy owner cleanup`) and descends from follow-up base
+`91f21217e5e6a18aa0238bd225ea8028eca70eb7`. This updated evidence report is
+its immediate report-only descendant; the final handoff includes that exact
+SHA.
