@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from infrastructure.persistence.run_store import create_run
 from purra.contracts import RunBinding
 import routers.ai as ai_routes
 from routers.ai import router as ai_router
+from schemas.ai import ChatStreamRequest
 from tests.support.asgi_sse import (
     decode_sse_json,
     request_json,
@@ -67,6 +69,17 @@ def request_body(request_id: str = "chat-route-1") -> dict:
         "chatAgentMode": "agent",
         "contextWindow": "200k",
     }
+
+
+def _lexical(text: str) -> str:
+    return json.dumps({
+        "root": {
+            "children": [{
+                "type": "paragraph",
+                "children": [{"type": "text", "text": text}],
+            }],
+        },
+    }, ensure_ascii=False)
 
 
 async def test_writing_routes_resolve_roles_from_persisted_profile_identity():
@@ -288,6 +301,207 @@ async def test_request_id_replay_cannot_change_api_key_credential(receipt_app):
     )
     assert "key" not in stored["request_digest"]
     assert "different-secret" not in stored["request_digest"]
+
+
+async def test_replan_cannot_rewrite_completed_writing_step_or_create_new_root(
+    receipt_app,
+    monkeypatch,
+):
+    app, db = receipt_app
+    request_id = "chat-replan-history"
+    chapter_text = "弄堂尽头没有雨，只有旧木门被风推得轻响。"
+    await db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-1", "重规划历史测试书"],
+    )
+    await db.execute(
+        "INSERT INTO outlines (id, title, type, book_id) "
+        "VALUES (?, ?, 'writing', ?)",
+        ["writing-history", "写作目录", "book-1"],
+    )
+    await db.execute(
+        "INSERT INTO outline_chapters "
+        "(id, outline_id, title, level, sort) VALUES (?, ?, ?, 1, 1)",
+        ["chapter-1", "writing-history", "第一章：弄堂"],
+    )
+    await db.execute(
+        "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
+        ["chapter-1", _lexical(chapter_text)],
+    )
+    planner_round = 0
+
+    async def _planner(_key, messages, _options, _provider, signal=None):
+        nonlocal planner_round
+        planner_round += 1
+        assert signal is not None
+        payload = json.loads(messages[1]["content"])
+        if planner_round == 1:
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "读取章节后提出氛围策略",
+                "todos": [
+                    {
+                        "id": "inspect-current-chapter",
+                        "title": "检查当前章节",
+                        "type": "read",
+                        "executor": "tool",
+                        "expectedTools": ["getChapterContent"],
+                        "riskLevel": "read",
+                    },
+                    {
+                        "id": "propose-atmosphere-rewrite",
+                        "title": "提出氛围改写",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
+                ],
+            }
+        else:
+            assert planner_round == 2
+            execution = payload["executionState"]
+            assert execution["completedSteps"][0]["id"] == (
+                "inspect-current-chapter"
+            )
+            assert chapter_text in json.dumps(
+                execution["recentToolObservations"],
+                ensure_ascii=False,
+            )
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "根据新证据调整未完成策略",
+                "todos": [
+                    {
+                        "id": "inspect-current-chapter",
+                        "title": "伪造已完成步骤标题",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
+                    {
+                        "id": "shape-wind-sound-atmosphere",
+                        "title": "围绕风声调整弄堂氛围",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
+                ],
+            }
+        return {
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(content, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
+    runtime_round = 0
+
+    async def _runtime(_key, messages, options, _provider, signal=None):
+        nonlocal runtime_round
+        runtime_round += 1
+        assert signal is not None
+
+        async def _stream():
+            if runtime_round == 1:
+                assert [
+                    item["function"]["name"]
+                    for item in options.get("tools", [])
+                ] == ["getChapterContent"]
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-read-history",
+                                "type": "function",
+                                "function": {
+                                    "name": "getChapterContent",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
+            assert not options.get("tools")
+            yield {
+                "choices": [{
+                    "delta": {"content": "应围绕风推木门的轻响深化氛围。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {"stream": _stream(), "model": "route-model"}
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+    body = request_body(request_id)
+    body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
+    body["currentChapterTitle"] = "第一章：弄堂"
+    body.pop("streamId")
+    body.pop("requestReceiptVersion")
+    frames = [
+        chunk
+        async for chunk in ai_routes._stream_composed_agent(
+            body=ChatStreamRequest.model_validate(body),
+            api_key="test-key",
+            provider_options={
+                "model": "deepseek-v4-flash",
+                "baseURL": "https://provider.test/v1/",
+                "max_tokens": 2_048,
+            },
+            signal=asyncio.Event(),
+        )
+    ]
+    plans = [
+        frame["payload"]["data"]
+        for frame in frames
+        if frame.get("kind") == "runtime.event"
+        and frame.get("payload", {}).get("eventType") == "run.todos_updated"
+    ]
+    observed_runs = await db.fetch_all(
+        "SELECT id, status, final_response FROM ai_agent_runs"
+    )
+    assert planner_round == 2
+    assert len(plans) >= 2
+    assert [
+        (step["id"], step["title"], step["status"])
+        for step in plans[-1]["steps"]
+    ] == [
+        ("inspect-current-chapter", "检查当前章节", "done"),
+        (
+            "shape-wind-sound-atmosphere",
+            "围绕风声调整弄堂氛围",
+            "running",
+        ),
+    ]
+    assert "伪造已完成步骤标题" not in json.dumps(
+        plans,
+        ensure_ascii=False,
+    )
+    root_run_id = observed_runs[0]["id"]
+    runs = await db.fetch_all(
+        "SELECT id, status, parent_run_id FROM ai_agent_runs"
+    )
+    assert runs == [{
+        "id": root_run_id,
+        "status": "done",
+        "parent_run_id": None,
+    }]
 
 
 async def test_post_claim_binds_one_run_and_bound_cancel_is_applied_once(

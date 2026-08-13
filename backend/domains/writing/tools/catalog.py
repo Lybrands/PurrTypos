@@ -12,6 +12,7 @@ from purra.contracts import (
     DomainEffect,
     ExecutionState,
     ToolHandlerResult,
+    ToolPlanningDisposition,
     ToolSchema,
 )
 from purra.ports import CancellationSignal, ToolRegistration
@@ -149,6 +150,11 @@ def _adapt_handler(tool_name: str, handler: WritingToolHandler):
             from_cache=bool(getattr(result, "from_cache", False)),
             effects=tuple(effects),
             error_code=_tool_error_code(content),
+            planning_disposition=(
+                ToolPlanningDisposition.REPLAN
+                if tool_name == "getChapterContent"
+                else ToolPlanningDisposition.KEEP_PLAN
+            ),
         )
 
     return _run
