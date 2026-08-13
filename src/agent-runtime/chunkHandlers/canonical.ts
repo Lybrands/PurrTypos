@@ -32,6 +32,7 @@ export function handleCanonicalOutput(
   )
   if (resumesPausedRun) {
     ctx.acc.terminalSettlement = undefined
+    ctx.acc.taskPlan = undefined
   }
 
   const currentState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
@@ -56,7 +57,11 @@ export function handleCanonicalOutput(
     .map((block) => block.text.trim())
     .filter(Boolean)
   ctx.acc.commentaryDurationsMs = undefined
-  applyCanonicalRuntimeView(ctx, state.latestRuntimeEvent)
+  if (chunk.kind === 'runtime.event') {
+    applyCanonicalRuntimeView(ctx, state.latestRuntimeEvent, chunk.runId)
+  } else if (chunk.kind === 'run.lifecycle') {
+    applyRunLifecycleView(ctx, chunk.runId, chunk.payload.status)
+  }
   ctx.acc.delegations = state.delegationOrder.map((delegationId) =>
     delegationView(state.delegations[delegationId]),
   )
@@ -112,20 +117,27 @@ function applyCanonicalRuntimeView(
     data: Record<string, unknown>
     sequence: number
   } | null,
+  envelopeRunId?: string,
 ): void {
   if (!runtime) return
   const { eventType, data } = runtime
-  const runId = stringValue(data.runId ?? data.run_id) || ctx.acc.agentRunId
+  const runId = envelopeRunId
+    || stringValue(data.runId ?? data.run_id)
+    || ctx.acc.agentRunId
 
   if (eventType === 'run.todos_updated') {
     const plan = normalizePlan(data, runId)
-    if (plan) ctx.acc.taskPlan = plan
+    if (plan && (!ctx.acc.taskPlan || ctx.acc.taskPlan.runId === plan.runId)) {
+      ctx.acc.taskPlan = plan
+    }
     return
   }
   if (eventType === 'run.todo_updated') {
     const stepId = stringValue(data.stepId ?? data.step_id)
     const step = normalizeStep(data.step)
-    if (!stepId || !step || !ctx.acc.taskPlan) return
+    if (!stepId || !step || !ctx.acc.taskPlan || ctx.acc.taskPlan.runId !== runId) {
+      return
+    }
     ctx.acc.taskPlan = {
       ...ctx.acc.taskPlan,
       status: normalizePlanStatus(data.status ?? ctx.acc.taskPlan.status),
@@ -141,14 +153,13 @@ function applyCanonicalRuntimeView(
     || eventType === 'run.blocked'
     || eventType === 'run.canceled'
   ) {
-    if (ctx.acc.taskPlan) {
-      ctx.acc.taskPlan = {
-        ...ctx.acc.taskPlan,
-        status: eventType === 'run.completed'
-          ? 'done'
-          : eventType.slice('run.'.length) as AiTaskPlan['status'],
-      }
-    }
+    updateTaskPlanStatus(
+      ctx,
+      runId,
+      eventType === 'run.completed'
+        ? 'done'
+        : eventType.slice('run.'.length) as AiTaskPlan['status'],
+    )
     return
   }
   if (eventType === 'long_task.dispatched') {
@@ -159,14 +170,6 @@ function applyCanonicalRuntimeView(
   if (eventType === 'long_task.progress') {
     ctx.acc.longTaskId = stringValue(data.taskId ?? data.task_id)
       || ctx.acc.longTaskId
-    const progressPlan = normalizeLongTaskPlan(data, runId)
-    if (progressPlan) {
-      const currentPlan = ctx.acc.taskPlan
-      ctx.acc.taskPlan = !currentPlan
-        || isLongTaskProjection(currentPlan, progressPlan)
-        ? progressPlan
-        : { ...currentPlan, status: progressPlan.status }
-    }
     return
   }
   if (eventType === 'context.budgeted' || eventType === 'context.usage_recorded') {
@@ -185,13 +188,32 @@ function applyCanonicalRuntimeView(
   }
 }
 
+function applyRunLifecycleView(
+  ctx: AgentChunkRuntimeContext,
+  runId: string,
+  status: unknown,
+): void {
+  const planStatus = normalizePlanStatus(status)
+  if (planStatus === 'running' || planStatus === 'planned') return
+  updateTaskPlanStatus(ctx, runId, planStatus)
+}
+
+function updateTaskPlanStatus(
+  ctx: AgentChunkRuntimeContext,
+  runId: string | undefined,
+  status: AiTaskPlan['status'],
+): void {
+  if (!ctx.acc.taskPlan || ctx.acc.taskPlan.runId !== runId) return
+  ctx.acc.taskPlan = { ...ctx.acc.taskPlan, status }
+}
+
 function normalizePlan(
   value: Record<string, unknown>,
   fallbackRunId?: string,
 ): AiTaskPlan | null {
   if (!Array.isArray(value.steps)) return null
   return {
-    runId: stringValue(value.runId ?? value.run_id) || fallbackRunId,
+    runId: fallbackRunId || stringValue(value.runId ?? value.run_id),
     title: stringValue(value.title) || 'To-dos',
     goal: stringValue(value.goal) || undefined,
     status: normalizePlanStatus(value.status),
@@ -224,84 +246,12 @@ function normalizeStep(value: unknown): AiTaskStep | null {
     protocolPrivate: false,
     agentRole: stringValue(value.agentRole ?? value.agent_role) || undefined,
     assignment: isRecord(value.assignment) ? value.assignment : undefined,
-    dependsOn: stringArray(value.dependsOn ?? value.depends_on),
+    dependsOn: Array.isArray(value.dependsOn ?? value.depends_on)
+      ? stringArray(value.dependsOn ?? value.depends_on) ?? []
+      : undefined,
     resultSummary: stringValue(value.resultSummary ?? value.result_summary) || undefined,
     error: stringValue(value.error) || undefined,
   }
-}
-
-function normalizeLongTaskPlan(
-  value: Record<string, unknown>,
-  fallbackRunId?: string,
-): AiTaskPlan | null {
-  if (!Array.isArray(value.units)) return null
-  const steps = value.units
-    .map(normalizeLongTaskStep)
-    .filter((step): step is AiTaskStep & { position: number } => step != null)
-    .sort((left, right) => left.position - right.position)
-    .map(({ position: _position, ...step }) => step)
-  if (!steps.length) return null
-  return {
-    runId: fallbackRunId,
-    title: stringValue(value.taskTitle ?? value.task_title ?? value.title)
-      || 'Task progress',
-    goal: stringValue(value.goal) || undefined,
-    status: normalizeLongTaskPlanStatus(value.status),
-    steps,
-  }
-}
-
-function normalizeLongTaskStep(
-  value: unknown,
-): (AiTaskStep & { position: number }) | null {
-  if (!isRecord(value)) return null
-  const id = stringValue(value.id)
-  if (!id) return null
-  const kind = stringValue(value.kind)
-  const rawPosition = Number(value.position)
-  return {
-    id,
-    title: stringValue(value.title) || kind || id,
-    type: normalizeLongTaskStepType(kind),
-    status: normalizeLongTaskStepStatus(value.status),
-    dependsOn: stringArray(value.dependsOn ?? value.depends_on),
-    error: stringValue(value.errorCode ?? value.error_code) || undefined,
-    position: Number.isFinite(rawPosition) ? rawPosition : Number.MAX_SAFE_INTEGER,
-  }
-}
-
-function normalizeLongTaskPlanStatus(value: unknown): AiTaskPlan['status'] {
-  const status = stringValue(value)
-  if (status === 'pending') return 'planned'
-  if (status === 'completed') return 'done'
-  return normalizePlanStatus(status)
-}
-
-function normalizeLongTaskStepStatus(value: unknown): AiTaskStep['status'] {
-  const status = stringValue(value)
-  if (status === 'claimed' || status === 'running') return 'running'
-  if (status === 'completed' || status === 'expanded') return 'done'
-  if (status === 'blocked') return 'blocked'
-  if (status === 'failed' || status === 'canceled') return 'failed'
-  return 'pending'
-}
-
-function normalizeLongTaskStepType(value: string): AiTaskStep['type'] {
-  const kind = value.toLowerCase()
-  if (/collect|fetch|load|read|evidence/.test(kind)) return 'read'
-  if (/validate|verify|review|check/.test(kind)) return 'review'
-  if (/generate|write|compose|publish|create|edit/.test(kind)) return 'write'
-  if (/confirm|approve|wait/.test(kind)) return 'confirm'
-  return 'analyze'
-}
-
-function isLongTaskProjection(
-  current: AiTaskPlan,
-  progress: AiTaskPlan,
-): boolean {
-  const unitIds = new Set(progress.steps.map((step) => step.id))
-  return current.steps.length > 0
-    && current.steps.every((step) => unitIds.has(step.id))
 }
 
 function normalizePlanStatus(value: unknown): AiTaskPlan['status'] {
