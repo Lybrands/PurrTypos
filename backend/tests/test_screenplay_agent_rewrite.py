@@ -1102,7 +1102,40 @@ async def test_planning_context_contains_state_not_artifact_bodies(
         "id": "sprev-large-candidate",
         "role": "screenplayDraft",
         "revisionNo": 2,
-        "summary": {"body": "候选正文" * 10_000},
+        "summary": {
+            "title": "第 1–2 集剧本",
+            "textLength": 8_000,
+            "fieldCount": 2,
+            "partCount": 3,
+            "role": "review",
+            "proposalKind": "scene_draft",
+            "derivedFromIds": ["sprev-private-derived"],
+            "inputRevisionIds": ["sprev-private-input"],
+            "receipts": [{"id": "receipt-private"}],
+            "partRefs": ["part-private"],
+            "digest": "sha256:private",
+            "body": "候选正文" * 10_000,
+            "content": "CANDIDATE_SUMMARY_CONTENT_MUST_NOT_LEAK",
+            "unknownNested": {"id": "nested-private"},
+        },
+    }, {
+        "id": "sprev-invalid-summary-scalars",
+        "role": "review",
+        "summary": {
+            "title": 123,
+            "textLength": True,
+            "fieldCount": -1,
+            "partCount": 1.0,
+        },
+    }, {
+        "id": "sprev-clipped-summary-title",
+        "role": "creativeBrief",
+        "summary": {
+            "title": "长" * 500,
+            "textLength": 1,
+            "fieldCount": 0,
+            "partCount": 0,
+        },
     }]
 
     context = await ScreenplayAgentContextQuery(temp_db).planning_context(workspace)
@@ -1119,6 +1152,42 @@ async def test_planning_context_contains_state_not_artifact_bodies(
     assert "creativeBrief" in context["availableDeliverables"]
     assert "revisionId" not in serialized
     assert "parentRevisionId" not in serialized
+    assert context["candidateDeliverables"][0] == {
+        "role": "screenplayDraft",
+        "status": "candidate",
+        "summary": {
+            "title": "第 1–2 集剧本",
+            "textLength": 8_000,
+            "fieldCount": 2,
+            "partCount": 3,
+        },
+    }
+    for forbidden in (
+        "sprev-private-derived",
+        "sprev-private-input",
+        "receipt-private",
+        "part-private",
+        "sha256:private",
+        "CANDIDATE_SUMMARY_CONTENT_MUST_NOT_LEAK",
+        "nested-private",
+        "scene_draft",
+    ):
+        assert forbidden not in serialized
+    assert context["candidateDeliverables"][1] == {
+        "role": "review",
+        "status": "candidate",
+        "summary": {},
+    }
+    assert context["candidateDeliverables"][2] == {
+        "role": "creativeBrief",
+        "status": "candidate",
+        "summary": {
+            "title": "长" * 240,
+            "textLength": 1,
+            "fieldCount": 0,
+            "partCount": 0,
+        },
+    }
     assert "episodeState" in context
 
 
@@ -1179,11 +1248,34 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
     )
     project_id = workspace["project"]["id"]
     body_marker = "SCREENPLAY_PLANNER_MUST_NOT_SEE_THIS_BODY_7F2A"
+    summary_marker = "SCREENPLAY_SUMMARY_CONTENT_MUST_NOT_LEAK_4A9E"
     head_id = await _install_head(
         temp_db,
         project_id,
         "sourceAnalysis",
         {"documentKind": "source_analysis", "body": body_marker},
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_revisions SET summary_json = ? WHERE id = ?",
+        [
+            json.dumps({
+                "title": "原作素材分析",
+                "textLength": 12_000,
+                "fieldCount": 4,
+                "partCount": 1,
+                "role": "screenplayDraft",
+                "proposalKind": "internal_analysis_candidate",
+                "derivedFromIds": ["sprev-derived-private"],
+                "inputRevisionIds": ["sprev-input-private"],
+                "receipts": [{"id": "receipt-private"}],
+                "partRefs": ["part-private"],
+                "digest": "sha256:private-summary",
+                "body": summary_marker,
+                "content": summary_marker,
+                "unknownNested": {"id": "nested-private"},
+            }, ensure_ascii=False),
+            head_id,
+        ],
     )
     await temp_db.execute(
         "UPDATE screenplay_revision_parts SET content_text = ? "
@@ -1229,13 +1321,29 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
     assert facts["stageCommand"] == command.to_mapping()
     assert "sourceAnalysis" in facts["availableDeliverables"]
     assert facts["acceptedDeliverables"][0]["role"] == "sourceAnalysis"
-    assert "summary" in facts["acceptedDeliverables"][0]
+    assert facts["acceptedDeliverables"][0]["summary"] == {
+        "title": "原作素材分析",
+        "textLength": 12_000,
+        "fieldCount": 4,
+        "partCount": 1,
+    }
     assert body_marker not in serialized
+    assert summary_marker not in serialized
     assert source_marker not in serialized
     assert "revisionId" not in serialized
     assert "parentRevisionId" not in serialized
     assert "contentText" not in serialized
     assert '"content"' not in serialized
+    for forbidden in (
+        "sprev-derived-private",
+        "sprev-input-private",
+        "receipt-private",
+        "part-private",
+        "sha256:private-summary",
+        "nested-private",
+        "internal_analysis_candidate",
+    ):
+        assert forbidden not in serialized
 
 
 async def test_create_draft_continues_from_head_instead_of_older_candidate():
