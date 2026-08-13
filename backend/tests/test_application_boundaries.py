@@ -9,6 +9,7 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 RUN_SERVICE = BACKEND_DIR / "application" / "agent_run_service.py"
 AI_ROUTER = BACKEND_DIR / "routers" / "ai.py"
+AGENT_COMPOSITION = BACKEND_DIR / "application" / "agent_composition.py"
 PORT_ONLY_SERVICES = (
     BACKEND_DIR / "application" / "agent_delegation_service.py",
     BACKEND_DIR / "application" / "agent_run_queries.py",
@@ -16,6 +17,31 @@ PORT_ONLY_SERVICES = (
     BACKEND_DIR / "application" / "agent_stability_service.py",
     BACKEND_DIR / "application" / "conversation_compaction.py",
 )
+
+
+def test_agent_composition_does_not_import_writing_products():
+    tree = ast.parse(
+        AGENT_COMPOSITION.read_text(encoding="utf-8"),
+        filename=str(AGENT_COMPOSITION),
+    )
+    forbidden_prefixes = (
+        "domains.writing",
+        "infrastructure.writing",
+        "infrastructure.persistence.writing",
+    )
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module]
+        for name in names:
+            if name.startswith(forbidden_prefixes):
+                violations.append(f"line {node.lineno} imports {name}")
+    assert not violations, "AgentComposition imports Writing:\n" + "\n".join(
+        violations
+    )
 
 
 def test_agent_run_service_has_no_http_or_sse_dependency():
