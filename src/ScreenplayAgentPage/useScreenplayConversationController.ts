@@ -30,6 +30,7 @@ export interface ScreenplayConversationBindings {
   project: ScreenplayProject
   sessions: AiSession[]
   activeSessionId: number | null
+  conversationIdentity?: string
   messages: AgentConversationMessage[]
   activities: Record<string, AgentConversationActivity>
   queuedSubmissions: ScreenplayQueuedSubmission[]
@@ -75,7 +76,8 @@ export function createScreenplayConversationController(
       sessionLoading: bindings.initializing,
     }),
     conversation: {
-      identity: `screenplay-session:${String(bindings.activeSessionId ?? 'none')}`,
+      identity: bindings.conversationIdentity
+        ?? `screenplay-session:${String(bindings.activeSessionId ?? 'none')}`,
       sessions: bindings.sessions.map((session) => (
         toAgentConversationSession(session, session.create_time)
       )),
@@ -99,7 +101,7 @@ export function createScreenplayConversationController(
       setValue: bindings.setPrompt,
       placeholder: '输入希望 Agent 完成的任务',
       ariaLabel: '输入希望剧本 Agent 完成的任务',
-      submitDisabled: !bindings.prompt.trim() || !selectedModel,
+      submitDisabled: bindings.initializing || !bindings.prompt.trim() || !selectedModel,
       selectedModel,
       modelConfigs: bindings.modelConfigs,
       selectModel: bindings.setSelectedModelId,

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
+from exceptions import AppError
 
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -14,6 +16,13 @@ from routers.story_background import (
     AttachmentInput,
     add_attachment,
     delete_attachment,
+)
+from application.writing_chat_request_lifecycle import (
+    WritingChatRequestLifecycle,
+    WritingChatRequestStartCanceled,
+)
+from infrastructure.persistence.writing_chat_request_store import (
+    SqliteWritingChatRequestStore,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -304,3 +313,249 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "chapter_diff_history",
     ]:
         assert await _count(temp_db, table) == 0, table
+
+
+async def test_delete_book_rejects_active_run_ownership(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-active', 'Active')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, scope) "
+        "VALUES (81, 'book-active', 'setting')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
+        "VALUES ('run-book-active', 81, 'running', '写作')"
+    )
+
+    with pytest.raises(AppError) as conflict:
+        await delete_book("book-active")
+
+    assert conflict.value.status_code == 409
+    assert await temp_db.fetch_one(
+        "SELECT id FROM books WHERE id = 'book-active'"
+    )
+
+
+async def test_delete_book_rejects_active_child_of_owned_terminal_root(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-child', 'Child')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, scope) "
+        "VALUES (85, 'book-child', 'setting')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
+        "VALUES ('run-child-root', 85, 'done', 'root')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, parent_run_id, status, prompt) "
+        "VALUES ('run-child-active', 'run-child-root', 'running', 'child')"
+    )
+
+    with pytest.raises(AppError) as conflict:
+        await delete_book("book-child")
+
+    assert conflict.value.status_code == 409
+    assert await temp_db.fetch_one(
+        "SELECT id FROM books WHERE id = 'book-child'"
+    ) == {"id": "book-child"}
+
+
+async def test_claimed_writing_request_blocks_book_delete_before_submit(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-claim', 'Claim')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, scope) "
+        "VALUES (82, 'book-claim', 'setting')"
+    )
+    store = SqliteWritingChatRequestStore(temp_db)
+    await store.reserve(
+        request_id="request-book-claim",
+        session_id=82,
+        request_digest="sha256:claim",
+        book_id="book-claim",
+        chapter_id=None,
+        expected_conversation_ids=[],
+        expected_run_ids=[],
+    )
+    await store.claim(
+        request_id="request-book-claim",
+        session_id=82,
+        request_digest="sha256:claim",
+        book_id="book-claim",
+        chapter_id=None,
+        expected_conversation_ids=[],
+        expected_run_ids=[],
+    )
+
+    with pytest.raises(AppError) as conflict:
+        await delete_book("book-claim")
+    assert conflict.value.status_code == 409
+
+    await WritingChatRequestLifecycle(
+        store,
+        "request-book-claim",
+    ).before_submit()
+    assert await temp_db.fetch_one(
+        "SELECT id FROM ai_sessions WHERE id = 82"
+    )
+
+
+async def test_before_submit_rechecks_owner_after_claim_delete_race(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-race', 'Race')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, scope) "
+        "VALUES (84, 'book-race', 'setting')"
+    )
+    store = SqliteWritingChatRequestStore(temp_db)
+    await store.reserve(
+        request_id="request-owner-race",
+        session_id=84,
+        request_digest="sha256:race",
+        book_id="book-race",
+        chapter_id=None,
+        expected_conversation_ids=[],
+        expected_run_ids=[],
+    )
+    await store.claim(
+        request_id="request-owner-race",
+        session_id=84,
+        request_digest="sha256:race",
+        book_id="book-race",
+        chapter_id=None,
+        expected_conversation_ids=[],
+        expected_run_ids=[],
+    )
+
+    # The product delete transaction normally loses to the claimed receipt.
+    # This raw delete models an owner disappearing after claim but before the
+    # final pre-submit check, which must still prevent Core Run creation.
+    await temp_db.execute("DELETE FROM ai_sessions WHERE id = 84")
+
+    with pytest.raises(WritingChatRequestStartCanceled):
+        await WritingChatRequestLifecycle(
+            store,
+            "request-owner-race",
+        ).before_submit()
+    assert await temp_db.fetch_one(
+        "SELECT status, rejection_code FROM ai_writing_chat_requests "
+        "WHERE request_id = 'request-owner-race'"
+    ) == {
+        "status": "rejected",
+        "rejection_code": "request_not_startable",
+    }
+
+
+async def test_delete_book_rejects_owner_long_task_without_session_metadata(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-task', 'Task')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units, metadata_json) VALUES "
+        "('book-task-active', 'book-work', 'purrtypos.writing', 'draft', "
+        "'book-task', 'missing-run', 'paused', 1, '{}')"
+    )
+
+    with pytest.raises(AppError) as conflict:
+        await delete_book('book-task')
+
+    assert conflict.value.status_code == 409
+    assert await temp_db.fetch_one(
+        "SELECT id FROM books WHERE id = 'book-task'"
+    )
+
+
+async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-terminal', 'Terminal')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, book_id, scope) "
+        "VALUES (83, 'book-terminal', 'setting')"
+    )
+    conversation_id = await temp_db.execute_and_get_id(
+        "INSERT INTO ai_conversations (session_id, prompt, response) "
+        "VALUES (83, 'done', 'done')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, conversation_id, status, prompt) "
+        "VALUES ('run-book-terminal', 83, ?, 'done', 'done')",
+        [conversation_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_error_reports "
+        "(id, stream_id, agent_run_id, session_id, conversation_id, error_message) "
+        "VALUES ('report-book-terminal', 'stream-terminal', "
+        "'run-book-terminal', 83, ?, 'x')",
+        [conversation_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, created_by_run_id, status) VALUES "
+        "('work-book-terminal', 'purrtypos.writing', 'draft', "
+        "'book-terminal', 'run-book-terminal', 'completed')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES ('task-book-terminal', "
+        "'work-book-terminal', 'purrtypos.writing', 'draft', 'book-terminal', "
+        "'run-book-terminal', 'completed', 1)"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, run_id) VALUES "
+        "('artifact-book-terminal', 'purrtypos.writing', 'draft', "
+        "'book-terminal', 'run-book-terminal')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_writing_chat_requests "
+        "(request_id, session_id, request_digest, status, rejection_code) "
+        "VALUES ('request-book-terminal', 83, 'sha256:done', "
+        "'rejected', 'done')"
+    )
+
+    await delete_book('book-terminal')
+
+    assert await temp_db.fetch_one(
+        "SELECT session_id, conversation_id FROM ai_agent_runs "
+        "WHERE id = 'run-book-terminal'"
+    ) == {"session_id": None, "conversation_id": None}
+    assert await temp_db.fetch_one(
+        "SELECT session_id, conversation_id FROM ai_error_reports "
+        "WHERE id = 'report-book-terminal'"
+    ) == {"session_id": None, "conversation_id": None}
+    assert await temp_db.fetch_one(
+        "SELECT id FROM ai_agent_long_tasks WHERE id = 'task-book-terminal'"
+    ) is None
+    assert await temp_db.fetch_one(
+        "SELECT id FROM ai_agent_work_items WHERE id = 'work-book-terminal'"
+    ) is None
+    assert await temp_db.fetch_one(
+        "SELECT id FROM ai_agent_artifacts "
+        "WHERE id = 'artifact-book-terminal'"
+    ) is None
+    assert await temp_db.fetch_one(
+        "SELECT request_id FROM ai_writing_chat_requests "
+        "WHERE request_id = 'request-book-terminal'"
+    ) is None

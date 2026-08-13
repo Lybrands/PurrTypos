@@ -1045,7 +1045,8 @@ async def test_truncating_history_retires_tail_run_from_latest_recovery(
         "WHERE id = 'report-tail'"
     ) == {"session_id": None, "conversation_id": None}
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items WHERE source_type = 'conversation' "
+        "SELECT status FROM memory_items "
+        "WHERE source_type = 'conversation_truncated' "
         "AND source_id = ?",
         [str(tail)],
     ) == {"status": "archived"}
@@ -1506,5 +1507,6 @@ async def test_memory_deposition_and_truncation_are_transactionally_ordered(
     assert saved["success"] is True
     assert deleted["success"] is True
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items WHERE source_type = 'conversation'"
+        "SELECT status FROM memory_items "
+        "WHERE source_type = 'conversation_truncated'"
     ) == {"status": "archived"}

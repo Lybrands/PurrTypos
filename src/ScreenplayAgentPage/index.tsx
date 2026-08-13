@@ -111,6 +111,10 @@ import {
   type ScreenplayTurnArtifact,
 } from './conversationState'
 import { createScreenplayOperationCommandLatch } from './screenplayOperationCommandLatch'
+import {
+  createScreenplayConversationSessionLifecycle,
+  type ScreenplayConversationLoadToken,
+} from './screenplayConversationSessionLifecycle'
 import RevisionLibraryModal from './RevisionLibraryModal'
 import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
 import {
@@ -658,6 +662,10 @@ export default function ScreenplayAgentPage({
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
   const [agentChunkHydrating, setAgentChunkHydrating] = React.useState(false)
+  const [agentLoadInitializing, setAgentLoadInitializing] = React.useState(false)
+  const [agentConversationIdentity, setAgentConversationIdentity] = React.useState(
+    'screenplay-session:none:0',
+  )
   const [acceptingAgentRevisionId, setAcceptingAgentRevisionId] = React.useState<
     EntityId | null
   >(null)
@@ -671,6 +679,13 @@ export default function ScreenplayAgentPage({
   const [comparisonDocument, setComparisonDocument] = React.useState<ScreenplayDocument | null>(null)
   const [updatingProjectStatus, setUpdatingProjectStatus] = React.useState(false)
   const activeAgentSessionRef = React.useRef<number | null>(null)
+  const agentPromptRef = React.useRef('')
+  const agentSessionLifecycleRef = React.useRef(
+    createScreenplayConversationSessionLifecycle(),
+  )
+  const activeAgentLoadTokenRef = React.useRef<
+    ScreenplayConversationLoadToken | undefined
+  >(undefined)
   const agentConversationStateRef = React.useRef<ScreenplayConversationState | null>(null)
   const agentChunkReplayRef = React.useRef(new AgentChunkReplay())
   const operationCommandLatchRef = React.useRef(
@@ -796,6 +811,35 @@ export default function ScreenplayAgentPage({
   React.useEffect(() => {
     activeAgentSessionRef.current = agentSessionId
   }, [agentSessionId])
+
+  React.useEffect(() => {
+    agentPromptRef.current = agentPrompt
+  }, [agentPrompt])
+
+  const updateAgentPrompt = React.useCallback((
+    value: React.SetStateAction<string>,
+  ) => {
+    setAgentPrompt((current) => {
+      const next = typeof value === 'function' ? value(current) : value
+      agentPromptRef.current = next
+      const token = agentSessionLifecycleRef.current.currentToken()
+      if (token) agentSessionLifecycleRef.current.setDraft(token, next)
+      return next
+    })
+  }, [])
+
+  React.useEffect(() => {
+    const token = activeAgentLoadTokenRef.current
+    if (
+      !token
+      || agentSessionLoading
+      || agentChunkHydrating
+      || agentConversationState?.sessionId !== token.sessionId
+    ) return
+    if (agentSessionLifecycleRef.current.finishLoad(token)) {
+      setAgentLoadInitializing(false)
+    }
+  }, [agentChunkHydrating, agentConversationState, agentSessionLoading])
 
   React.useEffect(() => {
     operationCommandLatchRef.current.clear()
@@ -1481,6 +1525,10 @@ export default function ScreenplayAgentPage({
   }, [])
 
   const resetToSource = React.useCallback(() => {
+    agentSessionLifecycleRef.current.invalidate()
+    activeAgentLoadTokenRef.current = undefined
+    setAgentLoadInitializing(false)
+    setAgentConversationIdentity('screenplay-session:none:0')
     setBriefStepIndex(0)
     setFurthestBriefStepIndex(0)
     setLaunchDraft(null)
@@ -1500,6 +1548,7 @@ export default function ScreenplayAgentPage({
     agentChunkCursorRef.current = 0
     setAgentChunkVersion((current) => current + 1)
     conversationPollErrorRef.current = ''
+    agentPromptRef.current = ''
     setAgentPrompt('')
     setSelectedDocument(null)
     setComparisonDocument(null)
@@ -1614,12 +1663,22 @@ export default function ScreenplayAgentPage({
     sessionId: number,
     project: ScreenplayProject,
   ) => {
+    const lifecycle = agentSessionLifecycleRef.current
+    const previous = lifecycle.currentToken()
+    if (previous) lifecycle.setDraft(previous, agentPromptRef.current)
+    const loadToken = lifecycle.beginLoad(project.id, sessionId)
+    activeAgentLoadTokenRef.current = loadToken
+    setAgentConversationIdentity(loadToken.identity)
+    setAgentLoadInitializing(true)
     setAgentSessionLoading(true)
     setAgentChunkHydrating(true)
     agentChunkReplayCaughtUpRef.current = false
     agentChunkRenderPendingRef.current = false
     activeAgentSessionRef.current = sessionId
     setAgentSessionId(sessionId)
+    const restoredDraft = lifecycle.getDraft(loadToken)
+    agentPromptRef.current = restoredDraft
+    setAgentPrompt(restoredDraft)
     storeScreenplayAgentSessionId(project.id, sessionId)
     setAgentConversationState(null)
     agentConversationStateRef.current = null
@@ -1628,20 +1687,23 @@ export default function ScreenplayAgentPage({
     setAgentChunkVersion((current) => current + 1)
     try {
       const next = await conversationClient.load(project.id, sessionId)
-      if (activeAgentSessionRef.current !== sessionId) return
+      if (!lifecycle.isCurrent(loadToken)) return
       agentConversationStateRef.current = next
       setAgentConversationState(next)
-      setAgentPrompt('')
     } catch (error) {
+      if (!lifecycle.isCurrent(loadToken)) return
       agentChunkReplayCaughtUpRef.current = true
       setAgentChunkHydrating(false)
       message.error(error instanceof Error ? error.message : '读取剧本 Agent 对话失败')
     } finally {
-      setAgentSessionLoading(false)
+      if (lifecycle.isCurrent(loadToken)) setAgentSessionLoading(false)
     }
   }, [conversationClient, message])
 
   const openProject = React.useCallback(async (project: ScreenplayProject) => {
+    agentSessionLifecycleRef.current.invalidate()
+    activeAgentLoadTokenRef.current = undefined
+    setAgentLoadInitializing(true)
     setLastOpenedProjectId(project.id)
     storeLastOpenedScreenplayProjectId(project.id)
     setOpenedProject(project)
@@ -1662,6 +1724,7 @@ export default function ScreenplayAgentPage({
     agentChunkRenderPendingRef.current = false
     setAgentChunkHydrating(true)
     setAgentChunkVersion((current) => current + 1)
+    agentPromptRef.current = ''
     setAgentPrompt('')
     setProjectLoading(true)
     setStage('project')
@@ -2172,6 +2235,12 @@ export default function ScreenplayAgentPage({
       message.warning('剧本 Agent 会话尚未就绪，请重新打开项目')
       return
     }
+    const actionToken = agentSessionLifecycleRef.current.currentToken()
+    if (
+      !agentSessionLifecycleRef.current.canAct(actionToken)
+      || actionToken?.projectId !== String(openedProject.id)
+      || actionToken.sessionId !== agentSessionId
+    ) return
     if (pausedConversationOperation) {
       message.info('当前任务已暂停，请先继续执行或停止任务')
       return
@@ -2202,13 +2271,13 @@ export default function ScreenplayAgentPage({
         runtime,
         ...(stageCommand ? { stageCommand } : {}),
       }])
-      if (consumesComposerPrompt) setAgentPrompt('')
+      if (consumesComposerPrompt) updateAgentPrompt('')
       message.info('已加入发送队列')
       return
     }
 
     setAgentSubmitting(true)
-    if (consumesComposerPrompt) setAgentPrompt('')
+    if (consumesComposerPrompt) updateAgentPrompt('')
     try {
       if (typeof editMessageIndex === 'number') {
         const editedMessage = agentConversationState?.messages[editMessageIndex]
@@ -2217,6 +2286,7 @@ export default function ScreenplayAgentPage({
           return
         }
         await conversationClient.truncateFromTurn(editedMessage.turnId)
+        if (!agentSessionLifecycleRef.current.canAct(actionToken)) return
       }
       await conversationClient.submit({
         commandId: createScreenplayCommandId('submit-turn'),
@@ -2226,21 +2296,23 @@ export default function ScreenplayAgentPage({
         runtime,
         ...(stageCommand ? { stageCommand } : {}),
       })
-      if (activeAgentSessionRef.current !== agentSessionId) return
+      if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
       const next = await conversationClient.load(openedProject.id, agentSessionId)
-      if (activeAgentSessionRef.current !== agentSessionId) return
+      if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
       agentConversationStateRef.current = next
       setAgentConversationState(next)
     } catch (error) {
       if (consumesComposerPrompt) {
-        setAgentPrompt((current) => current.trim() ? current : prompt)
+        if (agentSessionLifecycleRef.current.isCurrent(actionToken)) {
+          updateAgentPrompt((current) => current.trim() ? current : prompt)
+        }
       }
       if (typeof editMessageIndex === 'number') {
         const next = await conversationClient.load(
           openedProject.id,
           agentSessionId,
         ).catch(() => null)
-        if (next && activeAgentSessionRef.current === agentSessionId) {
+        if (next && agentSessionLifecycleRef.current.isCurrent(actionToken)) {
           agentConversationStateRef.current = next
           setAgentConversationState(next)
         }
@@ -2263,6 +2335,7 @@ export default function ScreenplayAgentPage({
     pausedConversationOperation,
     runtimeForModel,
     selectedModelId,
+    updateAgentPrompt,
   ])
 
   React.useEffect(() => {
@@ -2859,12 +2932,16 @@ export default function ScreenplayAgentPage({
     project: openedProject,
     sessions: agentSessions,
     activeSessionId: agentSessionId,
+    conversationIdentity: agentConversationIdentity,
     messages: agentMessages,
     activities: agentSessionActivities,
     queuedSubmissions: activeQueuedSubmissions,
     prompt: agentPrompt,
-    setPrompt: setAgentPrompt,
-    initializing: projectLoading || agentSessionLoading || agentChunkHydrating,
+    setPrompt: updateAgentPrompt,
+    initializing: projectLoading
+      || agentSessionLoading
+      || agentChunkHydrating
+      || agentLoadInitializing,
     running: agentRunning || agentSubmitting,
     stopping: Boolean(
       cancelPendingConversationOperation
@@ -2888,6 +2965,8 @@ export default function ScreenplayAgentPage({
     agentCancelSubmitting,
     agentCancelHeld,
     agentChunkHydrating,
+    agentConversationIdentity,
+    agentLoadInitializing,
     agentMessages,
     agentPrompt,
     agentResumeSubmitting,
@@ -2906,6 +2985,7 @@ export default function ScreenplayAgentPage({
     projectLoading,
     screenplayConversationActions,
     selectedModelId,
+    updateAgentPrompt,
   ])
   const screenplayConversationController = useScreenplayConversationController(
     screenplayConversationBindings,

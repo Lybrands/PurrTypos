@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -140,6 +141,186 @@ async def persist_setting_diff_resolution(
     )
 
 
+async def validate_setting_diff_mutation(
+    db,
+    *,
+    run_id: str,
+    resolution: dict[str, Any],
+    request_before: dict[str, Any],
+    request_proposed: dict[str, Any],
+    current: dict[str, Any],
+    final: dict[str, Any],
+) -> None:
+    await setting_diff_mutation_digest(
+        db,
+        run_id=run_id,
+        resolution=resolution,
+        request_before=request_before,
+        request_proposed=request_proposed,
+        final=final,
+    )
+    if current != request_before:
+        raise BookSettingResolutionConflictError(
+            "setting proposal target changed after proposal"
+        )
+
+
+async def setting_diff_mutation_digest(
+    db,
+    *,
+    run_id: str,
+    resolution: dict[str, Any],
+    request_before: dict[str, Any],
+    request_proposed: dict[str, Any],
+    final: dict[str, Any],
+) -> str:
+    proposal_id = str(resolution.get("proposalId") or "").strip()
+    projected = await SqliteWritingProposalReadModel(db).list_for_run(str(run_id))
+    occurrence = next(
+        (event for event in projected if event.get("proposalId") == proposal_id),
+        None,
+    )
+    proposal = occurrence.get("payload") if occurrence is not None else None
+    if not isinstance(proposal, dict):
+        raise BookSettingResolutionConflictError(
+            "setting proposal is not journal-owned"
+        )
+    journal_before = proposal.get("before")
+    journal_proposed = proposal.get("proposed")
+    if request_before != journal_before or request_proposed != journal_proposed:
+        raise BookSettingResolutionConflictError(
+            "setting proposal snapshots changed from journal"
+        )
+    if not _legal_setting_mutation(journal_before, journal_proposed, final):
+        raise BookSettingResolutionConflictError(
+            "setting proposal final mutation is not a reviewed composition"
+        )
+    payload = {
+        "kind": str(resolution.get("kind") or ""),
+        "sessionKey": str(resolution.get("sessionKey") or ""),
+        "before": journal_before,
+        "proposed": journal_proposed,
+        "final": final,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _legal_setting_mutation(
+    before: object,
+    proposed: object,
+    final: dict[str, Any],
+) -> bool:
+    if not isinstance(before, dict) or not isinstance(proposed, dict):
+        return False
+    if set(before) != set(proposed) or set(final) != set(before):
+        return False
+    for field, before_value in before.items():
+        proposed_value = proposed[field]
+        final_value = final[field]
+        if not all(isinstance(value, str) for value in (
+            before_value,
+            proposed_value,
+            final_value,
+        )):
+            return False
+        if field in {"profileMd", "content"}:
+            if not _legal_text_composition(before_value, proposed_value, final_value):
+                return False
+        elif final_value not in {before_value, proposed_value}:
+            return False
+    return True
+
+
+def _legal_text_composition(before: str, proposed: str, final: str) -> bool:
+    before_lines = before.split("\n") if before else []
+    proposed_lines = proposed.split("\n") if proposed else []
+    final_lines = final.split("\n") if final else []
+    raw = _paragraph_diff(before_lines, proposed_lines)
+    choices_by_op: list[list[list[str]]] = []
+    deletes: list[str] = []
+    inserts: list[str] = []
+
+    def flush() -> None:
+        paired = min(len(deletes), len(inserts))
+        for index in range(paired):
+            choices_by_op.append([
+                [deletes[index]] if deletes[index] else [],
+                [inserts[index]] if inserts[index] else [],
+            ])
+        for value in deletes[paired:]:
+            choices_by_op.append([[value] if value else [], []])
+        for value in inserts[paired:]:
+            choices_by_op.append([[], [value] if value else []])
+        deletes.clear()
+        inserts.clear()
+
+    for tag, value in raw:
+        if tag == "delete":
+            deletes.append(value)
+        elif tag == "insert":
+            inserts.append(value)
+        else:
+            flush()
+            choices_by_op.append([[value] if value else []])
+    flush()
+
+    reachable = {0}
+    for choices in choices_by_op:
+        next_reachable: set[int] = set()
+        for position in reachable:
+            for choice in choices:
+                end = position + len(choice)
+                if final_lines[position:end] == choice:
+                    next_reachable.add(end)
+        reachable = next_reachable
+        if not reachable:
+            return False
+    return len(final_lines) in reachable
+
+
+def _paragraph_diff(before: list[str], proposed: list[str]):
+    rows = len(before)
+    columns = len(proposed)
+    lengths = [[0] * (columns + 1) for _ in range(rows + 1)]
+    for row in range(1, rows + 1):
+        for column in range(1, columns + 1):
+            if before[row - 1] == proposed[column - 1]:
+                lengths[row][column] = lengths[row - 1][column - 1] + 1
+            else:
+                lengths[row][column] = max(
+                    lengths[row - 1][column],
+                    lengths[row][column - 1],
+                )
+    raw: list[tuple[str, str]] = []
+    row, column = rows, columns
+    while row > 0 or column > 0:
+        if (
+            row > 0
+            and column > 0
+            and before[row - 1] == proposed[column - 1]
+        ):
+            raw.append(("equal", before[row - 1]))
+            row -= 1
+            column -= 1
+        elif column > 0 and (
+            row == 0
+            or lengths[row][column - 1] >= lengths[row - 1][column]
+        ):
+            raw.append(("insert", proposed[column - 1]))
+            column -= 1
+        else:
+            raw.append(("delete", before[row - 1]))
+            row -= 1
+    raw.reverse()
+    return raw
+
+
 def _existing_resolution(
     process: dict[str, Any],
     proposal_id: str,
@@ -159,6 +340,7 @@ def _normalized_resolution(value: dict[str, Any]) -> dict[str, Any]:
         "status": str(value.get("status") or ""),
         "acceptedSegments": int(value.get("acceptedSegments") or 0),
         "rejectedSegments": int(value.get("rejectedSegments") or 0),
+        "mutationDigest": str(value.get("mutationDigest") or ""),
     }
 
 
@@ -268,4 +450,6 @@ __all__ = [
     "BookSettingResolutionWrite",
     "merge_product_agent_process",
     "persist_setting_diff_resolution",
+    "setting_diff_mutation_digest",
+    "validate_setting_diff_mutation",
 ]

@@ -74,3 +74,29 @@ test('deferred commit excludes exit and cannot delete a newer occurrence', async
   assert.deepEqual(deleted, [])
   assert.equal(activeProposalId, 'proposal-2')
 })
+
+test('session-owner eviction drops matching queue entries and releases its latch', () => {
+  const queue = createSettingDiffOccurrenceQueue()
+  const latch = createSettingDiffCommandLatch()
+  const owned = (proposalId: string, sessionId: number): ProposedSettingDiff => ({
+    ...proposal(proposalId),
+    resolutionTarget: {
+      sessionId,
+      agentRunId: `run-${sessionId}`,
+      prompt: `prompt-${sessionId}`,
+    },
+  })
+  queue.enqueue('character:1', owned('proposal-a-next', 1))
+  queue.enqueue('character:1', owned('proposal-b-next', 2))
+  latch.tryBegin('character:1', 'proposal-a-active')
+
+  assert.deepEqual(
+    queue.evictWhere((item) => item.resolutionTarget?.sessionId === 1),
+    ['character:1'],
+  )
+  latch.evictProposal('proposal-a-active')
+
+  assert.equal(queue.isQueued('proposal-a-next'), false)
+  assert.equal(queue.shift('character:1')?.proposalId, 'proposal-b-next')
+  assert.equal(latch.tryBegin('character:1', 'proposal-b-next'), true)
+})
