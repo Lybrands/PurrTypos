@@ -127,6 +127,7 @@ from domains.screenplay_agent.adapter import (
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
 from purra.task_admission import ExecutionMode
+from purra.long_tasks import DurableTaskDescriptor
 
 
 pytestmark = pytest.mark.asyncio
@@ -999,18 +1000,17 @@ class _AdmissionUnitExecutor:
         raise AssertionError("dispatch must not execute recipe units")
 
 
-async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attach_fails(
-    temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
+async def _durable_screenplay_admission(
+    db: DatabaseConnection,
+    *,
+    owner_id: str,
+    command_id: str,
 ):
-    _projects, workspace, session = await _project_and_session(temp_db)
+    _projects, workspace, session = await _project_and_session(db)
     project_id = workspace["project"]["id"]
-    repository = SqliteScreenplayAgentRepository(
-        temp_db,
-        owner_id="screenplay-atomic-dispatch-test",
-    )
+    repository = SqliteScreenplayAgentRepository(db, owner_id=owner_id)
     turn = await repository.begin_turn(
-        command_id="atomic-dispatch",
+        command_id=command_id,
         project_id=project_id,
         session_id=session["id"],
         content="生成原作分析",
@@ -1023,8 +1023,8 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
         runtime_profile={},
     )
     profile = ScreenplayAgentProfileExtension(
-        temp_db,
-        owner_id="screenplay-atomic-dispatch-test",
+        db,
+        owner_id=owner_id,
         resolver=_AdmissionResolver(),
     )
     request = await profile.prepare_request(_root_request(
@@ -1039,17 +1039,33 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
         phases=("evidence", "creation", "delivery"),
     )
     decision = await profile.evaluate(request, plan)
+    return profile, request, plan, decision
+
+
+def _admission_dispatcher(db, profile):
+    return profile.create_long_task_dispatcher(
+        work_item_repository=SqliteWorkItemRepository(db),
+        long_task_repository=SqliteLongTaskRepository(db),
+        executor=_AdmissionUnitExecutor(),
+    )
+
+
+async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attach_fails(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id="screenplay-atomic-dispatch-test",
+        command_id="atomic-dispatch",
+    )
     original_attach = profile._operations.attach_long_task
 
     async def fail_attach(*_args, **_kwargs):
         raise RuntimeError("injected operation attach failure")
 
     monkeypatch.setattr(profile._operations, "attach_long_task", fail_attach)
-    dispatcher = profile.create_long_task_dispatcher(
-        work_item_repository=SqliteWorkItemRepository(temp_db),
-        long_task_repository=SqliteLongTaskRepository(temp_db),
-        executor=_AdmissionUnitExecutor(),
-    )
+    dispatcher = _admission_dispatcher(temp_db, profile)
     with pytest.raises(RuntimeError, match="injected operation attach failure"):
         await dispatcher.dispatch(
             request,
@@ -1106,6 +1122,132 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
     assert operation is not None
     assert operation.status.value == "running"
     assert operation.long_task_id == first.task_id
+
+
+async def test_screenplay_dispatch_links_a_new_parent_and_resumes_a_paused_task(
+    temp_db: DatabaseConnection,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id="screenplay-paused-resume-test",
+        command_id="paused-resume",
+    )
+    long_tasks = SqliteLongTaskRepository(temp_db)
+    dispatcher = _admission_dispatcher(temp_db, profile)
+    first = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-paused-origin",
+    )
+    await long_tasks.pause(first.task_id)
+
+    resumed = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-paused-continuation",
+    )
+
+    assert resumed.task_id == first.task_id
+    assert resumed.metadata["resumed"] is True
+    assert resumed.metadata["status"] == "running"
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs "
+        "WHERE run_id = 'run-paused-continuation'"
+    ) == {"count": 1}
+
+
+class _FailedResumeDescriptorResolver:
+    async def resolve(self, request, plan, decision):
+        del plan
+        return DurableTaskDescriptor(
+            namespace=request.domain_context.namespace,
+            owner_id=str(decision.metadata["projectId"]),
+            idempotency_key=str(decision.metadata["commandId"]),
+            failed_resume_attempts=1,
+        )
+
+
+async def test_screenplay_dispatch_retries_a_failed_task_for_a_new_parent(
+    temp_db: DatabaseConnection,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id="screenplay-failed-resume-test",
+        command_id="failed-resume",
+    )
+    dispatcher = _admission_dispatcher(temp_db, profile)
+    dispatcher._descriptors = _FailedResumeDescriptorResolver()
+    first = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-failed-origin",
+    )
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await temp_db.execute(
+            "UPDATE ai_agent_long_tasks SET status = 'failed', failed_units = 1 "
+            "WHERE id = ?",
+            [first.task_id],
+        )
+        await temp_db.execute(
+            "UPDATE ai_agent_long_task_units SET status = 'failed' "
+            "WHERE task_id = ? AND position = 0",
+            [first.task_id],
+        )
+
+    resumed = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-failed-retry",
+    )
+
+    assert resumed.task_id == first.task_id
+    assert resumed.metadata["resumed"] is True
+    assert resumed.metadata["status"] == "running"
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs "
+        "WHERE run_id = 'run-failed-retry'"
+    ) == {"count": 1}
+
+
+async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_work_item(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id="screenplay-create-cleanup-test",
+        command_id="create-cleanup",
+    )
+    long_tasks = SqliteLongTaskRepository(temp_db)
+
+    async def fail_create(*_args, **_kwargs):
+        raise RuntimeError("injected primary long task create failure")
+
+    monkeypatch.setattr(long_tasks, "create", fail_create)
+    dispatcher = profile.create_long_task_dispatcher(
+        work_item_repository=SqliteWorkItemRepository(temp_db),
+        long_task_repository=long_tasks,
+        executor=_AdmissionUnitExecutor(),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="injected primary long task create failure",
+    ):
+        await dispatcher.dispatch(
+            request,
+            plan,
+            decision,
+            parent_run_id="run-create-cleanup",
+        )
+
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
+    ) == {"count": 0}
 
 
 async def test_turn_start_does_not_emit_a_host_authored_plan(
