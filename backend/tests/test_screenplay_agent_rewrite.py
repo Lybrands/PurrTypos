@@ -3982,7 +3982,7 @@ async def test_review_dimension_parts_aggregate_host_side(
         "draftContentText": "第 1 集真实正文",
         "scenePlan": {"scenes": [{"id": "scene-1"}]},
         "requiredContext": {"previousEpisode": None},
-        "contentDigest": "digest-episode-1",
+        "contentDigest": "a" * 64,
     }
     task = {
         "id": "task-review-dimensions",
@@ -4050,12 +4050,12 @@ async def test_review_dimension_parts_aggregate_host_side(
     assert review_input["sceneIds"] == ["scene-1"]
     assert "第 1 集真实正文" in review_input["draftContentText"]
     assert review_input["scenePlan"]["scenes"][0]["id"] == "scene-1"
-    assert review_input["contentDigest"] == "digest-episode-1"
+    assert review_input["contentDigest"] == "a" * 64
     assert len(tool_calls.user_payloads) == len(REVIEW_DIMENSIONS)
     assert {
         payload["reviewInput"]["contentDigest"]
         for payload in tool_calls.user_payloads
-    } == {"digest-episode-1"}
+    } == {"a" * 64}
     assert all(
         payload["reviewedDraftId"] == "draft-head"
         and payload["reviewInput"]["draftRevisionId"] == "draft-head"

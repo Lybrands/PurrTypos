@@ -132,3 +132,22 @@ Status: PASS
 - Final `npm run check:agent-refactor` passes with 1,725 backend tests and 344
   frontend tests. Five credential-gated real-provider E2E cases remain skipped
   with their existing `RELEASE BLOCKER` markers.
+
+## Candidate contract parser correction
+
+- Added one pure `parse_candidate_validation_contract()` authority for all six
+  Candidate kinds. It enforces the exact version/kind field set, JSON scalar
+  types, bounded/trimmed IDs, bounded unique scene IDs, episode bounds, review
+  dimension values, and an exact 64-character hexadecimal content digest.
+- `run_candidate()` invokes the parser before model request construction,
+  DomainContext creation, stable host identity, or Child reservation. Contracts
+  carrying body/content fields, nested IDs, booleans as integers, empty/long
+  IDs, duplicate/oversized scene lists, or malformed digests leave zero Runs
+  and zero host-child receipts.
+- The canonical result is reused by DomainContext, completion projection,
+  Candidate normalizer, persisted projection verification, and stable identity.
+  Uppercase and lowercase equivalent digests canonicalize to lowercase and
+  reuse the same DONE Child; a genuinely different digest conflicts closed.
+- Final `npm run check:agent-refactor` passes with 1,741 backend tests and 344
+  frontend tests. Five credential-gated real-provider E2E cases remain skipped
+  with their existing `RELEASE BLOCKER` markers.

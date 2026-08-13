@@ -46,6 +46,7 @@ from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
     candidate_completion_projection,
+    parse_candidate_validation_contract,
 )
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from infrastructure.screenplay import ScreenplayCandidateArtifacts
@@ -78,6 +79,14 @@ class ScreenplayToolCallingService:
         lineage: RunLineage,
         signal=None,
     ) -> ScreenplayCandidateRunResult:
+        validation_contract = parse_candidate_validation_contract(
+            candidate_validation_contract
+            if candidate_validation_contract is not None
+            else {
+                "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                "kind": "generic",
+            }
+        )
         model_request = model_request_from_runtime(runtime)
         window = context_window_tokens(
             runtime.contextWindow or runtime.options.get("context_window")
@@ -85,13 +94,6 @@ class ScreenplayToolCallingService:
         output_limit = resolve_invocation_output_limit(
             model_request.capability_snapshot,
             explicit_user_override=model_request.options.get("max_tokens"),
-        )
-        validation_contract = dict(
-            candidate_validation_contract
-            or {
-                "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                "kind": "generic",
-            }
         )
         bound_context = ScreenplayAgentDomainContext(
             project_id=domain_context.project_id,
