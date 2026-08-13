@@ -77,6 +77,7 @@ class OutputEventKind(StrEnum):
     OPERATION_STARTED = "operation.started"
     OPERATION_FINISHED = "operation.finished"
     RUN_LIFECYCLE = "run.lifecycle"
+    RUN_VALIDATED_RESULT = "run.validated_result"
     TOOL = "tool.event"
     DOMAIN_EFFECT = "domain.effect"
     DELEGATION = "delegation.event"

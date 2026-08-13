@@ -51,3 +51,26 @@ Status: PASS
   frontend unit tests, and 1,681 backend tests. Five real-provider E2E cases
   remain skipped because credentials are unavailable and retain their existing
   `RELEASE BLOCKER` markers.
+
+## Review corrections
+
+- `_HostChildCancellationSignal.wait()` now cancels and awaits both internal
+  `Event.wait()` tasks in `finally`. Tests cover normal owner cleanup,
+  upstream signal, local/caller cancellation, and the simultaneous race with
+  no pending waiter left behind.
+- A validated Child result is now durable protocol data rather than validator
+  process memory. The terminal Run transaction writes one private, versioned
+  `run.validated_result` canonical event; `AgentRunService` reads it through
+  the generic output repository only for `VALIDATED_RESULT` policy.
+- Readback fails closed unless the Run is DONE and exactly one event has the
+  authoritative run/turn/source/kind/channel/visibility/schema contract. The
+  private event never enters session-public replay. Missing, duplicate,
+  malformed, and cross-scope records are rejected.
+- `ScreenplayStructuredCallService` reparses and validates the persisted value.
+  A divergent in-memory validator test proves the persisted value wins, and a
+  recreated service reads it without replaying the provider or projector.
+- Failure injection after writing the private event proves Run terminal state
+  and result journal roll back together.
+- The post-review full Agent refactor gate passes with 1,700 backend tests and
+  344 frontend tests. Five credential-gated real-provider E2E cases remain
+  skipped with their existing `RELEASE BLOCKER` markers.

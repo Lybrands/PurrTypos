@@ -63,7 +63,7 @@ class PublicModelResult:
 
 
 class _StructuredResultValidator:
-    """Capture only a candidate that passed the product JSON contract."""
+    """Validate candidates without owning their authoritative return value."""
 
     def __init__(
         self,
@@ -73,7 +73,6 @@ class _StructuredResultValidator:
     ) -> None:
         self._repair_instruction = str(repair_instruction or "").strip()
         self._validate = validate
-        self.value: dict[str, Any] | None = None
         self.error: Exception | None = None
 
     def validate(
@@ -96,7 +95,7 @@ class _StructuredResultValidator:
                     or "Return one complete JSON object matching the required protocol."
                 ),
             )
-        self.value = dict(normalized)
+        del normalized
         self.error = None
         return ResponseValidationResult()
 
@@ -222,7 +221,7 @@ class ScreenplayStructuredCallService:
 
         if result.status is RunStatus.CANCELED:
             raise asyncio.CancelledError
-        if result.status is not RunStatus.DONE or validator.value is None:
+        if result.status is not RunStatus.DONE:
             if isinstance(
                 validator.error,
                 ScreenplayIntentCommandMismatchError,
@@ -238,7 +237,26 @@ class ScreenplayStructuredCallService:
                 ),
                 retryable=False,
             )
-        return StructuredModelResult(validator.value, result.run_id)
+        if result.validated_result is None:
+            raise ModelGatewayError(
+                "completed structured Run is missing its persisted result",
+                code="structured_output_invalid",
+                retryable=False,
+            )
+        try:
+            persisted_value = dict(parse_json_object(result.validated_result))
+            normalized_value = (
+                validate(persisted_value) if validate else persisted_value
+            )
+        except ScreenplayIntentCommandMismatchError:
+            raise
+        except Exception as error:
+            raise ModelGatewayError(
+                str(error or "persisted structured output invalid"),
+                code="structured_output_invalid",
+                retryable=False,
+            ) from error
+        return StructuredModelResult(dict(normalized_value), result.run_id)
 
     async def run_public_text(
         self,

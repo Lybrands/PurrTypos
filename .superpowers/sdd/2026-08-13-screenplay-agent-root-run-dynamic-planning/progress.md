@@ -7,3 +7,5 @@ Pre-flight: common prerequisite and Writing dynamic planning implementation comp
 Task 5: PASS. Screenplay Conversation Turns now submit one shared Root Run; answer and formal durable lifecycles, Root-ordered phase barriers, bounded full-transaction completion retry, strict persisted identity, terminal mapping, and cancellation are covered. Full Agent refactor gate: 1666 passed, 5 credential-blocked provider E2E.
 
 Task 6: PASS. Screenplay AI Parts now run as host-orchestrated PurrA Children through shared AgentRunService lifecycle ownership; deterministic Parts create no Run, Child planning/delegation stay disabled, and persisted lineage/cancellation are covered.
+
+Task 6 review: PASS. Host-child cancellation watcher cleanup is leak-free on all exits. Structured Child results are atomically journaled as private versioned canonical output and returned only by strict persisted readback; process-local validator state is no longer authoritative.
