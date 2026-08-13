@@ -46,6 +46,7 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             session_ids,
             screenplay_project_ids=[project_id],
         )
+        await _delete_host_child_receipts(db, project_id)
         if turn_ids:
             turn_marks = ",".join("?" for _ in turn_ids)
             await db.execute(
@@ -266,6 +267,7 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         [project_id],
     )
     work_ids = [str(row["id"]) for row in work_rows]
+    await _delete_host_child_receipts(db, project_id)
 
     if turn_ids:
         marks = ",".join("?" for _ in turn_ids)
@@ -441,6 +443,17 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
     await db.execute(
         "DELETE FROM screenplay_projects "
         "WHERE id = ? AND source_snapshot_json IS NULL",
+        [project_id],
+    )
+
+
+async def _delete_host_child_receipts(db, project_id: str) -> None:
+    # Foreign keys are intentionally disabled for the legacy SQLite schema.
+    # Aggregate deletion therefore owns this durable identity cleanup; normal
+    # session unlinking retains the receipt together with the terminal Run.
+    await db.execute(
+        "DELETE FROM ai_agent_host_child_runs WHERE "
+        "json_extract(contract_json, '$.bindingAggregateId') = ?",
         [project_id],
     )
 

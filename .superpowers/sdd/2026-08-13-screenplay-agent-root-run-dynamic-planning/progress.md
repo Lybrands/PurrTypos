@@ -9,3 +9,5 @@ Task 5: PASS. Screenplay Conversation Turns now submit one shared Root Run; answ
 Task 6: PASS. Screenplay AI Parts now run as host-orchestrated PurrA Children through shared AgentRunService lifecycle ownership; deterministic Parts create no Run, Child planning/delegation stay disabled, and persisted lineage/cancellation are covered.
 
 Task 6 review: PASS. Host-child cancellation watcher cleanup is leak-free on all exits. Structured Child results are atomically journaled as private versioned canonical output and returned only by strict persisted readback; process-local validator state is no longer authoritative.
+
+Task 6 durable retry review: PASS. Host-owned Child attempts now have a durable opaque idempotency receipt and generation CAS. Crash/restart and concurrent retries reuse the authoritative persisted Run, terminal retry policy is explicit, validated terminal replay identity is strict, and project aggregate cleanup owns receipt deletion while session audit retention is unchanged.

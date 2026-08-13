@@ -531,6 +531,33 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_writing_chat_requests_run
         ON ai_writing_chat_requests(run_id)
     """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_host_child_runs (
+        host_child_key TEXT PRIMARY KEY NOT NULL,
+        identity_digest TEXT NOT NULL,
+        contract_json TEXT NOT NULL,
+        generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+        attempt_key TEXT NOT NULL UNIQUE,
+        reservation_owner TEXT DEFAULT NULL,
+        reservation_expires_at_ms INTEGER DEFAULT NULL,
+        run_id TEXT DEFAULT NULL UNIQUE,
+        terminal_status TEXT DEFAULT NULL CHECK (
+            terminal_status IS NULL OR terminal_status IN (
+                'done', 'failed', 'blocked', 'canceled'
+            )
+        ),
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_host_child_attempt
+        ON ai_agent_runs(
+            json_extract(binding_attributes_json, '$.hostChild.attemptKey')
+        )
+        WHERE json_extract(
+            binding_attributes_json,
+            '$.hostChild.attemptKey'
+        ) IS NOT NULL
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,

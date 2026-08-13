@@ -74,3 +74,35 @@ Status: PASS
 - The post-review full Agent refactor gate passes with 1,700 backend tests and
   344 frontend tests. Five credential-gated real-provider E2E cases remain
   skipped with their existing `RELEASE BLOCKER` markers.
+
+## Durable host retry correction
+
+- Added a generic durable host-child registry keyed by an opaque stable key.
+  The receipt stores only an identity digest, normalized Run contract,
+  generation/attempt identity, reservation lease, bound Run id, and terminal
+  status. A partial unique index on the persisted Run attempt binding closes
+  the Run-begun-before-receipt-bind crash window.
+- Reservation, bind, reconcile, and failed-generation advance use SQLite
+  transaction/CAS rules. Concurrent same-key callers create one Child; an
+  existing RUNNING Child is awaited without canceling it when a secondary
+  waiter leaves; DONE is read back from canonical persisted output with zero
+  provider/projector calls.
+- Identity validation covers request/model/domain/tool/response contracts,
+  exact profile/binding/lineage/turn scope, and the canonical started event.
+  The Screenplay caller uses deterministic project/task/unit/Part identities
+  to derive the opaque key and explicitly selects
+  `REUSE_DONE_RETRY_FAILED`; canceled/blocked attempts remain fail-closed.
+- Recovery tests cover reserve-before-Run and Run-before-bind windows, a new
+  service/composition reading a crashed host's DONE Child, concurrent active
+  callers, waiter cancellation, one-winner failed generation advance,
+  canceled retry rejection, and request/lineage conflicts.
+- Validated terminal replay is now strict: exact same replay is idempotent;
+  validated-to-none, none-to-validated, a different value, or a persisted
+  host-child response-policy mismatch is rejected atomically.
+- Product aggregate deletion explicitly removes receipts owned by the deleted
+  project because this legacy database intentionally leaves foreign keys off.
+  Ordinary session unlink keeps terminal receipt/Run audit, and aggregate
+  cleanup releases the opaque stable key for safe future recreation.
+- Final `npm run check:agent-refactor` passes with 1,720 backend tests and 344
+  frontend tests. The five credential-gated real-provider E2E cases remain
+  skipped with their existing `RELEASE BLOCKER` markers.

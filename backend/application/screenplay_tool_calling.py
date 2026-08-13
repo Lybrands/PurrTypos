@@ -36,6 +36,10 @@ from application.model_runtime import (
     run_execution_intent,
 )
 from application.agent_run_service import AgentRunService
+from application.host_child_runs import (
+    HostChildTerminalRetryPolicy,
+    stable_host_child_key,
+)
 from application.request_mapping import context_window_tokens
 from application.run_provenance import digest_model_endpoint
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
@@ -140,6 +144,15 @@ class ScreenplayToolCallingService:
             lineage=lineage,
             mapped_request=request,
             base_options=options,
+            host_child_key=stable_host_child_key(
+                "screenplay.agent.task",
+                domain_context.project_id,
+                f"{domain_context.task_id}:{domain_context.unit_id}",
+                domain_context.expected_part_key,
+            ),
+            terminal_retry_policy=(
+                HostChildTerminalRetryPolicy.REUSE_DONE_RETRY_FAILED
+            ),
         )
         run_id = result.run_id
         if result.status is RunStatus.CANCELED:

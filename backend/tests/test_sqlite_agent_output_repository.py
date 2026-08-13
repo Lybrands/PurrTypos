@@ -11,7 +11,12 @@ import pytest_asyncio
 
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
-from purra.contracts import ModelFinishReason, RunCreateParams, RunStatus
+from purra.contracts import (
+    ModelFinishReason,
+    RunBinding,
+    RunCreateParams,
+    RunStatus,
+)
 from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.events import AgentEvent, CoreEventType
 from purra.output import (
@@ -533,6 +538,102 @@ async def test_validated_result_is_private_and_atomically_readable(output_db):
         event.kind is not OutputEventKind.RUN_VALIDATED_RESULT
         for _, event in public_events
     )
+
+
+@pytest.mark.asyncio
+async def test_validated_terminal_commit_exact_replay_is_idempotent(output_db):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    commit = _validated_commit(run_id)
+    draft = _completed_draft(run_id)
+
+    first = await repository.commit_run_lifecycle(run_id, commit, draft)
+    replay = await repository.commit_run_lifecycle(run_id, commit, draft)
+
+    assert replay == first
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ? AND kind = ?",
+        [run_id, OutputEventKind.RUN_VALIDATED_RESULT.value],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "replay"),
+    (
+        ("validated", "none"),
+        ("none", "validated"),
+        ("validated", "other"),
+    ),
+)
+async def test_terminal_commit_replay_rejects_validated_identity_change(
+    output_db,
+    first: str,
+    replay: str,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    commits = {
+        "none": _completed_commit(run_id),
+        "validated": _validated_commit(run_id, '{"answer":"persisted"}'),
+        "other": _validated_commit(run_id, '{"answer":"different"}'),
+    }
+    draft = _completed_draft(run_id)
+    await repository.commit_run_lifecycle(run_id, commits[first], draft)
+
+    with pytest.raises(ContractViolationError, match="validated result"):
+        await repository.commit_run_lifecycle(run_id, commits[replay], draft)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_mode", "include_validated"),
+    (
+        ("validated_result", False),
+        ("direct_live", True),
+    ),
+)
+async def test_host_child_terminal_commit_rejects_response_policy_mismatch(
+    output_db,
+    response_mode: str,
+    include_validated: bool,
+):
+    db, _run_id, runs = output_db
+    run_id = await runs.create(RunCreateParams(
+        session_id=7,
+        prompt="host child",
+        mode="agent",
+        binding=RunBinding(
+            namespace="test.host-child",
+            aggregate_id="project-1",
+            command_id="task-1:unit-1",
+            attributes={
+                "hostChild": {
+                    "protocol": "purra.host-child/v1",
+                    "responseMode": response_mode,
+                },
+            },
+        ),
+    ))
+    repository = _repository(db, run_repository=runs)
+    commit = (
+        _validated_commit(run_id)
+        if include_validated
+        else _completed_commit(run_id)
+    )
+
+    with pytest.raises(ContractViolationError, match="response policy"):
+        await repository.commit_run_lifecycle(
+            run_id,
+            commit,
+            _completed_draft(run_id),
+        )
+
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": RunStatus.RUNNING.value}
 
 
 @pytest.mark.asyncio
