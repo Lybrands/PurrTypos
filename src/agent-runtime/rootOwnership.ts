@@ -45,7 +45,8 @@ export function resolveTerminalRootOwnership(
         source: 'requestResult',
         accepted: !normalizedRunId(currentRootRunId)
           && !normalizedRunId(observedRunId)
-          && (!expectedRequestId || resultRequestId === expectedRequestId),
+          && Boolean(expectedRequestId && resultRequestId)
+          && resultRequestId === expectedRequestId,
       }
     }
     const binding = resolveRootRunBinding(currentRootRunId, candidate)
