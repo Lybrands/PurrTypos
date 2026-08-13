@@ -4,6 +4,7 @@ import {
   dispatchAgentChunk,
   initialAgentAccumulator,
   type AgentChunkHost,
+  type AgentChunkRuntimeContext,
   type AgentTerminalSnapshot,
 } from './chunkHandlers/index.ts'
 import type { AgentConversationMessage } from './contracts.ts'
@@ -35,21 +36,77 @@ function createTestChunkContext(
     onHostChunk: overrides.onHostChunk,
     onSettled: overrides.onSettled ?? (() => undefined),
   }
-  return {
-    context: {
-      acc: initialAgentAccumulator({
-        sessionId: 1,
-        userText: '问题',
-        turnStartedAt: 0,
-      }),
+  const context: AgentChunkRuntimeContext = {
+    acc: initialAgentAccumulator({
       sessionId: 1,
-      modelIdentity: { name: 'test-model' },
-      host,
-      now: () => 100,
-    },
+      userText: '问题',
+      turnStartedAt: 0,
+    }),
+    sessionId: 1,
+    modelIdentity: { name: 'test-model' },
+    host,
+    now: () => 100,
+  }
+  return {
+    context,
     readMessages: () => messages,
     readReplacementCount: () => replacementCount,
   }
+}
+
+function createBoundRootHarness() {
+  const outcomes: string[] = []
+  const taskPlan: NonNullable<AgentConversationMessage['taskPlan']> = {
+    runId: 'root-run',
+    title: 'Root plan',
+    status: 'running',
+    steps: [{
+      id: 'root-step',
+      title: 'Keep Root active',
+      type: 'write',
+      status: 'running',
+    }],
+  }
+  const canonicalOutput: NonNullable<
+    AgentConversationMessage['canonicalOutput']
+  > = {
+    lastSequence: 2,
+    lastSequenceByRun: { 'root-run': 2 },
+    finalText: 'Root response',
+    commentaryText: '',
+    commentaryBlocks: [],
+    operations: {},
+    operationOrder: [],
+    delegations: {},
+    delegationOrder: [],
+    approvals: {},
+    approvalOrder: [],
+    runId: 'root-run',
+    runStatus: 'running',
+    runTerminal: false,
+    finalStreamStatus: 'open',
+    finalStreamId: 'root-final',
+    finalStreamErrorCode: null,
+    latestRuntimeEvent: null,
+  }
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    {
+      role: 'assistant',
+      content: 'Root response',
+      agentRunId: 'root-run',
+      taskPlan,
+      canonicalOutput,
+    },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+  harness.context.acc.response = 'Root response'
+  harness.context.acc.agentRunId = 'root-run'
+  harness.context.acc.conversationRunId = 'root-run'
+  harness.context.acc.taskPlan = taskPlan
+  harness.context.acc.canonicalOutput = canonicalOutput
+  return { harness, outcomes, taskPlan, canonicalOutput }
 }
 
 test('terminal projection calls the host once and keeps provider text unchanged', () => {
@@ -111,6 +168,115 @@ test('snapshot-recovered terminal replaces partial canonical copy with final res
   assert.equal(message?.content, '服务端完整终稿')
   assert.equal(message?.canonicalOutput?.finalText, '服务端完整终稿')
   assert.equal(message?.canonicalOutput?.finalStreamStatus, 'committed')
+})
+
+for (const status of ['failed', 'blocked'] as const) {
+  test(`a bound Root ignores a foreign ${status} Run result`, () => {
+    const { harness, outcomes, taskPlan } = createBoundRootHarness()
+
+    dispatchAgentChunk({
+      done: true,
+      runResult: {
+        runId: 'foreign-child',
+        status,
+        errorCode: 'foreign_failure',
+      },
+    }, harness.context)
+
+    const message = harness.readMessages().at(-1)
+    assert.deepEqual(outcomes, [])
+    assert.equal(harness.context.acc.agentRunId, 'root-run')
+    assert.equal(harness.context.acc.terminalSettlement, undefined)
+    assert.deepEqual(harness.context.acc.taskPlan, taskPlan)
+    assert.equal(message?.agentRunId, 'root-run')
+    assert.equal(message?.content, 'Root response')
+    assert.equal(message?.error, undefined)
+    assert.equal(message?.termination, undefined)
+  })
+}
+
+test('a bound Root ignores foreign done text and stays unsettled', () => {
+  const { harness, outcomes, canonicalOutput } = createBoundRootHarness()
+
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: 'Foreign child response',
+    runResult: { runId: 'foreign-child', status: 'done' },
+  }, harness.context)
+
+  const message = harness.readMessages().at(-1)
+  assert.deepEqual(outcomes, [])
+  assert.equal(harness.context.acc.agentRunId, 'root-run')
+  assert.equal(harness.context.acc.response, 'Root response')
+  assert.equal(harness.context.acc.terminalSettlement, undefined)
+  assert.deepEqual(harness.context.acc.canonicalOutput, canonicalOutput)
+  assert.equal(message?.content, 'Root response')
+  assert.equal(message?.canonicalOutput?.finalText, 'Root response')
+})
+
+test('a bound Root ignores a foreign canceled Run result', () => {
+  const { harness, outcomes, taskPlan } = createBoundRootHarness()
+
+  dispatchAgentChunk({
+    done: true,
+    runResult: { runId: 'foreign-child', status: 'canceled' },
+  }, harness.context)
+
+  const message = harness.readMessages().at(-1)
+  assert.deepEqual(outcomes, [])
+  assert.equal(harness.context.acc.agentRunId, 'root-run')
+  assert.equal(harness.context.acc.terminalSettlement, undefined)
+  assert.deepEqual(harness.context.acc.taskPlan, taskPlan)
+  assert.equal(message?.termination, undefined)
+})
+
+test('a bound Root accepts its own terminal Run result', () => {
+  const { harness, outcomes } = createBoundRootHarness()
+
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: 'Authoritative Root response',
+    runResult: { runId: 'root-run', status: 'done' },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['completed'])
+  assert.equal(harness.context.acc.agentRunId, 'root-run')
+  assert.equal(harness.context.acc.terminalSettlement?.runId, 'root-run')
+  assert.equal(
+    harness.readMessages().at(-1)?.content,
+    'Authoritative Root response',
+  )
+})
+
+test('an unbound Run result establishes Root ownership against late terminals', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: 'Compatibility Root response',
+    runResult: { runId: 'compat-root', status: 'done' },
+  }, harness.context)
+  dispatchAgentChunk({
+    done: true,
+    finalResponse: 'Late child response',
+    runResult: { runId: 'late-child', status: 'done' },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['completed'])
+  assert.equal(harness.context.acc.conversationRunId, 'compat-root')
+  assert.equal(harness.context.acc.agentRunId, 'compat-root')
+  assert.equal(harness.context.acc.response, 'Compatibility Root response')
+  assert.equal(harness.context.acc.terminalSettlement?.runId, 'compat-root')
+  assert.equal(
+    harness.readMessages().at(-1)?.content,
+    'Compatibility Root response',
+  )
 })
 
 test('durable long-task dispatch settles without receipt prose or empty-response error', () => {
@@ -318,6 +484,7 @@ test('a pre-Run canceled request settles as canceled rather than paused', () => 
   ], {
     onSettled: (outcome) => outcomes.push(outcome),
   })
+  harness.context.turnId = 'request-canceled'
 
   dispatchAgentChunk({
     done: true,
@@ -346,6 +513,7 @@ test('a pre-Run rejected request settles as a structured failure', () => {
   ], {
     onSettled: (outcome) => outcomes.push(outcome),
   })
+  harness.context.turnId = 'request-rejected'
 
   dispatchAgentChunk({
     done: true,
@@ -364,6 +532,162 @@ test('a pre-Run rejected request settles as a structured failure', () => {
   assert.deepEqual(outcomes, ['failed'])
   assert.equal(harness.readMessages().at(-1)?.content, '')
   assert.equal(harness.readMessages().at(-1)?.error, 'invalid_model')
+})
+
+for (const status of ['canceled', 'rejected'] as const) {
+  test(`a foreign pre-Run ${status} request result cannot settle this request`, () => {
+    const outcomes: string[] = []
+    const harness = createTestChunkContext([
+      { role: 'user', content: '问题' },
+      { role: 'assistant', content: '' },
+    ], {
+      onSettled: (outcome) => outcomes.push(outcome),
+    })
+    harness.context.turnId = 'current-request'
+
+    dispatchAgentChunk({
+      done: true,
+      aborted: status === 'canceled',
+      finalResponseExpected: false,
+      requestResult: {
+        requestId: 'foreign-request',
+        sessionId: 7,
+        status,
+        runId: null,
+        cancelRequested: status === 'canceled',
+        rejectionCode: status === 'rejected' ? 'foreign_rejection' : null,
+        revision: 2,
+      },
+    }, harness.context)
+
+    const message = harness.readMessages().at(-1)
+    assert.deepEqual(outcomes, [])
+    assert.equal(harness.context.acc.terminalSettlement, undefined)
+    assert.equal(message?.error, undefined)
+    assert.equal(message?.termination, undefined)
+  })
+}
+
+test('an unbound request result with a Run id establishes Root ownership', () => {
+  const outcomes: string[] = []
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ], {
+    onSettled: (outcome) => outcomes.push(outcome),
+  })
+
+  dispatchAgentChunk({
+    done: true,
+    aborted: true,
+    finalResponseExpected: false,
+    requestResult: {
+      requestId: 'request-bound-at-terminal',
+      sessionId: 7,
+      status: 'canceled',
+      runId: 'root-from-request-result',
+      cancelRequested: true,
+      rejectionCode: null,
+      revision: 4,
+    },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['canceled'])
+  assert.equal(
+    harness.context.acc.conversationRunId,
+    'root-from-request-result',
+  )
+  assert.equal(harness.context.acc.agentRunId, 'root-from-request-result')
+})
+
+test('a matching bound request result settles its Root', () => {
+  const { harness, outcomes } = createBoundRootHarness()
+
+  dispatchAgentChunk({
+    done: true,
+    aborted: true,
+    finalResponseExpected: false,
+    requestResult: {
+      requestId: 'request-root',
+      sessionId: 7,
+      status: 'canceled',
+      runId: 'root-run',
+      cancelRequested: true,
+      rejectionCode: null,
+      revision: 5,
+    },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, ['canceled'])
+  assert.equal(harness.context.acc.agentRunId, 'root-run')
+  assert.equal(harness.context.acc.terminalSettlement?.runId, 'root-run')
+})
+
+for (const status of ['canceled', 'rejected'] as const) {
+  test(`a bound Root ignores a conflicting ${status} request result`, () => {
+    const { harness, outcomes, taskPlan } = createBoundRootHarness()
+
+    dispatchAgentChunk({
+      done: true,
+      aborted: status === 'canceled',
+      finalResponseExpected: false,
+      requestResult: {
+        requestId: 'foreign-request-result',
+        sessionId: 7,
+        status,
+        runId: 'foreign-child',
+        cancelRequested: status === 'canceled',
+        rejectionCode: status === 'rejected' ? 'foreign_rejection' : null,
+        revision: 6,
+      },
+    }, harness.context)
+
+    const message = harness.readMessages().at(-1)
+    assert.deepEqual(outcomes, [])
+    assert.equal(harness.context.acc.conversationRunId, 'root-run')
+    assert.equal(harness.context.acc.agentRunId, 'root-run')
+    assert.equal(harness.context.acc.terminalSettlement, undefined)
+    assert.deepEqual(harness.context.acc.taskPlan, taskPlan)
+    assert.equal(message?.error, undefined)
+    assert.equal(message?.termination, undefined)
+  })
+}
+
+test('a conflicting request result rejects its entire mixed envelope', () => {
+  const { harness, outcomes, canonicalOutput } = createBoundRootHarness()
+
+  dispatchAgentChunk({
+    eventId: 'mixed-conflicting-terminal',
+    outputStreamId: 'root-final',
+    runId: 'root-run',
+    turnId: null,
+    invocationId: 'foreign-envelope',
+    sequence: 3,
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    visibility: 'public',
+    payload: { delta: 'Foreign envelope text' },
+    occurredAt: '2026-08-14T00:00:03+00:00',
+    emittedAt: '2026-08-14T00:00:03+00:00',
+    done: true,
+    finalResponseExpected: false,
+    requestResult: {
+      requestId: 'foreign-request-result',
+      sessionId: 7,
+      status: 'rejected',
+      runId: 'foreign-child',
+      cancelRequested: false,
+      rejectionCode: 'foreign_rejection',
+      revision: 7,
+    },
+  }, harness.context)
+
+  assert.deepEqual(outcomes, [])
+  assert.equal(harness.context.acc.response, 'Root response')
+  assert.deepEqual(harness.context.acc.canonicalOutput, canonicalOutput)
+  assert.equal(harness.readMessages().at(-1)?.content, 'Root response')
+  assert.equal(harness.readMessages().at(-1)?.streamingContent, undefined)
 })
 
 for (const failingHostMethod of [

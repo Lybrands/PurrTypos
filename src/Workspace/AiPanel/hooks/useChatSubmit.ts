@@ -12,6 +12,10 @@ import {
   type AgentChunkRuntimeContext,
 } from "../../../agent-runtime";
 import { buildStreamOptions } from "../../../agent-runtime/streamOptions";
+import {
+  resolveRootRunBinding,
+  resolveTerminalRootOwnership,
+} from '../../../agent-runtime/rootOwnership'
 import { normalizeApiProvider } from "../../../modelCatalog";
 import {
   countQueuedForSession,
@@ -737,12 +741,33 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     })
     unsubscribe = services.ai.onAiChunk(
       (chunk) => {
-        const runId = chunk.requestReceipt?.runId
+        const receiptBinding = resolveRootRunBinding(
+          acc.conversationRunId,
+          chunk.requestReceipt?.runId,
+        )
+        const rootRunId = receiptBinding.accepted
+          ? receiptBinding.rootRunId
+          : acc.conversationRunId
+        const terminalOwnership = resolveTerminalRootOwnership(
+          chunk,
+          rootRunId,
+          acc.agentRunId,
+          streamId,
+        )
+        if (terminalOwnership.terminal && !terminalOwnership.accepted) {
+          return
+        }
+        const runId = rootRunId
+          || terminalOwnership.rootRunId
           || chunk.runId
           || chunk.runResult?.runId
         durableControl?.observeRunId(runId)
-        const authoritativeStatus = chunk.runResult?.status
-        const requestStatus = chunk.requestResult?.status
+        const authoritativeStatus = terminalOwnership.source === 'runResult'
+          ? chunk.runResult?.status
+          : undefined
+        const requestStatus = terminalOwnership.source === 'requestResult'
+          ? chunk.requestResult?.status
+          : undefined
         const requestTerminal = requestStatus === 'canceled'
           || requestStatus === 'rejected'
         if (requestTerminal) {

@@ -84,6 +84,291 @@ function renderHook(overrides = {}) {
   return { result, readMessages: () => messages }
 }
 
+const jsonResponse = (payload) => new Response(JSON.stringify(payload), {
+  status: 200,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+async function waitUntil(predicate) {
+  for (let attempt = 0; attempt < 50 && !predicate(); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
+function rootTransportSnapshot() {
+  return {
+    version: 1,
+    run: {
+      runId: 'root-transport',
+      sessionId: 7,
+      conversationId: null,
+      status: 'done',
+      lineage: { rootRunId: 'root-transport', depth: 0 },
+      finalResponse: 'Authoritative Root response',
+      execution: { attempt: 1, cancellationRequested: false },
+      provenance: {},
+    },
+    todos: [],
+    events: [{
+      version: 1,
+      cursor: 1,
+      type: 'provider.content_delta',
+      runId: 'root-transport',
+      payload: { delta: 'Authoritative Root response' },
+      createdAt: '2026-08-14T00:00:01+00:00',
+      chunk: {
+        eventId: 'root-response-1',
+        outputStreamId: 'root-final',
+        runId: 'root-transport',
+        turnId: 'root-turn',
+        invocationId: 'root-invocation',
+        sequence: 1,
+        source: 'provider',
+        kind: 'provider.content_delta',
+        channel: 'final',
+        visibility: 'public',
+        payload: { delta: 'Authoritative Root response' },
+        occurredAt: '2026-08-14T00:00:01+00:00',
+        emittedAt: '2026-08-14T00:00:01+00:00',
+      },
+    }],
+    delegations: {
+      items: [],
+      aggregate: {
+        state: 'ready',
+        counts: {
+          queued: 0,
+          claimed: 0,
+          running: 0,
+          done: 0,
+          failed: 0,
+          canceled: 0,
+        },
+        requiredFailures: [],
+        results: [],
+      },
+    },
+    nextCursor: 1,
+    hasMore: false,
+  }
+}
+
+test('bound backend transport recovers Root after foreign terminal envelopes', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const streamId = 'chat-foreign-terminal-transport'
+  const requestReceipt = {
+    requestId: streamId,
+    sessionId: 7,
+    status: 'run_bound',
+    runId: 'root-transport',
+    cancelRequested: false,
+    rejectionCode: null,
+    revision: 3,
+  }
+  let errorReportPosts = 0
+  let recoveryReads = 0
+  const delivered = []
+  globalThis.window = Object.assign(new EventTarget(), {
+    setTimeout: globalThis.setTimeout,
+  })
+  globalThis.fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.includes(`/api/ai/chat/requests/${streamId}`)) {
+      return jsonResponse({
+        success: true,
+        data: {
+          ...requestReceipt,
+          status: 'accepted',
+          runId: null,
+          revision: 1,
+        },
+      })
+    }
+    if (url.endsWith('/api/ai/chat/stream')) {
+      return new Response([
+        `data: ${JSON.stringify({ requestReceipt })}`,
+        `data: ${JSON.stringify({
+          done: true,
+          runResult: {
+            runId: 'foreign-child',
+            status: 'failed',
+            errorCode: 'foreign_failure',
+          },
+        })}`,
+        `data: ${JSON.stringify({
+          eventId: 'mixed-conflicting-transport-terminal',
+          outputStreamId: 'root-final',
+          runId: 'root-transport',
+          turnId: null,
+          invocationId: 'foreign-request-envelope',
+          sequence: 9,
+          source: 'provider',
+          kind: 'provider.content_delta',
+          channel: 'final',
+          visibility: 'public',
+          payload: { delta: 'Foreign envelope text' },
+          occurredAt: '2026-08-14T00:00:09+00:00',
+          emittedAt: '2026-08-14T00:00:09+00:00',
+          done: true,
+          aborted: true,
+          finalResponseExpected: false,
+          requestResult: {
+            ...requestReceipt,
+            status: 'canceled',
+            runId: 'foreign-request-run',
+            cancelRequested: true,
+            revision: 6,
+          },
+        })}`,
+        '',
+      ].join('\n'), { status: 200 })
+    }
+    if (url.includes('/api/ai/agent-runs/root-transport')) {
+      recoveryReads += 1
+      return jsonResponse({ success: true, data: rootTransportSnapshot() })
+    }
+    if (url.endsWith('/api/ai/error-reports')) {
+      errorReportPosts += 1
+      return jsonResponse({ success: true, data: { id: 'error-report' } })
+    }
+    throw new Error(`unexpected ${init?.method || 'GET'} ${url}`)
+  }
+  const unsubscribe = services.ai.onAiChunk(
+    (chunk) => delivered.push(chunk),
+    streamId,
+  )
+  try {
+    services.ai.aiChatStream({
+      streamId,
+      apiKey: 'test-key',
+      sessionId: 7,
+      messages: [{ role: 'user', content: '继续 Root' }],
+      options: { model: 'test-model' },
+      chatAgentMode: 'agent',
+      enableAgentTools: true,
+      bookId: 'book-1',
+      chapterId: 'chapter-1',
+    })
+    await waitUntil(() => delivered.some((chunk) => (
+      chunk.runResult?.runId === 'root-transport'
+    )))
+
+    assert.equal(errorReportPosts, 0)
+    assert.equal(recoveryReads, 1)
+    assert.equal(delivered.some((chunk) => (
+      chunk.eventId === 'mixed-conflicting-transport-terminal'
+    )), false)
+    assert.equal(delivered.at(-1)?.runResult?.runId, 'root-transport')
+  } finally {
+    unsubscribe()
+    services.ai.abortAiStream(streamId)
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  }
+})
+
+test('bound chat ignores foreign terminal envelopes until Root settles', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  let onChunk
+  let unsubscribeCalls = 0
+  const saved = []
+  const originalSubscribe = services.ai.onAiChunk
+  const originalStream = services.ai.aiChatStream
+  const originalSave = services.conversations.saveConversation
+  const originalSnapshot = services.ai.getAgentRunSnapshot
+  services.ai.onAiChunk = (callback) => {
+    onChunk = callback
+    return () => { unsubscribeCalls += 1 }
+  }
+  services.ai.aiChatStream = () => undefined
+  services.ai.getAgentRunSnapshot = () => new Promise(() => {})
+  services.conversations.saveConversation = async (input) => {
+    saved.push(input)
+    return { success: true, data: { id: 991 } }
+  }
+  try {
+    const { result } = renderHook()
+    assert.equal(result.handleSubmit({ content: '继续 Root' }), 'started')
+    onChunk({
+      requestReceipt: {
+        requestId: 'chat-root-terminal',
+        sessionId: 7,
+        status: 'run_bound',
+        runId: 'root-chat',
+        cancelRequested: false,
+        rejectionCode: null,
+        revision: 3,
+      },
+    })
+    onChunk({
+      eventId: 'mixed-conflicting-chat-terminal',
+      outputStreamId: 'root-final',
+      runId: 'root-chat',
+      turnId: null,
+      invocationId: 'foreign-request-envelope',
+      sequence: 1,
+      source: 'provider',
+      kind: 'provider.content_delta',
+      channel: 'final',
+      visibility: 'public',
+      payload: { delta: 'Foreign envelope text' },
+      occurredAt: '2026-08-14T00:00:01+00:00',
+      emittedAt: '2026-08-14T00:00:01+00:00',
+      done: true,
+      runResult: {
+        runId: 'foreign-child',
+        status: 'failed',
+        errorCode: 'foreign_failure',
+      },
+    })
+    onChunk({
+      done: true,
+      aborted: true,
+      finalResponseExpected: false,
+      requestResult: {
+        requestId: 'foreign-request',
+        sessionId: 7,
+        status: 'canceled',
+        runId: 'foreign-request-run',
+        cancelRequested: true,
+        rejectionCode: null,
+        revision: 4,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    assert.deepEqual(saved, [])
+    assert.equal(unsubscribeCalls, 0)
+    assert.equal(runtime.getChatSessionRuntime(7)?.loading, true)
+    assert.equal(
+      runtime.getChatSessionRuntime(7)?.messages.at(-1)?.streamingContent,
+      undefined,
+    )
+
+    onChunk({
+      done: true,
+      finalResponse: 'Authoritative Root response',
+      runResult: { runId: 'root-chat', status: 'done' },
+    })
+    await waitUntil(() => (
+      saved.length === 1
+      && runtime.getChatSessionRuntime(7)?.loading === false
+    ))
+
+    assert.equal(saved.length, 1)
+    assert.equal(saved[0].agentRunId, 'root-chat')
+    assert.equal(saved[0].response, 'Authoritative Root response')
+    assert.equal(unsubscribeCalls, 1)
+    assert.equal(runtime.getChatSessionRuntime(7)?.loading, false)
+  } finally {
+    services.ai.onAiChunk = originalSubscribe
+    services.ai.aiChatStream = originalStream
+    services.conversations.saveConversation = originalSave
+    services.ai.getAgentRunSnapshot = originalSnapshot
+  }
+})
+
 test('durable Book stop uses the request receipt plane and retains the stream', async () => {
   runtime.replaceChatRuntimeMessages(7, [
     { role: 'user', content: '慢任务' },
