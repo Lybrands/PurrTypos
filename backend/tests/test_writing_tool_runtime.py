@@ -9,9 +9,13 @@ import pytest
 
 import dependencies
 from purra.cancellation import await_with_cancellation
-from purra.contracts import ExecutionState
+from purra.contracts import (
+    ExecutionState,
+    ToolPlanningDisposition,
+)
 from database.connection import DatabaseConnection
-from domains.writing.tools.contracts import _err
+from domains.writing.policies import WRITING_TOOL_POLICIES
+from domains.writing.tools.contracts import ToolResult, _err
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence.writing.sqlite_writing_tool_memory_repository import (
     SqliteWritingToolMemoryRepository,
@@ -29,6 +33,20 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 SKILL_ITEMS = tuple(
     WritingSkillCatalog(BACKEND_DIR / "skills").skill_items()
 )
+REPLANNING_EVIDENCE_TOOL_NAMES = frozenset({
+    "batchGetChapterContents",
+    "getBookCharacters",
+    "getBookStyle",
+    "getChapterContent",
+    "getGlobalOutline",
+    "getSettingEntities",
+    "getStoryBackground",
+    "getStoryHealthDashboard",
+    "getWritingStatsDashboard",
+    "queryOutline",
+    "searchMemories",
+    "searchSparkIdeas",
+})
 
 
 def _tool_dependencies(db) -> WritingToolDependencies:
@@ -46,6 +64,77 @@ def _registration(db, name: str):
     return next(
         item for item in catalog.registrations() if item.schema.name == name
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        (
+            name,
+            (
+                ToolPlanningDisposition.REPLAN
+                if name in REPLANNING_EVIDENCE_TOOL_NAMES
+                else ToolPlanningDisposition.KEEP_PLAN
+            ),
+        )
+        for name in sorted(WRITING_TOOL_POLICIES)
+    ],
+)
+async def test_catalog_replans_only_after_explicit_evidence_reads(
+    tool_name: str,
+    expected: ToolPlanningDisposition,
+):
+    async def _successful(_ctx, _args, _send_chunk):
+        return ToolResult('{"evidence":"new fact"}')
+
+    catalog = build_writing_tool_catalog(
+        dependencies=WritingToolDependencies(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        ),
+        skill_items=SKILL_ITEMS,
+        handler_overrides={tool_name: _successful},
+    )
+    registration = next(
+        item for item in catalog.registrations()
+        if item.schema.name == tool_name
+    )
+
+    result = await registration.handler(
+        ExecutionState(domain={"bookId": "book-a"}),
+        {},
+    )
+
+    assert result.error_code is None
+    assert result.planning_disposition is expected
+
+
+@pytest.mark.asyncio
+async def test_failed_evidence_read_keeps_the_current_plan():
+    async def _failed(_ctx, _args, _send_chunk):
+        return _err({"error": "evidence unavailable"})
+
+    catalog = build_writing_tool_catalog(
+        dependencies=WritingToolDependencies(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        ),
+        skill_items=SKILL_ITEMS,
+        handler_overrides={"getBookStyle": _failed},
+    )
+    registration = next(
+        item for item in catalog.registrations()
+        if item.schema.name == "getBookStyle"
+    )
+
+    result = await registration.handler(
+        ExecutionState(domain={"bookId": "book-a"}),
+        {},
+    )
+
+    assert result.error_code == "tool_execution_failed"
+    assert result.planning_disposition is ToolPlanningDisposition.KEEP_PLAN
 
 
 @pytest.mark.asyncio

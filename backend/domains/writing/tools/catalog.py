@@ -34,6 +34,22 @@ WritingToolHandler = Callable[[dict, dict, Callable[[dict], None] | None], Any]
 WritingCachePredictor = Callable[[dict, dict], bool]
 
 
+WRITING_REPLANNING_EVIDENCE_TOOLS = frozenset({
+    "batchGetChapterContents",
+    "getBookCharacters",
+    "getBookStyle",
+    "getChapterContent",
+    "getGlobalOutline",
+    "getSettingEntities",
+    "getStoryBackground",
+    "getStoryHealthDashboard",
+    "getWritingStatsDashboard",
+    "queryOutline",
+    "searchMemories",
+    "searchSparkIdeas",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class _WritingCacheProbe:
     tool_name: str
@@ -145,14 +161,18 @@ def _adapt_handler(tool_name: str, handler: WritingToolHandler):
             _capture,
         )
         content = str(getattr(result, "content", "") or "")
+        error_code = _tool_error_code(content)
         return ToolHandlerResult(
             content=content,
             from_cache=bool(getattr(result, "from_cache", False)),
             effects=tuple(effects),
-            error_code=_tool_error_code(content),
+            error_code=error_code,
             planning_disposition=(
                 ToolPlanningDisposition.REPLAN
-                if tool_name == "getChapterContent"
+                if (
+                    error_code is None
+                    and tool_name in WRITING_REPLANNING_EVIDENCE_TOOLS
+                )
                 else ToolPlanningDisposition.KEEP_PLAN
             ),
         )
