@@ -5,9 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import replace
-from pathlib import Path
-from typing import Any
 
 from purra.contracts import (
     AgentRunRequest,
@@ -42,20 +39,11 @@ from purra.tools import InMemoryToolCatalog
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
 from application.agent_profile_registry import (
-    AgentProfileRegistration,
+    AgentProfileExtension,
     AgentProfileRegistry,
 )
 from application.planning_constraints import RequiredToolPlanningPolicy
 from application.run_execution_control import RunExecutionSession
-from application.memory_reranking import ModelBackedMemoryReranker
-from domains.writing.adapter import WritingDomainAdapter
-from domains.writing.context import WritingContextProvider
-from domains.writing.context_source import RepositoryWritingContextSource
-from domains.writing.response import writing_atomic_continuity_judge_policy
-from domains.writing.contracts import (
-    WRITING_DOMAIN_NAMESPACE,
-    WritingDomainContext,
-)
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.models.model_conversation_summarizer import (
     ModelBackedConversationSummarizer,
@@ -97,18 +85,6 @@ from infrastructure.persistence.sqlite_long_task_repository import (
 )
 from infrastructure.persistence import approval_store
 from infrastructure.persistence.sqlite_approval_gateway import SqliteApprovalGateway
-from infrastructure.persistence.writing import (
-    SqliteAssociatedContextRepository,
-    SqliteMemoryRecallRepository,
-    SqliteStoryMemoryRecallRepository,
-    SqliteWritingCatalogRepository,
-    SqliteWritingToolMemoryRepository,
-)
-from infrastructure.writing import (
-    WritingSkillCatalog,
-    WritingToolDependencies,
-    build_writing_tool_catalog,
-)
 from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 from domains.agent_roles import AgentRoleRegistry
 
@@ -124,18 +100,16 @@ class AgentComposition:
         db,
         *,
         execution_db=None,
-        skills_dir: Path | None = None,
-        writing: WritingDomainAdapter | None = None,
         run_commit_projector=None,
-        profile_registrations: Sequence[AgentProfileRegistration] = (),
-        profile_extension_factories: Sequence[Callable[..., Any]] = (),
+        profile_extension_factories: Sequence[
+            Callable[..., AgentProfileExtension]
+        ] = (),
         provider_capabilities: ProviderCapabilityCache | None = None,
         approval_gateway: ApprovalGateway | None = None,
         tool_execution_limits: ToolExecutionLimits | None = None,
     ):
         self._db = db
         self._execution_db = execution_db or db
-        self._writing_catalog_repository = SqliteWritingCatalogRepository(db)
         self._execution_lease_store = SqliteExecutionLeaseStore(
             self._execution_db
         )
@@ -173,32 +147,6 @@ class AgentComposition:
         self._provider_capabilities = (
             provider_capabilities or ProviderCapabilityCache()
         )
-        self._writing_context_source: RepositoryWritingContextSource | None = None
-        self._skill_catalog: WritingSkillCatalog | None = None
-        if writing is not None:
-            self._writing = writing
-        else:
-            resolved_skills_dir = skills_dir or (
-                Path(__file__).resolve().parent.parent / "skills"
-            )
-            self._skill_catalog = WritingSkillCatalog(resolved_skills_dir)
-            self._writing_context_source = RepositoryWritingContextSource(
-                SqliteAssociatedContextRepository(db),
-                SqliteMemoryRecallRepository(db),
-                SqliteStoryMemoryRecallRepository(db),
-            )
-            self._writing = WritingDomainAdapter.build(
-                tool_catalog=build_writing_tool_catalog(
-                    dependencies=WritingToolDependencies(
-                        db,
-                        SqliteWritingToolMemoryRepository(db),
-                    ),
-                    skill_items=tuple(self._skill_catalog.skill_items()),
-                ),
-                context_provider=WritingContextProvider(
-                    self._writing_context_source
-                ),
-            )
         self._profile_extensions = tuple(
             factory(
                 db=db,
@@ -221,15 +169,7 @@ class AgentComposition:
                 strict=True,
             )
         }
-        self._profile_registry = AgentProfileRegistry((
-            AgentProfileRegistration(
-                id="writing",
-                domain_namespace=WRITING_DOMAIN_NAMESPACE,
-                adapter=self._writing,
-            ),
-            *tuple(profile_registrations),
-            *extension_registrations,
-        ))
+        self._profile_registry = AgentProfileRegistry(extension_registrations)
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
         self._tool_execution_limits = tool_execution_limits or ToolExecutionLimits(
             approval_timeout_seconds=AGENT_APPROVAL_TIMEOUT_SECONDS,
@@ -240,16 +180,8 @@ class AgentComposition:
         self._closed = False
 
     @property
-    def writing(self) -> WritingDomainAdapter:
-        return self._writing
-
-    @property
     def database(self):
         return self._db
-
-    @property
-    def skill_catalog(self) -> WritingSkillCatalog | None:
-        return self._skill_catalog
 
     @property
     def provider_capabilities(self) -> ProviderCapabilityCache:
@@ -258,10 +190,6 @@ class AgentComposition:
     @property
     def agent_profile_ids(self) -> tuple[str, ...]:
         return self._profile_registry.ids
-
-    @property
-    def agent_role_registry(self) -> AgentRoleRegistry:
-        return self._writing.agent_role_registry
 
     @property
     def execution_owner_id(self) -> str:
@@ -308,42 +236,9 @@ class AgentComposition:
         """Hydrate renderer-independent, authoritative domain catalogs."""
 
         registration = self._profile_registry.for_request(request)
-        extension = self._profile_extensions_by_id.get(registration.id)
-        if extension is not None:
-            prepared = await extension.prepare_request(request)
-            return request if prepared is None else prepared
-        if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
-            return request
-        context = WritingDomainContext.from_core_context(
-            request.domain_context
-        )
-        book_id = str(context.book_id or "").strip()
-        if not book_id:
-            hydrated = replace(
-                context,
-                writing_chapters=(),
-                available_outlines=(),
-            )
-        else:
-            writing_chapters = (
-                await self._writing_catalog_repository.load_writing_chapters(
-                    book_id
-                )
-            )
-            available_outlines = (
-                await self._writing_catalog_repository.load_available_outlines(
-                    book_id
-                )
-            )
-            hydrated = replace(
-                context,
-                writing_chapters=writing_chapters,
-                available_outlines=available_outlines,
-            )
-        return replace(
-            request,
-            domain_context=hydrated.to_core_context(),
-        )
+        extension = self._profile_extensions_by_id[registration.id]
+        prepared = await extension.prepare_request(request)
+        return request if prepared is None else prepared
 
     async def resolve_context_claims(
         self,
@@ -370,7 +265,7 @@ class AgentComposition:
         self,
         api_key: str,
         *,
-        agent_profile: str = "writing",
+        agent_profile: str | None = None,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
         agent_role_guidance: Mapping[str, object] | None = None,
@@ -396,9 +291,10 @@ class AgentComposition:
                 on_required_tool_choice_unsupported
             ),
         )
-        registration = self._profile_registry.require(agent_profile)
+        profile_id = agent_profile or self._profile_registry.ids[0]
+        registration = self._profile_registry.require(profile_id)
         adapter = registration.adapter
-        extension = self._profile_extensions_by_id.get(agent_profile)
+        extension = self._profile_extensions_by_id[profile_id]
         planning_policy = adapter.planning_policy
         if required_tool_names:
             planning_policy = RequiredToolPlanningPolicy(
@@ -407,22 +303,13 @@ class AgentComposition:
             )
         context_provider = context_provider_override or adapter.context_provider
         context_provider_factory = None
-        if (
-            context_provider_override is None
-            and agent_profile == "writing"
-            and self._writing_context_source is not None
-        ):
-            context_provider = None
-            context_provider_factory = lambda model_tasks: (
-                WritingContextProvider(
-                    self._writing_context_source.with_memory_reranker(
-                        ModelBackedMemoryReranker(model_tasks)
-                    )
-                )
-            )
+        if context_provider_override is None:
+            context_provider_factory = extension.context_provider_factory()
+            if context_provider_factory is not None:
+                context_provider = None
         if context_provider is None and context_provider_factory is None:
             raise RuntimeError(
-                f"{agent_profile} ContextProvider is not configured"
+                f"{profile_id} ContextProvider is not configured"
             )
         resolved_compactor = conversation_compactor
         conversation_compactor_factory = None
@@ -495,19 +382,13 @@ class AgentComposition:
             tool_catalog=tool_catalog,
             agent_role_guidance=agent_role_guidance,
             max_parallel_agents=max_parallel_agents,
-            task_admission_evaluator=(
-                extension.task_admission
-                if extension is not None
-                else None
-            ),
+            task_admission_evaluator=extension.task_admission(),
             long_task_dispatcher=(
                 extension.create_long_task_dispatcher(
                     work_item_repository=self._work_item_repository,
                     long_task_repository=self._long_task_repository,
                     executor=long_task_executor,
                 )
-                if extension is not None
-                else None
             ),
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
@@ -559,12 +440,9 @@ class AgentComposition:
 
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
-        if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
-            return ()
-        judge_policy = writing_atomic_continuity_judge_policy(request)
-        if judge_policy is None:
-            return ()
-        return (judge_policy,)
+        registration = self._profile_registry.for_request(request)
+        extension = self._profile_extensions_by_id[registration.id]
+        return extension.response_judge_policies(request)
 
     def create_execution_session(self, signal) -> RunExecutionSession:
         return RunExecutionSession(
@@ -662,7 +540,7 @@ class AgentComposition:
 
         task.add_done_callback(_discard)
 
-    def profile_extension(self, profile_id: str):
+    def profile_extension(self, profile_id: str) -> AgentProfileExtension:
         normalized = str(profile_id or "").strip()
         extension = self._profile_extensions_by_id.get(normalized)
         if extension is None:
@@ -688,9 +566,7 @@ class AgentComposition:
                 return_exceptions=True,
             )
         for extension in self._profile_extensions:
-            clear = getattr(extension, "clear_active_executions", None)
-            if callable(clear):
-                clear()
+            extension.clear_active_executions()
         close = getattr(self._approval_gateway, "close", None)
         if close is not None:
             await close()
