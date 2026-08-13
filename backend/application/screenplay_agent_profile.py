@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from contextlib import suppress
 from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -449,39 +451,50 @@ class _ScreenplayCheckpointObserver:
             current,
         )
         input_digest = _checkpoint_input_digest(checkpoint_input)
-        if existing is not None and str(existing["status"]) == "ready":
-            root_digest = (
-                await self._dispatcher._checkpoints.root_revision_digest(
-                    self._root_run_id,
-                    checkpoint_key,
+        if existing is not None and str(existing["status"]) in {
+            "ready", "applying",
+        }:
+            try:
+                root_digest = (
+                    await self._dispatcher._checkpoints.root_revision_digest(
+                        self._root_run_id,
+                        checkpoint_key,
+                        expected_digest=str(existing["plan_digest"]),
+                    )
                 )
-            )
+            except ScreenplayCheckpointStateError:
+                await self._pause_stale_ready(task, existing)
+                return
             if root_digest is not None:
-                await self._emit_ready(existing, progress_update)
+                await self._emit_ready(existing, progress_update, task=task)
                 return
             if str(existing["input_digest"]) != input_digest:
                 await self._pause_stale_ready(task, existing)
                 return
-            await self._emit_ready(existing, progress_update)
+            await self._emit_ready(existing, progress_update, task=task)
             return
-        receipt = await self._dispatcher._checkpoints.reserve(
+        reservation_token = uuid4().hex
+        receipt = await self._dispatcher._checkpoints.acquire_planning(
             operation_id=operation_id,
             task_id=task.id,
             checkpoint_key=checkpoint_key,
             root_run_id=self._root_run_id,
             input_digest=input_digest,
-            reservation_token=uuid4().hex,
+            reservation_token=reservation_token,
+            signal=self._signal,
         )
-        if str(receipt["status"]) == "ready":
-            await self._emit_ready(receipt, progress_update)
+        if str(receipt["status"]) in {"ready", "applying"}:
+            await self._emit_ready(receipt, progress_update, task=task)
             return
         if str(receipt["status"]) != "reserved":
             if str(receipt["status"]) == "paused":
                 await self._dispatcher._long_tasks.pause(task.id)
             return
-        if not receipt.get("_acquired"):
-            return
-        decision = await self._planner.revise(checkpoint_input, self._signal)
+        decision = await self._with_heartbeat(
+            receipt,
+            "reserved",
+            self._planner.revise(checkpoint_input, self._signal),
+        )
         if decision.outcome in {
             ScreenplayCheckpointOutcome.PAUSED,
             ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION,
@@ -491,6 +504,8 @@ class _ScreenplayCheckpointObserver:
                 checkpoint_key=checkpoint_key,
                 outcome=decision.outcome,
                 code=decision.code or decision.outcome.value,
+                reservation_owner=reservation_token,
+                reservation_epoch=int(receipt["reservation_epoch"]),
             )
             await self._dispatcher._long_tasks.pause(task.id)
             return
@@ -500,8 +515,10 @@ class _ScreenplayCheckpointObserver:
             checkpoint_key=checkpoint_key,
             plan=revised,
             outcome=decision.outcome,
+            reservation_owner=reservation_token,
+            reservation_epoch=int(receipt["reservation_epoch"]),
         )
-        await self._emit_ready(receipt, progress_update)
+        await self._emit_ready(receipt, progress_update, task=task)
 
     async def _pause_without_planning(
         self,
@@ -518,13 +535,15 @@ class _ScreenplayCheckpointObserver:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
-        receipt = await self._dispatcher._checkpoints.reserve(
+        reservation_token = uuid4().hex
+        receipt = await self._dispatcher._checkpoints.acquire_planning(
             operation_id=operation_id,
             task_id=task.id,
             checkpoint_key=checkpoint_key,
             root_run_id=self._root_run_id,
             input_digest=input_digest,
-            reservation_token=uuid4().hex,
+            reservation_token=reservation_token,
+            signal=self._signal,
         )
         if str(receipt["status"]) == "reserved" and receipt.get("_acquired"):
             await self._dispatcher._checkpoints.pause(
@@ -532,59 +551,149 @@ class _ScreenplayCheckpointObserver:
                 checkpoint_key=checkpoint_key,
                 outcome=ScreenplayCheckpointOutcome.PAUSED,
                 code="checkpoint_root_plan_unavailable",
+                reservation_owner=reservation_token,
+                reservation_epoch=int(receipt["reservation_epoch"]),
             )
         await self._dispatcher._long_tasks.pause(task.id)
 
     async def _pause_stale_ready(self, task, receipt) -> None:
+        status = str(receipt["status"])
         await self._dispatcher._checkpoints.pause_ready_conflict(
             operation_id=str(receipt["operation_id"]),
             checkpoint_key=str(receipt["checkpoint_key"]),
             code="screenplay_checkpoint_ready_root_plan_conflict",
+            expected_plan_digest=str(receipt["plan_digest"]),
+            reservation_owner=(
+                str(receipt.get("reservation_owner") or "")
+                if status == "applying" else None
+            ),
+            reservation_epoch=(
+                int(receipt.get("reservation_epoch") or 0)
+                if status == "applying" else None
+            ),
         )
         await self._dispatcher._long_tasks.pause(task.id)
 
-    async def _emit_ready(self, receipt, progress_update) -> None:
+    async def _emit_ready(self, receipt, progress_update, *, task=None) -> None:
         checkpoint_key = str(receipt["checkpoint_key"])
         digest = str(receipt["plan_digest"])
-        root_digest = await self._dispatcher._checkpoints.root_revision_digest(
-            self._root_run_id,
-            checkpoint_key,
-        )
-        if root_digest is not None:
-            if root_digest != digest:
-                raise RuntimeError("screenplay_checkpoint_root_digest_conflict")
-        else:
-            event = AgentEvent(
-                type=CoreEventType.LONG_TASK_PROGRESS,
-                run_id=self._root_run_id,
-                payload={
-                    **thaw_json_mapping(progress_update.event.payload),
-                    "checkpoint": {
-                        "identity": checkpoint_key,
-                        "digest": digest,
-                    },
-                },
+        operation_id = str(receipt["operation_id"])
+        owner: str | None = None
+        epoch: int | None = None
+        try:
+            root_digest = await self._dispatcher._checkpoints.root_revision_digest(
+                self._root_run_id,
+                checkpoint_key,
+                expected_digest=digest,
             )
-            await self._downstream(type(progress_update)(
-                event=event,
-                plan_revision=parse_persisted_plan(str(receipt["plan_json"])),
-                plan_revision_metadata={
-                    "identity": checkpoint_key,
-                    "digest": digest,
-                },
-            ))
-            root_digest = (
-                await self._dispatcher._checkpoints.root_revision_digest(
-                    self._root_run_id,
-                    checkpoint_key,
-                )
-            )
-        if root_digest == digest:
-            await self._dispatcher._checkpoints.applied(
-                operation_id=str(receipt["operation_id"]),
+            applying = await self._dispatcher._checkpoints.acquire_applying(
+                operation_id=operation_id,
                 checkpoint_key=checkpoint_key,
                 digest=digest,
+                reservation_token=uuid4().hex,
+                signal=self._signal,
             )
+            if str(applying["status"]) in {"applied", "paused"}:
+                return
+            owner = str(applying["reservation_owner"])
+            epoch = int(applying["reservation_epoch"])
+            # The prior apply owner may have committed the Root event and crashed
+            # before acknowledging the receipt. Reconcile before any re-emission.
+            root_digest = await self._dispatcher._checkpoints.root_revision_digest(
+                self._root_run_id,
+                checkpoint_key,
+                expected_digest=digest,
+            )
+            if root_digest is None:
+                event = AgentEvent(
+                    type=CoreEventType.LONG_TASK_PROGRESS,
+                    run_id=self._root_run_id,
+                    payload={
+                        **thaw_json_mapping(progress_update.event.payload),
+                        "checkpoint": {
+                            "identity": checkpoint_key,
+                            "digest": digest,
+                        },
+                    },
+                )
+                await self._with_heartbeat(
+                    applying,
+                    "applying",
+                    self._downstream(type(progress_update)(
+                        event=event,
+                        plan_revision=parse_persisted_plan(
+                            str(receipt["plan_json"])
+                        ),
+                        plan_revision_metadata={
+                            "identity": checkpoint_key,
+                            "digest": digest,
+                        },
+                    )),
+                )
+                root_digest = await self._dispatcher._checkpoints.root_revision_digest(
+                    self._root_run_id,
+                    checkpoint_key,
+                    expected_digest=digest,
+                )
+            if root_digest != digest:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint Root revision ACK is missing"
+                )
+            await self._dispatcher._checkpoints.applied(
+                operation_id=operation_id,
+                checkpoint_key=checkpoint_key,
+                digest=digest,
+                reservation_owner=owner,
+                reservation_epoch=epoch,
+            )
+        except ScreenplayCheckpointStateError:
+            await self._dispatcher._checkpoints.pause_ready_conflict(
+                operation_id=operation_id,
+                checkpoint_key=checkpoint_key,
+                code="screenplay_checkpoint_ready_root_plan_conflict",
+                expected_plan_digest=digest,
+                reservation_owner=owner,
+                reservation_epoch=epoch,
+            )
+            if task is not None:
+                await self._dispatcher._long_tasks.pause(task.id)
+
+    async def _with_heartbeat(self, receipt, status: str, awaitable):
+        owner = str(receipt["reservation_owner"])
+        epoch = int(receipt["reservation_epoch"])
+        operation_id = str(receipt["operation_id"])
+        checkpoint_key = str(receipt["checkpoint_key"])
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(
+                    self._dispatcher._checkpoints.heartbeat_interval_seconds
+                )
+                await self._dispatcher._checkpoints.renew(
+                    operation_id=operation_id,
+                    checkpoint_key=checkpoint_key,
+                    reservation_owner=owner,
+                    reservation_epoch=epoch,
+                    status=status,
+                )
+
+        worker = asyncio.create_task(awaitable)
+        keeper = asyncio.create_task(heartbeat())
+        try:
+            done, _pending = await asyncio.wait(
+                {worker, keeper},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if keeper in done:
+                return keeper.result()
+            return worker.result()
+        finally:
+            for child in (worker, keeper):
+                if not child.done():
+                    child.cancel()
+            for child in (worker, keeper):
+                with suppress(asyncio.CancelledError):
+                    await child
 
 def _ready_checkpoint_keys(units) -> tuple[str, ...]:
     ready: list[tuple[int, str]] = []
@@ -639,10 +748,26 @@ def _checkpoint_input(
         unit_input = raw.get("input") or {}
         if not isinstance(unit_input, Mapping):
             continue
+        unit_kind = str(raw.get("unitKind") or "")
+        part_kind = {
+            "collect_evidence": "evidence",
+            "generate_draft_scene": "draftScene",
+            "compose_episode_metadata": "episodeMetadata",
+            "generate_review_dimension": "reviewDimension",
+            "generate_document_section": "documentSection",
+            "validate_manifest_part": "validation",
+        }.get(unit_kind)
+        if part_kind is None:
+            continue
         receipt: dict[str, Any] = {
-            "kind": str(raw.get("unitKind") or ""),
+            "partKind": part_kind,
             "digest": unit.artifact_digest,
+            "status": "completed",
         }
+        if unit_kind == "validate_manifest_part":
+            artifact_kind = str(unit_input.get("validationKind") or "").strip()
+            if artifact_kind in {"draft_episode", "review_episode", "document"}:
+                receipt["artifactKind"] = artifact_kind
         episode = int(unit_input.get("episodeNumber") or 0)
         section = str(unit_input.get("sectionKey") or "").strip()
         if episode:
