@@ -24,6 +24,7 @@ class ScreenplayAgentDomainContext:
     target_role: str | None = None
     expected_part_type: str | None = None
     expected_part_key: str | None = None
+    candidate_validation_contract: Mapping[str, Any] | None = None
     tool_access: str = "all"
     source_book_id: str | None = None
     source_scope: Mapping[str, Any] | None = None
@@ -64,6 +65,10 @@ class ScreenplayAgentDomainContext:
                 ScreenplayStageCommand,
             ):
                 raise TypeError("screenplay Agent stage_command is invalid")
+            if self.candidate_validation_contract is not None:
+                raise ValueError(
+                    "screenplay Root context cannot carry candidate validation"
+                )
         else:
             if self.stage_command is not None or not all(
                 value is not None for value in child_fields
@@ -71,6 +76,15 @@ class ScreenplayAgentDomainContext:
                 raise ValueError(
                     "screenplay Agent context must be a complete root or child"
                 )
+        object.__setattr__(
+            self,
+            "candidate_validation_contract",
+            (
+                dict(self.candidate_validation_contract)
+                if self.candidate_validation_contract is not None
+                else None
+            ),
+        )
         object.__setattr__(
             self,
             "source_book_id",
@@ -107,6 +121,15 @@ class ScreenplayAgentDomainContext:
                 "targetRole": self.target_role,
                 "expectedPartType": self.expected_part_type,
                 "expectedPartKey": self.expected_part_key,
+                **(
+                    {
+                        "candidateValidation": dict(
+                            self.candidate_validation_contract
+                        )
+                    }
+                    if self.candidate_validation_contract is not None
+                    else {}
+                ),
             })
         return DomainContext(
             namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
@@ -133,8 +156,16 @@ class ScreenplayAgentDomainContext:
         payload = thaw_json_mapping(context.payload)
         source_scope = payload.get("sourceScope")
         stage_command = payload.get("stageCommand")
+        candidate_validation = payload.get("candidateValidation")
         if "stageCommand" in payload and not isinstance(stage_command, Mapping):
             raise ValueError("screenplay Agent stage command must be an object")
+        if "candidateValidation" in payload and not isinstance(
+            candidate_validation,
+            Mapping,
+        ):
+            raise ValueError(
+                "screenplay candidate validation contract must be an object"
+            )
         return cls(
             project_id=str(payload.get("projectId") or ""),
             turn_id=str(payload.get("turnId") or "") or None,
@@ -151,6 +182,11 @@ class ScreenplayAgentDomainContext:
             ),
             expected_part_key=(
                 str(payload.get("expectedPartKey") or "") or None
+            ),
+            candidate_validation_contract=(
+                dict(candidate_validation)
+                if isinstance(candidate_validation, Mapping)
+                else None
             ),
             tool_access=str(payload.get("toolAccess") or "all"),
             source_book_id=str(payload.get("sourceBookId") or "") or None,

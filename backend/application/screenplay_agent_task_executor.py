@@ -21,7 +21,12 @@ from application.screenplay_structured_call import ScreenplayStructuredCallServi
 from application.screenplay_tool_calling import ScreenplayToolCallingService
 from domains.screenplay.source_scope import parse_source_scope
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
+from domains.screenplay_agent.candidate_projection import (
+    SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+)
 from exceptions import AppError
+
+
 _DOCUMENT_KIND = {
     "sourceAnalysis": "source_analysis",
     "creativeBrief": "creative_brief",
@@ -358,10 +363,11 @@ class ScreenplayTaskModelCalls:
                     scene_id,
                     scene_plans[scene_id],
                 ),
-                validate_candidate=lambda candidate: _validate_scene_candidate(
-                    candidate,
-                    scene_id,
-                ),
+                candidate_validation_contract={
+                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                    "kind": "scene",
+                    "expectedSceneId": scene_id,
+                },
                 signal=signal,
             )
             candidate = result.candidate
@@ -433,9 +439,11 @@ class ScreenplayTaskModelCalls:
                 conversation_turn_id=str(task["turnId"]),
                 lineage=_child_lineage(task),
                 reasoning_mode=ReasoningMode.DISABLED,
-                validate_candidate=lambda candidate: (
-                    _validate_episode_metadata_candidate(candidate, episode_number)
-                ),
+                candidate_validation_contract={
+                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                    "kind": "episode_metadata",
+                    "episodeNumber": episode_number,
+                },
                 signal=signal,
             )
             return {
@@ -504,14 +512,17 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             lineage=_child_lineage(task),
-            validate_candidate=lambda candidate: _validate_review_dimension_candidate(
-                candidate,
-                episode_number=episode_number,
-                dimension=dimension,
-                allowed_scene_ids=tuple(unit_input.get("sceneIds") or ()),
-                reviewed_draft_id=reviewed_draft_id,
-                reviewed_content_digest=str(review_input.get("contentDigest") or ""),
-            ),
+            candidate_validation_contract={
+                "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                "kind": "review_dimension",
+                "episodeNumber": episode_number,
+                "dimension": dimension,
+                "allowedSceneIds": list(unit_input.get("sceneIds") or ()),
+                "reviewedDraftId": reviewed_draft_id,
+                "reviewedContentDigest": str(
+                    review_input.get("contentDigest") or ""
+                ),
+            },
             signal=signal,
         )
         payload = dict(result.candidate["payload"])
@@ -564,16 +575,18 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             lineage=_child_lineage(task),
-            validate_candidate=(
-                lambda candidate: _validate_scene_list_fragment_candidate(
-                    candidate,
-                    episode_number,
-                )
+            candidate_validation_contract=(
+                {
+                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                    "kind": "scene_list_fragment",
+                    "episodeNumber": episode_number,
+                }
                 if episode_number
-                else _validate_document_section_candidate(
-                    candidate,
-                    section_key,
-                )
+                else {
+                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                    "kind": "document_section",
+                    "sectionKey": section_key,
+                }
             ),
             signal=signal,
         )
@@ -1055,9 +1068,15 @@ def _validate_review_dimension_candidate(
         scene_ids = tuple(str(value) for value in issue["sceneIds"])
         if not set(scene_ids).issubset(allowed):
             raise ValueError("review dimension references another episode")
+        issue_prefix = f"episode-{episode_number}:{dimension}:"
+        issue_id = str(issue["id"])
         issues.append({
             **dict(issue),
-            "id": f"episode-{episode_number}:{dimension}:{issue['id']}",
+            "id": (
+                issue_id
+                if issue_id.startswith(issue_prefix)
+                else f"{issue_prefix}{issue_id}"
+            ),
             "sceneIds": list(scene_ids),
             "dimension": dimension,
         })
@@ -1074,6 +1093,8 @@ def _validate_review_dimension_candidate(
         "inputContractVersion": 2,
     })
     payload["contentJson"] = content
+    payload["episodeNumber"] = episode_number
+    payload["reviewDimension"] = dimension
     return {**normalized, "payload": payload}
 
 
@@ -1110,6 +1131,7 @@ def _validate_document_section_candidate(
     return {
         **dict(candidate),
         "payload": {
+            "sectionKey": section_key,
             "title": title,
             "contentJson": dict(content),
         },
@@ -1631,6 +1653,7 @@ def _validate_scene_list_fragment_candidate(
     return {
         **dict(candidate),
         "payload": {
+            "sectionKey": f"episode-{episode_number}",
             "title": title,
             "contentJson": {"scenes": normalized_scenes},
         },
@@ -1733,4 +1756,127 @@ def _source_run_ids(outputs: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(result)
 
 
-__all__ = ["ScreenplayTaskModelCalls", "ScreenplayTaskUnitExecutor"]
+def normalize_screenplay_candidate(
+    contract: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply one persisted, versioned task Candidate contract deterministically."""
+
+    value = dict(contract)
+    if value.get("protocol") != SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL:
+        raise ValueError("candidate validation protocol is unsupported")
+    kind = str(value.get("kind") or "").strip()
+    normalized_candidate = dict(candidate)
+    if kind == "generic":
+        _require_candidate_contract_keys(value, {"protocol", "kind"})
+        return normalized_candidate
+    if kind == "scene":
+        _require_candidate_contract_keys(
+            value,
+            {"protocol", "kind", "expectedSceneId"},
+        )
+        scene_id = str(value.get("expectedSceneId") or "").strip()
+        if not scene_id:
+            raise ValueError("scene validation contract is incomplete")
+        return _validate_scene_candidate(normalized_candidate, scene_id)
+    if kind == "episode_metadata":
+        _require_candidate_contract_keys(
+            value,
+            {"protocol", "kind", "episodeNumber"},
+        )
+        episode_number = int(value.get("episodeNumber") or 0)
+        if episode_number <= 0:
+            raise ValueError("episode validation contract is incomplete")
+        return _validate_episode_metadata_candidate(
+            normalized_candidate,
+            episode_number,
+        )
+    if kind == "review_dimension":
+        _require_candidate_contract_keys(
+            value,
+            {
+                "protocol",
+                "kind",
+                "episodeNumber",
+                "dimension",
+                "allowedSceneIds",
+                "reviewedDraftId",
+                "reviewedContentDigest",
+            },
+        )
+        episode_number = int(value.get("episodeNumber") or 0)
+        dimension = str(value.get("dimension") or "").strip()
+        raw_scene_ids = value.get("allowedSceneIds")
+        allowed_scene_ids = (
+            tuple(str(item or "").strip() for item in raw_scene_ids)
+            if isinstance(raw_scene_ids, list)
+            else ()
+        )
+        reviewed_draft_id = str(value.get("reviewedDraftId") or "").strip()
+        reviewed_digest = str(
+            value.get("reviewedContentDigest") or ""
+        ).strip()
+        if (
+            episode_number <= 0
+            or dimension not in {
+                "continuity",
+                "character_arc",
+                "structure_rhythm",
+                "dialogue",
+                "format",
+            }
+            or not allowed_scene_ids
+            or any(not item for item in allowed_scene_ids)
+            or len(set(allowed_scene_ids)) != len(allowed_scene_ids)
+            or not reviewed_draft_id
+            or not reviewed_digest
+        ):
+            raise ValueError("review validation contract is incomplete")
+        return _validate_review_dimension_candidate(
+            normalized_candidate,
+            episode_number=episode_number,
+            dimension=dimension,
+            allowed_scene_ids=allowed_scene_ids,
+            reviewed_draft_id=reviewed_draft_id,
+            reviewed_content_digest=reviewed_digest,
+        )
+    if kind == "document_section":
+        _require_candidate_contract_keys(
+            value,
+            {"protocol", "kind", "sectionKey"},
+        )
+        section_key = str(value.get("sectionKey") or "").strip()
+        if not section_key:
+            raise ValueError("document validation contract is incomplete")
+        return _validate_document_section_candidate(
+            normalized_candidate,
+            section_key,
+        )
+    if kind == "scene_list_fragment":
+        _require_candidate_contract_keys(
+            value,
+            {"protocol", "kind", "episodeNumber"},
+        )
+        episode_number = int(value.get("episodeNumber") or 0)
+        if episode_number <= 0:
+            raise ValueError("scene list validation contract is incomplete")
+        return _validate_scene_list_fragment_candidate(
+            normalized_candidate,
+            episode_number,
+        )
+    raise ValueError("candidate validation kind is unsupported")
+
+
+def _require_candidate_contract_keys(
+    contract: Mapping[str, Any],
+    expected: set[str],
+) -> None:
+    if set(contract) != expected:
+        raise ValueError("candidate validation contract fields are invalid")
+
+
+__all__ = [
+    "ScreenplayTaskModelCalls",
+    "ScreenplayTaskUnitExecutor",
+    "normalize_screenplay_candidate",
+]

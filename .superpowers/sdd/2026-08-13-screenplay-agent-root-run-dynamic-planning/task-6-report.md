@@ -106,3 +106,29 @@ Status: PASS
 - Final `npm run check:agent-refactor` passes with 1,720 backend tests and 344
   frontend tests. The five credential-gated real-provider E2E cases remain
   skipped with their existing `RELEASE BLOCKER` markers.
+
+## Candidate terminal validation correction
+
+- Replaced the process-local, post-DONE `validate_candidate` callback with a
+  persisted, versioned `candidateValidation` contract. The contract contains
+  only task identity, bounded IDs and immutable content digests; Artifact
+  metadata stores only its digest plus Run/Turn/task/unit scope.
+- Composition injects one pure deterministic Screenplay Candidate normalizer
+  into both the tool/host-capture write path and the candidate terminal
+  projector. Unknown protocol/kind/fields and scope mismatches fail closed.
+- The terminal projector reads the immutable Run binding, validates the
+  canonical started Turn and OPEN Artifact scope, reruns the persisted
+  contract, and finalizes the Artifact in the same transaction as Child DONE.
+  It never trusts a callable or service-local Candidate value.
+- A real tool Child test submits a generic-schema-valid but task-invalid review
+  first. That generation becomes FAILED with no finalized Artifact; the same
+  durable host key advances to generation 2, reruns the provider, and publishes
+  only the corrected Artifact. A changed validation digest conflicts with the
+  existing stable-key identity without another provider call.
+- Strict contract/version and non-deterministic normalizer tests pass. Existing
+  host-captured scene, structured Child, candidate rollback, durable registry,
+  persisted output/replay, cancellation, Screenplay acceptance, and boundary
+  suites remain green.
+- Final `npm run check:agent-refactor` passes with 1,725 backend tests and 344
+  frontend tests. Five credential-gated real-provider E2E cases remain skipped
+  with their existing `RELEASE BLOCKER` markers.

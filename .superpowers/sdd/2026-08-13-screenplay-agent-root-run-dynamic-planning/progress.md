@@ -11,3 +11,5 @@ Task 6: PASS. Screenplay AI Parts now run as host-orchestrated PurrA Children th
 Task 6 review: PASS. Host-child cancellation watcher cleanup is leak-free on all exits. Structured Child results are atomically journaled as private versioned canonical output and returned only by strict persisted readback; process-local validator state is no longer authoritative.
 
 Task 6 durable retry review: PASS. Host-owned Child attempts now have a durable opaque idempotency receipt and generation CAS. Crash/restart and concurrent retries reuse the authoritative persisted Run, terminal retry policy is explicit, validated terminal replay identity is strict, and project aggregate cleanup owns receipt deletion while session audit retention is unchanged.
+
+Task 6 candidate validation review: PASS. Task-specific Candidate normalization is now a persisted versioned terminal projection contract shared by tool and host-capture paths. Invalid output cannot produce DONE/finalized state; failed generations retry through the durable receipt, while stable-key identity covers the validation digest. Full gate: 1725 backend passed, 5 credential-blocked provider E2E, 344 frontend passed.
