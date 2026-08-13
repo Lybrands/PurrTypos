@@ -38,8 +38,10 @@ class ScreenplayAgentContextQuery:
         project = dict(workspace.get("project") or {})
         workflow = dict(workspace.get("workflow") or {})
         heads = await self._db.fetch_all(
-            "SELECT d.role, h.revision_id FROM screenplay_project_heads AS h "
+            "SELECT d.role, r.summary_json "
+            "FROM screenplay_project_heads AS h "
             "JOIN screenplay_deliverables AS d ON d.id = h.deliverable_id "
+            "JOIN screenplay_revisions AS r ON r.id = h.revision_id "
             "WHERE h.project_id = ? ORDER BY d.role",
             [project_id],
         )
@@ -67,9 +69,15 @@ class ScreenplayAgentContextQuery:
                 "stage": str(project.get("stage") or workflow.get("stage") or ""),
             },
             "workflow": {"stage": str(workflow.get("stage") or "")},
+            "availableDeliverables": list(dict.fromkeys(
+                str(item.get("role") or "")
+                for item in (workspace.get("deliverables") or ())
+                if isinstance(item, Mapping) and str(item.get("role") or "")
+            )),
             "acceptedDeliverables": [{
                 "role": str(head["role"]),
-                "revisionId": str(head["revision_id"]),
+                "status": "accepted",
+                "summary": _planning_summary(head.get("summary_json")),
             } for head in heads],
             "candidateDeliverables": [
                 _planning_candidate(item)
@@ -635,27 +643,39 @@ def _structure_episode_guidance(
 
 def _planning_source(value: object) -> dict[str, Any]:
     source = value if isinstance(value, Mapping) else {}
-    return {
+    result = {
         key: source[key]
         for key in ("type", "bookId", "bookTitle")
         if source.get(key) not in (None, "")
     }
+    scope = source.get("scope")
+    if isinstance(scope, Mapping):
+        result["scope"] = {
+            key: scope[key]
+            for key in ("mode", "count", "chapterIds", "volumeIds")
+            if scope.get(key) not in (None, "", [], ())
+        }
+    return result
+
+
+def _planning_summary(value: object) -> str:
+    if isinstance(value, Mapping):
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        parsed = _object(value)
+        raw = (
+            json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+            if parsed
+            else str(value or "")
+        )
+    return _clip(raw, 1_200)
 
 
 def _planning_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
-    summary = value.get("summary")
-    summary_text = _clip(
-        json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
-        if isinstance(summary, Mapping)
-        else str(summary or ""),
-        1_200,
-    )
     return {
         "role": str(value.get("role") or ""),
-        "revisionId": str(value.get("id") or ""),
-        "revisionNo": int(value.get("revisionNo") or 1),
-        "parentRevisionId": value.get("parentRevisionId"),
-        "summary": summary_text,
+        "status": str(value.get("applicability") or "candidate"),
+        "summary": _planning_summary(value.get("summary")),
     }
 
 
