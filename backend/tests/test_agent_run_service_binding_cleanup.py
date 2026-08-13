@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 from application.agent_run_service import AgentRunService
+from purra.api import AgentCoreRunOptions
+from purra.contracts import AgentRunResult, RunLineage, RunStatus
 from application.request_mapping import (
     to_writing_agent_request,
     writing_run_options,
@@ -106,6 +108,32 @@ class _SubmitFailsCore(_Core):
     async def submit(self, _request, *, options):
         del options
         raise RuntimeError("submit lost after supervisor spawn")
+
+
+class _CancelableHandle(_Handle):
+    run_id = "child-run"
+
+    def __init__(self, stream: _Stream) -> None:
+        super().__init__(stream)
+        self.cancel_reasons: list[str] = []
+
+    async def cancel(self, reason: str) -> None:
+        self.cancel_reasons.append(reason)
+        self.finished.set()
+
+    async def wait(self):
+        await self.finished.wait()
+        return AgentRunResult(
+            run_id=self.run_id,
+            status=RunStatus.CANCELED,
+            error="host_child_canceled",
+        )
+
+
+class _CancelableCore(_Core):
+    def __init__(self, stream: _Stream) -> None:
+        super().__init__(stream)
+        self.handle = _CancelableHandle(stream)
 
 
 @pytest.mark.asyncio
@@ -237,3 +265,137 @@ async def test_shutdown_cancel_keeps_detached_core_owned_for_close():
     assert composition.released == []
     await composition.core.close()
     assert composition.core.closed is True
+
+
+@pytest.mark.asyncio
+async def test_host_child_signal_cancels_the_same_handle_and_awaits_terminal():
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "child part"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+        },
+        chatAgentMode="agent",
+    )
+    provider_options = {
+        "model": "deepseek-v4-flash",
+        "baseURL": "https://example.test/v1",
+        "max_tokens": 2_048,
+    }
+    request = to_writing_agent_request(body, provider_options)
+    composition = _Composition()
+    composition.core = _CancelableCore(composition.stream)
+    signal = asyncio.Event()
+    task = asyncio.create_task(AgentRunService(
+        composition,  # type: ignore[arg-type]
+    ).run_host_child(
+        body=body,
+        api_key="key",
+        provider_options=provider_options,
+        signal=signal,
+        lineage=RunLineage(
+            parent_run_id="root-run",
+            root_run_id="root-run",
+            delegation_id=None,
+            agent_role="screenplay-part",
+            depth=1,
+        ),
+        mapped_request=request,
+        base_options=AgentCoreRunOptions(),
+    ))
+
+    await asyncio.sleep(0)
+    signal.set()
+    result = await task
+
+    assert result.status is RunStatus.CANCELED
+    assert composition.core.handle.cancel_reasons == ["host_child_canceled"]
+    assert composition.released == [composition.core]
+
+
+@pytest.mark.asyncio
+async def test_canceling_host_child_caller_does_not_leave_the_run_alive():
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "child part"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+        },
+        chatAgentMode="agent",
+    )
+    provider_options = {
+        "model": "deepseek-v4-flash",
+        "baseURL": "https://example.test/v1",
+        "max_tokens": 2_048,
+    }
+    request = to_writing_agent_request(body, provider_options)
+    composition = _Composition()
+    composition.core = _CancelableCore(composition.stream)
+    task = asyncio.create_task(AgentRunService(
+        composition,  # type: ignore[arg-type]
+    ).run_host_child(
+        body=body,
+        api_key="key",
+        provider_options=provider_options,
+        signal=asyncio.Event(),
+        lineage=RunLineage(
+            parent_run_id="root-run",
+            root_run_id="root-run",
+            delegation_id=None,
+            agent_role="screenplay-part",
+            depth=1,
+        ),
+        mapped_request=request,
+        base_options=AgentCoreRunOptions(),
+    ))
+
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert composition.core.handle.cancel_reasons == ["host_child_canceled"]
+    assert composition.released == [composition.core]
+
+
+@pytest.mark.asyncio
+async def test_host_child_entry_rejects_model_delegation_lineage():
+    composition = _Composition()
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "child part"}],
+        apiKey="key",
+        apiProvider="openai",
+        options={
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
+        },
+        chatAgentMode="agent",
+    )
+    provider_options = {
+        "model": "deepseek-v4-flash",
+        "baseURL": "https://example.test/v1",
+        "max_tokens": 2_048,
+    }
+
+    with pytest.raises(ValueError, match="cannot claim a delegation"):
+        await AgentRunService(composition).run_host_child(  # type: ignore[arg-type]
+            body=body,
+            api_key="key",
+            provider_options=provider_options,
+            signal=asyncio.Event(),
+            lineage=RunLineage(
+                parent_run_id="root-run",
+                root_run_id="root-run",
+                delegation_id="delegation-1",
+                agent_role="researcher",
+                depth=1,
+            ),
+            mapped_request=to_writing_agent_request(body, provider_options),
+            base_options=AgentCoreRunOptions(),
+        )
+
+    assert composition.released == []

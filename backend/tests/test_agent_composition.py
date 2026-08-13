@@ -45,6 +45,7 @@ from application.agent_profile_registry import (
     StaticAgentProfileExtension,
 )
 from application.agent_run_service import AgentRunService
+from domains.agent_roles import AgentRoleDefinition, AgentRoleRegistry
 from application.conversation_compaction import ConversationCompactionService
 from application.memory_reranking import ModelBackedMemoryReranker
 from application.writing_agent_profile import build_writing_profile_extension
@@ -494,6 +495,70 @@ async def test_agent_run_service_disables_delegation_when_profile_has_no_roles()
     assert isinstance(kwargs, dict)
     assert "agent_role_guidance" not in kwargs
     assert "delegation_repository" not in kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("enabled", "expected"), ((False, False), (True, True)))
+async def test_agent_run_service_requires_both_roles_and_explicit_delegation_enablement(
+    enabled,
+    expected,
+):
+    from infrastructure.models.provider_capabilities import (
+        ProviderCapabilityCache,
+    )
+
+    class _CoreCreated(Exception):
+        pass
+
+    captured: dict[str, object] = {}
+
+    class _RoleComposition:
+        provider_capabilities = ProviderCapabilityCache()
+        delegation_repository = object()
+
+        def create_response_judge_policies(self, _request):
+            return ()
+
+        def agent_role_registry_for_request(self, _request):
+            return AgentRoleRegistry((AgentRoleDefinition(
+                id="researcher",
+                title="Researcher",
+                delegation_description="Research one explicit subtask",
+                instruction="Research only the delegated objective.",
+            ),))
+
+        def bind_run_profile(self, _request, options):
+            return options
+
+        def create_core_for_request(self, request, _api_key, **kwargs):
+            captured["request"] = request
+            captured["kwargs"] = kwargs
+            raise _CoreCreated
+
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "研究明确子任务"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chatAgentMode="agent",
+    )
+    updates = AgentRunService(_RoleComposition()).run(  # type: ignore[arg-type]
+        body=body,
+        api_key="key",
+        provider_options={"model": "model"},
+        signal=asyncio.Event(),
+        enable_delegation=enabled,
+    )
+
+    with pytest.raises(_CoreCreated):
+        await anext(updates)
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert ("child_core_submitter" in kwargs) is expected
+    assert ("delegation_repository" in kwargs) is expected
 
 
 def test_request_mapping_supports_kimi_256k_context_window():

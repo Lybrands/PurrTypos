@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from purra.contracts import ReasoningMode
+from purra.contracts import ReasoningMode, RunLineage
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
@@ -38,6 +38,13 @@ _ROLE_LABELS = {
     "screenplayDraft": "剧本正文",
     "review": "审阅报告",
 }
+SCREENPLAY_AI_PART_KINDS = frozenset({
+    "generate_draft_scene",
+    "generate_episode_metadata",
+    "generate_review_dimension",
+    "generate_document_section",
+    "compose_final_response",
+})
 
 
 class ScreenplayTaskModelCalls:
@@ -71,6 +78,12 @@ class ScreenplayTaskModelCalls:
         signal=None,
     ) -> Mapping[str, Any]:
         kind = str(unit.get("kind") or "")
+        if _requires_child_run(kind) and not str(
+            task.get("rootRunId") or ""
+        ).strip():
+            raise RuntimeError(
+                "screenplay AI Part requires its Root Run identity"
+            )
         if kind == "collect_evidence":
             return await self._collect_evidence(task, unit)
         if kind == "generate_draft_scene":
@@ -339,6 +352,7 @@ class ScreenplayTaskModelCalls:
                     runtime=runtime,
                 ),
                 conversation_turn_id=str(task["turnId"]),
+                lineage=_child_lineage(task),
                 reasoning_mode=ReasoningMode.DISABLED,
                 host_candidate_template=_host_scene_candidate_template(
                     scene_id,
@@ -371,7 +385,10 @@ class ScreenplayTaskModelCalls:
             binding_command_id=f"{task['id']}:{unit['id']}",
             conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
+            unit_id=str(unit["id"]),
+            expected_part_key=scene_id,
             phase="screenplay_scene_generation",
+            lineage=_child_lineage(task),
             validate=lambda value: _validate_scene_json(value, scene_id),
             signal=signal,
         )
@@ -414,6 +431,7 @@ class ScreenplayTaskModelCalls:
                     runtime=runtime,
                 ),
                 conversation_turn_id=str(task["turnId"]),
+                lineage=_child_lineage(task),
                 reasoning_mode=ReasoningMode.DISABLED,
                 validate_candidate=lambda candidate: (
                     _validate_episode_metadata_candidate(candidate, episode_number)
@@ -437,7 +455,10 @@ class ScreenplayTaskModelCalls:
             binding_command_id=f"{task['id']}:{unit['id']}",
             conversation_turn_id=str(task["turnId"]),
             task_id=str(task["id"]),
+            unit_id=str(unit["id"]),
+            expected_part_key=str(episode_number),
             phase="screenplay_episode_metadata",
+            lineage=_child_lineage(task),
             validate=lambda value: _validate_episode_metadata_json(
                 value,
                 episode_number,
@@ -482,6 +503,7 @@ class ScreenplayTaskModelCalls:
                 runtime=runtime,
             ),
             conversation_turn_id=str(task["turnId"]),
+            lineage=_child_lineage(task),
             validate_candidate=lambda candidate: _validate_review_dimension_candidate(
                 candidate,
                 episode_number=episode_number,
@@ -541,6 +563,7 @@ class ScreenplayTaskModelCalls:
                 runtime=runtime,
             ),
             conversation_turn_id=str(task["turnId"]),
+            lineage=_child_lineage(task),
             validate_candidate=(
                 lambda candidate: _validate_scene_list_fragment_candidate(
                     candidate,
@@ -618,8 +641,11 @@ class ScreenplayTaskModelCalls:
             binding_aggregate_id=str(task["projectId"]),
             binding_command_id=f"{task['id']}:{unit['id']}",
             task_id=str(task["id"]),
+            unit_id=str(unit["id"]),
+            expected_part_key="final_response",
             phase="screenplay_final_response_composition",
             conversation_turn_id=str(task["turnId"]),
+            lineage=_child_lineage(task),
             signal=signal,
         )
         return {
@@ -749,8 +775,8 @@ class ScreenplayTaskUnitExecutor:
             "projectId": str(metadata["projectId"]),
             "sessionId": int(metadata["sessionId"]),
             "turnId": str(metadata["turnId"]),
+            "rootRunId": context.task.created_by_run_id,
             "targetRole": str(metadata["targetRole"]),
-            "plannerRunId": str(metadata.get("plannerRunId") or "") or None,
             "sourceRevisionRefs": list(metadata.get("sourceRevisionRefs") or ()),
             "units": units,
         }
@@ -769,6 +795,23 @@ def _unit_result(ref, output: Mapping[str, Any]) -> LongTaskUnitResult:
             **({"finalResponse": final_response} if final_response else {}),
         },
     )
+
+
+def _child_lineage(task: Mapping[str, Any]) -> RunLineage:
+    root_run_id = str(task.get("rootRunId") or "").strip()
+    if not root_run_id:
+        raise RuntimeError("screenplay AI Part requires its Root Run identity")
+    return RunLineage(
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        delegation_id=None,
+        agent_role="screenplay-part",
+        depth=1,
+    )
+
+
+def _requires_child_run(kind: str) -> bool:
+    return str(kind or "").strip() in SCREENPLAY_AI_PART_KINDS
 
 
 def _dependency_output(
