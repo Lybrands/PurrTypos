@@ -17,6 +17,7 @@ from purra.output import OutputEventKind, RuntimeOutputEvent
 from application.agent_composition import set_agent_composition
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
+from dependencies import clear_db, set_db
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import (
     ASGIResponse,
@@ -47,6 +48,7 @@ async def composed_app(
 ):
     db = DatabaseConnection(tmp_path)
     await db.init()
+    set_db(db)
     composition = create_agent_composition(db)
     set_agent_composition(composition)
 
@@ -57,6 +59,7 @@ async def composed_app(
     finally:
         await composition.shutdown()
         set_agent_composition(None)
+        clear_db(db)
         await db.close()
 
 
@@ -336,14 +339,43 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
         if event["payload"].get("eventType") == "long_task.progress"
     )
 
-    assert public_plan["title"] == "续写故事"
-    assert [
-        (step["id"], step["title"])
-        for step in public_plan["steps"]
-    ] == [
-        ("understand-source", "理解原作"),
-        ("draft-continuation", "撰写续篇"),
-    ]
+    assert public_plan == {
+        "title": "续写故事",
+        "goal": "理解原作后完成续写",
+        "status": "running",
+        "steps": [
+            {
+                "id": "understand-source",
+                "title": "理解原作",
+                "type": "analyze",
+                "executor": "model",
+                "status": "running",
+                "risk_level": "read",
+                "suggested_tools": [],
+                "agent_role": None,
+                "assignment": {},
+                "depends_on": [],
+                "description": None,
+                "result_summary": None,
+                "error": None,
+            },
+            {
+                "id": "draft-continuation",
+                "title": "撰写续篇",
+                "type": "write",
+                "executor": "model",
+                "status": "pending",
+                "risk_level": "write",
+                "suggested_tools": [],
+                "agent_role": None,
+                "assignment": {},
+                "depends_on": [],
+                "description": None,
+                "result_summary": None,
+                "error": None,
+            },
+        ],
+    }
     encoded_plan = json.dumps(public_plan, ensure_ascii=False)
     assert "Recipe" not in encoded_plan
     assert "校验候选稿" not in encoded_plan
@@ -351,22 +383,59 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     assert "plannerStepId" not in encoded_plan
     assert live_progress == recipe_payload
 
-    replay_events = await composition.output_repository.list_events(
-        run_id,
-        after_sequence=0,
-        limit=200,
+    replay_response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{run_id}?after=0",
+        json_body=None,
     )
-    replay_payloads = [event.payload for event in replay_events]
-    assert next(
-        payload["data"]
-        for payload in replay_payloads
-        if payload.get("eventType") == "run.todos_updated"
-    ) == public_plan
-    assert next(
-        payload["data"]
-        for payload in replay_payloads
-        if payload.get("eventType") == "long_task.progress"
-    ) == recipe_payload
+    assert replay_response.status_code == 200
+    replay_snapshot = replay_response.json()
+    assert replay_snapshot["success"] is True
+    replay_events = [
+        event for event in replay_snapshot["data"]["events"]
+        if event["type"] in {"run.todos_updated", "long_task.progress"}
+    ]
+    assert [event["type"] for event in replay_events] == [
+        "run.todos_updated",
+        "long_task.progress",
+    ]
+    assert replay_events[0]["cursor"] < replay_events[1]["cursor"]
+    assert replay_snapshot["data"]["nextCursor"] >= replay_events[1]["cursor"]
+    assert [
+        {
+            "runId": event["chunk"]["runId"],
+            "sequence": event["chunk"]["sequence"],
+            "kind": event["chunk"]["kind"],
+            "channel": event["chunk"]["channel"],
+            "visibility": event["chunk"]["visibility"],
+            "payload": event["chunk"]["payload"],
+        }
+        for event in replay_events
+    ] == [
+        {
+            "runId": run_id,
+            "sequence": replay_events[0]["cursor"],
+            "kind": "runtime.event",
+            "channel": "lifecycle",
+            "visibility": "public",
+            "payload": {
+                "eventType": "run.todos_updated",
+                "data": public_plan,
+            },
+        },
+        {
+            "runId": run_id,
+            "sequence": replay_events[1]["cursor"],
+            "kind": "runtime.event",
+            "channel": "lifecycle",
+            "visibility": "public",
+            "payload": {
+                "eventType": "long_task.progress",
+                "data": recipe_payload,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio
