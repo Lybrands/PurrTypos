@@ -133,6 +133,7 @@ class LongTaskExecutionUpdate:
     event: AgentEvent
     persist: bool = True
     plan_revision: TaskPlan | None = None
+    plan_revision_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.plan_revision is not None and not isinstance(
@@ -140,6 +141,12 @@ class LongTaskExecutionUpdate:
             TaskPlan,
         ):
             raise TypeError("long task plan revision must be a TaskPlan")
+        metadata = freeze_json_mapping(self.plan_revision_metadata)
+        if metadata and self.plan_revision is None:
+            raise ValueError(
+                "long task plan revision metadata requires a plan revision"
+            )
+        object.__setattr__(self, "plan_revision_metadata", metadata)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from typing import Any
 from uuid import uuid4
 
 from application.agent_profile_registry import AgentProfileRegistration
@@ -13,6 +17,15 @@ from application.screenplay_task_resolver import (
     SqliteScreenplayTaskResolver,
 )
 from application.screenplay_v2_service import ScreenplayV2ProjectService
+from application.screenplay_checkpoint_planning import (
+    ScreenplayCheckpointInput,
+    ScreenplayCheckpointOutcome,
+    ScreenplayCheckpointStateError,
+    SqliteScreenplayCheckpointRepository,
+    _plan_mapping,
+    parse_persisted_plan,
+    plan_digest,
+)
 from domains.screenplay_agent.adapter import (
     ScreenplayDomainAdapter,
     ScreenplayHostContextProvider,
@@ -37,6 +50,8 @@ from infrastructure.screenplay import (
     build_screenplay_tool_catalog,
 )
 from purra.contracts import AgentRunRequest, TaskPlan
+from purra.contracts import StepStatus
+from purra.events import AgentEvent, CoreEventType
 from purra.long_tasks import (
     DurableExecutorRegistry,
     DurableTaskDescriptor,
@@ -219,6 +234,11 @@ class ScreenplayAgentProfileExtension:
                 "manifestId": compiled.manifest.id,
                 "manifestDigest": compiled.manifest.digest,
                 "sourceRevisionRefs": list(resolved.source_revision_refs),
+                "baseRevisionId": resolved.base_revision_id,
+                "screenplayScope": intent.scope.to_mapping(),
+                "screenplayAction": intent.action.value,
+                "requestedDeliverable": intent.requested_deliverable,
+                "originalPlan": _plan_mapping(plan),
             },
         )
 
@@ -242,6 +262,7 @@ class ScreenplayAgentProfileExtension:
             descriptor_resolver=_ScreenplayTaskDescriptorResolver(),
             executor_registry=DurableExecutorRegistry({"screenplay": executor}),
             worker_id=self._owner_id,
+            checkpoint_planner=getattr(executor, "checkpoint_planner", None),
         )
 
     def clear_active_executions(self) -> None:
@@ -267,17 +288,32 @@ class _ScreenplayTaskDescriptorResolver:
                     "manifestId",
                     "manifestDigest",
                     "sourceRevisionRefs",
+                    "baseRevisionId",
+                    "screenplayScope",
+                    "screenplayAction",
+                    "requestedDeliverable",
+                    "originalPlan",
                 )
             },
         )
 
 
 class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
-    def __init__(self, *, db, operations, turns, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        db,
+        operations,
+        turns,
+        checkpoint_planner=None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self._db = db
         self._operations = operations
         self._turns = turns
+        self._checkpoint_planner = checkpoint_planner
+        self._checkpoints = SqliteScreenplayCheckpointRepository(db)
 
     async def dispatch(self, request, plan, decision, **kwargs):
         async with self._db.transaction(cancellation_linearizable=True):
@@ -298,11 +334,23 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
         return receipt
 
     async def execute(self, task_id, *, parent_run_id, observer, signal=None):
+        checkpoint_observer = (
+            _ScreenplayCheckpointObserver(
+                dispatcher=self,
+                planner=self._checkpoint_planner,
+                downstream=observer,
+                task_id=task_id,
+                root_run_id=parent_run_id,
+                signal=signal,
+            )
+            if self._checkpoint_planner is not None
+            else observer
+        )
         try:
             result = await super().execute(
                 task_id,
                 parent_run_id=parent_run_id,
-                observer=observer,
+                observer=checkpoint_observer,
                 signal=signal,
             )
             await self._settle_execution(task_id, result)
@@ -312,87 +360,368 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
             raise
 
     async def _settle_execution(self, task_id, result) -> None:
-        task = await self._long_tasks.load(task_id)
-        if task is None:
-            raise RuntimeError("screenplay LongTask disappeared")
-        metadata = thaw_json_mapping(task.metadata)
-        operation_id = str(metadata.get("operationId") or "")
-        turn_id = str(metadata.get("turnId") or "")
-        operation = await self._operations.load(operation_id)
-        if operation is None:
-            raise RuntimeError("screenplay Operation disappeared")
-        if result.status is LongTaskExecutionStatus.PAUSED:
-            code = result.error or "screenplay_task_paused"
-            message = _task_failure_message(code)
-            async with self._db.transaction(cancellation_linearizable=True):
-                await self._operations.pause(
-                    operation_id,
-                    code=code,
-                    message=message,
-                    command_id=(
-                        f"operation:pause:{operation_id}:"
-                        f"{operation.revision}:{code}"
-                    ),
-                )
-                await self._turns.pause_task(
-                    turn_id,
-                    code=code,
-                    message=message,
-                )
-            return
-        if result.status is LongTaskExecutionStatus.CANCELED:
-            receipt = await self._operations.request_cancel(
-                turn_id,
-                idempotency_key=(
-                    f"runtime-cancel:{operation_id}:{operation.revision}"
-                ),
-            )
-            await self._operations.settle_cancel(turn_id, receipt_id=receipt.id)
-            return
-        if result.status is LongTaskExecutionStatus.FAILED:
-            code = result.error or "screenplay_task_failed"
-            message = _task_failure_message(code)
-            async with self._db.transaction(cancellation_linearizable=True):
-                await self._operations.fail(
-                    operation_id,
-                    code=code,
-                    message=message,
-                    command_id=(
-                        f"operation:fail:{operation_id}:"
-                        f"{operation.revision}:{code}"
-                    ),
-                )
-                await self._turns.fail_task(
-                    turn_id,
-                    code=code,
-                    message=message,
-                )
-            return
-        if result.status is not LongTaskExecutionStatus.COMPLETED:
-            raise RuntimeError("screenplay LongTask returned an unknown status")
+        await _settle_screenplay_execution(self, task_id, result)
 
     async def _settle_exception(self, task_id: str, error: Exception) -> None:
-        task = await self._long_tasks.load(task_id)
-        if task is None:
+        await _settle_screenplay_exception(self, task_id, error)
+
+
+class _ScreenplayCheckpointObserver:
+    def __init__(
+        self,
+        *,
+        dispatcher,
+        planner,
+        downstream,
+        task_id,
+        root_run_id,
+        signal,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._planner = planner
+        self._downstream = downstream
+        self._task_id = task_id
+        self._root_run_id = root_run_id
+        self._signal = signal
+
+    async def __call__(self, update):
+        await self._downstream(update)
+        if update.event.type != CoreEventType.LONG_TASK_PROGRESS:
+            return
+        task = await self._dispatcher._long_tasks.load(self._task_id)
+        if task is None or task.status.value not in {"running", "pending"}:
             return
         metadata = thaw_json_mapping(task.metadata)
         operation_id = str(metadata.get("operationId") or "")
-        turn_id = str(metadata.get("turnId") or "")
-        operation = await self._operations.load(operation_id)
-        if operation is None or operation.status.terminal:
-            return
-        code = str(getattr(error, "code", "") or "screenplay_task_failed")
-        message = str(error) or _task_failure_message(code)
-        async with self._db.transaction(cancellation_linearizable=True):
-            await self._operations.fail(
+        units = tuple(await self._dispatcher._long_tasks.list_units(task.id))
+        for checkpoint_key in _ready_checkpoint_keys(units):
+            await self._handle_checkpoint(
+                task,
+                units,
+                metadata,
                 operation_id,
-                code=code,
-                message=message,
-                command_id=(
-                    f"operation:fail:{operation_id}:{operation.revision}:{code}"
-                ),
+                checkpoint_key,
+                update,
             )
-            await self._turns.fail_task(turn_id, code=code, message=message)
+            refreshed = await self._dispatcher._long_tasks.load(task.id)
+            if refreshed is None or refreshed.status.value == "paused":
+                return
+
+    async def _handle_checkpoint(
+        self,
+        task,
+        units,
+        metadata,
+        operation_id,
+        checkpoint_key,
+        progress_update,
+    ) -> None:
+        existing = await self._dispatcher._checkpoints.load(
+            operation_id,
+            checkpoint_key,
+        )
+        if existing is not None and str(existing["status"]) == "applied":
+            return
+        if existing is not None and str(existing["status"]) == "paused":
+            await self._dispatcher._long_tasks.pause(task.id)
+            return
+        try:
+            original = await self._dispatcher._checkpoints.load_root_plan(
+                self._root_run_id,
+                initial=True,
+            )
+            current = await self._dispatcher._checkpoints.load_root_plan(
+                self._root_run_id,
+            )
+        except ScreenplayCheckpointStateError:
+            await self._pause_without_planning(
+                task,
+                operation_id,
+                checkpoint_key,
+            )
+            return
+        checkpoint_input = _checkpoint_input(
+            task,
+            units,
+            metadata,
+            checkpoint_key,
+            original,
+            current,
+        )
+        input_digest = _checkpoint_input_digest(checkpoint_input)
+        if existing is not None and str(existing["status"]) == "ready":
+            root_digest = (
+                await self._dispatcher._checkpoints.root_revision_digest(
+                    self._root_run_id,
+                    checkpoint_key,
+                )
+            )
+            if root_digest is not None:
+                await self._emit_ready(existing, progress_update)
+                return
+            if str(existing["input_digest"]) != input_digest:
+                await self._pause_stale_ready(task, existing)
+                return
+            await self._emit_ready(existing, progress_update)
+            return
+        receipt = await self._dispatcher._checkpoints.reserve(
+            operation_id=operation_id,
+            task_id=task.id,
+            checkpoint_key=checkpoint_key,
+            root_run_id=self._root_run_id,
+            input_digest=input_digest,
+            reservation_token=uuid4().hex,
+        )
+        if str(receipt["status"]) == "ready":
+            await self._emit_ready(receipt, progress_update)
+            return
+        if str(receipt["status"]) != "reserved":
+            if str(receipt["status"]) == "paused":
+                await self._dispatcher._long_tasks.pause(task.id)
+            return
+        if not receipt.get("_acquired"):
+            return
+        decision = await self._planner.revise(checkpoint_input, self._signal)
+        if decision.outcome in {
+            ScreenplayCheckpointOutcome.PAUSED,
+            ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION,
+        }:
+            await self._dispatcher._checkpoints.pause(
+                operation_id=operation_id,
+                checkpoint_key=checkpoint_key,
+                outcome=decision.outcome,
+                code=decision.code or decision.outcome.value,
+            )
+            await self._dispatcher._long_tasks.pause(task.id)
+            return
+        revised = decision.plan or current
+        receipt = await self._dispatcher._checkpoints.ready(
+            operation_id=operation_id,
+            checkpoint_key=checkpoint_key,
+            plan=revised,
+            outcome=decision.outcome,
+        )
+        await self._emit_ready(receipt, progress_update)
+
+    async def _pause_without_planning(
+        self,
+        task,
+        operation_id: str,
+        checkpoint_key: str,
+    ) -> None:
+        input_digest = "sha256:" + hashlib.sha256(json.dumps(
+            {
+                "checkpoint": checkpoint_key,
+                "rootRunId": self._root_run_id,
+                "error": "checkpoint_root_plan_unavailable",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        receipt = await self._dispatcher._checkpoints.reserve(
+            operation_id=operation_id,
+            task_id=task.id,
+            checkpoint_key=checkpoint_key,
+            root_run_id=self._root_run_id,
+            input_digest=input_digest,
+            reservation_token=uuid4().hex,
+        )
+        if str(receipt["status"]) == "reserved" and receipt.get("_acquired"):
+            await self._dispatcher._checkpoints.pause(
+                operation_id=operation_id,
+                checkpoint_key=checkpoint_key,
+                outcome=ScreenplayCheckpointOutcome.PAUSED,
+                code="checkpoint_root_plan_unavailable",
+            )
+        await self._dispatcher._long_tasks.pause(task.id)
+
+    async def _pause_stale_ready(self, task, receipt) -> None:
+        await self._dispatcher._checkpoints.pause_ready_conflict(
+            operation_id=str(receipt["operation_id"]),
+            checkpoint_key=str(receipt["checkpoint_key"]),
+            code="screenplay_checkpoint_ready_root_plan_conflict",
+        )
+        await self._dispatcher._long_tasks.pause(task.id)
+
+    async def _emit_ready(self, receipt, progress_update) -> None:
+        checkpoint_key = str(receipt["checkpoint_key"])
+        digest = str(receipt["plan_digest"])
+        root_digest = await self._dispatcher._checkpoints.root_revision_digest(
+            self._root_run_id,
+            checkpoint_key,
+        )
+        if root_digest is not None:
+            if root_digest != digest:
+                raise RuntimeError("screenplay_checkpoint_root_digest_conflict")
+        else:
+            event = AgentEvent(
+                type=CoreEventType.LONG_TASK_PROGRESS,
+                run_id=self._root_run_id,
+                payload={
+                    **thaw_json_mapping(progress_update.event.payload),
+                    "checkpoint": {
+                        "identity": checkpoint_key,
+                        "digest": digest,
+                    },
+                },
+            )
+            await self._downstream(type(progress_update)(
+                event=event,
+                plan_revision=parse_persisted_plan(str(receipt["plan_json"])),
+                plan_revision_metadata={
+                    "identity": checkpoint_key,
+                    "digest": digest,
+                },
+            ))
+            root_digest = (
+                await self._dispatcher._checkpoints.root_revision_digest(
+                    self._root_run_id,
+                    checkpoint_key,
+                )
+            )
+        if root_digest == digest:
+            await self._dispatcher._checkpoints.applied(
+                operation_id=str(receipt["operation_id"]),
+                checkpoint_key=checkpoint_key,
+                digest=digest,
+            )
+
+def _ready_checkpoint_keys(units) -> tuple[str, ...]:
+    ready: list[tuple[int, str]] = []
+    review_validations = []
+    for unit in units:
+        metadata = thaw_json_mapping(unit.metadata)
+        unit_input = metadata.get("input") or {}
+        if (
+            str(metadata.get("unitKind") or "") != "validate_manifest_part"
+            or not isinstance(unit_input, Mapping)
+        ):
+            continue
+        kind = str(unit_input.get("validationKind") or "")
+        if kind == "review_episode":
+            review_validations.append(unit)
+        if unit.status.value != "completed":
+            continue
+        if kind == "draft_episode":
+            ready.append((unit.position, f"episode:{int(unit_input['episodeNumber'])}"))
+        elif kind == "document":
+            ready.append((unit.position, "document:sections"))
+    if review_validations and all(
+        unit.status.value == "completed" for unit in review_validations
+    ):
+        ready.append((
+            max(unit.position for unit in review_validations),
+            "review:aggregate",
+        ))
+    return tuple(key for _position, key in sorted(ready))
+
+
+def _checkpoint_input(
+    task,
+    units,
+    metadata,
+    checkpoint_key,
+    original,
+    current,
+) -> ScreenplayCheckpointInput:
+    completed = tuple({
+        "stepId": step.id,
+        "title": step.title,
+        "summary": step.result_summary or "completed",
+    } for step in current.steps if step.status is StepStatus.DONE)
+    receipts = []
+    completed_episodes: set[int] = set()
+    completed_sections: set[str] = set()
+    for unit in units:
+        if unit.status.value != "completed" or not unit.artifact_digest:
+            continue
+        raw = thaw_json_mapping(unit.metadata)
+        unit_input = raw.get("input") or {}
+        if not isinstance(unit_input, Mapping):
+            continue
+        receipt: dict[str, Any] = {
+            "kind": str(raw.get("unitKind") or ""),
+            "digest": unit.artifact_digest,
+        }
+        episode = int(unit_input.get("episodeNumber") or 0)
+        section = str(unit_input.get("sectionKey") or "").strip()
+        if episode:
+            receipt["episodeNumber"] = episode
+        if section:
+            receipt["sectionKey"] = section
+        receipts.append(receipt)
+        if (
+            raw.get("unitKind") == "validate_manifest_part"
+            and unit_input.get("validationKind") in {"draft_episode", "review_episode"}
+            and episode
+        ):
+            completed_episodes.add(episode)
+        if raw.get("unitKind") == "generate_document_section" and section:
+            completed_sections.add(section)
+    scope = dict(metadata.get("screenplayScope") or {})
+    episode_numbers = tuple(
+        sorted({
+            int((thaw_json_mapping(unit.metadata).get("input") or {}).get("episodeNumber") or 0)
+            for unit in units
+        } - {0})
+    )
+    section_keys = tuple(dict.fromkeys(
+        str((thaw_json_mapping(unit.metadata).get("input") or {}).get("sectionKey") or "")
+        for unit in units
+        if str((thaw_json_mapping(unit.metadata).get("input") or {}).get("sectionKey") or "")
+    ))
+    remaining = {
+        "scope": scope,
+        "episodeNumbers": [
+            number for number in episode_numbers if number not in completed_episodes
+        ],
+        "sectionKeys": [
+            section for section in section_keys if section not in completed_sections
+        ],
+    }
+    failures = tuple({
+        "code": str(unit.error_code),
+        "category": str((unit.failure or {}).get("category") or "unit"),
+    } for unit in units if unit.error_code)
+    return ScreenplayCheckpointInput(
+        checkpoint_key=checkpoint_key,
+        root_run_id=task.created_by_run_id,
+        task_id=task.id,
+        turn_id=str(metadata["turnId"]),
+        project_id=str(metadata["projectId"]),
+        session_id=int(metadata["sessionId"]),
+        target_role=str(metadata["targetRole"]),
+        original_plan=original,
+        current_plan=current,
+        completed_summaries=completed,
+        artifact_receipts=tuple(receipts),
+        typed_failures=failures,
+        constraint_changes=(),
+        remaining_scope=remaining,
+        base_revision_id=str(metadata.get("baseRevisionId") or "") or None,
+    )
+
+
+def _checkpoint_input_digest(value: ScreenplayCheckpointInput) -> str:
+    payload = {
+        "checkpoint": value.checkpoint_key,
+        "originalPlan": _plan_mapping(value.original_plan),
+        "currentPlan": _plan_mapping(value.current_plan),
+        "completed": [dict(item) for item in value.completed_summaries],
+        "receipts": [dict(item) for item in value.artifact_receipts],
+        "failures": [dict(item) for item in value.typed_failures],
+        "constraintChanges": [dict(item) for item in value.constraint_changes],
+        "remainingScope": dict(value.remaining_scope),
+        "targetRole": value.target_role,
+        "baseRevisionId": value.base_revision_id,
+    }
+    return "sha256:" + hashlib.sha256(json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
 
 
 def _task_failure_message(code: str) -> str:
@@ -404,7 +733,111 @@ def _task_failure_message(code: str) -> str:
         "model_output_filtered": "模型输出被服务商安全策略中止，请调整要求后重试。",
         "upstream_stream_interrupted": "模型流式响应在完成前中断，请检查网络后重试。",
         "unsupported_model_finish_reason": "模型以不受支持的状态结束，请更换模型后重试。",
+        "checkpoint_scope_requires_reresolution": (
+            "检查点发现任务范围需要重新确认，已暂停本轮创作。"
+        ),
+        "checkpoint_root_plan_unavailable": (
+            "无法验证当前任务计划，已安全暂停本轮创作。"
+        ),
+        "screenplay_checkpoint_ready_root_plan_conflict": (
+            "任务计划已发生变化，旧检查点不会被重复应用。"
+        ),
     }.get(code, "剧本任务执行失败，请查看诊断信息后重试。")
+
+
+async def _settle_screenplay_execution(dispatcher, task_id, result) -> None:
+    task = await dispatcher._long_tasks.load(task_id)
+    if task is None:
+        raise RuntimeError("screenplay LongTask disappeared")
+    metadata = thaw_json_mapping(task.metadata)
+    operation_id = str(metadata.get("operationId") or "")
+    turn_id = str(metadata.get("turnId") or "")
+    operation = await dispatcher._operations.load(operation_id)
+    if operation is None:
+        raise RuntimeError("screenplay Operation disappeared")
+    if result.status is LongTaskExecutionStatus.PAUSED:
+        paused = await dispatcher._checkpoints.latest_paused(task_id)
+        code = (
+            str(paused.get("error_code") or "") if paused is not None else ""
+        ) or result.error or "screenplay_task_paused"
+        message = _task_failure_message(code)
+        async with dispatcher._db.transaction(cancellation_linearizable=True):
+            await dispatcher._operations.pause(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:pause:{operation_id}:"
+                    f"{operation.revision}:{code}"
+                ),
+            )
+            await dispatcher._turns.pause_task(
+                turn_id,
+                code=code,
+                message=message,
+            )
+        return
+    if result.status is LongTaskExecutionStatus.CANCELED:
+        receipt = await dispatcher._operations.request_cancel(
+            turn_id,
+            idempotency_key=(
+                f"runtime-cancel:{operation_id}:{operation.revision}"
+            ),
+        )
+        await dispatcher._operations.settle_cancel(
+            turn_id,
+            receipt_id=receipt.id,
+        )
+        return
+    if result.status is LongTaskExecutionStatus.FAILED:
+        code = result.error or "screenplay_task_failed"
+        message = _task_failure_message(code)
+        async with dispatcher._db.transaction(cancellation_linearizable=True):
+            await dispatcher._operations.fail(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:fail:{operation_id}:"
+                    f"{operation.revision}:{code}"
+                ),
+            )
+            await dispatcher._turns.fail_task(
+                turn_id,
+                code=code,
+                message=message,
+            )
+        return
+    if result.status is not LongTaskExecutionStatus.COMPLETED:
+        raise RuntimeError("screenplay LongTask returned an unknown status")
+
+
+async def _settle_screenplay_exception(dispatcher, task_id, error) -> None:
+    task = await dispatcher._long_tasks.load(task_id)
+    if task is None:
+        return
+    metadata = thaw_json_mapping(task.metadata)
+    operation_id = str(metadata.get("operationId") or "")
+    turn_id = str(metadata.get("turnId") or "")
+    operation = await dispatcher._operations.load(operation_id)
+    if operation is None or operation.status.terminal:
+        return
+    code = str(getattr(error, "code", "") or "screenplay_task_failed")
+    message = str(error) or _task_failure_message(code)
+    async with dispatcher._db.transaction(cancellation_linearizable=True):
+        await dispatcher._operations.fail(
+            operation_id,
+            code=code,
+            message=message,
+            command_id=(
+                f"operation:fail:{operation_id}:{operation.revision}:{code}"
+            ),
+        )
+        await dispatcher._turns.fail_task(
+            turn_id,
+            code=code,
+            message=message,
+        )
 
 
 def build_screenplay_profile_extension(

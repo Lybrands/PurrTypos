@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -29,6 +30,7 @@ from purra.contracts import (
     PlanningCapabilities,
     ReasoningMode,
     StepExecutor,
+    StepStatus,
     StepType,
     TaskPlan,
     TaskSpec,
@@ -51,7 +53,11 @@ from application.screenplay_agent_service import (
     _task_failure,
 )
 from application.screenplay_task_resolver import ResolvedScreenplayTask
-from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
+from application.screenplay_agent_profile import (
+    ScreenplayAgentProfileExtension,
+    _ScreenplayCheckpointObserver,
+    _ready_checkpoint_keys,
+)
 from application.composition_factory import create_agent_composition
 from application.agent_run_service import AgentRunService
 from application.model_runtime import model_request_from_runtime
@@ -74,6 +80,16 @@ from application.screenplay_part_artifacts import (
 from application.screenplay_manifest_compiler import (
     REVIEW_DIMENSIONS,
     compile_screenplay_manifest,
+)
+from application.screenplay_checkpoint_planning import (
+    CHECKPOINT_PLAN_PROTOCOL,
+    ScreenplayCheckpointDecision,
+    ScreenplayCheckpointInput,
+    ScreenplayCheckpointOutcome,
+    ScreenplayCheckpointPlanner,
+    ScreenplayCheckpointStateError,
+    SqliteScreenplayCheckpointRepository,
+    _plan_mapping,
 )
 from application.screenplay_agent_planner import SqliteScreenplayTaskResolver
 from application.screenplay_structured_call import (
@@ -154,6 +170,62 @@ def _part_lineage(root_run_id: str = "root-screenplay-part") -> RunLineage:
     )
 
 
+def _checkpoint_unit(
+    position: int,
+    *,
+    kind: str,
+    status: str = "completed",
+    episode_number: int | None = None,
+):
+    unit_input = {"validationKind": kind}
+    if episode_number is not None:
+        unit_input["episodeNumber"] = episode_number
+    return SimpleNamespace(
+        position=position,
+        status=SimpleNamespace(value=status),
+        metadata={
+            "unitKind": "validate_manifest_part",
+            "input": unit_input,
+        },
+    )
+
+
+async def test_checkpoint_boundaries_are_business_milestones_not_every_part():
+    ordinary_part = SimpleNamespace(
+        position=1,
+        status=SimpleNamespace(value="completed"),
+        metadata={"unitKind": "generate_draft_scene", "input": {}},
+    )
+    assert _ready_checkpoint_keys((ordinary_part,)) == ()
+    assert _ready_checkpoint_keys((
+        ordinary_part,
+        _checkpoint_unit(2, kind="draft_episode", episode_number=4),
+    )) == ("episode:4",)
+    assert _ready_checkpoint_keys((
+        _checkpoint_unit(3, kind="document"),
+    )) == ("document:sections",)
+    review_one = _checkpoint_unit(
+        4,
+        kind="review_episode",
+        episode_number=1,
+    )
+    review_two_pending = _checkpoint_unit(
+        5,
+        kind="review_episode",
+        status="pending",
+        episode_number=2,
+    )
+    assert _ready_checkpoint_keys((review_one, review_two_pending)) == ()
+    review_two_done = _checkpoint_unit(
+        5,
+        kind="review_episode",
+        episode_number=2,
+    )
+    assert _ready_checkpoint_keys((review_one, review_two_done)) == (
+        "review:aggregate",
+    )
+
+
 @pytest.mark.parametrize(("kind", "expected"), (
     ("collect_evidence", False),
     ("validate_manifest_part", False),
@@ -165,6 +237,395 @@ def _part_lineage(root_run_id: str = "root-screenplay-part") -> RunLineage:
 ))
 async def test_screenplay_part_child_run_classification(kind, expected):
     assert _requires_child_run(kind) is expected
+
+
+async def test_checkpoint_planner_accepts_only_future_copy_and_dependencies():
+    original = TaskPlan(
+        title="创作两集",
+        goal="完成两集候选稿",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    current = replace(original, steps=(
+        replace(original.steps[0], status=StepStatus.DONE),
+        replace(original.steps[1], status=StepStatus.RUNNING),
+        original.steps[2],
+    ))
+    revised = replace(current, steps=(
+        current.steps[0],
+        replace(current.steps[1], title="完成剩余集", description="依据检查点继续"),
+        replace(current.steps[2], depends_on=("create",)),
+    ))
+
+    class Models:
+        async def run_json(self, **kwargs):
+            self.payload = kwargs["user_payload"]
+            value = {
+                "protocol": CHECKPOINT_PLAN_PROTOCOL,
+                "outcome": "revised",
+                "plan": _plan_mapping(revised),
+            }
+            return StructuredModelResult(kwargs["validate"](value), "child-plan")
+
+    models = Models()
+    decision = await ScreenplayCheckpointPlanner(models, runtime=object()).revise(
+        ScreenplayCheckpointInput(
+            checkpoint_key="episode:4",
+            root_run_id="root-1",
+            task_id="task-1",
+            turn_id="turn-1",
+            project_id="project-1",
+            session_id=1,
+            target_role="screenplayDraft",
+            original_plan=original,
+            current_plan=current,
+            completed_summaries=({"stepId": "evidence", "summary": "完成"},),
+            artifact_receipts=({"part": "episode:4", "digest": "sha256:" + "a" * 64},),
+            remaining_scope={"episodeNumbers": [5]},
+            base_revision_id="sprev-private-root-id",
+        )
+    )
+
+    assert decision.outcome is ScreenplayCheckpointOutcome.REVISED
+    assert decision.plan == revised
+    serialized = json.dumps(models.payload, ensure_ascii=False)
+    assert "task-1" not in serialized
+    assert "root-1" not in serialized
+    assert "sprev-private-root-id" not in serialized
+    assert "正文" not in serialized
+
+
+async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
+    temp_db: DatabaseConnection,
+):
+    original = TaskPlan(
+        title="创作两集",
+        goal="完成两集候选稿",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt) VALUES (?, 'running', ?)",
+        ["root-checkpoint-plan", "创作两集"],
+    )
+    for position, step in enumerate(original.steps):
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_todos "
+            "(run_id, step_id, title, status, executor, step_type, "
+            "risk_level, description, expected_tools, agent_role, "
+            "assignment_json, depends_on_json, result_summary, error, sort) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "root-checkpoint-plan",
+                step.id,
+                step.title,
+                "done" if position == 0 else "running" if position == 1 else "pending",
+                step.executor.value,
+                step.type.value,
+                step.risk_level.value if step.risk_level else None,
+                step.description,
+                json.dumps(list(step.suggested_tools)),
+                step.agent_role,
+                json.dumps(thaw_json_mapping(step.assignment)),
+                json.dumps(list(step.depends_on)),
+                "已读取权威材料" if position == 0 else None,
+                None,
+                position,
+            ],
+        )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events (run_id, event_type, payload_json) "
+        "VALUES (?, 'run.todos_updated', ?)",
+        [
+            "root-checkpoint-plan",
+            json.dumps({
+                "title": original.title,
+                "goal": original.goal,
+                "taskSpec": original.task_spec.to_mapping(),
+                "steps": _plan_mapping(original)["steps"],
+            }, ensure_ascii=False),
+        ],
+    )
+
+    current = await SqliteScreenplayCheckpointRepository(
+        temp_db
+    ).load_root_plan("root-checkpoint-plan")
+
+    assert current.title == original.title
+    assert current.goal == original.goal
+    assert current.task_spec == original.task_spec
+    assert current.steps[0].status is StepStatus.DONE
+    assert current.steps[0].result_summary == "已读取权威材料"
+    assert current.steps[1].status is StepStatus.RUNNING
+    assert current.steps[1].depends_on == original.steps[1].depends_on
+
+
+async def test_checkpoint_root_plan_fails_closed_without_one_authoritative_plan_event(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt) VALUES (?, 'running', ?)",
+        ["root-missing-plan", "创作"],
+    )
+
+    with pytest.raises(
+        ScreenplayCheckpointStateError,
+        match="authoritative Root plan",
+    ):
+        await SqliteScreenplayCheckpointRepository(temp_db).load_root_plan(
+            "root-missing-plan"
+        )
+
+
+async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    await repository.reserve(
+        operation_id="operation-stale",
+        task_id="task-stale",
+        checkpoint_key="episode:4",
+        root_run_id="root-stale",
+        input_digest="sha256:" + "1" * 64,
+    )
+    await repository.ready(
+        operation_id="operation-stale",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+    )
+
+    row = await repository.pause_ready_conflict(
+        operation_id="operation-stale",
+        checkpoint_key="episode:4",
+        code="screenplay_checkpoint_ready_root_plan_conflict",
+    )
+
+    assert row["status"] == "paused"
+    assert row["error_code"] == (
+        "screenplay_checkpoint_ready_root_plan_conflict"
+    )
+    assert await repository.root_revision_digest(
+        "root-stale",
+        "episode:4",
+    ) is None
+
+
+async def test_checkpoint_reservation_is_single_winner_and_expiry_recoverable(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+
+    async def reserve(token: str):
+        return await repository.reserve(
+            operation_id="operation-cas",
+            task_id="task-cas",
+            checkpoint_key="episode:4",
+            root_run_id="root-cas",
+            input_digest="sha256:" + "2" * 64,
+            reservation_token=token,
+        )
+
+    first, second = await asyncio.gather(reserve("owner-a"), reserve("owner-b"))
+    assert sum(bool(row["_acquired"]) for row in (first, second)) == 1
+
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans "
+        "SET reservation_expires_at_ms = 0 WHERE operation_id = ?",
+        ["operation-cas"],
+    )
+    recovered = await reserve("owner-after-restart")
+    assert recovered["_acquired"] is True
+    assert recovered["reservation_owner"] == "owner-after-restart"
+
+
+@pytest.mark.parametrize("event_already_persisted", (False, True))
+async def test_ready_checkpoint_reconciles_root_event_without_replanning(
+    temp_db: DatabaseConnection,
+    event_already_persisted: bool,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    await repository.reserve(
+        operation_id="operation-ready",
+        task_id="task-ready",
+        checkpoint_key="episode:4",
+        root_run_id="root-ready",
+        input_digest="sha256:" + "1" * 64,
+    )
+    receipt = await repository.ready(
+        operation_id="operation-ready",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+    )
+    downstream_calls = 0
+
+    async def persist_revision(update):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) "
+            "VALUES (?, 'run.todos_updated', ?)",
+            [
+                "root-ready",
+                json.dumps({
+                    "planRevision": dict(update.plan_revision_metadata),
+                }),
+            ],
+        )
+
+    if event_already_persisted:
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json) "
+            "VALUES (?, 'run.todos_updated', ?)",
+            [
+                "root-ready",
+                json.dumps({"planRevision": {
+                    "identity": "episode:4",
+                    "digest": receipt["plan_digest"],
+                }}),
+            ],
+        )
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=persist_revision,
+        task_id="task-ready",
+        root_run_id="root-ready",
+        signal=None,
+    )
+    progress = SimpleNamespace(
+        event=AgentEvent(
+            type=CoreEventType.LONG_TASK_PROGRESS,
+            payload={"taskId": "task-ready"},
+        )
+    )
+
+    await observer._emit_ready(receipt, progress)
+
+    assert downstream_calls == (0 if event_already_persisted else 1)
+    assert (await repository.load("operation-ready", "episode:4"))["status"] == (
+        "applied"
+    )
+
+
+@pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))
+async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutation):
+    original = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    current = replace(original, steps=(
+        replace(original.steps[0], status=StepStatus.DONE),
+        original.steps[1],
+        original.steps[2],
+    ))
+    if mutation == "completed":
+        proposed = replace(current, steps=(
+            replace(current.steps[0], title="篡改完成步骤"),
+            *current.steps[1:],
+        ))
+    elif mutation == "step_id":
+        proposed = replace(current, steps=(
+            current.steps[0],
+            replace(current.steps[1], id="replacement"),
+            replace(current.steps[2], depends_on=("replacement",)),
+        ))
+    else:
+        changed_spec = replace(
+            original.task_spec,
+            target={"screenplay": {
+                "version": 1,
+                "scope": {"kind": "next_episodes", "count": 9},
+                "stepBindings": [
+                    {"stepId": "evidence", "phase": "evidence"},
+                    {"stepId": "create", "phase": "creation"},
+                    {"stepId": "deliver", "phase": "delivery"},
+                ],
+            }},
+        )
+        proposed = replace(current, task_spec=changed_spec)
+
+    class Models:
+        async def run_json(self, **kwargs):
+            value = {
+                "protocol": CHECKPOINT_PLAN_PROTOCOL,
+                "outcome": "revised",
+                "plan": _plan_mapping(proposed),
+            }
+            return StructuredModelResult(kwargs["validate"](value), "child-plan")
+
+    decision = await ScreenplayCheckpointPlanner(Models(), runtime=object()).revise(
+        ScreenplayCheckpointInput(
+            checkpoint_key="episode:4",
+            root_run_id="root-1",
+            task_id="task-1",
+            turn_id="turn-1",
+            project_id="project-1",
+            session_id=1,
+            target_role="screenplayDraft",
+            original_plan=original,
+            current_plan=current,
+            completed_summaries=(),
+            artifact_receipts=(),
+            remaining_scope={},
+        )
+    )
+    assert decision.outcome is (
+        ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION
+        if mutation == "scope"
+        else ScreenplayCheckpointOutcome.PAUSED
+    )
+
+
+async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
+    original = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+
+    class Models:
+        async def run_json(self, **_kwargs):
+            class TypedFailure(RuntimeError):
+                code = "checkpoint_provider_unavailable"
+
+            raise TypedFailure("checkpoint provider unavailable")
+
+    decision = await ScreenplayCheckpointPlanner(
+        Models(),
+        runtime=object(),
+    ).revise(ScreenplayCheckpointInput(
+        checkpoint_key="episode:4",
+        root_run_id="root-1",
+        task_id="task-1",
+        turn_id="turn-1",
+        project_id="project-1",
+        session_id=1,
+        target_role="screenplayDraft",
+        original_plan=original,
+        current_plan=original,
+        completed_summaries=(),
+        artifact_receipts=(),
+    ))
+
+    assert decision == ScreenplayCheckpointDecision(
+        ScreenplayCheckpointOutcome.PAUSED,
+        code="checkpoint_provider_unavailable",
+    )
 
 
 def _semantic_steps() -> tuple[TaskStep, ...]:

@@ -940,6 +940,36 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_long_task_units_ready
         ON ai_agent_long_task_units(task_id, status, position)
     """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_checkpoint_plans (
+        operation_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        checkpoint_key TEXT NOT NULL,
+        root_run_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input_digest TEXT NOT NULL,
+        plan_json TEXT DEFAULT NULL,
+        plan_digest TEXT DEFAULT NULL,
+        outcome TEXT DEFAULT NULL,
+        error_code TEXT DEFAULT NULL,
+        reservation_owner TEXT DEFAULT NULL,
+        reservation_expires_at_ms INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (operation_id, checkpoint_key),
+        UNIQUE (task_id, checkpoint_key)
+    )""")
+    for column in (
+        "reservation_owner TEXT DEFAULT NULL",
+        "reservation_expires_at_ms INTEGER DEFAULT NULL",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE screenplay_checkpoint_plans ADD COLUMN {column}",
+        )
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_screenplay_checkpoint_plans_root
+        ON screenplay_checkpoint_plans(root_run_id, status, update_time)
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifacts (
         id TEXT PRIMARY KEY NOT NULL,
         namespace TEXT NOT NULL,

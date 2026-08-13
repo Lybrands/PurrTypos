@@ -477,6 +477,11 @@ class SqliteScreenplayAgentRepository:
     async def _delete_tasks(self, task_ids: Sequence[str]) -> None:
         marks = _marks(task_ids)
         await self._remove_task_candidates(task_ids)
+        await self._db.execute(
+            f"DELETE FROM screenplay_checkpoint_plans "
+            f"WHERE task_id IN ({marks})",
+            list(task_ids),
+        )
         work_items = await self._db.fetch_all(
             f"SELECT work_item_id FROM ai_agent_long_tasks "
             f"WHERE id IN ({marks})",

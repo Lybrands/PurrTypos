@@ -57,6 +57,11 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
         if operation_ids:
             operation_marks = ",".join("?" for _ in operation_ids)
             await db.execute(
+                f"DELETE FROM screenplay_checkpoint_plans "
+                f"WHERE operation_id IN ({operation_marks})",
+                operation_ids,
+            )
+            await db.execute(
                 f"DELETE FROM screenplay_agent_operation_usage "
                 f"WHERE operation_id IN ({operation_marks})",
                 operation_ids,
@@ -278,6 +283,11 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         )
     if operation_ids:
         marks = ",".join("?" for _ in operation_ids)
+        await db.execute(
+            f"DELETE FROM screenplay_checkpoint_plans "
+            f"WHERE operation_id IN ({marks})",
+            operation_ids,
+        )
         for table in (
             "screenplay_agent_operation_usage",
             "screenplay_agent_operation_commands",

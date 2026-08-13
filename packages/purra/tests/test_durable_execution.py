@@ -366,6 +366,118 @@ async def test_invalid_durable_revision_fails_root_and_cancels_old_recipe():
 
 
 @pytest.mark.asyncio
+async def test_revision_contract_rejection_settles_observer_with_same_error():
+    controller, repository, sink = await _started()
+    observer_rejected = asyncio.Event()
+    cleaned = asyncio.Event()
+    invalid = replace(
+        _plan(revised=True),
+        steps=(
+            replace(_plan(revised=True).steps[0], title="Rewrite history"),
+            _plan(revised=True).steps[1],
+        ),
+    )
+
+    class Dispatcher:
+        async def dispatch(self, *args, **kwargs):
+            del args, kwargs
+            return LongTaskDispatchReceipt(task_id="task-ack", message="ok")
+
+        async def execute(self, task_id, *, observer, **kwargs):
+            del task_id, kwargs
+            try:
+                with pytest.raises(ContractViolationError):
+                    await observer(LongTaskExecutionUpdate(
+                        event=_progress_event(status="completed"),
+                        plan_revision=invalid,
+                    ))
+                observer_rejected.set()
+                raise AssertionError("the rejected dispatcher must be canceled")
+            finally:
+                cleaned.set()
+
+    async def collect():
+        return [
+            event
+            async for event in complete_admitted_task(
+                controller=controller,
+                request=_request(),
+                plan=_plan(),
+                admission=_admission(),
+                dispatcher=Dispatcher(),
+                sink=sink,
+                signal=None,
+            )
+        ]
+
+    yielded = await asyncio.wait_for(collect(), 1)
+
+    assert observer_rejected.is_set()
+    assert cleaned.is_set()
+    assert repository.status is RunStatus.FAILED
+    assert yielded[-1].type == CoreEventType.RUN_FAILED
+
+
+@pytest.mark.asyncio
+async def test_caller_cancel_settles_inflight_revision_observer_and_dispatcher():
+    controller, repository, sink = await _started()
+    commit_started = asyncio.Event()
+    cleaned = asyncio.Event()
+    original_commit = repository.commit
+
+    async def blocked_commit(run_id, commit):
+        if commit.replace_steps is not None and len(repository.commits) > 0:
+            commit_started.set()
+            await asyncio.Event().wait()
+        return await original_commit(run_id, commit)
+
+    repository.commit = blocked_commit  # type: ignore[method-assign]
+
+    class Dispatcher:
+        async def dispatch(self, *args, **kwargs):
+            del args, kwargs
+            return LongTaskDispatchReceipt(task_id="task-cancel", message="ok")
+
+        async def execute(self, task_id, *, observer, **kwargs):
+            del task_id, kwargs
+            try:
+                await observer(LongTaskExecutionUpdate(
+                    event=_progress_event(status="completed"),
+                ))
+                await observer(LongTaskExecutionUpdate(
+                    event=AgentEvent(
+                        type="long_task.checkpoint",
+                        payload={"checkpoint": "cancel"},
+                    ),
+                    plan_revision=_plan(revised=True),
+                ))
+            finally:
+                cleaned.set()
+
+    async def collect():
+        return [
+            event
+            async for event in complete_admitted_task(
+                controller=controller,
+                request=_request(),
+                plan=_plan(),
+                admission=_admission(),
+                dispatcher=Dispatcher(),
+                sink=sink,
+                signal=None,
+            )
+        ]
+
+    execution = asyncio.create_task(collect())
+    await asyncio.wait_for(commit_started.wait(), 1)
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, 1)
+
+    assert cleaned.is_set()
+
+
+@pytest.mark.asyncio
 async def test_durable_update_cannot_forge_todo_replacement_event():
     controller, repository, sink = await _started()
     canceled = asyncio.Event()
@@ -711,6 +823,62 @@ async def test_durable_revision_allows_future_copy_and_dependency_reordering():
         "source-a": StepStatus.RUNNING,
         "source-b": StepStatus.PENDING,
         "deliver": StepStatus.PENDING,
+    }
+
+
+@pytest.mark.asyncio
+async def test_durable_revision_persists_generic_checkpoint_identity_on_todo_event():
+    controller, repository, sink = await _started()
+
+    class Dispatcher:
+        async def dispatch(self, *_args, **_kwargs):
+            return LongTaskDispatchReceipt(
+                task_id="task-checkpoint-identity",
+                message="started",
+                metadata={"stepIds": ["gather", "deliver"]},
+            )
+
+        async def execute(self, task_id, *, observer, **kwargs):
+            del kwargs
+            await observer(LongTaskExecutionUpdate(
+                event=_progress_event(status="completed"),
+            ))
+            await observer(LongTaskExecutionUpdate(
+                event=AgentEvent(
+                    type="long_task.checkpoint",
+                    payload={"taskId": task_id},
+                ),
+                plan_revision=_plan(revised=True),
+                plan_revision_metadata={
+                    "identity": "episode:4",
+                    "digest": "sha256:" + "a" * 64,
+                },
+            ))
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="Finished",
+            )
+
+    async for _event in complete_admitted_task(
+        controller=controller,
+        request=_request(),
+        plan=_plan(),
+        admission=_admission(),
+        dispatcher=Dispatcher(),
+        sink=sink,
+        signal=None,
+    ):
+        pass
+
+    revision_event = next(
+        event for event in repository.events
+        if event.type == CoreEventType.RUN_TODOS_UPDATED
+        and event.payload.get("planRevision")
+    )
+    assert revision_event.payload["planRevision"] == {
+        "identity": "episode:4",
+        "digest": "sha256:" + "a" * 64,
     }
 
 

@@ -11,6 +11,7 @@ from purra.contracts import (
     StepStatus,
     StepType,
     TaskPlan,
+    TaskSpec,
     TaskStep,
     TaskStepUpdate,
     ToolBatchOutcome,
@@ -43,6 +44,7 @@ class RunSnapshot:
     title: str
     goal: str | None
     status: RunStatus
+    task_spec: TaskSpec | None = None
     steps: tuple[TaskStep, ...] = ()
     final_response: str = ""
     error: str | None = None
@@ -80,6 +82,8 @@ class RunSnapshot:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "goal", _optional_text(self.goal))
         object.__setattr__(self, "status", status)
+        if self.task_spec is not None and not isinstance(self.task_spec, TaskSpec):
+            raise TypeError("run snapshot task_spec must be a TaskSpec")
         object.__setattr__(self, "steps", steps)
         object.__setattr__(self, "final_response", str(self.final_response or ""))
         object.__setattr__(self, "error", _optional_text(self.error))
@@ -163,6 +167,7 @@ class RunStateMachine:
             title=plan.title,
             goal=plan.goal,
             status=RunStatus.RUNNING,
+            task_spec=plan.task_spec,
             steps=steps,
         )
 
@@ -204,6 +209,7 @@ class RunStateMachine:
             TaskPlan(
                 title=plan.title,
                 goal=plan.goal,
+                task_spec=plan.task_spec,
                 steps=tuple(
                     replace(
                         step,
@@ -245,6 +251,7 @@ class RunStateMachine:
             state,
             title=plan.title,
             goal=plan.goal,
+            task_spec=plan.task_spec,
             steps=history + revised_future_steps,
         )
 

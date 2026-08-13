@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,12 @@ import application.composition_factory as composition_factory
 from application.screenplay_candidate_assembler import (
     ScreenplayCandidateAssembler,
 )
+from application.screenplay_checkpoint_planning import (
+    ScreenplayCheckpointDecision,
+    ScreenplayCheckpointOutcome,
+    ScreenplayCheckpointPlanner,
+)
+from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
@@ -1405,6 +1412,37 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
         ),
     )
     executor = _UnitExecutor(screenplay_db)
+
+    class CheckpointPlanner:
+        def __init__(self):
+            self.calls = []
+
+        async def revise(self, value, signal=None):
+            del signal
+            self.calls.append(value)
+            if len(self.calls) == 1:
+                return ScreenplayCheckpointDecision(
+                    ScreenplayCheckpointOutcome.REVISED,
+                    plan=replace(
+                        value.current_plan,
+                        steps=tuple(
+                            replace(
+                                step,
+                                title="交付三集连续候选稿",
+                                description="根据首集检查点继续交付",
+                            )
+                            if step.id == "deliver-next-three"
+                            else step
+                            for step in value.current_plan.steps
+                        ),
+                    ),
+                )
+            return ScreenplayCheckpointDecision(
+                ScreenplayCheckpointOutcome.UNCHANGED,
+            )
+
+    checkpoint_planner = CheckpointPlanner()
+    executor.checkpoint_planner = checkpoint_planner
     composition = create_agent_composition(screenplay_db)
     service = ScreenplayAgentService(
         screenplay_db,
@@ -1479,6 +1517,41 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
         "id": root_run_id,
         "final_response": projected_turn["assistantContent"],
     }
+    assert [call.checkpoint_key for call in checkpoint_planner.calls] == [
+        "episode:4",
+        "episode:5",
+        "episode:6",
+    ]
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_checkpoint_plans "
+        "WHERE status = 'applied'"
+    ) == {"count": 3}
+    revision_events = await screenplay_db.fetch_all(
+        "SELECT json_extract(payload_json, '$.planRevision.identity') AS identity "
+        "FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_type = 'run.todos_updated' "
+        "AND json_extract(payload_json, '$.planRevision.identity') IS NOT NULL "
+        "ORDER BY id",
+        [root_run_id],
+    )
+    assert [row["identity"] for row in revision_events] == [
+        "episode:4",
+        "episode:5",
+        "episode:6",
+    ]
+    assert await screenplay_db.fetch_one(
+        "SELECT title, description FROM ai_agent_run_todos "
+        "WHERE run_id = ? AND step_id = 'deliver-next-three'",
+        [root_run_id],
+    ) == {
+        "title": "交付三集连续候选稿",
+        "description": "根据首集检查点继续交付",
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions "
+        "WHERE agent_task_id = ?",
+        [task["id"]],
+    ) == {"count": 1}
 
     removed = await service.truncate_from_turn(turn["id"])
     assert removed["deletedTaskIds"] == [task["id"]]
@@ -1489,6 +1562,151 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_work_items"
     ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_checkpoint_plans"
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_scope_change_pauses_operation_turn_and_root(
+    screenplay_db,
+    monkeypatch,
+):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-checkpoint-pause-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Checkpoint pause",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    plan = {
+        "needsTodos": True,
+        "title": "创作下一集",
+        "goal": "完成下一集候选稿",
+        "taskSpec": {
+            "goal": "完成下一集候选稿",
+            "operation": "create",
+            "instruction": "创作下一集",
+            "deliverable": "screenplayDraft",
+            "target": {"screenplay": {
+                "version": 1,
+                "scope": {"kind": "next_episodes", "count": 1},
+                "stepBindings": [
+                    {"stepId": "evidence", "phase": "evidence"},
+                    {"stepId": "draft", "phase": "creation"},
+                    {"stepId": "deliver", "phase": "delivery"},
+                ],
+            }},
+        },
+        "todos": [
+            {"id": "evidence", "title": "读取依据", "type": "analyze", "executor": "model"},
+            {"id": "draft", "title": "创作本集", "type": "write", "executor": "model"},
+            {"id": "deliver", "title": "交付候选稿", "type": "write", "executor": "model"},
+        ],
+    }
+    gateway = _ScriptedPlannerGateway([
+        [
+            ModelStreamChunk(content_delta=json.dumps(plan, ensure_ascii=False)),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta=json.dumps({
+                "protocol": "screenplay.checkpoint-plan.v1",
+                "outcome": "requires_reresolution",
+                "code": "checkpoint_scope_requires_reresolution",
+            })),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
+    monkeypatch.setattr(
+        agent_composition,
+        "ProviderModelGateway",
+        lambda *_args, **_kwargs: gateway,
+    )
+    monkeypatch.setattr(
+        composition_factory,
+        "build_screenplay_profile_extension",
+        lambda *, db, **_kwargs: ScreenplayAgentProfileExtension(
+            db,
+            resolver=_SingleDraftResolver(),
+        ),
+    )
+    executor = _UnitExecutor(screenplay_db)
+    composition = create_agent_composition(screenplay_db)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        unit_executor_factory=lambda _runtime: executor,
+        projects=projects,
+    )
+    request = SubmitScreenplayAgentTurnRequest.model_validate({
+        "sessionId": session["id"],
+        "content": "创作下一集。",
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://api.deepseek.com/v1",
+            "options": {"model": "deepseek-v4-flash"},
+            "contextWindow": "128k",
+        },
+    })
+    executor.checkpoint_planner = ScreenplayCheckpointPlanner(
+        ScreenplayStructuredCallService(
+            screenplay_db,
+            composition=composition,
+        ),
+        runtime=request.runtime,
+    )
+    turn = await service.submit_turn(
+        command_id="checkpoint-pause-turn",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+    try:
+        await service.execute_turn(turn["id"], request.runtime)
+    finally:
+        await composition.shutdown()
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert snapshot["turns"][0]["status"] == "paused"
+    assert snapshot["operations"][0]["status"] == "paused"
+    assert snapshot["tasks"][0]["status"] == "paused"
+    assert snapshot["operations"][0]["error"]["code"] == (
+        "checkpoint_scope_requires_reresolution"
+    )
+    root_run_id = snapshot["turns"][0]["rootRunId"]
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [root_run_id],
+    ) == {"status": "canceled"}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs "
+        "WHERE parent_run_id IS NULL",
+    ) == {"count": 1}
+    assert await screenplay_db.fetch_one(
+        "SELECT parent_run_id, root_run_id, agent_role, binding_namespace "
+        "FROM ai_agent_runs WHERE parent_run_id IS NOT NULL",
+    ) == {
+        "parent_run_id": root_run_id,
+        "root_run_id": root_run_id,
+        "agent_role": "screenplay-part",
+        "binding_namespace": "screenplay.checkpoint_plan",
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT status, outcome, error_code FROM screenplay_checkpoint_plans"
+    ) == {
+        "status": "paused",
+        "outcome": "requires_reresolution",
+        "error_code": "checkpoint_scope_requires_reresolution",
+    }
 
 
 @pytest.mark.asyncio
