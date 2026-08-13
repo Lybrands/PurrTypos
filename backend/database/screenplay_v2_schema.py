@@ -322,21 +322,6 @@ async def init_screenplay_v2_runtime_schema(db) -> None:
     for project in legacy_projects:
         await retire_legacy_screenplay_project_data(db, str(project["id"]))
 
-    await db.execute(
-        "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN ("
-        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
-    )
-    await db.execute(
-        "DELETE FROM ai_agent_artifact_claims WHERE artifact_id IN ("
-        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
-    )
-    await db.execute(
-        "DELETE FROM ai_agent_artifact_batches WHERE artifact_id IN ("
-        "SELECT id FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay')"
-    )
-    await db.execute(
-        "DELETE FROM ai_agent_artifacts WHERE namespace = 'purrtypos.screenplay'"
-    )
     for table in (
         "screenplay_document_source_refs",
         "screenplay_source_refs",

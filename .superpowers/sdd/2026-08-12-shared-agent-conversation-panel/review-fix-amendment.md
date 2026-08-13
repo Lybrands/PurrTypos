@@ -173,3 +173,18 @@ it does not change PurrA/provider contracts or Agent execution semantics.
   the public owner deletion path would perform after its guard: reports are
   unlinked, favorites removed, Conversation memory archived, and retained task
   metadata stripped, all inside the migration transaction.
+
+### Final artifact and ownership closure
+
+- Runtime schema initialization never globally purges
+  `purrtypos.screenplay` Artifacts. Native project Artifacts and their batch,
+  claim, and projection children survive restart; the migration-only legacy
+  retirement remains the sole owner-scoped cleanup path.
+- Guard-related Run links and `work_item_id` references do not transfer task or
+  WorkItem ownership. Every physically deleted WorkItem and LongTask must itself
+  match the deleting product namespace and `owner_id`.
+- Legacy retirement recognizes the production planner binding
+  `screenplay.agent.turn.response` in addition to the existing exact Screenplay
+  namespaces. Aggregate-only recovery is restricted to NULL-session roots and
+  the aggregate must match the legacy project; a native-session Run is never
+  reclassified by a stale or conflicting binding.

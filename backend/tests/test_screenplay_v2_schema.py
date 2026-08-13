@@ -265,6 +265,37 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         "(id, title, source_snapshot_json) "
         "VALUES ('native-project', '原生剧本', '{}')"
     )
+    for artifact_id, owner_id in (
+        ("legacy-artifact", "legacy-project"),
+        ("native-artifact", "native-project"),
+    ):
+        await first.execute(
+            "INSERT INTO ai_agent_artifacts "
+            "(id, namespace, kind, owner_id) VALUES "
+            "(?, 'purrtypos.screenplay', 'screenplayDraft', ?)",
+            [artifact_id, owner_id],
+        )
+        await first.execute(
+            "INSERT INTO ai_agent_artifact_batches "
+            "(artifact_id, batch_id, idempotency_key, sequence, "
+            "committed_revision, next_sequence, item_count, items_json, "
+            "content_digest) VALUES (?, 'batch', 'key', 1, 2, 2, 1, '[]', "
+            "'digest')",
+            [artifact_id],
+        )
+        await first.execute(
+            "INSERT INTO ai_agent_artifact_claims "
+            "(artifact_id, work_item_id, run_id, claim_token, "
+            "acquired_revision, expires_at_ms) VALUES (?, 'work', 'run', "
+            "'claim', 1, 9999999999999)",
+            [artifact_id],
+        )
+        await first.execute(
+            "INSERT INTO ai_agent_artifact_projections "
+            "(artifact_id, projector_namespace, result_ref, projected_by_run_id) "
+            "VALUES (?, 'screenplay.acceptance', 'result', 'run')",
+            [artifact_id],
+        )
     for table in (
         "screenplay_document_source_refs",
         "screenplay_source_refs",
@@ -304,6 +335,26 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         assert await reopened.fetch_one(
             "SELECT id FROM screenplay_projects WHERE id = 'native-project'"
         ) == {"id": "native-project"}
+        for table in (
+            "ai_agent_artifacts",
+            "ai_agent_artifact_batches",
+            "ai_agent_artifact_claims",
+            "ai_agent_artifact_projections",
+        ):
+            assert await reopened.fetch_one(
+                f"SELECT artifact_id AS id FROM {table} "
+                "WHERE artifact_id = 'native-artifact'"
+                if table != "ai_agent_artifacts"
+                else "SELECT id FROM ai_agent_artifacts "
+                "WHERE id = 'native-artifact'"
+            ) == {"id": "native-artifact"}, table
+            assert await reopened.fetch_one(
+                f"SELECT artifact_id AS id FROM {table} "
+                "WHERE artifact_id = 'legacy-artifact'"
+                if table != "ai_agent_artifacts"
+                else "SELECT id FROM ai_agent_artifacts "
+                "WHERE id = 'legacy-artifact'"
+            ) is None, table
         assert await reopened.fetch_one(
             "SELECT COUNT(*) AS count FROM books WHERE id = 'kept-book'"
         ) == {"count": 1}
@@ -380,6 +431,10 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
     await first.execute(
         "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
         "VALUES (9701, 'screenplay', 'legacy-active-project')"
+    )
+    await first.execute(
+        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
+        "VALUES (9702, 'screenplay', 'native-kept-project')"
     )
     await first.execute(
         "INSERT INTO screenplay_agent_turns "
@@ -459,6 +514,35 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
         "'draft', 'native-kept-project', 'native-kept-run', 'completed', 1, "
         "'{\"sessionId\":9701,\"kept\":true}')"
     )
+    await first.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES ('legacy-cross-task', "
+        "'native-kept-work', 'purrtypos.screenplay', 'draft', "
+        "'legacy-active-project', 'legacy-active-run', 'completed', 1)"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id) VALUES ('legacy-response-run', 'queued', '响应', "
+        "'screenplay.agent.turn.response', 'legacy-active-project', "
+        "'legacy-response-command')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id) VALUES ('native-response-run', 'queued', '响应', "
+        "'screenplay.agent.turn.response', 'native-kept-project', "
+        "'native-response-command')"
+    )
+    await first.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id) VALUES "
+        "('native-session-legacy-binding-run', 9702, 'queued', '响应', "
+        "'screenplay.agent.turn.response', 'legacy-active-project', "
+        "'native-session-command')"
+    )
     await first.close()
 
     reopened = DatabaseConnection(tmp_path)
@@ -515,6 +599,23 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
             "WHERE id = 'native-kept-task'"
         )
         assert json.loads(retained_task["metadata_json"]) == {"kept": True}
+        assert await reopened.fetch_one(
+            "SELECT id FROM ai_agent_work_items WHERE id = 'native-kept-work'"
+        ) == {"id": "native-kept-work"}
+        assert await reopened.fetch_one(
+            "SELECT id FROM ai_agent_long_tasks WHERE id = 'legacy-cross-task'"
+        ) is None
+        assert await reopened.fetch_one(
+            "SELECT status, session_id FROM ai_agent_runs "
+            "WHERE id = 'legacy-response-run'"
+        ) == {"status": "canceled", "session_id": None}
+        assert await reopened.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = 'native-response-run'"
+        ) == {"status": "queued"}
+        assert await reopened.fetch_one(
+            "SELECT status, session_id FROM ai_agent_runs "
+            "WHERE id = 'native-session-legacy-binding-run'"
+        ) == {"status": "queued", "session_id": 9702}
     finally:
         await reopened.close()
 
