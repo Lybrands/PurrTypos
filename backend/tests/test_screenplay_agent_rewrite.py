@@ -13,6 +13,7 @@ import application.screenplay_structured_call as screenplay_structured_call
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
+    AgentRunResult,
     AgentRunRequest,
     ContextBudget,
     DomainContext,
@@ -43,6 +44,7 @@ from purra.recovery import (
 )
 from application.screenplay_agent_service import (
     ScreenplayAgentService,
+    _ScreenplayTurnRunLifecycle,
     _task_failure,
 )
 from application.screenplay_task_resolver import ResolvedScreenplayTask
@@ -122,7 +124,11 @@ from domains.screenplay_agent.adapter import (
 )
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
-from purra.task_admission import ExecutionMode
+from purra.task_admission import (
+    ExecutionMode,
+    LongTaskExecutionResult,
+    LongTaskExecutionStatus,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -150,6 +156,19 @@ def _semantic_steps() -> tuple[TaskStep, ...]:
             executor=StepExecutor.MODEL,
             depends_on=("draft-analysis",),
         ),
+    )
+
+
+def _bound_steps(*step_ids: str) -> tuple[TaskStep, ...]:
+    return tuple(
+        TaskStep(
+            id=step_id,
+            title=step_id,
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=((step_ids[index - 1],) if index else ()),
+        )
+        for index, step_id in enumerate(step_ids)
     )
 
 
@@ -536,6 +555,7 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
             ScreenplayPlanBinding("draft", ScreenplayPlanPhase.CREATION),
             ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
         ),
+        plan_steps=_bound_steps("understand", "draft", "deliver"),
     )
     compiled = compile_screenplay_manifest(**arguments)
     repeated = compile_screenplay_manifest(**arguments)
@@ -596,6 +616,11 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
             ScreenplayPlanBinding("write-episodes", ScreenplayPlanPhase.CREATION),
             ScreenplayPlanBinding("deliver-result", ScreenplayPlanPhase.DELIVERY),
         ),
+        plan_steps=_bound_steps(
+            "read-sources",
+            "write-episodes",
+            "deliver-result",
+        ),
     )
 
     steps = {step.id: step for step in compiled.recipe.steps}
@@ -616,6 +641,48 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
     } == {"write-episodes"}
 
 
+async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order():
+    plan_steps = _semantic_steps()
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="连续创作第 4 至 5 集",
+            requested_deliverable="screenplayDraft",
+        ),
+        target_role="screenplayDraft",
+        episode_scene_ids={
+            4: ("ep04_s01",),
+            5: ("ep05_s01",),
+        },
+        plan_bindings=(
+            ScreenplayPlanBinding(
+                "deliver-candidate",
+                ScreenplayPlanPhase.DELIVERY,
+            ),
+            ScreenplayPlanBinding(
+                "understand-source",
+                ScreenplayPlanPhase.EVIDENCE,
+            ),
+            ScreenplayPlanBinding(
+                "draft-analysis",
+                ScreenplayPlanPhase.CREATION,
+            ),
+        ),
+        plan_steps=plan_steps,
+    )
+
+    steps = compiled.recipe.steps
+    assert tuple(dict.fromkeys(step.plan_step_id for step in steps)) == tuple(
+        step.id for step in plan_steps
+    )
+    by_id = {step.id: step for step in steps}
+    validation_ids = {"episode:4:validation", "episode:5:validation"}
+    assert set(by_id["compose-final-response"].depends_on) == validation_ids
+    assert steps.index(by_id["compose-final-response"]) > max(
+        steps.index(by_id[unit_id]) for unit_id in validation_ids
+    )
+
+
 async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode():
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
@@ -632,6 +699,7 @@ async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode(
             ScreenplayPlanBinding("review", ScreenplayPlanPhase.REVIEW),
             ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
         ),
+        plan_steps=_bound_steps("understand", "review", "deliver"),
     )
 
     dimension_parts = [
@@ -1073,6 +1141,53 @@ async def _durable_screenplay_admission(
     return profile, request, plan, decision
 
 
+@pytest.mark.parametrize(
+    ("root_status", "expected_status"),
+    (
+        (RunStatus.FAILED, "failed"),
+        (RunStatus.CANCELED, "canceled"),
+    ),
+)
+async def test_admitted_operation_settles_when_root_fails_before_dispatch(
+    temp_db: DatabaseConnection,
+    root_status,
+    expected_status,
+):
+    profile, _request, _plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id=f"screenplay-predispatch-{expected_status}",
+        command_id=f"predispatch-{expected_status}",
+    )
+    turn_id = str(decision.metadata["turnId"])
+    assert await profile._turns.claim_turn(turn_id)
+    await profile._turns.attach_root_run(turn_id, f"run-{expected_status}")
+    lifecycle = _ScreenplayTurnRunLifecycle(
+        temp_db,
+        profile._turns,
+        profile._operations,
+        turn_id,
+    )
+
+    await lifecycle.on_run_finished(AgentRunResult(
+        run_id=f"run-{expected_status}",
+        status=root_status,
+        final_response="",
+        error=f"injected_{expected_status}_before_dispatch",
+    ))
+
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    turn = await profile._turns.load_turn(turn_id)
+    assert operation is not None and operation.status.value == expected_status
+    assert turn is not None and turn["status"] == expected_status
+
+    await lifecycle.on_run_finished(AgentRunResult(
+        run_id=f"run-{expected_status}",
+        status=root_status,
+        final_response="",
+        error=f"injected_{expected_status}_before_dispatch",
+    ))
+
+
 def _admission_dispatcher(db, profile):
     return profile.create_long_task_dispatcher(
         work_item_repository=SqliteWorkItemRepository(db),
@@ -1190,6 +1305,95 @@ async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_w
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_work_items"
     ) == {"count": 0}
+
+
+@pytest.mark.parametrize(
+    ("status", "turn_method", "expected_status"),
+    (
+        (LongTaskExecutionStatus.PAUSED, "pause_task", "paused"),
+        (LongTaskExecutionStatus.FAILED, "fail_task", "failed"),
+    ),
+)
+async def test_screenplay_terminal_settlement_rolls_back_operation_with_turn_failure(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    status,
+    turn_method,
+    expected_status,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id=f"screenplay-{expected_status}-atomic-test",
+        command_id=f"{expected_status}-atomic",
+    )
+    dispatcher = _admission_dispatcher(temp_db, profile)
+    receipt = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id=f"run-{expected_status}-atomic",
+    )
+    original_turn_transition = getattr(profile._turns, turn_method)
+
+    async def fail_after_turn_write(*args, **kwargs):
+        await original_turn_transition(*args, **kwargs)
+        raise RuntimeError("injected turn terminal write failure")
+
+    monkeypatch.setattr(profile._turns, turn_method, fail_after_turn_write)
+    result = LongTaskExecutionResult(
+        task_id=receipt.task_id,
+        status=status,
+        error="injected_terminal",
+    )
+    with pytest.raises(RuntimeError, match="turn terminal write failure"):
+        await dispatcher._settle_execution(receipt.task_id, result)
+
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    turn = await profile._turns.load_turn(decision.metadata["turnId"])
+    assert operation is not None and operation.status.value == "running"
+    assert turn is not None and turn["status"] == "running"
+
+    monkeypatch.setattr(profile._turns, turn_method, original_turn_transition)
+    await dispatcher._settle_execution(receipt.task_id, result)
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    turn = await profile._turns.load_turn(decision.metadata["turnId"])
+    assert operation is not None and operation.status.value == expected_status
+    assert turn is not None and turn["status"] == expected_status
+
+
+async def test_screenplay_exception_settlement_rolls_back_operation_with_turn_failure(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    profile, request, plan, decision = await _durable_screenplay_admission(
+        temp_db,
+        owner_id="screenplay-exception-atomic-test",
+        command_id="exception-atomic",
+    )
+    dispatcher = _admission_dispatcher(temp_db, profile)
+    receipt = await dispatcher.dispatch(
+        request,
+        plan,
+        decision,
+        parent_run_id="run-exception-atomic",
+    )
+    original_fail = profile._turns.fail_task
+
+    async def fail_after_turn_write(*args, **kwargs):
+        await original_fail(*args, **kwargs)
+        raise RuntimeError("injected exception turn write failure")
+
+    monkeypatch.setattr(profile._turns, "fail_task", fail_after_turn_write)
+    with pytest.raises(RuntimeError, match="exception turn write failure"):
+        await dispatcher._settle_exception(
+            receipt.task_id,
+            RuntimeError("unit infrastructure failed"),
+        )
+
+    operation = await profile._operations.load(decision.metadata["operationId"])
+    turn = await profile._turns.load_turn(decision.metadata["turnId"])
+    assert operation is not None and operation.status.value == "running"
+    assert turn is not None and turn["status"] == "running"
 
 
 async def test_turn_start_does_not_emit_a_host_authored_plan(

@@ -10,6 +10,9 @@ from application.screenplay_agent_profile import (
 )
 from application.writing_agent_profile import build_writing_profile_extension
 from infrastructure.screenplay import ScreenplayCandidateCompletionProjector
+from infrastructure.screenplay.agent_root_completion_projector import (
+    ScreenplayAgentRootCompletionProjector,
+)
 
 
 class _ChainedRunCommitProjector:
@@ -34,11 +37,14 @@ def create_agent_composition(
         skills_dir=kwargs.pop("skills_dir", None),
     )
     supplied_projector = kwargs.pop("run_commit_projector", None)
-    screenplay_projector = ScreenplayCandidateCompletionProjector(db)
+    screenplay_projectors = (
+        ScreenplayCandidateCompletionProjector(db),
+        ScreenplayAgentRootCompletionProjector(db),
+    )
     run_commit_projector = (
-        _ChainedRunCommitProjector(screenplay_projector, supplied_projector)
+        _ChainedRunCommitProjector(*screenplay_projectors, supplied_projector)
         if supplied_projector is not None
-        else screenplay_projector
+        else _ChainedRunCommitProjector(*screenplay_projectors)
     )
     return AgentComposition(
         db,

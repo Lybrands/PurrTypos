@@ -38,13 +38,18 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     ScreenplayOperationFinalizationCommand,
     SqliteScreenplayOperationFinalizer,
 )
+from infrastructure.screenplay.agent_root_completion_projector import (
+    ScreenplayAgentRootCompletionProjector,
+)
 from purra.contracts import (
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
+    RunStatus,
 )
+from purra.ports import RunCommit
 from purra.api import AgentCore
 from purra.errors import ModelGatewayError
 from purra.long_tasks import LongTaskUnitResult, RecipeLongTaskDispatcher
@@ -499,6 +504,83 @@ async def test_operation_finalization_rolls_back_every_write_on_failure(
         "WHERE operation_id = ? AND command_type = 'finalize'",
         [operation.id],
     ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_answer_projection_joins_root_transaction_and_replays(
+    screenplay_db,
+):
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-answer-projector-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Atomic answer root",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    root_run_id = "run-atomic-answer-projection"
+    turn_id = "turn-atomic-answer-projection"
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, binding_attributes_json) "
+        "VALUES (?, ?, 'running', 'agent', ?, ?, ?, ?, ?)",
+        [
+            root_run_id,
+            session["id"],
+            "解释当前项目",
+            "screenplay.conversation_turn",
+            workspace["project"]["id"],
+            "command-atomic-answer-projection",
+            json.dumps({
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+            }),
+        ],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content, "
+        "planner_run_id) VALUES (?, ?, ?, ?, 'planning', ?, ?)",
+        [
+            turn_id,
+            workspace["project"]["id"],
+            session["id"],
+            "command-atomic-answer-projection",
+            "解释当前项目",
+            root_run_id,
+        ],
+    )
+    projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
+    commit = RunCommit(
+        terminal_status=RunStatus.DONE,
+        final_response="当前项目正在进行素材梳理。",
+    )
+
+    with pytest.raises(RuntimeError, match="later projector failed"):
+        async with screenplay_db.transaction(cancellation_linearizable=True):
+            await projector.project(root_run_id, commit)
+            raise RuntimeError("later projector failed")
+    assert await screenplay_db.fetch_one(
+        "SELECT status, assistant_content FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [turn_id],
+    ) == {"status": "planning", "assistant_content": ""}
+
+    for _attempt in range(2):
+        async with screenplay_db.transaction(cancellation_linearizable=True):
+            await projector.project(root_run_id, commit)
+    assert await screenplay_db.fetch_one(
+        "SELECT status, assistant_content FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [turn_id],
+    ) == {
+        "status": "completed",
+        "assistant_content": "当前项目正在进行素材梳理。",
+    }
 
 
 @pytest.mark.asyncio
@@ -1280,6 +1362,167 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_work_items"
     ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_formal_business_projection_rolls_back_when_later_root_projector_fails(
+    screenplay_db,
+    monkeypatch,
+):
+    class RejectAfterScreenplayProjection:
+        def __init__(self):
+            self.commit = None
+
+        async def project(self, run_id, commit):
+            binding = await screenplay_db.fetch_one(
+                "SELECT binding_namespace FROM ai_agent_runs WHERE id = ?",
+                [run_id],
+            )
+            if (
+                commit.terminal_status is not None
+                and binding == {"binding_namespace": "screenplay.conversation_turn"}
+            ):
+                if (
+                    commit.terminal_status.value == "done"
+                    and self.commit is None
+                ):
+                    self.commit = commit
+                raise RuntimeError("injected later Root projection failure")
+
+    projects = ScreenplayV2ProjectService(screenplay_db)
+    workspace = await projects.create_project(
+        command_id="create-atomic-root-project",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": "Atomic formal root",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "意外重逢"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    plan = {
+        "needsTodos": True,
+        "title": "创作剧本",
+        "taskSpec": {
+            "goal": "创作剧本",
+            "operation": "create",
+            "instruction": "创作剧本",
+            "deliverable": "screenplayDraft",
+            "target": {"screenplay": {
+                "version": 1,
+                "scope": {"kind": "next_episodes", "count": 3},
+                "stepBindings": [
+                    {"stepId": "read", "phase": "evidence"},
+                    {"stepId": "create", "phase": "creation"},
+                    {"stepId": "deliver", "phase": "delivery"},
+                ],
+            }},
+        },
+        "todos": [
+            {"id": "read", "title": "读取", "type": "analyze", "executor": "model", "riskLevel": "read"},
+            {"id": "create", "title": "生成", "type": "write", "executor": "model", "riskLevel": "write"},
+            {"id": "deliver", "title": "交付", "type": "write", "executor": "model", "riskLevel": "write"},
+        ],
+    }
+    gateway = _ScriptedPlannerGateway([[
+        ModelStreamChunk(content_delta=json.dumps(plan, ensure_ascii=False)),
+        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+    ]])
+    monkeypatch.setattr(
+        agent_composition,
+        "ProviderModelGateway",
+        lambda *_args, **_kwargs: gateway,
+    )
+    monkeypatch.setattr(
+        composition_factory,
+        "build_screenplay_profile_extension",
+        lambda *, db, **_kwargs: ScreenplayAgentProfileExtension(
+            db,
+            resolver=_Resolver(),
+        ),
+    )
+    rejecting_projector = RejectAfterScreenplayProjection()
+    composition = create_agent_composition(
+        screenplay_db,
+        run_commit_projector=rejecting_projector,
+    )
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        unit_executor_factory=lambda _runtime: _UnitExecutor(screenplay_db),
+        projects=projects,
+    )
+    request = SubmitScreenplayAgentTurnRequest.model_validate({
+        "sessionId": session["id"],
+        "content": "连续创作后面三集",
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://api.deepseek.com/v1",
+            "options": {
+                "model": "deepseek-v4-flash",
+                "model_profile": "deepseek:deepseek-v4-flash",
+            },
+            "contextWindow": "128k",
+        },
+    })
+    turn = await service.submit_turn(
+        command_id="formal-atomic-root",
+        project_id=workspace["project"]["id"],
+        request=request,
+    )
+
+    try:
+        await service.execute_turn(turn["id"], request.runtime)
+    finally:
+        await composition.shutdown()
+
+    snapshot = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    projected_turn = snapshot["turns"][0]
+    root = await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [projected_turn["rootRunId"]],
+    )
+    terminal_events = await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ? AND kind = 'run.lifecycle' "
+        "AND json_extract(payload_json, '$.status') = 'done'",
+        [projected_turn["rootRunId"]],
+    )
+    assert root == {"status": "running"}
+    assert terminal_events == {"count": 0}
+    assert projected_turn["status"] == "running"
+    assert snapshot["operations"][0]["status"] == "running"
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions "
+        "WHERE agent_task_id = ?",
+        [snapshot["tasks"][0]["id"]],
+    ) == {"count": 0}
+
+    assert rejecting_projector.commit is not None
+    assert rejecting_projector.commit.terminal_status.value == "done"
+    retry_projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
+    for _attempt in range(2):
+        async with screenplay_db.transaction(cancellation_linearizable=True):
+            await retry_projector.project(
+                projected_turn["rootRunId"],
+                rejecting_projector.commit,
+            )
+    retried = await service.get_snapshot(
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+    )
+    assert retried["turns"][0]["status"] == "completed"
+    assert retried["operations"][0]["status"] == "succeeded"
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_revisions "
+        "WHERE agent_task_id = ?",
+        [snapshot["tasks"][0]["id"]],
+    ) == {"count": 1}
 
 
 @pytest.mark.asyncio
