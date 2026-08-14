@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from purra.contracts import RunStatus, StepStatus, TaskStepUpdate
+from purra.errors import ContractViolationError
 from purra.events import AgentEvent, CoreEventType
 from purra.output import RunLifecycleOutputDraft
 from purra.ports import RunCommit
@@ -48,6 +49,48 @@ class AgentCancellationService:
         normalized = str(run_id or "").strip()
         if not normalized:
             return None
+        root = await self._db.fetch_one(
+            "SELECT id, status, cancellation_epoch FROM ai_agent_runs "
+            "WHERE id = ?",
+            [normalized],
+        )
+        if root is None:
+            return None
+        persisted_receipt = await self._db.fetch_one(
+            "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+            [normalized],
+        )
+        if (
+            persisted_receipt is not None
+            and str(persisted_receipt.get("status") or "") == "completed"
+        ):
+            receipt_root_id = str(
+                persisted_receipt.get("root_run_id") or ""
+            ).strip()
+            receipt_epoch = int(
+                persisted_receipt.get("cancellation_epoch") or 0
+            )
+            if (
+                receipt_root_id != normalized
+                or str(root.get("id") or "") != normalized
+                or str(root.get("status") or "") != RunStatus.CANCELED.value
+                or receipt_epoch <= 0
+                or int(root.get("cancellation_epoch") or 0) != receipt_epoch
+                or persisted_receipt.get("completed_at_ms") is None
+            ):
+                raise ContractViolationError(
+                    "completed cancellation receipt conflicts with Root Run"
+                )
+            return {
+                "status": RunStatus.CANCELED.value,
+                "newlyRequested": False,
+                "childrenCanceled": int(
+                    persisted_receipt.get("children_canceled") or 0
+                ),
+                "terminalized": False,
+                "cancellationStatus": "completed",
+                "cancellationEpoch": receipt_epoch,
+            }
         state = await self._composition.execution_lease_store.get(normalized)
         if state is None:
             return None
