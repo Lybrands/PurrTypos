@@ -335,7 +335,7 @@ async def test_private_protocol_plan_steps_never_enter_public_journal():
 
 
 @pytest.mark.asyncio
-async def test_external_runtime_event_keeps_its_explicit_turn_association():
+async def test_durable_progress_is_persisted_privately_with_turn_association():
     repository = _Repository()
     publisher = _Publisher()
     processor = _processor_type()(repository, publisher)
@@ -345,13 +345,24 @@ async def test_external_runtime_event_keeps_its_explicit_turn_association():
         run_id="run-parent",
         turn_id="turn-product",
         event_type="long_task.progress",
-        payload={"taskId": "task-1", "completedUnits": 1},
+        payload={
+            "taskId": "task-1",
+            "completedUnits": 1,
+            "units": [{
+                "id": "recipe:validate",
+                "title": "校验候选稿",
+                "plannerStepId": "deliver",
+            }],
+        },
         occurred_at=_now(),
     ))
 
     assert event is not None
     assert event.turn_id == "turn-product"
-    assert publisher.published == [event]
+    assert event.visibility is OutputVisibility.PRIVATE
+    assert event.channel is OutputChannel.DIAGNOSTIC
+    assert event.payload["data"]["units"][0]["id"] == "recipe:validate"
+    assert publisher.published == []
 
 
 @pytest.mark.asyncio

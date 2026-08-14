@@ -398,7 +398,12 @@ class AgentOutputProcessor:
     ) -> AgentOutputEvent | None:
         if not isinstance(event, RuntimeOutputEvent):
             raise TypeError("output processor requires a RuntimeOutputEvent")
-        payload = _public_runtime_payload(event.event_type, event.payload)
+        private = event.event_type in _PRIVATE_RUNTIME_EVENT_TYPES
+        payload = (
+            thaw_json_mapping(event.payload)
+            if private
+            else _public_runtime_payload(event.event_type, event.payload)
+        )
         if payload is None:
             return None
         return await self._append(AgentOutputEventDraft(
@@ -413,8 +418,14 @@ class AgentOutputProcessor:
             source_event_key=f"runtime:{event.event_id}",
             source=OutputSource.RUNTIME,
             kind=OutputEventKind.RUNTIME,
-            channel=OutputChannel.LIFECYCLE,
-            visibility=OutputVisibility.PUBLIC,
+            channel=(
+                OutputChannel.DIAGNOSTIC
+                if private else OutputChannel.LIFECYCLE
+            ),
+            visibility=(
+                OutputVisibility.PRIVATE
+                if private else OutputVisibility.PUBLIC
+            ),
             payload={
                 "eventType": event.event_type,
                 "data": payload,
@@ -621,8 +632,9 @@ _PUBLIC_RUNTIME_EVENT_TYPES = frozenset({
     "conversation.compaction.completed",
     "task.admission_decided",
     "long_task.dispatched",
-    "long_task.progress",
 })
+
+_PRIVATE_RUNTIME_EVENT_TYPES = frozenset({"long_task.progress"})
 
 
 __all__ = ["AgentOutputProcessor", "OutputRecoveryObserver"]

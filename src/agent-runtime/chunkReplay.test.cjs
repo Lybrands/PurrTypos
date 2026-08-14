@@ -451,11 +451,6 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   const child = 'child-screenplay-research'
   const delegation = 'delegation-screenplay-research'
   const dependencies = { cfg: model, appMessage }
-  const candidateReceipt = {
-    revisionId: 'revision-candidate-1',
-    contentDigest: 'a'.repeat(64),
-    status: 'candidate',
-  }
   const childEvent = (sequence, overrides) => canonical(child, sequence, {
     turnId: seed.turnId,
     ...overrides,
@@ -496,49 +491,21 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
             type: 'analyze',
             executor: 'tool',
             status: 'running',
-            dependsOn: [],
+            depends_on: [],
           }, {
             id: 'draft-episode',
             title: '创作下一集',
             type: 'write',
             executor: 'model',
             status: 'pending',
-            dependsOn: ['collect-evidence'],
+            depends_on: ['collect-evidence'],
           }, {
             id: 'deliver-candidate',
             title: '交付候选稿',
             type: 'review',
             executor: 'model',
             status: 'pending',
-            dependsOn: ['draft-episode'],
-          }],
-        },
-      },
-    }),
-    canonical(root, 3, {
-      turnId: seed.turnId,
-      payload: {
-        eventType: 'long_task.dispatched',
-        data: { taskId: 'screenplay-task-1', status: 'running' },
-      },
-    }),
-    canonical(root, 4, {
-      turnId: seed.turnId,
-      payload: {
-        eventType: 'long_task.progress',
-        data: {
-          taskId: 'screenplay-task-1',
-          status: 'running',
-          units: [{
-            id: 'recipe-draft',
-            title: 'Recipe 生成正文',
-            status: 'running',
-            plannerStepId: 'draft-episode',
-          }, {
-            id: 'recipe-validate',
-            title: '校验候选稿',
-            status: 'pending',
-            plannerStepId: 'deliver-candidate',
+            depends_on: ['draft-episode'],
           }],
         },
       },
@@ -580,19 +547,38 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
     canonical(root, 8, {
       turnId: seed.turnId,
       payload: {
+        eventType: 'run.todo_updated',
+        data: {
+          step_id: 'collect-evidence',
+          status: 'running',
+          step: {
+            id: 'collect-evidence',
+            title: '理解原作依据',
+            type: 'analyze',
+            executor: 'tool',
+            status: 'done',
+            depends_on: [],
+            result_summary: '已读取并核验原作依据',
+          },
+        },
+      },
+    }),
+    canonical(root, 9, {
+      turnId: seed.turnId,
+      payload: {
         eventType: 'conversation.compaction.started',
         data: { status: 'running', beforeTokens: 12000 },
       },
     }),
-    canonical(root, 9, {
+    canonical(root, 10, {
       turnId: seed.turnId,
       payload: {
         eventType: 'conversation.compaction.completed',
         data: { status: 'completed', beforeTokens: 12000, afterTokens: 4800 },
       },
     }),
-    delegationEvent(10, { eventType: 'status', status: 'running' }),
-    delegationEvent(11, {
+    delegationEvent(11, { eventType: 'status', status: 'running' }),
+    delegationEvent(12, {
       eventType: 'child_output',
       status: 'running',
       event: childEvent(1, {
@@ -608,7 +594,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         },
       }),
     }),
-    delegationEvent(12, {
+    delegationEvent(13, {
       eventType: 'child_output',
       status: 'running',
       event: childEvent(2, {
@@ -620,7 +606,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         },
       }),
     }),
-    delegationEvent(13, {
+    delegationEvent(14, {
       eventType: 'child_output',
       status: 'running',
       event: childEvent(3, {
@@ -632,7 +618,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         payload: { delta: '三条场景证据已核验。' },
       }),
     }),
-    delegationEvent(14, {
+    delegationEvent(15, {
       eventType: 'child_output',
       status: 'running',
       event: childEvent(4, {
@@ -643,8 +629,8 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         payload: { finishReason: 'stop' },
       }),
     }),
-    delegationEvent(15, { eventType: 'status', status: 'done' }),
-    canonical(root, 16, {
+    delegationEvent(16, { eventType: 'status', status: 'done' }),
+    canonical(root, 17, {
       turnId: seed.turnId,
       payload: {
         eventType: 'run.todos_updated',
@@ -659,38 +645,67 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
             type: 'analyze',
             executor: 'tool',
             status: 'done',
-            dependsOn: [],
+            depends_on: [],
+            result_summary: '已读取并核验原作依据',
           }, {
             id: 'draft-episode',
             title: '根据证据完成下一集',
             description: '检查点调整后的创作说明',
             type: 'write',
             executor: 'model',
-            status: 'done',
-            dependsOn: ['collect-evidence'],
+            status: 'running',
+            depends_on: ['collect-evidence'],
           }, {
             id: 'deliver-candidate',
             title: '交付下一集候选稿',
             type: 'review',
             executor: 'model',
-            status: 'running',
-            dependsOn: ['draft-episode'],
+            status: 'pending',
+            depends_on: ['draft-episode'],
           }],
         },
       },
     }),
-    canonical(root, 17, {
+    canonical(root, 18, {
       turnId: seed.turnId,
-      source: 'domain',
-      kind: 'domain.effect',
-      channel: 'diagnostic',
-      visibility: 'private',
       payload: {
-        type: 'screenplay.candidate.ready',
-        payload: candidateReceipt,
+        eventType: 'run.todo_updated',
+        data: {
+          step_id: 'draft-episode',
+          status: 'running',
+          step: {
+            id: 'draft-episode',
+            title: '根据证据完成下一集',
+            description: '检查点调整后的创作说明',
+            type: 'write',
+            executor: 'model',
+            status: 'done',
+            depends_on: ['collect-evidence'],
+            result_summary: '下一集正文候选已经完成',
+          },
+        },
       },
     }),
-    canonical(root, 18, {
+    canonical(root, 19, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'run.todo_updated',
+        data: {
+          step_id: 'deliver-candidate',
+          status: 'running',
+          step: {
+            id: 'deliver-candidate',
+            title: '交付下一集候选稿',
+            type: 'review',
+            executor: 'model',
+            status: 'done',
+            depends_on: ['draft-episode'],
+            result_summary: '候选稿已完成权威校验并准备交付',
+          },
+        },
+      },
+    }),
+    canonical(root, 20, {
       turnId: seed.turnId,
       outputStreamId: 'root-final',
       invocationId: 'root-final-invocation',
@@ -699,7 +714,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
       channel: 'final',
       payload: { delta: '下一集候选稿已经完成。' },
     }),
-    canonical(root, 19, {
+    canonical(root, 21, {
       turnId: seed.turnId,
       outputStreamId: 'root-final',
       invocationId: 'root-final-invocation',
@@ -707,7 +722,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
       channel: 'final',
       payload: { finishReason: 'stop' },
     }),
-    canonical(root, 20, {
+    canonical(root, 22, {
       turnId: seed.turnId,
       kind: 'run.lifecycle',
       payload: { status: 'done' },
@@ -720,10 +735,12 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   chunks.forEach((chunk) => replay.dispatch(seed, chunk, dependencies))
   const restored = replay.assistant(seed.turnId)
 
+  assert.equal(chunks.some((chunk) => chunk?.visibility === 'private'), false)
+  assert.equal(JSON.stringify(chunks).includes('Recipe 生成正文'), false)
+  assert.equal(JSON.stringify(chunks).includes('plannerStepId'), false)
   assert.deepEqual(restored, live)
   assert.equal(restored?.agentRunId, root)
   assert.equal(restored?.content, '下一集候选稿已经完成。')
-  assert.equal(restored?.longTaskId, 'screenplay-task-1')
   assert.equal(restored?.taskPlan?.runId, root)
   assert.equal(restored?.taskPlan?.status, 'done')
   assert.deepEqual(
@@ -736,7 +753,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
     [
       ['collect-evidence', '理解原作依据', 'done', []],
       ['draft-episode', '根据证据完成下一集', 'done', ['collect-evidence']],
-      ['deliver-candidate', '交付下一集候选稿', 'running', ['draft-episode']],
+      ['deliver-candidate', '交付下一集候选稿', 'done', ['draft-episode']],
     ],
   )
   const publicPlan = JSON.stringify(restored?.taskPlan)
@@ -764,14 +781,13 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
     childMessage?.canonicalOutput?.operationOrder,
     ['child-tool-verify'],
   )
-  const candidateEvent = chunks.find((chunk) => (
-    chunk?.kind === 'domain.effect'
-    && chunk?.payload?.type === 'screenplay.candidate.ready'
-  ))
-  assert.deepEqual(candidateEvent?.payload?.payload, candidateReceipt)
-  assert.equal(
-    JSON.stringify(restored?.canonicalOutput).includes('revision-candidate-1'),
-    false,
+  assert.deepEqual(
+    restored?.taskPlan?.steps.map((step) => step.resultSummary),
+    [
+      '已读取并核验原作依据',
+      '下一集正文候选已经完成',
+      '候选稿已完成权威校验并准备交付',
+    ],
   )
 })
 
