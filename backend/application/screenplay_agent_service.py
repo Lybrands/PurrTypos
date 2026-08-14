@@ -81,6 +81,7 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
+from infrastructure.persistence.run_execution_store import now_ms
 
 
 _ACTIVE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -620,6 +621,12 @@ class ScreenplayAgentService:
         root_executions_signaled = False
         while True:
             rows = await self._truncate_rows(turn_id)
+            checked_at = now_ms()
+            for row in rows:
+                await self._repository.release_expired_canceled_claim(
+                    str(row["turn_id"]),
+                    checked_at,
+                )
             root_ids = tuple(dict.fromkeys(
                 str(row.get("root_run_id") or "").strip()
                 for row in rows
