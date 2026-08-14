@@ -82,6 +82,7 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "heartbeat_at_ms",
         "execution_attempt",
         "cancel_requested_at_ms",
+        "cancellation_epoch",
         "final_response",
         "create_time",
         "update_time",
@@ -157,6 +158,11 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
 @pytest.mark.asyncio
 async def test_host_child_lineage_does_not_require_a_delegation_claim(run_db):
     repository = SqliteRunRepository(run_db)
+    await run_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt, root_run_id) VALUES "
+        "('run-root', 'running', '', 'run-root'), "
+        "('run-parent', 'running', '', 'run-root')"
+    )
 
     run_id = await repository.create(RunCreateParams(
         session_id=None,
