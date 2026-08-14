@@ -253,6 +253,29 @@ class SqliteScreenplayAgentRepository:
             changed = await self._db.fetch_one("SELECT changes() AS count")
             return int((changed or {}).get("count") or 0) == 1
 
+    async def release_expired_canceled_claim(
+        self,
+        turn_id: str,
+        now: int,
+    ) -> bool:
+        """Release only an expired foreign claim after cancellation was fenced."""
+
+        checked_at = int(now)
+        async with self._mutation_transaction():
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET execution_owner_id = NULL, "
+                "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+                "AND status IN ('queued', 'planning', 'running', 'paused') "
+                "AND cancel_requested_at_ms IS NOT NULL "
+                "AND execution_owner_id IS NOT NULL "
+                "AND lease_expires_at_ms IS NOT NULL "
+                "AND lease_expires_at_ms <= ?",
+                [turn_id, checked_at],
+            )
+            changed = await self._db.fetch_one("SELECT changes() AS count")
+            return int((changed or {}).get("count") or 0) == 1
+
     async def record_intent(
         self,
         turn_id: str,
