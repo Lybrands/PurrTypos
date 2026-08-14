@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from application.screenplay_checkpoint_planning import (
+    SqliteScreenplayCheckpointRepository,
+)
 from domains.screenplay_agent.agent_context import SCREENPLAY_AGENT_DOMAIN_NAMESPACE
 from purra.contracts import RunCreateParams
 from purra.errors import ContractViolationError
@@ -89,6 +92,13 @@ class ScreenplayContinuationBeginProjector:
             or source != {"status": "canceled"}
         ):
             raise ContractViolationError("screenplay continuation identity conflicts")
+        await SqliteScreenplayCheckpointRepository(
+            self._db
+        ).rebind_for_continuation(
+            operation_id=operation_id,
+            source_root_run_id=source_root,
+            continuation_root_run_id=run_id,
+        )
         await self._db.execute(
             "UPDATE screenplay_agent_operation_commands SET "
             "continuation_status = 'bound', continuation_root_run_id = ?, "

@@ -1304,6 +1304,14 @@ async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
         project_id=str(turn["project_id"]),
         owner_id="continuation-owner",
     )
+    await screenplay_db.execute(
+        "INSERT INTO screenplay_checkpoint_plans "
+        "(operation_id, task_id, checkpoint_key, root_run_id, status, "
+        "input_digest, outcome, error_code) "
+        "VALUES (?, 'task-atomic-finalizer', 'episode:4', ?, 'paused', ?, "
+        "'requires_reresolution', 'scope_changed')",
+        [paused.id, source_root_run_id, "sha256:" + "e" * 64],
+    )
     params = RunCreateParams(
         session_id=int(turn["session_id"]),
         prompt="continue",
@@ -1349,6 +1357,17 @@ async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
         "continuation_status": "bound",
         "continuation_root_run_id": begun.run_id,
     }
+    assert await screenplay_db.fetch_one(
+        "SELECT root_run_id, status, outcome, error_code FROM "
+        "screenplay_checkpoint_plans WHERE operation_id = ? AND "
+        "checkpoint_key = 'episode:4'",
+        [paused.id],
+    ) == {
+        "root_run_id": begun.run_id,
+        "status": "continuation_retry",
+        "outcome": "requires_reresolution",
+        "error_code": "scope_changed",
+    }
     with pytest.raises(ContractViolationError):
         await repository.begin_run_lifecycle(
             params,
@@ -1387,6 +1406,14 @@ async def test_continuation_begin_failure_rolls_back_root_receipt_and_turn(
         session_id=int(turn["session_id"]),
         project_id=str(turn["project_id"]),
         owner_id="rollback-owner",
+    )
+    await screenplay_db.execute(
+        "INSERT INTO screenplay_checkpoint_plans "
+        "(operation_id, task_id, checkpoint_key, root_run_id, status, "
+        "input_digest, outcome, error_code) "
+        "VALUES (?, 'task-atomic-finalizer', 'episode:4', ?, 'paused', ?, "
+        "'requires_reresolution', 'scope_changed')",
+        [paused.id, source_root_run_id, "sha256:" + "f" * 64],
     )
 
     class RejectAfterProjection:
@@ -1448,6 +1475,14 @@ async def test_continuation_begin_failure_rolls_back_root_receipt_and_turn(
         "binding_command_id = ?",
         [command_id],
     ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT root_run_id, status FROM screenplay_checkpoint_plans "
+        "WHERE operation_id = ? AND checkpoint_key = 'episode:4'",
+        [paused.id],
+    ) == {
+        "root_run_id": source_root_run_id,
+        "status": "paused",
+    }
     assert await operations.release_continuation_start(
         command_id=command_id,
         owner_id="rollback-owner",
@@ -2245,7 +2280,7 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_scope_change_pauses_operation_turn_and_root(
+async def test_checkpoint_scope_change_pauses_then_explicit_continuation_replans(
     screenplay_db,
     monkeypatch,
 ):
@@ -2298,6 +2333,13 @@ async def test_checkpoint_scope_change_pauses_operation_turn_and_root(
             })),
             ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
         ],
+        [
+            ModelStreamChunk(content_delta=json.dumps({
+                "protocol": "screenplay.checkpoint-plan.v1",
+                "outcome": "unchanged",
+            })),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
     ])
     monkeypatch.setattr(
         agent_composition,
@@ -2346,44 +2388,75 @@ async def test_checkpoint_scope_change_pauses_operation_turn_and_root(
     )
     try:
         await service.execute_turn(turn["id"], request.runtime)
+        snapshot = await service.get_snapshot(
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+        )
+        old_root_run_id = snapshot["turns"][0]["rootRunId"]
+        old_root_event_count = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+            [old_root_run_id],
+        )
+        resumed = await service.prepare_resume(
+            snapshot["operations"][0]["id"],
+            idempotency_key="resume-checkpoint-scope-change",
+            request=ResumeScreenplayOperationRequest.model_validate({
+                "expectedOperationRevision": snapshot["operations"][0][
+                    "revision"
+                ],
+                "runtime": request.runtime.model_dump(mode="json"),
+            }),
+        )
+        await service.execute_resumed_operation(
+            resumed["operationId"],
+            request.runtime,
+            continuation_command="resume-checkpoint-scope-change",
+        )
+        completed = await service.get_snapshot(
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+        )
     finally:
         await composition.shutdown()
 
-    snapshot = await service.get_snapshot(
-        project_id=workspace["project"]["id"],
-        session_id=session["id"],
-    )
     assert snapshot["turns"][0]["status"] == "paused"
     assert snapshot["operations"][0]["status"] == "paused"
     assert snapshot["tasks"][0]["status"] == "paused"
     assert snapshot["operations"][0]["error"]["code"] == (
         "checkpoint_scope_requires_reresolution"
     )
-    root_run_id = snapshot["turns"][0]["rootRunId"]
     assert await screenplay_db.fetch_one(
         "SELECT status FROM ai_agent_runs WHERE id = ?",
-        [root_run_id],
+        [old_root_run_id],
     ) == {"status": "canceled"}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs "
         "WHERE parent_run_id IS NULL",
-    ) == {"count": 1}
+    ) == {"count": 2}
+    assert completed["turns"][0]["status"] == "completed"
     assert await screenplay_db.fetch_one(
-        "SELECT parent_run_id, root_run_id, agent_role, binding_namespace "
-        "FROM ai_agent_runs WHERE parent_run_id IS NOT NULL",
-    ) == {
-        "parent_run_id": root_run_id,
-        "root_run_id": root_run_id,
-        "agent_role": "screenplay-part",
-        "binding_namespace": "screenplay.checkpoint_plan",
-    }
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+        "binding_namespace = 'screenplay.checkpoint_plan'",
+    ) == {"count": 2}
     assert await screenplay_db.fetch_one(
         "SELECT status, outcome, error_code FROM screenplay_checkpoint_plans"
     ) == {
-        "status": "paused",
-        "outcome": "requires_reresolution",
-        "error_code": "checkpoint_scope_requires_reresolution",
+        "status": "applied",
+        "outcome": "unchanged",
+        "error_code": None,
     }
+    new_root_run_id = completed["turns"][0]["rootRunId"]
+    assert new_root_run_id != old_root_run_id
+    assert completed["operations"][0]["status"] == "succeeded"
+    assert completed["tasks"][0]["status"] == "completed"
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [new_root_run_id],
+    ) == {"status": "done"}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+        [old_root_run_id],
+    ) == old_root_event_count
 
 
 @pytest.mark.asyncio
