@@ -24,6 +24,9 @@ from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     ScreenplayOperationFinalizationCommand,
     SqliteScreenplayOperationFinalizer,
 )
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
 
 
 _ROOT_BINDING_NAMESPACE = "screenplay.conversation_turn"
@@ -47,6 +50,7 @@ class ScreenplayAgentRootCompletionProjector:
             candidate_assembler=ScreenplayCandidateAssembler(db),
         )
         self._operations = SqliteScreenplayOperationRepository(db)
+        self._long_tasks = SqliteLongTaskRepository(db)
         self._turns = SqliteScreenplayAgentRepository(
             db,
             owner_id="screenplay-root-projector",
@@ -181,13 +185,31 @@ class ScreenplayAgentRootCompletionProjector:
         if operation is None:
             raise LookupError("screenplay Root Operation does not exist")
         task = (
-            await self._db.fetch_one(
-                "SELECT status FROM ai_agent_long_tasks WHERE id = ?",
-                [operation.long_task_id],
-            )
+            await self._long_tasks.load(operation.long_task_id)
             if operation.long_task_id else None
         )
-        if status is RunStatus.CANCELED and task == {"status": "paused"}:
+        explicit_cancel = (
+            turn.get("cancel_requested_at_ms") is not None
+            or operation.cancel_requested_at_ms is not None
+        )
+        if status is RunStatus.CANCELED and explicit_cancel:
+            if task is not None and not task.status.terminal:
+                await self._long_tasks.cancel(task.id)
+            receipt_id = str(turn.get("cancel_receipt_id") or "").strip()
+            if not receipt_id:
+                raise ValueError(
+                    "screenplay explicit cancel has no durable receipt"
+                )
+            await self._operations.settle_cancel(
+                str(turn["id"]),
+                receipt_id=receipt_id,
+            )
+            return
+        if (
+            status is RunStatus.CANCELED
+            and task is not None
+            and task.status.value == "paused"
+        ):
             paused = await self._db.fetch_one(
                 "SELECT error_code FROM screenplay_checkpoint_plans "
                 "WHERE operation_id = ? AND status = 'paused' "
