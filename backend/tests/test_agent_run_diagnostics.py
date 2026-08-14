@@ -228,16 +228,6 @@ async def test_diagnostics_aggregates_durable_child_run_evidence(
         "long_task.dispatched",
         {"taskId": "task-workflow"},
     )
-    await append_event(
-        temp_db,
-        root_run_id,
-        "run.completed",
-        {"status": "done"},
-    )
-    await temp_db.execute(
-        "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
-        [root_run_id],
-    )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
         "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
@@ -299,6 +289,16 @@ async def test_diagnostics_aggregates_durable_child_run_evidence(
     await temp_db.execute(
         "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
         [child_run_id],
+    )
+    await append_event(
+        temp_db,
+        root_run_id,
+        "run.completed",
+        {"status": "done"},
+    )
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
+        [root_run_id],
     )
 
     response = await get_agent_run_diagnostics(root_run_id)
