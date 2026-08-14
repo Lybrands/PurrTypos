@@ -66,6 +66,7 @@ from application.model_runtime import (
 from application.request_mapping import context_window_tokens
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent import (
+    ContinuationStartLost,
     ScreenplayIntentCommandMismatchError,
     ScreenplayStageCommand,
 )
@@ -414,7 +415,7 @@ class ScreenplayAgentService:
         turn_id: str,
         error: Exception,
     ) -> None:
-        if isinstance(error, RunCommitProjectionError):
+        if isinstance(error, (ContinuationStartLost, RunCommitProjectionError)):
             # The Root terminal transaction rolled back in full. Leave the
             # durable business state retryable instead of compensating it into
             # a terminal product failure outside that transaction.
@@ -1008,7 +1009,9 @@ class _ScreenplayContinuationRunLifecycle(_ScreenplayTurnRunLifecycle):
             or str(command.get("continuation_identity_digest") or "")
             != str(self._reservation.get("continuation_identity_digest") or "")
         ):
-            raise ValueError("screenplay continuation reservation was lost")
+            raise ContinuationStartLost(
+                "screenplay continuation reservation was lost"
+            )
 
     async def on_start_failed(self, code: str):
         del code

@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from application.screenplay_agent_service import ScreenplayAgentService, _ACTIVE_TASKS
+from application.screenplay_agent_service import (
+    ScreenplayAgentService,
+    _ACTIVE_TASKS,
+    _ScreenplayContinuationRunLifecycle,
+)
 from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
@@ -30,6 +34,7 @@ from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from domains.screenplay_agent import (
+    ContinuationStartLost,
     OperationUsage,
     ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
@@ -1594,6 +1599,73 @@ async def test_continuation_reservation_rejects_identity_mismatch_and_reclaims_e
 
 
 @pytest.mark.asyncio
+async def test_lost_continuation_starter_does_not_fail_winner_business_state(
+    screenplay_db,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    command_id = "resume-lost-starter-benign"
+    resumed = await operations.resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot={"digest": "sha256:" + "e" * 64},
+    )
+    first = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="old-starter",
+    )
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_operation_commands SET "
+        "continuation_lease_expires_at_ms = 0 WHERE command_id = ?",
+        [command_id],
+    )
+    winner = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="new-starter",
+    )
+    lifecycle = _ScreenplayContinuationRunLifecycle(
+        screenplay_db,
+        SqliteScreenplayAgentRepository(screenplay_db, owner_id="old-starter"),
+        operations,
+        turn_id,
+        source_root_run_id=source_root_run_id,
+        continuation_command=command_id,
+        reservation=first,
+    )
+    with pytest.raises(ContinuationStartLost, match="reservation was lost") as lost:
+        await lifecycle.before_submit()
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="old-starter",
+        projects=object(),
+    )
+
+    await service._settle_execution_exception(turn_id, lost.value)
+
+    current = await operations.load(resumed.id)
+    persisted_turn = await screenplay_db.fetch_one(
+        "SELECT status FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    )
+    assert current is not None and current.status.value == "running"
+    assert persisted_turn == {"status": "running"}
+    assert int(winner["continuation_epoch"]) == int(first["continuation_epoch"]) + 1
+
+
+@pytest.mark.asyncio
 async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
     screenplay_db,
 ):
@@ -1681,7 +1753,7 @@ async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
         "outcome": "requires_reresolution",
         "error_code": "scope_changed",
     }
-    with pytest.raises(ContractViolationError):
+    with pytest.raises(ContinuationStartLost):
         await repository.begin_run_lifecycle(
             params,
             AgentEvent(
