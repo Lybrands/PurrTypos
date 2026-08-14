@@ -202,6 +202,17 @@ async def fence_cancellation_tree(db, root_run_id: str) -> dict[str, Any]:
         "WHERE (id = ? OR root_run_id = ?) AND status = 'running'",
         [requested_at, normalized_root, normalized_root],
     )
+    # A host-child reservation may exist before its Child Run is begun/bound.
+    # Close that crash window in the same Root fence transaction.  Stable
+    # identity, generation, and attempt audit remain intact for fail-closed
+    # reconciliation; only the active reservation lease is relinquished.
+    await db.execute(
+        "UPDATE ai_agent_host_child_runs SET reservation_owner = NULL, "
+        "reservation_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
+        "WHERE run_id IS NULL AND CASE WHEN json_valid(contract_json) "
+        "THEN json_extract(contract_json, '$.rootRunId') ELSE NULL END = ?",
+        [normalized_root],
+    )
     descendants = await db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ? "
         "AND id <> ? AND status = 'running'",
