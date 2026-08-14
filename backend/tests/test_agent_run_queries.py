@@ -635,6 +635,16 @@ async def test_session_latest_exposes_an_unposted_active_request_for_fresh_recov
 
 async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     run_id = await _seed_run(temp_db)
+    reservation = await SqliteHostChildRunRegistry(
+        temp_db,
+        reservation_ttl_ms=60_000,
+    ).reserve(
+        host_child_key="terminal-root-unbound-child",
+        identity_digest="terminal-root-unbound-child-digest",
+        contract={"rootRunId": run_id, "parentRunId": run_id},
+        owner_token="terminal-root-worker",
+        timestamp_ms=now_ms(),
+    )
     app = FastAPI()
     app.include_router(ai_router, prefix="/api")
 
@@ -673,6 +683,17 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert snapshot["todos"][0]["status"] == "blocked"
     assert snapshot["events"][-1]["type"] == "run.lifecycle"
     assert snapshot["events"][-1]["payload"]["status"] == "canceled"
+    assert await temp_db.fetch_one(
+        "SELECT generation, attempt_key, reservation_owner, "
+        "reservation_expires_at_ms FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = ?",
+        [reservation.host_child_key],
+    ) == {
+        "generation": reservation.generation,
+        "attempt_key": reservation.attempt_key,
+        "reservation_owner": None,
+        "reservation_expires_at_ms": None,
+    }
 
 
 async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):
@@ -771,6 +792,33 @@ async def test_root_cancel_fence_rejects_new_child_run_and_host_receipt(temp_db)
         heartbeat_at_ms=timestamp,
         lease_expires_at_ms=timestamp + 60_000,
     )
+    foreign_root_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="foreign root",
+        mode="agent",
+    )
+    registry = SqliteHostChildRunRegistry(temp_db, reservation_ttl_ms=60_000)
+    reserved = await registry.reserve(
+        host_child_key="reserved-before-root-cancel",
+        identity_digest="reserved-child-digest",
+        contract={
+            "rootRunId": root_run_id,
+            "parentRunId": root_run_id,
+        },
+        owner_token="reserved-worker",
+        timestamp_ms=timestamp,
+    )
+    foreign = await registry.reserve(
+        host_child_key="foreign-reservation",
+        identity_digest="foreign-child-digest",
+        contract={
+            "rootRunId": foreign_root_run_id,
+            "parentRunId": foreign_root_run_id,
+        },
+        owner_token="foreign-worker",
+        timestamp_ms=timestamp,
+    )
     result = await AgentCancellationService(
         temp_db,
         get_agent_composition(),
@@ -813,6 +861,26 @@ async def test_root_cancel_fence_rejects_new_child_run_and_host_receipt(temp_db)
         "SELECT COUNT(*) AS count FROM ai_agent_host_child_runs "
         "WHERE host_child_key = 'late-host-child'"
     ) == {"count": 0}
+    assert await temp_db.fetch_one(
+        "SELECT generation, attempt_key, identity_digest, reservation_owner, "
+        "reservation_expires_at_ms FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = ?",
+        [reserved.host_child_key],
+    ) == {
+        "generation": reserved.generation,
+        "attempt_key": reserved.attempt_key,
+        "identity_digest": reserved.identity_digest,
+        "reservation_owner": None,
+        "reservation_expires_at_ms": None,
+    }
+    assert await temp_db.fetch_one(
+        "SELECT reservation_owner, reservation_expires_at_ms "
+        "FROM ai_agent_host_child_runs WHERE host_child_key = ?",
+        [foreign.host_child_key],
+    ) == {
+        "reservation_owner": "foreign-worker",
+        "reservation_expires_at_ms": timestamp + 60_000,
+    }
 
 
 async def test_child_attach_waiting_on_root_cancel_transaction_sees_fence(
@@ -877,6 +945,20 @@ async def test_root_cancel_fence_transaction_rolls_back_every_write(
     monkeypatch,
 ):
     root_run_id = await _seed_run(temp_db)
+    reservation_timestamp = now_ms()
+    reserved = await SqliteHostChildRunRegistry(
+        temp_db,
+        reservation_ttl_ms=60_000,
+    ).reserve(
+        host_child_key="rollback-host-child",
+        identity_digest="rollback-host-child-digest",
+        contract={
+            "rootRunId": root_run_id,
+            "parentRunId": root_run_id,
+        },
+        owner_token="rollback-worker",
+        timestamp_ms=reservation_timestamp,
+    )
     original_execute = temp_db.execute
 
     async def fail_delegation_cancel(sql, params=None):
@@ -904,6 +986,14 @@ async def test_root_cancel_fence_transaction_rolls_back_every_write(
         "SELECT root_run_id FROM ai_agent_run_cancellations WHERE root_run_id = ?",
         [root_run_id],
     ) is None
+    assert await temp_db.fetch_one(
+        "SELECT reservation_owner, reservation_expires_at_ms "
+        "FROM ai_agent_host_child_runs WHERE host_child_key = ?",
+        [reserved.host_child_key],
+    ) == {
+        "reservation_owner": "rollback-worker",
+        "reservation_expires_at_ms": reservation_timestamp + 60_000,
+    }
 
 
 async def test_root_cancel_receipt_recovers_draining_tree_after_restart(temp_db):
