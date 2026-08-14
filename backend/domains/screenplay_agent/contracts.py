@@ -22,6 +22,10 @@ class ScreenplayIntentCommandMismatchError(ValueError):
     code = "screenplay_intent_command_mismatch"
 
 
+class ContinuationStartLost(RuntimeError):
+    """A valid continuation starter lost its durable reservation fence."""
+
+
 class ScreenplayScopeKind(StrEnum):
     CURRENT_STAGE = "current_stage"
     NEXT_EPISODES = "next_episodes"
