@@ -8,6 +8,7 @@ from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
 from domains.screenplay_agent.agent_context import SCREENPLAY_AGENT_DOMAIN_NAMESPACE
+from domains.screenplay_agent import ContinuationStartLost
 from purra.contracts import RunCreateParams
 from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
@@ -66,12 +67,16 @@ class ScreenplayContinuationBeginProjector:
             "session": int(params.session_id or 0),
             "project": str(binding.aggregate_id or ""),
         }
-        if (
-            command is None
-            or str(command.get("operation_id") or "") != expected["operation"]
-            or str(command.get("continuation_status") or "") != "starting"
+        if command is None or (
+            str(command.get("continuation_status") or "") != "starting"
             or str(command.get("continuation_owner_id") or "") != owner_id
             or int(command.get("continuation_epoch") or 0) != epoch
+        ):
+            raise ContinuationStartLost(
+                "screenplay continuation reservation was lost"
+            )
+        if (
+            str(command.get("operation_id") or "") != expected["operation"]
             or str(command.get("continuation_identity_digest") or "")
             != identity_digest
             or str(command.get("continuation_source_root_run_id") or "")
@@ -112,7 +117,9 @@ class ScreenplayContinuationBeginProjector:
         )
         changed = await self._db.fetch_one("SELECT changes() AS count")
         if int((changed or {}).get("count") or 0) != 1:
-            raise ContractViolationError("screenplay continuation reservation was lost")
+            raise ContinuationStartLost(
+                "screenplay continuation reservation was lost"
+            )
         await self._db.execute(
             "UPDATE screenplay_agent_turns SET planner_run_id = ?, "
             "update_time = CURRENT_TIMESTAMP WHERE id = ? "
@@ -121,7 +128,9 @@ class ScreenplayContinuationBeginProjector:
         )
         changed = await self._db.fetch_one("SELECT changes() AS count")
         if int((changed or {}).get("count") or 0) != 1:
-            raise ContractViolationError("screenplay continuation Turn rotation failed")
+            raise ContinuationStartLost(
+                "screenplay continuation Turn rotation was lost"
+            )
         return None
 
 
