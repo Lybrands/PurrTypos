@@ -838,7 +838,7 @@ class SqliteLongTaskRepository:
             return await self._require(task.id)
 
     async def cancel(self, task_id: str) -> LongTaskRecord:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             task = await self._require(task_id)
             if task.status is LongTaskStatus.CANCELED:
                 return task
@@ -872,7 +872,7 @@ class SqliteLongTaskRepository:
             if requested_at_ms is None
             else int(requested_at_ms)
         )
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             task = await self._require(task_id)
             if task.status.terminal:
                 return task

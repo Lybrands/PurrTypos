@@ -132,7 +132,7 @@ class SqliteScreenplayOperationRepository:
         normalized_run_id = _required(run_id, "Operation usage Run id")
         if not isinstance(usage, OperationUsage):
             raise TypeError("screenplay Operation usage must be OperationUsage")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             existing = await self._db.fetch_one(
                 "SELECT * FROM screenplay_agent_operation_usage "
                 "WHERE operation_id = ? AND run_id = ?",
