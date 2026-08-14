@@ -104,7 +104,14 @@ class ScreenplayCheckpointPlanner:
                 user_payload=payload,
                 binding_namespace="screenplay.checkpoint_plan",
                 binding_aggregate_id=value.project_id,
-                binding_command_id=f"{value.task_id}:{value.checkpoint_key}",
+                # A continuation is a new Root lifecycle and must not reuse a
+                # terminal checkpoint Child whose lineage belongs to the old
+                # Root. Retries within the same Root retain the same durable
+                # key and therefore still read back the authoritative result.
+                binding_command_id=(
+                    f"{value.task_id}:{value.checkpoint_key}:"
+                    f"{value.root_run_id}"
+                ),
                 conversation_turn_id=value.turn_id,
                 task_id=value.task_id,
                 unit_id=f"checkpoint:{value.checkpoint_key}",
@@ -259,6 +266,279 @@ class SqliteScreenplayCheckpointRepository:
             [task_id],
         )
 
+    async def continuation_plan_roots(
+        self,
+        root_run_id: str,
+    ) -> tuple[str | None, str]:
+        current = str(root_run_id or "").strip()
+        if not current:
+            raise ScreenplayCheckpointStateError(
+                "checkpoint continuation Root is missing"
+            )
+        immediate: str | None = None
+        origin = current
+        visited = {current}
+        while True:
+            row = await self._db.fetch_one(
+                "SELECT binding_attributes_json FROM ai_agent_runs WHERE id = ?",
+                [origin],
+            )
+            if row is None:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation Root does not exist"
+                )
+            try:
+                attributes = json.loads(
+                    str(row.get("binding_attributes_json") or "{}")
+                )
+            except (TypeError, ValueError) as error:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation binding is invalid"
+                ) from error
+            previous = str(
+                (
+                    attributes.get("continuationOf")
+                    if isinstance(attributes, Mapping) else ""
+                ) or ""
+            ).strip()
+            if not previous:
+                return immediate, origin
+            if previous in visited:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation lineage is cyclic"
+                )
+            if immediate is None:
+                immediate = previous
+            visited.add(previous)
+            origin = previous
+
+    async def rebase_ready_for_continuation(
+        self,
+        *,
+        operation_id: str,
+        checkpoint_key: str,
+        expected_plan_digest: str,
+        current_plan: TaskPlan,
+        input_digest: str,
+    ):
+        row = await self.load(operation_id, checkpoint_key)
+        if (
+            row is None
+            or str(row.get("status") or "") != "ready"
+            or str(row.get("plan_digest") or "") != expected_plan_digest
+        ):
+            raise ScreenplayCheckpointStateError(
+                "checkpoint continuation ready receipt changed"
+            )
+        try:
+            revised = parse_persisted_plan(str(row.get("plan_json") or ""))
+        except (TypeError, ValueError) as error:
+            raise ScreenplayCheckpointStateError(
+                "checkpoint continuation revised plan is invalid"
+            ) from error
+        if (
+            revised.title != current_plan.title
+            or revised.goal != current_plan.goal
+            or revised.task_spec != current_plan.task_spec
+            or tuple(step.id for step in revised.steps)
+            != tuple(step.id for step in current_plan.steps)
+        ):
+            raise ScreenplayCheckpointStateError(
+                "checkpoint continuation changed Root semantics"
+            )
+        rebased_steps = []
+        for candidate, current in zip(
+            revised.steps,
+            current_plan.steps,
+            strict=True,
+        ):
+            rebased = replace(
+                candidate,
+                status=current.status,
+                result_summary=current.result_summary,
+                error=current.error,
+            )
+            if replace(
+                rebased,
+                title=current.title,
+                description=current.description,
+                depends_on=current.depends_on,
+            ) != current or (
+                current.status is StepStatus.DONE and rebased != current
+            ):
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation revision exceeds future plan fields"
+                )
+            rebased_steps.append(rebased)
+        rebased_plan = replace(revised, steps=tuple(rebased_steps))
+        encoded = json.dumps(
+            _plan_mapping(rebased_plan),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        digest = plan_digest(_canonical_root_plan(rebased_plan))
+        await self._db.execute(
+            "UPDATE screenplay_checkpoint_plans SET plan_json = ?, "
+            "plan_digest = ?, input_digest = ?, update_time = CURRENT_TIMESTAMP "
+            "WHERE operation_id = ? AND checkpoint_key = ? AND status = 'ready' "
+            "AND plan_digest = ?",
+            [
+                encoded,
+                digest,
+                input_digest,
+                operation_id,
+                checkpoint_key,
+                expected_plan_digest,
+            ],
+        )
+        if not await self._last_write_changed():
+            raise ScreenplayCheckpointStateError(
+                "checkpoint continuation ready receipt changed"
+            )
+        return await self.load(operation_id, checkpoint_key)
+
+    async def rebind_for_continuation(
+        self,
+        *,
+        operation_id: str,
+        source_root_run_id: str,
+        continuation_root_run_id: str,
+    ) -> None:
+        receipts = await self._db.fetch_all(
+            "SELECT * FROM screenplay_checkpoint_plans WHERE operation_id = ? "
+            "AND status <> 'applied' ORDER BY checkpoint_key",
+            [operation_id],
+        )
+        now = int(time.time() * 1000)
+        for receipt in receipts:
+            if str(receipt.get("root_run_id") or "") != source_root_run_id:
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation Root conflicts"
+                )
+            status = str(receipt.get("status") or "")
+            if status in {"reserved", "applying"}:
+                if int(receipt.get("reservation_expires_at_ms") or 0) > now:
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint continuation reservation is active"
+                    )
+                next_status = (
+                    "ready"
+                    if status == "applying"
+                    and str(receipt.get("plan_json") or "").strip()
+                    and str(receipt.get("plan_digest") or "").strip()
+                    else "continuation_retry"
+                )
+                await self._db.execute(
+                    "UPDATE screenplay_checkpoint_plans SET status = ?, "
+                    "outcome = CASE WHEN ? = 'continuation_retry' THEN ? "
+                    "ELSE outcome END, error_code = CASE WHEN ? = "
+                    "'continuation_retry' THEN ? ELSE NULL END, "
+                    "reservation_owner = NULL, reservation_expires_at_ms = NULL, "
+                    "reservation_epoch = reservation_epoch + 1, "
+                    "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                    "AND checkpoint_key = ? AND status = ? AND "
+                    "COALESCE(reservation_expires_at_ms, 0) <= ?",
+                    [
+                        next_status,
+                        next_status,
+                        ScreenplayCheckpointOutcome.PAUSED.value,
+                        next_status,
+                        "screenplay_checkpoint_owner_expired",
+                        operation_id,
+                        str(receipt["checkpoint_key"]),
+                        status,
+                        now,
+                    ],
+                )
+                if not await self._last_write_changed():
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint continuation reservation changed"
+                    )
+                receipt = await self.load(
+                    operation_id,
+                    str(receipt["checkpoint_key"]),
+                )
+                status = str(receipt.get("status") or "")
+            if status == "paused":
+                await self._db.execute(
+                    "UPDATE screenplay_checkpoint_plans SET "
+                    "status = 'continuation_retry', root_run_id = ?, "
+                    "reservation_owner = NULL, reservation_expires_at_ms = NULL, "
+                    "reservation_epoch = reservation_epoch + 1, "
+                    "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                    "AND checkpoint_key = ? AND root_run_id = ? "
+                    "AND status = 'paused'",
+                    [
+                        continuation_root_run_id,
+                        operation_id,
+                        str(receipt["checkpoint_key"]),
+                        source_root_run_id,
+                    ],
+                )
+                if not await self._last_write_changed():
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint continuation pause changed"
+                    )
+                continue
+            if status == "continuation_retry":
+                await self._db.execute(
+                    "UPDATE screenplay_checkpoint_plans SET root_run_id = ?, "
+                    "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                    "AND checkpoint_key = ? AND root_run_id = ? "
+                    "AND status = 'continuation_retry'",
+                    [
+                        continuation_root_run_id,
+                        operation_id,
+                        str(receipt["checkpoint_key"]),
+                        source_root_run_id,
+                    ],
+                )
+                if not await self._last_write_changed():
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint continuation retry changed"
+                    )
+                continue
+            if status != "ready":
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation status is invalid"
+                )
+            digest = str(receipt.get("plan_digest") or "")
+            applied = await self.root_revision_digest(
+                source_root_run_id,
+                str(receipt["checkpoint_key"]),
+                expected_digest=digest,
+            )
+            if applied == digest:
+                await self._db.execute(
+                    "UPDATE screenplay_checkpoint_plans SET status = 'applied', "
+                    "reservation_owner = NULL, reservation_expires_at_ms = NULL, "
+                    "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                    "AND checkpoint_key = ? AND status = 'ready'",
+                    [operation_id, str(receipt["checkpoint_key"])],
+                )
+                if not await self._last_write_changed():
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint continuation apply changed"
+                    )
+                continue
+            await self._db.execute(
+                "UPDATE screenplay_checkpoint_plans SET root_run_id = ?, "
+                "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                "AND checkpoint_key = ? AND root_run_id = ? AND status = 'ready'",
+                [
+                    continuation_root_run_id,
+                    operation_id,
+                    str(receipt["checkpoint_key"]),
+                    source_root_run_id,
+                ],
+            )
+            if not await self._last_write_changed():
+                raise ScreenplayCheckpointStateError(
+                    "checkpoint continuation ready changed"
+                )
+
     async def reserve(
         self,
         *,
@@ -277,14 +557,45 @@ class SqliteScreenplayCheckpointRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             existing = await self.load(operation_id, checkpoint_key)
             if existing is not None:
+                status = str(existing["status"])
                 if (
                     str(existing["task_id"]) != task_id
                     or str(existing["root_run_id"]) != root_run_id
-                    or str(existing["input_digest"]) != input_digest
+                ):
+                    raise RuntimeError("screenplay_checkpoint_identity_conflict")
+                if status == "continuation_retry":
+                    await self._db.execute(
+                        "UPDATE screenplay_checkpoint_plans SET "
+                        "status = 'reserved', input_digest = ?, "
+                        "plan_json = NULL, plan_digest = NULL, "
+                        "reservation_owner = ?, reservation_expires_at_ms = ?, "
+                        "reservation_epoch = reservation_epoch + 1, "
+                        "update_time = CURRENT_TIMESTAMP WHERE operation_id = ? "
+                        "AND checkpoint_key = ? AND root_run_id = ? "
+                        "AND status = 'continuation_retry'",
+                        [
+                            input_digest,
+                            token,
+                            expires_at,
+                            operation_id,
+                            checkpoint_key,
+                            root_run_id,
+                        ],
+                    )
+                    if not await self._last_write_changed():
+                        raise RuntimeError(
+                            "screenplay_checkpoint_continuation_retry_conflict"
+                        )
+                    return {
+                        **await self.load(operation_id, checkpoint_key),
+                        "_acquired": True,
+                    }
+                if (
+                    str(existing["input_digest"]) != input_digest
                 ):
                     raise RuntimeError("screenplay_checkpoint_identity_conflict")
                 acquired = (
-                    str(existing["status"]) == "reserved"
+                    status == "reserved"
                     and str(existing.get("reservation_owner") or "") == token
                     and int(existing.get("reservation_expires_at_ms") or 0) > now
                 )
