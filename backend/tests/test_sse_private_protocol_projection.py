@@ -18,6 +18,7 @@ def _runtime_event(
     sequence: int,
     event_type: str,
     data: dict,
+    visibility: OutputVisibility = OutputVisibility.PUBLIC,
 ) -> AgentOutputEvent:
     now = datetime.now(timezone.utc)
     return AgentOutputEvent(
@@ -30,7 +31,7 @@ def _runtime_event(
         source=OutputSource.RUNTIME,
         kind=OutputEventKind.RUNTIME,
         channel=OutputChannel.LIFECYCLE,
-        visibility=OutputVisibility.PUBLIC,
+        visibility=visibility,
         payload={
             "eventType": event_type,
             "data": data,
@@ -40,7 +41,7 @@ def _runtime_event(
     )
 
 
-def test_sse_keeps_public_plan_and_recipe_progress_as_distinct_wire_events():
+def test_sse_keeps_public_plan_and_filters_private_recipe_progress():
     plan = _runtime_event(
         event_id="event-plan",
         sequence=1,
@@ -57,6 +58,7 @@ def test_sse_keeps_public_plan_and_recipe_progress_as_distinct_wire_events():
         event_id="event-recipe-progress",
         sequence=2,
         event_type="long_task.progress",
+        visibility=OutputVisibility.PRIVATE,
         data={
             "taskId": "recipe-task-1",
             "taskTitle": "Recipe 内部执行",
@@ -79,9 +81,7 @@ def test_sse_keeps_public_plan_and_recipe_progress_as_distinct_wire_events():
     progress_wire = canonical_output_to_sse_chunk(progress)
 
     assert plan_wire is not None
-    assert progress_wire is not None
-    assert plan_wire["kind"] == progress_wire["kind"] == "runtime.event"
+    assert progress_wire is None
+    assert plan_wire["kind"] == "runtime.event"
     assert plan_wire["payload"] == plan.payload
-    assert progress_wire["payload"] == progress.payload
     assert "agentRunTodosUpdated" not in plan_wire
-    assert "longTaskProgress" not in progress_wire

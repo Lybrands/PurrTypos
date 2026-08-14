@@ -32,7 +32,9 @@ from application.screenplay_checkpoint_planning import (
     ScreenplayCheckpointPlanner,
 )
 from application.screenplay_structured_call import ScreenplayStructuredCallService
+from application.screenplay_tool_calling import ScreenplayToolCallingService
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
+from application.sse_mapping import canonical_output_to_sse_chunk
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from domains.screenplay_agent import (
@@ -42,6 +44,7 @@ from domains.screenplay_agent import (
     ScreenplayOperationCreateCommand,
     ScreenplayRootStartLost,
 )
+from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
@@ -71,8 +74,10 @@ from purra.contracts import (
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
+    ReasoningMode,
     RunBinding,
     RunCreateParams,
+    RunLineage,
     RunStatus,
 )
 from purra.events import AgentEvent, CoreEventType
@@ -258,6 +263,89 @@ class _UnitExecutor:
             artifact_digest=ref.content_digest,
             validation_receipt=ref.validation_receipt,
             metadata=metadata,
+        )
+
+
+class _CandidateChildUnitExecutor(_UnitExecutor):
+    def __init__(
+        self,
+        db,
+        *,
+        composition,
+        runtime,
+        session_id: int,
+        turn_id: str,
+    ) -> None:
+        super().__init__(db)
+        self._candidate_runs = ScreenplayToolCallingService(
+            db,
+            composition=composition,
+        )
+        self._runtime = runtime
+        self._session_id = session_id
+        self._turn_id = turn_id
+
+    async def execute(self, context, signal=None):
+        if context.unit.id != "episode:4:validation":
+            return await super().execute(context, signal)
+        episode_number = 4
+        scene_id = "ep04_s01"
+        result = await self._candidate_runs.run_candidate(
+            runtime=self._runtime,
+            session_id=self._session_id,
+            prompt="校验并提交第 4 集候选稿",
+            system_instruction="只返回第 4 集校验摘要。",
+            user_payload={"episodeNumber": episode_number},
+            domain_context=ScreenplayAgentDomainContext(
+                project_id=context.task.owner_id,
+                task_id=context.task.id,
+                unit_id=context.unit.id,
+                target_role="screenplayDraft",
+                expected_part_type="episode",
+                expected_part_key=str(episode_number),
+                tool_access="candidate_write",
+            ),
+            conversation_turn_id=self._turn_id,
+            reasoning_mode=ReasoningMode.DISABLED,
+            host_candidate_template={
+                "executionSummary": f"完成第 {episode_number} 集",
+                "sceneListId": "sprev-scenes",
+                "scenes": [{
+                    "sceneId": scene_id,
+                    "sceneText": f"第 {episode_number} 集正文",
+                }],
+                "episodeDraft": {
+                    "episodeNumber": episode_number,
+                    "title": f"第 {episode_number} 集",
+                    "sceneIds": [scene_id],
+                    "sceneTexts": [{
+                        "sceneId": scene_id,
+                        "contentText": f"第 {episode_number} 集正文",
+                    }],
+                    "contentText": f"第 {episode_number} 集正文",
+                    "continuitySummary": f"第 {episode_number} 集连续性",
+                },
+            },
+            lineage=RunLineage(
+                parent_run_id=context.task.created_by_run_id,
+                root_run_id=context.task.created_by_run_id,
+                delegation_id=None,
+                agent_role="screenplay-part",
+                depth=1,
+            ),
+            signal=signal,
+        )
+        ref = await self._parts.validated_ref(
+            artifact_id=str(result.candidate["artifactId"]),
+            run_id=result.run_id,
+            semantic_key=context.unit.id,
+        )
+        self.output_refs[context.unit.id] = ref.output_ref
+        return LongTaskUnitResult(
+            output_ref=ref.output_ref,
+            run_id=ref.run_id,
+            artifact_digest=ref.content_digest,
+            validation_receipt=ref.validation_receipt,
         )
 
 
@@ -3379,10 +3467,16 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
             },
         ],
     }
-    gateway = _ScriptedPlannerGateway([[
-        ModelStreamChunk(content_delta=json.dumps(plan, ensure_ascii=False)),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
+    gateway = _ScriptedPlannerGateway([
+        [
+            ModelStreamChunk(content_delta=json.dumps(plan, ensure_ascii=False)),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+        [
+            ModelStreamChunk(content_delta="第 4 集候选已经校验。"),
+            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
+        ],
+    ])
     monkeypatch.setattr(
         agent_composition,
         "ProviderModelGateway",
@@ -3396,8 +3490,6 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
             resolver=_Resolver(),
         ),
     )
-    executor = _UnitExecutor(screenplay_db)
-
     class CheckpointPlanner:
         def __init__(self):
             self.calls = []
@@ -3427,15 +3519,7 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
             )
 
     checkpoint_planner = CheckpointPlanner()
-    executor.checkpoint_planner = checkpoint_planner
     composition = create_agent_composition(screenplay_db)
-    service = ScreenplayAgentService(
-        screenplay_db,
-        owner_id=composition.execution_owner_id,
-        composition=composition,
-        unit_executor_factory=lambda _runtime: executor,
-        projects=projects,
-    )
     request = SubmitScreenplayAgentTurnRequest.model_validate({
         "sessionId": session["id"],
         "content": "不要只写下一集，连续写完后面三集。",
@@ -3446,15 +3530,32 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
             "options": {
                 "model": "deepseek-v4-flash",
                 "model_profile": "deepseek:deepseek-v4-flash",
+                "max_tokens": 4096,
             },
             "contextWindow": "128k",
         },
     })
+    executor = _CandidateChildUnitExecutor(
+        screenplay_db,
+        composition=composition,
+        runtime=request.runtime,
+        session_id=session["id"],
+        turn_id="pending-formal-turn",
+    )
+    executor.checkpoint_planner = checkpoint_planner
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        unit_executor_factory=lambda _runtime: executor,
+        projects=projects,
+    )
     turn = await service.submit_turn(
         command_id="formal-root-next-three",
         project_id=workspace["project"]["id"],
         request=request,
     )
+    executor._turn_id = turn["id"]
 
     try:
         await service.execute_turn(turn["id"], request.runtime)
@@ -3491,11 +3592,56 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     ) == []
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
-    ) == {"count": 1}
+    ) == {"count": 2}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs "
         "WHERE parent_run_id IS NOT NULL"
-    ) == {"count": 0}
+    ) == {"count": 1}
+    candidate_child = await screenplay_db.fetch_one(
+        "SELECT id, status, root_run_id FROM ai_agent_runs "
+        "WHERE parent_run_id = ?",
+        [root_run_id],
+    )
+    assert candidate_child == {
+        "id": candidate_child["id"],
+        "status": "done",
+        "root_run_id": root_run_id,
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ? AND event_type = 'run.validated_result' "
+        "AND visibility = 'private'",
+        [candidate_child["id"]],
+    ) == {"count": 1}
+    candidate_events = await SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+    ).list_events(candidate_child["id"], after_sequence=0)
+    validated_events = [
+        event
+        for event in candidate_events
+        if event.kind.value == "run.validated_result"
+    ]
+    assert len(validated_events) == 1
+    assert canonical_output_to_sse_chunk(validated_events[0]) is None
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifacts "
+        "WHERE run_id = ? AND status = 'finalized'",
+        [candidate_child["id"]],
+    ) == {"count": 1}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_outbox_events "
+        "WHERE aggregate_id = ? AND event_type = 'screenplay.candidate.ready'",
+        [task["resultRevisionId"]],
+    ) == {"count": 1}
+    public_candidate_leaks = await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id IN (?, ?) AND visibility = 'public' "
+        "AND (event_type = 'run.validated_result' "
+        "OR payload_json LIKE '%screenplay.candidate.ready%')",
+        [root_run_id, candidate_child["id"]],
+    )
+    assert public_candidate_leaks == {"count": 0}
     run = await screenplay_db.fetch_one(
         "SELECT id, final_response FROM ai_agent_runs WHERE id = ?",
         [root_run_id],
