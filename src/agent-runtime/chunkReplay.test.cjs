@@ -436,6 +436,345 @@ test('live and replay converge when Recipe progress interleaves Root plan events
   assert.equal(encodedPlan.includes('plannerStepId'), false)
 })
 
+test('screenplay canonical Root lifecycle is identical live and on replay', () => {
+  const seed = {
+    turnId: 'turn-screenplay-canonical',
+    rootRunId: 'root-screenplay-canonical',
+    sessionId: 538,
+    userContent: '创作下一集并生成候选稿',
+    model: model.name,
+    // Keep the wall-clock-derived duration deterministic so the assertion below
+    // compares only canonical reducer state, not scheduling jitter.
+    turnStartedAt: performance.now() + 60_000,
+  }
+  const root = seed.rootRunId
+  const child = 'child-screenplay-research'
+  const delegation = 'delegation-screenplay-research'
+  const dependencies = { cfg: model, appMessage }
+  const candidateReceipt = {
+    revisionId: 'revision-candidate-1',
+    contentDigest: 'a'.repeat(64),
+    status: 'candidate',
+  }
+  const childEvent = (sequence, overrides) => canonical(child, sequence, {
+    turnId: seed.turnId,
+    ...overrides,
+  })
+  const delegationEvent = (sequence, payload) => canonical(root, sequence, {
+    turnId: seed.turnId,
+    kind: 'delegation.event',
+    channel: 'delegation',
+    payload: {
+      delegationId: delegation,
+      parentRunId: root,
+      childRunId: child,
+      agentRole: 'researcher',
+      agentTitle: '研究 Agent',
+      objective: '核验场景证据',
+      ...payload,
+    },
+  })
+  const chunks = [
+    requestReceipt(root),
+    canonical(root, 1, {
+      turnId: seed.turnId,
+      kind: 'run.lifecycle',
+      payload: { status: 'running' },
+    }),
+    canonical(root, 2, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'run.todos_updated',
+        data: {
+          runId: root,
+          title: '完成下一集候选稿',
+          goal: '依据原作完成下一集',
+          status: 'running',
+          steps: [{
+            id: 'collect-evidence',
+            title: '理解原作依据',
+            type: 'analyze',
+            executor: 'tool',
+            status: 'running',
+            dependsOn: [],
+          }, {
+            id: 'draft-episode',
+            title: '创作下一集',
+            type: 'write',
+            executor: 'model',
+            status: 'pending',
+            dependsOn: ['collect-evidence'],
+          }, {
+            id: 'deliver-candidate',
+            title: '交付候选稿',
+            type: 'review',
+            executor: 'model',
+            status: 'pending',
+            dependsOn: ['draft-episode'],
+          }],
+        },
+      },
+    }),
+    canonical(root, 3, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'long_task.dispatched',
+        data: { taskId: 'screenplay-task-1', status: 'running' },
+      },
+    }),
+    canonical(root, 4, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'long_task.progress',
+        data: {
+          taskId: 'screenplay-task-1',
+          status: 'running',
+          units: [{
+            id: 'recipe-draft',
+            title: 'Recipe 生成正文',
+            status: 'running',
+            plannerStepId: 'draft-episode',
+          }, {
+            id: 'recipe-validate',
+            title: '校验候选稿',
+            status: 'pending',
+            plannerStepId: 'deliver-candidate',
+          }],
+        },
+      },
+    }),
+    canonical(root, 5, {
+      turnId: seed.turnId,
+      kind: 'operation.started',
+      channel: 'operation',
+      payload: {
+        operationId: 'tool-read-source',
+        kind: 'tool',
+        display: {
+          labelKey: 'agent.operation.tool',
+          labelParams: { toolName: 'readScreenplaySource' },
+        },
+      },
+    }),
+    canonical(root, 6, {
+      turnId: seed.turnId,
+      source: 'tool',
+      kind: 'tool.event',
+      channel: 'operation',
+      payload: {
+        operationId: 'tool-read-source',
+        toolCallId: 'tool-call-read-source',
+        toolName: 'readScreenplaySource',
+      },
+    }),
+    canonical(root, 7, {
+      turnId: seed.turnId,
+      kind: 'operation.finished',
+      channel: 'operation',
+      payload: {
+        operationId: 'tool-read-source',
+        status: 'succeeded',
+        durationMs: 12,
+      },
+    }),
+    canonical(root, 8, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'conversation.compaction.started',
+        data: { status: 'running', beforeTokens: 12000 },
+      },
+    }),
+    canonical(root, 9, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'conversation.compaction.completed',
+        data: { status: 'completed', beforeTokens: 12000, afterTokens: 4800 },
+      },
+    }),
+    delegationEvent(10, { eventType: 'status', status: 'running' }),
+    delegationEvent(11, {
+      eventType: 'child_output',
+      status: 'running',
+      event: childEvent(1, {
+        kind: 'operation.started',
+        channel: 'operation',
+        payload: {
+          operationId: 'child-tool-verify',
+          kind: 'tool',
+          display: {
+            labelKey: 'agent.operation.tool',
+            labelParams: { toolName: 'verifySceneEvidence' },
+          },
+        },
+      }),
+    }),
+    delegationEvent(12, {
+      eventType: 'child_output',
+      status: 'running',
+      event: childEvent(2, {
+        kind: 'operation.finished',
+        channel: 'operation',
+        payload: {
+          operationId: 'child-tool-verify',
+          status: 'succeeded',
+        },
+      }),
+    }),
+    delegationEvent(13, {
+      eventType: 'child_output',
+      status: 'running',
+      event: childEvent(3, {
+        outputStreamId: 'child-final',
+        invocationId: 'child-invocation',
+        source: 'provider',
+        kind: 'provider.content_delta',
+        channel: 'final',
+        payload: { delta: '三条场景证据已核验。' },
+      }),
+    }),
+    delegationEvent(14, {
+      eventType: 'child_output',
+      status: 'running',
+      event: childEvent(4, {
+        outputStreamId: 'child-final',
+        invocationId: 'child-invocation',
+        kind: 'stream.committed',
+        channel: 'final',
+        payload: { finishReason: 'stop' },
+      }),
+    }),
+    delegationEvent(15, { eventType: 'status', status: 'done' }),
+    canonical(root, 16, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'run.todos_updated',
+        data: {
+          runId: root,
+          title: '完成下一集候选稿',
+          goal: '依据原作完成下一集',
+          status: 'running',
+          steps: [{
+            id: 'collect-evidence',
+            title: '理解原作依据',
+            type: 'analyze',
+            executor: 'tool',
+            status: 'done',
+            dependsOn: [],
+          }, {
+            id: 'draft-episode',
+            title: '根据证据完成下一集',
+            description: '检查点调整后的创作说明',
+            type: 'write',
+            executor: 'model',
+            status: 'done',
+            dependsOn: ['collect-evidence'],
+          }, {
+            id: 'deliver-candidate',
+            title: '交付下一集候选稿',
+            type: 'review',
+            executor: 'model',
+            status: 'running',
+            dependsOn: ['draft-episode'],
+          }],
+        },
+      },
+    }),
+    canonical(root, 17, {
+      turnId: seed.turnId,
+      source: 'domain',
+      kind: 'domain.effect',
+      channel: 'diagnostic',
+      visibility: 'private',
+      payload: {
+        type: 'screenplay.candidate.ready',
+        payload: candidateReceipt,
+      },
+    }),
+    canonical(root, 18, {
+      turnId: seed.turnId,
+      outputStreamId: 'root-final',
+      invocationId: 'root-final-invocation',
+      source: 'provider',
+      kind: 'provider.content_delta',
+      channel: 'final',
+      payload: { delta: '下一集候选稿已经完成。' },
+    }),
+    canonical(root, 19, {
+      turnId: seed.turnId,
+      outputStreamId: 'root-final',
+      invocationId: 'root-final-invocation',
+      kind: 'stream.committed',
+      channel: 'final',
+      payload: { finishReason: 'stop' },
+    }),
+    canonical(root, 20, {
+      turnId: seed.turnId,
+      kind: 'run.lifecycle',
+      payload: { status: 'done' },
+    }),
+    { done: true, model: 'screenplay-final-model' },
+  ]
+
+  const live = reduceLive(seed, chunks)
+  const replay = new AgentChunkReplay()
+  chunks.forEach((chunk) => replay.dispatch(seed, chunk, dependencies))
+  const restored = replay.assistant(seed.turnId)
+
+  assert.deepEqual(restored, live)
+  assert.equal(restored?.agentRunId, root)
+  assert.equal(restored?.content, '下一集候选稿已经完成。')
+  assert.equal(restored?.longTaskId, 'screenplay-task-1')
+  assert.equal(restored?.taskPlan?.runId, root)
+  assert.equal(restored?.taskPlan?.status, 'done')
+  assert.deepEqual(
+    restored?.taskPlan?.steps.map((step) => [
+      step.id,
+      step.title,
+      step.status,
+      step.dependsOn,
+    ]),
+    [
+      ['collect-evidence', '理解原作依据', 'done', []],
+      ['draft-episode', '根据证据完成下一集', 'done', ['collect-evidence']],
+      ['deliver-candidate', '交付下一集候选稿', 'running', ['draft-episode']],
+    ],
+  )
+  const publicPlan = JSON.stringify(restored?.taskPlan)
+  assert.equal(publicPlan.includes('Recipe'), false)
+  assert.equal(publicPlan.includes('校验候选稿'), false)
+  assert.equal(publicPlan.includes('plannerStepId'), false)
+  assert.deepEqual(restored?.canonicalOutput?.operationOrder, ['tool-read-source'])
+  assert.equal(
+    restored?.canonicalOutput?.operations['tool-read-source']?.toolName,
+    'readScreenplaySource',
+  )
+  assert.deepEqual(restored?.contextCompaction, {
+    status: 'completed',
+    beforeTokens: 12000,
+    afterTokens: 4800,
+  })
+  assert.deepEqual(restored?.delegations?.map((item) => [
+    item.delegationId,
+    item.childRunId,
+    item.status,
+  ]), [[delegation, child, 'done']])
+  const childMessage = restored?.subAgentActivities?.[0]?.message
+  assert.equal(childMessage?.content, '三条场景证据已核验。')
+  assert.deepEqual(
+    childMessage?.canonicalOutput?.operationOrder,
+    ['child-tool-verify'],
+  )
+  const candidateEvent = chunks.find((chunk) => (
+    chunk?.kind === 'domain.effect'
+    && chunk?.payload?.type === 'screenplay.candidate.ready'
+  ))
+  assert.deepEqual(candidateEvent?.payload?.payload, candidateReceipt)
+  assert.equal(
+    JSON.stringify(restored?.canonicalOutput).includes('revision-candidate-1'),
+    false,
+  )
+})
+
 test('replay keeps the Root Run public plan isolated from child Run events', () => {
   const replay = new AgentChunkReplay()
   const seed = {

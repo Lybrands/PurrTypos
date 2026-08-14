@@ -397,7 +397,7 @@ export interface ScreenplayConversationTurn {
     contextWindow?: string | null;
   };
   intent: Record<string, unknown> | null;
-  plannerRunId: string | null;
+  rootRunId: string | null;
   taskId: string | null;
   error: { code?: string; message?: string } | null;
   createdAt?: string | null;
@@ -445,7 +445,7 @@ export interface ScreenplayAgentTask {
   status: ScreenplayAgentTaskStatus;
   targetRole: ScreenplayV2DeliverableRole;
   intent: Record<string, unknown>;
-  plannerRunId: string | null;
+  rootRunId: string | null;
   totalUnits: number;
   completedUnits: number;
   usage: ScreenplayOperationUsage;

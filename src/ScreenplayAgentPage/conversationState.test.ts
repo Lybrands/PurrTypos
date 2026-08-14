@@ -15,7 +15,9 @@ import {
   screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
   isScreenplayOperationCancellable,
+  decodeScreenplayConversationSnapshot,
   stateFromScreenplayConversationSnapshot,
+  type LegacyScreenplayConversationSnapshot,
 } from './conversationState.ts'
 import { ScreenplayConversationClient } from './conversationClient.ts'
 
@@ -30,7 +32,7 @@ function turn(overrides: Partial<ScreenplayConversationTurn> = {}): ScreenplayCo
     assistantContent: '',
     runtimeProfile: { model: 'glm-5.2' },
     intent: null,
-    plannerRunId: 'run-plan-1',
+    rootRunId: 'run-root-1',
     taskId: null,
     error: null,
     createdAt: '2026-08-09T00:00:00Z',
@@ -48,7 +50,7 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     status: 'running',
     targetRole: 'screenplayDraft',
     intent: {},
-    plannerRunId: 'run-plan-1',
+    rootRunId: 'run-root-1',
     totalUnits: 2,
     completedUnits: 1,
     usage: {
@@ -76,6 +78,23 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     ...overrides,
   }
 }
+
+test('legacy snapshot plannerRunId decodes once into canonical rootRunId', () => {
+  const legacy = structuredClone(snapshot()) as unknown as (
+    LegacyScreenplayConversationSnapshot
+  )
+  delete legacy.turns[0].rootRunId
+  delete legacy.tasks[0].rootRunId
+  legacy.turns[0].plannerRunId = 'run-legacy-root'
+  legacy.tasks[0].plannerRunId = 'run-legacy-root'
+
+  const decoded = decodeScreenplayConversationSnapshot(legacy)
+
+  assert.equal(decoded.turns[0].rootRunId, 'run-legacy-root')
+  assert.equal(decoded.tasks[0].rootRunId, 'run-legacy-root')
+  assert.equal('plannerRunId' in decoded.turns[0], false)
+  assert.equal('plannerRunId' in decoded.tasks[0], false)
+})
 
 function operation(
   overrides: Partial<ScreenplayOperationProjection> = {},

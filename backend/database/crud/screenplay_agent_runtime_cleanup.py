@@ -150,6 +150,10 @@ async def build_cleanup_plan(
         "task_id",
         "operation_id",
     ))
+    # Protocol v1 stored the Root identity in this legacy physical column.
+    # Normalize immediately so all cleanup graph semantics remain root-owned.
+    for row in turn_rows:
+        row["root_run_id"] = row.pop("planner_run_id", None)
     scoped_turns = [
         row for row in turn_rows
         if str(row.get("project_id") or "") in requested
@@ -189,7 +193,7 @@ async def build_cleanup_plan(
         if str(row.get("operation_id") or "") in operation_ids
     ]
     run_ids = _texts(
-        [row.get("planner_run_id") for row in scoped_turns]
+        [row.get("root_run_id") for row in scoped_turns]
         + [row.get("run_id") for row in scoped_operation_usage]
     )
 

@@ -39,6 +39,37 @@ export interface ScreenplayConversationState {
   messages: ScreenplayConversationMessage[]
 }
 
+type LegacyRootRunCarrier = {
+  rootRunId?: string | null
+  plannerRunId?: string | null
+}
+
+export interface LegacyScreenplayConversationSnapshot extends Omit<
+  ScreenplayConversationSnapshot,
+  'turns' | 'tasks'
+> {
+  turns: Array<Omit<ScreenplayConversationTurn, 'rootRunId'> & LegacyRootRunCarrier>
+  tasks: Array<Omit<ScreenplayAgentTask, 'rootRunId'> & LegacyRootRunCarrier>
+}
+
+/** Protocol v1 input compatibility; protocol v2 serializes only rootRunId. */
+export function decodeScreenplayConversationSnapshot(
+  snapshot: ScreenplayConversationSnapshot | LegacyScreenplayConversationSnapshot,
+): ScreenplayConversationSnapshot {
+  const normalizeRoot = <T extends LegacyRootRunCarrier>(value: T) => {
+    const { plannerRunId: legacyRootRunId, ...canonical } = value
+    return {
+      ...canonical,
+      rootRunId: String(value.rootRunId || legacyRootRunId || '').trim() || null,
+    }
+  }
+  return {
+    ...snapshot,
+    turns: snapshot.turns.map(normalizeRoot) as ScreenplayConversationTurn[],
+    tasks: snapshot.tasks.map(normalizeRoot) as ScreenplayAgentTask[],
+  }
+}
+
 export interface ScreenplayTurnArtifact {
   turnId: string
   taskId: string
@@ -126,7 +157,7 @@ export function screenplayTurnArtifacts(
       sourceRunId: revision?.finalizingRunId
         || revision?.rootRunId
         || modelRunIds(task).at(-1)
-        || task?.plannerRunId
+        || task?.rootRunId
         || null,
     })
   }
@@ -134,8 +165,9 @@ export function screenplayTurnArtifacts(
 }
 
 export function stateFromScreenplayConversationSnapshot(
-  snapshot: ScreenplayConversationSnapshot,
+  input: ScreenplayConversationSnapshot | LegacyScreenplayConversationSnapshot,
 ): ScreenplayConversationState {
+  const snapshot = decodeScreenplayConversationSnapshot(input)
   const tasksByTurn = new Map(snapshot.tasks.map((task) => [task.turnId, task]))
   const operationsByTurn = new Map(snapshot.operations.map((item) => [item.turnId, item]))
   return {
@@ -193,7 +225,7 @@ export function isScreenplayOperationCancellable(
 export function modelRunIds(task: ScreenplayAgentTask | undefined): string[] {
   if (!task) return []
   return [...new Set([
-    task.plannerRunId,
+    task.rootRunId,
     ...task.units.map((unit) => (
       String(unit.validationReceipt.runId || '') || null
     )),
@@ -207,7 +239,7 @@ function messagesFromTurn(
 ): ScreenplayConversationMessage[] {
   const status = operation?.status || task?.status || turn.status
   const error = operation?.error || task?.error || turn.error
-  const runId = modelRunIds(task).at(-1) || turn.plannerRunId
+  const runId = modelRunIds(task).at(-1) || turn.rootRunId
   const shared = {
     turnId: turn.id,
     status,

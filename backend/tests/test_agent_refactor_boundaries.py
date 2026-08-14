@@ -55,7 +55,6 @@ SHARED_AGENT_CONVERSATION_PANEL = (
     ROOT_DIR / "src" / "components" / "AgentConversation" / "Panel.tsx"
 )
 SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
-    BACKEND_DIR / "application" / "screenplay_agent_planner.py",
     BACKEND_DIR / "application" / "screenplay_agent_service.py",
     BACKEND_DIR / "application" / "screenplay_agent_stream.py",
     BACKEND_DIR / "application" / "screenplay_agent_task_executor.py",
@@ -75,6 +74,10 @@ SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
     / "timeline.ts",
     SCREENPLAY_CONVERSATION_CONTROLLER,
     SCREENPLAY_PAGE,
+)
+
+RETIRED_SCREENPLAY_PLANNER = (
+    BACKEND_DIR / "application" / "screenplay_agent_planner.py"
 )
 PHASE_FOUR_REMOVED_PATHS = (
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
@@ -471,6 +474,75 @@ def test_phase_four_removed_compatibility_modules_stay_deleted():
     assert not restored, "Deleted Phase 4 compatibility modules returned: " + ", ".join(
         restored
     )
+
+
+def test_independent_screenplay_planner_stays_deleted():
+    assert not RETIRED_SCREENPLAY_PLANNER.exists()
+    forbidden = {
+        "ModelScreenplayIntentPlanner",
+        "screenplay_intent_planning",
+        "_ANSWER_INSTRUCTION",
+        "_PLANNER_INSTRUCTION",
+        "_PLANNER_REPAIR",
+    }
+    paths = (
+        *sorted((BACKEND_DIR / "application").rglob("*.py")),
+        *sorted((BACKEND_DIR / "infrastructure").rglob("*.py")),
+    )
+    violations = [
+        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
+        for path in paths
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8")
+    ]
+    assert not violations, "Independent Screenplay planner returned:\n" + "\n".join(
+        violations
+    )
+
+
+def test_planner_run_alias_is_confined_to_storage_and_legacy_input_decoder():
+    backend_paths = (
+        *sorted((BACKEND_DIR / "application").rglob("*.py")),
+        *sorted((BACKEND_DIR / "database").rglob("*.py")),
+        *sorted((BACKEND_DIR / "infrastructure").rglob("*.py")),
+    )
+    identifier_violations: list[str] = []
+    for path in backend_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.Name) and node.id == "planner_run_id"
+            or isinstance(node, ast.arg) and node.arg == "planner_run_id"
+            for node in ast.walk(tree)
+        ):
+            identifier_violations.append(path.relative_to(ROOT_DIR).as_posix())
+    assert not identifier_violations, (
+        "planner_run_id escaped its physical SQLite adapter boundary: "
+        + ", ".join(identifier_violations)
+    )
+
+    legacy_decoder = (
+        ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts"
+    )
+    production_sources = [
+        path
+        for path in (ROOT_DIR / "src").rglob("*.ts*")
+        if ".test." not in path.name
+    ]
+    alias_paths = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in production_sources
+        if "plannerRunId" in path.read_text(encoding="utf-8")
+    ]
+    assert alias_paths == [legacy_decoder.relative_to(ROOT_DIR).as_posix()]
+    decoder_source = legacy_decoder.read_text(encoding="utf-8")
+    decoder_boundary = _source_between(
+        decoder_source,
+        "type LegacyRootRunCarrier = {",
+        "export interface ScreenplayTurnArtifact {",
+    )
+    assert decoder_boundary.count("plannerRunId") == 2
+    assert "protocol v2 serializes only rootRunId" in decoder_boundary
+    assert "plannerRunId" not in decoder_source.replace(decoder_boundary, "")
 
 
 def test_phase_four_generic_conversation_contract_has_no_screenplay_fields():

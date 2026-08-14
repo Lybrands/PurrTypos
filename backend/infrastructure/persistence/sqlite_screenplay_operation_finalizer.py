@@ -151,7 +151,8 @@ class SqliteScreenplayOperationFinalizer:
                 tuple(candidate_parts),
             )
             turn = await self._db.fetch_one(
-                "SELECT * FROM screenplay_agent_turns WHERE id = ? "
+                "SELECT *, planner_run_id AS root_run_id "
+                "FROM screenplay_agent_turns WHERE id = ? "
                 "AND project_id = ? AND session_id = ?",
                 [operation.turn_id, operation.project_id, operation.session_id],
             )
@@ -166,7 +167,7 @@ class SqliteScreenplayOperationFinalizer:
                 title=str(publication.title),
                 content_json=publication.content_json,
                 content_text=str(publication.content_text),
-                planner_run_id=str(turn.get("planner_run_id") or "").strip() or None,
+                root_run_id=str(turn.get("root_run_id") or "").strip() or None,
                 finalizing_run_id=publication.finalizing_run_id,
                 base_revision_id=publication.base_revision_id,
                 source_run_ids=publication.source_run_ids,

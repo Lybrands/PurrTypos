@@ -748,7 +748,7 @@ class SqliteScreenplayV2Repository:
         title: str,
         content_json: Mapping[str, Any],
         content_text: str,
-        planner_run_id: str | None,
+        root_run_id: str | None,
         finalizing_run_id: str | None,
         base_revision_id: str | None,
         source_run_ids: Sequence[str] = (),
@@ -844,7 +844,7 @@ class SqliteScreenplayV2Repository:
                     parent_revision_id,
                     str(document_part["contentDigest"]),
                     _dump(summary),
-                    str(planner_run_id or "").strip() or None,
+                    str(root_run_id or "").strip() or None,
                     str(finalizing_run_id or "").strip() or None,
                     task_id,
                 ],
@@ -873,7 +873,7 @@ class SqliteScreenplayV2Repository:
             )
             run_ids = tuple(dict.fromkeys(
                 value for value in (
-                    str(planner_run_id or "").strip(),
+                    str(root_run_id or "").strip(),
                     str(finalizing_run_id or "").strip(),
                     *(str(value or "").strip() for value in source_run_ids),
                 ) if value
