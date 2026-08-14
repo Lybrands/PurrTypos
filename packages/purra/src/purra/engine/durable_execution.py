@@ -18,6 +18,7 @@ from purra.contracts import (
 )
 from purra.errors import ContractViolationError
 from purra.events import AgentEvent, CoreEventType
+from purra.engine.options import DurableTaskContinuation
 from purra.json_values import thaw_json_mapping
 from purra.ports import CancellationSignal
 from purra.run_controller import AgentRunController
@@ -33,6 +34,40 @@ from purra.task_admission import (
 
 class BufferedEventSink(Protocol):
     def drain(self) -> tuple[AgentEvent, ...]: ...
+
+
+async def complete_durable_continuation(
+    controller: AgentRunController,
+    request: AgentRunRequest,
+    continuation: DurableTaskContinuation,
+    dispatcher: LongTaskDispatcher | None,
+    sink: BufferedEventSink,
+    signal: CancellationSignal | None,
+) -> AsyncIterator[AgentEvent]:
+    """Resume an admitted durable receipt without re-planning or dispatching."""
+
+    validate_task_admission_coverage(continuation.plan, continuation.admission)
+    await controller.record_event(
+        CoreEventType.TASK_ADMISSION_DECIDED,
+        {
+            **continuation.admission.to_event_payload(),
+            "continuation": True,
+            "sourceRootRunId": continuation.source_root_run_id,
+            "continuationCommand": continuation.continuation_command,
+        },
+    )
+    await controller.install_plan(continuation.plan)
+    async for event in complete_admitted_task(
+        controller=controller,
+        request=request,
+        plan=continuation.plan,
+        admission=continuation.admission,
+        dispatcher=dispatcher,
+        sink=sink,
+        signal=signal,
+        existing_receipt=continuation.receipt,
+    ):
+        yield event
 
 
 async def complete_admitted_task(

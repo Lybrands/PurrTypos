@@ -90,6 +90,7 @@ from purra.engine.canonical_sink import (
 from purra.engine.durable_execution import (
     bind_event_to_run as _bind_event_to_run,
     complete_admitted_task as _complete_admitted_task,
+    complete_durable_continuation as _complete_durable_continuation,
     validate_task_admission_coverage as _validate_task_admission_coverage,
 )
 from purra.engine.dynamic_planning import (
@@ -554,39 +555,15 @@ class AgentCore:
                 yield _run_result(controller)
                 return
 
-            continuation = options.durable_continuation
-            if continuation is not None:
-                _validate_task_admission_coverage(
-                    continuation.plan,
-                    continuation.admission,
-                )
-                await controller.record_event(
-                    CoreEventType.TASK_ADMISSION_DECIDED,
-                    {
-                        **continuation.admission.to_event_payload(),
-                        "continuation": True,
-                        "sourceRootRunId": continuation.source_root_run_id,
-                        "continuationCommand": continuation.continuation_command,
-                    },
-                )
-                await controller.install_plan(continuation.plan)
-                async for admitted_event in _complete_admitted_task(
-                    controller=controller,
-                    request=request,
-                    plan=continuation.plan,
-                    admission=continuation.admission,
-                    dispatcher=self._long_task_dispatcher,
-                    sink=sink,
-                    signal=signal,
-                    existing_receipt=continuation.receipt,
+            if (continuation := options.durable_continuation) is not None:
+                async for event in _complete_durable_continuation(
+                    controller, request, continuation, self._long_task_dispatcher, sink, signal,
                 ):
-                    yield admitted_event
+                    yield event
                 yield _run_result(controller)
                 return
 
-            # Reserve against every enabled schema. Staged providers use this
-            # pass only for a lightweight, host-authenticated planning manifest;
-            # legacy providers retain their original single-pass behavior.
+            # Reserve against every enabled planning schema.
             reservation_started = perf_counter()
             try:
                 context_claims = await await_with_cancellation(
