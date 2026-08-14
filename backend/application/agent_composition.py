@@ -107,6 +107,7 @@ class AgentComposition:
         execution_db=None,
         run_begin_projector=None,
         run_commit_projector=None,
+        root_cancellation_participants: Sequence[object] = (),
         profile_extension_factories: Sequence[
             Callable[..., AgentProfileExtension]
         ] = (),
@@ -139,6 +140,9 @@ class AgentComposition:
         self._output_processor = AgentOutputProcessor(
             self._output_repository,
             self._output_publisher,
+        )
+        self._root_cancellation_participants = tuple(
+            root_cancellation_participants
         )
         self._tool_idempotency_gateway = SqliteToolIdempotencyGateway(
             db,
@@ -206,6 +210,10 @@ class AgentComposition:
     @property
     def execution_lease_store(self) -> ExecutionLeaseStore:
         return self._execution_lease_store
+
+    @property
+    def root_cancellation_participants(self) -> tuple[object, ...]:
+        return self._root_cancellation_participants
 
     @property
     def delegation_repository(self) -> DelegationRepository:

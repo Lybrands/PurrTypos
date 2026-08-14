@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from typing import Protocol
 
 from purra.contracts import RunStatus, StepStatus, TaskStepUpdate
 from purra.events import AgentEvent, CoreEventType
@@ -17,12 +19,30 @@ from infrastructure.persistence.run_execution_store import (
 )
 
 
+class RootCancellationParticipant(Protocol):
+    async def project(
+        self,
+        root_run_id: str,
+        receipt: Mapping[str, object],
+    ) -> None: ...
+
+
 class AgentCancellationService:
     """Request cancellation for a Root and every persisted descendant."""
 
-    def __init__(self, db, composition) -> None:
+    def __init__(
+        self,
+        db,
+        composition,
+        *,
+        participants: Sequence[RootCancellationParticipant] | None = None,
+    ) -> None:
         self._db = db
         self._composition = composition
+        self._participants = tuple(
+            composition.root_cancellation_participants
+            if participants is None else participants
+        )
 
     async def cancel(self, run_id: str) -> dict[str, object] | None:
         normalized = str(run_id or "").strip()
@@ -46,6 +66,12 @@ class AgentCancellationService:
         )
         async with self._db.transaction(cancellation_linearizable=True):
             receipt = await fence_cancellation_tree(self._db, normalized)
+            for participant in self._participants:
+                projected = await participant.project(normalized, receipt)
+                if projected is not None:
+                    raise TypeError(
+                        "Root cancellation participant must return None"
+                    )
         newly_requested = prior is None
         # The fence makes the tree closed. Re-read the authority each pass;
         # this also recovers after a process crash between request and drain.
@@ -164,4 +190,4 @@ class AgentCancellationService:
         return True
 
 
-__all__ = ["AgentCancellationService"]
+__all__ = ["AgentCancellationService", "RootCancellationParticipant"]
