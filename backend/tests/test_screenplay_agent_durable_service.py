@@ -1108,6 +1108,69 @@ async def test_truncate_waits_for_foreign_pre_root_turn_claim(screenplay_db):
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
     ) == {"count": 0}
 
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_turns SET lease_expires_at_ms = 0 "
+        "WHERE id = ?",
+        [turn["id"]],
+    )
+    removed = await service.truncate_from_turn(turn["id"])
+    assert removed["deletedTurnIds"] == [turn["id"]]
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_expired_canceled_turn_claim_release_respects_fresh_heartbeat(
+    screenplay_db,
+):
+    repository, turn = await _claimed_pre_root_turn(
+        screenplay_db,
+        owner_id="foreign-heartbeat-owner",
+        suffix="foreign-heartbeat",
+    )
+    await SqliteScreenplayOperationRepository(screenplay_db).request_cancel(
+        turn["id"],
+        idempotency_key="cancel-foreign-heartbeat",
+    )
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_turns SET lease_expires_at_ms = 200 "
+        "WHERE id = ?",
+        [turn["id"]],
+    )
+
+    assert await repository.release_expired_canceled_claim(
+        turn["id"],
+        100,
+    ) is False
+    live = await screenplay_db.fetch_one(
+        "SELECT execution_owner_id, lease_expires_at_ms, attempt, "
+        "cancel_requested_at_ms FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    )
+    assert live is not None
+    assert live["execution_owner_id"] == "foreign-heartbeat-owner"
+    assert live["lease_expires_at_ms"] == 200
+    assert live["attempt"] == 1
+    assert live["cancel_requested_at_ms"] is not None
+
+    assert await repository.release_expired_canceled_claim(
+        turn["id"],
+        200,
+    ) is True
+    persisted = await screenplay_db.fetch_one(
+        "SELECT execution_owner_id, lease_expires_at_ms, heartbeat_at_ms, "
+        "attempt, cancel_requested_at_ms FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    )
+    assert persisted is not None
+    assert persisted["execution_owner_id"] is None
+    assert persisted["lease_expires_at_ms"] is None
+    assert persisted["heartbeat_at_ms"] is None
+    assert persisted["attempt"] == 1
+    assert persisted["cancel_requested_at_ms"] is not None
+
 
 @pytest.mark.asyncio
 async def test_truncate_fences_and_waits_for_local_pre_root_turn_claim(
