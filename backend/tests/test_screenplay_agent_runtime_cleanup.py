@@ -231,6 +231,62 @@ async def test_cleanup_preserves_domain_documents_artifacts_and_review_decisions
 
 
 @pytest.mark.asyncio
+async def test_cleanup_owns_continuation_lineage_receipts_but_not_foreign_receipts(
+    cleanup_db,
+):
+    await cleanup_db.execute(
+        "INSERT INTO ai_agent_runs (id, session_id, prompt, status, "
+        "binding_namespace, binding_aggregate_id, binding_command_id, "
+        "binding_attributes_json, root_run_id) VALUES "
+        "('run-continuation', 10, '', 'done', 'screenplay.conversation_turn', "
+        "'project-target', 'resume-1', '{\"continuationOf\":\"run-target\"}', "
+        "'run-continuation'), "
+        "('run-continuation-child', NULL, '', 'done', "
+        "'screenplay.agent.task', 'project-target', 'part-1', '{}', "
+        "'run-continuation')"
+    )
+    await cleanup_db.execute(
+        "UPDATE ai_agent_runs SET parent_run_id = 'run-continuation' "
+        "WHERE id = 'run-continuation-child'"
+    )
+    for key, run_id in (
+        ("receipt-target", "run-continuation-child"),
+        ("receipt-other", "run-other"),
+    ):
+        await cleanup_db.execute(
+            "INSERT INTO ai_agent_host_child_runs "
+            "(host_child_key, identity_digest, contract_json, attempt_key, "
+            "run_id, terminal_status) VALUES (?, ?, '{}', ?, ?, 'done')",
+            [key, f"digest-{key}", f"attempt-{key}", run_id],
+        )
+
+    plan = await build_cleanup_plan(
+        cleanup_db,
+        project_ids=("project-target",),
+    )
+    assert "run-continuation" in plan.run_ids
+    assert "run-continuation-child" in plan.run_ids
+    assert plan.table_counts["ai_agent_host_child_runs"] == 1
+    await apply_cleanup(
+        cleanup_db,
+        plan.digest,
+        project_ids=("project-target",),
+    )
+
+    assert await cleanup_db.fetch_one(
+        "SELECT host_child_key FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = 'receipt-target'"
+    ) is None
+    assert await cleanup_db.fetch_one(
+        "SELECT host_child_key FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = 'receipt-other'"
+    ) == {"host_child_key": "receipt-other"}
+    assert await cleanup_db.fetch_one(
+        "SELECT id FROM ai_agent_runs WHERE id = 'run-other'"
+    )
+
+
+@pytest.mark.asyncio
 async def test_cleanup_rolls_back_every_table_after_any_delete_failure(cleanup_db):
     plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
     before = await cleanup_db.fetch_one(

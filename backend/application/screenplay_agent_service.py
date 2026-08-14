@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -118,6 +119,8 @@ class ScreenplayAgentService:
             AgentCancellationService(db, composition)
             if composition is not None else None
         )
+        self._truncate_wait_timeout_seconds = 5.0
+        self._truncate_poll_interval_seconds = 0.05
 
     async def submit_turn(
         self,
@@ -573,12 +576,193 @@ class ScreenplayAgentService:
         }
 
     async def truncate_from_turn(self, turn_id: str):
+        await self._cancel_truncated_runtime(turn_id)
         result = await self._repository.truncate_from_turn(turn_id)
         for deleted_turn_id in result["deletedTurnIds"]:
             self._cancel_task(f"turn:{deleted_turn_id}")
         for deleted_operation_id in result.get("deletedOperationIds", ()):
             self._cancel_task(f"operation:{deleted_operation_id}")
         return result
+
+    async def _cancel_truncated_runtime(self, turn_id: str) -> None:
+        rows = await self._truncate_rows(turn_id)
+        for row in rows:
+            if str(row.get("turn_status") or "") not in {
+                "queued", "planning", "running", "paused",
+            }:
+                continue
+            await self._operations.request_cancel(
+                str(row["turn_id"]),
+                idempotency_key=f"truncate:{row['turn_id']}:cancel",
+            )
+
+        deadline = time.monotonic() + max(
+            0.0,
+            float(self._truncate_wait_timeout_seconds),
+        )
+        cancellation_roots: set[str] = set()
+        local_executions_signaled = False
+        while True:
+            rows = await self._truncate_rows(turn_id)
+            root_ids = tuple(dict.fromkeys(
+                str(row.get("root_run_id") or "").strip()
+                for row in rows
+                if str(row.get("root_run_id") or "").strip()
+            ))
+            active_roots = await self._active_root_ids(root_ids)
+            if active_roots and self._cancellation is None:
+                raise AppError(
+                    "truncate cancellation requires Agent composition",
+                    409,
+                )
+            for root_run_id in active_roots:
+                cancellation_roots.add(root_run_id)
+                assert self._cancellation is not None
+                await self._cancellation.cancel(root_run_id)
+            if active_roots and not local_executions_signaled:
+                await self._cancel_local_truncate_tasks(rows)
+                local_executions_signaled = True
+            await self._finalize_truncated_tasks(rows)
+            if not await self._truncate_runtime_active(
+                root_ids=root_ids,
+                task_ids=tuple(
+                    str(row.get("task_id") or "").strip()
+                    for row in rows
+                    if str(row.get("task_id") or "").strip()
+                ),
+                cancellation_roots=tuple(cancellation_roots),
+            ):
+                break
+            if time.monotonic() >= deadline:
+                raise AppError("truncate cancellation timed out", 409)
+            await asyncio.sleep(max(
+                0.001,
+                float(self._truncate_poll_interval_seconds),
+            ))
+
+    async def _finalize_truncated_tasks(self, rows) -> None:
+        for task_id in dict.fromkeys(
+            str(row.get("task_id") or "").strip()
+            for row in rows
+            if str(row.get("task_id") or "").strip()
+        ):
+            task = await self._long_tasks.load(task_id)
+            if (
+                task is not None
+                and not task.status.terminal
+                and task.cancellation_requested_at_ms is not None
+            ):
+                await self._long_tasks.finalize_if_complete(task_id)
+
+    @staticmethod
+    async def _cancel_local_truncate_tasks(rows) -> None:
+        keys = {
+            key
+            for row in rows
+            for key in (
+                f"turn:{row['turn_id']}",
+                (
+                    f"operation:{row['operation_id']}"
+                    if row.get("operation_id") else ""
+                ),
+            )
+            if key
+        }
+        tasks = []
+        for key in keys:
+            task = _ACTIVE_TASKS.get(key)
+            if task is None or task.done():
+                continue
+            task.cancel()
+            tasks.append((key, task))
+        for key, task in tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+            if _ACTIVE_TASKS.get(key) is task:
+                _ACTIVE_TASKS.pop(key, None)
+
+    async def _truncate_rows(self, turn_id: str):
+        turn = await self._db.fetch_one(
+            "SELECT project_id, session_id, rowid FROM screenplay_agent_turns "
+            "WHERE id = ?",
+            [turn_id],
+        )
+        if turn is None:
+            raise NotFoundError("剧本 Agent Turn 不存在")
+        return await self._db.fetch_all(
+            "SELECT t.id AS turn_id, t.status AS turn_status, "
+            "t.planner_run_id AS root_run_id, o.id AS operation_id, "
+            "o.long_task_id AS task_id "
+            "FROM screenplay_agent_turns AS t "
+            "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+            "WHERE t.project_id = ? AND t.session_id = ? AND t.rowid >= ? "
+            "ORDER BY t.rowid",
+            [turn["project_id"], turn["session_id"], turn["rowid"]],
+        )
+
+    async def _active_root_ids(self, root_ids: Sequence[str]) -> tuple[str, ...]:
+        if not root_ids:
+            return ()
+        rows = await self._db.fetch_all(
+            "SELECT root.id FROM ai_agent_runs AS root WHERE "
+            f"root.id IN ({_sql_marks(root_ids)}) AND ("
+            "root.status = 'running' OR EXISTS (SELECT 1 FROM ai_agent_runs "
+            "AS child WHERE child.root_run_id = root.id AND "
+            "child.id <> root.id AND child.status = 'running') OR EXISTS "
+            "(SELECT 1 FROM ai_agent_run_cancellations AS cancellation "
+            "WHERE cancellation.root_run_id = root.id AND "
+            "cancellation.status = 'draining')) ORDER BY root.id",
+            list(root_ids),
+        )
+        return tuple(str(row["id"]) for row in rows)
+
+    async def _truncate_runtime_active(
+        self,
+        *,
+        root_ids: Sequence[str],
+        task_ids: Sequence[str],
+        cancellation_roots: Sequence[str],
+    ) -> bool:
+        if root_ids:
+            marks = _sql_marks(root_ids)
+            active = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+                f"(id IN ({marks}) OR root_run_id IN ({marks})) AND "
+                "(status = 'running' OR execution_owner_id IS NOT NULL OR "
+                "lease_expires_at_ms IS NOT NULL)",
+                [*root_ids, *root_ids],
+            )
+            if int((active or {}).get("count") or 0):
+                return True
+            delegations = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
+                f"root_run_id IN ({marks}) AND (status IN "
+                "('queued', 'claimed', 'running') OR worker_id IS NOT NULL OR "
+                "claim_expires_at_ms IS NOT NULL)",
+                list(root_ids),
+            )
+            if int((delegations or {}).get("count") or 0):
+                return True
+        if task_ids:
+            units = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units WHERE "
+                f"task_id IN ({_sql_marks(task_ids)}) AND (status IN "
+                "('claimed', 'running') OR worker_id IS NOT NULL OR "
+                "lease_expires_at_ms IS NOT NULL)",
+                list(task_ids),
+            )
+            if int((units or {}).get("count") or 0):
+                return True
+        if cancellation_roots:
+            receipts = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations "
+                f"WHERE root_run_id IN ({_sql_marks(cancellation_roots)}) "
+                "AND status <> 'completed'",
+                list(cancellation_roots),
+            )
+            if int((receipts or {}).get("count") or 0):
+                return True
+        return False
 
     @staticmethod
     def _remember_task(key: str, task: asyncio.Task[None]) -> None:
@@ -938,6 +1122,10 @@ def _root_request(turn: Mapping[str, Any], runtime) -> AgentRunRequest:
         tools_enabled=True,
         metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
     )
+
+
+def _sql_marks(values: Sequence[object]) -> str:
+    return ",".join("?" for _ in values)
 
 
 __all__ = [
