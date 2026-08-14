@@ -588,8 +588,8 @@ async def _answer_projection_fixture(screenplay_db, suffix: str):
     await screenplay_db.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, binding_namespace, "
-        "binding_aggregate_id, binding_command_id, binding_attributes_json) "
-        "VALUES (?, ?, 'running', 'agent', ?, ?, ?, ?, ?)",
+        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
+        "root_run_id) VALUES (?, ?, 'running', 'agent', ?, ?, ?, ?, ?, ?)",
         [
             root_run_id,
             run_session_id,
@@ -598,6 +598,7 @@ async def _answer_projection_fixture(screenplay_db, suffix: str):
             binding_project_id,
             binding_command_id,
             json.dumps(binding_attributes),
+            root_run_id,
         ],
     )
     if suffix != "missing_turn_event":

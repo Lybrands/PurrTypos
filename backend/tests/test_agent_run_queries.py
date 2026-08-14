@@ -16,7 +16,10 @@ from application.writing_proposal_read_model import (
 )
 from application.agent_composition import set_agent_composition
 from application.agent_composition import get_agent_composition
-from application.agent_cancellation_service import AgentCancellationService
+from application.agent_cancellation_service import (
+    AgentCancellationService,
+    RootCancellationTargetError,
+)
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -732,6 +735,125 @@ async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):
         "lease_expires_at_ms": None,
     }
     assert child["cancel_requested_at_ms"] is not None
+
+
+async def test_root_cancellation_service_rejects_child_target_without_writes(
+    temp_db,
+):
+    root_run_id = await _seed_run(temp_db)
+    child_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="host child",
+        mode="agent",
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        agent_role="screenplay-part",
+        run_depth=1,
+    )
+    sibling_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="sibling child",
+        mode="agent",
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        agent_role="screenplay-part",
+        run_depth=1,
+    )
+
+    with pytest.raises(RootCancellationTargetError, match="Root Run"):
+        await AgentCancellationService(
+            temp_db,
+            get_agent_composition(),
+        ).cancel(child_run_id)
+
+    rows = await temp_db.fetch_all(
+        "SELECT id, status, cancellation_epoch, cancel_requested_at_ms "
+        "FROM ai_agent_runs WHERE id IN (?, ?, ?) ORDER BY id",
+        [root_run_id, child_run_id, sibling_run_id],
+    )
+    assert {row["id"]: row["status"] for row in rows} == {
+        root_run_id: "running",
+        child_run_id: "running",
+        sibling_run_id: "running",
+    }
+    assert all(int(row["cancellation_epoch"] or 0) == 0 for row in rows)
+    assert all(row["cancel_requested_at_ms"] is None for row in rows)
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
+    ) == {"count": 0}
+
+
+async def test_run_cancel_route_rejects_child_target_as_contract_error(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    child_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="route child",
+        mode="agent",
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        agent_role="screenplay-part",
+        run_depth=1,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{child_run_id}/cancel",
+        json_body={},
+    )
+
+    assert response.status_code == 409
+    assert "Root Run" in response.json()["detail"]
+    assert await temp_db.fetch_one(
+        "SELECT status, cancellation_epoch, cancel_requested_at_ms "
+        "FROM ai_agent_runs WHERE id = ?",
+        [root_run_id],
+    ) == {
+        "status": "running",
+        "cancellation_epoch": 0,
+        "cancel_requested_at_ms": None,
+    }
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
+    ) == {"count": 0}
+
+
+async def test_root_cancellation_rejects_malformed_foreign_lineage(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    malformed_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="malformed root",
+        mode="agent",
+    )
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET root_run_id = ? WHERE id = ?",
+        [root_run_id, malformed_run_id],
+    )
+
+    with pytest.raises(RootCancellationTargetError, match="Root Run"):
+        await AgentCancellationService(
+            temp_db,
+            get_agent_composition(),
+        ).cancel(malformed_run_id)
+
+    assert await temp_db.fetch_one(
+        "SELECT status, cancellation_epoch, cancel_requested_at_ms "
+        "FROM ai_agent_runs WHERE id = ?",
+        [malformed_run_id],
+    ) == {
+        "status": "running",
+        "cancellation_epoch": 0,
+        "cancel_requested_at_ms": None,
+    }
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
+    ) == {"count": 0}
 
 
 async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):

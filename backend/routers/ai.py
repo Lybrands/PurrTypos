@@ -523,12 +523,21 @@ async def get_agent_run_stability_trend(
 async def cancel_agent_run(run_id: str):
     """Persist a cancellation request for the executor that owns this Run."""
 
-    from application.agent_cancellation_service import AgentCancellationService
+    from application.agent_cancellation_service import (
+        AgentCancellationService,
+        RootCancellationTargetError,
+    )
     from application.agent_composition import get_agent_composition
     from dependencies import get_db
 
     composition = get_agent_composition()
-    result = await AgentCancellationService(get_db(), composition).cancel(run_id)
+    try:
+        result = await AgentCancellationService(
+            get_db(),
+            composition,
+        ).cancel(run_id)
+    except RootCancellationTargetError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     if result is None:
         return {"success": False, "error": "Agent Run 不存在"}
     if result["status"] not in {"canceled", "cancel_requested"}:
