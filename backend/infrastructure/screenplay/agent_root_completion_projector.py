@@ -9,6 +9,13 @@ from collections.abc import Mapping, Sequence
 from purra.contracts import RunStatus
 from purra.errors import RunCommitProjectionError
 from purra.ports import RunCommit
+from purra.recovery import (
+    FailureCategory,
+    FailureDecision,
+    FailureDisposition,
+    FailureScope,
+    RecoveryEffectState,
+)
 
 from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
@@ -234,6 +241,8 @@ class ScreenplayAgentRootCompletionProjector:
             )
             return
         if status is RunStatus.CANCELED:
+            if task is not None and not task.status.terminal:
+                await self._long_tasks.cancel(task.id)
             receipt_id = str(turn.get("cancel_receipt_id") or "").strip()
             if not receipt_id:
                 receipt = await self._operations.request_cancel(
@@ -248,6 +257,22 @@ class ScreenplayAgentRootCompletionProjector:
             return
         code = str(error or status.value or "screenplay_root_failed")[:240]
         message = _terminal_message(code)
+        if task is not None and not task.status.terminal:
+            if status is RunStatus.BLOCKED:
+                await self._long_tasks.cancel(task.id)
+            else:
+                await self._long_tasks.fail(
+                    task.id,
+                    decision=FailureDecision(
+                        category=FailureCategory.BUSINESS_INVARIANT,
+                        code=code,
+                        disposition=FailureDisposition.FAIL_PERMANENT,
+                        attempts_remaining=0,
+                        effect_state=RecoveryEffectState.UNKNOWN,
+                        checkpoint_available=False,
+                        scope=FailureScope.SYSTEMIC,
+                    ),
+                )
         operation = await self._operations.load(operation_id)
         assert operation is not None
         await self._operations.fail(
