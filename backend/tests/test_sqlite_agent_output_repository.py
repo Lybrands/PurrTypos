@@ -17,7 +17,11 @@ from purra.contracts import (
     RunCreateParams,
     RunStatus,
 )
-from purra.errors import ContractViolationError, RunCommitProjectionError
+from purra.errors import (
+    ContractViolationError,
+    RunCancellationConflictError,
+    RunCommitProjectionError,
+)
 from purra.events import AgentEvent, CoreEventType
 from purra.output import (
     AgentOutputEventDraft,
@@ -966,6 +970,43 @@ async def test_projection_retry_never_overwrites_a_concurrent_terminal_commit(
         "FROM ai_agent_run_events WHERE run_id = ? AND kind = 'run.lifecycle'",
         [f"run:{run_id}:done", run_id],
     ) == {"canceled": 1, "done": 0}
+
+
+@pytest.mark.asyncio
+async def test_cancel_fence_rejects_done_before_run_projector(output_db):
+    db, run_id, runs = output_db
+
+    class RecordingProjector:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, _run_id, _commit):
+            self.calls += 1
+
+    projector = RecordingProjector()
+    repository = _repository(
+        db,
+        run_repository=runs,
+        run_commit_projector=projector,
+    )
+    await db.execute(
+        "UPDATE ai_agent_runs SET cancel_requested_at_ms = 1, "
+        "cancellation_epoch = 1 WHERE id = ?",
+        [run_id],
+    )
+
+    with pytest.raises(RunCancellationConflictError, match="cancel-requested"):
+        await repository.commit_run_lifecycle(
+            run_id,
+            _completed_commit(run_id),
+            _completed_draft(run_id),
+        )
+
+    assert projector.calls == 0
+    assert await db.fetch_one(
+        "SELECT status, cancel_requested_at_ms FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "running", "cancel_requested_at_ms": 1}
 
 
 @pytest.mark.asyncio

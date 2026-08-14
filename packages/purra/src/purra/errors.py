@@ -31,6 +31,10 @@ class ContractViolationError(AgentCoreError):
     """A registered capability violates a Core contract."""
 
 
+class RunCancellationConflictError(ContractViolationError):
+    """A stale execution tried to out-race a durable Run cancellation fence."""
+
+
 class OutputPersistenceError(CodedAgentCoreError):
     """A canonical output event could not become durable."""
 
