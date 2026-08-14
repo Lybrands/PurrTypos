@@ -509,6 +509,7 @@ _PLANNER_STORAGE_ROLES: dict[str, frozenset[str]] = {
     "backend/tests/test_screenplay_agent_durable_service.py": frozenset(
         {"read", "write"}
     ),
+    "backend/tests/test_screenplay_multi_model_e2e.py": frozenset({"read"}),
     "backend/tests/test_screenplay_agent_runtime_cleanup.py": frozenset(
         {"write"}
     ),
@@ -947,3 +948,24 @@ def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
     assert not (
         BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
     ).exists()
+
+
+def test_paid_screenplay_e2e_uses_the_real_root_workflow():
+    path = BACKEND_DIR / "tests" / "test_screenplay_multi_model_e2e.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    referenced_names = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+    }
+
+    assert "_finalization_fixture" not in imported
+    assert "monkeypatch" not in referenced_names
+    assert "ScreenplayAgentService" in imported
+    assert "create_agent_composition" in imported
