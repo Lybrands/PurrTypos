@@ -51,17 +51,27 @@ from infrastructure.screenplay.agent_root_completion_projector import (
     ScreenplayAgentRootCompletionError,
     ScreenplayAgentRootCompletionProjector,
 )
+from infrastructure.screenplay.agent_continuation_begin_projector import (
+    ScreenplayContinuationBeginProjector,
+)
 from purra.contracts import (
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
+    RunBinding,
+    RunCreateParams,
     RunStatus,
 )
+from purra.events import AgentEvent, CoreEventType
 from purra.ports import RunCommit
 from purra.api import AgentCore
-from purra.errors import ModelGatewayError, RunCommitProjectionError
+from purra.errors import (
+    ContractViolationError,
+    ModelGatewayError,
+    RunCommitProjectionError,
+)
 from purra.long_tasks import LongTaskUnitResult, RecipeLongTaskDispatcher
 from purra.tools import InMemoryToolCatalog
 from domains.screenplay_agent.adapter import (
@@ -1060,6 +1070,402 @@ async def test_incompatible_model_resume_keeps_operation_paused(screenplay_db):
     assert unchanged is not None
     assert unchanged.status.value == "paused"
     assert unchanged.revision == paused.revision
+
+
+async def _paused_continuation_fixture(db):
+    operation, turn_id, _command, _finalizer = await _finalization_fixture(db)
+    turn = await db.fetch_one(
+        "SELECT project_id, session_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    )
+    source_root_run_id = "run-paused-continuation-source"
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, root_run_id) "
+        "VALUES (?, ?, 'canceled', 'agent', '', ?, ?, ?, ?)",
+        [
+            source_root_run_id,
+            turn["session_id"],
+            "screenplay.conversation_turn",
+            turn["project_id"],
+            "command-atomic-finalizer",
+            source_root_run_id,
+        ],
+    )
+    await db.execute(
+        "UPDATE screenplay_agent_turns SET planner_run_id = ? WHERE id = ?",
+        [source_root_run_id, turn_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES (?, ?, ?, 'recipe', ?, ?, 'paused', 1)",
+        [
+            "task-atomic-finalizer",
+            "work-paused-continuation",
+            "purrtypos.screenplay",
+            turn["project_id"],
+            source_root_run_id,
+        ],
+    )
+    operations = SqliteScreenplayOperationRepository(db)
+    paused = await operations.pause(
+        operation.id,
+        code="checkpoint_requires_resume",
+        message="resume",
+        command_id="pause-for-continuation-reservation",
+    )
+    return paused, turn_id, source_root_run_id, turn
+
+
+@pytest.mark.asyncio
+async def test_continuation_start_reservation_has_one_cross_connection_winner(
+    screenplay_db,
+    tmp_path,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    snapshot = {"digest": "sha256:" + "a" * 64}
+    command_id = "resume-cross-connection"
+    await SqliteScreenplayOperationRepository(screenplay_db).resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot=snapshot,
+    )
+    second_db = DatabaseConnection(tmp_path)
+    await second_db.init()
+    try:
+        first, second = await asyncio.gather(
+            SqliteScreenplayOperationRepository(
+                screenplay_db
+            ).claim_continuation_start(
+                command_id=command_id,
+                operation_id=paused.id,
+                turn_id=turn_id,
+                source_root_run_id=source_root_run_id,
+                session_id=int(turn["session_id"]),
+                project_id=str(turn["project_id"]),
+                owner_id="resume-owner-one",
+            ),
+            SqliteScreenplayOperationRepository(second_db).claim_continuation_start(
+                command_id=command_id,
+                operation_id=paused.id,
+                turn_id=turn_id,
+                source_root_run_id=source_root_run_id,
+                session_id=int(turn["session_id"]),
+                project_id=str(turn["project_id"]),
+                owner_id="resume-owner-two",
+            ),
+        )
+    finally:
+        await second_db.close()
+
+    assert sorted((first["_acquired"], second["_acquired"])) == [False, True]
+    assert first["identity_digest"] == second["identity_digest"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_resume_cross_service_dispatches_exactly_one_root(
+    screenplay_db,
+    tmp_path,
+):
+    paused, _turn_id, _source_root_run_id, _turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    second_db = DatabaseConnection(tmp_path)
+    await second_db.init()
+    request = ResumeScreenplayOperationRequest.model_validate({
+        "expectedOperationRevision": paused.revision,
+        "runtime": {
+            "apiKey": "secret",
+            "apiProvider": "openai",
+            "baseURL": "https://api.deepseek.com/v1",
+            "options": {
+                "model": "deepseek-v4-flash",
+                "model_profile": "deepseek:deepseek-v4-flash",
+            },
+            "contextWindow": "128k",
+        },
+    })
+    first_service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="resume-service-one",
+        projects=ScreenplayV2ProjectService(screenplay_db),
+    )
+    second_service = ScreenplayAgentService(
+        second_db,
+        owner_id="resume-service-two",
+        projects=ScreenplayV2ProjectService(second_db),
+    )
+    try:
+        first, second = await asyncio.gather(
+            first_service.prepare_resume(
+                paused.id,
+                idempotency_key="resume-cross-service-command",
+                request=request,
+            ),
+            second_service.prepare_resume(
+                paused.id,
+                idempotency_key="resume-cross-service-command",
+                request=request,
+            ),
+        )
+    finally:
+        await second_db.close()
+
+    assert sorted((first["dispatchRequired"], second["dispatchRequired"])) == [
+        False,
+        True,
+    ]
+    assert first["continuationRootRunId"] is None
+    assert second["continuationRootRunId"] is None
+
+
+@pytest.mark.asyncio
+async def test_continuation_reservation_rejects_identity_mismatch_and_reclaims_expiry(
+    screenplay_db,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    command_id = "resume-expiry-and-identity"
+    await operations.resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot={"digest": "sha256:" + "d" * 64},
+    )
+    first = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="first-owner",
+    )
+    with pytest.raises(ValueError, match="identity conflicts"):
+        await operations.claim_continuation_start(
+            command_id=command_id,
+            operation_id=paused.id,
+            turn_id=turn_id,
+            source_root_run_id="different-source-root",
+            session_id=int(turn["session_id"]),
+            project_id=str(turn["project_id"]),
+            owner_id="attacker",
+        )
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_operation_commands SET "
+        "continuation_lease_expires_at_ms = 0 WHERE command_id = ?",
+        [command_id],
+    )
+    recovered = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="recovery-owner",
+    )
+
+    assert first["_acquired"] is True
+    assert recovered["_acquired"] is True
+    assert int(recovered["continuation_epoch"]) == (
+        int(first["continuation_epoch"]) + 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
+    screenplay_db,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    command_id = "resume-atomic-root-begin"
+    await operations.resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot={"digest": "sha256:" + "b" * 64},
+    )
+    reservation = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="continuation-owner",
+    )
+    params = RunCreateParams(
+        session_id=int(turn["session_id"]),
+        prompt="continue",
+        mode="agent",
+        turn_id=turn_id,
+        binding=RunBinding(
+            namespace="screenplay.conversation_turn",
+            aggregate_id=str(turn["project_id"]),
+            command_id=command_id,
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+                "continuationOf": source_root_run_id,
+                "operationId": paused.id,
+                "continuationOwner": "continuation-owner",
+                "continuationEpoch": int(reservation["continuation_epoch"]),
+                "continuationIdentityDigest": reservation["identity_digest"],
+            },
+        ),
+    )
+    repository = SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+        run_begin_projector=ScreenplayContinuationBeginProjector(screenplay_db),
+    )
+    begun, _output = await repository.begin_run_lifecycle(
+        params,
+        AgentEvent(
+            type=CoreEventType.RUN_STARTED,
+            payload={"status": RunStatus.RUNNING.value},
+        ),
+    )
+
+    assert await screenplay_db.fetch_one(
+        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"planner_run_id": begun.run_id}
+    assert await screenplay_db.fetch_one(
+        "SELECT continuation_status, continuation_root_run_id FROM "
+        "screenplay_agent_operation_commands WHERE command_id = ?",
+        [command_id],
+    ) == {
+        "continuation_status": "bound",
+        "continuation_root_run_id": begun.run_id,
+    }
+    with pytest.raises(ContractViolationError):
+        await repository.begin_run_lifecycle(
+            params,
+            AgentEvent(
+                type=CoreEventType.RUN_STARTED,
+                payload={"status": RunStatus.RUNNING.value},
+            ),
+        )
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+        "binding_command_id = ?",
+        [command_id],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_continuation_begin_failure_rolls_back_root_receipt_and_turn(
+    screenplay_db,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    command_id = "resume-rollback-root-begin"
+    await operations.resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot={"digest": "sha256:" + "c" * 64},
+    )
+    reservation = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="rollback-owner",
+    )
+
+    class RejectAfterProjection:
+        async def project(self, run_id, params):
+            await ScreenplayContinuationBeginProjector(screenplay_db).project(
+                run_id,
+                params,
+            )
+            raise RuntimeError("injected begin projection failure")
+
+    repository = SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+        run_begin_projector=RejectAfterProjection(),
+    )
+    params = RunCreateParams(
+        session_id=int(turn["session_id"]),
+        prompt="continue",
+        mode="agent",
+        turn_id=turn_id,
+        binding=RunBinding(
+            namespace="screenplay.conversation_turn",
+            aggregate_id=str(turn["project_id"]),
+            command_id=command_id,
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+                "continuationOf": source_root_run_id,
+                "operationId": paused.id,
+                "continuationOwner": "rollback-owner",
+                "continuationEpoch": int(reservation["continuation_epoch"]),
+                "continuationIdentityDigest": reservation["identity_digest"],
+            },
+        ),
+    )
+    with pytest.raises(RuntimeError, match="injected begin projection failure"):
+        await repository.begin_run_lifecycle(
+            params,
+            AgentEvent(
+                type=CoreEventType.RUN_STARTED,
+                payload={"status": RunStatus.RUNNING.value},
+            ),
+        )
+
+    assert await screenplay_db.fetch_one(
+        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"planner_run_id": source_root_run_id}
+    assert await screenplay_db.fetch_one(
+        "SELECT continuation_status, continuation_root_run_id FROM "
+        "screenplay_agent_operation_commands WHERE command_id = ?",
+        [command_id],
+    ) == {
+        "continuation_status": "starting",
+        "continuation_root_run_id": None,
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+        "binding_command_id = ?",
+        [command_id],
+    ) == {"count": 0}
+    assert await operations.release_continuation_start(
+        command_id=command_id,
+        owner_id="rollback-owner",
+        epoch=int(reservation["continuation_epoch"]),
+    ) is True
+    retry = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="retry-owner",
+    )
+    assert retry["_acquired"] is True
+    assert int(retry["continuation_epoch"]) == (
+        int(reservation["continuation_epoch"]) + 1
+    )
 
 
 @pytest.mark.asyncio
@@ -2237,12 +2643,100 @@ async def test_screenplay_formal_root_settles_non_success_terminal_states(
     )
     try:
         await service.execute_turn(turn["id"], request.runtime)
+        initial_snapshot = await service.get_snapshot(
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+        )
+        old_root_run_id = initial_snapshot["turns"][0]["rootRunId"]
+        old_root_event_count = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+            [old_root_run_id],
+        )
+        if turn_status == "paused":
+            service._unit_executor_factory = (
+                lambda _runtime: _UnitExecutor(screenplay_db)
+            )
+            resumed = await service.prepare_resume(
+                initial_snapshot["operations"][0]["id"],
+                idempotency_key="resume-formal-paused-root",
+                request=ResumeScreenplayOperationRequest.model_validate({
+                    "expectedOperationRevision": initial_snapshot["operations"][0][
+                        "revision"
+                    ],
+                    "runtime": request.runtime.model_dump(mode="json"),
+                }),
+            )
+            await service.execute_resumed_operation(
+                resumed["operationId"],
+                request.runtime,
+                continuation_command="resume-formal-paused-root",
+            )
     finally:
         await composition.shutdown()
+    snapshot = initial_snapshot
+    assert rejecting_projector.calls == 2
+    if turn_status == "paused":
+        completed = await service.get_snapshot(
+            project_id=workspace["project"]["id"],
+            session_id=session["id"],
+        )
+        new_root_run_id = completed["turns"][0]["rootRunId"]
+        assert new_root_run_id != old_root_run_id, completed
+        assert completed["turns"][0]["status"] == "completed", await screenplay_db.fetch_one(
+            "SELECT status, error_json FROM screenplay_agent_turns WHERE id = ?",
+            [turn["id"]],
+        )
+        assert completed["operations"][0]["status"] == "succeeded"
+        assert await screenplay_db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [old_root_run_id],
+        ) == {"status": "canceled"}
+        assert await screenplay_db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [new_root_run_id],
+        ) == {"status": "done"}
+        replayed = await service.prepare_resume(
+            initial_snapshot["operations"][0]["id"],
+            idempotency_key="resume-formal-paused-root",
+            request=ResumeScreenplayOperationRequest.model_validate({
+                "expectedOperationRevision": initial_snapshot["operations"][0][
+                    "revision"
+                ],
+                "runtime": request.runtime.model_dump(mode="json"),
+            }),
+        )
+        assert replayed["continuationRootRunId"] == new_root_run_id
+        assert replayed["dispatchRequired"] is False
+        assert await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+            "binding_namespace = 'screenplay.conversation_turn' AND "
+            "binding_command_id = ?",
+            ["resume-formal-paused-root"],
+        ) == {"count": 1}
+        assert await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+            [old_root_run_id],
+        ) == old_root_event_count
+        assert await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+            "AND event_type = 'run.todos_updated'",
+            [new_root_run_id],
+        ) == {"count": 1}
+        assert await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND attempt > 1",
+            [completed["tasks"][0]["id"]],
+        ) == {"count": 1}
+        completed_first_attempt = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
+            "WHERE task_id = ? AND status = 'completed' AND attempt = 1",
+            [completed["tasks"][0]["id"]],
+        )
+        assert int(completed_first_attempt["count"]) >= 1
     snapshot = await service.get_snapshot(
         project_id=workspace["project"]["id"],
         session_id=session["id"],
-    )
+    ) if turn_status != "paused" else snapshot
     assert snapshot["turns"][0]["status"] == turn_status
     assert snapshot["operations"][0]["status"] == operation_status
     run = await screenplay_db.fetch_one(

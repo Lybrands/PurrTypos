@@ -8,6 +8,7 @@ from purra.contracts import RunId
 from purra.output.contracts import DomainEffectOutput
 
 if TYPE_CHECKING:
+    from purra.contracts import RunCreateParams
     from purra.ports.run_lifecycle import RunCommit
 
 
@@ -32,4 +33,15 @@ class RunCommitProjector(Protocol):
     async def project(self, run_id: RunId, commit: "RunCommit") -> None: ...
 
 
-__all__ = ["DomainEventProjector", "RunCommitProjector"]
+@runtime_checkable
+class RunBeginProjector(Protocol):
+    """Project host-bound identity effects inside the Root begin transaction."""
+
+    async def project(
+        self,
+        run_id: RunId,
+        params: "RunCreateParams",
+    ) -> None: ...
+
+
+__all__ = ["DomainEventProjector", "RunBeginProjector", "RunCommitProjector"]

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import replace
 from uuid import uuid4
 
@@ -487,14 +488,18 @@ class AgentRunService:
         try:
             if run_binding_lifecycle is not None:
                 await run_binding_lifecycle.before_submit()
-        except BaseException:
+        except BaseException as error:
             release_core = getattr(composition, "release_core", None)
             if callable(release_core):
                 release_core(core)
+            if run_binding_lifecycle is not None:
+                await run_binding_lifecycle.on_start_failed(
+                    str(getattr(error, "code", "") or type(error).__name__)
+                )
             raise
         try:
             handle = await core.submit(request, options=options)
-        except BaseException:
+        except BaseException as error:
             # submit() may already have spawned a shielded supervisor task.
             # Closing the Core is the only safe ownership conclusion; merely
             # discarding it can orphan execution during request cancellation.
@@ -502,6 +507,10 @@ class AgentRunService:
             release_core = getattr(composition, "release_core", None)
             if callable(release_core):
                 release_core(core)
+            if run_binding_lifecycle is not None:
+                await run_binding_lifecycle.on_start_failed(
+                    str(getattr(error, "code", "") or type(error).__name__)
+                )
             raise
         cancel_watcher = (
             asyncio.create_task(
@@ -521,7 +530,17 @@ class AgentRunService:
         terminal = False
         try:
             if run_binding_lifecycle is not None:
-                await run_binding_lifecycle.on_run_started(handle.run_id)
+                try:
+                    await run_binding_lifecycle.on_run_started(handle.run_id)
+                except BaseException as error:
+                    await handle.cancel("run_binding_failed")
+                    with suppress(BaseException):
+                        await handle.wait()
+                    await run_binding_lifecycle.on_start_failed(
+                        str(getattr(error, "code", "") or type(error).__name__)
+                    )
+                    terminal = True
+                    raise
             async for update in core_stream:
                 if (
                     isinstance(update, AgentOutputEvent)
@@ -670,6 +689,11 @@ class _HostChildRunBindingLifecycle:
 
     async def on_run_finished(self, _result) -> None:
         self._reservation = await self._registry.refresh(self._reservation)
+
+    async def on_start_failed(self, _code: str) -> None:
+        # The durable reservation remains the recovery authority. It has no
+        # Run to terminalize yet and is safely reclaimed after its lease.
+        return None
 
 
 async def _wait_for_existing_host_child(signal) -> None:

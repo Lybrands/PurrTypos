@@ -105,6 +105,7 @@ class AgentComposition:
         db,
         *,
         execution_db=None,
+        run_begin_projector=None,
         run_commit_projector=None,
         profile_extension_factories: Sequence[
             Callable[..., AgentProfileExtension]
@@ -130,6 +131,7 @@ class AgentComposition:
         self._output_repository = SqliteAgentOutputRepository(
             db,
             run_repository=self._repository,
+            run_begin_projector=run_begin_projector,
             run_commit_projector=run_commit_projector,
         )
         self._host_child_run_registry = SqliteHostChildRunRegistry(db)

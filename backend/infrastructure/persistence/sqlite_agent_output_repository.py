@@ -32,7 +32,7 @@ from purra.output import (
     RunLifecycleOutputDraft,
 )
 from purra.ports import RunBeginResult, RunCommit
-from purra.ports.projection import RunCommitProjector
+from purra.ports.projection import RunBeginProjector, RunCommitProjector
 
 
 _VALIDATED_RESULT_SCHEMA = "purra.run-validated-result/v1"
@@ -47,11 +47,13 @@ class SqliteAgentOutputRepository:
         *,
         run_repository=None,
         domain_projector=None,
+        run_begin_projector: RunBeginProjector | None = None,
         run_commit_projector: RunCommitProjector | None = None,
     ) -> None:
         self._db = db
         self._runs = run_repository
         self._domain_projector = domain_projector
+        self._run_begin_projector = run_begin_projector
         self._run_commit_projector = run_commit_projector
 
     async def open_stream(self, spec: OutputStreamSpec) -> OutputStreamSpec:
@@ -116,6 +118,13 @@ class SqliteAgentOutputRepository:
                 started_event,
                 persist_legacy_event=False,
             )
+            if self._run_begin_projector is not None:
+                projected = await self._run_begin_projector.project(
+                    begun.run_id,
+                    params,
+                )
+                if projected is not None:
+                    raise TypeError("run begin projector must return None")
             output = await self._append_event_in_transaction(
                 AgentOutputEventDraft(
                     run_id=begun.run_id,

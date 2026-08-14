@@ -554,6 +554,36 @@ class AgentCore:
                 yield _run_result(controller)
                 return
 
+            continuation = options.durable_continuation
+            if continuation is not None:
+                _validate_task_admission_coverage(
+                    continuation.plan,
+                    continuation.admission,
+                )
+                await controller.record_event(
+                    CoreEventType.TASK_ADMISSION_DECIDED,
+                    {
+                        **continuation.admission.to_event_payload(),
+                        "continuation": True,
+                        "sourceRootRunId": continuation.source_root_run_id,
+                        "continuationCommand": continuation.continuation_command,
+                    },
+                )
+                await controller.install_plan(continuation.plan)
+                async for admitted_event in _complete_admitted_task(
+                    controller=controller,
+                    request=request,
+                    plan=continuation.plan,
+                    admission=continuation.admission,
+                    dispatcher=self._long_task_dispatcher,
+                    sink=sink,
+                    signal=signal,
+                    existing_receipt=continuation.receipt,
+                ):
+                    yield admitted_event
+                yield _run_result(controller)
+                return
+
             # Reserve against every enabled schema. Staged providers use this
             # pass only for a lightweight, host-authenticated planning manifest;
             # legacy providers retain their original single-pass behavior.

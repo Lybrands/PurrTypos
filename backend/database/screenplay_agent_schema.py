@@ -89,9 +89,42 @@ async def init_screenplay_agent_schema(db) -> None:
         request_digest TEXT NOT NULL,
         receipt_id TEXT NOT NULL,
         response_json TEXT NOT NULL DEFAULT '{}',
+        continuation_status TEXT DEFAULT NULL,
+        continuation_owner_id TEXT DEFAULT NULL,
+        continuation_lease_expires_at_ms INTEGER DEFAULT NULL,
+        continuation_epoch INTEGER NOT NULL DEFAULT 0,
+        continuation_identity_digest TEXT DEFAULT NULL,
+        continuation_source_root_run_id TEXT DEFAULT NULL,
+        continuation_turn_id TEXT DEFAULT NULL,
+        continuation_session_id INTEGER DEFAULT NULL,
+        continuation_project_id TEXT DEFAULT NULL,
+        continuation_root_run_id TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(operation_id, command_type, request_digest)
     )""")
+    command_columns = {
+        str(column["name"])
+        for column in await db.fetch_all(
+            "PRAGMA table_info(screenplay_agent_operation_commands)"
+        )
+    }
+    for name, definition in (
+        ("continuation_status", "TEXT DEFAULT NULL"),
+        ("continuation_owner_id", "TEXT DEFAULT NULL"),
+        ("continuation_lease_expires_at_ms", "INTEGER DEFAULT NULL"),
+        ("continuation_epoch", "INTEGER NOT NULL DEFAULT 0"),
+        ("continuation_identity_digest", "TEXT DEFAULT NULL"),
+        ("continuation_source_root_run_id", "TEXT DEFAULT NULL"),
+        ("continuation_turn_id", "TEXT DEFAULT NULL"),
+        ("continuation_session_id", "INTEGER DEFAULT NULL"),
+        ("continuation_project_id", "TEXT DEFAULT NULL"),
+        ("continuation_root_run_id", "TEXT DEFAULT NULL"),
+    ):
+        if name not in command_columns:
+            await db.execute(
+                f"ALTER TABLE screenplay_agent_operation_commands "
+                f"ADD COLUMN {name} {definition}"
+            )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_screenplay_agent_operation_commands "
         "ON screenplay_agent_operation_commands(operation_id, create_time)"
