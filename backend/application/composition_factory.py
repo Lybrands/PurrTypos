@@ -19,6 +19,9 @@ from infrastructure.screenplay.agent_root_completion_projector import (
 from infrastructure.screenplay.agent_continuation_begin_projector import (
     ScreenplayContinuationBeginProjector,
 )
+from infrastructure.screenplay.agent_root_cancellation_participant import (
+    ScreenplayRootCancellationParticipant,
+)
 
 
 class _ChainedRunCommitProjector:
@@ -59,6 +62,9 @@ def create_agent_composition(
         db,
         run_begin_projector=ScreenplayContinuationBeginProjector(db),
         run_commit_projector=run_commit_projector,
+        root_cancellation_participants=(
+            ScreenplayRootCancellationParticipant(db),
+        ),
         profile_extension_factories=(
             writing_extension_factory,
             partial(

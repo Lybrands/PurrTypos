@@ -718,6 +718,86 @@ async def test_orphan_root_cancel_uses_canonical_terminal_projector(
 
 
 @pytest.mark.asyncio
+async def test_root_cancel_participant_failure_rolls_back_fence(screenplay_db):
+    identity = await _answer_projection_fixture(screenplay_db, "cancel_rollback")
+    composition = create_agent_composition(screenplay_db)
+
+    class FailingParticipant:
+        async def project(self, root_run_id, receipt):
+            assert root_run_id == identity["rootRunId"]
+            assert int(receipt["cancellation_epoch"]) == 1
+            raise RuntimeError("injected cancellation participant failure")
+
+    try:
+        cancellation = AgentCancellationService(
+            screenplay_db,
+            composition,
+            participants=(
+                *composition.root_cancellation_participants,
+                FailingParticipant(),
+            ),
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="injected cancellation participant failure",
+        ):
+            await cancellation.cancel(identity["rootRunId"])
+    finally:
+        await composition.shutdown()
+
+    assert await screenplay_db.fetch_one(
+        "SELECT cancel_requested_at_ms, cancellation_epoch FROM ai_agent_runs "
+        "WHERE id = ?",
+        [identity["rootRunId"]],
+    ) == {"cancel_requested_at_ms": None, "cancellation_epoch": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT cancel_requested_at_ms FROM screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    ) == {"cancel_requested_at_ms": None}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations WHERE "
+        "root_run_id = ?",
+        [identity["rootRunId"]],
+    ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_cancel_commands "
+        "WHERE command_id = ?",
+        [f"root-cancel:{identity['rootRunId']}"],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_generic_root_cancel_requests_screenplay_business_cancel(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "generic_cancel")
+    composition = create_agent_composition(screenplay_db)
+    try:
+        result = await AgentCancellationService(
+            screenplay_db,
+            composition,
+        ).cancel(identity["rootRunId"])
+    finally:
+        await composition.shutdown()
+
+    assert result is not None and result["cancellationStatus"] == "completed"
+    persisted = await screenplay_db.fetch_one(
+        "SELECT status, cancel_requested_at_ms, cancel_receipt_id FROM "
+        "screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    )
+    assert persisted is not None
+    assert persisted["status"] == "canceled"
+    assert persisted["cancel_requested_at_ms"] is not None
+    assert str(persisted["cancel_receipt_id"] or "")
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_cancel_commands "
+        "WHERE command_id = ?",
+        [f"root-cancel:{identity['rootRunId']}"],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
 async def test_truncate_active_foreign_root_times_out_without_deleting_business_state(
     screenplay_db,
 ):
@@ -1582,14 +1662,18 @@ async def _paused_continuation_fixture(db):
     await db.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, mode, prompt, binding_namespace, "
-        "binding_aggregate_id, binding_command_id, root_run_id) "
-        "VALUES (?, ?, 'canceled', 'agent', '', ?, ?, ?, ?)",
+        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
+        "root_run_id) VALUES (?, ?, 'canceled', 'agent', '', ?, ?, ?, ?, ?)",
         [
             source_root_run_id,
             turn["session_id"],
             "screenplay.conversation_turn",
             turn["project_id"],
             "command-atomic-finalizer",
+            json.dumps({
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+            }),
             source_root_run_id,
         ],
     )
@@ -1617,6 +1701,110 @@ async def _paused_continuation_fixture(db):
         command_id="pause-for-continuation-reservation",
     )
     return paused, turn_id, source_root_run_id, turn
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancel_wins_over_paused_long_task_projection(
+    screenplay_db,
+):
+    paused, turn_id, root_run_id, _turn = await _paused_continuation_fixture(
+        screenplay_db
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+        "source, kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'run.started', '{\"status\":\"running\"}', ?, ?, 1, "
+        "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?)",
+        [root_run_id, f"event-{root_run_id}", turn_id, f"run:{root_run_id}:running"],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status) VALUES "
+        "('task-atomic-finalizer', 'paused-unit', 'paused-unit', 1, 'blocked')"
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    receipt = await operations.request_cancel(
+        turn_id,
+        idempotency_key="explicit-cancel-paused-root",
+    )
+
+    async with screenplay_db.transaction(cancellation_linearizable=True):
+        await ScreenplayAgentRootCompletionProjector(screenplay_db).project(
+            root_run_id,
+            RunCommit(terminal_status=RunStatus.CANCELED),
+        )
+
+    stored = await operations.load(paused.id)
+    assert stored is not None and stored.status.value == "canceled"
+    assert await screenplay_db.fetch_one(
+        "SELECT status, cancel_receipt_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"status": "canceled", "cancel_receipt_id": receipt.id}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_tasks WHERE id = 'task-atomic-finalizer'"
+    ) == {"status": "canceled"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_task_units WHERE task_id = "
+        "'task-atomic-finalizer' AND unit_id = 'paused-unit'"
+    ) == {"status": "canceled"}
+
+
+@pytest.mark.asyncio
+async def test_generic_root_cancel_overrides_live_screenplay_pause(
+    screenplay_db,
+):
+    paused, turn_id, root_run_id, _turn = await _paused_continuation_fixture(
+        screenplay_db
+    )
+    await screenplay_db.execute(
+        "UPDATE ai_agent_runs SET status = 'running' WHERE id = ?",
+        [root_run_id],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+        "source, kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'run.started', '{\"status\":\"running\"}', ?, ?, 1, "
+        "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?)",
+        [
+            root_run_id,
+            f"event-live-{root_run_id}",
+            turn_id,
+            f"run:{root_run_id}:running",
+        ],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status) VALUES "
+        "('task-atomic-finalizer', 'live-paused-unit', 'live-paused-unit', "
+        "1, 'blocked')"
+    )
+    composition = create_agent_composition(screenplay_db)
+    try:
+        result = await AgentCancellationService(
+            screenplay_db,
+            composition,
+        ).cancel(root_run_id)
+    finally:
+        await composition.shutdown()
+
+    assert result is not None and result["cancellationStatus"] == "completed"
+    stored = await SqliteScreenplayOperationRepository(screenplay_db).load(
+        paused.id
+    )
+    assert stored is not None and stored.status.value == "canceled"
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"status": "canceled"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_tasks WHERE id = 'task-atomic-finalizer'"
+    ) == {"status": "canceled"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_long_task_units WHERE task_id = "
+        "'task-atomic-finalizer' AND unit_id = 'live-paused-unit'"
+    ) == {"status": "canceled"}
 
 
 @pytest.mark.asyncio
