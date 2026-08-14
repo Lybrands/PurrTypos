@@ -3290,7 +3290,7 @@ async def test_screenplay_answer_turn_does_not_create_a_durable_task(
     )
     assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
     root_run_id = snapshot["turns"][0]["rootRunId"]
-    assert snapshot["turns"][0]["plannerRunId"] == root_run_id
+    assert "plannerRunId" not in snapshot["turns"][0]
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
     ) == {"count": 1}
@@ -3471,10 +3471,12 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     assert projected_turn["assistantContent"] == (
         "第 4 至 6 集候选稿已经完成。可以在候选稿区域查看并继续编辑。"
     )
-    assert projected_turn["plannerRunId"] == root_run_id
+    assert "plannerRunId" not in projected_turn
     assert len(snapshot["operations"]) == 1
     operation = snapshot["operations"][0]
     task = snapshot["tasks"][0]
+    assert task["rootRunId"] == root_run_id
+    assert "plannerRunId" not in task
     assert operation["status"] == "succeeded"
     assert operation["taskId"] == task["id"]
     assert operation["resultRevisionId"] == task["resultRevisionId"]

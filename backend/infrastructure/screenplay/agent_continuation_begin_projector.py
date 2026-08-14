@@ -50,7 +50,8 @@ class ScreenplayContinuationBeginProjector:
             [command_id],
         )
         turn = await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_turns WHERE id = ?",
+            "SELECT *, planner_run_id AS root_run_id "
+            "FROM screenplay_agent_turns WHERE id = ?",
             [params.turn_id],
         )
         operation = await self._db.fetch_one(
@@ -88,7 +89,7 @@ class ScreenplayContinuationBeginProjector:
             or str(command.get("continuation_project_id") or "")
             != expected["project"]
             or turn is None
-            or str(turn.get("planner_run_id") or "") != expected["source"]
+            or str(turn.get("root_run_id") or "") != expected["source"]
             or str(turn.get("status") or "") != "running"
             or turn.get("cancel_requested_at_ms") is not None
             or operation is None

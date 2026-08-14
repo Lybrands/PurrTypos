@@ -29,7 +29,7 @@ class _Service:
             "assistantContent": "",
             "runtimeProfile": {"model": request.runtime.options["model"]},
             "intent": None,
-            "plannerRunId": None,
+            "rootRunId": None,
             "taskId": None,
             "error": None,
         }

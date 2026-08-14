@@ -343,6 +343,66 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
             occurred_at=datetime.now(timezone.utc),
         )
     )
+    compaction_payload = {
+        "status": "completed",
+        "beforeTokens": 12_000,
+        "afterTokens": 4_800,
+    }
+    await composition.output_processor.accept_runtime_event(
+        RuntimeOutputEvent(
+            event_id="wire-context-compaction",
+            run_id=run_id,
+            event_type="conversation.compaction.completed",
+            payload=compaction_payload,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    checkpoint_plan = {
+        "title": "续写故事",
+        "goal": "理解原作后完成续写",
+        "status": "running",
+        "steps": [
+            {
+                "id": "understand-source",
+                "title": "理解原作",
+                "type": "analyze",
+                "executor": "model",
+                "status": "done",
+                "risk_level": "read",
+                "suggested_tools": [],
+                "agent_role": None,
+                "assignment": {},
+                "depends_on": [],
+                "description": None,
+                "result_summary": "原作依据已确认",
+                "error": None,
+            },
+            {
+                "id": "draft-continuation",
+                "title": "依据检查点证据撰写续篇",
+                "type": "write",
+                "executor": "model",
+                "status": "running",
+                "risk_level": "write",
+                "suggested_tools": [],
+                "agent_role": None,
+                "assignment": {},
+                "depends_on": ["understand-source"],
+                "description": "只调整未完成步骤",
+                "result_summary": None,
+                "error": None,
+            },
+        ],
+    }
+    await composition.output_processor.accept_runtime_event(
+        RuntimeOutputEvent(
+            event_id="wire-checkpoint-plan-revision",
+            run_id=run_id,
+            event_type="run.todos_updated",
+            payload=checkpoint_plan,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
     release_runtime.set()
 
     response = await live.finish()
@@ -351,11 +411,12 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
         event for event in decode_sse_json(response.content)
         if event.get("kind") == "runtime.event"
     ]
-    public_plan = next(
+    live_plans = [
         event["payload"]["data"]
         for event in canonical_events
         if event["payload"].get("eventType") == "run.todos_updated"
-    )
+    ]
+    public_plan = live_plans[0]
     live_progress = next(
         event["payload"]["data"]
         for event in canonical_events
@@ -405,6 +466,14 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     assert "发布候选稿" not in encoded_plan
     assert "plannerStepId" not in encoded_plan
     assert live_progress == recipe_payload
+    assert live_plans[1] == checkpoint_plan
+    assert "Recipe" not in json.dumps(checkpoint_plan, ensure_ascii=False)
+    assert next(
+        event["payload"]["data"]
+        for event in canonical_events
+        if event["payload"].get("eventType")
+        == "conversation.compaction.completed"
+    ) == compaction_payload
 
     replay_response = await request_json(
         app,
@@ -415,49 +484,41 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     assert replay_response.status_code == 200
     replay_snapshot = replay_response.json()
     assert replay_snapshot["success"] is True
+    replay_types = {
+        "run.todos_updated",
+        "long_task.progress",
+        "conversation.compaction.completed",
+    }
     replay_events = [
         event for event in replay_snapshot["data"]["events"]
-        if event["type"] in {"run.todos_updated", "long_task.progress"}
+        if event["type"] in replay_types
     ]
     assert [event["type"] for event in replay_events] == [
         "run.todos_updated",
         "long_task.progress",
+        "conversation.compaction.completed",
+        "run.todos_updated",
     ]
-    assert replay_events[0]["cursor"] < replay_events[1]["cursor"]
-    assert replay_snapshot["data"]["nextCursor"] >= replay_events[1]["cursor"]
-    assert [
-        {
-            "runId": event["chunk"]["runId"],
-            "sequence": event["chunk"]["sequence"],
-            "kind": event["chunk"]["kind"],
-            "channel": event["chunk"]["channel"],
-            "visibility": event["chunk"]["visibility"],
-            "payload": event["chunk"]["payload"],
-        }
+    assert [event["cursor"] for event in replay_events] == sorted(
+        event["cursor"] for event in replay_events
+    )
+    assert replay_snapshot["data"]["nextCursor"] >= replay_events[-1]["cursor"]
+    assert all(
+        event["chunk"]["runId"] == run_id
+        and event["chunk"]["sequence"] == event["cursor"]
+        and event["chunk"]["kind"] == "runtime.event"
+        and event["chunk"]["channel"] == "lifecycle"
+        and event["chunk"]["visibility"] == "public"
         for event in replay_events
-    ] == [
+    )
+    assert [event["chunk"]["payload"] for event in replay_events] == [
+        {"eventType": "run.todos_updated", "data": public_plan},
+        {"eventType": "long_task.progress", "data": recipe_payload},
         {
-            "runId": run_id,
-            "sequence": replay_events[0]["cursor"],
-            "kind": "runtime.event",
-            "channel": "lifecycle",
-            "visibility": "public",
-            "payload": {
-                "eventType": "run.todos_updated",
-                "data": public_plan,
-            },
+            "eventType": "conversation.compaction.completed",
+            "data": compaction_payload,
         },
-        {
-            "runId": run_id,
-            "sequence": replay_events[1]["cursor"],
-            "kind": "runtime.event",
-            "channel": "lifecycle",
-            "visibility": "public",
-            "payload": {
-                "eventType": "long_task.progress",
-                "data": recipe_payload,
-            },
-        },
+        {"eventType": "run.todos_updated", "data": checkpoint_plan},
     ]
 
 

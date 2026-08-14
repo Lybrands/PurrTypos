@@ -909,7 +909,7 @@ export default function ScreenplayAgentPage({
     for (const turn of agentConversationState?.turns ?? []) {
       const task = agentConversationState?.tasks.find((item) => item.turnId === turn.id)
       const runIds = new Set([
-        turn.plannerRunId,
+        turn.rootRunId,
         ...modelRunIds(task),
       ].filter((runId): runId is string => Boolean(runId?.trim())))
       for (const runId of runIds) {
@@ -1863,7 +1863,7 @@ export default function ScreenplayAgentPage({
                 const chunk = event.chunk as AiStreamChunk
                 agentChunkReplayRef.current.dispatch({
                   turnId: event.turnId,
-                  rootRunId: turn?.plannerRunId || undefined,
+                  rootRunId: turn?.rootRunId || undefined,
                   sessionId: agentSessionId,
                   userContent: event.userContent || turn?.userContent || '',
                   model: modelName || undefined,

@@ -226,7 +226,7 @@ class SqliteScreenplayAgentRepository:
         attempt: int,
     ) -> bool:
         turn = await self._db.fetch_one(
-            "SELECT status, planner_run_id, execution_owner_id, "
+            "SELECT status, planner_run_id AS root_run_id, execution_owner_id, "
             "lease_expires_at_ms, cancel_requested_at_ms, attempt "
             "FROM screenplay_agent_turns WHERE id = ?",
             [turn_id],
@@ -234,7 +234,7 @@ class SqliteScreenplayAgentRepository:
         return bool(
             turn is not None
             and str(turn.get("status") or "") == "planning"
-            and not str(turn.get("planner_run_id") or "")
+            and not str(turn.get("root_run_id") or "")
             and str(turn.get("execution_owner_id") or "") == self._owner_id
             and int(turn.get("lease_expires_at_ms") or 0) > now_ms()
             and turn.get("cancel_requested_at_ms") is None
@@ -281,7 +281,7 @@ class SqliteScreenplayAgentRepository:
         turn_id: str,
         *,
         intent: ScreenplayIntent,
-        planner_run_id: str | None,
+        root_run_id: str | None,
     ) -> None:
         async with self._db.transaction():
             turn = await self._require_owned_turn(turn_id)
@@ -291,7 +291,7 @@ class SqliteScreenplayAgentRepository:
                 "WHERE id = ?",
                 [
                     _dump(intent.to_mapping()),
-                    str(planner_run_id or "").strip() or None,
+                    str(root_run_id or "").strip() or None,
                     turn_id,
                 ],
             )
@@ -304,7 +304,7 @@ class SqliteScreenplayAgentRepository:
         normalized_run_id = _required(root_run_id, "screenplay Root Run id")
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_owned_turn(turn_id)
-            existing = str(turn.get("planner_run_id") or "").strip()
+            existing = str(turn.get("root_run_id") or "").strip()
             if existing and existing != normalized_run_id:
                 raise AppError("剧本 Agent Turn 已绑定另一 Root Run", 409)
             await self._db.execute(
@@ -357,7 +357,7 @@ class SqliteScreenplayAgentRepository:
         normalized_root_run_id = _required(root_run_id, "screenplay Root Run id")
         async with self._mutation_transaction():
             turn = await self._require_turn(turn_id)
-            existing_root_run_id = str(turn.get("planner_run_id") or "").strip()
+            existing_root_run_id = str(turn.get("root_run_id") or "").strip()
             if existing_root_run_id and existing_root_run_id != normalized_root_run_id:
                 raise AppError("剧本 Agent Turn Root Run 不匹配", 409)
             if not existing_root_run_id:
@@ -482,7 +482,8 @@ class SqliteScreenplayAgentRepository:
         async with self._db.transaction(cancellation_linearizable=True):
             turn = await self._require_turn(turn_id)
             rows = await self._db.fetch_all(
-                "SELECT t.*, o.id AS authoritative_operation_id, "
+                "SELECT t.*, t.planner_run_id AS root_run_id, "
+                "o.id AS authoritative_operation_id, "
                 "o.long_task_id AS authoritative_task_id "
                 "FROM screenplay_agent_turns AS t "
                 "LEFT JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
@@ -504,9 +505,9 @@ class SqliteScreenplayAgentRepository:
                 if row.get("authoritative_operation_id")
             ]
             root_ids = [
-                str(row["planner_run_id"])
+                str(row["root_run_id"])
                 for row in rows
-                if row.get("planner_run_id")
+                if row.get("root_run_id")
             ]
             await self._require_truncation_barrier(
                 turn_ids=turn_ids,
@@ -682,7 +683,8 @@ class SqliteScreenplayAgentRepository:
     ) -> dict[str, Any]:
         await self._require_session(project_id, session_id, writable=False)
         turns = await self._db.fetch_all(
-            "SELECT t.*, o.id AS authoritative_operation_id, "
+            "SELECT t.*, t.planner_run_id AS root_run_id, "
+            "o.id AS authoritative_operation_id, "
             "o.status AS operation_status, "
             "o.long_task_id AS authoritative_task_id, "
             "o.revision AS operation_revision, "
@@ -750,8 +752,7 @@ class SqliteScreenplayAgentRepository:
             "status": _operation_task_status(turn.get("operation_status")),
             "targetRole": str(turn.get("operation_target_role") or ""),
             "intent": _object(turn.get("intent_json")),
-            "rootRunId": str(turn.get("planner_run_id") or "") or None,
-            "plannerRunId": str(turn.get("planner_run_id") or "") or None,
+            "rootRunId": str(turn.get("root_run_id") or "") or None,
             "totalUnits": int((task or {}).get("total_units") or 0),
             "completedUnits": int((task or {}).get("completed_units") or 0),
             "usage": _object((task or {}).get("usage_json")),
@@ -848,7 +849,7 @@ class SqliteScreenplayAgentRepository:
         return turn
 
 def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    root_run_id = str(row.get("planner_run_id") or "") or None
+    root_run_id = str(row.get("root_run_id") or "") or None
     return {
         "id": str(row["id"]),
         "commandId": str(row.get("command_id") or ""),
@@ -865,8 +866,6 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "attempt": int(row.get("attempt") or 0),
         "intent": _object(row.get("intent_json")) or None,
         "rootRunId": root_run_id,
-        # Deprecated read-only alias for clients persisted before Root Runs.
-        "plannerRunId": root_run_id,
         "operationId": str(row.get("authoritative_operation_id") or "") or None,
         "taskId": str(row.get("authoritative_task_id") or "") or None,
         "targetRole": str(row.get("operation_target_role") or "") or None,
@@ -983,7 +982,8 @@ def _marks(values: Sequence[object]) -> str:
 
 
 _TURN_WITH_OPERATION_SQL = (
-    "SELECT t.*, o.id AS authoritative_operation_id, "
+    "SELECT t.*, t.planner_run_id AS root_run_id, "
+    "o.id AS authoritative_operation_id, "
     "o.status AS operation_status, "
     "o.long_task_id AS authoritative_task_id, "
     "o.revision AS operation_revision, "

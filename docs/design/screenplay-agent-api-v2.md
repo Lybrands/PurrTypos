@@ -1,6 +1,6 @@
 # 剧本 Agent / 项目 API v2
 
-> 状态：当前唯一运行时契约。没有 v1 兼容层，没有项目迁移接口，没有旧 Document 写入链路。
+> 状态：当前唯一服务端运行时契约。没有 v1 服务端路由兼容层，没有项目迁移接口，没有旧 Document 写入链路；历史前端快照字段的只读解码边界见 5.2。
 >
 > 对话重写说明：原生 Conversation/Turn/Snapshot/cursor API 已成为唯一剧本页面运行链路；Phase 4 已删除旧页面 SSE、通用 Writing chunk 分支和 long-task conversation 兼容接口。Project/Operation/Revision/Head 契约继续保留，收口顺序由 [`purra-screenplay-refactor-charter.md`](purra-screenplay-refactor-charter.md) 定义。
 
@@ -171,6 +171,11 @@ GET  /projects/{projectId}/conversation/events?sessionId={sessionId}&after={curs
 POST /conversation/turns/{turnId}/cancel
 POST /conversation/turns/{turnId}/resume
 ```
+
+Conversation Snapshot 协议 v2 只序列化 `rootRunId`。前端只在读取历史缓存时接受
+协议 v1 的 `plannerRunId`，并在单一反序列化边界立即转换为 `rootRunId`；服务端与新的
+前端持久化都不再输出旧字段。SQLite 的 `planner_run_id` 仅作为兼容物理列保留，不代表
+独立 Planner Run。
 
 只读问答提交：
 
