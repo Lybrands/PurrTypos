@@ -1,6 +1,6 @@
 ## Task 9: 清理旧 Planner Run 代码并完成 canonical replay 验收
 
-Status: IN PROGRESS
+Status: COMPLETE
 
 ### Objective
 

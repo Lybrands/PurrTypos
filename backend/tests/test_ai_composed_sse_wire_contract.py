@@ -13,9 +13,10 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from purra.events import CoreEventType
-from purra.output import OutputEventKind, RuntimeOutputEvent
+from purra.output import OutputEventKind, OutputVisibility, RuntimeOutputEvent
 from application.agent_composition import set_agent_composition
 from application.composition_factory import create_agent_composition
+from application.sse_mapping import canonical_output_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
 from routers.ai import router as ai_router
@@ -228,11 +229,11 @@ def _event_name(event: dict[str, Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
+async def test_composed_root_plan_replays_without_private_recipe_progress(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    app, composition, _db = composed_app
+    app, composition, db = composed_app
     release_runtime = asyncio.Event()
 
     async def _semantic_plan(*_args, **_kwargs):
@@ -334,7 +335,7 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
             },
         ],
     }
-    await composition.output_processor.accept_runtime_event(
+    progress_event = await composition.output_processor.accept_runtime_event(
         RuntimeOutputEvent(
             event_id="wire-recipe-progress",
             run_id=run_id,
@@ -343,6 +344,9 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
             occurred_at=datetime.now(timezone.utc),
         )
     )
+    assert progress_event is not None
+    assert progress_event.visibility is OutputVisibility.PRIVATE
+    assert canonical_output_to_sse_chunk(progress_event) is None
     compaction_payload = {
         "status": "completed",
         "beforeTokens": 12_000,
@@ -406,7 +410,40 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     release_runtime.set()
 
     response = await live.finish()
-    _assert_sse_wire(response)
+    live_events = _assert_sse_wire(response)
+    terminal_todo_updates = {
+        event["agentRunTodoUpdated"]["stepId"]: event["agentRunTodoUpdated"][
+            "step"
+        ]
+        for event in live_events
+        if event.get("agentRunTodoUpdated", {}).get("step", {}).get("status")
+        == "done"
+    }
+    assert set(terminal_todo_updates) == {
+        "understand-source",
+        "draft-continuation",
+    }
+    assert all(
+        step["resultSummary"] == "Final response covered this model step."
+        for step in terminal_todo_updates.values()
+    )
+    assert any("agentRunCompleted" in event for event in live_events)
+    assert await db.fetch_all(
+        "SELECT step_id, status, result_summary FROM ai_agent_run_todos "
+        "WHERE run_id = ? ORDER BY sort",
+        [run_id],
+    ) == [
+        {
+            "step_id": "understand-source",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+        },
+        {
+            "step_id": "draft-continuation",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+        },
+    ]
     canonical_events = [
         event for event in decode_sse_json(response.content)
         if event.get("kind") == "runtime.event"
@@ -417,11 +454,24 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
         if event["payload"].get("eventType") == "run.todos_updated"
     ]
     public_plan = live_plans[0]
-    live_progress = next(
-        event["payload"]["data"]
+    assert not any(
+        event["payload"].get("eventType") == "long_task.progress"
         for event in canonical_events
-        if event["payload"].get("eventType") == "long_task.progress"
     )
+    persisted = await composition.output_repository.list_events(
+        run_id,
+        after_sequence=0,
+        limit=500,
+    )
+    private_progress = [
+        event for event in persisted
+        if event.kind is OutputEventKind.RUNTIME
+        and event.payload.get("eventType") == "long_task.progress"
+    ]
+    assert len(private_progress) == 1
+    assert private_progress[0].visibility is OutputVisibility.PRIVATE
+    assert private_progress[0].payload["data"] == recipe_payload
+    assert canonical_output_to_sse_chunk(private_progress[0]) is None
 
     assert public_plan == {
         "title": "续写故事",
@@ -465,7 +515,6 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     assert "校验候选稿" not in encoded_plan
     assert "发布候选稿" not in encoded_plan
     assert "plannerStepId" not in encoded_plan
-    assert live_progress == recipe_payload
     assert live_plans[1] == checkpoint_plan
     assert "Recipe" not in json.dumps(checkpoint_plan, ensure_ascii=False)
     assert next(
@@ -486,7 +535,6 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     assert replay_snapshot["success"] is True
     replay_types = {
         "run.todos_updated",
-        "long_task.progress",
         "conversation.compaction.completed",
     }
     replay_events = [
@@ -495,7 +543,6 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     ]
     assert [event["type"] for event in replay_events] == [
         "run.todos_updated",
-        "long_task.progress",
         "conversation.compaction.completed",
         "run.todos_updated",
     ]
@@ -513,13 +560,15 @@ async def test_composed_root_plan_and_recipe_progress_replay_as_distinct_events(
     )
     assert [event["chunk"]["payload"] for event in replay_events] == [
         {"eventType": "run.todos_updated", "data": public_plan},
-        {"eventType": "long_task.progress", "data": recipe_payload},
         {
             "eventType": "conversation.compaction.completed",
             "data": compaction_payload,
         },
         {"eventType": "run.todos_updated", "data": checkpoint_plan},
     ]
+    encoded_public_replay = json.dumps(replay_snapshot, ensure_ascii=False)
+    assert "Recipe 生成正文" not in encoded_public_replay
+    assert "plannerStepId" not in encoded_public_replay
 
 
 @pytest.mark.asyncio
