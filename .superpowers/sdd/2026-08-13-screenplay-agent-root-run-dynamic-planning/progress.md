@@ -19,3 +19,7 @@ Task 6 candidate contract parser review: PASS. One pure strict parser now canoni
 Task 7: IN PROGRESS. Auditing the Screenplay Recipe milestone boundaries and the durable observer/pause feedback seam before adding checkpoint planning. Task 1 remains the sole owner of public todo revision events.
 
 Task 7: PASS. Screenplay durable work now performs bounded LLM Root plan revision only at episode, document-batch, and review-aggregate checkpoints. Crash-safe CAS receipts reconcile ready output with authoritative Root revision events; current plans come from persisted Root state, private content/IDs stay out of planner input, scope changes and invalid planning pause the business lifecycle, and Core remains the only todo publisher. Full gate: 1754 backend passed, 5 credential-blocked provider E2E, 344 frontend passed.
+
+Task 8: IN PROGRESS. Auditing shared Root cancellation, transport detach, continuation-Root binding, resumable Recipe ownership, lineage-based usage, and cleanup before writing persistent RED tests.
+
+Task 8: PASS. Root cancellation is now a persistent fenced tree lifecycle shared by generic and Screenplay routes; canonical terminal projectors atomically settle business state and lineage-based usage. Explicit resume creates one durable continuation Root over the existing Recipe, SSE disconnect only detaches, orphan recovery uses canonical commits, and truncate/aggregate cleanup wait for terminal ownership then remove only owned runtime receipts. Full gate: 1840 backend passed, 5 credential-blocked provider E2E, 344 frontend passed.
