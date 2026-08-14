@@ -631,6 +631,11 @@ async def _delete_selections(
     work_item_ids: set[str],
 ) -> tuple[CleanupTableSelection, ...]:
     specs: list[tuple[str, tuple[str, ...], Any]] = [
+        (
+            "ai_agent_run_cancellations",
+            ("root_run_id",),
+            lambda row: str(row.get("root_run_id") or "") in run_ids,
+        ),
         ("ai_error_reports", ("id",), lambda row: (
             str(row.get("agent_run_id") or "") in run_ids
             or _as_int(row.get("conversation_id")) in conversation_ids
@@ -661,6 +666,7 @@ async def _delete_selections(
         ("ai_agent_runs", ("id",), lambda row: str(row.get("id") or "") in run_ids),
     ]
     relationship_columns = {
+        "ai_agent_run_cancellations": ("root_run_id",),
         "ai_error_reports": ("agent_run_id", "conversation_id"),
         "ai_agent_run_reviews": ("run_id",),
         "ai_agent_output_streams": ("run_id",),
