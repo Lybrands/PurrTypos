@@ -66,6 +66,37 @@ async def output_db(tmp_path: Path):
         await db.close()
 
 
+async def _seed_artifact_claim(db, run_id: str) -> None:
+    await db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, created_by_run_id) "
+        "VALUES ('terminal-claim-item', 'test', 'draft', 'owner', ?)",
+        [run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_work_item_runs "
+        "(work_item_id, run_id, relation, work_item_revision) "
+        "VALUES ('terminal-claim-item', ?, 'created', 1)",
+        [run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
+        "work_item_id, created_by_run_id) VALUES "
+        "('terminal-claim-artifact', 'test', 'draft', 'owner', ?, "
+        "'work_item', 'terminal-claim-item', ?)",
+        [run_id, run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifact_claims "
+        "(artifact_id, work_item_id, run_id, claim_token, "
+        "acquired_revision, expires_at_ms) VALUES "
+        "('terminal-claim-artifact', 'terminal-claim-item', ?, "
+        "'terminal-claim-token', 1, 9999999999999)",
+        [run_id],
+    )
+
+
 def _repository(
     db,
     *,
@@ -505,6 +536,89 @@ async def test_run_terminal_and_canonical_event_commit_together(output_db):
     assert run == {"status": RunStatus.DONE.value}
     assert await repository.list_events(run_id, after_sequence=0) == events
     assert legacy_terminal == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "event_type"),
+    (
+        (RunStatus.DONE, CoreEventType.RUN_COMPLETED),
+        (RunStatus.FAILED, CoreEventType.RUN_FAILED),
+        (RunStatus.BLOCKED, CoreEventType.RUN_BLOCKED),
+        (RunStatus.CANCELED, CoreEventType.RUN_CANCELED),
+    ),
+)
+async def test_every_terminal_commit_releases_run_artifact_claim(
+    output_db,
+    status,
+    event_type,
+):
+    db, run_id, runs = output_db
+    await _seed_artifact_claim(db, run_id)
+    repository = _repository(db, run_repository=runs)
+    event = AgentEvent(
+        type=event_type,
+        run_id=run_id,
+        payload={"status": status.value},
+    )
+
+    await repository.commit_run_lifecycle(
+        run_id,
+        RunCommit(
+            terminal_status=status,
+            error=("terminal failure" if status is RunStatus.FAILED else None),
+            events=(event,),
+        ),
+        RunLifecycleOutputDraft(
+            source_event_key=f"run:{run_id}:{status.value}",
+            status=status,
+            payload={"status": status.value},
+            occurred_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_failure_rolls_back_artifact_claim_cleanup(output_db):
+    db, run_id, runs = output_db
+    await _seed_artifact_claim(db, run_id)
+    await db.execute(
+        "CREATE TRIGGER reject_terminal_output BEFORE INSERT ON "
+        "ai_agent_run_events WHEN NEW.source_event_key = 'run:" + run_id
+        + ":done' BEGIN SELECT RAISE(ABORT, 'terminal output rejected'); END"
+    )
+    repository = _repository(db, run_repository=runs)
+    event = AgentEvent(
+        type=CoreEventType.RUN_COMPLETED,
+        run_id=run_id,
+        payload={"status": RunStatus.DONE.value},
+    )
+
+    with pytest.raises(Exception, match="terminal output rejected"):
+        await repository.commit_run_lifecycle(
+            run_id,
+            RunCommit(terminal_status=RunStatus.DONE, events=(event,)),
+            RunLifecycleOutputDraft(
+                source_event_key=f"run:{run_id}:done",
+                status=RunStatus.DONE,
+                payload={"status": RunStatus.DONE.value},
+                occurred_at=datetime.now(timezone.utc),
+            ),
+        )
+
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "running"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    ) == {"count": 1}
 
 
 @pytest.mark.asyncio

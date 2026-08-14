@@ -140,11 +140,24 @@ async def test_lifespan_startup_terminalizes_run_abandoned_by_previous_process(
     async with main.lifespan(_RecordingApplication()):
         run = await run_store.get_run(created[0], run_id)
         events = await run_store.get_run_events(created[0], run_id)
-        assert run is not None and run["status"] == "canceled"
-        assert events[-1]["eventType"] == "run.canceled"
+        assert run is not None and run["status"] == "failed"
+        assert events[-1]["eventType"] == "run.lifecycle"
         assert events[-1]["payload"]["reason"] == (
             "execution_recovery_after_restart"
         )
+        terminal = await created[0].fetch_one(
+            "SELECT source_event_key, event_id FROM ai_agent_run_events "
+            "WHERE run_id = ? AND source_event_key = ?",
+            [run_id, f"run:{run_id}:failed"],
+        )
+        assert terminal is not None
+        assert terminal["source_event_key"] == f"run:{run_id}:failed"
+        assert str(terminal["event_id"] or "")
+        assert await created[0].fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+            "WHERE run_id = ? AND event_id IS NULL",
+            [run_id],
+        ) == {"count": 0}
 
 
 @pytest.mark.asyncio
@@ -183,7 +196,7 @@ async def test_lifespan_startup_materializes_abandoned_writing_run(
             "WHERE r.id = ?",
             [run_id],
         ) == {
-            "status": "canceled",
+            "status": "failed",
             "conversation_id": 1,
             "prompt": "abandoned Writing turn",
             "response": "",

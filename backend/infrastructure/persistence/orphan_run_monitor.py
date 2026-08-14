@@ -6,15 +6,12 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 
-from infrastructure.persistence.run_execution_store import recover_orphaned_runs
-
-
 logger = logging.getLogger(__name__)
 
 
 async def monitor_orphaned_runs(
-    db,
     *,
+    recover_orphans: Callable[[], Awaitable[Sequence[str]]],
     poll_interval_seconds: float = 5.0,
     stop_event: asyncio.Event | None = None,
     reconcile_linked_state: (
@@ -38,7 +35,7 @@ async def monitor_orphaned_runs(
         if stop.is_set():
             return
         try:
-            recovered = await recover_orphaned_runs(db)
+            recovered = tuple(await recover_orphans())
         except asyncio.CancelledError:
             raise
         except Exception:
