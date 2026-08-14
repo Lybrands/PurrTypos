@@ -9,6 +9,7 @@ import pytest_asyncio
 from database.connection import DatabaseConnection
 from database.crud.screenplay_agent_runtime_cleanup import (
     CleanupApplyInjectedFailure,
+    CleanupPlanDigestMismatch,
     apply_cleanup,
     apply_existing_database,
     build_cleanup_plan,
@@ -53,6 +54,13 @@ async def _seed(db: DatabaseConnection) -> None:
         "'project-target', 'task-target:unit-1', 'run-target'), "
         "('run-other', 20, 200, 'other', 'screenplay.agent.turn', "
         "'project-other', 'turn-other', 'run-other')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES "
+        "('run-target', 1, 'completed', 1, 2), "
+        "('run-other', 1, 'completed', 1, 2)"
     )
     await db.execute(
         "UPDATE ai_agent_runs SET parent_run_id = 'run-target' "
@@ -199,6 +207,7 @@ async def test_dry_run_resolves_exact_relationships_without_text_matching(cleanu
     assert plan.run_ids == ("run-child", "run-target")
     assert "run-other" not in plan.run_ids
     assert plan.table_counts["ai_conversations"] == 1
+    assert plan.table_counts["ai_agent_run_cancellations"] == 1
     assert plan.protected_counts["ai_agent_artifacts"] == 1
 
 
@@ -228,6 +237,58 @@ async def test_cleanup_preserves_domain_documents_artifacts_and_review_decisions
     assert await cleanup_db.fetch_one(
         "SELECT id FROM ai_agent_runs WHERE id = 'run-other'"
     )
+    assert await cleanup_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-target'"
+    ) is None
+    assert await cleanup_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-other'"
+    ) == {"root_run_id": "run-other"}
+    await cleanup_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, root_run_id) "
+        "VALUES ('run-target', 'done', 'rebuilt', 'run-target')"
+    )
+    await cleanup_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES ('run-target', 1, 'completed', 3, 4)"
+    )
+    assert await cleanup_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-target'"
+    ) == {"root_run_id": "run-target"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_digest_changes_when_owned_cancellation_receipt_appears(
+    cleanup_db,
+):
+    await cleanup_db.execute(
+        "DELETE FROM ai_agent_run_cancellations WHERE root_run_id = 'run-target'"
+    )
+    stale = await build_cleanup_plan(
+        cleanup_db,
+        project_ids=("project-target",),
+    )
+    await cleanup_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms) "
+        "VALUES ('run-target', 1, 'completed', 1)"
+    )
+
+    with pytest.raises(CleanupPlanDigestMismatch):
+        await apply_cleanup(
+            cleanup_db,
+            stale.digest,
+            project_ids=("project-target",),
+        )
+
+    assert await cleanup_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-target'"
+    ) == {"root_run_id": "run-target"}
 
 
 @pytest.mark.asyncio
@@ -308,6 +369,10 @@ async def test_cleanup_rolls_back_every_table_after_any_delete_failure(cleanup_d
     assert await cleanup_db.fetch_one(
         "SELECT id FROM ai_agent_runs WHERE id = 'run-target'"
     )
+    assert await cleanup_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-target'"
+    ) == {"root_run_id": "run-target"}
 
 
 @pytest.mark.asyncio
