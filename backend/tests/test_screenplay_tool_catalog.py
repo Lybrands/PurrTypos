@@ -83,6 +83,15 @@ def _part_lineage(root_run_id: str) -> RunLineage:
     )
 
 
+async def _seed_running_root(db, root_run_id: str) -> None:
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, root_run_id) "
+        "VALUES (?, 1, 'running', 'agent', 'fixture root', ?)",
+        [root_run_id, root_run_id],
+    )
+
+
 def _request(context: ScreenplayAgentDomainContext) -> AgentRunRequest:
     return AgentRunRequest(
         messages=(),
@@ -1161,6 +1170,7 @@ async def test_task_candidate_validation_fails_child_then_retries_new_generation
     screenplay_tool_db,
     monkeypatch,
 ):
+    await _seed_running_root(screenplay_tool_db, "root-task-validation-retry")
     gateway = _TaskValidationRetryGateway()
     monkeypatch.setattr(
         agent_composition_module,
@@ -1289,6 +1299,7 @@ async def test_screenplay_tool_run_publishes_no_host_text_and_redacts_candidate_
     screenplay_tool_db,
     monkeypatch,
 ):
+    await _seed_running_root(screenplay_tool_db, "root-screenplay-tools")
     gateway = _ToolModelGateway()
     monkeypatch.setattr(
         agent_composition_module,
@@ -1340,6 +1351,7 @@ async def test_screenplay_tool_length_fails_without_replaying_reasoning_mode(
     screenplay_tool_db,
     monkeypatch,
 ):
+    await _seed_running_root(screenplay_tool_db, "root-reasoning-fallback")
     await _install_source_project(screenplay_tool_db, restricted=False)
     gateway = _ReasoningTruncationToolModelGateway()
     monkeypatch.setattr(
@@ -1393,6 +1405,7 @@ async def test_host_prepared_scene_is_host_committed_without_tool_json(
     screenplay_tool_db,
     monkeypatch,
 ):
+    await _seed_running_root(screenplay_tool_db, "root-host-prepared-scene")
     gateway = _HostPreparedSceneModelGateway()
     monkeypatch.setattr(
         agent_composition_module,
@@ -1480,6 +1493,8 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
     screenplay_tool_db,
     monkeypatch,
 ):
+    await _seed_running_root(screenplay_tool_db, "root-atomic-rollback")
+
     class RejectAfterCandidateProjection:
         async def project(self, run_id, commit):
             del run_id
@@ -1538,6 +1553,7 @@ async def test_candidate_and_run_completion_roll_back_as_one_commit(
     assert raised.value.code == "completion_projection_failed"
     stored_run = await screenplay_tool_db.fetch_one(
         "SELECT id, status, final_response FROM ai_agent_runs "
+        "WHERE parent_run_id = 'root-atomic-rollback' "
         "ORDER BY create_time DESC LIMIT 1"
     )
     artifact_count = await screenplay_tool_db.fetch_one(
