@@ -345,7 +345,7 @@ class SqliteScreenplayOperationRepository:
             bound_root = str(row.get("continuation_root_run_id") or "").strip()
             scope = await self._db.fetch_one(
                 "SELECT t.project_id, t.session_id, t.operation_id, "
-                "t.planner_run_id, r.status AS source_status "
+                "t.planner_run_id AS root_run_id, r.status AS source_status "
                 "FROM screenplay_agent_turns AS t "
                 "LEFT JOIN ai_agent_runs AS r ON r.id = ? WHERE t.id = ?",
                 [source, turn],
@@ -355,7 +355,7 @@ class SqliteScreenplayOperationRepository:
                 or str(scope.get("project_id") or "") != project
                 or int(scope.get("session_id") or 0) != int(session_id)
                 or str(scope.get("operation_id") or "") != operation
-                or str(scope.get("planner_run_id") or "")
+                or str(scope.get("root_run_id") or "")
                 not in ({source, bound_root} if status == "bound" else {source})
                 or str(scope.get("source_status") or "") != "canceled"
             ):

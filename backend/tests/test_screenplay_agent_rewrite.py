@@ -101,7 +101,7 @@ from application.screenplay_checkpoint_planning import (
     parse_persisted_plan,
     plan_digest,
 )
-from application.screenplay_agent_planner import SqliteScreenplayTaskResolver
+from application.screenplay_task_resolver import SqliteScreenplayTaskResolver
 from application.screenplay_structured_call import (
     PublicModelResult,
     StructuredModelResult,
