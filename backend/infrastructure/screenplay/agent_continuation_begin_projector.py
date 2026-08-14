@@ -84,11 +84,13 @@ class ScreenplayContinuationBeginProjector:
             or turn is None
             or str(turn.get("planner_run_id") or "") != expected["source"]
             or str(turn.get("status") or "") != "running"
+            or turn.get("cancel_requested_at_ms") is not None
             or operation is None
             or str(operation.get("turn_id") or "") != expected["turn"]
             or str(operation.get("project_id") or "") != expected["project"]
             or int(operation.get("session_id") or 0) != expected["session"]
             or str(operation.get("status") or "") != "running"
+            or operation.get("cancel_requested_at_ms") is not None
             or source != {"status": "canceled"}
         ):
             raise ContractViolationError("screenplay continuation identity conflicts")

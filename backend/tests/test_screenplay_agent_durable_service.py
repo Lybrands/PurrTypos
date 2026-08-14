@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from application.screenplay_agent_service import ScreenplayAgentService
+from application.screenplay_agent_service import ScreenplayAgentService, _ACTIVE_TASKS
 from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
@@ -36,6 +36,9 @@ from domains.screenplay_agent import (
 )
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_agent_repository import (
+    SqliteScreenplayAgentRepository,
 )
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
@@ -705,6 +708,316 @@ async def test_orphan_root_cancel_uses_canonical_terminal_projector(
             f"run:{identity['rootRunId']}:canceled",
         ],
     ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_truncate_active_foreign_root_times_out_without_deleting_business_state(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "truncate_timeout")
+    await screenplay_db.execute(
+        "UPDATE ai_agent_runs SET execution_owner_id = 'foreign-worker', "
+        "lease_expires_at_ms = 9999999999999 WHERE id = ?",
+        [identity["rootRunId"]],
+    )
+    composition = create_agent_composition(screenplay_db)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        projects=object(),
+    )
+    service._truncate_wait_timeout_seconds = 0.01
+    service._truncate_poll_interval_seconds = 0.001
+    try:
+        with pytest.raises(AppError, match="truncate cancellation timed out"):
+            await service.truncate_from_turn(identity["turnId"])
+    finally:
+        await composition.shutdown()
+
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    ) == {"status": "planning"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [identity["rootRunId"]],
+    ) == {"status": "running"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [identity["rootRunId"]],
+    ) == {"status": "draining"}
+
+
+@pytest.mark.asyncio
+async def test_truncate_cancellation_error_does_not_delete_business_state(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "truncate_error")
+    local_task = asyncio.create_task(asyncio.Event().wait())
+    ScreenplayAgentService._remember_task(
+        f"turn:{identity['turnId']}",
+        local_task,
+    )
+    await asyncio.sleep(0)
+    composition = create_agent_composition(screenplay_db)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        projects=object(),
+    )
+
+    class RejectingCancellation:
+        async def cancel(self, _run_id):
+            raise RuntimeError("injected truncate cancellation failure")
+
+    service._cancellation = RejectingCancellation()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="injected truncate cancellation failure",
+        ):
+            await service.truncate_from_turn(identity["turnId"])
+        assert local_task.done() is False
+    finally:
+        local_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await local_task
+        _ACTIVE_TASKS.pop(f"turn:{identity['turnId']}", None)
+        await composition.shutdown()
+
+    assert await screenplay_db.fetch_one(
+        "SELECT id FROM screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    ) == {"id": identity["turnId"]}
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [identity["rootRunId"]],
+    ) == {"status": "running"}
+
+
+@pytest.mark.asyncio
+async def test_truncate_persists_fence_before_canceling_and_awaiting_local_wrapper(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "truncate_local")
+    local_cleaned = asyncio.Event()
+
+    async def local_wrapper():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            local_cleaned.set()
+
+    local_task = asyncio.create_task(local_wrapper())
+    ScreenplayAgentService._remember_task(
+        f"turn:{identity['turnId']}",
+        local_task,
+    )
+    await asyncio.sleep(0)
+    composition = create_agent_composition(screenplay_db)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        projects=object(),
+    )
+
+    class PersistingCancellation:
+        async def cancel(self, run_id):
+            assert run_id == identity["rootRunId"]
+            assert local_task.done() is False
+            async with screenplay_db.transaction(cancellation_linearizable=True):
+                await screenplay_db.execute(
+                    "UPDATE ai_agent_runs SET status = 'canceled', "
+                    "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
+                    "cancellation_epoch = 1, cancel_requested_at_ms = 1 "
+                    "WHERE id = ?",
+                    [run_id],
+                )
+                await screenplay_db.execute(
+                    "INSERT INTO ai_agent_run_cancellations "
+                    "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+                    "completed_at_ms) VALUES (?, 1, 'completed', 1, 1)",
+                    [run_id],
+                )
+            return {"cancellationStatus": "completed"}
+
+    service._cancellation = PersistingCancellation()
+    try:
+        removed = await service.truncate_from_turn(identity["turnId"])
+    finally:
+        await composition.shutdown()
+
+    assert removed["deletedTurnIds"] == [identity["turnId"]]
+    assert local_task.done() is True
+    assert local_cleaned.is_set()
+    assert f"turn:{identity['turnId']}" not in _ACTIVE_TASKS
+
+
+@pytest.mark.asyncio
+async def test_truncate_repository_rechecks_active_root_inside_delete_transaction(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "truncate_guard")
+    repository = SqliteScreenplayAgentRepository(
+        screenplay_db,
+        owner_id="truncate-guard-owner",
+    )
+
+    with pytest.raises(AppError, match="truncate runtime is still active"):
+        await repository.truncate_from_turn(identity["turnId"])
+
+    assert await screenplay_db.fetch_one(
+        "SELECT id FROM screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    ) == {"id": identity["turnId"]}
+
+
+@pytest.mark.asyncio
+async def test_truncate_cancels_complete_root_tree_before_business_delete(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "truncate_tree")
+    root_run_id = identity["rootRunId"]
+    child_run_id = "run-truncate-host-child"
+    await screenplay_db.execute(
+        "UPDATE ai_agent_runs SET execution_owner_id = 'foreign-worker', "
+        "lease_expires_at_ms = 0 WHERE id = ?",
+        [root_run_id],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, mode, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id, binding_attributes_json, parent_run_id, "
+        "root_run_id, agent_role, run_depth, execution_owner_id, "
+        "lease_expires_at_ms) VALUES (?, 'running', 'agent', '', "
+        "'screenplay.checkpoint_plan', ?, 'checkpoint-child', '{}', ?, ?, "
+        "'screenplay-part', 1, 'foreign-child-worker', 0)",
+        [
+            child_run_id,
+            identity["projectId"],
+            root_run_id,
+            root_run_id,
+        ],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_delegations "
+        "(id, parent_run_id, root_run_id, child_run_id, agent_role, "
+        "objective, status, worker_id, claim_expires_at_ms) VALUES "
+        "('delegation-truncate', ?, ?, ?, 'screenplay-part', 'test', "
+        "'claimed', 'foreign-delegation-worker', 9999999999999)",
+        [root_run_id, root_run_id, child_run_id],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_host_child_runs "
+        "(host_child_key, identity_digest, contract_json, attempt_key, "
+        "run_id) VALUES ('host-child-truncate', 'identity-truncate', '{}', "
+        "'attempt-truncate', ?)",
+        [child_run_id],
+    )
+    composition = create_agent_composition(screenplay_db)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id=composition.execution_owner_id,
+        composition=composition,
+        projects=object(),
+    )
+    try:
+        removed = await service.truncate_from_turn(identity["turnId"])
+    finally:
+        await composition.shutdown()
+
+    assert removed["deletedTurnIds"] == [identity["turnId"]]
+    assert await screenplay_db.fetch_one(
+        "SELECT id FROM screenplay_agent_turns WHERE id = ?",
+        [identity["turnId"]],
+    ) is None
+    assert await screenplay_db.fetch_all(
+        "SELECT id, status, execution_owner_id, lease_expires_at_ms "
+        "FROM ai_agent_runs WHERE id IN (?, ?) ORDER BY id",
+        [root_run_id, child_run_id],
+    ) == [
+        {
+            "id": root_run_id,
+            "status": "canceled",
+            "execution_owner_id": None,
+            "lease_expires_at_ms": None,
+        },
+        {
+            "id": child_run_id,
+            "status": "canceled",
+            "execution_owner_id": None,
+            "lease_expires_at_ms": None,
+        },
+    ]
+    assert await screenplay_db.fetch_one(
+        "SELECT status, worker_id, claim_expires_at_ms FROM "
+        "ai_agent_delegations WHERE id = 'delegation-truncate'"
+    ) == {
+        "status": "canceled",
+        "worker_id": None,
+        "claim_expires_at_ms": None,
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [root_run_id],
+    ) == {"status": "completed"}
+    assert await screenplay_db.fetch_one(
+        "SELECT host_child_key FROM ai_agent_host_child_runs WHERE "
+        "host_child_key = 'host-child-truncate'"
+    ) == {"host_child_key": "host-child-truncate"}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_cancel_commands "
+        "WHERE turn_id = ?",
+        [identity["turnId"]],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_truncate_cancels_long_task_claim_before_delete(
+    screenplay_db,
+):
+    paused, turn_id, _root_run_id, _turn = await _paused_continuation_fixture(
+        screenplay_db
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status, worker_id, "
+        "lease_expires_at_ms) VALUES "
+        "('task-atomic-finalizer', 'unit-active', 'unit-active', 1, "
+        "'claimed', 'foreign-unit-worker', 9999999999999)"
+    )
+
+    class InspectingRepository(SqliteScreenplayAgentRepository):
+        async def truncate_from_turn(self, requested_turn_id):
+            assert await screenplay_db.fetch_one(
+                "SELECT status, worker_id, lease_expires_at_ms FROM "
+                "ai_agent_long_task_units WHERE task_id = "
+                "'task-atomic-finalizer' AND unit_id = 'unit-active'"
+            ) == {
+                "status": "canceled",
+                "worker_id": None,
+                "lease_expires_at_ms": None,
+            }
+            return await super().truncate_from_turn(requested_turn_id)
+
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="truncate-task-owner",
+        projects=object(),
+        repository=InspectingRepository(
+            screenplay_db,
+            owner_id="truncate-task-owner",
+        ),
+    )
+    removed = await service.truncate_from_turn(turn_id)
+
+    assert removed["deletedOperationIds"] == [paused.id]
+    assert await screenplay_db.fetch_one(
+        "SELECT id FROM ai_agent_long_tasks WHERE id = 'task-atomic-finalizer'"
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -1381,6 +1694,83 @@ async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
         "binding_command_id = ?",
         [command_id],
     ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_truncate_cancel_fence_rejects_concurrent_continuation_begin(
+    screenplay_db,
+):
+    paused, turn_id, source_root_run_id, turn = (
+        await _paused_continuation_fixture(screenplay_db)
+    )
+    operations = SqliteScreenplayOperationRepository(screenplay_db)
+    command_id = "resume-racing-truncate"
+    await operations.resume_with_model(
+        paused.id,
+        command_id=command_id,
+        expected_revision=paused.revision,
+        capability_snapshot={"digest": "sha256:" + "1" * 64},
+    )
+    reservation = await operations.claim_continuation_start(
+        command_id=command_id,
+        operation_id=paused.id,
+        turn_id=turn_id,
+        source_root_run_id=source_root_run_id,
+        session_id=int(turn["session_id"]),
+        project_id=str(turn["project_id"]),
+        owner_id="continuation-racing-truncate",
+    )
+    await operations.request_cancel(
+        turn_id,
+        idempotency_key="truncate-race-cancel",
+    )
+    params = RunCreateParams(
+        session_id=int(turn["session_id"]),
+        prompt="continue",
+        mode="agent",
+        turn_id=turn_id,
+        binding=RunBinding(
+            namespace="screenplay.conversation_turn",
+            aggregate_id=str(turn["project_id"]),
+            command_id=command_id,
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+                "continuationOf": source_root_run_id,
+                "operationId": paused.id,
+                "continuationOwner": "continuation-racing-truncate",
+                "continuationEpoch": int(reservation["continuation_epoch"]),
+                "continuationIdentityDigest": reservation["identity_digest"],
+            },
+        ),
+    )
+    repository = SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+        run_begin_projector=ScreenplayContinuationBeginProjector(screenplay_db),
+    )
+
+    with pytest.raises(
+        ContractViolationError,
+        match="continuation identity conflicts",
+    ):
+        await repository.begin_run_lifecycle(
+            params,
+            AgentEvent(
+                type=CoreEventType.RUN_STARTED,
+                payload={"status": RunStatus.RUNNING.value},
+            ),
+        )
+
+    assert await screenplay_db.fetch_one(
+        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"planner_run_id": source_root_run_id}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+        "binding_command_id = ?",
+        [command_id],
+    ) == {"count": 0}
 
 
 @pytest.mark.asyncio
