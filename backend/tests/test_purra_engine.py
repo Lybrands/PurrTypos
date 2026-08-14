@@ -67,6 +67,7 @@ from purra.engine.durable_execution import _durable_plan_step_statuses
 from purra.errors import (
     ContractViolationError,
     InvalidPlannerOutputError,
+    RunCancellationConflictError,
     UnsupportedModelFeatureError,
 )
 from purra.events import AgentEvent, CoreEventType
@@ -271,6 +272,21 @@ class FailingTerminalRepository(MemoryRunRepository):
     async def commit(self, run_id, commit):
         if commit.terminal_status is not None:
             raise RuntimeError("terminal commit failed")
+        return await super().commit(run_id, commit)
+
+
+class CancelFencedTerminalRepository(MemoryRunRepository):
+    def __init__(self):
+        super().__init__()
+        self.terminal_attempts: list[RunStatus] = []
+
+    async def commit(self, run_id, commit):
+        if commit.terminal_status is not None:
+            self.terminal_attempts.append(commit.terminal_status)
+        if commit.terminal_status not in {None, RunStatus.CANCELED}:
+            raise RunCancellationConflictError(
+                "cancel-requested run only accepts a canceled terminal commit"
+            )
         return await super().commit(run_id, commit)
 
 
@@ -2388,6 +2404,28 @@ async def test_disconnect_surfaces_terminal_commit_failure_to_aclose_caller():
     assert repository.runs[started.run_id]["status"] is RunStatus.RUNNING
     assert model.completions == []
     assert state.domain["handler_order"] == []
+
+
+@pytest.mark.asyncio
+async def test_completion_losing_to_cancel_fence_commits_canceled_not_failed():
+    repository = CancelFencedTerminalRepository()
+    core, request, options, _, _model, _state = _core_fixture(
+        repository=repository,
+        invalid_plan=True,
+    )
+
+    updates = [
+        item async for item in core._execute_run(request, options=options)
+    ]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.CANCELED
+    assert repository.terminal_attempts == [
+        RunStatus.DONE,
+        RunStatus.CANCELED,
+    ]
+    assert repository.runs[result.run_id]["status"] is RunStatus.CANCELED
 
 
 @pytest.mark.asyncio
