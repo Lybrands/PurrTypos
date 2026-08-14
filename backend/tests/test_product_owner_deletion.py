@@ -8,6 +8,8 @@ import pytest_asyncio
 from exceptions import AppError
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import delete_screenplay_project_data
+from application.agent_cancellation_service import AgentCancellationService
+from application.composition_factory import create_agent_composition
 from application.product_owner_deletion import prepare_session_owner_deletion
 
 pytestmark = pytest.mark.asyncio
@@ -143,9 +145,12 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "VALUES ('request-done', 92, 'sha256:done', 'rejected', 'done')"
     )
     await owner_db.execute(
-        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
-        "VALUES ('run-project-done', 92, 'done', 'done'), "
-        "('run-foreign-audit', NULL, 'done', 'foreign')"
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, root_run_id, cancellation_epoch, "
+        "cancel_requested_at_ms) VALUES "
+        "('run-project-done', 92, 'canceled', 'done', "
+        "'run-project-done', 1, 1), "
+        "('run-foreign-audit', NULL, 'done', 'foreign', NULL, 0, NULL)"
     )
     await owner_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
@@ -220,6 +225,47 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "SELECT root_run_id FROM ai_agent_run_cancellations "
         "WHERE root_run_id = 'run-foreign-audit'"
     ) == {"root_run_id": "run-foreign-audit"}
+
+    class CountingParticipant:
+        calls = 0
+
+        async def project(self, root_run_id, receipt):
+            self.calls += 1
+
+    participant = CountingParticipant()
+    composition = create_agent_composition(owner_db)
+    try:
+        replay = await AgentCancellationService(
+            owner_db,
+            composition,
+            participants=(participant,),
+        ).cancel("run-project-done")
+    finally:
+        await composition.shutdown()
+    assert replay == {
+        "status": "canceled",
+        "newlyRequested": False,
+        "childrenCanceled": 0,
+        "terminalized": False,
+        "cancellationStatus": "completed",
+        "cancellationEpoch": 1,
+        "cancellationReceipt": "tombstoned",
+    }
+    assert participant.calls == 0
+    assert await owner_db.fetch_one(
+        "SELECT status, cancellation_epoch, execution_owner_id, "
+        "lease_expires_at_ms FROM ai_agent_runs "
+        "WHERE id = 'run-project-done'"
+    ) == {
+        "status": "canceled",
+        "cancellation_epoch": 1,
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+    assert await owner_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-project-done'"
+    ) is None
     await owner_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
         "(root_run_id, cancellation_epoch, status, requested_at_ms, "
