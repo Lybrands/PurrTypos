@@ -800,6 +800,113 @@ async def test_generic_root_cancel_requests_screenplay_business_cancel(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("turn_disposition", ["rotated", "deleted"])
+async def test_completed_root_cancel_replays_without_business_participant(
+    screenplay_db,
+    turn_disposition,
+):
+    identity = await _answer_projection_fixture(
+        screenplay_db,
+        f"cancel_replay_{turn_disposition}",
+    )
+    composition = create_agent_composition(screenplay_db)
+    try:
+        cancellation = AgentCancellationService(screenplay_db, composition)
+        first = await cancellation.cancel(identity["rootRunId"])
+        assert first is not None and first["cancellationStatus"] == "completed"
+        receipt_before = await screenplay_db.fetch_one(
+            "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+            [identity["rootRunId"]],
+        )
+        event_count_before = await screenplay_db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+            "WHERE run_id = ?",
+            [identity["rootRunId"]],
+        )
+
+        if turn_disposition == "rotated":
+            await screenplay_db.execute(
+                "UPDATE screenplay_agent_turns SET planner_run_id = ? "
+                "WHERE id = ?",
+                ["run-continuation-winner", identity["turnId"]],
+            )
+        else:
+            await screenplay_db.execute(
+                "DELETE FROM screenplay_agent_turns WHERE id = ?",
+                [identity["turnId"]],
+            )
+
+        class CountingParticipant:
+            calls = 0
+
+            async def project(self, root_run_id, receipt):
+                self.calls += 1
+
+        participant = CountingParticipant()
+        replay = await AgentCancellationService(
+            screenplay_db,
+            composition,
+            participants=(participant,),
+        ).cancel(identity["rootRunId"])
+    finally:
+        await composition.shutdown()
+
+    assert replay is not None
+    assert replay["status"] == "canceled"
+    assert replay["cancellationStatus"] == "completed"
+    assert replay["cancellationEpoch"] == first["cancellationEpoch"]
+    assert replay["newlyRequested"] is False
+    assert replay["terminalized"] is False
+    assert participant.calls == 0
+    assert await screenplay_db.fetch_one(
+        "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [identity["rootRunId"]],
+    ) == receipt_before
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
+        [identity["rootRunId"]],
+    ) == event_count_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_column", "conflicting_value"),
+    [("status", "failed"), ("cancellation_epoch", 2)],
+)
+async def test_completed_root_cancel_receipt_conflict_fails_closed(
+    screenplay_db,
+    root_column,
+    conflicting_value,
+):
+    identity = await _answer_projection_fixture(
+        screenplay_db,
+        f"cancel_conflict_{root_column}",
+    )
+    composition = create_agent_composition(screenplay_db)
+    try:
+        cancellation = AgentCancellationService(screenplay_db, composition)
+        first = await cancellation.cancel(identity["rootRunId"])
+        assert first is not None and first["cancellationStatus"] == "completed"
+        await screenplay_db.execute(
+            f"UPDATE ai_agent_runs SET {root_column} = ? WHERE id = ?",
+            [conflicting_value, identity["rootRunId"]],
+        )
+        with pytest.raises(
+            ContractViolationError,
+            match="completed cancellation receipt conflicts",
+        ):
+            await cancellation.cancel(identity["rootRunId"])
+    finally:
+        await composition.shutdown()
+
+    assert await screenplay_db.fetch_one(
+        "SELECT status, cancellation_epoch FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = ?",
+        [identity["rootRunId"]],
+    ) == {"status": "completed", "cancellation_epoch": 1}
+
+
+@pytest.mark.asyncio
 async def test_truncate_active_foreign_root_times_out_without_deleting_business_state(
     screenplay_db,
 ):
