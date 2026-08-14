@@ -476,129 +476,267 @@ def test_phase_four_removed_compatibility_modules_stay_deleted():
     )
 
 
-def test_independent_screenplay_planner_stays_deleted():
-    assert not RETIRED_SCREENPLAY_PLANNER.exists()
-    forbidden = {
-        "ModelScreenplayIntentPlanner",
-        "screenplay_intent_planning",
-        "_ANSWER_INSTRUCTION",
-        "_PLANNER_INSTRUCTION",
-        "_PLANNER_REPAIR",
-    }
-    paths = tuple(
+_RETIRED_SCREENPLAY_SYMBOLS = frozenset({
+    "ModelScreenplayIntentPlanner",
+    "screenplay_intent_planning",
+    "_ANSWER_INSTRUCTION",
+    "_PLANNER_INSTRUCTION",
+    "_PLANNER_REPAIR",
+})
+_LEGACY_ROOT_JSON_ALIAS = "plannerRunId"
+_LEGACY_ROOT_COLUMN = "planner_run_id"
+_BOUNDARY_TEST = Path(__file__).resolve()
+
+_PLANNER_STORAGE_ROLES: dict[str, frozenset[str]] = {
+    "backend/application/screenplay_agent_service.py": frozenset({"read"}),
+    "backend/database/crud/screenplay_agent_runtime_cleanup.py": frozenset(
+        {"cleanup"}
+    ),
+    "backend/database/screenplay_agent_schema.py": frozenset({"schema"}),
+    "backend/infrastructure/persistence/sqlite_screenplay_agent_repository.py":
+        frozenset({"read", "write"}),
+    "backend/infrastructure/persistence/sqlite_screenplay_operation_finalizer.py":
+        frozenset({"read"}),
+    "backend/infrastructure/persistence/sqlite_screenplay_operation_repository.py":
+        frozenset({"read"}),
+    "backend/infrastructure/screenplay/agent_continuation_begin_projector.py":
+        frozenset({"read", "write"}),
+    "backend/infrastructure/screenplay/agent_root_cancellation_participant.py":
+        frozenset({"read"}),
+    "backend/infrastructure/screenplay/agent_root_completion_projector.py":
+        frozenset({"read"}),
+    "backend/tests/test_agent_run_queries.py": frozenset({"write"}),
+    "backend/tests/test_screenplay_agent_durable_service.py": frozenset(
+        {"read", "write"}
+    ),
+    "backend/tests/test_screenplay_agent_runtime_cleanup.py": frozenset(
+        {"write"}
+    ),
+}
+
+
+def _backend_python_paths() -> tuple[Path, ...]:
+    return tuple(
         path for path in sorted(BACKEND_DIR.rglob("*.py"))
-        if "tests" not in path.relative_to(BACKEND_DIR).parts
-        and "__pycache__" not in path.parts
+        if "__pycache__" not in path.parts
     )
-    violations = [
-        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
-        for path in paths
-        for token in forbidden
-        if token in path.read_text(encoding="utf-8")
-    ]
+
+
+def _boundary_negative_literal(
+    path: Path,
+    node: ast.AST,
+    needle: str,
+) -> bool:
+    return (
+        path.resolve() == _BOUNDARY_TEST
+        and isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and needle in node.value
+    )
+
+
+def _retired_screenplay_violations() -> list[str]:
+    violations: list[str] = []
+    for path in _backend_python_paths():
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(ROOT_DIR).as_posix()
+        for token in _RETIRED_SCREENPLAY_SYMBOLS:
+            allowed_lines = {
+                node.lineno for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and node.value == token
+                and _boundary_negative_literal(path, node, token)
+            }
+            violations.extend(
+                f"{relative}:{line_number}: {token}"
+                for line_number, line in enumerate(source.splitlines(), 1)
+                if token in line and line_number not in allowed_lines
+            )
+    return violations
+
+
+def _planner_column_violations(
+    source_overrides: dict[Path, str] | None = None,
+) -> list[str]:
+    overrides = {
+        path.resolve(): source
+        for path, source in (source_overrides or {}).items()
+    }
+    violations: list[str] = []
+    for path in _backend_python_paths():
+        source = overrides.get(path.resolve())
+        if source is None:
+            source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(ROOT_DIR).as_posix()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Name) and node.id == _LEGACY_ROOT_COLUMN
+                or isinstance(node, ast.arg) and node.arg == _LEGACY_ROOT_COLUMN
+                or isinstance(node, ast.Attribute)
+                and node.attr == _LEGACY_ROOT_COLUMN
+                or isinstance(node, ast.keyword)
+                and node.arg == _LEGACY_ROOT_COLUMN
+            ):
+                violations.append(
+                    f"{relative}:{getattr(node, 'lineno', 0)}: legacy identifier"
+                )
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if _LEGACY_ROOT_JSON_ALIAS in node.value:
+                if not _boundary_negative_literal(
+                    path,
+                    node,
+                    _LEGACY_ROOT_JSON_ALIAS,
+                ):
+                    violations.append(
+                        f"{relative}:{node.lineno}: legacy JSON alias"
+                    )
+            if _LEGACY_ROOT_COLUMN not in node.value:
+                continue
+            if _boundary_negative_literal(path, node, _LEGACY_ROOT_COLUMN):
+                continue
+            normalized = " ".join(node.value.split())
+            upper = normalized.upper()
+            if normalized == _LEGACY_ROOT_COLUMN:
+                role = "cleanup"
+            elif "CREATE TABLE" in upper or "CREATE INDEX" in upper:
+                role = "schema"
+            elif "SELECT" in upper:
+                role = "read"
+            elif "INSERT" in upper or "UPDATE" in upper:
+                role = "write"
+            elif "DELETE" in upper:
+                role = "cleanup"
+            else:
+                role = "unknown"
+            if role not in _PLANNER_STORAGE_ROLES.get(relative, frozenset()):
+                violations.append(
+                    f"{relative}:{node.lineno}: unapproved {role} storage role"
+                )
+                continue
+            if re.search(r"\bAS\s+planner_run_id\b", normalized, re.IGNORECASE):
+                violations.append(
+                    f"{relative}:{node.lineno}: legacy output alias"
+                )
+            if re.search(
+                r'''["']planner_run_id["']\s*:''',
+                normalized,
+                re.IGNORECASE,
+            ):
+                violations.append(
+                    f"{relative}:{node.lineno}: legacy JSON key"
+                )
+            if role == "read" and not re.search(
+                r"(?:\b\w+\.)?planner_run_id\s+AS\s+root_run_id\b",
+                normalized,
+                re.IGNORECASE,
+            ):
+                violations.append(
+                    f"{relative}:{node.lineno}: read must alias root_run_id"
+                )
+            if role == "schema" and normalized.count(_LEGACY_ROOT_COLUMN) != 1:
+                violations.append(
+                    f"{relative}:{node.lineno}: schema must define one physical column"
+                )
+    return violations
+
+
+def test_independent_screenplay_planner_stays_deleted_everywhere():
+    assert not RETIRED_SCREENPLAY_PLANNER.exists()
+    violations = _retired_screenplay_violations()
     assert not violations, "Independent Screenplay planner returned:\n" + "\n".join(
         violations
     )
 
 
-def test_planner_run_alias_is_confined_to_storage_and_legacy_input_decoder():
-    backend_paths = tuple(
-        path for path in sorted(BACKEND_DIR.rglob("*.py"))
-        if "tests" not in path.relative_to(BACKEND_DIR).parts
-        and "__pycache__" not in path.parts
-    )
-    identifier_violations: list[str] = []
-    string_violations: list[str] = []
-    sql_adapters = {
-        "backend/application/screenplay_agent_service.py",
-        "backend/infrastructure/persistence/sqlite_screenplay_agent_repository.py",
-        "backend/infrastructure/persistence/sqlite_screenplay_operation_finalizer.py",
-        "backend/infrastructure/persistence/sqlite_screenplay_operation_repository.py",
-        "backend/infrastructure/screenplay/agent_continuation_begin_projector.py",
-        "backend/infrastructure/screenplay/agent_root_cancellation_participant.py",
-        "backend/infrastructure/screenplay/agent_root_completion_projector.py",
-    }
-    for path in backend_paths:
-        relative = path.relative_to(ROOT_DIR).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        if any(
-            isinstance(node, ast.Name) and node.id == "planner_run_id"
-            or isinstance(node, ast.arg) and node.arg == "planner_run_id"
-            or isinstance(node, ast.Attribute) and node.attr == "planner_run_id"
-            or isinstance(node, ast.keyword) and node.arg == "planner_run_id"
-            for node in ast.walk(tree)
-        ):
-            identifier_violations.append(relative)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            value = node.value
-            if "plannerRunId" in value:
-                string_violations.append(f"{relative}:{node.lineno}: JSON alias")
-            if "planner_run_id" not in value:
-                continue
-            physical_storage = (
-                relative in sql_adapters
-                and any(keyword in value.upper() for keyword in (
-                    "SELECT", "UPDATE", "INSERT", "DELETE",
-                ))
-            ) or (
-                relative == "backend/database/screenplay_agent_schema.py"
-                and "planner_run_id TEXT" in value
-            ) or (
-                relative
-                == "backend/database/crud/screenplay_agent_runtime_cleanup.py"
-                and value == "planner_run_id"
-            )
-            if not physical_storage:
-                string_violations.append(
-                    f"{relative}:{node.lineno}: non-storage planner_run_id"
-                )
-    assert not identifier_violations, (
-        "planner_run_id escaped its physical SQLite adapter boundary: "
-        + ", ".join(identifier_violations)
-    )
-    assert not string_violations, (
-        "legacy Planner identity escaped its exact storage allowlist:\n"
-        + "\n".join(string_violations)
+def test_planner_run_alias_is_confined_to_storage_roles_and_v1_decoder():
+    violations = _planner_column_violations()
+    assert not violations, (
+        "legacy Planner identity escaped its storage role allowlist:\n"
+        + "\n".join(violations)
     )
 
     legacy_decoder = (
         ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts"
     )
+    legacy_test = (
+        ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.test.ts"
+    )
     frontend_suffixes = {".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs"}
-    production_sources = [
-        path
+    alias_sources = {
+        path: path.read_text(encoding="utf-8")
         for path in (ROOT_DIR / "src").rglob("*")
         if path.is_file()
         and path.suffix in frontend_suffixes
-        if ".test." not in path.name
-    ]
-    alias_paths = [
-        path.relative_to(ROOT_DIR).as_posix()
-        for path in production_sources
-        if "plannerRunId" in path.read_text(encoding="utf-8")
-    ]
-    assert alias_paths == [legacy_decoder.relative_to(ROOT_DIR).as_posix()]
-    decoder_source = legacy_decoder.read_text(encoding="utf-8")
+        and _LEGACY_ROOT_JSON_ALIAS in path.read_text(encoding="utf-8")
+    }
+    assert set(alias_sources) == {legacy_decoder, legacy_test}
+
+    decoder_source = alias_sources[legacy_decoder]
     decoder_boundary = _source_between(
         decoder_source,
         "type LegacyRootRunCarrier = {",
         "export interface ScreenplayTurnArtifact {",
     )
-    assert decoder_boundary.count("plannerRunId") == 2
+    assert decoder_boundary.count(_LEGACY_ROOT_JSON_ALIAS) == 2
     assert "protocol v2 serializes only rootRunId" in decoder_boundary
-    assert "plannerRunId" not in decoder_source.replace(decoder_boundary, "")
-
-    legacy_test = (
-        ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.test.ts"
+    assert _LEGACY_ROOT_JSON_ALIAS not in decoder_source.replace(
+        decoder_boundary,
+        "",
     )
-    test_source = legacy_test.read_text(encoding="utf-8")
-    marker = "test('legacy snapshot plannerRunId decodes once into canonical rootRunId'"
+
+    test_source = alias_sources[legacy_test]
+    marker = (
+        "test('legacy snapshot plannerRunId decodes once into canonical rootRunId'"
+    )
     before, after = test_source.split(marker, 1)
     fixture, remainder = after.split("function operation(", 1)
-    assert "plannerRunId" not in before + remainder
-    assert (marker + fixture).count("plannerRunId") == 5
+    assert _LEGACY_ROOT_JSON_ALIAS not in before + remainder
+    assert (marker + fixture).count(_LEGACY_ROOT_JSON_ALIAS) == 5
+
+
+def test_storage_roles_tolerate_formatting_but_reject_rogue_reads_and_aliases():
+    adapter = (
+        BACKEND_DIR / "infrastructure" / "persistence"
+        / "sqlite_screenplay_agent_repository.py"
+    )
+    source = adapter.read_text(encoding="utf-8")
+    formatted = source + (
+        "\n_BOUNDARY_FORMATTED = '''SELECT\n"
+        "planner_run_id   AS   root_run_id\n"
+        "FROM screenplay_agent_turns'''\n"
+    )
+    assert _planner_column_violations({adapter: formatted}) == []
+
+    rogue = source + (
+        "\n_BOUNDARY_ROGUE = "
+        "'SELECT planner_run_id FROM screenplay_agent_turns'\n"
+    )
+    assert any(
+        "read must alias root_run_id" in item
+        for item in _planner_column_violations({adapter: rogue})
+    )
+
+    wrong_alias = source + (
+        "\n_BOUNDARY_ALIAS = "
+        "'SELECT root_run_id AS planner_run_id FROM screenplay_agent_turns'\n"
+    )
+    assert any(
+        "legacy output alias" in item
+        for item in _planner_column_violations({adapter: wrong_alias})
+    )
+
+    json_alias = source + (
+        "\n_BOUNDARY_JSON = "
+        "\"UPDATE screenplay_agent_turns SET intent_json = "
+        "'{\\\"planner_run_id\\\": \\\"run-1\\\"}'\"\n"
+    )
+    assert any(
+        "legacy JSON key" in item
+        for item in _planner_column_violations({adapter: json_alias})
+    )
 
 
 def test_phase_four_generic_conversation_contract_has_no_screenplay_fields():

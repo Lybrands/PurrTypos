@@ -104,7 +104,8 @@ class ScreenplayAgentRootCompletionProjector:
                     "screenplay Root canonical Turn identity is empty"
                 )
             turns = await self._db.fetch_all(
-                "SELECT * FROM screenplay_agent_turns WHERE planner_run_id = ?",
+                "SELECT *, planner_run_id AS root_run_id "
+                "FROM screenplay_agent_turns WHERE planner_run_id = ?",
                 [run_id],
             )
             if len(turns) != 1:
