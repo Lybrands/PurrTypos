@@ -227,6 +227,45 @@ async def test_claimed_delegation_atomically_attaches_child_run_and_result(db):
 
 
 @pytest.mark.asyncio
+async def test_cancel_fence_rejects_late_delegation_child_attachment(db):
+    parent_run_id = await _parent(db)
+    service = _service(db)
+    delegation = await service.delegate(
+        parent_run_id=parent_run_id,
+        agent_role="researcher",
+        objective="collect facts",
+    )
+    claimed = await service.claim(
+        parent_run_id=parent_run_id,
+        worker_id="worker-child",
+        max_parallel_children=1,
+    )
+    assert claimed is not None
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, mode, prompt, parent_run_id, root_run_id, "
+        "delegation_id, agent_role, run_depth) "
+        "VALUES ('late-delegated-child', 'running', 'agent', '', ?, ?, ?, "
+        "'researcher', 1)",
+        [parent_run_id, parent_run_id, delegation["delegationId"]],
+    )
+    await run_execution_store.fence_cancellation_tree(db, parent_run_id)
+
+    assert not await SqliteDelegationRepository(db).attach_child_run(
+        delegation_id=delegation["delegationId"],
+        child_run_id="late-delegated-child",
+        worker_id="worker-child",
+    )
+    persisted = await delegation_store.get_delegation(
+        db,
+        delegation["delegationId"],
+    )
+    assert persisted is not None
+    assert persisted["status"] == "canceled"
+    assert persisted["child_run_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_required_child_failure_blocks_aggregate_but_optional_failure_does_not(db):
     parent_run_id = await _parent(db)
     service = _service(db)
@@ -325,13 +364,19 @@ async def test_parent_cancel_cascades_to_queued_and_running_children(db):
 
 @pytest.mark.asyncio
 async def test_depth_limit_rejects_unbounded_delegation(db):
+    root = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="root",
+        mode="agent",
+    )
     deep_parent = await run_store.create_run(
         db,
         session_id=None,
         prompt="too deep",
         mode="agent",
-        parent_run_id="parent",
-        root_run_id="root",
+        parent_run_id=root,
+        root_run_id=root,
         delegation_id="delegation-parent",
         agent_role="worker",
         run_depth=3,

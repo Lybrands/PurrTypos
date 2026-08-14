@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ from application.writing_proposal_read_model import (
     unseen_product_chunks,
 )
 from application.agent_composition import set_agent_composition
+from application.agent_composition import get_agent_composition
+from application.agent_cancellation_service import AgentCancellationService
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
@@ -42,6 +45,10 @@ from infrastructure.persistence.sqlite_checkpoint_store import (
 from infrastructure.persistence.sqlite_delegation_repository import (
     SqliteDelegationRepository,
 )
+from infrastructure.persistence.sqlite_host_child_run_registry import (
+    SqliteHostChildRunRegistry,
+)
+from purra.errors import ContractViolationError
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import request_json
 from purra.output import (
@@ -650,17 +657,59 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
         "newlyRequested": True,
         "childrenCanceled": 0,
         "terminalized": True,
+        "cancellationStatus": "completed",
+        "cancellationEpoch": 1,
     }
     assert second.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
         "childrenCanceled": 0,
         "terminalized": False,
+        "cancellationStatus": "completed",
+        "cancellationEpoch": 1,
     }
     assert snapshot is not None
     assert snapshot["run"]["status"] == "canceled"
     assert snapshot["todos"][0]["status"] == "blocked"
     assert snapshot["events"][-1]["type"] == "fixture.event_3"
+
+
+async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    child_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="host child",
+        mode="agent",
+        parent_run_id=root_run_id,
+        root_run_id=root_run_id,
+        delegation_id=None,
+        agent_role="screenplay-part",
+        run_depth=1,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{root_run_id}/cancel",
+        json_body={},
+    )
+    child = await temp_db.fetch_one(
+        "SELECT status, cancel_requested_at_ms, execution_owner_id, "
+        "lease_expires_at_ms FROM ai_agent_runs WHERE id = ?",
+        [child_run_id],
+    )
+
+    assert response.json()["data"]["childrenCanceled"] == 1
+    assert child == {
+        "status": "canceled",
+        "cancel_requested_at_ms": child["cancel_requested_at_ms"],
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+    assert child["cancel_requested_at_ms"] is not None
 
 
 async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
@@ -694,13 +743,201 @@ async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
         "newlyRequested": True,
         "childrenCanceled": 0,
         "terminalized": False,
+        "cancellationStatus": "draining",
+        "cancellationEpoch": 1,
     }
+    assert await temp_db.fetch_one(
+        "SELECT cancellation_epoch, status FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = ?",
+        [run_id],
+    ) == {"cancellation_epoch": 1, "status": "draining"}
     assert snapshot is not None
     assert snapshot["run"]["status"] == "running"
     assert snapshot["run"]["execution"]["leaseExpiresAtMs"] == (
         timestamp + 60_000
     )
     assert snapshot["run"]["execution"]["cancellationRequested"] is True
+
+
+async def test_root_cancel_fence_rejects_new_child_run_and_host_receipt(temp_db):
+    timestamp = now_ms()
+    root_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="live root",
+        mode="agent",
+        execution_owner_id="live-worker",
+        heartbeat_at_ms=timestamp,
+        lease_expires_at_ms=timestamp + 60_000,
+    )
+    result = await AgentCancellationService(
+        temp_db,
+        get_agent_composition(),
+    ).cancel(root_run_id)
+    assert result is not None and result["cancellationStatus"] == "draining"
+
+    with pytest.raises(ContractViolationError, match="cancellation"):
+        await create_run(
+            temp_db,
+            session_id=7,
+            prompt="late child",
+            mode="agent",
+            parent_run_id=root_run_id,
+            root_run_id=root_run_id,
+            agent_role="screenplay-part",
+            run_depth=1,
+        )
+    with pytest.raises(ContractViolationError, match="cancellation"):
+        await SqliteHostChildRunRegistry(temp_db).reserve(
+            host_child_key="late-host-child",
+            identity_digest="late-child-digest",
+            contract={
+                "rootRunId": root_run_id,
+                "parentRunId": root_run_id,
+            },
+            owner_token="late-worker",
+            timestamp_ms=timestamp + 1,
+        )
+    with pytest.raises(ValueError, match="cancellation"):
+        await SqliteDelegationRepository(temp_db).create(
+            parent_run_id=root_run_id,
+            agent_role="researcher",
+            objective="late delegation",
+        )
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ?",
+        [root_run_id],
+    ) == {"count": 1}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_host_child_runs "
+        "WHERE host_child_key = 'late-host-child'"
+    ) == {"count": 0}
+
+
+async def test_child_attach_waiting_on_root_cancel_transaction_sees_fence(
+    temp_db,
+    monkeypatch,
+):
+    timestamp = now_ms()
+    root_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="live root",
+        mode="agent",
+        execution_owner_id="live-worker",
+        heartbeat_at_ms=timestamp,
+        lease_expires_at_ms=timestamp + 60_000,
+    )
+    fence_written = asyncio.Event()
+    release_fence = asyncio.Event()
+    original_execute = temp_db.execute
+
+    async def hold_fence(sql, params=None):
+        result = await original_execute(sql, params)
+        if "INSERT INTO ai_agent_run_cancellations" in sql:
+            fence_written.set()
+            await release_fence.wait()
+        return result
+
+    monkeypatch.setattr(temp_db, "execute", hold_fence)
+    cancel_task = asyncio.create_task(
+        AgentCancellationService(
+            temp_db,
+            get_agent_composition(),
+        ).cancel(root_run_id)
+    )
+    await asyncio.wait_for(fence_written.wait(), timeout=1)
+    child_task = asyncio.create_task(
+        create_run(
+            temp_db,
+            session_id=7,
+            prompt="racing child",
+            mode="agent",
+            parent_run_id=root_run_id,
+            root_run_id=root_run_id,
+            agent_role="screenplay-part",
+            run_depth=1,
+        )
+    )
+    await asyncio.sleep(0)
+    release_fence.set()
+    await asyncio.wait_for(cancel_task, timeout=1)
+    with pytest.raises(ContractViolationError, match="cancellation"):
+        await asyncio.wait_for(child_task, timeout=1)
+
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ?",
+        [root_run_id],
+    ) == {"count": 1}
+
+
+async def test_root_cancel_fence_transaction_rolls_back_every_write(
+    temp_db,
+    monkeypatch,
+):
+    root_run_id = await _seed_run(temp_db)
+    original_execute = temp_db.execute
+
+    async def fail_delegation_cancel(sql, params=None):
+        if (
+            "UPDATE ai_agent_delegations" in sql
+            and "parent_canceled" in sql
+        ):
+            raise RuntimeError("injected delegation cancellation failure")
+        return await original_execute(sql, params)
+
+    monkeypatch.setattr(temp_db, "execute", fail_delegation_cancel)
+    with pytest.raises(RuntimeError, match="injected delegation"):
+        await AgentCancellationService(
+            temp_db,
+            get_agent_composition(),
+        ).cancel(root_run_id)
+    monkeypatch.setattr(temp_db, "execute", original_execute)
+
+    assert await temp_db.fetch_one(
+        "SELECT cancel_requested_at_ms, cancellation_epoch FROM ai_agent_runs "
+        "WHERE id = ?",
+        [root_run_id],
+    ) == {"cancel_requested_at_ms": None, "cancellation_epoch": 0}
+    assert await temp_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [root_run_id],
+    ) is None
+
+
+async def test_root_cancel_receipt_recovers_draining_tree_after_restart(temp_db):
+    timestamp = now_ms()
+    root_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="live root",
+        mode="agent",
+        execution_owner_id="old-process",
+        heartbeat_at_ms=timestamp,
+        lease_expires_at_ms=timestamp + 60_000,
+    )
+    first = await AgentCancellationService(
+        temp_db,
+        get_agent_composition(),
+    ).cancel(root_run_id)
+    assert first is not None and first["cancellationStatus"] == "draining"
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET lease_expires_at_ms = 0 WHERE id = ?",
+        [root_run_id],
+    )
+
+    recovered = await AgentCancellationService(
+        temp_db,
+        get_agent_composition(),
+    ).cancel(root_run_id)
+
+    assert recovered is not None
+    assert recovered["cancellationStatus"] == "completed"
+    assert recovered["cancellationEpoch"] == first["cancellationEpoch"] == 1
+    assert await temp_db.fetch_one(
+        "SELECT status, cancellation_epoch FROM ai_agent_runs WHERE id = ?",
+        [root_run_id],
+    ) == {"status": "canceled", "cancellation_epoch": 1}
 
 
 async def test_delegation_route_is_visible_in_parent_snapshot(temp_db):

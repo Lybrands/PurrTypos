@@ -132,6 +132,81 @@ async def request_cancellation(
     return int((changed or {}).get("count") or 0) == 1
 
 
+async def fence_cancellation_tree(db, root_run_id: str) -> dict[str, Any]:
+    """Atomically fence a Root and request cancellation for its current tree."""
+
+    normalized_root = _required_text(root_run_id, "root run id")
+    requested_at = now_ms()
+    if not db.current_task_owns_transaction():
+        async with db.transaction(cancellation_linearizable=True):
+            return await fence_cancellation_tree(db, normalized_root)
+    root = await db.fetch_one(
+        "SELECT id, status, cancellation_epoch FROM ai_agent_runs WHERE id = ?",
+        [normalized_root],
+    )
+    if root is None:
+        raise LookupError("Root Run does not exist")
+    existing = await db.fetch_one(
+        "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [normalized_root],
+    )
+    if existing is None:
+        epoch = int(root.get("cancellation_epoch") or 0) + 1
+        await db.execute(
+            "UPDATE ai_agent_runs SET cancellation_epoch = ?, "
+            "cancel_requested_at_ms = COALESCE(cancel_requested_at_ms, ?), "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            [epoch, requested_at, normalized_root],
+        )
+        await db.execute(
+            "INSERT INTO ai_agent_run_cancellations "
+            "(root_run_id, cancellation_epoch, status, requested_at_ms) "
+            "VALUES (?, ?, 'draining', ?)",
+            [normalized_root, epoch, requested_at],
+        )
+    else:
+        epoch = int(existing["cancellation_epoch"])
+    await db.execute(
+        "UPDATE ai_agent_runs SET cancel_requested_at_ms = "
+        "COALESCE(cancel_requested_at_ms, ?), update_time = CURRENT_TIMESTAMP "
+        "WHERE (id = ? OR root_run_id = ?) AND status = 'running'",
+        [requested_at, normalized_root, normalized_root],
+    )
+    descendants = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ? "
+        "AND id <> ? AND status = 'running'",
+        [normalized_root, normalized_root],
+    )
+    unbound_delegations = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_delegations "
+        "WHERE root_run_id = ? AND status IN ('queued', 'claimed', 'running') "
+        "AND child_run_id IS NULL",
+        [normalized_root],
+    )
+    await db.execute(
+        "UPDATE ai_agent_delegations SET status = 'canceled', "
+        "error = 'parent_canceled', worker_id = NULL, "
+        "claim_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
+        "WHERE root_run_id = ? AND status IN ('queued', 'claimed', 'running')",
+        [normalized_root],
+    )
+    children_canceled = int((descendants or {}).get("count") or 0) + int(
+        (unbound_delegations or {}).get("count") or 0
+    )
+    await db.execute(
+        "UPDATE ai_agent_run_cancellations SET children_canceled = MAX("
+        "children_canceled, ?), update_time = CURRENT_TIMESTAMP "
+        "WHERE root_run_id = ? AND cancellation_epoch = ?",
+        [children_canceled, normalized_root, epoch],
+    )
+    receipt = await db.fetch_one(
+        "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [normalized_root],
+    )
+    assert receipt is not None
+    return receipt
+
+
 async def terminalize_orphaned_run(
     db,
     run_id: str,

@@ -523,57 +523,17 @@ async def get_agent_run_stability_trend(
 async def cancel_agent_run(run_id: str):
     """Persist a cancellation request for the executor that owns this Run."""
 
-    from application.agent_delegation_service import AgentDelegationService
+    from application.agent_cancellation_service import AgentCancellationService
     from application.agent_composition import get_agent_composition
     from dependencies import get_db
-    from infrastructure.persistence.run_execution_store import (
-        terminalize_orphaned_run,
-    )
 
     composition = get_agent_composition()
-    children_canceled = await AgentDelegationService(
-        composition.delegation_repository,
-    ).cancel_children(run_id)
-    requested = await composition.execution_lease_store.request_cancellation(run_id)
-    state = await composition.execution_lease_store.get(run_id)
-    if state is None:
+    result = await AgentCancellationService(get_db(), composition).cancel(run_id)
+    if result is None:
         return {"success": False, "error": "Agent Run 不存在"}
-    terminalized = await terminalize_orphaned_run(
-        get_db(),
-        run_id,
-        reason="cancellation_requested_without_live_executor",
-    )
-    if terminalized:
-        return {
-            "success": True,
-            "data": {
-                "status": "canceled",
-                "newlyRequested": requested,
-                "childrenCanceled": children_canceled,
-                "terminalized": True,
-            },
-        }
-    if state.status.value == "canceled":
-        return {
-            "success": True,
-            "data": {
-                "status": "canceled",
-                "newlyRequested": False,
-                "childrenCanceled": children_canceled,
-                "terminalized": False,
-            },
-        }
-    if state.status.value != "running":
+    if result["status"] not in {"canceled", "cancel_requested"}:
         return {"success": False, "error": "Agent Run 已结束"}
-    return {
-        "success": True,
-        "data": {
-            "status": "cancel_requested",
-            "newlyRequested": requested,
-            "childrenCanceled": children_canceled,
-            "terminalized": False,
-        },
-    }
+    return {"success": True, "data": result}
 
 
 @router.post("/ai/agent-runs/{run_id}/delegations")

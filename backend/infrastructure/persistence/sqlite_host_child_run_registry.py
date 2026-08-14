@@ -42,6 +42,20 @@ class SqliteHostChildRunRegistry:
         normalized_contract = thaw_json_mapping(contract)
         contract_json = _dump(normalized_contract)
         async with self._db.transaction(cancellation_linearizable=True):
+            root_run_id = str(normalized_contract.get("rootRunId") or "").strip()
+            if root_run_id:
+                root = await self._db.fetch_one(
+                    "SELECT status, cancellation_epoch FROM ai_agent_runs "
+                    "WHERE id = ?",
+                    [root_run_id],
+                )
+                if root is not None and (
+                    str(root.get("status") or "") != "running"
+                    or int(root.get("cancellation_epoch") or 0) > 0
+                ):
+                    raise ContractViolationError(
+                        "host child reservation conflicts with Root cancellation"
+                    )
             row = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_host_child_runs "
                 "WHERE host_child_key = ?",
@@ -207,6 +221,18 @@ class SqliteHostChildRunRegistry:
             )
             if run is None:
                 raise ContractViolationError("host child Run does not exist")
+            root = await self._db.fetch_one(
+                "SELECT status, cancellation_epoch FROM ai_agent_runs "
+                "WHERE id = ?",
+                [run.get("root_run_id")],
+            )
+            if root is not None and (
+                str(root.get("status") or "") != "running"
+                or int(root.get("cancellation_epoch") or 0) > 0
+            ):
+                raise ContractViolationError(
+                    "host child Run cannot bind after Root cancellation"
+                )
             await self._validate_persisted_run(row, run)
             await self._db.execute(
                 "UPDATE ai_agent_host_child_runs SET run_id = ?, "
