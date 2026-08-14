@@ -75,7 +75,7 @@ test('real-time reduction equals zero-based replay', () => {
   assert.deepEqual(replayCanonicalOutput(events), live)
 })
 
-test('public text accepts Provider deltas only', () => {
+test('runtime event text does not impersonate Provider deltas', () => {
   const state = replayCanonicalOutput([
     event(1, {
       source: 'runtime',
@@ -94,6 +94,22 @@ test('public text accepts Provider deltas only', () => {
   ])
 
   assert.equal(state.finalText, 'Provider text')
+})
+
+test('terminal Root lifecycle restores its authoritative final response', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      kind: 'run.lifecycle',
+      payload: {
+        status: 'done',
+        final_response: '候选稿已经完成。',
+      },
+    }),
+  ])
+
+  assert.equal(state.finalText, '候选稿已经完成。')
+  assert.equal(state.finalStreamStatus, 'committed')
+  assert.equal(state.runTerminal, true)
 })
 
 test('terminal operation freezes backend duration', () => {

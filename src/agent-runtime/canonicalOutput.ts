@@ -383,11 +383,17 @@ function applyRunLifecycle(
   event: CanonicalOutputEvent,
 ): CanonicalOutputState {
   const status = stringValue(event.payload.status) || null
+  const terminal = status != null && status !== 'running' && status !== 'pending'
+  const finalResponse = terminal
+    ? stringValue(event.payload.final_response ?? event.payload.finalResponse)
+    : ''
   return {
     ...state,
     runId: event.runId,
     runStatus: status,
-    runTerminal: status != null && status !== 'running' && status !== 'pending',
+    runTerminal: terminal,
+    finalText: finalResponse || state.finalText,
+    finalStreamStatus: finalResponse ? 'committed' : state.finalStreamStatus,
   }
 }
 

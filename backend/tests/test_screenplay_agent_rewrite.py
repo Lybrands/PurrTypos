@@ -4474,7 +4474,7 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
         binding_aggregate_id="project-test",
         binding_command_id="reasoning-json-test",
         lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_intent_planning",
+        phase="screenplay_structured_generation",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
     )

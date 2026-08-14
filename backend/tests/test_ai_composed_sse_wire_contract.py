@@ -335,6 +335,23 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
             },
         ],
     }
+    dispatch_payload = {
+        "taskId": "recipe-task-wire",
+        "dispatchReceiptId": "dispatch-receipt-wire",
+        "status": "running",
+    }
+    dispatch_event = await composition.output_processor.accept_runtime_event(
+        RuntimeOutputEvent(
+            event_id="wire-recipe-dispatched",
+            run_id=run_id,
+            event_type="long_task.dispatched",
+            payload=dispatch_payload,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    assert dispatch_event is not None
+    assert dispatch_event.visibility is OutputVisibility.PUBLIC
+    assert canonical_output_to_sse_chunk(dispatch_event) is not None
     progress_event = await composition.output_processor.accept_runtime_event(
         RuntimeOutputEvent(
             event_id="wire-recipe-progress",
@@ -347,6 +364,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert progress_event is not None
     assert progress_event.visibility is OutputVisibility.PRIVATE
     assert canonical_output_to_sse_chunk(progress_event) is None
+    assert progress_event.sequence == dispatch_event.sequence + 1
     compaction_payload = {
         "status": "completed",
         "beforeTokens": 12_000,
@@ -454,6 +472,14 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
         if event["payload"].get("eventType") == "run.todos_updated"
     ]
     public_plan = live_plans[0]
+    live_dispatch = next(
+        event["payload"]["data"]
+        for event in canonical_events
+        if event["payload"].get("eventType") == "long_task.dispatched"
+    )
+    assert live_dispatch == dispatch_payload
+    assert "title" not in json.dumps(live_dispatch, ensure_ascii=False).casefold()
+    assert "units" not in live_dispatch
     assert not any(
         event["payload"].get("eventType") == "long_task.progress"
         for event in canonical_events
@@ -535,6 +561,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert replay_snapshot["success"] is True
     replay_types = {
         "run.todos_updated",
+        "long_task.dispatched",
         "conversation.compaction.completed",
     }
     replay_events = [
@@ -543,6 +570,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     ]
     assert [event["type"] for event in replay_events] == [
         "run.todos_updated",
+        "long_task.dispatched",
         "conversation.compaction.completed",
         "run.todos_updated",
     ]
@@ -560,6 +588,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     )
     assert [event["chunk"]["payload"] for event in replay_events] == [
         {"eventType": "run.todos_updated", "data": public_plan},
+        {"eventType": "long_task.dispatched", "data": dispatch_payload},
         {
             "eventType": "conversation.compaction.completed",
             "data": compaction_payload,
@@ -567,6 +596,15 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
         {"eventType": "run.todos_updated", "data": checkpoint_plan},
     ]
     encoded_public_replay = json.dumps(replay_snapshot, ensure_ascii=False)
+    replay_dispatch = next(
+        event for event in replay_events
+        if event["type"] == "long_task.dispatched"
+    )
+    assert replay_dispatch["cursor"] == dispatch_event.sequence
+    assert all(
+        event["cursor"] != progress_event.sequence
+        for event in replay_snapshot["data"]["events"]
+    )
     assert "Recipe 生成正文" not in encoded_public_replay
     assert "plannerStepId" not in encoded_public_replay
 

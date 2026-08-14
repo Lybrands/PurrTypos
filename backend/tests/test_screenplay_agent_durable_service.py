@@ -1376,9 +1376,9 @@ async def test_pre_root_cancel_fence_blocks_atomic_root_begin(screenplay_db):
         )
 
     assert await screenplay_db.fetch_one(
-        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        "SELECT planner_run_id AS root_run_id FROM screenplay_agent_turns WHERE id = ?",
         [turn["id"]],
-    ) == {"planner_run_id": None}
+    ) == {"root_run_id": None}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
     ) == {"count": 0}
@@ -2630,9 +2630,9 @@ async def test_continuation_root_begin_binds_receipt_and_turn_atomically(
     )
 
     assert await screenplay_db.fetch_one(
-        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        "SELECT planner_run_id AS root_run_id FROM screenplay_agent_turns WHERE id = ?",
         [turn_id],
-    ) == {"planner_run_id": begun.run_id}
+    ) == {"root_run_id": begun.run_id}
     assert await screenplay_db.fetch_one(
         "SELECT continuation_status, continuation_root_run_id FROM "
         "screenplay_agent_operation_commands WHERE command_id = ?",
@@ -2734,9 +2734,9 @@ async def test_truncate_cancel_fence_rejects_concurrent_continuation_begin(
         )
 
     assert await screenplay_db.fetch_one(
-        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        "SELECT planner_run_id AS root_run_id FROM screenplay_agent_turns WHERE id = ?",
         [turn_id],
-    ) == {"planner_run_id": source_root_run_id}
+    ) == {"root_run_id": source_root_run_id}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
         "binding_command_id = ?",
@@ -2820,9 +2820,9 @@ async def test_continuation_begin_failure_rolls_back_root_receipt_and_turn(
         )
 
     assert await screenplay_db.fetch_one(
-        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        "SELECT planner_run_id AS root_run_id FROM screenplay_agent_turns WHERE id = ?",
         [turn_id],
-    ) == {"planner_run_id": source_root_run_id}
+    ) == {"root_run_id": source_root_run_id}
     assert await screenplay_db.fetch_one(
         "SELECT continuation_status, continuation_root_run_id FROM "
         "screenplay_agent_operation_commands WHERE command_id = ?",
@@ -3378,7 +3378,6 @@ async def test_screenplay_answer_turn_does_not_create_a_durable_task(
     )
     assert snapshot["turns"][0]["assistantContent"] == "当前处于创作简报阶段。"
     root_run_id = snapshot["turns"][0]["rootRunId"]
-    assert "plannerRunId" not in snapshot["turns"][0]
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
     ) == {"count": 1}
@@ -3395,11 +3394,6 @@ async def test_screenplay_answer_turn_does_not_create_a_durable_task(
     assert {event["turn_id"] for event in canonical_events} == {turn["id"]}
     sequences = [event["sequence"] for event in canonical_events]
     assert sequences == list(range(1, len(sequences) + 1))
-    assert await screenplay_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
-        "WHERE json_extract(payload_json, '$.phase') = "
-        "'screenplay_intent_planning'"
-    ) == {"count": 0}
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM screenplay_agent_operations"
     ) == {"count": 0}
@@ -3572,12 +3566,10 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     assert projected_turn["assistantContent"] == (
         "第 4 至 6 集候选稿已经完成。可以在候选稿区域查看并继续编辑。"
     )
-    assert "plannerRunId" not in projected_turn
     assert len(snapshot["operations"]) == 1
     operation = snapshot["operations"][0]
     task = snapshot["tasks"][0]
     assert task["rootRunId"] == root_run_id
-    assert "plannerRunId" not in task
     assert operation["status"] == "succeeded"
     assert operation["taskId"] == task["id"]
     assert operation["resultRevisionId"] == task["resultRevisionId"]
@@ -3624,6 +3616,11 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
     ]
     assert len(validated_events) == 1
     assert canonical_output_to_sse_chunk(validated_events[0]) is None
+    assert not any(
+        event.visibility.value == "public"
+        and event.kind.value == "provider.content_delta"
+        for event in candidate_events
+    )
     assert await screenplay_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_artifacts "
         "WHERE run_id = ? AND status = 'finalized'",
@@ -3650,6 +3647,81 @@ async def test_screenplay_formal_turn_finishes_on_the_same_root_run(
         "id": root_run_id,
         "final_response": projected_turn["assistantContent"],
     }
+    root_events = await SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+    ).list_events(root_run_id, after_sequence=0, limit=200)
+    public_chunks = [
+        chunk
+        for event in root_events
+        if (chunk := canonical_output_to_sse_chunk(event)) is not None
+    ]
+    dispatch_chunks = [
+        chunk for chunk in public_chunks
+        if chunk["payload"].get("eventType") == "long_task.dispatched"
+    ]
+    assert len(dispatch_chunks) == 1
+    dispatch_data = dispatch_chunks[0]["payload"]["data"]
+    assert dispatch_data["taskId"] == task["id"]
+    assert {"taskTitle", "units", "plannerStepId"}.isdisjoint(dispatch_data)
+    assert not any(
+        chunk["payload"].get("eventType") == "long_task.progress"
+        for chunk in public_chunks
+    )
+    private_progress_sequences = [
+        event.sequence for event in root_events
+        if event.visibility.value == "private"
+        and event.payload.get("eventType") == "long_task.progress"
+    ]
+    assert private_progress_sequences
+    assert all(
+        sequence not in {chunk["sequence"] for chunk in public_chunks}
+        for sequence in private_progress_sequences
+    )
+    done_updates = [
+        chunk["payload"]["data"]
+        for chunk in public_chunks
+        if chunk["payload"].get("eventType") == "run.todo_updated"
+        and chunk["payload"]["data"].get("step", {}).get("status") == "done"
+    ]
+    expected_done = [
+        {
+            "step_id": step_id,
+            "status": "done",
+            "result_summary": "Durable execution completed this Planner step.",
+        }
+        for step_id in (
+            "collect-evidence",
+            "draft-next-three",
+            "deliver-next-three",
+        )
+    ]
+    assert [
+        {
+            "step_id": update["step_id"],
+            "status": update["step"]["status"],
+            "result_summary": update["step"]["result_summary"],
+        }
+        for update in done_updates
+    ] == expected_done
+    assert await screenplay_db.fetch_all(
+        "SELECT step_id, status, result_summary FROM ai_agent_run_todos "
+        "WHERE run_id = ? ORDER BY sort",
+        [root_run_id],
+    ) == expected_done
+    assert public_chunks[-2]["payload"]["data"]["step_id"] == (
+        "deliver-next-three"
+    )
+    assert public_chunks[-1]["kind"] == "run.lifecycle"
+    assert public_chunks[-1]["payload"] == {
+        "status": "done",
+        "final_response": projected_turn["assistantContent"],
+    }
+    assert not any(
+        chunk["kind"] == "provider.content_delta"
+        and chunk["channel"] == "final"
+        for chunk in public_chunks
+    )
     assert [call.checkpoint_key for call in checkpoint_planner.calls] == [
         "episode:4",
         "episode:5",

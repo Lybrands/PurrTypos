@@ -24,6 +24,10 @@ Status: PASS
   fixture contains only public canonical chunks; it does not fabricate Candidate or
   Recipe protocol events.
 - Live chunk handling and replay converge on the same Root-owned state and final answer.
+- The formal transcript preserves the public `long_task.dispatched` receipt and the
+  private progress cursor gap. It contains no invented Root Provider final stream;
+  the Assistant answer is restored from the terminal Root lifecycle's authoritative
+  `final_response`.
 - Recipe unit titles and `plannerStepId` never enter the public Root plan.
 - A real formal Screenplay run now proves Candidate authority end-to-end: the AI Part
   creates one Child Run, persists exactly one private `run.validated_result`, finalizes
@@ -37,6 +41,10 @@ Status: PASS
   live SSE and replay, so Recipe titles, unit IDs, and `plannerStepId` cannot leak.
 - Existing real composed Child lifecycle coverage continues to prove persisted
   delegation and Child output replay through the same canonical journal.
+- The real formal Root replay contains all three terminal `run.todo_updated` events
+  with the same DONE statuses and result summaries as durable todo storage. The final
+  delivery update is the last public event before Root completion; intervening raw
+  durable progress remains private.
 
 ## Compatibility and boundaries
 
@@ -45,9 +53,11 @@ Status: PASS
 - Added the protocol v1 input/v2 output contract to
   `docs/design/screenplay-agent-api-v2.md`.
 - Added ratchets for deleted Planner code, storage-only `planner_run_id`, and the single
-- Expanded those ratchets across every backend production Python surface and all
-  frontend TS/TSX/JS/JSX/CJS/MJS sources with exact physical-SQL and v1-fixture
-  allowlists.
+  legacy decoder. The ratchets scan every backend production and test Python file plus
+  all frontend TS/TSX/JS/JSX/CJS/MJS sources.
+- The physical-column boundary is role-based rather than query-text-based: known paths
+  may only read with `AS root_run_id`, write/schema/cleanup roles are explicit, and
+  rogue reads, legacy output aliases, JSON keys, and unknown roles fail closed.
 
 ## Verification
 
@@ -55,9 +65,10 @@ Status: PASS
   durable service): passed.
 - Task9 frontend Conversation/reducer targets: 29 passed.
 - TypeScript typecheck: passed.
-- Review-focused Task9 backend suites: 304 passed; the complete PurrA package suite:
+- Review-focused Task9 backend suites: passed; the complete PurrA package suite:
   92 passed; the architecture boundary gate: 56 passed.
-- Complete frontend unit suite: 346 passed; TypeScript typecheck: passed.
+- Final boundary follow-up gate: 57 passed. Complete frontend unit suite: 347 passed;
+  TypeScript typecheck: passed.
 - Full `check:agent-refactor`: 1846 backend passed; frontend unit/typecheck and all
   intermediate gates passed. Five live Provider E2E cases remain skipped for missing
   credentials and are release blockers, not passes.
