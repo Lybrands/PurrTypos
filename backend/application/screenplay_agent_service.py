@@ -69,6 +69,7 @@ from domains.screenplay_agent import (
     ContinuationStartLost,
     ScreenplayIntentCommandMismatchError,
     ScreenplayStageCommand,
+    ScreenplayRootStartLost,
 )
 from exceptions import AppError, NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -215,6 +216,10 @@ class ScreenplayAgentService:
                         namespace="screenplay.conversation_turn",
                         aggregate_id=str(turn["projectId"]),
                         command_id=str(turn["commandId"]),
+                        attributes={
+                            "turnExecutionOwner": self._owner_id,
+                            "turnAttempt": int(turn["attempt"]),
+                        },
                     ),
                     response_transaction_policy=ResponseTransactionPolicy(
                         mode=ResponseTransactionMode.DIRECT_LIVE,
@@ -415,7 +420,11 @@ class ScreenplayAgentService:
         turn_id: str,
         error: Exception,
     ) -> None:
-        if isinstance(error, (ContinuationStartLost, RunCommitProjectionError)):
+        if isinstance(error, (
+            ContinuationStartLost,
+            RunCommitProjectionError,
+            ScreenplayRootStartLost,
+        )):
             # The Root terminal transaction rolled back in full. Leave the
             # durable business state retryable instead of compensating it into
             # a terminal product failure outside that transaction.
@@ -596,13 +605,19 @@ class ScreenplayAgentService:
                 str(row["turn_id"]),
                 idempotency_key=f"truncate:{row['turn_id']}:cancel",
             )
+        pre_root_rows = [row for row in rows if not row.get("root_run_id")]
+        await self._cancel_local_truncate_tasks(pre_root_rows)
+        for row in pre_root_rows:
+            await self._repository.release_canceled_turn_claim(
+                str(row["turn_id"])
+            )
 
         deadline = time.monotonic() + max(
             0.0,
             float(self._truncate_wait_timeout_seconds),
         )
         cancellation_roots: set[str] = set()
-        local_executions_signaled = False
+        root_executions_signaled = False
         while True:
             rows = await self._truncate_rows(turn_id)
             root_ids = tuple(dict.fromkeys(
@@ -620,12 +635,18 @@ class ScreenplayAgentService:
                 cancellation_roots.add(root_run_id)
                 assert self._cancellation is not None
                 await self._cancellation.cancel(root_run_id)
-            if active_roots and not local_executions_signaled:
-                await self._cancel_local_truncate_tasks(rows)
-                local_executions_signaled = True
+            if root_ids and not root_executions_signaled:
+                root_rows = [row for row in rows if row.get("root_run_id")]
+                await self._cancel_local_truncate_tasks(root_rows)
+                for row in root_rows:
+                    await self._repository.release_canceled_turn_claim(
+                        str(row["turn_id"])
+                    )
+                root_executions_signaled = True
             await self._finalize_truncated_tasks(rows)
             if not await self._truncate_runtime_active(
                 root_ids=root_ids,
+                turn_ids=tuple(str(row["turn_id"]) for row in rows),
                 task_ids=tuple(
                     str(row.get("task_id") or "").strip()
                     for row in rows
@@ -633,6 +654,7 @@ class ScreenplayAgentService:
                 ),
                 cancellation_roots=tuple(cancellation_roots),
             ):
+                await self._settle_truncated_cancellations(rows)
                 break
             if time.monotonic() >= deadline:
                 raise AppError("truncate cancellation timed out", 409)
@@ -654,6 +676,15 @@ class ScreenplayAgentService:
                 and task.cancellation_requested_at_ms is not None
             ):
                 await self._long_tasks.finalize_if_complete(task_id)
+
+    async def _settle_truncated_cancellations(self, rows) -> None:
+        for row in rows:
+            if not row.get("cancel_receipt_id"):
+                continue
+            await self._operations.settle_cancel(
+                str(row["turn_id"]),
+                receipt_id=str(row["cancel_receipt_id"]),
+            )
 
     @staticmethod
     async def _cancel_local_truncate_tasks(rows) -> None:
@@ -692,6 +723,7 @@ class ScreenplayAgentService:
             raise NotFoundError("剧本 Agent Turn 不存在")
         return await self._db.fetch_all(
             "SELECT t.id AS turn_id, t.status AS turn_status, "
+            "t.cancel_receipt_id AS cancel_receipt_id, "
             "t.planner_run_id AS root_run_id, o.id AS operation_id, "
             "o.long_task_id AS task_id "
             "FROM screenplay_agent_turns AS t "
@@ -721,9 +753,19 @@ class ScreenplayAgentService:
         self,
         *,
         root_ids: Sequence[str],
+        turn_ids: Sequence[str],
         task_ids: Sequence[str],
         cancellation_roots: Sequence[str],
     ) -> bool:
+        if turn_ids:
+            claimed_turns = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM screenplay_agent_turns WHERE "
+                f"id IN ({_sql_marks(turn_ids)}) AND ("
+                "execution_owner_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
+                list(turn_ids),
+            )
+            if int((claimed_turns or {}).get("count") or 0):
+                return True
         if root_ids:
             marks = _sql_marks(root_ids)
             active = await self._db.fetch_one(
@@ -894,10 +936,19 @@ class _ScreenplayTurnRunLifecycle:
             raise ValueError("screenplay Turn is not startable")
 
     async def before_submit(self) -> None:
-        return None
+        turn = await self._turns.load_turn(self._turn_id)
+        if turn is None or not await self._turns.validate_claimed_turn_start(
+            self._turn_id,
+            attempt=int(turn["attempt"]),
+        ):
+            raise ScreenplayRootStartLost("screenplay Turn is not startable")
 
     async def on_run_started(self, run_id: str) -> None:
-        await self._turns.attach_root_run(self._turn_id, run_id)
+        turn = await self._turns.load_turn(self._turn_id)
+        if turn is None or str(turn.get("rootRunId") or "") != run_id:
+            raise ScreenplayRootStartLost(
+                "screenplay Root atomic binding is missing"
+            )
 
     async def on_run_finished(self, result: AgentRunResult) -> None:
         turn = await self._turns.load_turn(self._turn_id)
@@ -938,6 +989,13 @@ class _ScreenplayTurnRunLifecycle:
             )
 
     async def on_start_failed(self, code: str):
+        turn = await self._turns.load_turn(self._turn_id)
+        if (
+            turn is None
+            or turn.get("cancelRequestedAtMs") is not None
+            or turn.get("executionOwnerId") != self._turns.owner_id
+        ):
+            return None
         return await self._turns.fail_turn(
             self._turn_id,
             code=str(code or "screenplay_root_start_failed"),

@@ -14,6 +14,7 @@ from application.screenplay_agent_service import (
     ScreenplayAgentService,
     _ACTIVE_TASKS,
     _ScreenplayContinuationRunLifecycle,
+    _ScreenplayTurnRunLifecycle,
 )
 from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_task_resolver import ResolvedScreenplayTask
@@ -38,6 +39,7 @@ from domains.screenplay_agent import (
     OperationUsage,
     ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
+    ScreenplayRootStartLost,
 )
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
@@ -859,6 +861,186 @@ async def test_truncate_persists_fence_before_canceling_and_awaiting_local_wrapp
     assert local_task.done() is True
     assert local_cleaned.is_set()
     assert f"turn:{identity['turnId']}" not in _ACTIVE_TASKS
+
+
+async def _claimed_pre_root_turn(db, *, owner_id: str, suffix: str):
+    projects = ScreenplayV2ProjectService(db)
+    workspace = await projects.create_project(
+        command_id=f"create-pre-root-{suffix}",
+        request=CreateScreenplayV2ProjectRequest.model_validate({
+            "title": f"Pre Root {suffix}",
+            "format": "series",
+            "source": {"type": "original"},
+            "brief": {"approach": "人物驱动", "premise": "竞态"},
+        }),
+    )
+    session = await projects.ensure_current_session(workspace["project"]["id"])
+    repository = SqliteScreenplayAgentRepository(db, owner_id=owner_id)
+    turn = await repository.begin_turn(
+        command_id=f"turn-pre-root-{suffix}",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="开始分析",
+        stage_command=None,
+        runtime_profile={},
+    )
+    assert await repository.claim_turn(turn["id"])
+    return repository, turn
+
+
+@pytest.mark.asyncio
+async def test_truncate_waits_for_foreign_pre_root_turn_claim(screenplay_db):
+    _repository, turn = await _claimed_pre_root_turn(
+        screenplay_db,
+        owner_id="foreign-pre-root-owner",
+        suffix="foreign",
+    )
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="truncate-owner",
+        projects=object(),
+    )
+    service._truncate_wait_timeout_seconds = 0.01
+    service._truncate_poll_interval_seconds = 0.001
+
+    with pytest.raises(AppError, match="truncate cancellation timed out"):
+        await service.truncate_from_turn(turn["id"])
+
+    persisted = await screenplay_db.fetch_one(
+        "SELECT status, execution_owner_id, cancel_requested_at_ms "
+        "FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    )
+    assert persisted is not None
+    assert persisted["status"] == "planning"
+    assert persisted["execution_owner_id"] == "foreign-pre-root-owner"
+    assert persisted["cancel_requested_at_ms"] is not None
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_truncate_fences_and_waits_for_local_pre_root_turn_claim(
+    screenplay_db,
+):
+    _repository, turn = await _claimed_pre_root_turn(
+        screenplay_db,
+        owner_id="local-pre-root-owner",
+        suffix="local",
+    )
+    fence_seen = asyncio.Event()
+
+    async def local_wrapper():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            persisted = await screenplay_db.fetch_one(
+                "SELECT cancel_requested_at_ms FROM screenplay_agent_turns "
+                "WHERE id = ?",
+                [turn["id"]],
+            )
+            assert persisted is not None
+            assert persisted["cancel_requested_at_ms"] is not None
+            fence_seen.set()
+
+    local_task = asyncio.create_task(local_wrapper())
+    ScreenplayAgentService._remember_task(f"turn:{turn['id']}", local_task)
+    await asyncio.sleep(0)
+    service = ScreenplayAgentService(
+        screenplay_db,
+        owner_id="local-pre-root-owner",
+        projects=object(),
+    )
+
+    removed = await service.truncate_from_turn(turn["id"])
+
+    assert removed["deletedTurnIds"] == [turn["id"]]
+    assert local_task.done() is True
+    assert fence_seen.is_set()
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_pre_root_cancel_fence_blocks_submit_after_validate(screenplay_db):
+    repository, turn = await _claimed_pre_root_turn(
+        screenplay_db,
+        owner_id="pre-root-owner",
+        suffix="before-submit",
+    )
+    lifecycle = _ScreenplayTurnRunLifecycle(
+        screenplay_db,
+        repository,
+        SqliteScreenplayOperationRepository(screenplay_db),
+        turn["id"],
+    )
+    await lifecycle.validate()
+    await SqliteScreenplayOperationRepository(screenplay_db).request_cancel(
+        turn["id"],
+        idempotency_key="cancel-before-root-submit",
+    )
+
+    with pytest.raises(ScreenplayRootStartLost, match="not startable"):
+        await lifecycle.before_submit()
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_pre_root_cancel_fence_blocks_atomic_root_begin(screenplay_db):
+    repository, claimed = await _claimed_pre_root_turn(
+        screenplay_db,
+        owner_id="pre-root-begin-owner",
+        suffix="atomic-begin",
+    )
+    turn = await repository.load_turn(claimed["id"])
+    assert turn is not None
+    await SqliteScreenplayOperationRepository(screenplay_db).request_cancel(
+        turn["id"],
+        idempotency_key="cancel-before-atomic-root-begin",
+    )
+    params = RunCreateParams(
+        session_id=int(turn["sessionId"]),
+        prompt="开始分析",
+        mode="agent",
+        turn_id=turn["id"],
+        binding=RunBinding(
+            namespace="screenplay.conversation_turn",
+            aggregate_id=turn["projectId"],
+            command_id=turn["commandId"],
+            attributes={
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+                "turnExecutionOwner": "pre-root-begin-owner",
+                "turnAttempt": int(turn["attempt"]),
+            },
+        ),
+    )
+    outputs = SqliteAgentOutputRepository(
+        screenplay_db,
+        run_repository=SqliteRunRepository(screenplay_db),
+        run_begin_projector=ScreenplayContinuationBeginProjector(screenplay_db),
+    )
+
+    with pytest.raises(ScreenplayRootStartLost, match="claim was lost"):
+        await outputs.begin_run_lifecycle(
+            params,
+            AgentEvent(
+                type=CoreEventType.RUN_STARTED,
+                payload={"status": RunStatus.RUNNING.value},
+            ),
+        )
+
+    assert await screenplay_db.fetch_one(
+        "SELECT planner_run_id FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    ) == {"planner_run_id": None}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs"
+    ) == {"count": 0}
 
 
 @pytest.mark.asyncio
