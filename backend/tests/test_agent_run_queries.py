@@ -671,7 +671,8 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert snapshot is not None
     assert snapshot["run"]["status"] == "canceled"
     assert snapshot["todos"][0]["status"] == "blocked"
-    assert snapshot["events"][-1]["type"] == "fixture.event_3"
+    assert snapshot["events"][-1]["type"] == "run.lifecycle"
+    assert snapshot["events"][-1]["payload"]["status"] == "canceled"
 
 
 async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):

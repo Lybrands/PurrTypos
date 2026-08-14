@@ -40,6 +40,7 @@ from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
 from purra.tools import InMemoryToolCatalog
 from purra.errors import ContractViolationError, ModelGatewayError
+from purra.ports import RunCommit
 from purra.cancellation import OperationCanceled
 from purra.json_values import thaw_json_mapping
 from purra.recovery import (
@@ -75,6 +76,9 @@ from application.screenplay_candidate_assembler import (
     aggregate_review_validations,
 )
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from infrastructure.screenplay.agent_root_completion_projector import (
+    ScreenplayAgentRootCompletionProjector,
+)
 from application.screenplay_part_artifacts import (
     ScreenplayPartArtifactQuery,
     ValidatedPartArtifactRef,
@@ -174,6 +178,26 @@ def _part_lineage(root_run_id: str = "root-screenplay-part") -> RunLineage:
         agent_role="screenplay-part",
         depth=1,
     )
+
+
+async def _persisted_part_lineage(
+    db: DatabaseConnection,
+    session_id: int,
+) -> RunLineage:
+    existing = await db.fetch_one(
+        "SELECT id FROM ai_agent_runs "
+        "WHERE session_id = ? AND mode = 'screenplay_part_test_root' "
+        "ORDER BY create_time, id LIMIT 1",
+        [session_id],
+    )
+    root_run_id = str(existing["id"]) if existing is not None else (
+        await SqliteRunRepository(db).create(RunCreateParams(
+            session_id=session_id,
+            prompt="Screenplay Part test Root",
+            mode="screenplay_part_test_root",
+        ))
+    )
+    return _part_lineage(root_run_id)
 
 
 def _checkpoint_unit(
@@ -2303,7 +2327,36 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
     )
     turn_id = str(decision.metadata["turnId"])
     assert await profile._turns.claim_turn(turn_id)
-    await profile._turns.attach_root_run(turn_id, f"run-{expected_status}")
+    root_run_id = f"run-{expected_status}"
+    await profile._turns.attach_root_run(turn_id, root_run_id)
+    turn = await profile._turns.load_turn(turn_id)
+    assert turn is not None
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
+        "root_run_id) VALUES (?, ?, 'running', 'agent', '', ?, ?, ?, ?, ?)",
+        [
+            root_run_id,
+            turn["sessionId"],
+            "screenplay.conversation_turn",
+            turn["projectId"],
+            turn["commandId"],
+            json.dumps({
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+            }),
+            root_run_id,
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+        "source, kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'run.started', '{\"status\":\"running\"}', ?, ?, 1, "
+        "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?)",
+        [root_run_id, f"event-{root_run_id}", turn_id, f"run:{root_run_id}:running"],
+    )
     lifecycle = _ScreenplayTurnRunLifecycle(
         temp_db,
         profile._turns,
@@ -2311,8 +2364,20 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
         turn_id,
     )
 
+    commit = RunCommit(
+        terminal_status=root_status,
+        error=(
+            f"injected_{expected_status}_before_dispatch"
+            if root_status is RunStatus.FAILED else None
+        ),
+    )
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await ScreenplayAgentRootCompletionProjector(temp_db).project(
+            root_run_id,
+            commit,
+        )
     await lifecycle.on_run_finished(AgentRunResult(
-        run_id=f"run-{expected_status}",
+        run_id=root_run_id,
         status=root_status,
         final_response="",
         error=f"injected_{expected_status}_before_dispatch",
@@ -2324,7 +2389,7 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
     assert turn is not None and turn["status"] == expected_status
 
     await lifecycle.on_run_finished(AgentRunResult(
-        run_id=f"run-{expected_status}",
+        run_id=root_run_id,
         status=root_status,
         final_response="",
         error=f"injected_{expected_status}_before_dispatch",
@@ -2451,62 +2516,40 @@ async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_w
 
 
 @pytest.mark.parametrize(
-    ("status", "turn_method", "expected_status"),
-    (
-        (LongTaskExecutionStatus.PAUSED, "pause_task", "paused"),
-        (LongTaskExecutionStatus.FAILED, "fail_task", "failed"),
-    ),
+    "status",
+    (LongTaskExecutionStatus.PAUSED, LongTaskExecutionStatus.FAILED),
 )
-async def test_screenplay_terminal_settlement_rolls_back_operation_with_turn_failure(
+async def test_screenplay_dispatcher_leaves_business_terminal_settlement_to_root_commit(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
     status,
-    turn_method,
-    expected_status,
 ):
     profile, request, plan, decision = await _durable_screenplay_admission(
         temp_db,
-        owner_id=f"screenplay-{expected_status}-atomic-test",
-        command_id=f"{expected_status}-atomic",
+        owner_id=f"screenplay-{status.value}-root-settlement-test",
+        command_id=f"{status.value}-root-settlement",
     )
     dispatcher = _admission_dispatcher(temp_db, profile)
     receipt = await dispatcher.dispatch(
         request,
         plan,
         decision,
-        parent_run_id=f"run-{expected_status}-atomic",
+        parent_run_id=f"run-{status.value}-root-settlement",
     )
-    original_turn_transition = getattr(profile._turns, turn_method)
-
-    async def fail_after_turn_write(*args, **kwargs):
-        await original_turn_transition(*args, **kwargs)
-        raise RuntimeError("injected turn terminal write failure")
-
-    monkeypatch.setattr(profile._turns, turn_method, fail_after_turn_write)
     result = LongTaskExecutionResult(
         task_id=receipt.task_id,
         status=status,
         error="injected_terminal",
     )
-    with pytest.raises(RuntimeError, match="turn terminal write failure"):
-        await dispatcher._settle_execution(receipt.task_id, result)
+    await dispatcher._settle_execution(receipt.task_id, result)
 
     operation = await profile._operations.load(decision.metadata["operationId"])
     turn = await profile._turns.load_turn(decision.metadata["turnId"])
     assert operation is not None and operation.status.value == "running"
     assert turn is not None and turn["status"] == "running"
 
-    monkeypatch.setattr(profile._turns, turn_method, original_turn_transition)
-    await dispatcher._settle_execution(receipt.task_id, result)
-    operation = await profile._operations.load(decision.metadata["operationId"])
-    turn = await profile._turns.load_turn(decision.metadata["turnId"])
-    assert operation is not None and operation.status.value == expected_status
-    assert turn is not None and turn["status"] == expected_status
 
-
-async def test_screenplay_exception_settlement_rolls_back_operation_with_turn_failure(
+async def test_screenplay_dispatcher_exception_does_not_settle_business_state(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     profile, request, plan, decision = await _durable_screenplay_admission(
         temp_db,
@@ -2520,18 +2563,10 @@ async def test_screenplay_exception_settlement_rolls_back_operation_with_turn_fa
         decision,
         parent_run_id="run-exception-atomic",
     )
-    original_fail = profile._turns.fail_task
-
-    async def fail_after_turn_write(*args, **kwargs):
-        await original_fail(*args, **kwargs)
-        raise RuntimeError("injected exception turn write failure")
-
-    monkeypatch.setattr(profile._turns, "fail_task", fail_after_turn_write)
-    with pytest.raises(RuntimeError, match="exception turn write failure"):
-        await dispatcher._settle_exception(
-            receipt.task_id,
-            RuntimeError("unit infrastructure failed"),
-        )
+    await dispatcher._settle_exception(
+        receipt.task_id,
+        RuntimeError("unit infrastructure failed"),
+    )
 
     operation = await profile._operations.load(decision.metadata["operationId"])
     turn = await profile._turns.load_turn(decision.metadata["turnId"])
@@ -3475,6 +3510,11 @@ async def test_structured_child_returns_persisted_result_not_validator_memory(
         ModelStreamChunk(content_delta='{"answer":"persisted"}'),
         ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
     ]])
+    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
+        session_id=session["id"],
+        prompt="持久结果优先 Root",
+        mode="agent",
+    ))
     composition = _core_composition(temp_db, gateway)
     original_validate = (
         screenplay_structured_call._StructuredResultValidator.validate
@@ -3502,7 +3542,7 @@ async def test_structured_child_returns_persisted_result_not_validator_memory(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="persisted-result-test",
-        lineage=_part_lineage(),
+        lineage=_part_lineage(root_run_id),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -3524,6 +3564,11 @@ async def test_structured_child_retry_after_host_crash_reuses_persisted_run(
         ModelStreamChunk(content_delta='{"answer":"persisted"}'),
         ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
     ]])
+    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
+        session_id=session["id"],
+        prompt="崩溃恢复 Root",
+        mode="agent",
+    ))
     composition = _core_composition(temp_db, gateway)
 
     async def invoke(active_composition=composition):
@@ -3542,7 +3587,7 @@ async def test_structured_child_retry_after_host_crash_reuses_persisted_run(
             task_id="task-crash",
             unit_id="unit-crash",
             expected_part_key="answer",
-            lineage=_part_lineage(),
+            lineage=_part_lineage(root_run_id),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -3600,7 +3645,7 @@ async def test_structured_child_same_key_request_conflict_fails_closed(
         task_id="task-conflict",
         unit_id="unit-conflict",
         expected_part_key="answer",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -3654,7 +3699,7 @@ async def test_concurrent_structured_child_same_key_invokes_provider_once(
             task_id="task-concurrent",
             unit_id="unit-concurrent",
             expected_part_key="answer",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -3715,7 +3760,7 @@ async def test_canceling_existing_host_child_waiter_does_not_cancel_owner(
             task_id="task-wait-cancel",
             unit_id="unit-wait-cancel",
             expected_part_key="answer",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -3767,7 +3812,7 @@ async def test_truncated_structured_output_is_never_repaired_or_replayed(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="truncated-output-test",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -3808,7 +3853,7 @@ async def test_structured_model_renews_its_core_run_lease_during_slow_generation
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="slow-lease-test",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -3939,7 +3984,7 @@ async def test_structured_model_preserves_the_frontend_thinking_option(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="thinking-option-test",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -3994,7 +4039,7 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="failure-diagnostic-test",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -4003,7 +4048,8 @@ async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
     assert captured.value.code == "model_gateway_error"
     assert await _public_text_events(temp_db) == []
     assert await temp_db.fetch_one(
-        "SELECT status FROM ai_agent_runs ORDER BY create_time DESC LIMIT 1"
+        "SELECT status FROM ai_agent_runs "
+        "WHERE parent_run_id IS NOT NULL ORDER BY create_time DESC LIMIT 1"
     ) == {"status": "failed"}
 
 
@@ -4029,7 +4075,7 @@ async def test_failed_host_child_retry_uses_one_new_generation(
         task_id="task-failed-retry",
         unit_id="unit-failed-retry",
         expected_part_key="answer",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_test",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -4056,7 +4102,7 @@ async def test_failed_host_child_retry_uses_one_new_generation(
         "SELECT status FROM ai_agent_runs WHERE parent_run_id = ? "
         "ORDER BY CAST(json_extract(binding_attributes_json, "
         "'$.hostChild.generation') AS INTEGER)",
-        [_part_lineage().root_run_id],
+        [(await _persisted_part_lineage(temp_db, session["id"])).root_run_id],
     )
     assert [row["status"] for row in rows] == ["failed", "done"]
     assert await temp_db.fetch_one(
@@ -4097,7 +4143,7 @@ async def test_reasoning_only_structured_output_retries_original_not_repair(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="reasoning-json-test",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_intent_planning",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
@@ -4136,7 +4182,7 @@ async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="empty-json-test",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -4184,7 +4230,7 @@ async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
             binding_namespace="screenplay.agent.test",
             binding_aggregate_id="project-test",
             binding_command_id="invalid-json-test",
-            lineage=_part_lineage(),
+            lineage=await _persisted_part_lineage(temp_db, session["id"]),
             phase="screenplay_test",
             repair_instruction="修复 JSON",
             validate=lambda value: value,
@@ -4217,7 +4263,7 @@ async def test_generated_screenplay_body_never_becomes_a_chat_delta(
         binding_namespace="screenplay.agent.test",
         binding_aggregate_id="project-test",
         binding_command_id="body-isolation-test",
-        lineage=_part_lineage(),
+        lineage=await _persisted_part_lineage(temp_db, session["id"]),
         phase="screenplay_episode_generation",
         repair_instruction="修复 JSON",
         validate=lambda value: value,
