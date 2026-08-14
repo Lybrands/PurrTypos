@@ -273,10 +273,21 @@ async def test_resume_operation_preflights_then_dispatches_selected_runtime(monk
                 "operationId": operation_id,
                 "status": "running",
                 "revision": request.expectedOperationRevision + 1,
+                "dispatchRequired": True,
             }
 
-        def dispatch_resumed_operation(self, operation_id, runtime):
-            self.dispatched.append((operation_id, runtime.options["model"]))
+        def dispatch_resumed_operation(
+            self,
+            operation_id,
+            runtime,
+            *,
+            continuation_command,
+        ):
+            self.dispatched.append((
+                operation_id,
+                runtime.options["model"],
+                continuation_command,
+            ))
 
     service = ResumeService()
     monkeypatch.setattr(conversation_routes, "_service", lambda: service)
@@ -294,7 +305,9 @@ async def test_resume_operation_preflights_then_dispatches_selected_runtime(monk
     assert service.prepared == [(
         "operation-1", "resume-command-1", 4, "route-model",
     )]
-    assert service.dispatched == [("operation-1", "route-model")]
+    assert service.dispatched == [(
+        "operation-1", "route-model", "resume-command-1",
+    )]
 
 
 async def test_resume_operation_replay_does_not_redispatch_terminal_operation(
@@ -307,12 +320,19 @@ async def test_resume_operation_replay_does_not_redispatch_terminal_operation(
             del idempotency_key, request
             return {
                 "operationId": operation_id,
-                "status": "succeeded",
+                "status": "running",
                 "revision": 8,
+                "dispatchRequired": False,
             }
 
-        def dispatch_resumed_operation(self, operation_id, runtime):
-            del operation_id, runtime
+        def dispatch_resumed_operation(
+            self,
+            operation_id,
+            runtime,
+            *,
+            continuation_command,
+        ):
+            del operation_id, runtime, continuation_command
             self.dispatched = True
 
     service = ResumeService()
@@ -327,7 +347,7 @@ async def test_resume_operation_replay_does_not_redispatch_terminal_operation(
         "resume-command-1",
     )
 
-    assert result["data"]["status"] == "succeeded"
+    assert result["data"]["status"] == "running"
     assert service.dispatched is False
 
 
@@ -561,3 +581,46 @@ async def test_chunk_replay_keeps_persisted_history_in_one_batch():
         "nextCursor": 3,
         "hasMore": True,
     }
+
+
+async def test_conversation_sse_disconnect_only_detaches_subscription(monkeypatch):
+    class Request:
+        calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    class Chunks:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def list_chunks(self, **_kwargs):
+            return {"chunks": [], "nextCursor": 0, "hasMore": False}
+
+    class Composition:
+        output_journal = object()
+
+    monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
+    monkeypatch.setattr(
+        agent_composition,
+        "get_agent_composition",
+        lambda: Composition(),
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayCanonicalOutputQuery",
+        Chunks,
+    )
+
+    response = await conversation_routes.stream_screenplay_conversation_events(
+        Request(),
+        "project-1",
+        7,
+        0,
+        100,
+    )
+    events = [item async for item in response.body_iterator]
+
+    assert len(events) == 1
+    assert "agent_chunks" in str(events[0])

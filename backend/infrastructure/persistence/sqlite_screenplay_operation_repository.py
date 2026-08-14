@@ -292,6 +292,159 @@ class SqliteScreenplayOperationRepository:
             )
             return resumed
 
+    async def claim_continuation_start(
+        self,
+        *,
+        command_id: str,
+        operation_id: str,
+        turn_id: str,
+        source_root_run_id: str,
+        session_id: int,
+        project_id: str,
+        owner_id: str,
+        lease_duration_ms: int = 30_000,
+    ) -> dict[str, Any]:
+        command = _required(command_id, "continuation command id")
+        operation = _required(operation_id, "continuation Operation id")
+        turn = _required(turn_id, "continuation Turn id")
+        source = _required(source_root_run_id, "continuation source Root id")
+        project = _required(project_id, "continuation project id")
+        owner = _required(owner_id, "continuation reservation owner")
+        lease_ms = int(lease_duration_ms)
+        if lease_ms <= 0:
+            raise ValueError("continuation reservation lease must be positive")
+        now = int(time.time() * 1000)
+        identity = {
+            "commandId": command,
+            "operationId": operation,
+            "turnId": turn,
+            "sourceRootRunId": source,
+            "sessionId": int(session_id),
+            "projectId": project,
+        }
+        async with self._mutation_transaction():
+            row = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operation_commands "
+                "WHERE command_id = ?",
+                [command],
+            )
+            if (
+                row is None
+                or str(row.get("operation_id") or "") != operation
+                or str(row.get("command_type") or "") != "resume"
+            ):
+                raise ValueError("screenplay continuation command conflicts")
+            identity["requestDigest"] = str(row.get("request_digest") or "")
+            identity_digest = _digest(identity)
+            persisted_digest = str(
+                row.get("continuation_identity_digest") or ""
+            ).strip()
+            if persisted_digest and persisted_digest != identity_digest:
+                raise ValueError("screenplay continuation identity conflicts")
+            status = str(row.get("continuation_status") or "reserved")
+            bound_root = str(row.get("continuation_root_run_id") or "").strip()
+            scope = await self._db.fetch_one(
+                "SELECT t.project_id, t.session_id, t.operation_id, "
+                "t.planner_run_id, r.status AS source_status "
+                "FROM screenplay_agent_turns AS t "
+                "LEFT JOIN ai_agent_runs AS r ON r.id = ? WHERE t.id = ?",
+                [source, turn],
+            )
+            if (
+                scope is None
+                or str(scope.get("project_id") or "") != project
+                or int(scope.get("session_id") or 0) != int(session_id)
+                or str(scope.get("operation_id") or "") != operation
+                or str(scope.get("planner_run_id") or "")
+                not in ({source, bound_root} if status == "bound" else {source})
+                or str(scope.get("source_status") or "") != "canceled"
+            ):
+                raise ValueError("screenplay continuation scope conflicts")
+            lease_expires = int(
+                row.get("continuation_lease_expires_at_ms") or 0
+            )
+            acquired = status == "reserved" or (
+                status == "starting" and lease_expires <= now
+            )
+            if acquired:
+                await self._db.execute(
+                    "UPDATE screenplay_agent_operation_commands SET "
+                    "continuation_status = 'starting', "
+                    "continuation_owner_id = ?, "
+                    "continuation_lease_expires_at_ms = ?, "
+                    "continuation_epoch = continuation_epoch + 1, "
+                    "continuation_identity_digest = ?, "
+                    "continuation_source_root_run_id = ?, "
+                    "continuation_turn_id = ?, continuation_session_id = ?, "
+                    "continuation_project_id = ? WHERE command_id = ? "
+                    "AND (continuation_status IS NULL OR "
+                    "continuation_status = 'reserved' OR "
+                    "(continuation_status = 'starting' AND "
+                    "continuation_lease_expires_at_ms <= ?))",
+                    [
+                        owner,
+                        now + lease_ms,
+                        identity_digest,
+                        source,
+                        turn,
+                        int(session_id),
+                        project,
+                        command,
+                        now,
+                    ],
+                )
+                changed = await self._db.fetch_one("SELECT changes() AS count")
+                acquired = int((changed or {}).get("count") or 0) == 1
+            current = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operation_commands "
+                "WHERE command_id = ?",
+                [command],
+            )
+            assert current is not None
+            return {
+                **dict(current),
+                "identity_digest": str(
+                    current.get("continuation_identity_digest") or ""
+                ),
+                "_acquired": acquired,
+            }
+
+    async def load_continuation_command(
+        self,
+        command_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self._db.fetch_one(
+            "SELECT * FROM screenplay_agent_operation_commands "
+            "WHERE command_id = ? AND command_type = 'resume'",
+            [_required(command_id, "continuation command id")],
+        )
+        return dict(row) if row is not None else None
+
+    async def release_continuation_start(
+        self,
+        *,
+        command_id: str,
+        owner_id: str,
+        epoch: int,
+    ) -> bool:
+        async with self._mutation_transaction():
+            await self._db.execute(
+                "UPDATE screenplay_agent_operation_commands SET "
+                "continuation_status = 'reserved', "
+                "continuation_owner_id = NULL, "
+                "continuation_lease_expires_at_ms = NULL "
+                "WHERE command_id = ? AND command_type = 'resume' "
+                "AND continuation_status = 'starting' "
+                "AND continuation_owner_id = ? AND continuation_epoch = ?",
+                [
+                    _required(command_id, "continuation command id"),
+                    _required(owner_id, "continuation reservation owner"),
+                    int(epoch),
+                ],
+            )
+            changed = await self._db.fetch_one("SELECT changes() AS count")
+            return int((changed or {}).get("count") or 0) == 1
+
     async def pause(
         self,
         operation_id: str,

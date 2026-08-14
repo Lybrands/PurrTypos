@@ -200,8 +200,15 @@ async def resume_screenplay_operation(
         idempotency_key=idempotency_key,
         request=body,
     )
-    if receipt.get("status") == "running":
-        service.dispatch_resumed_operation(operation_id, body.runtime)
+    if receipt.get("status") == "running" and receipt.get(
+        "dispatchRequired",
+        True,
+    ):
+        service.dispatch_resumed_operation(
+            operation_id,
+            body.runtime,
+            continuation_command=idempotency_key,
+        )
     return {"success": True, "data": receipt}
 
 
