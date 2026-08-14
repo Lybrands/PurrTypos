@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 
 from application.screenplay_agent_service import ScreenplayAgentService
+from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.composition_factory import create_agent_composition
@@ -653,6 +654,50 @@ async def test_answer_projection_joins_root_transaction_and_replays(
 
 
 @pytest.mark.asyncio
+async def test_orphan_root_cancel_uses_canonical_terminal_projector(
+    screenplay_db,
+):
+    identity = await _answer_projection_fixture(screenplay_db, "orphan_cancel")
+    requested = await SqliteScreenplayOperationRepository(
+        screenplay_db
+    ).request_cancel(
+        identity["turnId"],
+        idempotency_key="cancel-orphan-answer-root",
+    )
+    composition = create_agent_composition(screenplay_db)
+    try:
+        result = await AgentCancellationService(
+            screenplay_db,
+            composition,
+        ).cancel(identity["rootRunId"])
+    finally:
+        await composition.shutdown()
+
+    assert result is not None
+    assert result["cancellationStatus"] == "completed"
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [identity["rootRunId"]],
+    ) == {"status": "canceled"}
+    assert await screenplay_db.fetch_one(
+        "SELECT status, cancel_receipt_id FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [identity["turnId"]],
+    ) == {
+        "status": "canceled",
+        "cancel_receipt_id": requested.id,
+    }
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [
+            identity["rootRunId"],
+            f"run:{identity['rootRunId']}:canceled",
+        ],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mismatch",
     (
@@ -790,6 +835,184 @@ async def test_operation_usage_is_run_idempotent_and_revisioned(screenplay_db):
         output_tokens=60,
         reasoning_tokens=12,
     )
+
+
+@pytest.mark.asyncio
+async def test_root_usage_projects_actual_lineage_once_and_excludes_foreign_run(
+    screenplay_db,
+):
+    operation, _turn_id, _command, _finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    for run_id, root_id in (
+        ("usage-root", None),
+        ("usage-child", "usage-root"),
+        ("usage-foreign", "another-root"),
+    ):
+        await screenplay_db.execute(
+            "INSERT INTO ai_agent_runs (id, status, prompt, root_run_id) "
+            "VALUES (?, 'running', '', ?)",
+            [run_id, root_id],
+        )
+        await screenplay_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json, event_id, sequence, source, "
+            "kind, channel, visibility, source_event_key) VALUES "
+            "(?, 'provider.usage', ?, ?, 1, 'provider', 'provider.usage', "
+            "'diagnostic', 'private', ?)",
+            [
+                run_id,
+                json.dumps({
+                    "inputTokens": 10,
+                    "outputTokens": 4,
+                    "reasoningOutputTokens": 2,
+                }),
+                f"event-{run_id}",
+                f"usage:{run_id}",
+            ],
+        )
+    projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
+
+    async with screenplay_db.transaction(cancellation_linearizable=True):
+        await projector._project_operation_usage("usage-root", operation.id)
+        await projector._project_operation_usage("usage-root", operation.id)
+
+    stored = await SqliteScreenplayOperationRepository(screenplay_db).load(
+        operation.id
+    )
+    assert stored is not None
+    assert stored.usage == OperationUsage(
+        invocation_count=2,
+        input_tokens=20,
+        output_tokens=8,
+        reasoning_tokens=4,
+    )
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operation_usage "
+        "WHERE operation_id = ?",
+        [operation.id],
+    ) == {"count": 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_status", "task_status", "business_status"),
+    (
+        (RunStatus.FAILED, "failed", "failed"),
+        (RunStatus.CANCELED, "canceled", "canceled"),
+    ),
+)
+async def test_non_success_root_projects_usage_and_business_terminal_once(
+    screenplay_db,
+    terminal_status,
+    task_status,
+    business_status,
+):
+    operation, turn_id, _command, _finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    turn = await screenplay_db.fetch_one(
+        "SELECT project_id, session_id, command_id FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [turn_id],
+    )
+    root_run_id = f"usage-terminal-{terminal_status.value}"
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
+        "root_run_id) VALUES (?, ?, 'running', 'agent', '', ?, ?, ?, ?, ?)",
+        [
+            root_run_id,
+            turn["session_id"],
+            "screenplay.conversation_turn",
+            turn["project_id"],
+            turn["command_id"],
+            json.dumps({
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+            }),
+            root_run_id,
+        ],
+    )
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_turns SET planner_run_id = ? WHERE id = ?",
+        [root_run_id, turn_id],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+        "source, kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'run.started', '{\"status\":\"running\"}', ?, ?, 1, "
+        "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?)",
+        [root_run_id, f"event-{root_run_id}", turn_id, f"run:{root_run_id}:running"],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES "
+        "('task-atomic-finalizer', 'work-terminal', 'purrtypos.screenplay', "
+        "'recipe', ?, ?, ?, 1)",
+        [turn["project_id"], root_run_id, task_status],
+    )
+    for run_id, lineage_root in (
+        (root_run_id, root_run_id),
+        (f"{root_run_id}-child", root_run_id),
+    ):
+        if run_id != root_run_id:
+            await screenplay_db.execute(
+                "INSERT INTO ai_agent_runs "
+                "(id, status, prompt, parent_run_id, root_run_id, run_depth) "
+                "VALUES (?, 'done', '', ?, ?, 1)",
+                [run_id, root_run_id, lineage_root],
+            )
+        await screenplay_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json, event_id, sequence, source, "
+            "kind, channel, visibility, source_event_key) VALUES "
+            "(?, 'provider.usage', ?, ?, 2, 'provider', 'provider.usage', "
+            "'diagnostic', 'private', ?)",
+            [
+                run_id,
+                json.dumps({"inputTokens": 11, "outputTokens": 5}),
+                f"usage-event-{run_id}",
+                f"usage:{run_id}",
+            ],
+        )
+    if terminal_status is RunStatus.CANCELED:
+        await SqliteScreenplayOperationRepository(
+            screenplay_db
+        ).request_cancel(turn_id, idempotency_key=f"cancel-{root_run_id}")
+    commit = RunCommit(
+        terminal_status=terminal_status,
+        error=("provider failed" if terminal_status is RunStatus.FAILED else None),
+    )
+    projector = ScreenplayAgentRootCompletionProjector(screenplay_db)
+
+    for _attempt in range(2):
+        async with screenplay_db.transaction(cancellation_linearizable=True):
+            await projector.project(root_run_id, commit)
+
+    stored = await SqliteScreenplayOperationRepository(screenplay_db).load(
+        operation.id
+    )
+    assert stored is not None
+    assert stored.status.value == business_status
+    assert stored.usage == OperationUsage(
+        invocation_count=2,
+        input_tokens=22,
+        output_tokens=10,
+        reasoning_tokens=0,
+    )
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"status": business_status}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM screenplay_agent_operation_usage "
+        "WHERE operation_id = ?",
+        [operation.id],
+    ) == {"count": 2}
 
 
 @pytest.mark.asyncio
@@ -966,6 +1189,20 @@ class _PausedUnitExecutor:
             code="provider_bad_request",
             retryable=False,
         )
+
+    def classify_failure(self, error):
+        return classify_screenplay_run_failure(error)
+
+
+class _PauseAfterOneUnitExecutor(_UnitExecutor):
+    async def execute(self, context, signal=None):
+        if self.calls:
+            raise ModelGatewayError(
+                "selected protocol is incompatible",
+                code="provider_bad_request",
+                retryable=False,
+            )
+        return await super().execute(context, signal)
 
     def classify_failure(self, error):
         return classify_screenplay_run_failure(error)
@@ -1151,23 +1388,40 @@ async def test_service_cancel_settles_root_task_operation_and_turn(
         turn["id"],
         idempotency_key="cancel-active-command",
     )
+    draining = await screenplay_db.fetch_one(
+        "SELECT t.status AS turn_status, o.status AS operation_status, "
+        "t.cancel_receipt_id FROM screenplay_agent_turns AS t "
+        "JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+        "WHERE t.id = ?",
+        [turn["id"]],
+    )
+    assert first["terminalStatus"] == "cancel_requested"
+    assert draining == {
+        "turn_status": "running",
+        "operation_status": "running",
+        "cancel_receipt_id": first["cancelReceiptId"],
+    }
     replay = await service.cancel_turn(
         turn["id"],
         idempotency_key="cancel-active-command",
     )
     with suppress(asyncio.CancelledError):
         await execution
+    settled = await service.cancel_turn(
+        turn["id"],
+        idempotency_key="cancel-active-command",
+    )
     await composition.shutdown()
 
     assert replay == first
-    assert first["terminalStatus"] == "canceled"
+    assert settled["terminalStatus"] == "canceled"
     operation = await screenplay_db.fetch_one(
         "SELECT status, long_task_id, cancel_receipt_id "
         "FROM screenplay_agent_operations WHERE turn_id = ?",
         [turn["id"]],
     )
     assert operation["status"] == "canceled"
-    assert operation["cancel_receipt_id"] == first["cancelReceiptId"]
+    assert operation["cancel_receipt_id"] == settled["cancelReceiptId"]
     assert await screenplay_db.fetch_one(
         "SELECT status, assistant_content FROM screenplay_agent_turns WHERE id = ?",
         [turn["id"]],
@@ -1190,6 +1444,23 @@ async def test_service_cancel_settles_root_task_operation_and_turn(
     )["cancel_requested_at_ms"] is not None
     assert snapshot["operations"][0]["status"] == "canceled"
     assert snapshot["operations"][0]["resultRevisionId"] is None
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+        "(id = ? OR root_run_id = ?) AND (status = 'running' OR "
+        "execution_owner_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
+        [root_run_id, root_run_id],
+    ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_task_units WHERE "
+        "task_id = ? AND (status IN ('claimed', 'running') OR "
+        "worker_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
+        [operation["long_task_id"]],
+    ) == {"count": 0}
+    assert await screenplay_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
+        "root_run_id = ? AND status IN ('queued', 'claimed', 'running')",
+        [root_run_id],
+    ) == {"count": 0}
 
 
 
@@ -1855,7 +2126,7 @@ async def test_formal_root_retries_the_complete_business_projection_transaction(
 @pytest.mark.parametrize(
     ("executor_factory", "turn_status", "operation_status", "run_status"),
     (
-        (lambda db: _PausedUnitExecutor(), "paused", "paused", "canceled"),
+        (lambda db: _PauseAfterOneUnitExecutor(db), "paused", "paused", "canceled"),
         (lambda db: _ExplodingUnitExecutor(), "failed", "failed", "failed"),
     ),
 )
@@ -1867,6 +2138,27 @@ async def test_screenplay_formal_root_settles_non_success_terminal_states(
     operation_status,
     run_status,
 ):
+    class RejectFirstMatchingTerminal:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, run_id, commit):
+            binding = await screenplay_db.fetch_one(
+                "SELECT binding_namespace FROM ai_agent_runs WHERE id = ?",
+                [run_id],
+            )
+            if (
+                binding == {"binding_namespace": "screenplay.conversation_turn"}
+                and commit.terminal_status is not None
+                and commit.terminal_status.value == run_status
+            ):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RunCommitProjectionError(
+                        "injected non-success projection failure",
+                        retryable=True,
+                    )
+
     projects = ScreenplayV2ProjectService(screenplay_db)
     workspace = await projects.create_project(
         command_id=f"create-{turn_status}-root-project",
@@ -1885,10 +2177,10 @@ async def test_screenplay_formal_root_settles_non_success_terminal_states(
             "goal": "生成原作分析",
             "operation": "create",
             "instruction": "生成原作分析",
-            "deliverable": "sourceAnalysis",
+            "deliverable": "screenplayDraft",
             "target": {"screenplay": {
                 "version": 1,
-                "scope": {"kind": "current_stage"},
+                "scope": {"kind": "next_episodes", "count": 1},
                 "stepBindings": [
                     {"stepId": "read", "phase": "evidence"},
                     {"stepId": "create", "phase": "creation"},
@@ -1912,10 +2204,14 @@ async def test_screenplay_formal_root_settles_non_success_terminal_states(
         "build_screenplay_profile_extension",
         lambda *, db, **_kwargs: ScreenplayAgentProfileExtension(
             db,
-            resolver=_SourceAnalysisResolver(),
+            resolver=_SingleDraftResolver(),
         ),
     )
-    composition = create_agent_composition(screenplay_db)
+    rejecting_projector = RejectFirstMatchingTerminal()
+    composition = create_agent_composition(
+        screenplay_db,
+        run_commit_projector=rejecting_projector,
+    )
     service = ScreenplayAgentService(
         screenplay_db,
         owner_id=composition.execution_owner_id,

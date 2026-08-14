@@ -67,6 +67,41 @@ async def claim_run(
     return int((changed or {}).get("count") or 0) == 1
 
 
+async def claim_run_for_cancellation(
+    db,
+    *,
+    run_id: str,
+    owner_id: str,
+    lease_duration_ms: int,
+    timestamp_ms: int | None = None,
+) -> bool:
+    """Claim an unowned canceled-requested Run for canonical settlement."""
+
+    normalized_run = _required_text(run_id, "run id")
+    normalized_owner = _required_text(owner_id, "owner id")
+    claimed_at = now_ms() if timestamp_ms is None else int(timestamp_ms)
+    deadline = _lease_deadline(claimed_at, lease_duration_ms)
+    async with db.transaction(cancellation_linearizable=True):
+        await db.execute(
+            "UPDATE ai_agent_runs SET execution_owner_id = ?, "
+            "heartbeat_at_ms = ?, lease_expires_at_ms = ?, "
+            "execution_attempt = execution_attempt + 1, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND status = 'running' AND cancel_requested_at_ms IS NOT NULL "
+            "AND (execution_owner_id IS NULL OR lease_expires_at_ms IS NULL "
+            "OR lease_expires_at_ms <= ?)",
+            [
+                normalized_owner,
+                claimed_at,
+                deadline,
+                normalized_run,
+                claimed_at,
+            ],
+        )
+        changed = await db.fetch_one("SELECT changes() AS count")
+    return int((changed or {}).get("count") or 0) == 1
+
+
 async def renew_lease(
     db,
     *,

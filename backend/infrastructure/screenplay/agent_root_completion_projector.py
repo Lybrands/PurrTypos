@@ -13,6 +13,13 @@ from purra.ports import RunCommit
 from application.screenplay_candidate_assembler import ScreenplayCandidateAssembler
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from domains.screenplay_agent.agent_context import SCREENPLAY_AGENT_DOMAIN_NAMESPACE
+from domains.screenplay_agent import OperationUsage
+from infrastructure.persistence.sqlite_screenplay_operation_repository import (
+    SqliteScreenplayOperationRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_agent_repository import (
+    SqliteScreenplayAgentRepository,
+)
 from infrastructure.persistence.sqlite_screenplay_operation_finalizer import (
     ScreenplayOperationFinalizationCommand,
     SqliteScreenplayOperationFinalizer,
@@ -39,9 +46,14 @@ class ScreenplayAgentRootCompletionProjector:
             db,
             candidate_assembler=ScreenplayCandidateAssembler(db),
         )
+        self._operations = SqliteScreenplayOperationRepository(db)
+        self._turns = SqliteScreenplayAgentRepository(
+            db,
+            owner_id="screenplay-root-projector",
+        )
 
     async def project(self, run_id: str, commit: RunCommit) -> None:
-        if commit.terminal_status is not RunStatus.DONE:
+        if commit.terminal_status is None:
             return None
         try:
             row = await self._db.fetch_one(
@@ -95,13 +107,30 @@ class ScreenplayAgentRootCompletionProjector:
             operation_id = str(turn.get("operation_id") or "").strip()
             final_response = str(commit.final_response or "")
             if operation_id:
-                await self._finalize_operation(
-                    turn=turn,
-                    operation_id=operation_id,
-                    final_response=final_response,
-                )
+                await self._project_operation_usage(run_id, operation_id)
+                if commit.terminal_status is RunStatus.DONE:
+                    await self._finalize_operation(
+                        turn=turn,
+                        operation_id=operation_id,
+                        final_response=final_response,
+                    )
+                else:
+                    await self._settle_operation_terminal(
+                        root_run_id=run_id,
+                        turn=turn,
+                        operation_id=operation_id,
+                        status=RunStatus(commit.terminal_status),
+                        error=commit.error,
+                    )
             else:
-                await self._complete_answer(turn, final_response)
+                if commit.terminal_status is RunStatus.DONE:
+                    await self._complete_answer(turn, final_response)
+                else:
+                    await self._settle_answer_terminal(
+                        turn=turn,
+                        status=RunStatus(commit.terminal_status),
+                        error=commit.error,
+                    )
         except ScreenplayAgentRootCompletionError:
             raise
         except Exception as error:
@@ -109,6 +138,164 @@ class ScreenplayAgentRootCompletionProjector:
                 "screenplay Root product state could not be committed",
                 retryable=_is_transient_projection_error(error),
             ) from error
+
+    async def _settle_operation_terminal(
+        self,
+        *,
+        root_run_id: str,
+        turn: Mapping[str, object],
+        operation_id: str,
+        status: RunStatus,
+        error: str | None,
+    ) -> None:
+        operation = await self._operations.load(operation_id)
+        if operation is None:
+            raise LookupError("screenplay Root Operation does not exist")
+        task = (
+            await self._db.fetch_one(
+                "SELECT status FROM ai_agent_long_tasks WHERE id = ?",
+                [operation.long_task_id],
+            )
+            if operation.long_task_id else None
+        )
+        if status is RunStatus.CANCELED and task == {"status": "paused"}:
+            paused = await self._db.fetch_one(
+                "SELECT error_code FROM screenplay_checkpoint_plans "
+                "WHERE operation_id = ? AND status = 'paused' "
+                "ORDER BY update_time DESC, checkpoint_key DESC LIMIT 1",
+                [operation_id],
+            )
+            code = str((paused or {}).get("error_code") or "screenplay_task_paused")
+            message = _terminal_message(code, paused=True)
+            operation = await self._operations.pause(
+                operation_id,
+                code=code,
+                message=message,
+                command_id=(
+                    f"operation:root-pause:{operation_id}:"
+                    f"{root_run_id}:{code}"
+                ),
+            )
+            await self._turns.pause_task(
+                str(turn["id"]),
+                code=code,
+                message=message,
+            )
+            return
+        if status is RunStatus.CANCELED:
+            receipt_id = str(turn.get("cancel_receipt_id") or "").strip()
+            if not receipt_id:
+                receipt = await self._operations.request_cancel(
+                    str(turn["id"]),
+                    idempotency_key=f"root-terminal-cancel:{turn['id']}",
+                )
+                receipt_id = receipt.id
+            await self._operations.settle_cancel(
+                str(turn["id"]),
+                receipt_id=receipt_id,
+            )
+            return
+        code = str(error or status.value or "screenplay_root_failed")[:240]
+        message = _terminal_message(code)
+        operation = await self._operations.load(operation_id)
+        assert operation is not None
+        await self._operations.fail(
+            operation_id,
+            code=code,
+            message=message,
+            command_id=(
+                f"operation:root-fail:{operation_id}:"
+                f"{root_run_id}:{code}"
+            ),
+        )
+        await self._turns.fail_task(
+            str(turn["id"]),
+            code=code,
+            message=message,
+        )
+
+    async def _settle_answer_terminal(
+        self,
+        *,
+        turn: Mapping[str, object],
+        status: RunStatus,
+        error: str | None,
+    ) -> None:
+        turn_id = str(turn["id"])
+        if status is RunStatus.CANCELED:
+            receipt_id = str(turn.get("cancel_receipt_id") or "").strip()
+            if not receipt_id:
+                receipt = await self._operations.request_cancel(
+                    turn_id,
+                    idempotency_key=f"root-terminal-cancel:{turn_id}",
+                )
+                receipt_id = receipt.id
+            await self._operations.settle_cancel(
+                turn_id,
+                receipt_id=receipt_id,
+            )
+            return
+        code = str(error or status.value or "screenplay_root_failed")[:240]
+        await self._turns.fail_turn(
+            turn_id,
+            code=code,
+            message=_terminal_message(code),
+        )
+
+    async def _project_operation_usage(
+        self,
+        root_run_id: str,
+        operation_id: str,
+    ) -> None:
+        root_ids = {str(root_run_id)}
+        cursor = str(root_run_id)
+        while cursor:
+            row = await self._db.fetch_one(
+                "SELECT binding_attributes_json FROM ai_agent_runs WHERE id = ?",
+                [cursor],
+            )
+            previous = str(
+                _json_mapping((row or {}).get("binding_attributes_json")).get(
+                    "continuationOf"
+                ) or ""
+            ).strip()
+            if not previous or previous in root_ids:
+                break
+            root_ids.add(previous)
+            cursor = previous
+        placeholders = ",".join("?" for _ in root_ids)
+        rows = await self._db.fetch_all(
+            "SELECT id FROM ai_agent_runs WHERE id IN (" + placeholders + ") "
+            "OR root_run_id IN (" + placeholders + ") ORDER BY id",
+            [*sorted(root_ids), *sorted(root_ids)],
+        )
+        operation = await self._operations.load(operation_id)
+        if operation is None:
+            raise LookupError("screenplay Root Operation does not exist")
+        for run in rows:
+            usage_rows = await self._db.fetch_all(
+                "SELECT payload_json FROM ai_agent_run_events WHERE run_id = ? "
+                "AND kind = 'provider.usage' AND visibility = 'private' "
+                "AND event_id IS NOT NULL ORDER BY sequence, id",
+                [str(run["id"])],
+            )
+            if not usage_rows:
+                continue
+            payloads = [_json_mapping(row.get("payload_json")) for row in usage_rows]
+            operation = await self._operations.record_usage(
+                operation_id,
+                run_id=str(run["id"]),
+                usage=OperationUsage(
+                    invocation_count=len(payloads),
+                    input_tokens=sum(int(item.get("inputTokens") or 0) for item in payloads),
+                    output_tokens=sum(int(item.get("outputTokens") or 0) for item in payloads),
+                    reasoning_tokens=sum(
+                        int(item.get("reasoningOutputTokens") or 0)
+                        for item in payloads
+                    ),
+                ),
+                expected_revision=operation.revision,
+            )
 
     async def _complete_answer(
         self,
@@ -223,6 +410,12 @@ def _json_mapping(value: object) -> dict[str, object]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _terminal_message(code: str, *, paused: bool = False) -> str:
+    if paused:
+        return "剧本任务已安全暂停，可在确认后继续。"
+    return str(code or "剧本 Agent Root Run 未完成")
 
 
 def _require_root_identity(

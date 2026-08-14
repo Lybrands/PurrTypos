@@ -44,6 +44,7 @@ from purra.output import (
     ResponseTransactionPolicy,
 )
 from application.agent_run_service import AgentRunService
+from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_agent_task_executor import ScreenplayTaskUnitExecutor
 from application.screenplay_tool_calling import ScreenplayToolCallingService
 from application.run_provenance import digest_model_endpoint
@@ -59,7 +60,6 @@ from domains.screenplay_agent import (
     ScreenplayStageCommand,
 )
 from exceptions import AppError, NotFoundError
-from infrastructure.persistence import run_execution_store
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
@@ -105,6 +105,10 @@ class ScreenplayAgentService:
         self._output_processor = output_processor
         self._long_tasks = SqliteLongTaskRepository(db)
         self._operations = SqliteScreenplayOperationRepository(db)
+        self._cancellation = (
+            AgentCancellationService(db, composition)
+            if composition is not None else None
+        )
 
     async def submit_turn(
         self,
@@ -335,34 +339,22 @@ class ScreenplayAgentService:
             return receipt.to_mapping()
 
         operation = await self._operations.load_for_turn(turn_id)
-        run_ids: set[str] = set()
         turn = await self._repository.load_turn(turn_id)
-        if turn is not None and str(turn.get("plannerRunId") or "").strip():
-            run_ids.add(str(turn["plannerRunId"]))
-        if operation is not None and operation.long_task_id:
-            rows = await self._db.fetch_all(
-                "SELECT run_id FROM ai_agent_long_task_units "
-                "WHERE task_id = ? AND run_id IS NOT NULL AND status IN "
-                "('claimed', 'running')",
-                [operation.long_task_id],
-            )
-            run_ids.update(
-                str(row["run_id"]) for row in rows if row.get("run_id")
-            )
-        for run_id in sorted(run_ids):
-            await run_execution_store.request_cancellation(self._db, run_id)
+        root_run_id = str((turn or {}).get("rootRunId") or "").strip()
+        if root_run_id and self._cancellation is not None:
+            await self._cancellation.cancel(root_run_id)
 
         if operation is not None:
             self._cancel_task(f"operation:{operation.id}")
-        if operation is not None and operation.long_task_id:
-            task = await self._long_tasks.load(operation.long_task_id)
-            if task is not None and not task.status.terminal:
-                await self._long_tasks.cancel(task.id)
-        settled = await self._operations.settle_cancel(
-            turn_id,
-            receipt_id=receipt.id,
-        )
-        return settled.to_mapping()
+        async with self._db.transaction(cancellation_linearizable=True):
+            if operation is not None and operation.long_task_id:
+                task = await self._long_tasks.load(operation.long_task_id)
+                if task is not None and not task.status.terminal:
+                    await self._long_tasks.cancel(task.id)
+        # Operation and Turn remain active-but-cancel-requested until the Root
+        # terminal commit closes the execution tree.  The Root projector owns
+        # the atomic business settlement.
+        return receipt.to_mapping()
 
     async def _publish_task_update(
         self,
@@ -561,10 +553,12 @@ class _ScreenplayTurnRunLifecycle:
         await self._turns.attach_root_run(self._turn_id, run_id)
 
     async def on_run_finished(self, result: AgentRunResult) -> None:
+        turn = await self._turns.load_turn(self._turn_id)
+        operation = await self._operations.load_for_turn(self._turn_id)
+        if turn is None:
+            raise RuntimeError("screenplay Root Turn projection disappeared")
         if result.status is RunStatus.DONE:
-            turn = await self._turns.load_turn(self._turn_id)
-            operation = await self._operations.load_for_turn(self._turn_id)
-            if turn is None or turn["status"] != "completed":
+            if turn["status"] != "completed":
                 raise RuntimeError(
                     "screenplay Root completed before its Turn projection"
                 )
@@ -577,47 +571,24 @@ class _ScreenplayTurnRunLifecycle:
                     "screenplay durable Root completed before its Operation"
                 )
             return
-        async with self._db.transaction(cancellation_linearizable=True):
-            operation = await self._operations.load_for_turn(self._turn_id)
-            if result.status is RunStatus.CANCELED:
-                if operation is not None and operation.status.value == "paused":
-                    # Core represents a paused durable execution as a
-                    # non-completed Root. Preserve the resumable product state
-                    # already committed by the dispatcher.
-                    return
-                receipt = await self._operations.request_cancel(
-                    self._turn_id,
-                    idempotency_key=f"root-terminal-cancel:{self._turn_id}",
+        expected = "failed"
+        if result.status is RunStatus.CANCELED:
+            expected = "canceled"
+            if operation is not None and operation.long_task_id:
+                task = await self._db.fetch_one(
+                    "SELECT status FROM ai_agent_long_tasks WHERE id = ?",
+                    [operation.long_task_id],
                 )
-                await self._operations.settle_cancel(
-                    self._turn_id,
-                    receipt_id=receipt.id,
-                )
-                return
-            code = str(result.error or result.status.value)
-            message = str(result.error or "剧本 Agent Root Run 未完成")
-            if operation is not None and not operation.status.terminal:
-                await self._operations.fail(
-                    operation.id,
-                    code=code,
-                    message=message,
-                    command_id=(
-                        f"operation:root-fail:{operation.id}:"
-                        f"{operation.revision}:{code}"
-                    ),
-                )
-            if operation is None:
-                await self._turns.fail_turn(
-                    self._turn_id,
-                    code=code,
-                    message=message,
-                )
-            else:
-                await self._turns.fail_task(
-                    self._turn_id,
-                    code=code,
-                    message=message,
-                )
+                if task == {"status": "paused"}:
+                    expected = "paused"
+        if turn["status"] != expected:
+            raise RuntimeError(
+                "screenplay Root terminal state conflicts with Turn projection"
+            )
+        if operation is not None and operation.status.value != expected:
+            raise RuntimeError(
+                "screenplay Root terminal state conflicts with Operation projection"
+            )
 
     async def on_start_failed(self, code: str):
         return await self._turns.fail_turn(

@@ -858,120 +858,27 @@ def _checkpoint_input_digest(value: ScreenplayCheckpointInput) -> str:
     ).encode("utf-8")).hexdigest()
 
 
-def _task_failure_message(code: str) -> str:
-    return {
-        "model_output_truncated": (
-            "模型本轮输出额度耗尽，未形成完整候选稿；不完整结果未被保存。"
-            "请重试；若重复出现，请更换模型或减少本次生成的内容量。"
-        ),
-        "model_output_filtered": "模型输出被服务商安全策略中止，请调整要求后重试。",
-        "upstream_stream_interrupted": "模型流式响应在完成前中断，请检查网络后重试。",
-        "unsupported_model_finish_reason": "模型以不受支持的状态结束，请更换模型后重试。",
-        "checkpoint_scope_requires_reresolution": (
-            "检查点发现任务范围需要重新确认，已暂停本轮创作。"
-        ),
-        "checkpoint_root_plan_unavailable": (
-            "无法验证当前任务计划，已安全暂停本轮创作。"
-        ),
-        "screenplay_checkpoint_ready_root_plan_conflict": (
-            "任务计划已发生变化，旧检查点不会被重复应用。"
-        ),
-    }.get(code, "剧本任务执行失败，请查看诊断信息后重试。")
-
-
 async def _settle_screenplay_execution(dispatcher, task_id, result) -> None:
     task = await dispatcher._long_tasks.load(task_id)
     if task is None:
         raise RuntimeError("screenplay LongTask disappeared")
     metadata = thaw_json_mapping(task.metadata)
     operation_id = str(metadata.get("operationId") or "")
-    turn_id = str(metadata.get("turnId") or "")
-    operation = await dispatcher._operations.load(operation_id)
-    if operation is None:
+    if await dispatcher._operations.load(operation_id) is None:
         raise RuntimeError("screenplay Operation disappeared")
-    if result.status is LongTaskExecutionStatus.PAUSED:
-        paused = await dispatcher._checkpoints.latest_paused(task_id)
-        code = (
-            str(paused.get("error_code") or "") if paused is not None else ""
-        ) or result.error or "screenplay_task_paused"
-        message = _task_failure_message(code)
-        async with dispatcher._db.transaction(cancellation_linearizable=True):
-            await dispatcher._operations.pause(
-                operation_id,
-                code=code,
-                message=message,
-                command_id=(
-                    f"operation:pause:{operation_id}:"
-                    f"{operation.revision}:{code}"
-                ),
-            )
-            await dispatcher._turns.pause_task(
-                turn_id,
-                code=code,
-                message=message,
-            )
-        return
-    if result.status is LongTaskExecutionStatus.CANCELED:
-        receipt = await dispatcher._operations.request_cancel(
-            turn_id,
-            idempotency_key=(
-                f"runtime-cancel:{operation_id}:{operation.revision}"
-            ),
-        )
-        await dispatcher._operations.settle_cancel(
-            turn_id,
-            receipt_id=receipt.id,
-        )
-        return
-    if result.status is LongTaskExecutionStatus.FAILED:
-        code = result.error or "screenplay_task_failed"
-        message = _task_failure_message(code)
-        async with dispatcher._db.transaction(cancellation_linearizable=True):
-            await dispatcher._operations.fail(
-                operation_id,
-                code=code,
-                message=message,
-                command_id=(
-                    f"operation:fail:{operation_id}:"
-                    f"{operation.revision}:{code}"
-                ),
-            )
-            await dispatcher._turns.fail_task(
-                turn_id,
-                code=code,
-                message=message,
-            )
-        return
-    if result.status is not LongTaskExecutionStatus.COMPLETED:
+    if result.status not in {
+        LongTaskExecutionStatus.COMPLETED,
+        LongTaskExecutionStatus.PAUSED,
+        LongTaskExecutionStatus.CANCELED,
+        LongTaskExecutionStatus.FAILED,
+    }:
         raise RuntimeError("screenplay LongTask returned an unknown status")
 
 
 async def _settle_screenplay_exception(dispatcher, task_id, error) -> None:
-    task = await dispatcher._long_tasks.load(task_id)
-    if task is None:
-        return
-    metadata = thaw_json_mapping(task.metadata)
-    operation_id = str(metadata.get("operationId") or "")
-    turn_id = str(metadata.get("turnId") or "")
-    operation = await dispatcher._operations.load(operation_id)
-    if operation is None or operation.status.terminal:
-        return
-    code = str(getattr(error, "code", "") or "screenplay_task_failed")
-    message = str(error) or _task_failure_message(code)
-    async with dispatcher._db.transaction(cancellation_linearizable=True):
-        await dispatcher._operations.fail(
-            operation_id,
-            code=code,
-            message=message,
-            command_id=(
-                f"operation:fail:{operation_id}:{operation.revision}:{code}"
-            ),
-        )
-        await dispatcher._turns.fail_task(
-            turn_id,
-            code=code,
-            message=message,
-        )
+    del dispatcher, task_id, error
+    # Root terminal commit projection owns Operation and Turn settlement.
+    return None
 
 
 def build_screenplay_profile_extension(
