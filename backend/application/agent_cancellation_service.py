@@ -28,6 +28,10 @@ class RootCancellationParticipant(Protocol):
     ) -> None: ...
 
 
+class RootCancellationTargetError(ContractViolationError):
+    """Cancellation was requested for a non-Root or malformed Run lineage."""
+
+
 class AgentCancellationService:
     """Request cancellation for a Root and every persisted descendant."""
 
@@ -50,12 +54,19 @@ class AgentCancellationService:
         if not normalized:
             return None
         root = await self._db.fetch_one(
-            "SELECT id, status, cancellation_epoch FROM ai_agent_runs "
-            "WHERE id = ?",
+            "SELECT id, status, parent_run_id, root_run_id, "
+            "cancellation_epoch FROM ai_agent_runs WHERE id = ?",
             [normalized],
         )
         if root is None:
             return None
+        if (
+            str(root.get("parent_run_id") or "").strip()
+            or str(root.get("root_run_id") or "").strip() != normalized
+        ):
+            raise RootCancellationTargetError(
+                "cancellation target must be the persisted Root Run"
+            )
         persisted_receipt = await self._db.fetch_one(
             "SELECT * FROM ai_agent_run_cancellations WHERE root_run_id = ?",
             [normalized],
@@ -233,4 +244,8 @@ class AgentCancellationService:
         return True
 
 
-__all__ = ["AgentCancellationService", "RootCancellationParticipant"]
+__all__ = [
+    "AgentCancellationService",
+    "RootCancellationParticipant",
+    "RootCancellationTargetError",
+]
