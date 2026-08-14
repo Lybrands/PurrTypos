@@ -148,6 +148,7 @@ async def prepare_session_owner_deletion(
     # rows owned by the surviving Book/project and only unlinks session
     # metadata above. Aggregate deletion owns and removes the product tasks.
     if projects or books:
+        await _delete_owned_run_cancellations(db, owned_run_ids)
         await _delete_owned_work(db, work_item_ids, task_ids)
 
     if sessions:
@@ -199,6 +200,17 @@ async def prepare_session_owner_deletion(
                 list(artifact_ids),
             )
     return SessionOwnerRows(sessions, conversation_ids)
+
+
+async def _delete_owned_run_cancellations(db, owned_run_ids) -> None:
+    if not owned_run_ids:
+        return
+    marks = _marks(owned_run_ids)
+    await db.execute(
+        "DELETE FROM ai_agent_run_cancellations "
+        f"WHERE root_run_id IN ({marks})",
+        list(owned_run_ids),
+    )
 
 
 async def _owned_work_and_task_ids(db, owned_run_ids, projects, books):

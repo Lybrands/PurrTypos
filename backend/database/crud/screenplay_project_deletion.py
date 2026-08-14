@@ -273,6 +273,7 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
     )
     work_ids = [str(row["id"]) for row in work_rows]
     await _delete_host_child_receipts(db, project_id)
+    await _delete_run_cancellation_receipts(db, run_ids)
 
     if turn_ids:
         marks = ",".join("?" for _ in turn_ids)
@@ -465,6 +466,17 @@ async def _delete_host_child_receipts(db, project_id: str) -> None:
         "DELETE FROM ai_agent_host_child_runs WHERE "
         "json_extract(contract_json, '$.bindingAggregateId') = ?",
         [project_id],
+    )
+
+
+async def _delete_run_cancellation_receipts(db, run_ids) -> None:
+    if not run_ids:
+        return
+    marks = ",".join("?" for _ in run_ids)
+    await db.execute(
+        "DELETE FROM ai_agent_run_cancellations "
+        f"WHERE root_run_id IN ({marks})",
+        list(run_ids),
     )
 
 

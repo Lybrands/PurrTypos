@@ -144,7 +144,15 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     )
     await owner_db.execute(
         "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
-        "VALUES ('run-project-done', 92, 'done', 'done')"
+        "VALUES ('run-project-done', 92, 'done', 'done'), "
+        "('run-foreign-audit', NULL, 'done', 'foreign')"
+    )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES "
+        "('run-project-done', 1, 'completed', 1, 2), "
+        "('run-foreign-audit', 1, 'completed', 1, 2)"
     )
     await owner_db.execute(
         "INSERT INTO ai_agent_host_child_runs "
@@ -204,6 +212,20 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     assert await owner_db.fetch_one(
         "SELECT session_id FROM ai_agent_runs WHERE id = 'run-project-done'"
     ) == {"session_id": None}
+    assert await owner_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-project-done'"
+    ) is None
+    assert await owner_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-foreign-audit'"
+    ) == {"root_run_id": "run-foreign-audit"}
+    await owner_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES "
+        "('run-project-done', 1, 'completed', 3, 4)"
+    )
     await owner_db.execute(
         "INSERT INTO ai_agent_host_child_runs "
         "(host_child_key, identity_digest, contract_json, generation, "
@@ -229,6 +251,12 @@ async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
         "'{\"bindingAggregateId\":\"project-audit\"}', 1, "
         "'attempt-project-audit', 'run-session-audit', 'done')"
     )
+    await owner_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES "
+        "('run-session-audit', 1, 'completed', 1, 2)"
+    )
 
     await prepare_session_owner_deletion(owner_db, [96])
 
@@ -240,6 +268,10 @@ async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
         "SELECT session_id, status FROM ai_agent_runs "
         "WHERE id = 'run-session-audit'"
     ) == {"session_id": None, "status": "done"}
+    assert await owner_db.fetch_one(
+        "SELECT root_run_id, status FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = 'run-session-audit'"
+    ) == {"root_run_id": "run-session-audit", "status": "completed"}
 
 
 @pytest.mark.parametrize("relation", ["reference", "continuation"])
