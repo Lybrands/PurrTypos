@@ -22,6 +22,9 @@ from application.agent_cancellation_service import (
 )
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
+from database.crud.screenplay_project_deletion import (
+    delete_screenplay_project_data,
+)
 from dependencies import set_db
 from domains.writing.agent_roles import build_writing_agent_role_registry
 from domains.screenplay_agent.agent_context import (
@@ -699,6 +702,87 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     }
 
 
+async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db):
+    project_id = "project-canceled-audit"
+    turn_id = "turn-canceled-audit"
+    operation_id = "operation-canceled-audit"
+    root_run_id = "run-canceled-audit"
+    await temp_db.execute(
+        "INSERT INTO screenplay_projects "
+        "(id, title, source_kind, source_snapshot_json) "
+        "VALUES (?, 'Canceled audit', 'original', '{}')",
+        [project_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
+        "VALUES (77, 'screenplay', ?)",
+        [project_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content, "
+        "planner_run_id, operation_id) VALUES "
+        "(?, ?, 77, 'cancel-audit-command', 'canceled', 'cancel', ?, ?)",
+        [turn_id, project_id, root_run_id, operation_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO screenplay_agent_operations "
+        "(id, turn_id, project_id, session_id, status, target_role, "
+        "manifest_digest) VALUES (?, ?, ?, 77, 'canceled', "
+        "'screenplayDraft', 'cancel-audit-digest')",
+        [operation_id, turn_id, project_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, prompt, root_run_id, cancellation_epoch, "
+        "cancel_requested_at_ms) VALUES (?, 77, 'canceled', '', ?, 1, 1)",
+        [root_run_id, root_run_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_cancellations "
+        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "completed_at_ms) VALUES (?, 1, 'completed', 1, 2)",
+        [root_run_id],
+    )
+    assert await delete_screenplay_project_data(temp_db, project_id) is True
+    root_before = await temp_db.fetch_one(
+        "SELECT * FROM ai_agent_runs WHERE id = ?",
+        [root_run_id],
+    )
+    assert await temp_db.fetch_one(
+        "SELECT root_run_id FROM ai_agent_run_cancellations "
+        "WHERE root_run_id = ?",
+        [root_run_id],
+    ) is None
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="POST",
+        path=f"/api/ai/agent-runs/{root_run_id}/cancel",
+        json_body={},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "status": "canceled",
+        "newlyRequested": False,
+        "childrenCanceled": 0,
+        "terminalized": False,
+        "cancellationStatus": "completed",
+        "cancellationEpoch": 1,
+        "cancellationReceipt": "tombstoned",
+    }
+    assert await temp_db.fetch_one(
+        "SELECT * FROM ai_agent_runs WHERE id = ?",
+        [root_run_id],
+    ) == root_before
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
+    ) == {"count": 0}
+
+
 async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):
     root_run_id = await _seed_run(temp_db)
     child_run_id = await create_run(
@@ -851,6 +935,86 @@ async def test_root_cancellation_rejects_malformed_foreign_lineage(temp_db):
         "cancellation_epoch": 0,
         "cancel_requested_at_ms": None,
     }
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
+    ) == {"count": 0}
+
+
+@pytest.mark.parametrize(
+    "conflict_kind",
+    ["descendant", "delegation", "host_reservation", "epoch_zero", "failed"],
+)
+async def test_tombstoned_root_cancel_replay_fails_closed_on_conflict(
+    temp_db,
+    conflict_kind,
+):
+    root_run_id = await _seed_run(temp_db)
+    child_run_id = None
+    if conflict_kind == "descendant":
+        child_run_id = await create_run(
+            temp_db,
+            session_id=7,
+            prompt="still active child",
+            mode="agent",
+            parent_run_id=root_run_id,
+            root_run_id=root_run_id,
+            agent_role="screenplay-part",
+            run_depth=1,
+        )
+    if conflict_kind == "host_reservation":
+        await SqliteHostChildRunRegistry(
+            temp_db,
+            reservation_ttl_ms=60_000,
+        ).reserve(
+            host_child_key="active-tombstoned-host",
+            identity_digest="active-tombstoned-host-digest",
+            contract={"rootRunId": root_run_id, "parentRunId": root_run_id},
+            owner_token="host-worker",
+            timestamp_ms=1,
+        )
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET status = ?, "
+        "cancellation_epoch = ?, cancel_requested_at_ms = 1, "
+        "execution_owner_id = NULL, lease_expires_at_ms = NULL "
+        "WHERE id = ?",
+        [
+            "failed" if conflict_kind == "failed" else "canceled",
+            0 if conflict_kind == "epoch_zero" else 1,
+            root_run_id,
+        ],
+    )
+    if conflict_kind == "delegation":
+        await temp_db.execute(
+            "INSERT INTO ai_agent_delegations "
+            "(id, parent_run_id, root_run_id, agent_role, objective, status, "
+            "worker_id, claim_expires_at_ms) VALUES "
+            "('delegation-active-tombstone', ?, ?, 'researcher', 'active', "
+            "'claimed', 'delegation-worker', 9999999999999)",
+            [root_run_id, root_run_id],
+        )
+    with pytest.raises(
+        ContractViolationError,
+        match=(
+            "terminal Root Run has no cancellation audit"
+            if conflict_kind == "failed"
+            else "tombstoned cancellation"
+        ),
+    ):
+        await AgentCancellationService(
+            temp_db,
+            get_agent_composition(),
+        ).cancel(root_run_id)
+
+    if child_run_id is not None:
+        assert await temp_db.fetch_one(
+            "SELECT status, cancellation_epoch, cancel_requested_at_ms "
+            "FROM ai_agent_runs WHERE id = ?",
+            [child_run_id],
+        ) == {
+            "status": "running",
+            "cancellation_epoch": 0,
+            "cancel_requested_at_ms": None,
+        }
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
     ) == {"count": 0}
