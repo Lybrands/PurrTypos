@@ -442,9 +442,27 @@ class SqliteScreenplayAgentRepository:
                 for row in rows
                 if row.get("authoritative_operation_id")
             ]
+            root_ids = [
+                str(row["planner_run_id"])
+                for row in rows
+                if row.get("planner_run_id")
+            ]
+            await self._require_truncation_barrier(
+                root_ids=root_ids,
+                task_ids=task_ids,
+            )
             turn_marks = _marks(turn_ids)
             if task_ids:
                 await self._delete_tasks(task_ids)
+            await self._db.execute(
+                f"DELETE FROM screenplay_agent_cancel_commands "
+                f"WHERE turn_id IN ({turn_marks})"
+                + (
+                    f" OR operation_id IN ({_marks(operation_ids)})"
+                    if operation_ids else ""
+                ),
+                [*turn_ids, *operation_ids],
+            )
             if operation_ids:
                 operation_marks = _marks(operation_ids)
                 await self._db.execute(
@@ -473,6 +491,43 @@ class SqliteScreenplayAgentRepository:
                 "deletedTaskIds": task_ids,
                 "deletedOperationIds": operation_ids,
             }
+
+    async def _require_truncation_barrier(
+        self,
+        *,
+        root_ids: Sequence[str],
+        task_ids: Sequence[str],
+    ) -> None:
+        if root_ids:
+            marks = _marks(root_ids)
+            active_runs = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
+                f"(id IN ({marks}) OR root_run_id IN ({marks})) AND "
+                "(status = 'running' OR execution_owner_id IS NOT NULL OR "
+                "lease_expires_at_ms IS NOT NULL)",
+                [*root_ids, *root_ids],
+            )
+            active_delegations = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
+                f"root_run_id IN ({marks}) AND (status IN "
+                "('queued', 'claimed', 'running') OR worker_id IS NOT NULL OR "
+                "claim_expires_at_ms IS NOT NULL)",
+                list(root_ids),
+            )
+            if int((active_runs or {}).get("count") or 0) or int(
+                (active_delegations or {}).get("count") or 0
+            ):
+                raise AppError("screenplay truncate runtime is still active", 409)
+        if task_ids:
+            active_units = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units WHERE "
+                f"task_id IN ({_marks(task_ids)}) AND (status IN "
+                "('claimed', 'running') OR worker_id IS NOT NULL OR "
+                "lease_expires_at_ms IS NOT NULL)",
+                list(task_ids),
+            )
+            if int((active_units or {}).get("count") or 0):
+                raise AppError("screenplay truncate task is still active", 409)
 
     async def _delete_tasks(self, task_ids: Sequence[str]) -> None:
         marks = _marks(task_ids)
