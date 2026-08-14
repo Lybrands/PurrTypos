@@ -303,6 +303,52 @@ async def test_durable_checkpoint_atomically_revises_root_plan_before_evidence()
 
 
 @pytest.mark.asyncio
+async def test_continuation_executes_existing_receipt_without_redispatch():
+    controller, repository, sink = await _started()
+
+    class _Dispatcher:
+        async def dispatch(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("continuation must not dispatch a second task")
+
+        async def execute(self, task_id, *, parent_run_id, observer, signal=None):
+            del signal
+            assert task_id == "task-existing"
+            assert parent_run_id == "run-root"
+            await observer(LongTaskExecutionUpdate(
+                event=AgentEvent(
+                    type=CoreEventType.LONG_TASK_PROGRESS,
+                    payload={"taskId": task_id, "units": []},
+                ),
+            ))
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="Continued",
+            )
+
+    yielded = [
+        event
+        async for event in complete_admitted_task(
+            controller=controller,
+            request=_request(),
+            plan=_plan(),
+            admission=_admission(),
+            dispatcher=_Dispatcher(),
+            sink=sink,
+            signal=None,
+            existing_receipt=LongTaskDispatchReceipt(
+                task_id="task-existing",
+                message="Resumed existing durable task",
+            ),
+        )
+    ]
+
+    assert repository.status is RunStatus.DONE
+    assert all(event.type != CoreEventType.LONG_TASK_DISPATCHED for event in yielded)
+
+
+@pytest.mark.asyncio
 async def test_invalid_durable_revision_fails_root_and_cancels_old_recipe():
     controller, repository, sink = await _started()
     canceled = asyncio.Event()

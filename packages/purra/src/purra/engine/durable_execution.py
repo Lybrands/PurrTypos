@@ -44,6 +44,7 @@ async def complete_admitted_task(
     dispatcher: LongTaskDispatcher | None,
     sink: BufferedEventSink,
     signal: CancellationSignal | None,
+    existing_receipt: LongTaskDispatchReceipt | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run durable work under the originating Run and its event stream."""
 
@@ -64,26 +65,28 @@ async def complete_admitted_task(
             raise ContractViolationError(
                 "durable task admission requires a dispatcher"
             )
-        receipt = await await_with_cancellation(
-            dispatcher.dispatch(
-                request,
-                plan,
-                admission,
-                parent_run_id=controller.run_id,
-                signal=signal,
-            ),
-            signal,
-        )
-        await controller.record_event(
-            CoreEventType.LONG_TASK_DISPATCHED,
-            {
-                "taskId": receipt.task_id,
-                "message": receipt.message,
-                **thaw_json_mapping(receipt.metadata),
-            },
-        )
-        for event in sink.drain():
-            yield event
+        receipt = existing_receipt
+        if receipt is None:
+            receipt = await await_with_cancellation(
+                dispatcher.dispatch(
+                    request,
+                    plan,
+                    admission,
+                    parent_run_id=controller.run_id,
+                    signal=signal,
+                ),
+                signal,
+            )
+            await controller.record_event(
+                CoreEventType.LONG_TASK_DISPATCHED,
+                {
+                    "taskId": receipt.task_id,
+                    "message": receipt.message,
+                    **thaw_json_mapping(receipt.metadata),
+                },
+            )
+            for event in sink.drain():
+                yield event
 
         durable_step_aliases = _durable_step_aliases(receipt, admission)
         updates: asyncio.Queue[

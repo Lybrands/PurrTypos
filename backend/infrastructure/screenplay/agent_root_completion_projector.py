@@ -99,10 +99,39 @@ class ScreenplayAgentRootCompletionProjector:
             if len(turns) != 1:
                 raise LookupError("screenplay Root Turn does not exist")
             turn = turns[0]
+            expected_command_id = str(turn.get("command_id") or "").strip()
+            continuation_of = str(attributes.get("continuationOf") or "").strip()
+            if continuation_of:
+                operation_id = str(attributes.get("operationId") or "").strip()
+                resume = await self._db.fetch_one(
+                    "SELECT command_id FROM screenplay_agent_operation_commands "
+                    "WHERE operation_id = ? AND command_type = 'resume' "
+                    "AND command_id = ? AND continuation_status = 'bound' "
+                    "AND continuation_root_run_id = ? "
+                    "AND continuation_source_root_run_id = ? "
+                    "AND continuation_turn_id = ? "
+                    "AND continuation_session_id = ? "
+                    "AND continuation_project_id = ?",
+                    [
+                        operation_id,
+                        str(row.get("binding_command_id") or ""),
+                        run_id,
+                        continuation_of,
+                        canonical_turn_id,
+                        int(row.get("session_id") or 0),
+                        str(row.get("binding_aggregate_id") or ""),
+                    ],
+                )
+                if resume is None:
+                    raise ValueError(
+                        "screenplay continuation command is not persisted"
+                    )
+                expected_command_id = str(resume["command_id"])
             _require_root_identity(
                 run=row,
                 turn=turn,
                 canonical_turn_id=canonical_turn_id,
+                expected_command_id=expected_command_id,
             )
             operation_id = str(turn.get("operation_id") or "").strip()
             final_response = str(commit.final_response or "")
@@ -423,6 +452,7 @@ def _require_root_identity(
     run: Mapping[str, object],
     turn: Mapping[str, object],
     canonical_turn_id: str,
+    expected_command_id: str | None = None,
 ) -> None:
     expected = {
         "conversation Turn": (
@@ -439,7 +469,7 @@ def _require_root_identity(
         ),
         "command": (
             str(run.get("binding_command_id") or "").strip(),
-            str(turn.get("command_id") or "").strip(),
+            str(expected_command_id or turn.get("command_id") or "").strip(),
         ),
     }
     for label, (actual, persisted) in expected.items():

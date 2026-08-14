@@ -51,6 +51,9 @@ class _Handle:
     async def wait(self):
         await self.finished.wait()
 
+    async def cancel(self, _reason: str) -> None:
+        self.finished.set()
+
 
 class _Core:
     def __init__(self, stream: _Stream) -> None:
@@ -95,6 +98,9 @@ class _Composition:
 
 
 class _FailingBinding:
+    def __init__(self) -> None:
+        self.start_failure_codes: list[str] = []
+
     async def validate(self) -> None:
         return None
 
@@ -106,6 +112,9 @@ class _FailingBinding:
 
     async def on_run_finished(self, _result) -> None:
         return None
+
+    async def on_start_failed(self, code: str) -> None:
+        self.start_failure_codes.append(code)
 
 
 class _CancelBeforeSubmit(_FailingBinding):
@@ -193,6 +202,7 @@ async def test_bind_failure_after_submit_closes_stream_and_releases_core():
     composition = _Composition()
     service = AgentRunService(composition)  # type: ignore[arg-type]
 
+    binding = _FailingBinding()
     updates = service.run(
         body=body,
         api_key="key",
@@ -200,17 +210,15 @@ async def test_bind_failure_after_submit_closes_stream_and_releases_core():
         signal=asyncio.Event(),
         mapped_request=request,
         base_options=options,
-        run_binding_lifecycle=_FailingBinding(),  # type: ignore[arg-type]
+        run_binding_lifecycle=binding,
     )
     with pytest.raises(RuntimeError, match="receipt bind failed"):
         await anext(updates)
 
     assert composition.stream.closed is True
-    assert composition.released == []
-    assert len(composition.background) == 1
-    composition.core.handle.finished.set()
-    await composition.background[0]
+    assert binding.start_failure_codes == ["RuntimeError"]
     assert composition.released == [composition.core]
+    assert composition.background == []
 
 
 @pytest.mark.asyncio
@@ -232,6 +240,7 @@ async def test_pre_submit_failure_releases_core_without_starting_a_run():
     }
     request = to_writing_agent_request(body, provider_options)
     composition = _Composition()
+    binding = _CancelBeforeSubmit()
     updates = AgentRunService(composition).run(  # type: ignore[arg-type]
         body=body,
         api_key="key",
@@ -239,7 +248,7 @@ async def test_pre_submit_failure_releases_core_without_starting_a_run():
         signal=asyncio.Event(),
         mapped_request=request,
         base_options=writing_run_options(request, provider_options),
-        run_binding_lifecycle=_CancelBeforeSubmit(),  # type: ignore[arg-type]
+        run_binding_lifecycle=binding,
     )
 
     with pytest.raises(RuntimeError, match="canceled before submit"):
@@ -247,6 +256,7 @@ async def test_pre_submit_failure_releases_core_without_starting_a_run():
 
     assert composition.released == [composition.core]
     assert composition.background == []
+    assert binding.start_failure_codes == ["RuntimeError"]
 
 
 @pytest.mark.asyncio
@@ -269,6 +279,7 @@ async def test_submit_failure_closes_core_before_releasing_ownership():
     request = to_writing_agent_request(body, provider_options)
     composition = _Composition()
     composition.core = _SubmitFailsCore(composition.stream)
+    binding = _FailingBinding()
     updates = AgentRunService(composition).run(  # type: ignore[arg-type]
         body=body,
         api_key="key",
@@ -276,7 +287,7 @@ async def test_submit_failure_closes_core_before_releasing_ownership():
         signal=asyncio.Event(),
         mapped_request=request,
         base_options=writing_run_options(request, provider_options),
-        run_binding_lifecycle=_FailingBinding(),  # type: ignore[arg-type]
+        run_binding_lifecycle=binding,
     )
 
     with pytest.raises(RuntimeError, match="supervisor spawn"):
@@ -284,6 +295,7 @@ async def test_submit_failure_closes_core_before_releasing_ownership():
 
     assert composition.core.closed is True
     assert composition.released == [composition.core]
+    assert binding.start_failure_codes == ["RuntimeError"]
 
 
 @pytest.mark.asyncio

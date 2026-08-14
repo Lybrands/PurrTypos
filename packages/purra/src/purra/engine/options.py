@@ -11,6 +11,7 @@ from purra.contracts import (
     RunBinding,
     RunLineage,
     RunProvenance,
+    TaskPlan,
 )
 from purra.normalization import (
     optional_non_negative_int,
@@ -24,6 +25,38 @@ from purra.output.contracts import (
 )
 from purra.output.ports import CommittedResultFactsProvider
 from purra.ports import ResponseJudge, ResponseJudgePolicy, ResponseValidator
+from purra.task_admission import (
+    ExecutionMode,
+    LongTaskDispatchReceipt,
+    TaskAdmissionDecision,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DurableTaskContinuation:
+    """Trusted host receipt for resuming one existing durable task in a new Run."""
+
+    source_root_run_id: str
+    continuation_command: str
+    plan: TaskPlan
+    admission: TaskAdmissionDecision
+    receipt: LongTaskDispatchReceipt
+
+    def __post_init__(self) -> None:
+        for name in ("source_root_run_id", "continuation_command"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise ValueError(f"durable continuation {name} is required")
+            object.__setattr__(self, name, value)
+        if not isinstance(self.plan, TaskPlan):
+            raise TypeError("durable continuation plan must be TaskPlan")
+        if (
+            not isinstance(self.admission, TaskAdmissionDecision)
+            or self.admission.mode is not ExecutionMode.DURABLE
+        ):
+            raise ValueError("durable continuation requires durable admission")
+        if not isinstance(self.receipt, LongTaskDispatchReceipt):
+            raise TypeError("durable continuation receipt is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +83,7 @@ class AgentCoreRunOptions:
     response_judge_policies: tuple[ResponseJudgePolicy, ...] = ()
     response_transaction_policy: ResponseTransactionPolicy | None = None
     committed_result_facts_provider: CommittedResultFactsProvider | None = None
+    durable_continuation: DurableTaskContinuation | None = None
 
     def __post_init__(self) -> None:
         claims = tuple(self.context_claims)
@@ -137,6 +171,11 @@ class AgentCoreRunOptions:
             raise TypeError(
                 "committed result facts provider must implement facts_for"
             )
+        if self.durable_continuation is not None and not isinstance(
+            self.durable_continuation,
+            DurableTaskContinuation,
+        ):
+            raise TypeError("durable continuation must be DurableTaskContinuation")
         requires_full_text = bool(
             self.response_constraints.exact_top_level_item_count is not None
             or validators

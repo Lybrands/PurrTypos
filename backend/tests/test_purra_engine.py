@@ -59,6 +59,7 @@ from purra.contracts import (
 from purra.engine import (
     AgentCore,
     AgentCoreRunOptions,
+    DurableTaskContinuation,
     _validate_planning_constraints,
     _validate_task_constraint_refinement,
 )
@@ -838,6 +839,83 @@ async def test_durable_task_admission_dispatches_before_runtime_execution():
         if trace.stage == "planning"
     )
     assert planning_trace.outcome == "planned"
+
+
+@pytest.mark.asyncio
+async def test_durable_continuation_starts_new_root_without_planning_or_dispatch():
+    plan = TaskPlan(
+        title="Resume durable task",
+        goal="Finish remaining durable work",
+        steps=(TaskStep(
+            id="write",
+            title="Write remaining units",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+        ),),
+    )
+    admission = TaskAdmissionDecision(
+        mode=ExecutionMode.DURABLE,
+        reason_code="fixture_continuation",
+        covered_step_ids=("write",),
+        execution_recipe=ExecutionRecipe(
+            kind="fixture.write",
+            steps=(ExecutionRecipeStep(id="write", kind="model"),),
+        ),
+    )
+
+    class _Dispatcher:
+        async def dispatch(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("continuation must not create a second task")
+
+        async def execute(self, task_id, *, parent_run_id, observer, signal=None):
+            del observer, signal
+            assert task_id == "existing-task"
+            assert parent_run_id
+            return LongTaskExecutionResult(
+                task_id=task_id,
+                status=LongTaskExecutionStatus.COMPLETED,
+                final_response="continued result",
+            )
+
+    dispatcher = _Dispatcher()
+    planner = CapturePlanner(plan)
+    core, request, options, repository, model, state = _core_fixture(
+        planner=planner,
+        long_task_dispatcher=dispatcher,
+    )
+    options = replace(
+        options,
+        durable_continuation=DurableTaskContinuation(
+            source_root_run_id="old-root",
+            continuation_command="resume-command-1",
+            plan=plan,
+            admission=admission,
+            receipt=LongTaskDispatchReceipt(
+                task_id="existing-task",
+                message="Resume existing task",
+            ),
+        ),
+    )
+
+    updates = [
+        update async for update in core._execute_run(request, options=options)
+    ]
+
+    result = updates[-1]
+    assert isinstance(result, AgentRunResult)
+    assert result.status is RunStatus.DONE
+    assert result.final_response == "continued result"
+    assert planner.call_count == 0
+    assert model.invocations == []
+    assert state.domain["handler_order"] == []
+    assert [event.type for event in repository.events] == [
+        CoreEventType.RUN_STARTED,
+        CoreEventType.TASK_ADMISSION_DECIDED,
+        CoreEventType.RUN_TODOS_UPDATED,
+        CoreEventType.RUN_TODO_UPDATED,
+        CoreEventType.RUN_COMPLETED,
+    ]
     persisted_steps = repository.runs[result.run_id]["steps"]
     assert persisted_steps[0].status is StepStatus.DONE
     assert persisted_steps[0].result_summary == (

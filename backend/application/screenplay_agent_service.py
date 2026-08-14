@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -25,8 +25,11 @@ from purra.contracts import (
     RunBinding,
     RunProvenance,
     RunStatus,
+    ExecutionRecipe,
+    ExecutionRecipeStep,
+    StepStatus,
 )
-from purra.api import AgentCoreRunOptions
+from purra.api import AgentCoreRunOptions, DurableTaskContinuation
 from purra.errors import (
     ModelGatewayError,
     RunCommitProjectionError,
@@ -34,7 +37,10 @@ from purra.errors import (
 )
 from purra.model_protocol import FeatureRequirement, TaskCapabilityRequirements
 from purra.task_admission import (
+    ExecutionMode,
+    LongTaskDispatchReceipt,
     LongTaskExecutionUpdate,
+    TaskAdmissionDecision,
 )
 from purra.output import RuntimeOutputEvent
 from purra.model_protocol import InvocationOutputLimit, resolve_invocation_output_limit
@@ -46,6 +52,9 @@ from purra.output import (
 from application.agent_run_service import AgentRunService
 from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_agent_task_executor import ScreenplayTaskUnitExecutor
+from application.screenplay_checkpoint_planning import (
+    SqliteScreenplayCheckpointRepository,
+)
 from application.screenplay_tool_calling import ScreenplayToolCallingService
 from application.run_provenance import digest_model_endpoint
 from application.model_runtime import (
@@ -164,12 +173,6 @@ class ScreenplayAgentService:
             body = _ScreenplayRunInput.from_turn(turn, runtime)
             model_request = request.model
             window = int(request.context_window or 200_000)
-            lifecycle = _ScreenplayTurnRunLifecycle(
-                self._db,
-                self._repository,
-                self._operations,
-                turn_id,
-            )
             output_limit = resolve_invocation_output_limit(
                 model_request.capability_snapshot,
                 model_request.options.get("max_tokens"),
@@ -180,6 +183,12 @@ class ScreenplayAgentService:
                     source=output_limit.source,
                     profile_max_tokens=output_limit.profile_max_tokens,
                 )
+            lifecycle = _ScreenplayTurnRunLifecycle(
+                self._db,
+                self._repository,
+                self._operations,
+                turn_id,
+            )
             async for _update in self._run_service.run(
                 body=body,
                 api_key=runtime.apiKey.get_secret_value(),
@@ -232,20 +241,32 @@ class ScreenplayAgentService:
         self,
         operation_id: str,
         runtime,
+        *,
+        continuation_command: str,
     ) -> asyncio.Task[None]:
         key = f"operation:{operation_id}"
         active = _ACTIVE_TASKS.get(key)
         if active is not None and not active.done():
             return active
         task = asyncio.create_task(
-            self.execute_resumed_operation(operation_id, runtime)
+            self.execute_resumed_operation(
+                operation_id,
+                runtime,
+                continuation_command=continuation_command,
+            )
         )
         self._remember_task(key, task)
         if callable(self._track_background):
             self._track_background(task)
         return task
 
-    async def execute_resumed_operation(self, operation_id: str, runtime) -> None:
+    async def execute_resumed_operation(
+        self,
+        operation_id: str,
+        runtime,
+        *,
+        continuation_command: str,
+    ) -> None:
         operation = await self._operations.load(operation_id)
         if operation is None:
             raise NotFoundError("剧本 Agent Operation 不存在")
@@ -256,26 +277,132 @@ class ScreenplayAgentService:
         turn = await self._repository.load_turn(operation.turn_id)
         if turn is None:
             raise NotFoundError("剧本 Agent Turn 不存在")
-        root_run_id = str(turn.get("rootRunId") or "").strip()
-        if not root_run_id:
+        source_root_run_id = str(turn.get("rootRunId") or "").strip()
+        if not source_root_run_id:
             raise AppError("resumed screenplay Operation has no Root Run", 409)
         if self._composition is None:
             raise RuntimeError("screenplay Root Run composition is required")
         try:
-            dispatcher = self._composition.create_long_task_dispatcher(
-                "screenplay",
-                executor=self._unit_executor_factory(runtime),
+            source = await self._db.fetch_one(
+                "SELECT status FROM ai_agent_runs WHERE id = ?",
+                [source_root_run_id],
             )
-            if dispatcher is None:
-                raise RuntimeError("screenplay durable dispatcher is unavailable")
-            await dispatcher.execute(
-                operation.long_task_id,
-                parent_run_id=root_run_id,
-                observer=lambda update: self._publish_task_update(
-                    operation.turn_id,
-                    update,
+            if source is None or str(source.get("status") or "") != "canceled":
+                raise AppError("resume requires a canceled source Root Run", 409)
+            plan = await SqliteScreenplayCheckpointRepository(
+                self._db
+            ).load_root_plan(source_root_run_id)
+            plan = replace(
+                plan,
+                steps=tuple(
+                    step if step.status is StepStatus.DONE else replace(
+                        step,
+                        status=StepStatus.PENDING,
+                        result_summary=None,
+                        error=None,
+                    )
+                    for step in plan.steps
                 ),
             )
+            task = await self._long_tasks.load(operation.long_task_id)
+            if task is None or task.status.value != "running":
+                raise AppError("resumed screenplay LongTask is not running", 409)
+            reservation = await self._operations.load_continuation_command(
+                continuation_command
+            )
+            if (
+                reservation is None
+                or str(reservation.get("operation_id") or "") != operation.id
+                or str(reservation.get("continuation_status") or "") != "starting"
+                or str(reservation.get("continuation_owner_id") or "")
+                != self._owner_id
+            ):
+                raise AppError("screenplay continuation reservation is not owned", 409)
+            recipe = _execution_recipe_from_metadata(task.metadata.get("recipe"))
+            continuation = DurableTaskContinuation(
+                source_root_run_id=source_root_run_id,
+                continuation_command=continuation_command,
+                plan=plan,
+                admission=TaskAdmissionDecision(
+                    mode=ExecutionMode.DURABLE,
+                    reason_code="durable_continuation",
+                    covered_step_ids=tuple(step.id for step in plan.steps),
+                    execution_recipe=recipe,
+                ),
+                receipt=LongTaskDispatchReceipt(
+                    task_id=task.id,
+                    message="Resume existing durable task",
+                ),
+            )
+            request = _root_request(turn, runtime)
+            body = _ScreenplayRunInput.from_turn(turn, runtime)
+            model_request = request.model
+            window = int(request.context_window or 200_000)
+            output_limit = resolve_invocation_output_limit(
+                model_request.capability_snapshot,
+                model_request.options.get("max_tokens"),
+            )
+            if output_limit.max_tokens >= window:
+                output_limit = InvocationOutputLimit(
+                    max_tokens=max(1_024, window // 4),
+                    source=output_limit.source,
+                    profile_max_tokens=output_limit.profile_max_tokens,
+                )
+            lifecycle = _ScreenplayContinuationRunLifecycle(
+                self._db,
+                self._repository,
+                self._operations,
+                operation.turn_id,
+                source_root_run_id=source_root_run_id,
+                continuation_command=continuation_command,
+                reservation=reservation,
+            )
+            async for _update in self._run_service.run(
+                body=body,
+                api_key=runtime.apiKey.get_secret_value(),
+                provider_options={
+                    "model": model_request.model,
+                    **dict(model_request.options),
+                },
+                signal=asyncio.Event(),
+                provenance=_root_provenance(runtime, turn),
+                enable_delegation=False,
+                mapped_request=request,
+                base_options=AgentCoreRunOptions(
+                    turn_id=operation.turn_id,
+                    output_limit=output_limit,
+                    default_context_window_tokens=window,
+                    force_planned_tool_choice=False,
+                    require_tool_call=False,
+                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    binding=RunBinding(
+                        namespace="screenplay.conversation_turn",
+                        aggregate_id=str(turn["projectId"]),
+                        command_id=str(continuation_command),
+                        attributes={
+                            "continuationOf": source_root_run_id,
+                            "operationId": operation.id,
+                            "continuationOwner": str(
+                                reservation["continuation_owner_id"]
+                            ),
+                            "continuationEpoch": int(
+                                reservation["continuation_epoch"]
+                            ),
+                            "continuationIdentityDigest": str(
+                                reservation["continuation_identity_digest"]
+                            ),
+                        },
+                    ),
+                    response_transaction_policy=ResponseTransactionPolicy(
+                        mode=ResponseTransactionMode.DIRECT_LIVE,
+                        public_presentation=PublicPresentationMode.NONE,
+                    ),
+                    durable_continuation=continuation,
+                ),
+                run_binding_lifecycle=lifecycle,
+                long_task_executor=self._unit_executor_factory(runtime),
+            ):
+                pass
         except Exception as error:
             await self._settle_execution_exception(operation.turn_id, error)
 
@@ -393,12 +520,42 @@ class ScreenplayAgentService:
         snapshot = model_request.capability_snapshot.to_mapping(
             include_digest=True,
         )
+        turn = await self._repository.load_turn(operation.turn_id)
+        if turn is None:
+            raise AppError("screenplay continuation Turn is missing", 409)
+        prior = await self._operations.load_continuation_command(idempotency_key)
+        source_root_run_id = str(
+            (prior or {}).get("continuation_source_root_run_id")
+            or turn.get("rootRunId")
+            or ""
+        ).strip()
+        source = await self._db.fetch_one(
+            "SELECT status, session_id, binding_aggregate_id FROM ai_agent_runs "
+            "WHERE id = ?",
+            [source_root_run_id],
+        )
+        if (
+            source is None
+            or str(source.get("status") or "") != "canceled"
+            or int(source.get("session_id") or 0) != operation.session_id
+            or str(source.get("binding_aggregate_id") or "") != operation.project_id
+        ):
+            raise AppError("resume requires a canceled matching Root Run", 409)
         try:
             resumed = await self._operations.resume_with_model(
                 operation.id,
                 command_id=idempotency_key,
                 expected_revision=request.expectedOperationRevision,
                 capability_snapshot=snapshot,
+            )
+            reservation = await self._operations.claim_continuation_start(
+                command_id=idempotency_key,
+                operation_id=operation.id,
+                turn_id=operation.turn_id,
+                source_root_run_id=source_root_run_id,
+                session_id=operation.session_id,
+                project_id=operation.project_id,
+                owner_id=self._owner_id,
             )
         except ValueError as error:
             raise AppError(str(error), 409) from error
@@ -408,6 +565,11 @@ class ScreenplayAgentService:
             "status": resumed.status.value,
             "revision": resumed.revision,
             "capabilitySnapshotDigest": model_request.capability_snapshot.digest(),
+            "continuationCommand": idempotency_key,
+            "continuationRootRunId": (
+                str(reservation.get("continuation_root_run_id") or "") or None
+            ),
+            "dispatchRequired": bool(reservation["_acquired"]),
         }
 
     async def truncate_from_turn(self, turn_id: str):
@@ -596,6 +758,127 @@ class _ScreenplayTurnRunLifecycle:
             code=str(code or "screenplay_root_start_failed"),
             message="剧本 Agent Root Run 启动失败。",
         )
+
+
+class _ScreenplayContinuationRunLifecycle(_ScreenplayTurnRunLifecycle):
+    def __init__(
+        self,
+        db,
+        turns,
+        operations,
+        turn_id: str,
+        *,
+        source_root_run_id: str,
+        continuation_command: str,
+        reservation: Mapping[str, Any],
+    ) -> None:
+        super().__init__(db, turns, operations, turn_id)
+        self._source_root_run_id = str(source_root_run_id)
+        self._continuation_command = str(continuation_command)
+        self._reservation = dict(reservation)
+
+    async def validate(self) -> None:
+        turn = await self._turns.load_turn(self._turn_id)
+        operation = await self._operations.load_for_turn(self._turn_id)
+        source = await self._db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [self._source_root_run_id],
+        )
+        if (
+            turn is None
+            or turn["status"] != "running"
+            or str(turn.get("rootRunId") or "") != self._source_root_run_id
+            or operation is None
+            or operation.status.value != "running"
+            or source is None
+            or str(source.get("status") or "") != "canceled"
+        ):
+            raise ValueError("screenplay continuation is not startable")
+
+    async def on_run_started(self, run_id: str) -> None:
+        command = await self._operations.load_continuation_command(
+            self._continuation_command
+        )
+        turn = await self._turns.load_turn(self._turn_id)
+        if (
+            command is None
+            or str(command.get("continuation_status") or "") != "bound"
+            or str(command.get("continuation_root_run_id") or "") != run_id
+            or turn is None
+            or str(turn.get("rootRunId") or "") != run_id
+        ):
+            raise ValueError("screenplay continuation atomic binding is missing")
+
+    async def before_submit(self) -> None:
+        await self.validate()
+        command = await self._operations.load_continuation_command(
+            self._continuation_command
+        )
+        if (
+            command is None
+            or str(command.get("continuation_status") or "") != "starting"
+            or str(command.get("continuation_owner_id") or "")
+            != str(self._reservation.get("continuation_owner_id") or "")
+            or int(command.get("continuation_epoch") or 0)
+            != int(self._reservation.get("continuation_epoch") or 0)
+            or str(command.get("continuation_identity_digest") or "")
+            != str(self._reservation.get("continuation_identity_digest") or "")
+        ):
+            raise ValueError("screenplay continuation reservation was lost")
+
+    async def on_start_failed(self, code: str):
+        del code
+        await self._operations.release_continuation_start(
+            command_id=self._continuation_command,
+            owner_id=str(self._reservation["continuation_owner_id"]),
+            epoch=int(self._reservation["continuation_epoch"]),
+        )
+        # Root begin and product binding rolled back together. Keep the resumed
+        # durable work active and make the same command claimable again.
+        return None
+
+
+def _execution_recipe_from_metadata(value: object) -> ExecutionRecipe:
+    if not isinstance(value, Mapping):
+        raise ValueError("screenplay durable Recipe is missing")
+    raw = dict(value)
+    reserved = {"kind", "maxParallelism", "steps"}
+    steps = raw.get("steps")
+    if (
+        not isinstance(steps, Sequence)
+        or isinstance(steps, (str, bytes, bytearray))
+        or not steps
+    ):
+        raise ValueError("screenplay durable Recipe steps are missing")
+    parsed = []
+    for item in steps:
+        if not isinstance(item, Mapping):
+            raise ValueError("screenplay durable Recipe step is invalid")
+        step = dict(item)
+        step_reserved = {
+            "id", "kind", "dependsOn", "inputRef", "executor",
+            "plannerStepId", "maxAttempts",
+        }
+        parsed.append(ExecutionRecipeStep(
+            id=str(step.get("id") or ""),
+            kind=str(step.get("kind") or ""),
+            depends_on=tuple(step.get("dependsOn") or ()),
+            input_ref=str(step.get("inputRef") or "") or None,
+            executor=str(step.get("executor") or "") or None,
+            plan_step_id=str(step.get("plannerStepId") or "") or None,
+            max_attempts=int(step.get("maxAttempts") or 1),
+            metadata={
+                key: item_value
+                for key, item_value in step.items()
+                if key not in step_reserved
+            },
+        ))
+    return ExecutionRecipe(
+        kind=str(raw.get("kind") or ""),
+        steps=tuple(parsed),
+        max_parallelism=int(raw.get("maxParallelism") or 1),
+        metadata={key: item for key, item in raw.items() if key not in reserved},
+    )
 
 
 def _root_provenance(runtime, turn: Mapping[str, Any]) -> RunProvenance:
