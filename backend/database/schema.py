@@ -396,6 +396,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         heartbeat_at_ms INTEGER DEFAULT NULL,
         execution_attempt INTEGER NOT NULL DEFAULT 0,
         cancel_requested_at_ms INTEGER DEFAULT NULL,
+        cancellation_epoch INTEGER NOT NULL DEFAULT 0,
         final_response TEXT DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -429,11 +430,22 @@ async def init_schema(db: DatabaseConnection) -> None:
         "heartbeat_at_ms INTEGER DEFAULT NULL",
         "execution_attempt INTEGER NOT NULL DEFAULT 0",
         "cancel_requested_at_ms INTEGER DEFAULT NULL",
+        "cancellation_epoch INTEGER NOT NULL DEFAULT 0",
     ):
         await _try_exec(
             db,
             f"ALTER TABLE ai_agent_runs ADD COLUMN {column}",
         )
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_cancellations (
+        root_run_id TEXT PRIMARY KEY NOT NULL,
+        cancellation_epoch INTEGER NOT NULL CHECK (cancellation_epoch >= 1),
+        status TEXT NOT NULL CHECK (status IN ('draining', 'completed')),
+        children_canceled INTEGER NOT NULL DEFAULT 0,
+        requested_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     # Recreate the trigger so databases that once included additional routing
     # metadata enforce only the current model-request provenance contract.
     await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_provenance_immutable")

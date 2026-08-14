@@ -244,6 +244,16 @@ async def attach_child_run(
         child = await run_store.get_run(db, normalized_child)
         if delegation is None or child is None:
             return False
+        root = await run_store.get_run(
+            db,
+            str(delegation.get("root_run_id") or ""),
+        )
+        if (
+            root is None
+            or root.get("status") != RunStatus.RUNNING.value
+            or int(root.get("cancellation_epoch") or 0) > 0
+        ):
+            return False
         if (
             child.get("parent_run_id") != delegation.get("parent_run_id")
             or child.get("root_run_id") != delegation.get("root_run_id")

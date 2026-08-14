@@ -9,6 +9,9 @@ import pytest
 import pytest_asyncio
 
 from database.connection import DatabaseConnection
+from infrastructure.persistence.run_execution_store import (
+    fence_cancellation_tree,
+)
 from purra.errors import ContractViolationError
 
 
@@ -247,6 +250,45 @@ async def test_receipt_bind_exact_replay_is_idempotent(registry_db):
     )
 
     assert replay == first
+
+
+@pytest.mark.asyncio
+async def test_unbound_receipt_cannot_bind_run_after_root_cancel_fence(
+    registry_db,
+):
+    registry = _registry_type()(registry_db, reservation_ttl_ms=1_000)
+    await registry_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, root_run_id) "
+        "VALUES ('root-7', 7, 'running', 'agent', '', 'root-7')"
+    )
+    initial = await registry.reserve(
+        host_child_key="project-7/task-7/unit-7/main",
+        identity_digest="identity-7",
+        contract=_contract(),
+        owner_token="owner-1",
+        timestamp_ms=100,
+    )
+    await _insert_attempt_run(
+        registry_db,
+        initial,
+        run_id="child-run-unbound",
+        status="running",
+    )
+    await fence_cancellation_tree(registry_db, "root-7")
+
+    with pytest.raises(ContractViolationError, match="cancellation"):
+        await registry.bind_run(
+            initial,
+            run_id="child-run-unbound",
+            owner_token="owner-1",
+        )
+
+    receipt = await registry_db.fetch_one(
+        "SELECT run_id FROM ai_agent_host_child_runs WHERE host_child_key = ?",
+        [initial.host_child_key],
+    )
+    assert receipt == {"run_id": None}
 
 
 @pytest.mark.asyncio
