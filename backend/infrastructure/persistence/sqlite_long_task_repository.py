@@ -846,6 +846,65 @@ class SqliteLongTaskRepository:
                 raise ValueError("terminal long task cannot be canceled")
             return await self._cancel_in_transaction(task)
 
+    async def fail(
+        self,
+        task_id: str,
+        *,
+        decision: FailureDecision,
+    ) -> LongTaskRecord:
+        """Close nonterminal work after a systemic permanent host failure."""
+
+        if not isinstance(decision, FailureDecision):
+            raise TypeError("long task failure requires a FailureDecision")
+        if (
+            decision.disposition is not FailureDisposition.FAIL_PERMANENT
+            or decision.scope is not FailureScope.SYSTEMIC
+        ):
+            raise ValueError(
+                "long task host failure must be systemic and permanent"
+            )
+        async with self._mutation_transaction():
+            task = await self._require(task_id)
+            if task.status is LongTaskStatus.FAILED:
+                return task
+            if task.status.terminal:
+                raise ValueError("terminal long task cannot be failed")
+            active = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND required = 1 "
+                "AND status IN ('claimed', 'running')",
+                [task.id],
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'failed', "
+                "worker_id = NULL, lease_expires_at_ms = NULL, "
+                "error_code = ?, failure_json = ?, disposition = ?, "
+                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                "AND status IN ('claimed', 'running')",
+                [
+                    decision.code[:240],
+                    _json_dump(_failure_payload(decision)),
+                    decision.disposition.value,
+                    task.id,
+                ],
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'canceled', "
+                "worker_id = NULL, lease_expires_at_ms = NULL, "
+                "error_code = COALESCE(error_code, "
+                "'task_failed_dependency'), update_time = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status IN ('pending', 'waiting_retry', "
+                "'needs_split', 'blocked')",
+                [task.id],
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_tasks SET status = 'failed', "
+                "failed_units = MAX(failed_units, ?), revision = revision + 1, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                [int((active or {}).get("count") or 0), task.id],
+            )
+            return await self._require(task.id)
+
     async def _cancel_in_transaction(
         self,
         task: LongTaskRecord,
