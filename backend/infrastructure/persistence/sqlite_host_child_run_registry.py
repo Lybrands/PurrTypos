@@ -203,6 +203,22 @@ class SqliteHostChildRunRegistry:
                     await self._reconcile(row),
                     HostChildReservationDisposition.BOUND,
                 )
+            root_run_id = str(
+                reservation.contract.get("rootRunId") or ""
+            ).strip()
+            if root_run_id:
+                root = await self._db.fetch_one(
+                    "SELECT status, cancellation_epoch FROM ai_agent_runs "
+                    "WHERE id = ?",
+                    [root_run_id],
+                )
+                if root is not None and (
+                    str(root.get("status") or "") != "running"
+                    or int(root.get("cancellation_epoch") or 0) > 0
+                ):
+                    raise ContractViolationError(
+                        "host child Run cannot bind after Root cancellation"
+                    )
             if (
                 int(row["generation"]) != reservation.generation
                 or str(row["attempt_key"]) != reservation.attempt_key
