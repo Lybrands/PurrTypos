@@ -655,22 +655,21 @@ def test_legacy_task_budgets_and_truncation_replay_stay_removed():
     )
 
 
-def test_screenplay_paused_result_cannot_fall_through_to_failure():
+def test_screenplay_profile_cannot_settle_business_terminal_state():
     source = (
         BACKEND_DIR / "application" / "screenplay_agent_profile.py"
     ).read_text(encoding="utf-8")
-    paused_start = source.index(
-        "if result.status is LongTaskExecutionStatus.PAUSED:"
+    settle_start = source.index("async def _settle_screenplay_execution(")
+    settle_end = source.index(
+        "async def _settle_screenplay_exception(",
+        settle_start,
     )
-    canceled_start = source.index(
-        "if result.status is LongTaskExecutionStatus.CANCELED:",
-        paused_start,
-    )
-    paused_branch = source[paused_start:canceled_start]
+    settle = source[settle_start:settle_end]
 
-    assert "pause_task(" in paused_branch
-    assert "fail_task(" not in paused_branch
-    assert "return" in paused_branch
+    assert "pause_task(" not in settle
+    assert "fail_task(" not in settle
+    assert "complete_task(" not in settle
+    assert "cancel_task(" not in settle
 
 
 def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
