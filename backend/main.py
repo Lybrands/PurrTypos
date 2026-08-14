@@ -89,8 +89,9 @@ async def lifespan(application: FastAPI):
                 recovered_approvals,
             )
 
-        from infrastructure.persistence.run_execution_store import (
-            recover_orphaned_runs,
+        from config import SKILLS_DIR
+        from application.agent_orphan_recovery_service import (
+            AgentOrphanRecoveryService,
         )
         from infrastructure.persistence.writing_chat_request_store import (
             SqliteWritingChatRequestStore,
@@ -98,8 +99,18 @@ async def lifespan(application: FastAPI):
 
         await SqliteWritingChatRequestStore(db).recover_unbound()
 
-        recovered_runs = await recover_orphaned_runs(
-            execution_db,
+        skills_dir = (
+            SKILLS_DIR
+            if SKILLS_DIR and SKILLS_DIR != Path("")
+            else Path(__file__).parent / "skills"
+        )
+        composition = create_agent_composition(
+            db,
+            execution_db=execution_db,
+            skills_dir=skills_dir,
+        )
+        orphan_recovery = AgentOrphanRecoveryService(db, composition)
+        recovered_runs = await orphan_recovery.recover(
             after_restart=True,
         )
         from infrastructure.persistence.run_conversation_store import (
@@ -177,18 +188,6 @@ async def lifespan(application: FastAPI):
                 recovered_delegations,
             )
 
-        from config import SKILLS_DIR
-
-        skills_dir = (
-            SKILLS_DIR
-            if SKILLS_DIR and SKILLS_DIR != Path("")
-            else Path(__file__).parent / "skills"
-        )
-        composition = create_agent_composition(
-            db,
-            execution_db=execution_db,
-            skills_dir=skills_dir,
-        )
         set_agent_composition(composition)
 
         from infrastructure.persistence.orphan_run_monitor import (
@@ -199,7 +198,7 @@ async def lifespan(application: FastAPI):
         artifact_monitor_stop = asyncio.Event()
         orphan_monitor = asyncio.create_task(
             monitor_orphaned_runs(
-                execution_db,
+                recover_orphans=orphan_recovery.recover,
                 stop_event=orphan_monitor_stop,
                 reconcile_terminal_holes=lambda: (
                     materialize_terminal_writing_run_holes(db)
