@@ -16,7 +16,7 @@ from purra.contracts import (
     TerminalRunStatus,
     TraceRecord,
 )
-from purra.errors import ContractViolationError
+from purra.errors import ContractViolationError, RunCancellationConflictError
 from purra.events import AgentEvent, CoreEventType
 from purra.json_values import thaw_json_mapping
 from purra.ports import (
@@ -152,7 +152,8 @@ class SqliteRunRepository:
             raise RuntimeError("run commit requires an ambient transaction")
 
         current = await self._db.fetch_one(
-            "SELECT status, execution_owner_id, lease_expires_at_ms "
+            "SELECT status, execution_owner_id, lease_expires_at_ms, "
+            "cancel_requested_at_ms "
             "FROM ai_agent_runs WHERE id = ?",
             [normalized_run_id],
         )
@@ -168,6 +169,14 @@ class SqliteRunRepository:
             )
         if int(current.get("lease_expires_at_ms") or 0) <= now_ms():
             raise ContractViolationError("run execution lease has expired")
+        if (
+            current.get("cancel_requested_at_ms") is not None
+            and commit.terminal_status is not None
+            and commit.terminal_status is not RunStatus.CANCELED
+        ):
+            raise RunCancellationConflictError(
+                "cancel-requested run only accepts a canceled terminal commit"
+            )
 
         if commit.replace_steps is not None:
             await self.replace_steps(normalized_run_id, commit.replace_steps)

@@ -17,6 +17,7 @@ from purra.contracts import (
 )
 from purra.json_values import freeze_json_mapping, thaw_json_mapping
 from purra.events import AgentEvent, CoreEventType
+from purra.errors import RunCancellationConflictError
 from purra.ports import EventSink, RunCommit, RunRepository
 from purra.run_state import RunSnapshot, RunStateMachine, RunTransition
 
@@ -318,27 +319,33 @@ class AgentRunController:
             if transition.after.status is not before.status
             else None
         )
-        persisted, canceled = await _await_repository_receipt(
-            self._repository.commit(
-                before.run_id,
-                RunCommit(
-                    step_updates=transition.step_updates,
-                    terminal_status=terminal_status,  # type: ignore[arg-type]
-                    final_response=(
-                        transition.after.final_response
-                        if terminal_status is RunStatus.DONE
-                        else None
+        try:
+            persisted, canceled = await _await_repository_receipt(
+                self._repository.commit(
+                    before.run_id,
+                    RunCommit(
+                        step_updates=transition.step_updates,
+                        terminal_status=terminal_status,  # type: ignore[arg-type]
+                        final_response=(
+                            transition.after.final_response
+                            if terminal_status is RunStatus.DONE
+                            else None
+                        ),
+                        validated_result=validated_result,
+                        error=(
+                            transition.after.error
+                            if terminal_status is RunStatus.FAILED
+                            else None
+                        ),
+                        events=events,
                     ),
-                    validated_result=validated_result,
-                    error=(
-                        transition.after.error
-                        if terminal_status is RunStatus.FAILED
-                        else None
-                    ),
-                    events=events,
-                ),
+                )
             )
-        )
+        except RunCancellationConflictError:
+            await self._apply(
+                RunStateMachine.cancel(before, "request_canceled")
+            )
+            return
         if self._snapshot is not before:
             raise RuntimeError("stale run transition")
         self._snapshot = transition.after

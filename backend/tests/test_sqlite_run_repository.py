@@ -23,7 +23,7 @@ from purra.contracts import (
     ToolRiskLevel,
     TraceRecord,
 )
-from purra.errors import ContractViolationError
+from purra.errors import ContractViolationError, RunCancellationConflictError
 from purra.events import AgentEvent, CoreEventType
 from purra.ports import RunCommit, RunRepository
 from database.connection import DatabaseConnection
@@ -952,6 +952,67 @@ async def test_sqlite_repository_rejects_every_commit_after_terminal_state(run_d
     events_after = await get_run_events(run_db, begun.run_id)
     assert run and run["status"] == "done"
     assert events_after == events_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    (RunStatus.DONE, RunStatus.FAILED, RunStatus.BLOCKED),
+)
+async def test_cancel_fence_rejects_every_non_canceled_terminal_commit(
+    run_db,
+    terminal_status,
+):
+    repository = SqliteRunRepository(run_db)
+    begun = await repository.begin(
+        RunCreateParams(session_id=None, prompt="cancel wins", mode="agent"),
+        AgentEvent(type=CoreEventType.RUN_STARTED),
+    )
+    await run_db.execute(
+        "UPDATE ai_agent_runs SET cancel_requested_at_ms = 1, "
+        "cancellation_epoch = 1 WHERE id = ?",
+        [begun.run_id],
+    )
+    event_type = {
+        RunStatus.DONE: CoreEventType.RUN_COMPLETED,
+        RunStatus.FAILED: CoreEventType.RUN_FAILED,
+        RunStatus.BLOCKED: CoreEventType.RUN_BLOCKED,
+    }[terminal_status]
+
+    with pytest.raises(RunCancellationConflictError, match="cancel-requested"):
+        await repository.commit(
+            begun.run_id,
+            RunCommit(
+                terminal_status=terminal_status,
+                final_response=("late answer" if terminal_status is RunStatus.DONE else None),
+                error=("late failure" if terminal_status is RunStatus.FAILED else None),
+                events=(AgentEvent(
+                    type=event_type,
+                    run_id=begun.run_id,
+                    payload={"status": terminal_status.value},
+                ),),
+            ),
+        )
+
+    assert await run_db.fetch_one(
+        "SELECT status, cancel_requested_at_ms FROM ai_agent_runs WHERE id = ?",
+        [begun.run_id],
+    ) == {"status": "running", "cancel_requested_at_ms": 1}
+    await repository.commit(
+        begun.run_id,
+        RunCommit(
+            terminal_status=RunStatus.CANCELED,
+            events=(AgentEvent(
+                type=CoreEventType.RUN_CANCELED,
+                run_id=begun.run_id,
+                payload={"status": RunStatus.CANCELED.value},
+            ),),
+        ),
+    )
+    assert await run_db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [begun.run_id],
+    ) == {"status": "canceled"}
 
 
 @pytest.mark.asyncio
