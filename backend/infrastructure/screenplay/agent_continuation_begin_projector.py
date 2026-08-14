@@ -8,10 +8,11 @@ from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
 from domains.screenplay_agent.agent_context import SCREENPLAY_AGENT_DOMAIN_NAMESPACE
-from domains.screenplay_agent import ContinuationStartLost
+from domains.screenplay_agent import ContinuationStartLost, ScreenplayRootStartLost
 from purra.contracts import RunCreateParams
 from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
+from infrastructure.persistence.run_execution_store import now_ms
 
 
 class ScreenplayContinuationBeginProjector:
@@ -24,14 +25,14 @@ class ScreenplayContinuationBeginProjector:
             return None
         attributes = thaw_json_mapping(binding.attributes)
         source_root = str(attributes.get("continuationOf") or "").strip()
-        if not source_root:
-            return None
         if (
             str(attributes.get("agentProfile") or "") != "screenplay"
             or str(attributes.get("domainNamespace") or "")
             != SCREENPLAY_AGENT_DOMAIN_NAMESPACE
         ):
             raise ContractViolationError("screenplay continuation profile conflicts")
+        if not source_root:
+            return await self._project_initial_root(run_id, params, attributes)
         command_id = str(binding.command_id or "").strip()
         operation_id = str(attributes.get("operationId") or "").strip()
         owner_id = str(attributes.get("continuationOwner") or "").strip()
@@ -130,6 +131,49 @@ class ScreenplayContinuationBeginProjector:
         if int((changed or {}).get("count") or 0) != 1:
             raise ContinuationStartLost(
                 "screenplay continuation Turn rotation was lost"
+            )
+        return None
+
+    async def _project_initial_root(
+        self,
+        run_id: str,
+        params: RunCreateParams,
+        attributes: Mapping[str, object],
+    ) -> None:
+        binding = params.binding
+        assert binding is not None
+        owner = str(attributes.get("turnExecutionOwner") or "").strip()
+        attempt = attributes.get("turnAttempt")
+        if not owner or not (
+            isinstance(attempt, int)
+            and not isinstance(attempt, bool)
+            and attempt > 0
+        ):
+            raise ContractViolationError(
+                "screenplay initial Root binding is incomplete"
+            )
+        await self._db.execute(
+            "UPDATE screenplay_agent_turns SET planner_run_id = ?, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ? "
+            "AND session_id = ? AND command_id = ? AND status = 'planning' "
+            "AND planner_run_id IS NULL AND execution_owner_id = ? "
+            "AND attempt = ? AND lease_expires_at_ms > ? "
+            "AND cancel_requested_at_ms IS NULL",
+            [
+                run_id,
+                str(params.turn_id or ""),
+                str(binding.aggregate_id or ""),
+                int(params.session_id or 0),
+                str(binding.command_id or ""),
+                owner,
+                attempt,
+                now_ms(),
+            ],
+        )
+        changed = await self._db.fetch_one("SELECT changes() AS count")
+        if int((changed or {}).get("count") or 0) != 1:
+            raise ScreenplayRootStartLost(
+                "screenplay initial Root Turn claim was lost"
             )
         return None
 

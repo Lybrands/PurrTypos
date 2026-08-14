@@ -26,6 +26,10 @@ class ContinuationStartLost(RuntimeError):
     """A valid continuation starter lost its durable reservation fence."""
 
 
+class ScreenplayRootStartLost(RuntimeError):
+    """A claimed Turn lost its authority before the Root became durable."""
+
+
 class ScreenplayScopeKind(StrEnum):
     CURRENT_STAGE = "current_stage"
     NEXT_EPISODES = "next_episodes"

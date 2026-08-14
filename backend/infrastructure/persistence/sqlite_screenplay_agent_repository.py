@@ -23,6 +23,10 @@ class SqliteScreenplayAgentRepository:
         self._db = db
         self._owner_id = _required(owner_id, "screenplay Agent owner id")
 
+    @property
+    def owner_id(self) -> str:
+        return self._owner_id
+
     @asynccontextmanager
     async def _mutation_transaction(self):
         if self._db.current_task_owns_transaction():
@@ -214,6 +218,40 @@ class SqliteScreenplayAgentRepository:
                 [self._owner_id, current + LEASE_MS, current, turn_id],
             )
             return True
+
+    async def validate_claimed_turn_start(
+        self,
+        turn_id: str,
+        *,
+        attempt: int,
+    ) -> bool:
+        turn = await self._db.fetch_one(
+            "SELECT status, planner_run_id, execution_owner_id, "
+            "lease_expires_at_ms, cancel_requested_at_ms, attempt "
+            "FROM screenplay_agent_turns WHERE id = ?",
+            [turn_id],
+        )
+        return bool(
+            turn is not None
+            and str(turn.get("status") or "") == "planning"
+            and not str(turn.get("planner_run_id") or "")
+            and str(turn.get("execution_owner_id") or "") == self._owner_id
+            and int(turn.get("lease_expires_at_ms") or 0) > now_ms()
+            and turn.get("cancel_requested_at_ms") is None
+            and int(turn.get("attempt") or 0) == int(attempt)
+        )
+
+    async def release_canceled_turn_claim(self, turn_id: str) -> bool:
+        async with self._db.transaction(cancellation_linearizable=True):
+            await self._db.execute(
+                "UPDATE screenplay_agent_turns SET execution_owner_id = NULL, "
+                "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
+                "update_time = CURRENT_TIMESTAMP WHERE id = ? "
+                "AND execution_owner_id = ? AND cancel_requested_at_ms IS NOT NULL",
+                [turn_id, self._owner_id],
+            )
+            changed = await self._db.fetch_one("SELECT changes() AS count")
+            return int((changed or {}).get("count") or 0) == 1
 
     async def record_intent(
         self,
@@ -448,6 +486,7 @@ class SqliteScreenplayAgentRepository:
                 if row.get("planner_run_id")
             ]
             await self._require_truncation_barrier(
+                turn_ids=turn_ids,
                 root_ids=root_ids,
                 task_ids=task_ids,
             )
@@ -495,6 +534,7 @@ class SqliteScreenplayAgentRepository:
     async def _require_truncation_barrier(
         self,
         *,
+        turn_ids: Sequence[str],
         root_ids: Sequence[str],
         task_ids: Sequence[str],
     ) -> None:
@@ -518,6 +558,16 @@ class SqliteScreenplayAgentRepository:
                 (active_delegations or {}).get("count") or 0
             ):
                 raise AppError("screenplay truncate runtime is still active", 409)
+        if turn_ids:
+            active_turns = await self._db.fetch_one(
+                "SELECT COUNT(*) AS count FROM screenplay_agent_turns WHERE "
+                f"id IN ({_marks(turn_ids)}) AND (status IN "
+                "('queued', 'planning', 'running', 'paused') OR "
+                "execution_owner_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
+                list(turn_ids),
+            )
+            if int((active_turns or {}).get("count") or 0):
+                raise AppError("screenplay truncate Turn is still active", 409)
         if task_ids:
             active_units = await self._db.fetch_one(
                 "SELECT COUNT(*) AS count FROM ai_agent_long_task_units WHERE "
@@ -786,6 +836,10 @@ def _turn_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "stageCommand": _object(row.get("stage_command_json")) or None,
         "assistantContent": str(row.get("assistant_content") or ""),
         "runtimeProfile": _object(row.get("runtime_profile_json")),
+        "executionOwnerId": str(row.get("execution_owner_id") or "") or None,
+        "leaseExpiresAtMs": row.get("lease_expires_at_ms"),
+        "cancelRequestedAtMs": row.get("cancel_requested_at_ms"),
+        "attempt": int(row.get("attempt") or 0),
         "intent": _object(row.get("intent_json")) or None,
         "rootRunId": root_run_id,
         # Deprecated read-only alias for clients persisted before Root Runs.

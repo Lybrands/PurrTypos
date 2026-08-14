@@ -9,6 +9,7 @@ from domains.screenplay_agent.contracts import (
     ScreenplayIntentCommandMismatchError,
     ScreenplayIntentScope,
     ScreenplayStageCommand,
+    ScreenplayRootStartLost,
 )
 from domains.screenplay_agent.operation import (
     OperationUsage,
@@ -24,6 +25,7 @@ from domains.screenplay_agent.manifest import (
 
 __all__ = [
     "ContinuationStartLost",
+    "ScreenplayRootStartLost",
     "OperationUsage",
     "ScreenplayIntent",
     "ScreenplayIntentAction",
