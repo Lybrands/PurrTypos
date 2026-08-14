@@ -428,8 +428,13 @@ class _ScreenplayCheckpointObserver:
             await self._dispatcher._long_tasks.pause(task.id)
             return
         try:
+            source_root, original_root = (
+                await self._dispatcher._checkpoints.continuation_plan_roots(
+                    self._root_run_id
+                )
+            )
             original = await self._dispatcher._checkpoints.load_root_plan(
-                self._root_run_id,
+                original_root,
                 initial=True,
             )
             current = await self._dispatcher._checkpoints.load_root_plan(
@@ -449,6 +454,7 @@ class _ScreenplayCheckpointObserver:
             checkpoint_key,
             original,
             current,
+            root_run_id=self._root_run_id,
         )
         input_digest = _checkpoint_input_digest(checkpoint_input)
         if existing is not None and str(existing["status"]) in {
@@ -469,8 +475,43 @@ class _ScreenplayCheckpointObserver:
                 await self._emit_ready(existing, progress_update, task=task)
                 return
             if str(existing["input_digest"]) != input_digest:
-                await self._pause_stale_ready(task, existing)
-                return
+                if source_root is None:
+                    await self._pause_stale_ready(task, existing)
+                    return
+                try:
+                    source_current = (
+                        await self._dispatcher._checkpoints.load_root_plan(
+                            source_root
+                        )
+                    )
+                    source_input = _checkpoint_input(
+                        task,
+                        units,
+                        metadata,
+                        checkpoint_key,
+                        original,
+                        source_current,
+                        root_run_id=source_root,
+                    )
+                    if str(existing["input_digest"]) != (
+                        _checkpoint_input_digest(source_input)
+                    ):
+                        raise ScreenplayCheckpointStateError(
+                            "checkpoint continuation input changed"
+                        )
+                    existing = await (
+                        self._dispatcher._checkpoints
+                        .rebase_ready_for_continuation(
+                            operation_id=operation_id,
+                            checkpoint_key=checkpoint_key,
+                            expected_plan_digest=str(existing["plan_digest"]),
+                            current_plan=current,
+                            input_digest=input_digest,
+                        )
+                    )
+                except ScreenplayCheckpointStateError:
+                    await self._pause_stale_ready(task, existing)
+                    return
             await self._emit_ready(existing, progress_update, task=task)
             return
         reservation_token = uuid4().hex
@@ -741,6 +782,8 @@ def _checkpoint_input(
     checkpoint_key,
     original,
     current,
+    *,
+    root_run_id: str | None = None,
 ) -> ScreenplayCheckpointInput:
     completed = tuple({
         "stepId": step.id,
@@ -819,7 +862,10 @@ def _checkpoint_input(
     } for unit in units if unit.error_code)
     return ScreenplayCheckpointInput(
         checkpoint_key=checkpoint_key,
-        root_run_id=task.created_by_run_id,
+        root_run_id=(
+            str(root_run_id or "").strip()
+            or str(task.created_by_run_id)
+        ),
         task_id=task.id,
         turn_id=str(metadata["turnId"]),
         project_id=str(metadata["projectId"]),

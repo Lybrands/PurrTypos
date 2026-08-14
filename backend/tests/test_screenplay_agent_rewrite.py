@@ -564,6 +564,336 @@ async def test_checkpoint_reservation_is_single_winner_and_expiry_recoverable(
     assert recovered["reservation_owner"] == "owner-after-restart"
 
 
+async def test_ready_checkpoint_rebinds_to_continuation_root_after_crash(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-continuation",
+        task_id="task-continuation",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest="sha256:" + "3" * 64,
+    )
+    ready = await repository.ready(
+        operation_id="operation-continuation",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await repository.rebind_for_continuation(
+            operation_id="operation-continuation",
+            source_root_run_id="root-old",
+            continuation_root_run_id="root-new",
+        )
+
+    rebound = await repository.load("operation-continuation", "episode:4")
+    assert rebound["status"] == "ready"
+    assert rebound["root_run_id"] == "root-new"
+    assert rebound["plan_digest"] == ready["plan_digest"]
+    assert rebound["input_digest"] == ready["input_digest"]
+
+
+async def test_applied_checkpoint_on_source_root_remains_immutable_audit(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-applied-audit",
+        task_id="task-applied-audit",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest="sha256:" + "7" * 64,
+    )
+    ready = await repository.ready(
+        operation_id="operation-applied-audit",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json) "
+        "VALUES ('root-old', 'run.todos_updated', ?)",
+        [json.dumps(_root_revision_payload(
+            _canonical_root_plan(plan),
+            identity="episode:4",
+            digest=str(ready["plan_digest"]),
+        ))],
+    )
+
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await repository.rebind_for_continuation(
+            operation_id="operation-applied-audit",
+            source_root_run_id="root-old",
+            continuation_root_run_id="root-new",
+        )
+
+    applied = await repository.load("operation-applied-audit", "episode:4")
+    assert applied["status"] == "applied"
+    assert applied["root_run_id"] == "root-old"
+    assert applied["plan_digest"] == ready["plan_digest"]
+
+
+async def test_paused_checkpoint_retries_only_after_explicit_continuation_rebind(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    reservation = await repository.reserve(
+        operation_id="operation-paused-retry",
+        task_id="task-paused-retry",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest="sha256:" + "8" * 64,
+        reservation_token="planner-old",
+    )
+    paused = await repository.pause(
+        operation_id="operation-paused-retry",
+        checkpoint_key="episode:4",
+        outcome=ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION,
+        code="scope_changed",
+        reservation_owner="planner-old",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+
+    unchanged = await repository.reserve(
+        operation_id="operation-paused-retry",
+        task_id="task-paused-retry",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest=str(paused["input_digest"]),
+        reservation_token="implicit-retry",
+    )
+    assert unchanged["status"] == "paused"
+    assert unchanged["_acquired"] is False
+
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await repository.rebind_for_continuation(
+            operation_id="operation-paused-retry",
+            source_root_run_id="root-old",
+            continuation_root_run_id="root-new",
+        )
+    retried = await repository.acquire_planning(
+        operation_id="operation-paused-retry",
+        task_id="task-paused-retry",
+        checkpoint_key="episode:4",
+        root_run_id="root-new",
+        input_digest="sha256:" + "9" * 64,
+        reservation_token="explicit-retry",
+    )
+
+    assert retried["status"] == "reserved"
+    assert retried["_acquired"] is True
+    assert retried["root_run_id"] == "root-new"
+    assert retried["input_digest"] == "sha256:" + "9" * 64
+    assert retried["reservation_owner"] == "explicit-retry"
+
+
+async def test_null_continuation_binding_is_not_a_phantom_root(
+    temp_db: DatabaseConnection,
+):
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, binding_attributes_json) "
+        "VALUES ('root-original', 'running', '', ?)",
+        [json.dumps({"continuationOf": None})],
+    )
+
+    assert await SqliteScreenplayCheckpointRepository(
+        temp_db
+    ).continuation_plan_roots("root-original") == (None, "root-original")
+
+
+async def test_expired_checkpoint_owner_is_fenced_during_continuation_rebind(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-expired-applying",
+        task_id="task-expired-applying",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest="sha256:" + "4" * 64,
+    )
+    ready = await repository.ready(
+        operation_id="operation-expired-applying",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    applying = await repository.acquire_applying(
+        operation_id="operation-expired-applying",
+        checkpoint_key="episode:4",
+        digest=str(ready["plan_digest"]),
+        reservation_token="dead-owner",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-expired-applying"],
+    )
+    reserved = await repository.reserve(
+        operation_id="operation-expired-reserved",
+        task_id="task-expired-reserved",
+        checkpoint_key="episode:5",
+        root_run_id="root-old",
+        input_digest="sha256:" + "5" * 64,
+        reservation_token="dead-planner",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-expired-reserved"],
+    )
+
+    async with temp_db.transaction(cancellation_linearizable=True):
+        await repository.rebind_for_continuation(
+            operation_id="operation-expired-applying",
+            source_root_run_id="root-old",
+            continuation_root_run_id="root-new",
+        )
+        await repository.rebind_for_continuation(
+            operation_id="operation-expired-reserved",
+            source_root_run_id="root-old",
+            continuation_root_run_id="root-new",
+        )
+
+    rebound = await repository.load(
+        "operation-expired-applying", "episode:4"
+    )
+    assert rebound["status"] == "ready"
+    assert rebound["root_run_id"] == "root-new"
+    assert rebound["reservation_owner"] is None
+    assert int(rebound["reservation_epoch"]) > int(
+        applying["reservation_epoch"]
+    )
+    abandoned = await repository.load(
+        "operation-expired-reserved", "episode:5"
+    )
+    assert abandoned["status"] == "continuation_retry"
+    assert abandoned["root_run_id"] == "root-new"
+    assert abandoned["error_code"] == "screenplay_checkpoint_owner_expired"
+    assert abandoned["reservation_owner"] is None
+    assert int(abandoned["reservation_epoch"]) > int(
+        reserved["reservation_epoch"]
+    )
+
+
+async def test_active_checkpoint_owner_blocks_continuation_rebind(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    active = await repository.reserve(
+        operation_id="operation-active-owner",
+        task_id="task-active-owner",
+        checkpoint_key="episode:4",
+        root_run_id="root-old",
+        input_digest="sha256:" + "a" * 64,
+        reservation_token="live-planner",
+    )
+
+    with pytest.raises(
+        ScreenplayCheckpointStateError,
+        match="reservation is active",
+    ):
+        async with temp_db.transaction(cancellation_linearizable=True):
+            await repository.rebind_for_continuation(
+                operation_id="operation-active-owner",
+                source_root_run_id="root-old",
+                continuation_root_run_id="root-new",
+            )
+
+    unchanged = await repository.load("operation-active-owner", "episode:4")
+    assert unchanged["status"] == "reserved"
+    assert unchanged["root_run_id"] == "root-old"
+    assert unchanged["reservation_owner"] == "live-planner"
+    assert unchanged["reservation_epoch"] == active["reservation_epoch"]
+
+
+async def test_continuation_ready_rebase_only_synchronizes_root_step_status(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    baseline = TaskPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    revised = replace(
+        baseline,
+        steps=(
+            baseline.steps[0],
+            replace(baseline.steps[1], title="调整后的生成步骤"),
+            baseline.steps[2],
+        ),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-rebase",
+        task_id="task-rebase",
+        checkpoint_key="episode:4",
+        root_run_id="root-new",
+        input_digest="sha256:" + "6" * 64,
+    )
+    ready = await repository.ready(
+        operation_id="operation-rebase",
+        checkpoint_key="episode:4",
+        plan=revised,
+        outcome=ScreenplayCheckpointOutcome.REVISED,
+        reservation_owner=str(reservation["reservation_owner"]),
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    current = replace(
+        baseline,
+        steps=(
+            replace(
+                baseline.steps[0],
+                status=StepStatus.DONE,
+                result_summary="证据已读取",
+            ),
+            baseline.steps[1],
+            baseline.steps[2],
+        ),
+    )
+
+    rebound = await repository.rebase_ready_for_continuation(
+        operation_id="operation-rebase",
+        checkpoint_key="episode:4",
+        expected_plan_digest=str(ready["plan_digest"]),
+        current_plan=current,
+        input_digest="sha256:" + "7" * 64,
+    )
+
+    plan = parse_persisted_plan(str(rebound["plan_json"]))
+    assert plan.steps[0].status is StepStatus.DONE
+    assert plan.steps[0].result_summary == "证据已读取"
+    assert plan.steps[1].title == "调整后的生成步骤"
+    assert rebound["input_digest"] == "sha256:" + "7" * 64
+    assert rebound["plan_digest"] != ready["plan_digest"]
+
+
 async def test_checkpoint_non_owner_waits_at_barrier_until_owner_is_ready(
     temp_db: DatabaseConnection,
 ):
