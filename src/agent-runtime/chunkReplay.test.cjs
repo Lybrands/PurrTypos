@@ -510,6 +510,19 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         },
       },
     }),
+    canonical(root, 3, {
+      turnId: seed.turnId,
+      payload: {
+        eventType: 'long_task.dispatched',
+        data: {
+          taskId: 'screenplay-task-1',
+          dispatchReceiptId: 'dispatch-receipt-screenplay-1',
+          status: 'running',
+        },
+      },
+    }),
+    // Sequence 4 is the persisted PRIVATE long_task.progress event. Public
+    // live and replay cursors intentionally retain this gap.
     canonical(root, 5, {
       turnId: seed.turnId,
       kind: 'operation.started',
@@ -705,27 +718,13 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
         },
       },
     }),
-    canonical(root, 20, {
-      turnId: seed.turnId,
-      outputStreamId: 'root-final',
-      invocationId: 'root-final-invocation',
-      source: 'provider',
-      kind: 'provider.content_delta',
-      channel: 'final',
-      payload: { delta: '下一集候选稿已经完成。' },
-    }),
-    canonical(root, 21, {
-      turnId: seed.turnId,
-      outputStreamId: 'root-final',
-      invocationId: 'root-final-invocation',
-      kind: 'stream.committed',
-      channel: 'final',
-      payload: { finishReason: 'stop' },
-    }),
     canonical(root, 22, {
       turnId: seed.turnId,
       kind: 'run.lifecycle',
-      payload: { status: 'done' },
+      payload: {
+        status: 'done',
+        final_response: '下一集候选稿已经完成。',
+      },
     }),
     { done: true, model: 'screenplay-final-model' },
   ]
@@ -738,9 +737,15 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   assert.equal(chunks.some((chunk) => chunk?.visibility === 'private'), false)
   assert.equal(JSON.stringify(chunks).includes('Recipe 生成正文'), false)
   assert.equal(JSON.stringify(chunks).includes('plannerStepId'), false)
+  assert.equal(chunks.some((chunk) => (
+    chunk?.runId === root
+    && chunk?.kind === 'provider.content_delta'
+    && chunk?.channel === 'final'
+  )), false)
   assert.deepEqual(restored, live)
   assert.equal(restored?.agentRunId, root)
   assert.equal(restored?.content, '下一集候选稿已经完成。')
+  assert.equal(restored?.longTaskId, 'screenplay-task-1')
   assert.equal(restored?.taskPlan?.runId, root)
   assert.equal(restored?.taskPlan?.status, 'done')
   assert.deepEqual(
@@ -760,6 +765,15 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   assert.equal(publicPlan.includes('Recipe'), false)
   assert.equal(publicPlan.includes('校验候选稿'), false)
   assert.equal(publicPlan.includes('plannerStepId'), false)
+  const dispatch = chunks.find((chunk) => (
+    chunk?.payload?.eventType === 'long_task.dispatched'
+  ))
+  assert.deepEqual(dispatch?.payload?.data, {
+    taskId: 'screenplay-task-1',
+    dispatchReceiptId: 'dispatch-receipt-screenplay-1',
+    status: 'running',
+  })
+  assert.equal(chunks.some((chunk) => chunk?.sequence === 4), false)
   assert.deepEqual(restored?.canonicalOutput?.operationOrder, ['tool-read-source'])
   assert.equal(
     restored?.canonicalOutput?.operations['tool-read-source']?.toolName,

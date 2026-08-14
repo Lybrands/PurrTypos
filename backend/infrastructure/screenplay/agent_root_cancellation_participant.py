@@ -54,7 +54,8 @@ class ScreenplayRootCancellationParticipant:
             )
         turn_id = str(identities[0].get("turn_id") or "").strip()
         turn = await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_turns WHERE id = ? "
+            "SELECT *, planner_run_id AS root_run_id "
+            "FROM screenplay_agent_turns WHERE id = ? "
             "AND planner_run_id = ?",
             [turn_id, root_run_id],
         )
