@@ -7,6 +7,9 @@ import pytest
 import pytest_asyncio
 
 from purra.contracts import RunBinding, RunCreateParams
+from purra.errors import RunCommitProjectionError
+from application.agent_orphan_recovery_service import AgentOrphanRecoveryService
+from application.composition_factory import create_agent_composition
 from application.run_execution_control import RunExecutionSession
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_execution_store, run_store
@@ -27,12 +30,51 @@ async def db(tmp_path: Path):
         await connection.close()
 
 
+@pytest_asyncio.fixture
+async def orphan_recovery(db):
+    composition = create_agent_composition(db)
+    try:
+        yield AgentOrphanRecoveryService(db, composition)
+    finally:
+        await composition.shutdown()
+
+
 async def _unowned_run(db: DatabaseConnection) -> str:
     return await run_store.create_run(
         db,
         session_id=None,
         prompt="execute",
         mode="agent",
+    )
+
+
+async def _seed_orphan_artifact_claim(db, run_id: str, suffix: str) -> None:
+    work_item_id = f"orphan-item-{suffix}"
+    artifact_id = f"orphan-artifact-{suffix}"
+    await db.execute(
+        "INSERT INTO ai_agent_work_items "
+        "(id, namespace, kind, owner_id, created_by_run_id) "
+        "VALUES (?, 'test', 'draft', 'owner', ?)",
+        [work_item_id, run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_work_item_runs "
+        "(work_item_id, run_id, relation, work_item_revision) "
+        "VALUES (?, ?, 'created', 1)",
+        [work_item_id, run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
+        "work_item_id, created_by_run_id) VALUES "
+        "(?, 'test', 'draft', 'owner', ?, 'work_item', ?, ?)",
+        [artifact_id, run_id, work_item_id, run_id],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifact_claims "
+        "(artifact_id, work_item_id, run_id, claim_token, "
+        "acquired_revision, expires_at_ms) VALUES (?, ?, ?, ?, 1, 999999)",
+        [artifact_id, work_item_id, run_id, f"claim-{suffix}"],
     )
 
 
@@ -159,7 +201,10 @@ async def test_cancellation_blocks_future_claim_and_wakes_live_session(db):
 
 
 @pytest.mark.asyncio
-async def test_expired_run_is_terminalized_atomically_and_idempotently(db):
+async def test_expired_run_is_terminalized_atomically_and_idempotently(
+    db,
+    orphan_recovery,
+):
     run_id = await run_store.create_run(
         db,
         session_id=7,
@@ -204,30 +249,26 @@ async def test_expired_run_is_terminalized_atomically_and_idempotently(db):
         [run_id],
     )
 
-    assert not await run_execution_store.terminalize_orphaned_run(
+    assert await run_execution_store.list_orphaned_run_candidates(
         db,
-        run_id,
         timestamp_ms=1_099,
-    )
-    assert await run_execution_store.terminalize_orphaned_run(
+    ) == ()
+    candidates = await run_execution_store.list_orphaned_run_candidates(
         db,
-        run_id,
         timestamp_ms=1_100,
     )
-    assert not await run_execution_store.terminalize_orphaned_run(
-        db,
-        run_id,
-        timestamp_ms=1_101,
-    )
+    assert [candidate["id"] for candidate in candidates] == [run_id]
+    assert await orphan_recovery.recover() == (run_id,)
+    assert await orphan_recovery.recover() == ()
 
     run = await run_store.get_run(db, run_id)
     todos = await run_store.get_run_todos(db, run_id)
     events = await run_store.get_run_events(db, run_id)
-    assert run is not None and run["status"] == "canceled"
+    assert run is not None and run["status"] == "failed"
     assert run["execution_owner_id"] is None
-    assert todos[0]["status"] == "blocked"
-    assert [event["eventType"] for event in events] == ["run.canceled"]
-    assert events[0]["payload"]["reason"] == "execution_owner_unavailable"
+    assert todos[0]["status"] == "failed"
+    assert [event["eventType"] for event in events] == ["run.lifecycle"]
+    assert events[0]["payload"]["reason"] == "execution_lease_expired"
     assert await db.fetch_one(
         "SELECT artifact_id FROM ai_agent_artifact_claims "
         "WHERE artifact_id = 'orphan-artifact'"
@@ -235,7 +276,315 @@ async def test_expired_run_is_terminalized_atomically_and_idempotently(db):
 
 
 @pytest.mark.asyncio
-async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(db):
+async def test_orphan_recovery_uses_canonical_failed_commit_and_clears_claim(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="canonical orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    await _seed_orphan_artifact_claim(db, run_id, "canonical")
+    composition = create_agent_composition(db)
+    try:
+        recovered = await AgentOrphanRecoveryService(db, composition).recover()
+    finally:
+        await composition.shutdown()
+
+    assert recovered == (run_id,)
+    assert await db.fetch_one(
+        "SELECT status, execution_owner_id, lease_expires_at_ms FROM "
+        "ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {
+        "status": "failed",
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+    terminal = await db.fetch_one(
+        "SELECT source_event_key, event_id, source, kind FROM "
+        "ai_agent_run_events WHERE run_id = ? AND source_event_key = ?",
+        [run_id, f"run:{run_id}:failed"],
+    )
+    assert terminal is not None
+    assert terminal["source_event_key"] == f"run:{run_id}:failed"
+    assert str(terminal["event_id"] or "")
+    assert terminal["source"] == "runtime"
+    assert terminal["kind"] == "run.lifecycle"
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_id IS NULL",
+        [run_id],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_retries_full_terminal_projection_once(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="retry canonical orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    await _seed_orphan_artifact_claim(db, run_id, "retry")
+
+    class FailOnce:
+        def __init__(self):
+            self.calls = 0
+
+        async def project(self, projected_run_id, commit):
+            assert projected_run_id == run_id
+            assert commit.terminal_status.value == "failed"
+            self.calls += 1
+            if self.calls == 1:
+                raise RunCommitProjectionError(
+                    "transient orphan projection",
+                    retryable=True,
+                )
+
+    projector = FailOnce()
+    composition = create_agent_composition(
+        db,
+        run_commit_projector=projector,
+    )
+    try:
+        recovered = await AgentOrphanRecoveryService(db, composition).recover()
+    finally:
+        await composition.shutdown()
+
+    assert recovered == (run_id,)
+    assert projector.calls == 2
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [run_id, f"run:{run_id}:failed"],
+    ) == {"count": 1}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    ) == {"count": 0}
+
+
+@pytest.mark.asyncio
+async def test_orphan_projection_failure_rolls_back_terminal_and_claim_cleanup(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="rollback canonical orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    await _seed_orphan_artifact_claim(db, run_id, "rollback")
+
+    class RejectProjection:
+        async def project(self, projected_run_id, commit):
+            assert projected_run_id == run_id
+            assert commit.terminal_status.value == "failed"
+            raise RunCommitProjectionError(
+                "permanent orphan projection",
+                retryable=False,
+            )
+
+    composition = create_agent_composition(
+        db,
+        run_commit_projector=RejectProjection(),
+    )
+    try:
+        with pytest.raises(
+            RunCommitProjectionError,
+            match="permanent orphan projection",
+        ):
+            await AgentOrphanRecoveryService(db, composition).recover()
+    finally:
+        await composition.shutdown()
+
+    assert await db.fetch_one(
+        "SELECT status, execution_owner_id, lease_expires_at_ms FROM "
+        "ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {
+        "status": "running",
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [run_id, f"run:{run_id}:failed"],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
+        [run_id],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_orphan_recovers_as_canceled(
+    db,
+    orphan_recovery,
+):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="canceled orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    assert await run_execution_store.request_cancellation(db, run_id)
+
+    assert await orphan_recovery.recover() == (run_id,)
+
+    assert await db.fetch_one(
+        "SELECT status, execution_owner_id, lease_expires_at_ms FROM "
+        "ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {
+        "status": "canceled",
+        "execution_owner_id": None,
+        "lease_expires_at_ms": None,
+    }
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [run_id],
+    ) == {"status": "completed"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [run_id, f"run:{run_id}:canceled"],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_orphan_monitors_have_one_recovery_owner(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="one recovery owner",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    first_composition = create_agent_composition(db)
+    second_composition = create_agent_composition(db)
+    try:
+        results = await asyncio.gather(
+            AgentOrphanRecoveryService(db, first_composition).recover(),
+            AgentOrphanRecoveryService(db, second_composition).recover(),
+        )
+    finally:
+        await first_composition.shutdown()
+        await second_composition.shutdown()
+
+    assert sorted(len(result) for result in results) == [0, 1]
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "failed"}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [run_id, f"run:{run_id}:failed"],
+    ) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_live_descendant_defers_runtime_root_orphan_recovery(db):
+    root_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="expired root",
+        mode="agent",
+        execution_owner_id="dead-root-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    child_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="live child",
+        mode="agent",
+        parent_run_id=root_id,
+        root_run_id=root_id,
+        run_depth=1,
+        execution_owner_id="live-child-worker",
+        heartbeat_at_ms=10,
+        lease_expires_at_ms=9999999999999,
+    )
+
+    assert await run_execution_store.list_orphaned_run_candidates(db) == ()
+    restart = await run_execution_store.list_orphaned_run_candidates(
+        db,
+        after_restart=True,
+    )
+    assert {row["id"] for row in restart} == {root_id, child_id}
+
+
+@pytest.mark.asyncio
+async def test_restart_cancel_recovery_drains_root_and_old_child(
+    db,
+    orphan_recovery,
+):
+    root_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="canceled old root",
+        mode="agent",
+        execution_owner_id="old-root-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=9999999999999,
+    )
+    child_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="canceled old child",
+        mode="agent",
+        parent_run_id=root_id,
+        root_run_id=root_id,
+        run_depth=1,
+        execution_owner_id="old-child-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=9999999999999,
+    )
+    assert await run_execution_store.request_cancellation(db, root_id)
+
+    recovered = await orphan_recovery.recover(after_restart=True)
+
+    assert set(recovered) == {root_id, child_id}
+    assert await db.fetch_all(
+        "SELECT id, status FROM ai_agent_runs WHERE id IN (?, ?) ORDER BY id",
+        [root_id, child_id],
+    ) == sorted(
+        [
+            {"id": root_id, "status": "canceled"},
+            {"id": child_id, "status": "canceled"},
+        ],
+        key=lambda row: row["id"],
+    )
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        [root_id],
+    ) == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(
+    db,
+    orphan_recovery,
+):
     live_until_later = await run_store.create_run(
         db,
         session_id=None,
@@ -247,9 +596,7 @@ async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(db):
     )
     unowned = await _unowned_run(db)
 
-    recovered = await run_execution_store.recover_orphaned_runs(
-        db,
-        timestamp_ms=10_001,
+    recovered = await orphan_recovery.recover(
         after_restart=True,
     )
 
@@ -257,14 +604,17 @@ async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(db):
     for run_id in recovered:
         run = await run_store.get_run(db, run_id)
         events = await run_store.get_run_events(db, run_id)
-        assert run is not None and run["status"] == "canceled"
+        assert run is not None and run["status"] == "failed"
         assert events[-1]["payload"]["reason"] == (
             "execution_recovery_after_restart"
         )
 
 
 @pytest.mark.asyncio
-async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(db):
+async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(
+    db,
+    orphan_recovery,
+):
     await db.execute(
         "INSERT INTO ai_sessions (id, book_id, chapter_id) "
         "VALUES (91, 'book-91', 'chapter-91')"
@@ -279,9 +629,7 @@ async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(
         heartbeat_at_ms=10_000,
         lease_expires_at_ms=99_999,
     )
-    recovered = await run_execution_store.recover_orphaned_runs(
-        db,
-        timestamp_ms=10_001,
+    recovered = await orphan_recovery.recover(
         after_restart=True,
     )
 
@@ -299,7 +647,7 @@ async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(
         "WHERE r.id = ?",
         [run_id],
     ) == {
-        "status": "canceled",
+        "status": "failed",
         "conversation_id": 1,
         "response": "",
     }
@@ -325,7 +673,10 @@ async def test_restart_recovery_materializes_terminal_book_run_before_next_turn(
 
 
 @pytest.mark.asyncio
-async def test_orphan_monitor_reaps_expired_run_without_restart(db):
+async def test_orphan_monitor_reaps_expired_run_without_restart(
+    db,
+    orphan_recovery,
+):
     run_id = await run_store.create_run(
         db,
         session_id=None,
@@ -336,13 +687,13 @@ async def test_orphan_monitor_reaps_expired_run_without_restart(db):
         lease_expires_at_ms=2,
     )
     monitor = asyncio.create_task(monitor_orphaned_runs(
-        db,
+        recover_orphans=orphan_recovery.recover,
         poll_interval_seconds=0.01,
     ))
     try:
         for _ in range(100):
             run = await run_store.get_run(db, run_id)
-            if run is not None and run["status"] == "canceled":
+            if run is not None and run["status"] == "failed":
                 break
             await asyncio.sleep(0.01)
         else:
@@ -354,7 +705,10 @@ async def test_orphan_monitor_reaps_expired_run_without_restart(db):
 
 
 @pytest.mark.asyncio
-async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(db):
+async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(
+    db,
+    orphan_recovery,
+):
     run_id = await run_store.create_run(
         db,
         session_id=None,
@@ -371,13 +725,13 @@ async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(db):
         nonlocal calls
         calls += 1
         run = await run_store.get_run(db, run_id)
-        if run is not None and run["status"] == "canceled":
+        if run is not None and run["status"] == "failed":
             reconciled.set()
             return ("linked-operation",)
         return ()
 
     monitor = asyncio.create_task(monitor_orphaned_runs(
-        db,
+        recover_orphans=orphan_recovery.recover,
         poll_interval_seconds=0.01,
         reconcile_linked_state=reconcile_linked_state,
     ))
@@ -392,7 +746,10 @@ async def test_orphan_monitor_reconciles_linked_state_after_run_recovery(db):
 
 
 @pytest.mark.asyncio
-async def test_orphan_monitor_materializes_each_recovered_book_run(db):
+async def test_orphan_monitor_materializes_each_recovered_book_run(
+    db,
+    orphan_recovery,
+):
     await db.execute(
         "INSERT INTO ai_sessions (id, book_id, chapter_id) "
         "VALUES (92, 'book-92', 'chapter-92')"
@@ -412,7 +769,7 @@ async def test_orphan_monitor_materializes_each_recovered_book_run(db):
     )
 
     monitor = asyncio.create_task(monitor_orphaned_runs(
-        db,
+        recover_orphans=orphan_recovery.recover,
         poll_interval_seconds=0.01,
         reconcile_terminal_holes=lambda: (
             materialize_terminal_writing_run_holes(db)
@@ -549,6 +906,7 @@ async def test_terminal_writing_hole_is_reconciled_without_current_recovery_ids(
 @pytest.mark.asyncio
 async def test_orphan_monitor_retries_terminal_writing_holes_after_projection_failure(
     db,
+    orphan_recovery,
 ):
     await db.execute(
         "INSERT INTO ai_sessions (id, book_id, chapter_id) "
@@ -578,7 +936,7 @@ async def test_orphan_monitor_retries_terminal_writing_holes_after_projection_fa
         return await materialize_terminal_writing_run_holes(db)
 
     monitor = asyncio.create_task(monitor_orphaned_runs(
-        db,
+        recover_orphans=orphan_recovery.recover,
         poll_interval_seconds=0.01,
         reconcile_terminal_holes=flaky_reconcile,
     ))

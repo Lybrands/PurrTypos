@@ -17,6 +17,7 @@ from application.screenplay_agent_service import (
     _ScreenplayTurnRunLifecycle,
 )
 from application.agent_cancellation_service import AgentCancellationService
+from application.agent_orphan_recovery_service import AgentOrphanRecoveryService
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import ScreenplayAgentProfileExtension
 from application.composition_factory import create_agent_composition
@@ -1603,6 +1604,105 @@ async def test_non_success_root_projects_usage_and_business_terminal_once(
         "WHERE operation_id = ?",
         [operation.id],
     ) == {"count": 2}
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_projects_screenplay_failure_and_usage(
+    screenplay_db,
+):
+    operation, turn_id, _command, _finalizer = await _finalization_fixture(
+        screenplay_db
+    )
+    turn = await screenplay_db.fetch_one(
+        "SELECT project_id, session_id, command_id FROM screenplay_agent_turns "
+        "WHERE id = ?",
+        [turn_id],
+    )
+    assert turn is not None
+    root_run_id = "run-orphan-screenplay-failure"
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, status, mode, prompt, binding_namespace, "
+        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
+        "root_run_id, execution_owner_id, heartbeat_at_ms, lease_expires_at_ms) "
+        "VALUES (?, ?, 'running', 'agent', '', ?, ?, ?, ?, ?, "
+        "'dead-screenplay-worker', 1, 9999999999999)",
+        [
+            root_run_id,
+            turn["session_id"],
+            "screenplay.conversation_turn",
+            turn["project_id"],
+            turn["command_id"],
+            json.dumps({
+                "agentProfile": "screenplay",
+                "domainNamespace": "purrtypos.screenplay",
+            }),
+            root_run_id,
+        ],
+    )
+    await screenplay_db.execute(
+        "UPDATE screenplay_agent_turns SET planner_run_id = ? WHERE id = ?",
+        [root_run_id, turn_id],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, "
+        "source, kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'run.started', '{\"status\":\"running\"}', ?, ?, 1, "
+        "'runtime', 'run.lifecycle', 'lifecycle', 'public', ?)",
+        [root_run_id, f"event-{root_run_id}", turn_id, f"run:{root_run_id}:running"],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, turn_id, sequence, source, "
+        "kind, channel, visibility, source_event_key) VALUES "
+        "(?, 'provider.usage', ?, ?, ?, 2, 'provider', 'provider.usage', "
+        "'diagnostic', 'private', ?)",
+        [
+            root_run_id,
+            json.dumps({"inputTokens": 17, "outputTokens": 6}),
+            f"usage-event-{root_run_id}",
+            turn_id,
+            f"usage:{root_run_id}",
+        ],
+    )
+    await screenplay_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "status, total_units) VALUES "
+        "('task-atomic-finalizer', 'work-orphan-screenplay', "
+        "'purrtypos.screenplay', 'recipe', ?, ?, 'running', 1)",
+        [turn["project_id"], root_run_id],
+    )
+    composition = create_agent_composition(screenplay_db)
+    try:
+        recovered = await AgentOrphanRecoveryService(
+            screenplay_db,
+            composition,
+        ).recover(after_restart=True)
+    finally:
+        await composition.shutdown()
+
+    assert recovered == (root_run_id,)
+    stored = await SqliteScreenplayOperationRepository(screenplay_db).load(
+        operation.id
+    )
+    assert stored is not None and stored.status.value == "failed"
+    assert stored.usage == OperationUsage(
+        invocation_count=1,
+        input_tokens=17,
+        output_tokens=6,
+        reasoning_tokens=0,
+    )
+    assert await screenplay_db.fetch_one(
+        "SELECT status FROM screenplay_agent_turns WHERE id = ?",
+        [turn_id],
+    ) == {"status": "failed"}
+    assert await screenplay_db.fetch_one(
+        "SELECT source_event_key FROM ai_agent_run_events WHERE run_id = ? "
+        "AND source_event_key = ?",
+        [root_run_id, f"run:{root_run_id}:failed"],
+    ) == {"source_event_key": f"run:{root_run_id}:failed"}
 
 
 @pytest.mark.asyncio

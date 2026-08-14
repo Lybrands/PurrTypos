@@ -294,6 +294,11 @@ class SqliteAgentOutputRepository:
                     raise ContractViolationError(
                         "run commit projector must return None"
                     )
+            if commit.terminal_status is not None:
+                await self._db.execute(
+                    "DELETE FROM ai_agent_artifact_claims WHERE run_id = ?",
+                    [run_id],
+                )
             related = tuple(
                 [
                     await self._append_event_in_transaction(item)
