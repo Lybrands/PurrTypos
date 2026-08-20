@@ -17,7 +17,7 @@ from purra.artifacts import (
     ArtifactRecord,
     ArtifactStatus,
 )
-from purra.artifacts.continuity import ArtifactWriteClaimCommand
+from purra.artifacts import ArtifactWriteClaimCommand
 from purra.json_values import freeze_json_mapping, thaw_json_mapping
 
 from infrastructure.persistence.sqlite_artifact_repository import (

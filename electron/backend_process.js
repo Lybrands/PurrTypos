@@ -74,17 +74,11 @@ function createBackendProcessManager({
     if (childProcess) return childProcess
 
     const { backendDir, skillsDir } = getBackendPaths()
-    const purraSrc = path.join(moduleDir, '..', 'packages', 'purra', 'src')
     const env = {
       ...processEnv,
       PURRTYPOS_DATA_DIR: app.getPath('userData'),
       PURRTYPOS_SKILLS_DIR: skillsDir,
       PURRTYPOS_PORT: String(port),
-      ...(!app.isPackaged && {
-        PYTHONPATH: [purraSrc, processEnv.PYTHONPATH]
-          .filter(Boolean)
-          .join(path.delimiter),
-      }),
     }
     const frozen = app.isPackaged ? getFrozenBackendExe(backendDir) : null
 

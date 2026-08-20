@@ -25,7 +25,7 @@ function supportsPytest(candidate) {
   if (candidate.local && !fs.existsSync(candidate.command)) return false
   const probe = spawnSync(
     candidate.command,
-    [...candidate.prefix, '-c', 'import pytest'],
+    [...candidate.prefix, '-c', 'import purra, pytest'],
     { cwd: projectRoot, stdio: 'ignore' },
   )
   return probe.status === 0
@@ -34,8 +34,8 @@ function supportsPytest(candidate) {
 const python = candidates.find(supportsPytest)
 if (!python) {
   console.error(
-    'No Python interpreter with pytest was found. Install backend/requirements.txt ' +
-      'or set PURRTYPOS_PYTHON.',
+    'No Python interpreter with pytest and PurrA was found. Install ' +
+      'backend/requirements.txt and packages/purra, or set PURRTYPOS_PYTHON.',
   )
   process.exit(1)
 }

@@ -33,6 +33,7 @@ def test_complete_run_api_is_importable_from_the_package_boundary():
         WorkPlan,
         WorkPlanner,
         WorkStep,
+        canonicalize_execution_plan,
         decide_orphan_run,
     )
 
@@ -70,6 +71,7 @@ def test_complete_run_api_is_importable_from_the_package_boundary():
     assert WorkPlan.__module__.startswith("purra.")
     assert WorkStep.__module__.startswith("purra.")
     assert WorkPlanner.__module__.startswith("purra.")
+    assert canonicalize_execution_plan.__module__.startswith("purra.")
     assert hasattr(AgentCore, "submit")
     assert not hasattr(AgentCore, "run")
 

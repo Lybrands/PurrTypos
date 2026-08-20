@@ -30,6 +30,15 @@ PurrA 不提供一个“万能 Host 对象”；宿主按需组合现有公共�
 
 在 `0.1.x` 系列中，`purra.api` 以及上表列出的能力所属公共模块构成受支持的宿主契约。兼容性新增和修复可以发布 patch 版本；PurrA 在 1.0 之前删除或改变现有公共契约时必须升级 minor 版本。`purra.engine`、`purra.runtime` 及其实现子模块不属于宿主兼容面。CI 会同时构建 wheel 与 sdist，在干净环境安装 wheel，并只通过公共导入运行一个 Agent。
 
+本系列受支持的顶层宿主模块为：`api`、`artifacts`、`cancellation`、
+`context_budget`、`context_orchestration`、`context_strategies`、`contracts`、
+`errors`、`evaluation`、`events`、`evidence`、`json_values`、`long_tasks`、
+`model_call_parameters`、`model_execution`、`model_invocation`、
+`model_protocol`、`normalization`、`observability`、`orphan_recovery`、
+`output`、`ports`、`recovery`、`run_control`、`stream_ownership`、
+`structured_output`、`task_admission`、`testing` 与 `tools`。宿主只导入这些
+模块根导出的符号；除非本文明确点名，实现子模块不属于兼容面。
+
 ## 依赖方向
 
 ```text

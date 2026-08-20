@@ -11,16 +11,8 @@ From backend/:
 from __future__ import annotations
 
 import os
-import sys
 
 _spec_dir = os.path.dirname(os.path.abspath(SPEC))
-_purra_src = os.path.abspath(
-    os.path.join(_spec_dir, "..", "packages", "purra", "src")
-)
-if _spec_dir not in sys.path:
-    sys.path.insert(0, _spec_dir)
-if _purra_src not in sys.path:
-    sys.path.insert(0, _purra_src)
 
 _skills_src = os.path.join(_spec_dir, "skills")
 _datas = []
@@ -90,7 +82,7 @@ _hiddenimports = [
 
 a = Analysis(
     [os.path.join(_spec_dir, "main.py")],
-    pathex=[_spec_dir, _purra_src],
+    pathex=[_spec_dir],
     binaries=[],
     datas=_datas,
     hiddenimports=_hiddenimports,

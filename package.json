@@ -9,7 +9,7 @@
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "dev:web": "concurrently -k \"node scripts/run-web-backend.cjs\" \"vite --open\"",
     "prepare:backend-resources": "node scripts/prepare-backend-resources.cjs",
-    "build:backend:win": "py -m pip install -q -r backend/requirements.txt pyinstaller && py -m PyInstaller --clean --noconfirm --distpath backend/dist --workpath backend/build backend/purrtypos-backend.spec",
+    "build:backend:win": "py -m pip install -q -r backend/requirements.txt --no-build-isolation -e packages/purra pyinstaller && py -m PyInstaller --clean --noconfirm --distpath backend/dist --workpath backend/build backend/purrtypos-backend.spec",
     "build:win": "npm run build:backend:win && npm run build:electron",
     "build": "npm run build:electron",
     "build:electron": "node scripts/prepare-backend-resources.cjs && node build/icon.js && vite build && node -e \"try { require('fs').rmSync('dist-electron', { recursive: true, force: true }) } catch (e) {}\" && electron-builder",

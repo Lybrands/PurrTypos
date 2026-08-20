@@ -26,6 +26,7 @@ from purra.ports.planning import (
     WorkPlanningConstraintProvider,
 )
 from purra.ports.projection import DomainEventProjector, RunCancellationProjector
+from purra.ports.projection import RunBeginProjector, RunCommitProjector
 from purra.ports.run_lifecycle import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     TERMINAL_RUN_EVENT_TYPES,
